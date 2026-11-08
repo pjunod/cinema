@@ -380,10 +380,15 @@ internal data class PreparedSeamEvidence(
  * The `prepared_seam` beacon body, the same shape on every client. The server
  * counts it per platform; the processed Dolby Vision upgrade leaves the
  * Developer tab only after twenty committed switches with complete frames,
- * zero dropped, observed audio continuity and no reopen. Null for an outcome
- * outside the vocabulary.
+ * zero dropped, observed audio continuity and no reopen. [reopened] is what
+ * happened, not what the outcome implies: whether an ordinary reopen actually
+ * ran inside the report's window. Null for an outcome outside the vocabulary.
  */
-internal fun preparedSeamReport(outcome: String, evidence: PreparedSeamEvidence?): PreparedSeam? {
+internal fun preparedSeamReport(
+    outcome: String,
+    evidence: PreparedSeamEvidence?,
+    reopened: Boolean,
+): PreparedSeam? {
     if (outcome !in listOf("committed", "refused", "switched_without_a_frame")) return null
     val committed = outcome == "committed"
     return PreparedSeam(
@@ -392,6 +397,6 @@ internal fun preparedSeamReport(outcome: String, evidence: PreparedSeamEvidence?
         framesComplete = committed && evidence?.framesComplete == true,
         droppedFrames = if (committed) evidence?.droppedFrames else null,
         audioObserved = committed && evidence?.audioObserved == true,
-        reopened = !committed,
+        reopened = reopened,
     )
 }

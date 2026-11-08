@@ -1327,6 +1327,10 @@ final class PlayerController: ObservableObject {
     /// switch cannot be the thing that changes it. The arithmetic lives in
     /// `PreparedSwitchMeasurement.swift` as pure functions.
     private var preparedSwitch = PreparedSwitchMeasurement.Recorder()
+    /// Session opens this controller has started, the initial one included.
+    /// Only its movement matters: a prepared seam report compares it across
+    /// its window to say whether the change also took an ordinary reopen.
+    private var reopensStarted = 0
 
     /// The three rows the info panel shows, computed on demand.
     var preparedSwitchReading: PreparedSwitchMeasurement.Reading { preparedSwitch.reading() }
@@ -3924,6 +3928,9 @@ final class PlayerController: ObservableObject {
         var request = request
         while true {
             let next = request.positionMs
+            // Every session open after the first is an ordinary reopen; the
+            // seam report reads whether one ran inside its window.
+            reopensStarted &+= 1
             try await open(decision: decision, at: next, intent: request.intent)
             guard isCurrentLifecycle(lifecycle) else { return }
             // A newer `open()` superseded this one while it ran (P2-6). The
@@ -11293,26 +11300,29 @@ extension PlayerController: PreparedSuccessorHost {
         preparedFallbackInterruptionMs = ms
     }
 
-    /// One `prepared_seam` beacon per commit. A committed switch is reported
-    /// once the successor's side of the ±2 s window has had its 2 s status poll
-    /// (the synchronous read at the swap is the other reading), so the report
-    /// carries the same coverage the ledger row shows. Observation only.
+    /// One `prepared_seam` beacon per commit outcome, reported once the
+    /// ±2 s window has elapsed. A committed switch then carries the evidence
+    /// its successor's side of the window had its 2 s status poll for (the
+    /// synchronous read at the swap is the other reading), so the report has
+    /// the coverage the ledger row shows. Every outcome says whether an
+    /// ordinary reopen actually ran inside the window (`reopensStarted` moved
+    /// since the outcome): a refused or frameless switch owes one and counts
+    /// as reopened only once it ran. Observation only.
     func reportPreparedSeam(_ outcome: PreparedCommitOutcome) {
+        let reopensAtOutcome = reopensStarted
+        // The session the outcome is about, not whichever one a reopen
+        // inside the window has since opened.
         let session = sessionId
-        guard case .committed = outcome else {
-            if let seam = PreparedSeamBeacon.seam(outcome, evidence: nil) {
-                postClientLog(PreparedSeamBeacon(message: "prepared switch: \(seam.outcome)",
-                                                 detail: seam.outcome, session_id: session, prepared_seam: seam))
-            }
-            return
-        }
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(PreparedSwitchMeasurement.windowMs + 500) * 1_000_000)
-            guard let self,
-                  let seam = PreparedSeamBeacon.seam(outcome, evidence: self.preparedSwitch.seamEvidence())
+            guard let self else { return }
+            let evidence: PreparedSeamEvidence?
+            if case .committed = outcome { evidence = self.preparedSwitch.seamEvidence() } else { evidence = nil }
+            guard let seam = PreparedSeamBeacon.seam(outcome, evidence: evidence,
+                                                     reopened: self.reopensStarted != reopensAtOutcome)
             else { return }
             self.postClientLog(PreparedSeamBeacon(message: "prepared switch: \(seam.outcome)",
-                                                  detail: seam.outcome, session_id: self.sessionId,
+                                                  detail: seam.outcome, session_id: session,
                                                   prepared_seam: seam))
         }
     }

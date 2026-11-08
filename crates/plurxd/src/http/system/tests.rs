@@ -1851,26 +1851,37 @@ fn a_prepared_seam_counts_toward_graduation_only_when_clean_and_fully_measured()
             .report()
             .is_none()
     );
-    let (qualified, total) = prepared_seam_counts(ClientPlatform::Linux);
+    let (qualified, total) = prepared_seam_counts(ClientPlatform::Linux, false);
+    let processed_before = prepared_seam_counts(ClientPlatform::Linux, true);
     let (_, refused) = parse(serde_json::json!({"platform":"linux","outcome":"refused"}))
         .report()
         .expect("in vocabulary");
-    record_prepared_seam(ClientPlatform::Linux, refused);
+    record_prepared_seam(ClientPlatform::Linux, false, refused);
     let (_, linux_clean) = parse(serde_json::json!({"platform":"linux","outcome":"committed",
         "frames_complete":true,"dropped_frames":0,"audio_observed":true}))
     .report()
     .expect("in vocabulary");
-    record_prepared_seam(ClientPlatform::Linux, linux_clean);
-    let (after_qualified, after_total) = prepared_seam_counts(ClientPlatform::Linux);
+    record_prepared_seam(ClientPlatform::Linux, false, linux_clean);
+    let (after_qualified, after_total) = prepared_seam_counts(ClientPlatform::Linux, false);
     assert_eq!(after_total - total, 2);
     assert_eq!(after_qualified - qualified, 1);
+    // Review 3 S4: an ordinary rung change is not one of the processed
+    // upgrade's switches; a processed successor's is counted on its own.
+    assert_eq!(
+        prepared_seam_counts(ClientPlatform::Linux, true),
+        processed_before
+    );
+    record_prepared_seam(ClientPlatform::Linux, true, linux_clean);
+    let (processed_qualified, processed_total) = prepared_seam_counts(ClientPlatform::Linux, true);
+    assert_eq!(processed_qualified - processed_before.0, 1);
+    assert_eq!(processed_total - processed_before.1, 1);
     let metrics = crate::playback_control::prometheus();
     assert!(metrics.contains(
-        "plurx_playback_preparation_seams_total{platform=\"linux\",outcome=\"refused\"}"
+        "plurx_playback_preparation_seams_total{platform=\"linux\",processed=\"false\",outcome=\"refused\"}"
     ));
-    assert!(
-        metrics.contains("plurx_playback_preparation_seams_qualified_total{platform=\"linux\"}")
-    );
+    assert!(metrics.contains(
+        "plurx_playback_preparation_seams_qualified_total{platform=\"linux\",processed=\"true\"}"
+    ));
     assert!(metrics
         .contains("plurx_playback_preparation_processed_upgrades_total{outcome=\"scheduled\"}"));
 }

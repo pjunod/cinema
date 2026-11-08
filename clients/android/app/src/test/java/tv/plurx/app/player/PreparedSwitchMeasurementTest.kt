@@ -229,14 +229,20 @@ class PreparedSwitchMeasurementTest {
     @Test
     fun theSeamReportNamesEachOutcomeAndOnlyACommitCanCount() {
         val clean = PreparedSeamEvidence(framesComplete = true, droppedFrames = 0, audioObserved = true)
-        val committed = preparedSeamReport("committed", clean)!!
+        val committed = preparedSeamReport("committed", clean, reopened = false)!!
         assertEquals("android", committed.platform)
         assertTrue(committed.framesComplete && committed.audioObserved && !committed.reopened)
-        val refused = preparedSeamReport("refused", clean)!!
-        assertTrue(refused.reopened && !refused.framesComplete && !refused.audioObserved)
+        // Review 3 B2: the reopen leg is what ran, never implied by the outcome.
+        assertTrue(preparedSeamReport("committed", clean, reopened = true)!!.reopened)
+        val refused = preparedSeamReport("refused", clean, reopened = false)!!
+        assertTrue(!refused.reopened && !refused.framesComplete && !refused.audioObserved)
         assertNull(refused.droppedFrames)
-        assertEquals("switched_without_a_frame", preparedSeamReport("switched_without_a_frame", null)!!.outcome)
-        assertNull(preparedSeamReport("teleported", clean))
+        assertTrue(preparedSeamReport("refused", null, reopened = true)!!.reopened)
+        assertEquals(
+            "switched_without_a_frame",
+            preparedSeamReport("switched_without_a_frame", null, reopened = true)!!.outcome,
+        )
+        assertNull(preparedSeamReport("teleported", clean, reopened = false))
     }
 
     /**

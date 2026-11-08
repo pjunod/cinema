@@ -302,7 +302,11 @@ struct PreparedSeamBeacon: Encodable {
     let session_id: String?
     let prepared_seam: Seam
 
-    static func seam(_ outcome: PreparedCommitOutcome, evidence: PreparedSeamEvidence?) -> Seam? {
+    /// `reopened` is what happened, not what the outcome implies: whether an
+    /// ordinary reopen actually ran inside the report's window. A refused or
+    /// frameless switch owes one, and counts as reopened only once it ran.
+    static func seam(_ outcome: PreparedCommitOutcome, evidence: PreparedSeamEvidence?,
+                     reopened: Bool) -> Seam? {
         let name: String
         switch outcome {
         case .committed: name = "committed"
@@ -318,7 +322,7 @@ struct PreparedSeamBeacon: Encodable {
             frames_complete: committed && evidence?.framesComplete == true,
             dropped_frames: committed ? evidence?.droppedFrames : nil,
             audio_observed: committed && evidence?.audioObserved == true,
-            reopened: !committed
+            reopened: reopened
         )
     }
 }

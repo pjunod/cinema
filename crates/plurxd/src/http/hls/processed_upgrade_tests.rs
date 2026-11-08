@@ -3,7 +3,7 @@
 
 use super::*;
 
-fn ordinary_request(playback_id: &str) -> crate::transcode::SessionRequest {
+pub(in crate::http) fn ordinary_request(playback_id: &str) -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
         source_telemetry: None,
         continuous_media: None,
@@ -114,16 +114,39 @@ fn a_viewer_change_owns_the_playback_slot_over_an_upgrade() {
     let playback = uuid::Uuid::new_v4().to_string();
     // A viewer's own change in flight: the upgrade does not take its slot.
     let viewer = PendingCandidateGuard::begin(&playback, "viewer-ask");
-    assert!(begin_processed_upgrade(&playback).is_none());
+    assert!(
+        begin_processed_upgrade(&playback, &tokio_util::sync::CancellationToken::new()).is_none()
+    );
     assert!(
         !viewer.cancelled(),
         "an upgrade never cancels the viewer's ask"
     );
     drop(viewer);
     // An upgrade in its trial: a viewer's change takes the slot and cancels it.
-    let upgrade = begin_processed_upgrade(&playback).expect("an idle playback");
+    let upgrade = begin_processed_upgrade(&playback, &tokio_util::sync::CancellationToken::new())
+        .expect("an idle playback");
     assert!(!upgrade.cancelled());
     let viewer = PendingCandidateGuard::begin(&playback, "viewer-ask");
     assert!(upgrade.cancelled() && upgrade.cancellation_token().is_cancelled());
     assert!(!viewer.cancelled());
+}
+
+/// Review 3 S1: cancellation reaches the staging half through the playback
+/// claim, not by dropping the upgrade's future. The claim's token is the one
+/// the trial races and the staged successor registers under, so a release
+/// cancels it and staging exits by its own cleanup.
+#[test]
+fn a_release_cancels_the_upgrades_playback_claim() {
+    use super::super::preparation::begin_processed_upgrade;
+    let (playback, session, _) = waiting(51);
+    let (_intent, run) = take_on_first_frame(51, &session).expect("first frame");
+    let claim = begin_processed_upgrade(&playback, run.cancelled()).expect("an idle playback");
+    assert!(!claim.cancelled());
+    cancel_for_session(&session);
+    assert!(claim.cancelled() && claim.cancellation_token().is_cancelled());
+    // A run already cancelled claims nothing.
+    let (playback, session, _) = waiting(52);
+    let (_intent, run) = take_on_first_frame(52, &session).expect("first frame");
+    cancel_for_session(&session);
+    assert!(begin_processed_upgrade(&playback, run.cancelled()).is_none());
 }

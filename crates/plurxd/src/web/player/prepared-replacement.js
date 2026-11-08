@@ -1285,7 +1285,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     if(p.preparedCommitting===state) p.preparedCommitting=null;
     rollbackPreparedReplacement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
-    reportPreparedSeam(p,state,"switched_without_a_frame",null);
+    reportPreparedSeamAfterWindow(p,state,"switched_without_a_frame");
     // Rolled back to the incumbent, which is the quality the viewer was
     // already watching -- so the change they asked for still has not happened
     // and still owes them its one reopen.

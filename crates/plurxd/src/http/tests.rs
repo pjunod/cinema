@@ -10503,6 +10503,68 @@ async fn logs_endpoint_is_admin_only() {
     assert_eq!(body[0]["message"], "cluster-only proof");
 }
 
+/// Review 3 S9: the viewer's first-frame beacon is what starts the processed
+/// upgrade, and only for the session it names. A `ttff` naming one session
+/// takes that session's waiting upgrade and leaves another session's waiting;
+/// a beacon of another kind takes nothing.
+#[tokio::test]
+async fn a_ttff_client_log_schedules_only_the_named_sessions_upgrade() {
+    use super::hls::processed_upgrade::{
+        is_waiting, register, tests::ordinary_request, UpgradeIntent,
+    };
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let user_id = state
+        .store
+        .get_user_by_username("paul")
+        .await
+        .expect("user read")
+        .expect("the admin")
+        .id;
+    let waiting = || {
+        let playback = uuid::Uuid::new_v4().to_string();
+        let session = uuid::Uuid::new_v4().to_string();
+        register(UpgradeIntent {
+            user_id,
+            playback_id: playback.clone(),
+            session_id: session.clone(),
+            incarnation_id: uuid::Uuid::new_v4().to_string(),
+            request: ordinary_request(&playback),
+            hdr10_intent: false,
+            auto_policy: false,
+            network: None,
+            network_prior: None,
+            incumbent_receipt: None,
+        });
+        session
+    };
+    let named = waiting();
+    let other = waiting();
+    let beacon = |event: &str, session: &str| {
+        post(
+            "/api/v1/client-log",
+            Some(&admin),
+            json!({ "level": "info", "event": event, "session_id": session, "file_id": 7, "ms": 850 }),
+        )
+    };
+    let (status, _) = call(&app, beacon("playback_failed", &named)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        is_waiting(&named),
+        "a beacon that is not a first frame takes nothing"
+    );
+    let (status, _) = call(&app, beacon("ttff", &named)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        !is_waiting(&named),
+        "the named session's first frame took its upgrade"
+    );
+    assert!(
+        is_waiting(&other),
+        "another session's upgrade still waits for its own frame"
+    );
+}
+
 #[tokio::test]
 async fn client_log_requires_auth_and_accepts_reports() {
     let app = test_app();

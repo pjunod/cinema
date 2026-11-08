@@ -261,7 +261,17 @@ pub(super) const PROCESSED_UPGRADE_ASK: &str = "processed-upgrade";
 /// the one lock, so an upgrade never cancels a viewer's ask; a viewer's ask
 /// arriving later overwrites (and so cancels) the upgrade's claim, exactly as
 /// it would an older ask of its own.
-pub(super) fn begin_processed_upgrade(playback_id: &str) -> Option<PendingCandidateGuard> {
+///
+/// The claim's token is a child of `run`, the upgrade's own cancellation: a
+/// release or a newer session for the playback cancels the run, and with it
+/// this claim, which is the token the trial races and the staged successor
+/// registers under. Cancellation therefore reaches every phase through the
+/// phase's own exit path, and the upgrade's future is never dropped while
+/// staging holds a half-registered successor.
+pub(super) fn begin_processed_upgrade(
+    playback_id: &str,
+    run: &tokio_util::sync::CancellationToken,
+) -> Option<PendingCandidateGuard> {
     let successor_registered = active_prepared_successors()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -271,15 +281,16 @@ pub(super) fn begin_processed_upgrade(playback_id: &str) -> Option<PendingCandid
         return None;
     }
     let claim = NEXT_PENDING_CANDIDATE_CLAIM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let cancelled = tokio_util::sync::CancellationToken::new();
+    let cancelled = run.child_token();
     let registered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let mut pending = pending_preparation_candidates()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if pending
-            .get(playback_id)
-            .is_some_and(|entry| !entry.cancelled.is_cancelled())
+        if run.is_cancelled()
+            || pending
+                .get(playback_id)
+                .is_some_and(|entry| !entry.cancelled.is_cancelled())
         {
             return None;
         }
@@ -623,6 +634,8 @@ pub(super) async fn settle_cancelled_preparation(
 
 fn spawn_cancelled_preparation(active: ActivePreparedSuccessor, reason: &'static str) {
     active.cancelled.cancel();
+    // A successor that will never present has no upgrade to wait for.
+    super::processed_upgrade::cancel_for_session(&active.preparation.session_id);
     tokio::spawn(settle_cancelled_preparation(active, reason));
 }
 
@@ -1710,6 +1723,10 @@ async fn plan_preparation_with_candidate(
         Some(review),
         body,
         bootstrap.then_some(delivered_height),
+        predecessor
+            .candidate_catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.candidate.processed_dv),
     )
     .await?;
     if bootstrap
@@ -2961,6 +2978,58 @@ pub(super) async fn stage_prepared_successor_as(
                     )
                     .await;
                 }
+            }
+            // A locally owned ordinary successor gets the processed upgrade a
+            // create would have left it (review 3 S3): it waits for the
+            // successor's own first presented frame, which its commit proves
+            // ([`super::processed_upgrade::note_presented`]). The processed
+            // upgrade's own successor, and any processed successor, is already
+            // the upgrade.
+            let processed = staged_request.dv_processing_destination.is_some()
+                || staged_request
+                    .candidate_context
+                    .as_ref()
+                    .is_some_and(|context| context.selected_candidate.processed_dv);
+            // The upgrade's own request-only gates, as the create runs them,
+            // where this successor's planning snapshot is in hand; a source
+            // with no Dolby Vision metadata a processed destination could use
+            // is never one. Without a snapshot the trial's own gates decide.
+            let applies = matches!(source.dolby_vision.profile, Some(5 | 7 | 8))
+                && staged_request
+                    .candidate_context
+                    .as_ref()
+                    .and_then(|context| context.planning_snapshot.as_deref())
+                    .is_none_or(|snapshot| {
+                        matches!(
+                            crate::transcode::TranscodeManager::processed_upgrade_gates(
+                                &staged_request,
+                                snapshot,
+                                staged_request.hdr10,
+                            ),
+                            Ok(Some(_))
+                        )
+                    });
+            if successor_owner == state.node_id
+                && !processed
+                && applies
+                && staged_request.presentation == crate::transcode::Presentation::Vod
+            {
+                super::processed_upgrade::register(super::processed_upgrade::UpgradeIntent {
+                    user_id: local_user_id,
+                    playback_id: active.preparation.playback_id.clone(),
+                    session_id: active.preparation.session_id.clone(),
+                    incarnation_id: active.preparation.incarnation_id.clone(),
+                    request: staged_request.clone(),
+                    hdr10_intent: staged_request.hdr10,
+                    auto_policy: staged_request.automatic,
+                    // The control exchange that asked for this successor
+                    // carries no network identity or link receipt; recovery
+                    // and link admission read none, as for a start without
+                    // them.
+                    network: None,
+                    network_prior: None,
+                    incumbent_receipt: None,
+                });
             }
             trace_auto_preparation_stage(candidate, "activated");
             crate::playback_control::record_preparation_staged(true);

@@ -1879,18 +1879,30 @@ struct PlanScope<'a> {
     continuous: Option<&'a ContinuousFamilyStart>,
     auto_bootstrap_ceiling: Option<i64>,
     /// Whether a processed Dolby Vision candidate may be selected. Only a
-    /// prepared successor may: a create resolves the ordinary plan and leaves
+    /// prepared successor of a processed predecessor may: its root is the
+    /// predecessor's own. A create resolves the ordinary plan and leaves
     /// processing to the upgrade after its first frame (plan ruling 3).
     processed_selectable: bool,
 }
 
 /// Internal preparation policy, never a create-body override. Ordinary creates
 /// retain their own selection and named-route admission rules.
+///
+/// `processed_predecessor` says whether the session being replaced is itself
+/// processed. Only then can a processed candidate be primed: its successor
+/// reuses that predecessor's verified root. For an ordinary predecessor no
+/// processed graph exists to prime from (the upgrade's own trial is the only
+/// thing that makes one), so a viewer who picks the processed rung there gets
+/// the ordinary rung it enhances, exactly as a create does, and the upgrade
+/// follows that successor's first presented frame. Selecting it anyway would
+/// stage a successor whose prime must fail, and spend the viewer's one reopen
+/// on it (review 3 S2).
 pub(super) async fn resolve_plan_for_preparation(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
     body: CreateSession,
     auto_bootstrap_ceiling: Option<i64>,
+    processed_predecessor: bool,
 ) -> Result<ResolvedPlan, ApiError> {
     resolve_plan_with_scope(
         inputs,
@@ -1899,7 +1911,7 @@ pub(super) async fn resolve_plan_for_preparation(
         PlanScope {
             continuous: None,
             auto_bootstrap_ceiling,
-            processed_selectable: true,
+            processed_selectable: processed_predecessor,
         },
     )
     .await
@@ -2177,9 +2189,12 @@ async fn resolve_plan_for_principal_with_local_evidence(
             }
             let authority_refused = catalogue_result.authority_refused;
             // A create never dispatches a processed candidate: it has no
-            // qualified graph before the first frame. One the viewer named (a
-            // reopen of a processed session) starts as the ordinary rung it
-            // enhances, and the upgrade runs again after the first frame.
+            // qualified graph before the first frame. Nor does a prepared
+            // successor of an ordinary session, which has no processed root
+            // to prime from. One the viewer named (a reopen of a processed
+            // session, or the processed rung picked on an ordinary one) starts
+            // as the ordinary rung it enhances, and the upgrade runs after
+            // that session's first presented frame.
             let unprocessed;
             let worker_catalog = if processed_selectable {
                 &catalogue_result.candidates

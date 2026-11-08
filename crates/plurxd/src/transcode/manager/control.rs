@@ -1218,6 +1218,25 @@ impl TranscodeManager {
         Some(Arc::new(control) as Arc<dyn crate::playback_control::PreparationGate>)
     }
 
+    /// Where the viewer of `session_id` is now on the source timeline: its
+    /// latest accepted control demand advanced by that observation's age,
+    /// the playhead estimate the producers read
+    /// ([`crate::playback_control::rolling_estimated_position_ms`]), from
+    /// whichever engine serves the session. `None` before any exchange was
+    /// accepted, or for a session this node does not serve.
+    pub(crate) async fn session_playhead_estimate_ms(&self, session_id: &str) -> Option<i64> {
+        if let Some(estimate) = self.vod.accepted_playhead_estimate_ms(session_id).await {
+            return Some(estimate);
+        }
+        let control = self.sessions.lock().await.get(session_id)?.control.clone();
+        let lease = control.snapshot().await?;
+        let demand = lease.demand.as_ref()?;
+        Some(crate::playback_control::rolling_estimated_position_ms(
+            demand,
+            lease.demand_observation_age?,
+        ))
+    }
+
     pub(crate) async fn promote_prepared_session(&self, session_id: &str) {
         let _ = self.vod.promote_prepared_session(session_id).await;
     }
