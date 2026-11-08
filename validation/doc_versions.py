@@ -320,6 +320,10 @@ def _spell_cardinal(value: int) -> str:
     if value < 100:
         quotient, remainder = divmod(value, 10)
         return tens[quotient] if remainder == 0 else f"{tens[quotient]}-{ones[remainder]}"
+    if value < 1000:
+        hundreds, remainder = divmod(value, 100)
+        head = f"{ones[hundreds]} hundred"
+        return head if remainder == 0 else f"{head} {_spell_cardinal(remainder)}"
     raise ValueError(f"cannot spell WEB_ASSETS row count {value}")
 
 

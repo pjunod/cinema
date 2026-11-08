@@ -129,6 +129,22 @@ claim-refused transition and its `Admission` premise describes only
 `library-work-v1`. It rests on a running scan of its own library finishing,
 the premise the models state for a domain peer.
 
+## Promotion merge of main into effort/pipeline-v2 — scoped review on 2026-11-08
+
+Claude (`claude-sonnet-5-5`) reviewed the authority-source drift left where
+main and `effort/pipeline-v2` both changed pinned files, against each side's
+last reviewed bytes. This is an author review awaiting an independent check,
+not execution evidence.
+
+| Changed source | Change | Model action or property | Still holds? |
+|---|---|---|---|
+| `plurx-core/store/background_jobs.rs`, `store/sqlite/mod.rs`, `store/hiqlite.rs` (main) | Adds read-only `analysis_source_admission` and `analysis_completions_executed_by` queue reads and their SQL; no claim, settle, release or fence write changes | None; the library claim/settlement protocol the model covers is unchanged and the effort's targeted-claim edits are separate hunks | Yes |
+| `plurxd/state.rs`, `plurxd/background_jobs.rs`, `transcode/manager/construct.rs` (main) | Playback and analysis state wiring, two lines in `background_jobs.rs`, one line in `construct.rs` | None; no library worker claim, wait or lock-order change | Yes |
+| `plurx-core/tests/store_contract.rs` (main) | Test-only additions | None | Yes |
+
+No model, configuration or property changes; only whole-file pins are
+refreshed.
+
 ## Main direct-push source drift — scoped review on 2026-11-08
 
 Claude (`claude-opus-5-5`) reviewed the authority-source drift that direct

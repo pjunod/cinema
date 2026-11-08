@@ -2209,3 +2209,72 @@ async fn assert_admitted_delivery(f: &Fixture, session: &str, destination: DvDes
         assert!(master.contains("VIDEO-RANGE=PQ"), "{master}");
     }
 }
+
+async fn prepare_without_admitted_epoch(f: &Fixture, session: &str, json: &str) -> bool {
+    f.manager
+        .vod_prepare_first_before(
+            json,
+            session,
+            f.user_id,
+            PreparedVodOwner {
+                node_id: "node".into(),
+                source_authority: None,
+            },
+            f.manager.session_adoption_token(session).expect("adoption"),
+            None,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+}
+
+/// D1: the processed upgrade's successor. Its predecessor is the ordinary
+/// session, which has no processed root to lend, so the successor's first
+/// preparation consumes the exact root the post-first-frame trial verified and
+/// held for that successor's incarnation — once — and serves the admitted
+/// processed delivery from it. Without a held root (the old path) the same
+/// staged processed successor cannot prime at all.
+#[tokio::test]
+async fn a_processed_upgrade_successor_primes_from_the_root_its_trial_held() {
+    for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
+        let f = fixture(destination).await;
+        // No admitted predecessor epoch: the processed-predecessor seed is
+        // unavailable, exactly as for an ordinary predecessor.
+        let (incarnation, session, json) = stage(&f).await;
+        assert!(
+            !prepare_without_admitted_epoch(&f, &session, &json).await,
+            "a processed successor with neither a processed parent nor a held root cannot prime"
+        );
+        let (_, root) = f
+            .manager
+            .vod
+            .capture_staged_processed_root(
+                &SessionRequest {
+                    request_id: Some(incarnation.clone()),
+                    ..f.remote.request.clone()
+                },
+                &expectation(&f, &incarnation, &session),
+                &principal_supersession_scope(&f.remote.principal),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("the trial's verified root");
+        let context = f
+            .remote
+            .request
+            .candidate_context
+            .as_deref()
+            .cloned()
+            .expect("processed context");
+        let _lease = f
+            .manager
+            .hold_processed_upgrade_root(&incarnation, context, root);
+        assert!(prepare_without_admitted_epoch(&f, &session, &json).await);
+        assert!(
+            f.manager
+                .take_processed_upgrade_root(&incarnation)
+                .is_none(),
+            "the successor's first preparation consumed the held root"
+        );
+        assert_admitted_delivery(&f, &session, destination).await;
+    }
+}

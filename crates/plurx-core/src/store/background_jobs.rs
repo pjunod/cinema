@@ -2531,6 +2531,25 @@ pub trait BackgroundJobStore: Send + Sync {
         owner: super::background_jobs_resources::BackgroundSourceOwner,
         now_ms: i64,
     ) -> Result<bool, StoreError>;
+    /// The claim's source-capacity rule asked again of a claimed analysis
+    /// request, leaving out what the request itself holds: the decision the
+    /// claim made, carried through the read (before hashing, while hashing
+    /// and before submission). Reads the ledger rows the claim read.
+    async fn analysis_source_admission(
+        &self,
+        request_id: &str,
+        owner_node_id: &str,
+        fence: i64,
+        now_ms: i64,
+    ) -> Result<AnalysisSourceAdmission, StoreError>;
+    /// Fragment-index requests executed by `node_id` whose result reached
+    /// their target (state `ready`, which settlement sets only once the
+    /// target holds the index), settled at or after `since_ms`.
+    async fn analysis_completions_executed_by(
+        &self,
+        node_id: &str,
+        since_ms: i64,
+    ) -> Result<i64, StoreError>;
     async fn pause_background_source(
         &self,
         token: JobToken,
@@ -2591,6 +2610,32 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: PublishFragmentJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+}
+
+/// What [`BackgroundJobStore::analysis_source_admission`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalysisSourceAdmission {
+    /// The claim's rule still admits this read.
+    Admit,
+    /// The rule refuses it now; the reason names the term that refused.
+    Yield(&'static str),
+    /// The row is no longer this owner's running, uncancelled fence.
+    NotOwned,
+}
+
+impl AnalysisSourceAdmission {
+    fn from_verdict(verdict: &str) -> Self {
+        match verdict {
+            "admit" => Self::Admit,
+            "not_owned" => Self::NotOwned,
+            // The reasons `analysis_source_capacity_terms` names.
+            "source_custody_unsettled" => Self::Yield("source_custody_unsettled"),
+            "foreground_source" => Self::Yield("foreground_source"),
+            "domain_readers_full" => Self::Yield("domain_readers_full"),
+            "background_reader_busy" => Self::Yield("background_reader_busy"),
+            _ => Self::Yield("source_capacity"),
+        }
+    }
 }
 
 /// Narrow internal SQL bridge: callers cannot submit SQL through Store.
@@ -4547,6 +4592,64 @@ LIMIT 1
         now_ms: i64,
     ) -> Result<bool, StoreError> {
         super::background_jobs_resources::background_may_continue(self, owner, now_ms).await
+    }
+    async fn analysis_source_admission(
+        &self,
+        request_id: &str,
+        owner_node_id: &str,
+        fence: i64,
+        now_ms: i64,
+    ) -> Result<AnalysisSourceAdmission, StoreError> {
+        if request_id.is_empty() || owner_node_id.is_empty() || fence <= 0 || now_ms < 0 {
+            return Err(invalid("invalid analysis source admission"));
+        }
+        let rows = self
+            .queue_sql(
+                super::fragment_index_cluster::analysis_source_admission_sql(),
+                encode(&serde_json::json!({
+                    "request_id": request_id,
+                    "owner_node_id": owner_node_id,
+                    "fence": fence,
+                    "now_ms": now_ms,
+                }))?,
+                false,
+                true,
+            )
+            .await?;
+        let verdict: String = rows
+            .first()
+            .map(|row| decode(row))
+            .transpose()?
+            .ok_or_else(|| invalid("missing analysis source admission"))?;
+        Ok(AnalysisSourceAdmission::from_verdict(&verdict))
+    }
+    async fn analysis_completions_executed_by(
+        &self,
+        node_id: &str,
+        since_ms: i64,
+    ) -> Result<i64, StoreError> {
+        if !identifier(node_id) || since_ms < 0 {
+            return Err(invalid("invalid analysis completion query"));
+        }
+        let rows = self
+            .queue_sql(
+                "SELECT json(COUNT(*)) AS result_json FROM analysis_attempts attempt
+                   JOIN analysis_requests request ON request.request_id = attempt.request_id
+                    AND request.fence = attempt.claim_epoch
+                  WHERE attempt.claim_node_id = json_extract($1, '$.node_id')
+                    AND attempt.phase = 'published'
+                    AND attempt.phase_updated_at_ms >= json_extract($1, '$.since_ms')
+                    AND request.component = 'fragment_index' AND request.state = 'ready'"
+                    .into(),
+                encode(&serde_json::json!({"node_id": node_id, "since_ms": since_ms}))?,
+                false,
+                false,
+            )
+            .await?;
+        rows.first()
+            .map(|row| decode(row))
+            .transpose()
+            .map(|count| count.unwrap_or(0))
     }
     async fn pause_background_source(
         &self,

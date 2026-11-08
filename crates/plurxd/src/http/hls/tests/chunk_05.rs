@@ -509,6 +509,113 @@ async fn pre_worker_request_guard_releases_an_owned_claim_for_immediate_retry() 
         .expect("settle retry claim"));
 }
 
+/// Review 1, B1: a create cancelled at its claim await, after the Store has
+/// committed the claim but before the create saw the answer, leaves that
+/// claim retryable within one settlement budget. Before the guard was armed
+/// ahead of the await, the cancelled create left a `starting` row that no
+/// guard, worker or owner would settle, and every re-post with the same
+/// `request_id` joined it until the claim expired a minute later.
+#[tokio::test]
+async fn a_create_cancelled_at_its_claim_await_leaves_the_claim_retryable() {
+    let (_app, state) = super::super::tests::test_app_with_state();
+    let user = state
+        .store
+        .create_user("claim-cancelled", "hash", false)
+        .await
+        .expect("create claim-cancelled user");
+    let principal =
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
+    let request_id = "claim-cancelled-attempt";
+    let player = "claim-cancelled-player";
+    let owner = uuid::Uuid::new_v4().to_string();
+    let retry = uuid::Uuid::new_v4().to_string();
+    let fingerprint = "d".repeat(64);
+    let now_ms = unix_ms();
+    let (committed, claim_committed) = tokio::sync::oneshot::channel::<()>();
+    let budget = crate::media_pool::CreateStartupBudget::new(10_000);
+    // The viewer's create, as `create_with_purpose` runs it: an owned task that
+    // is cancelled with its viewer until it owns its claim.
+    let create = crate::media_pool::OwnedCreate::spawn(&budget, {
+        let state = state.clone();
+        let principal = principal.clone();
+        let fingerprint = fingerprint.clone();
+        let owner = owner.clone();
+        budget.scope(async move {
+            let claim = async {
+                let claimed = state
+                    .store
+                    .claim_media_session_request(
+                        &principal,
+                        request_id,
+                        &fingerprint,
+                        player,
+                        &owner,
+                        now_ms,
+                        now_ms.saturating_add(60_000),
+                    )
+                    .await;
+                // Committed, and the create is not polled again before its
+                // viewer goes.
+                let _ = committed.send(());
+                std::future::pending::<()>().await;
+                claimed
+            };
+            let _ = MediaSessionRequestGuard::claim(
+                state.clone(),
+                principal.clone(),
+                request_id.to_owned(),
+                owner.clone(),
+                claim,
+            )
+            .await;
+        })
+    });
+    claim_committed.await.expect("the claim committed");
+    assert!(
+        matches!(
+            state
+                .store
+                .media_session_request_progress(&principal, request_id)
+                .await
+                .expect("read the claim"),
+            Some(progress) if progress.state == "starting" && progress.incarnation_id == owner
+        ),
+        "the committed claim belongs to the create that is about to be cancelled"
+    );
+    // The viewer goes before the create owned its claim.
+    drop(create);
+
+    let deadline = tokio::time::Instant::now() + REQUEST_CLAIM_SETTLEMENT_BUDGET;
+    loop {
+        // The original claim stays unexpired: only the cancelled create's own
+        // settlement, never claim expiry, may let this retry acquire it.
+        match state
+            .store
+            .claim_media_session_request(
+                &principal,
+                request_id,
+                &fingerprint,
+                player,
+                &retry,
+                now_ms,
+                now_ms.saturating_add(60_000),
+            )
+            .await
+            .expect("retry the claim")
+        {
+            MediaSessionRequestClaim::Acquired { incarnation_id } if incarnation_id == retry => {
+                break;
+            }
+            MediaSessionRequestClaim::InFlight { .. } if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            other => panic!(
+                "the cancelled create's claim was not retryable within one settlement budget: {other:?}"
+            ),
+        }
+    }
+}
+
 // ---- segment delivery, through the real response ------------------------
 //
 // These drive the handler, not `SegmentDelivery`. The correction under
@@ -1894,6 +2001,11 @@ fn every_create_not_yet_answer_keeps_its_start_attempt_open() {
             42,
             crate::transcode::vod_refusal_error("vod_engine_unattested", "probing"),
         ),
+        session_start_error(
+            42,
+            "transcode capacity is temporarily unavailable: background encoding did not yield"
+                .to_owned(),
+        ),
         super::segment::media_owner_transition(),
     ];
     for error in &not_yet {
@@ -1931,11 +2043,7 @@ fn every_create_not_yet_answer_keeps_its_start_attempt_open() {
             42,
             crate::transcode::vod_refusal_error("vod_disabled", "off"),
         ),
-        session_start_error(
-            42,
-            "transcode capacity is temporarily unavailable: background encoding did not yield"
-                .to_owned(),
-        ),
+        session_start_error(42, crate::transcode::replacement_deadline_error()),
     ] {
         let ledger = crate::playstart::StartAttempts::new();
         ledger.refused(1, 42, None, error.code(), std::time::Instant::now());
@@ -1953,6 +2061,95 @@ fn bounded_admission_failure_is_a_retryable_503() {
         session_start_error(42, "ffmpeg failed".into()),
         ApiError::Internal(_)
     ));
+}
+
+/// D2 item 1: the create's allowance is the client's own remaining start
+/// time when it sends one; the 10 s default is only for a client that does
+/// not.
+#[test]
+fn create_allowance_is_the_clients_remaining_time() {
+    let mut headers = HeaderMap::new();
+    assert_eq!(startup_allowance_ms(&headers), 10_000);
+    headers.insert("x-plurx-startup-remaining-ms", "4200".parse().expect("value"));
+    assert_eq!(startup_allowance_ms(&headers), 4_200);
+    headers.insert("x-plurx-startup-remaining-ms", "0".parse().expect("value"));
+    assert_eq!(startup_allowance_ms(&headers), 0, "an exhausted client is not given 10 s");
+    headers.insert("x-plurx-startup-remaining-ms", "soon".parse().expect("value"));
+    assert_eq!(startup_allowance_ms(&headers), 10_000);
+}
+
+/// D2 item 2: every capacity refusal reaches the client with a code. The one
+/// failure a retry would cure — a slot, a CPU share, a queue position — is the
+/// `create_503_not_yet` code with a wait; each refusal no retry can cure names
+/// itself instead of hiding in a codeless 503.
+#[tokio::test]
+async fn every_capacity_refusal_class_carries_its_code() {
+    async fn answer(error: String) -> (StatusCode, Option<String>, serde_json::Value) {
+        let response = session_start_error(42, error).into_response();
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .map(|value| value.to_str().expect("ascii").to_owned());
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        (status, retry_after, serde_json::from_slice(&body).expect("json"))
+    }
+    // Waitable: the admission loop's slot/CPU refusals and the replacement
+    // gate registry, each with the class's own wait.
+    for (error, wait) in [
+        (
+            "transcode capacity is temporarily unavailable: all 2 hardware transcode slots are in use and the software CPU pool is spent (8 of 8 threads reserved); try again in a moment".to_owned(),
+            "2",
+        ),
+        (
+            "transcode capacity is temporarily unavailable: waiting for this player's previous start: held".to_owned(),
+            "3",
+        ),
+    ] {
+        let (status, retry_after, body) = answer(error.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
+        assert_eq!(body["code"], "transcode_capacity_pending", "{error}");
+        assert_eq!(retry_after.as_deref(), Some(wait), "{error}");
+        assert!(
+            crate::playstart::START_NOT_YET_CODES.contains(&body["code"].as_str().expect("code")),
+            "the waitable code is the one every client's create ladder retries"
+        );
+    }
+    // Terminal: each producer's class names its own code and no wait.
+    for (error, code) in [
+        (
+            crate::transcode::replacement_deadline_error(),
+            crate::transcode::REPLACEMENT_EXPIRED,
+        ),
+        (
+            crate::transcode::terminal_capacity_error_for_test(
+                crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE,
+                "the proved 4K HDR10 QuickSync slot is busy; retry at 1080p",
+            ),
+            crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE,
+        ),
+        (
+            crate::transcode::terminal_capacity_error_for_test(
+                crate::transcode::TRANSCODE_SCRATCH_EXHAUSTED,
+                "rolling scratch capacity unavailable: 0 bytes charged, 9 requested, 8 configured",
+            ),
+            crate::transcode::TRANSCODE_SCRATCH_EXHAUSTED,
+        ),
+    ] {
+        let (status, retry_after, body) = answer(error.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
+        assert_eq!(body["code"], code, "{error}");
+        assert_eq!(retry_after, None, "a terminal refusal asks for no wait: {error}");
+        assert!(
+            !crate::playstart::START_NOT_YET_CODES.contains(&code),
+            "a terminal code is never one a client re-posts unchanged"
+        );
+        let message = body["message"].as_str().expect("message");
+        assert!(!message.contains('['), "the class tag is not the viewer's sentence: {message}");
+        assert!(crate::transcode::is_retryable_capacity_error(&error), "still the capacity class server-side");
+    }
 }
 
 #[test]

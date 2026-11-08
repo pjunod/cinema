@@ -885,6 +885,7 @@ fn bounded_playback_query(query: PlaybackEventsQuery) -> PlaybackEventQuery {
         since_ms: query.since,
         event: query.event,
         limit: query.limit.clamp(1, 2_000),
+        ..PlaybackEventQuery::default()
     }
 }
 
@@ -1105,6 +1106,87 @@ pub struct ClientLog {
     /// document is built from (`"5,8"`). Split here rather than on the wire so
     /// a client that grows a profile does not need a new field.
     pub declared_dv_profiles: Option<String>,
+    /// How a prepared switch ended at its seam, with the evidence the client
+    /// measured (plan ruling 3: the processed upgrade leaves the Developer
+    /// tab only after twenty clean, fully measured switches per platform).
+    pub(crate) prepared_seam: Option<ClientPreparedSeam>,
+}
+
+/// One `prepared_seam` report. Every field is the client's observation; the
+/// server counts them (`plurx_playback_preparation_seams_*`) and decides
+/// nothing from them.
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(default)]
+pub(crate) struct ClientPreparedSeam {
+    platform: String,
+    outcome: String,
+    /// The ±2 s window around the commit was sampled end to end.
+    frames_complete: bool,
+    dropped_frames: Option<u64>,
+    /// Audio continuity was measured by an instrument of its own, not
+    /// inferred from the picture.
+    audio_observed: bool,
+    /// The change also took an ordinary reopen.
+    reopened: bool,
+}
+
+impl ClientPreparedSeam {
+    /// The counted report, or `None` for a platform or outcome outside the
+    /// vocabulary (a newer client's word is dropped, not guessed at).
+    pub(crate) fn report(
+        &self,
+    ) -> Option<(
+        crate::playback_control::ClientPlatform,
+        crate::playback_control::PreparedSeamReport,
+    )> {
+        use crate::playback_control::ClientPlatform;
+        let platform = match self.platform.as_str() {
+            "web" => ClientPlatform::Web,
+            "apple" => ClientPlatform::Apple,
+            "android" => ClientPlatform::Android,
+            "linux" => ClientPlatform::Linux,
+            _ => return None,
+        };
+        let outcome = crate::playback_control::PREPARED_SEAM_OUTCOMES
+            .iter()
+            .position(|known| *known == self.outcome)?;
+        Some((
+            platform,
+            crate::playback_control::PreparedSeamReport {
+                outcome,
+                frames_complete: self.frames_complete,
+                dropped_frames: self.dropped_frames,
+                audio_observed: self.audio_observed,
+                reopened: self.reopened,
+            },
+        ))
+    }
+}
+
+/// Whether the session a `prepared_seam` report names is a processed Dolby
+/// Vision / HDR10-E successor, read from its durable recipe: the server's own
+/// record of what that successor delivers, so the processed upgrade's bar
+/// counts its own switches (review 3 S4) without a new beacon field and for
+/// every client version. Bounded: a read that misses its budget, or a session
+/// with no route (a refused successor that never committed), counts as an
+/// ordinary switch.
+async fn prepared_seam_session_processed(state: &AppState, session_id: &str) -> bool {
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        state.store.media_session_route(session_id),
+    )
+    .await;
+    let Ok(Ok(Some(route))) = read else {
+        return false;
+    };
+    serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(&route.recipe_json).is_ok_and(
+        |recipe| {
+            recipe.request.dv_processing_destination.is_some()
+                || recipe
+                    .candidate_catalog
+                    .is_some_and(|catalog| catalog.candidate.processed_dv)
+        },
+    )
 }
 
 /// Sustained rate and burst allowance for `/client-log`, in reports per minute.
@@ -1325,7 +1407,18 @@ pub async fn client_log(
         tracing::warn!(target: "plurxd::client", "{line}");
     }
 
-    let event = client_playback_event(&ev, user.id);
+    if let Some((platform, report)) = ev
+        .prepared_seam
+        .as_ref()
+        .and_then(ClientPreparedSeam::report)
+    {
+        let processed = match ev.session_id.as_deref() {
+            Some(session) => prepared_seam_session_processed(&state, session).await,
+            None => false,
+        };
+        crate::playback_control::record_prepared_seam(platform, processed, report);
+    }
+    let mut event = client_playback_event(&ev, user.id);
     // A first frame or a failure report settles the start attempt this
     // node opened for the viewer and file (C-08 M5 row 4); any other beacon
     // about a play in progress keeps that play alive. The beacon's own
@@ -1339,6 +1432,42 @@ pub async fn client_log(
             event.reason.as_deref(),
             std::time::Instant::now(),
         );
+        // Plan ruling 3: processed Dolby Vision is an upgrade after the
+        // first frame. The viewer's first picture for a session this node
+        // owns starts its upgrade, if the create left one waiting.
+        if event.event == "ttff" {
+            if let Some(session) = event.session_id.as_deref() {
+                super::hls::processed_upgrade::note_first_frame(&state, user.id, session);
+            }
+        }
+        // The same report also settles the create it answers (G1): carry that
+        // create's attempt id on the beacon, and record the first frame as a
+        // row of its own. Matched by the session the report names, so two
+        // devices of one viewer on one title settle their own creates.
+        let session = event.session_id.clone();
+        if let Some(settled) = state.start_attempts.settle(
+            user.id,
+            file_id,
+            session.as_deref(),
+            &event.event,
+            std::time::Instant::now(),
+        ) {
+            carry_create_attempt(&mut event, &settled.attempt);
+            if settled.outcome == crate::playstart::SettledOutcome::Presented {
+                crate::telemetry::emit(
+                    Arc::clone(&state.store),
+                    crate::playstart::presented_event(
+                        &settled.attempt,
+                        (user.id, file_id),
+                        settled.session.as_deref(),
+                        event.method.as_deref(),
+                        event.ms,
+                        event.reason.as_deref(),
+                        event.at_unix_ms,
+                    ),
+                );
+            }
+        }
     }
     // Deliberately not `ev.ua`: the class must come from the same input the
     // read paths use, or the prior is written under a key nothing reads.
@@ -1627,6 +1756,27 @@ fn emit_client_playback_event(
         .as_deref()
         .map(crate::transcode::session_log_id);
     crate::telemetry::emit_with_network(store, event, network, client);
+}
+
+/// Put the create's attempt id in the beacon's `attempt` column, where the
+/// Starts view joins on it. The player's own per-page counter (`a1`, `a2`, …)
+/// names an attempt only within one page and so cannot tell two devices
+/// apart; it moves to `extra.client_attempt` rather than being lost.
+fn carry_create_attempt(event: &mut PlaybackEvent, attempt: &str) {
+    let mut extra = event
+        .extra
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .and_then(|value| match value {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if let Some(client) = event.attempt.take() {
+        extra.insert("client_attempt".to_owned(), client.into());
+    }
+    event.attempt = Some(attempt.chars().take(64).collect());
+    event.extra = Some(serde_json::Value::Object(extra).to_string());
 }
 
 fn normalize_client_marker_prewarm(event: &mut PlaybackEvent) {
@@ -6285,6 +6435,12 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
              # TYPE plurx_analysis_queue_claimable gauge\n\
              # HELP plurx_analysis_queue_running_past_lease Fragment-index jobs sitting running past a lease nobody renewed.\n\
              # TYPE plurx_analysis_queue_running_past_lease gauge\n\
+             # HELP plurx_analysis_queue_eligible Due fragment-index work some live engine can claim now (queued jobs plus compatible pre-worker requests).\n\
+             # TYPE plurx_analysis_queue_eligible gauge\n\
+             # HELP plurx_analysis_queue_waiting Fragment-index work inside a retry wait: pre-worker requests and queued worker jobs.\n\
+             # TYPE plurx_analysis_queue_waiting gauge\n\
+             # HELP plurx_analysis_queue_incompatible Due pre-worker fragment-index requests nobody can claim: no live worker runs their engine digest, or their target was removed.\n\
+             # TYPE plurx_analysis_queue_incompatible gauge\n\
              # HELP plurx_analysis_queue_claims_since_start Claims this process has watched, since it started. Shared with skip-marker work.\n\
              # TYPE plurx_analysis_queue_claims_since_start gauge\n\
              # HELP plurx_analysis_queue_lease_losses_since_start Lost leases this process has watched, since it started.\n\
@@ -6296,6 +6452,9 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
              plurx_analysis_queue_claimed_24h {}\n\
              plurx_analysis_queue_claimable {}\n\
              plurx_analysis_queue_running_past_lease {}\n\
+             plurx_analysis_queue_eligible {}\n\
+             plurx_analysis_queue_waiting {}\n\
+             plurx_analysis_queue_incompatible {}\n\
              plurx_analysis_queue_claims_since_start {}\n\
              plurx_analysis_queue_lease_losses_since_start {}\n",
             report.health.ready_24h,
@@ -6303,8 +6462,21 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
             report.health.claimed_24h,
             report.health.claimable,
             report.health.running_past_lease,
+            report.health.eligible,
+            report.health.waiting,
+            report.health.incompatible,
             report.claims_since_start,
             report.lease_losses_since_start,
+        ));
+    }
+    out.push_str(
+        "# HELP plurx_analysis_queue_failed_by_code Failed analysis rows by last error code (bounded; unlisted codes count as other).\n\
+         # TYPE plurx_analysis_queue_failed_by_code gauge\n",
+    );
+    for (slot, code) in plurx_core::store::ANALYSIS_FAILURE_CODES.iter().enumerate() {
+        out.push_str(&format!(
+            "plurx_analysis_queue_failed_by_code{{code=\"{code}\"}} {}\n",
+            analysis.failed_by_code[slot]
         ));
     }
     out.push_str(
@@ -6377,7 +6549,7 @@ pub(crate) async fn metrics(
         super::prometheus_http_request_metrics(),
         crate::panics::prometheus_panics(),
         crate::state::fragment_index_validation_prometheus() + &super::browse::detail_projection_prometheus(),
-        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &state.clock.prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &crate::background_jobs::analysis_reconcile::prometheus() + &crate::state::analysis_completed_prometheus(&state.node_id) + &state.clock.prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();

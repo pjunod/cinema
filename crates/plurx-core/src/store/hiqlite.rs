@@ -6004,15 +6004,18 @@ impl NetworkPriorStore for HiqliteAuthStore {
 
 #[async_trait]
 impl MetricsStore for HiqliteAuthStore {
-    async fn prometheus_store_snapshot(
+    async fn prometheus_store_snapshot_with(
         &self,
         node_id: &str,
         now: i64,
+        live_fragment_engines: Option<&super::LiveAnalysisEngines>,
     ) -> Result<PrometheusStoreSnapshot, StoreError> {
+        let live = super::live_engines_param(live_fragment_engines);
+        let request_health = super::analysis_request_health_sql("$2", "$3");
         let row = self
             .client()
             .query_consistent_map::<PrometheusStoreRow, _>(
-                "SELECT \
+                String::from("SELECT \
                     (SELECT COUNT(*) FROM libraries) AS libraries, \
                     (SELECT COUNT(*) FROM users) AS users, \
                     COALESCE(SUM(state = 'queued'), 0) AS queued, \
@@ -6053,7 +6056,7 @@ impl MetricsStore for HiqliteAuthStore {
                        FROM (SELECT component, \
                               CASE \
                                 WHEN last_error_code = 'source_superseded' THEN 'stale' \
-                                WHEN state = 'queued' AND not_before_ms > $2 THEN 'retry_wait' \
+                                WHEN state = 'queued' AND not_before_ms > $2 * 1000 THEN 'retry_wait' \
                                 WHEN state = 'running' THEN 'claimed' \
                                 WHEN state = 'submitted' THEN 'staged' \
                                 WHEN state = 'ready' THEN 'published' \
@@ -6061,8 +6064,8 @@ impl MetricsStore for HiqliteAuthStore {
                                 ELSE state END AS durable_state, \
                               priority, trigger, \
                               COUNT(*) AS depth, \
-                              CASE WHEN $2 > MIN(created_at_ms) \
-                                THEN ($2 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds \
+                              CASE WHEN $2 * 1000 > MIN(created_at_ms) \
+                                THEN ($2 * 1000 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds \
                          FROM ( \
                            SELECT component, state, last_error_code, not_before_ms, \
                                   priority, trigger, created_at_ms \
@@ -6137,9 +6140,10 @@ impl MetricsStore for HiqliteAuthStore {
                             + (SELECT COUNT(*) FROM analysis_source_reservations \
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000)), \
                         'source_recovery_pending', (SELECT COUNT(DISTINCT custody_id) FROM source_io_occupancy WHERE custody_id IS NOT NULL AND active_occupancy=1 AND expires_at_ms <= $2 * 1000), \
-                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json \
-                 FROM offline_packages WHERE node_id = $1",
-                params!(node_id, now),
+                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json, ")
+                    + &request_health
+                    + " FROM offline_packages WHERE node_id = $1",
+                params!(node_id, now, live),
             )
             .await?
             .into_iter()
@@ -7461,6 +7465,11 @@ struct PrometheusStoreRow {
     analysis_running_past_lease: i64,
     analysis_last_ready_at_ms: i64,
     background_jobs_json: String,
+    analysis_waiting: i64,
+    analysis_incompatible: i64,
+    analysis_eligible_requests: i64,
+    analysis_oldest_queued_at_ms: i64,
+    analysis_failed_code_json: String,
 }
 
 impl From<&mut Row<'_>> for PrometheusStoreRow {
@@ -7491,6 +7500,11 @@ impl From<&mut Row<'_>> for PrometheusStoreRow {
             analysis_running_past_lease: row.get("analysis_running_past_lease"),
             analysis_last_ready_at_ms: row.get("analysis_last_ready_at_ms"),
             background_jobs_json: row.get("background_jobs_json"),
+            analysis_waiting: row.get("analysis_waiting"),
+            analysis_incompatible: row.get("analysis_incompatible"),
+            analysis_eligible_requests: row.get("analysis_eligible_requests"),
+            analysis_oldest_queued_at_ms: row.get("analysis_oldest_queued_at_ms"),
+            analysis_failed_code_json: row.get("analysis_failed_code_json"),
         }
     }
 }
@@ -7521,14 +7535,23 @@ impl TryFrom<PrometheusStoreRow> for PrometheusStoreSnapshot {
                 &row.analysis_queue_json,
                 &row.analysis_marker_json,
                 &row.analysis_lifecycle_json,
-                super::AnalysisQueueHealth {
-                    ready_24h: row.analysis_ready_24h,
-                    attempt_limit_24h: row.analysis_attempt_limit_24h,
-                    claimed_24h: row.analysis_claimed_24h,
-                    claimable: row.analysis_claimable,
-                    running_past_lease: row.analysis_running_past_lease,
-                    last_ready_at_ms: row.analysis_last_ready_at_ms,
-                },
+                &row.analysis_failed_code_json,
+                super::AnalysisQueueHealth::with_requests(
+                    [
+                        row.analysis_ready_24h,
+                        row.analysis_attempt_limit_24h,
+                        row.analysis_claimed_24h,
+                        row.analysis_claimable,
+                        row.analysis_running_past_lease,
+                        row.analysis_last_ready_at_ms,
+                    ],
+                    [
+                        row.analysis_waiting,
+                        row.analysis_incompatible,
+                        row.analysis_eligible_requests,
+                        row.analysis_oldest_queued_at_ms,
+                    ],
+                ),
             ),
         })
     }

@@ -10,6 +10,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A client releasing a rolling stream, or an operator stopping it from
+  Activity, now retires it as `released` / `stopped` instead of an authority
+  fence. Metrics and session-end events no longer report every ordinary
+  release as failover, and a control request racing the stop is answered with
+  the existing `deleted` / `admin_stop` reason rather than `authority_fenced`,
+  which clients treat as recoverable.
 - A targeted scan of a path under a library root that cannot be read right now
   (an unmounted share, an empty mount point, `ENOTCONN`, `EIO`) answers
   `503 {"code":"path_unreadable","retry_after_s":60}` with `Retry-After`,

@@ -712,6 +712,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # `post_media_retirement_keeps_exact_resources_after_caller_cancellation` asserts that
 # `child_transition.try_lock()` fails while retirement is held at its cleanup-handoff point. A
 # test-only probe that is expected to fail and takes nothing; no transition owner is created.
+# Main merged into the effort (2026-11-08): main's reviewed additions and the
+# effort's are both present; the total is the merged tree's exact count.
 # 19 -> 20 with bee39df0e (test: expose the blocked retirement phase on a cleanup failure):
 # `test_support.rs::worker_retirement_debug` formats `child_transition.try_lock().is_ok()` into a
 # failure message. A test-only, non-blocking probe whose guard drops at once; no transition owner.
@@ -1041,7 +1043,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # awaits its JoinHandle before asserting.
 # PR1341: +1 test-only spawn in chunk_06.rs (M5 init-wait driver); the
 # test joins it under its deadline.
-expected_occurrences = 121
+# Playback start Phase 1: the create-time processed credit D1 left unreachable is
+# removed (PreparedCandidateOnce, session_request.rs). -1: its expiry task, which
+# dropped an unconsumed credit at its deadline.
+expected_occurrences = 120
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -1338,6 +1343,8 @@ pattern = "child_transition"
 # 34 -> 35 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
 # test-only failing `try_lock()` probe at the retirement handoff point.
 # S10 retained attachment initializes its existing response transition mutex.
+# Main merged into the effort (2026-11-08): main's reviewed additions and the
+# effort's are both present; the total is the merged tree's exact count.
 # 36 -> 38 with bee39df0e: the same test-only debug helper names `child_transition` twice
 # (its `child_transition_available` label and the `try_lock()` probe above). No new owner.
 expected_occurrences = 38
@@ -2296,12 +2303,20 @@ expected_occurrences = 2
 id = "m4-exact-session-release-admission"
 pattern = "begin_session_release"
 # J0: one public recovery fixture releases its exact native route through the existing owner.
-expected_occurrences = 3
+# R1 (playback-start): 3 -> 8. `begin_session_release_fence` is the phase-one
+# release fence that carries the requester's typed intent: its definition, the
+# client/admin DELETE caller in release.rs, the release-reconciliation retry
+# in media_sessions.rs, and two test calls. It closes the same publication
+# gate as before and owns no task or timer; only the actor mirror's typed
+# cause changes (Released/Stopped instead of AuthorityFence).
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-terminal-capability-projection"
 pattern = "begin_session_terminal"
-expected_occurrences = 15
+# R1: +1 test-only (`admin_stop_settles_stopped_not_authority_fence`) drives
+# the operator-stop phase-two projection; no new projection owner.
+expected_occurrences = 16
 
 [[module_symbols]]
 id = "m4-release-shared-settlement"
@@ -2365,18 +2380,26 @@ pattern = "terminal_reason"
 # 50 -> 52 with the VOD index recovery (PR1299), both test-only: the budget
 # test's outcome fixture initializes the field to None, and the vod test reads
 # the `attempt_limit` cause the recovery wrote. No route cause changes.
-expected_occurrences = 54
+# R1: +2 test-only reads asserting a release/stop maps to the existing
+# durable reasons (`deleted`, `admin_stop`). No new writer of a terminal cause.
+expected_occurrences = 56
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
 pattern = "retire_session_until_with_cause"
-expected_occurrences = 10
+# R1: +3 test-only calls (operator-stop join, release/fence race) that read
+# the one shared settlement's winning cause; no new retirement owner.
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-release-publication-gate"
 pattern = "begin_session_publication_fence"
 # PR1341: +1 test-only (authority_recovery.rs).
-expected_occurrences = 7
+# R1: 7 -> 9. The gate body moved into `begin_session_publication_fence_for`
+# (definition, the cause-neutral wrapper's call, the release fence's call, one
+# doc link) while release.rs and the reconciliation retry moved to
+# `begin_session_release_fence` (-2). Same gate, same linearization point.
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-release-terminal-store-deadlines"
@@ -3689,11 +3712,42 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # warm_inventory awaits the existing refresh owner and spawns no extra task.
 # Cinema manual-scan dispatch adds the driver in the busy-worker renewal
 # regression. The test releases its BeforeScan barrier and awaits the handle.
+# R1: +3 test-only `RollingControlHandle::spawn_for_test` actors in
+# `release_projection_is_the_first_terminal_and_keeps_its_cause`, each owned by
+# its handle and dropped at the end of the test.
+# D2 start contract: +5. `OwnedCreate` (media_pool.rs) owns the create task
+# it spawns: cancelled with the request until the create holds its durable
+# request claim, then bounded by the claim window and aborted past it. +1 its
+# `tokio::spawn`, +1 the create handler's `OwnedCreate::spawn` call, +2 the two
+# media_pool tests' `OwnedCreate::spawn`, +1 the joined `tokio::spawn` that
+# runs the waiting re-post in `a_retry_of_a_start_still_in_flight_joins_its_claim`.
+# Review 1 B1: +1 test-only `OwnedCreate::spawn` in
+# `a_create_cancelled_at_its_claim_await_leaves_the_claim_retryable`; the
+# test drops it before the create owns its claim, which aborts it.
+# D1 processed DV upgrade: +1 production `tokio::spawn` in
+# http/hls/processed_upgrade.rs `start_upgrade` (called by `note_first_frame`
+# and `note_presented`). It runs one upgrade for one session after that
+# session's first frame: it owns the `UpgradeRun` claim (dropped, and its
+# registry entry removed, when the task ends however it ends). It is awaited
+# to completion, never raced against the claim's cancellation (review 3 S1):
+# release and a newer session reach the trial and the staged successor
+# through the playback slot's token, a child of the run's, so a cancelled
+# successor is settled by staging's own cleanup instead of stranded by a
+# dropped future. It holds the trial's prepared root only through a
+# `ProcessedUpgradeRootLease` that frees it on drop, and starts no process of
+# its own: the trial and the successor's prime use the existing owners.
+# Main merged into the effort (2026-11-08): main's and the effort's reviewed
+# additions are both counted; the total is the merged tree's exact count.
+# Main (8f2585e6b..c32bf261c, jellyfin/activity fixture fixes) landed these
+# without a recount; counted at the 2026-11-08 main→effort merge so the census is exact.
+# Playback start Phase 1: the create-time processed credit D1 left unreachable is
+# removed (PreparedCandidateOnce, session_request.rs). -2: that expiry task and a
+# test-only thread spawn in its removed consume-once test.
 # d9a0ebc76 (learner worker accounting): `spawn_background_loops` also starts
 # `http::cluster_operations::worker_status_cache_loop`, a read-only refresh of local worker
 # capacity for Activity. It owns no child or source, and returns on `background_shutdown`, the
 # same cancellation as its sibling peer-status loop.
-expected_occurrences = 1089
+expected_occurrences = 1097
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3936,7 +3990,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # the listener owner. Both parent additions are present in the source union.
 # Subtitle cue index (#1340): +1 scope.spawn in mkv_sparse::parallel; the
 # reader threads are scoped and joined by std::thread::scope before it returns.
-expected_occurrences = 90
+# D2 start contract: +1 `runtime.spawn` in `OwnedCreate::drop`: the detached
+# owner's bound, which awaits the owned create until its owner deadline and
+# aborts it there; it owns nothing else.
+# Review 2 fixes (#1438): +1 is the fleet route test's server thread in
+# http/activity_starts/tests.rs, joined before the test returns; no production launcher.
+expected_occurrences = 92
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -3957,7 +4016,9 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # both use the same retained cancellation/reap owner, not separate launchers.
 # PR1225: +1 is vod/driver.rs:1245's cfg(test) controlled_driver::spawn
 # declaration, not a second task. Its actual task/cancellation is noted above.
-expected_occurrences = 18
+# D2 start contract: +1 the `fn spawn(` declaration of `OwnedCreate`, not a
+# task call.
+expected_occurrences = 19
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5453,6 +5514,36 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # commit and pressure-check event ordering (15 s), scan acknowledgement
 # (3 s), and renewal visibility (12 s with a 50 ms poll).
 # The worker's existing idle sleep changes delay in place (zero net sites).
+# R1: +1 production `timeout_at` in `Session::end_activity_until`: a released
+# or stopped generation's retirement observes the actor's committed cause
+# through a snapshot bounded by the caller's existing replacement deadline;
+# on expiry the projected release stands. It decides no recovery and spawns
+# nothing. The other +2 in this total predate R1 on main (88fa37663..ae779d141:
+# subtitle_work.rs `interval_at`, source_custody/recovery/tests.rs `timeout`);
+# they are counted here so the census is exact, not reviewed by R1.
+# D2 start contract: media_pool.rs +4 (the owner bound's `timeout_at` in
+# `OwnedCreate::drop` and three test sleeps), http/tests.rs +1 (the joined
+# re-post test's wait before the owner lets go), create.rs -1 (the
+# compatibility-only activation wait folded into the claim join loop).
+# Review 1 B1: +1 test-only condition poll (`sleep`) in
+# `a_create_cancelled_at_its_claim_await_leaves_the_claim_retryable`, bounded
+# by one settlement budget. The other +5 in this total landed on
+# effort/playback-start with the C1, C3 and G1 merges without a recount; they
+# are counted here so the census is exact, not reviewed by this lane.
+# Review 2 fixes (#1438): +6 are test-only bounds — the fleet route test's two
+# timeouts and one poll sleep, the replay/direct settle test's two poll sleeps,
+# and the cross-node exclusion test's one sleep. No production timer is added.
+# Main merged into the effort (2026-11-08): main's and the effort's reviewed
+# additions are both counted; the total is the merged tree's exact count.
+# Review 3 D1 fixes: +2. http/system.rs `prepared_seam_session_processed`
+# bounds its one route read with `tokio::time::timeout` (250 ms) and starts
+# nothing; the S9 trial-failure test waits one exchange cadence (`sleep`,
+# 260 ms) before its second control exchange. No task or process is added.
+# Main (8f2585e6b..c32bf261c, jellyfin/activity fixture fixes) landed these
+# without a recount; counted at the 2026-11-08 main→effort merge so the census is exact.
+# Playback start Phase 1: the create-time processed credit D1 left unreachable is
+# removed (PreparedCandidateOnce, session_request.rs). -2: the expiry `sleep_until`
+# and `Instant::from_std`.
 # +6 after the Cinema dispatch/release pushes. Two belong to d9a0ebc76's
 # `worker_status_cache_loop`: a 1 s `timeout` around one local capacity read, and the
 # `sleep_until` to its next refresh, both raced against shutdown. One is ad4acb07c's test-only
@@ -5460,7 +5551,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # (`foreground_admission_tests`). Three are Jellyfin native-HLS test retries (d25a35ea3,
 # 9fde9d148, 55f84b0e8): 250 ms and 1 s sleeps while a fixture response is `503` pending.
 # No production producer, child or detached owner is added.
-expected_occurrences = 2094
+expected_occurrences = 2111
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5486,7 +5577,9 @@ expected_occurrences = 2094
 id = "bare-time-constructor"
 pattern = "(?<![:.\\w])(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
 # J4 shared startup: Two calls to the local timeout error factory in the shared-start observer return ApiError only; they construct no timer.
-expected_occurrences = 3
+# D2 start contract: the shared-start observer and its two local `timeout()`
+# factory calls are gone; the claim join loop answers `create_still_starting`.
+expected_occurrences = 1
 
 [[module_structures]]
 id = "tokio-time-import"
@@ -6622,10 +6715,19 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # are unchanged; the two joined fixture tasks are classified above separately.
 # PR1369: +2 output() calls for the same bounded offline FFmpeg/FFprobe
 # controls inventoried above, not additional children or detached owners.
+# D2 start contract: +4, none a process. Three `.status()` reads of HTTP
+# responses in new tests (hls chunk_05, http/tests.rs, media_sessions tests)
+# and `runtime.spawn` in `OwnedCreate::drop` (the task counted by method-spawn).
+# Review 2 fixes (#1438): +5 are `reqwest::Response::status()` calls in the
+# fleet route and settle tests matched by the launch-method shape; no process.
+# Main merged into the effort (2026-11-08): main's reviewed additions and the
+# effort's are both present; the total is the merged tree's exact count.
+# Main (8f2585e6b..c32bf261c, jellyfin/activity fixture fixes) landed these
+# without a recount; counted at the 2026-11-08 main→effort merge so the census is exact.
 # +3 in `http/jellyfin/tests.rs` (d25a35ea3, 9fde9d148, 55f84b0e8): HTTP
 # `response.status()` reads in the pending-segment retry loops above. They match the
 # `.status(` shape but launch no process.
-expected_occurrences = 883
+expected_occurrences = 892
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6921,7 +7023,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Subtitle completion adds two installer qualification child lifecycle calls;
 # the child remains owned through wait or kill-and-wait on its 60s bound.
 # Main retains the HTTPS transport listener's awaited task/connection boundary.
-expected_occurrences = 384
+# Playback start Phase 1: the create-time processed credit D1 left unreachable is
+# removed (PreparedCandidateOnce, session_request.rs). -2: barrier waits and the
+# thread join in its removed consume-once test.
+expected_occurrences = 382
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

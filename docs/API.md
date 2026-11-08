@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-28, plurx has 409 routes declared by the ordinary listener's
+As of 2026-10-28, plurx has 411 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 409 routes across the registered routers.
+plurx has 411 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -516,6 +516,7 @@ of never storing it.
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
 | GET | `/api/v1/activity` | bearer | Flat list of what the server is doing |
 | GET | `/api/v1/activity/detail` | bearer; admin sees more | The activity page |
+| GET | `/api/v1/activity/starts` | admin | Query `limit`, `before`. One row per playback start across the cluster, newest first: each media-session create (route `vod` or `rolling`, a retry that replayed its owner's session included) and each direct or progressive request that opened a start (route `direct` or `progressive`, so a `vod_index_pending` fallback to the remux is its own row): time, title, client build, route, refusal, phases, owner node, time to first frame, outcome, index state and the `index now` action (from each title's own newest fragment-index request). `outcome` `unobserved` means no client report reached the node that handled the start (the report may have gone to another node). `before` is the `next_before` cursor of the previous page; a node's page never ends inside a millisecond, so rows sharing one are not skipped. Every committed member is asked, learners included; members that did not answer are listed under `unavailable`; their starts are missing, not absent |
 | DELETE | `/api/v1/activity/sessions/{id}` | admin | Stops one transcode or VOD session |
 | DELETE | `/api/v1/activity/offline/{id}` | admin | Cancels and deletes one visible offline package |
 | DELETE | `/api/v1/activity/producer` | admin | Stops the pre-transcode producer after the current title |
@@ -1967,10 +1968,30 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
 | 410 | `live_presentation_removed` | `presentation` is anything but `"vod"` |
 | 410 | `media_session_ended` | the idempotent session was already released |
 | 422 | `hdr_subtitle_burn_refused` | the resolved plan delivers HDR without the burn, so burning would discard that grade. Judged after `resolve_plan`, against the no-burn delivered range — not against the source `hdr` column, and not exempted by a transcode verdict. The M6 preparation candidate is refused the same way |
-| 503 | `media_session_starting` | an identical request is still starting |
+| 503 | `startup_timeout` + `Retry-After` | the create's owner is still working, or an identical request (same `request_id`) is: re-post the same body; the retry joins that owner |
+| 503 | `transcode_capacity_pending` + `Retry-After` | a hardware slot, CPU share or queue position is taken; a retry of the same request can succeed |
+| 503 | `transcode_height_unavailable` | this worker cannot encode the requested height now; ask for a smaller one rather than re-posting (no shipped client re-asks yet: each ends the start on the `create_capacity_terminal` surface row) |
+| 503 | `transcode_scratch_exhausted` | this start's scratch grant is larger than the configured ceiling; no retry can succeed |
+| 503 | `replacement_expired` | the replacement start spent its own deadline before provisional work finished |
 | 503 | `media_session_handoff_pending` | the predecessor owner has not finished handoff |
 | 503 | `media_session_superseded` / `playback_target_superseded` | the client has since settled on a later destination |
-| 503 | — | too many session starts already active for this user |
+| 503 | `media_session_overloaded` + `Retry-After` | too many session starts already active for this user; the caps free as this user's other starts activate or end |
+| 503 | `media_owner_transition` + `Retry-After` | the ingress or the chosen worker lost serving authority, a worker did not answer, or the session's durable owner could not be committed in time; re-post the same body. Every create 503 carries a code; one with no more specific cause carries this one |
+
+**Start budget.** A client sends `X-Plurx-Startup-Remaining-Ms`: what its
+own start sequence has left, in milliseconds, on every attempt. The server
+answers within that or within **10 s, whichever is less** — it never holds one
+create longer than 10 s, whatever the header says — and a create without the
+header gets the 10 s. `0` is answered `startup_timeout` at once. When the
+allowance ends first, the answer is `startup_timeout` with `Retry-After`, but
+the start itself is not abandoned: once the create holds its durable
+`request_id` claim it runs on to activation for as long as the viewer can
+still take the answer — the header's whole remaining time (unclamped) plus one
+re-post, inside the claim's 60 s window — and a re-post of the same body with the same `request_id` — on any
+node — waits for that owner's activation (bounded by the new attempt's own
+allowance) and answers with it, rather than starting a second encoder. A
+client with more time left than 10 s therefore re-posts on `startup_timeout`;
+one with none left stops.
 
 **The deprecated bridge.** `GET /files/{id}/hls/start` accepts `height`,
 `start`, `audio`, `copy=1`, `aac=1`, builds a create body and calls the same
@@ -2973,7 +2994,7 @@ The preparation status read requires an authenticated viewer; every other route 
 | GET | `/api/v1/analysis/jobs/{id}` | One job's exact durable state and attempt history |
 | DELETE | `/api/v1/analysis/jobs/{id}` | Cooperative cancellation |
 | POST | `/api/v1/analysis/jobs/{id}/retry` | Creates a successor for one terminal job |
-| POST | `/api/v1/analysis/reopen` | Bulk reopen; **dry-run by default** |
+| POST | `/api/v1/analysis/reopen` | Bulk reopen; **dry-run by default**; optional `last_error_code` (one of the bounded `plurx_analysis_queue_failed_by_code` codes) selects one cause |
 | POST | `/api/v1/analysis/reconcile` | Preview and replace obsolete unfinished requests; **dry-run by default** |
 | PUT | `/api/v1/files/{id}/timeline-annotations/{kind}` | Writes a durable manual boundary |
 | DELETE | `/api/v1/files/{id}/timeline-annotations/{kind}` | Discards it, with explicit confirmation |
@@ -4063,6 +4084,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | Method | Path | Body limit | What it does |
 |---|---|---|---|
 | GET | `/_internal/v1/activity-snapshot` | — | Node-local delivery snapshot |
+| POST | `/_internal/v1/activity-starts` | — (signed exact request) | This node's own page of start-attempt rows for the fleet `activity/starts` read; response is signed by the node |
 | GET | `/_internal/v1/clock` | — (empty exact request) | Signed `{node_id, received_unix_ms, sent_unix_ms}` for four-timestamp clock observation. Any exact committed member, including a learner; unchanged 30 s auth window. The prober captures the exact signed request timestamp and bounded-body receipt before verifying the response; 1 KiB response budget and 2 s peer deadline. The route itself only measures; since 2026-10-04 (#793) the observations it supplies feed the cluster clock guard, which refuses takeover, the expired-session scan, membership changes and readiness only while the Developer switch `cluster.clock_guard_enforced` is on (default off; see OPERATIONS.md). |
 | GET | `/api/v1/internal/cluster/operations-status` | — | This node's own operations status, for the aggregate |
 | POST | `/api/v1/internal/auth/cache-revocation` | 256 B | Propagates one credential-revocation phase |

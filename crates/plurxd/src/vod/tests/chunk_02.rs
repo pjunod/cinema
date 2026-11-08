@@ -2067,6 +2067,7 @@
                         since_ms: None,
                         event: None,
                         limit: 20,
+                        ..Default::default()
                     })
                     .await
                     .expect("VOD lifecycle telemetry query");

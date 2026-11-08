@@ -9,6 +9,7 @@
   - Live reference; maintained with behavior changes. No overall status line.
 - **Read further only for:**
   - install and run (Docker, service, bare metal): `## Running it`
+  - upgrading a cluster one node at a time: `## Rolling upgrades`
   - settings, ports and listeners: `## Configuration surface`; `## Ports`
   - what a pill, scan state, storage number or the stats overlay means: `## Reading the activity pill`; `## Reading library scan status`; `## Reading playback (and the stats overlay)`
   - runbooks: sharing addresses, Curator, channels, Jellyfin, Live TV: `## Sharing Cinema addresses — set up before creating invitations`; `## Pairing another application (Curator) — the runbook`; `## Library channels — the runbook`; `## Jellyfin client compatibility`; `## Live TV (HDHomeRun) — the runbook`
@@ -3315,6 +3316,40 @@ that its Raft id is no longer a voter and refuses. To add that machine again,
 stop it, discard its old plurx data directory, and join from a fresh directory
 with a newly issued token. Never copy the removed directory back into service.
 
+## Rolling upgrades
+
+Media placement between nodes compares three facts **independently**, and
+Settings → Cluster shows all three on every node card: the **build** the node
+reports, its **media protocol** (`PROTOCOL_VERSION` in
+`crates/plurxd/src/media_pool.rs`; placement requires an exact match), and
+whether the node you are looking from would place on it now (**eligible
+owner** — a fresh, exact-protocol advertisement with an available egress and
+an encoder; the card names the reason when it is not). A node on another
+protocol never appears in placement at all, so during a protocol-changing
+upgrade the fleet is two placement cohorts: old nodes place among old nodes,
+new among new.
+
+The rule for a rolling upgrade:
+
+1. Upgrade one serving cohort at a time — one node, then confirm on the
+   Cluster card that it reads ready, its new build and protocol, and
+   *eligible owner* before the next.
+2. Keep at least one eligible owner in each cohort. While any old-build
+   ingress still takes requests, at least one old-protocol worker must stay
+   eligible, or that ingress can only start locally.
+3. Drain old ingress before upgrading the last old node: its sessions finish
+   or move first, because no new-protocol worker will accept its placement.
+
+A build skew with the same protocol is ordinary and needs none of this; the
+card flags it so it is noticed, not because placement refuses it.
+
+Protocol changes, newest first. `tests/operations/test_media_pool_wire.py`
+(run by `make paperwork`) refuses a change to a strict media-pool envelope
+without a `PROTOCOL_VERSION` bump and a dated line here naming it:
+
+- 2026-11-07 (recorded): protocol 9 — resolved audio claim and delivery on
+  `SessionRequest`, `QualityCatalogRequest` and `RemoteStartResponse`.
+
 ## Configuration surface
 
 Precedence, lowest to highest: **built-in defaults → TOML file → `PLURX_*` env**.
@@ -5979,6 +6014,80 @@ A `dead` or `degraded` verdict warns at most once an hour, and the hour only
 re-arms after the verdict has been clean for several consecutive samples — a
 queue that flaps between `degraded` and `healthy` logs on the hour, not on every
 sample.
+
+### Indexing while serving
+
+A node no longer stops indexing because one of its encoders is in use. The
+analysis worker claims requests one after another for as long as the claim's
+source-capacity rule admits one (two readers per storage domain; without a live
+viewer, a background read takes only a domain no other reader holds), and the
+rule is asked again before the read starts, while it reads (every 2 s; the
+node-local "viewer queuing" check every 0.5 s) and before the result is
+submitted — a foreground stream that takes the source in between makes
+the request yield, back to the queue uncharged, as `foreground_preempted`. A
+viewer queuing for this node's encoder limits claims to requests a playback is
+waiting on.
+
+An idle node (no encoder in use, nobody queuing) also claims other nodes'
+fragment-index requests that asked for exactly its engine. Work a viewer is
+waiting on comes first wherever it is targeted, then the node's own requests,
+then other nodes'. A request naming a copy-video pipeline the executor cannot
+produce (Dolby Vision tooling it lacks, a Profile 7 conversion it has turned
+off) goes back uncharged once, and that executor then leaves requests naming
+that pipeline to other nodes for 15 minutes rather than taking them back on
+every pass. The request keeps its target: the executor builds the index and publishes its own
+copy, delivery hydrates the node that asked, and the request is `ready` only
+once that node holds it. A target membership has removed is never worked for.
+`plurx_analysis_completed_total{node}` counts, per executing node, the
+fragment-index requests it ran that reached their target since the process
+started (it reads the attempt history, so pruning after 30 days can lower it,
+which reads as a counter reset). **Settings → Developer → Indexing while
+serving** shows what this node's indexer may do right now; it is advisory and
+switches nothing.
+
+### Processed Dolby Vision as an upgrade after the first frame
+
+A create no longer renders or verifies processed Dolby Vision / HDR10-E before
+it answers: it resolves the ordinary plan, and a declined upgrade (setting off,
+no `hvc1` HLS fMP4, burned subtitles, the continuous route) is named on the
+start's enhancement details as before. When the upgrade applies, the node that
+owns the session waits for the viewer's first frame (the `ttff` beacon naming
+the session), then runs one bounded trial (8 s) in its one processed-preparation
+slot. The trial verifies its window where the viewer is (the session's latest
+accepted control position advanced by its age, plus the trial's budget), and
+the successor is staged at the viewer's position when the trial ends, so the
+client's alignment finds it at the playhead. When this node has already
+described the processed recipe, this playback's recovery evidence and Auto's
+link evidence are read before the trial, and a refused recipe costs no GPU.
+The control exchange offers the successor like any other prepared switch; the
+client aligns it, proves a decoded frame and switches, or keeps the ordinary
+session. Every refusal — slot busy, trial failure, this playback's recovery
+evidence, Auto's link evidence, a viewer's own quality change taking the
+playback's preparation slot, a release, a newer session — leaves the ordinary
+session playing untouched. A create that names a processed candidate (a reopen
+of a processed session), and a viewer who picks the processed rung on an
+ordinary session, get the ordinary rung it enhances, and are upgraded after
+that session's first frame. An ordinary prepared successor this node owns is
+upgraded the same way once committed (the commit is the client's proof of the
+successor's frame). A start the ingress placed on another node is not
+upgraded: the owner does not hold the create's catalog scope (see the plan's
+open gaps).
+
+`plurx_playback_preparation_processed_upgrades_total{outcome}` counts the
+upgrades (`scheduled`, `staged`, `not_staged`, `declined`,
+`admission_refused`, `not_applicable`, `cancelled`).
+`plurx_playback_preparation_seams_total{platform,processed,outcome}` counts the
+prepared switches the clients reported at their seam (`committed`, `refused`,
+`switched_without_a_frame`) and
+`plurx_playback_preparation_seams_qualified_total{platform,processed}` the
+committed ones with complete ±2 s frame samples, zero dropped frames,
+independently observed audio continuity and no reopen (a reopen the change
+actually took within the window, as each client observed it). `processed` is
+read from the durable recipe of the session the report names: `true` for a
+switch to a processed successor. **Settings → Developer → Processed DV upgrade**
+reads the `processed="true"` counts per platform against Paul's bar of twenty; until a platform has
+them its row reads `unqualified`. The rows are advisory: the upgrade runs
+either way. The counts are this node's since it started.
 
 ### Putting a failed queue back to work
 

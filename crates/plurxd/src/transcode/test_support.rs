@@ -665,6 +665,7 @@ impl HlsDeliveryFixture {
                         since_ms: None,
                         event: None,
                         limit: 50,
+                        ..Default::default()
                     })
                     .await
                     .expect("delivery telemetry query")
@@ -690,6 +691,7 @@ impl HlsDeliveryFixture {
                 since_ms: None,
                 event: None,
                 limit: 50,
+                ..Default::default()
             })
             .await
             .expect("delivery telemetry query")

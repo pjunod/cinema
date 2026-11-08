@@ -20,8 +20,14 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.8.0**, build `189` — media waits retire with their settled or superseded
-> destination intent, matching the shared playback-surface contract. Native qualification
+> Status: **v0.8.0**, build `193` — a prepared switch hands MediaSession the successor only
+> after its decoded frame and reports its seam (`prepared_seam`) with decoder-counter frame
+> and audio-underrun evidence, once per commit that began, with whether an ordinary reopen
+> actually ran in its window; a create refusal no retry can outlive
+> (`transcode_height_unavailable`, `transcode_scratch_exhausted`, `replacement_expired`) ends the
+> start on its own surface row, and `media_session_overloaded` is retried; every session create tells the server what its start
+> sequence has left (`X-Plurx-Startup-Remaining-Ms`); media waits retire with their settled
+> or superseded destination intent, matching the shared playback-surface contract. Native qualification
 > is tracked in PR #1378; physical acceptance remains open.
 >
 > Build `188` — progressive captions discover stopped operations before explicit Resume

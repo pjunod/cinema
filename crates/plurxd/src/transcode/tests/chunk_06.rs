@@ -1724,6 +1724,7 @@
                         since_ms: None,
                         event: Some("session_end".to_owned()),
                         limit: 50,
+                        ..Default::default()
                     })
                     .await
                     .expect("retirement event query")
