@@ -4652,6 +4652,13 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(ci, {"gha-macb-linux-arm-01"})
         self.assertFalse(release & ci, "CI fallback requires workload qualification")
 
+    def test_native_arm_compiler_has_its_qualified_labels(self):
+        runners = dict(rostered_runners())
+        self.assertEqual(
+            runners["gha-macb-linux-rust-01"],
+            {"self-hosted", "Linux", "ARM64", "lab", "ubuntu-26.04", "high-cpu"},
+        )
+
     def test_reserved_async_proof_label_has_one_existing_nonvoter_owner(self):
         # The branch consumer is absent from main; retain its provisioned route
         # without duplicating that branch's admission or qualification metadata.

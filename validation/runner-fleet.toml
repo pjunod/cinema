@@ -230,7 +230,7 @@ labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
 # --- maca / macb: laptops, non-voters -----------------------------------------
 # Apple CI uses the M4 Air (`maca`) as primary and the M3 Max Pro (`macb`)
 # as standby; deploy/apple-runner controls eligibility during outages. The two
-# Linux ARM64 guests are Lima VMs registered by hand rather than by ansible.
+# ARM package registrations use Lima guests registered by hand.
 # Their Forgejo roles are separate: `maca` serves release-arm64 only; `macb`
 # supplies ci-arm64. The release guest has no qualified CI fallback role.
 [[runners]]
@@ -273,3 +273,13 @@ host = "macb"
 os = "Linux"
 arch = "ARM64"
 labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "primary"]
+
+# Native Linux Rust compiler on the M3 Max. Forgejo run #6624 passed the
+# all-target check and vendored Hiqlite Clippy in the Ubuntu 24.04 job image.
+# Capacity one, with an eight-CPU and 16 GiB job limit.
+[[runners]]
+name = "gha-macb-linux-rust-01"
+host = "macb"
+os = "Linux"
+arch = "ARM64"
+labels = ["lab", "ubuntu-26.04", "high-cpu"]
