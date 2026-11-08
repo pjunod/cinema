@@ -467,6 +467,7 @@ paths = [
   "crates/plurx-core/src/store/subtitle_managed_resources_v2.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v3.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v4.sql",
+  "crates/plurx-core/src/store/subtitle_managed_resources_v5.sql",
   "Cargo.lock",
   "Cargo.toml",
   "crates/plurx-core/Cargo.toml",
@@ -580,6 +581,7 @@ paths = [
   "crates/plurx-core/src/store/background_jobs_source_service.sql",
   "crates/plurx-core/src/store/source_checkpoints.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v4.sql",
+  "crates/plurx-core/src/store/subtitle_managed_resources_v5.sql",
   "crates/plurxd/tests/cluster_activation.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth"]
