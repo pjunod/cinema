@@ -1,4 +1,4 @@
-name: Qualify and publish the native Cinema reader recovery packages
+name: Prepare landed Cinema native media
 on:
   workflow_dispatch:
 env:
@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   package_amd64:
-    name: package and smoke (${{ matrix.arch }})
+    name: Prepare source-pinned native media
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     concurrency:
       group: plurx-cinema-amd-package
@@ -44,32 +44,19 @@ jobs:
           set -euo pipefail
           test "$(uname -s)/$(uname -m)" = "Linux/$KERNEL_ARCH"
           test "$(docker info --format '{{.OSType}}/{{.Architecture}}')" = "linux/$DOCKER_ARCH"
-      - name: Prepare the signed nonvoter registry client before the build
+      - name: Unpack the Ubuntu-signed native Buildx tool
         shell: bash
-        env:
-          REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
-          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          tool="$RUNNER_TEMP/reader-registry"
-          (umask 077; mkdir -p "$tool/debs" "$tool/root")
+          tool="$RUNNER_TEMP/reader-media-buildx"
+          mkdir -p "$tool/debs" "$tool/root" "$tool/config/cli-plugins"
           cd "$tool/debs"
-          apt-get download 'skopeo=1.13.3+ds1-2ubuntu0.24.04.3' libgpgme11t64 'docker-buildx=0.30.1-0ubuntu1~24.04.1'
-          for package in ./*.deb; do dpkg-deb -x "$package" "$tool/root"; done
-          export DOCKER_CONFIG="$tool/docker-config"
-          mkdir -p "$DOCKER_CONFIG/cli-plugins"
-          ln -s "$tool/root/usr/libexec/docker/cli-plugins/docker-buildx" "$DOCKER_CONFIG/cli-plugins/docker-buildx"
+          apt-get download 'docker-buildx=0.30.1-0ubuntu1~24.04.1'
+          dpkg-deb -x ./*.deb "$tool/root"
+          ln -s "$tool/root/usr/libexec/docker/cli-plugins/docker-buildx" "$tool/config/cli-plugins/docker-buildx"
+          export DOCKER_CONFIG="$tool/config"
           docker buildx version | grep -F '0.30.1'
           echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
-          export LD_LIBRARY_PATH="$tool/root/usr/lib/x86_64-linux-gnu"
-          cli="$tool/root/usr/bin/skopeo"
-          "$cli" --version
-          printf '%s' "$REGISTRY_TOKEN" | "$cli" login --tls-verify=false --authfile "$tool/auth.json" --username fleet --password-stdin "$REGISTRY"
-          chmod 600 "$tool/auth.json"
-          printf '%s\n' '{"default":[{"type":"reject"}],"transports":{"docker-daemon":{"":[{"type":"insecureAcceptAnything"}]},"docker":{"":[{"type":"insecureAcceptAnything"}]}}}' > "$tool/policy.json"
-          # This preflight also proves the guest can read an actual previous immutable release.
-          "$cli" inspect --tls-verify=false --authfile "$tool/auth.json" --raw "docker://$REGISTRY/noirr/plurxd:sha-8f2585e6b200" > "$tool/previous.json"
-          python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["schemaVersion"] == 2' "$tool/previous.json"
       - id: buildx-cache
         uses: ./.github/actions/buildx-cache
         with:
@@ -84,50 +71,6 @@ jobs:
           test "$(docker inspect --format '{{.Name}}' "$container")" = "/$container"
           docker update --memory 9g --memory-swap 9g --cpuset-cpus 0-1 --cpu-period 100000 --cpu-quota 200000 "$container"
           test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}}' "$container")" = '9663676416 9663676416 200000 100000 0-1'
-      - name: Derive the binary-only Bookworm build
-        id: binary-build
-        run: |
-          python3 -m validation.release_dockerfile --binary-export \
-            Dockerfile Dockerfile.binaries
-          python3 - <<'PYTHON'
-          from pathlib import Path
-          file = Path("Dockerfile.binaries")
-          text = file.read_text()
-          needle = "find crates vendor -type f -exec touch {} +"
-          assert text.count(needle) == 1
-          probe = "grep '^Cpus_allowed_list:' /proc/self/status && grep -Eq '^Cpus_allowed_list:[[:space:]]*0-1$' /proc/self/status && "
-          file.write_text(text.replace(needle, probe + needle))
-          PYTHON
-          echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Compile and export the exact candidate binaries
-        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: Dockerfile.binaries
-          target: release-binaries
-          platforms: linux/${{ matrix.arch }}
-          outputs: type=local,dest=binary-export
-          build-args: |
-            PLURX_BUILD_REF=99d08f9b5ed0ecfd8992e82ac5d2ff93f59a2b5c
-            PLURX_BUILD_SHA=99d08f9b5ed0ecfd8992e82ac5d2ff93f59a2b5c
-            SOURCE_DATE_EPOCH=${{ steps.binary-build.outputs.source_date_epoch }}
-          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-compile-{0}', matrix.arch) || '' }}
-          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=max,scope=package-compile-{0}', matrix.arch) || '' }}
-      - name: Bind the binary set to this candidate tree
-        run: |
-          scripts/release-package-candidate \
-            . . binary-export release-bin \
-            "${{ matrix.target }}" "$CINEMA_MAIN_COMMIT" "$CINEMA_MAIN_COMMIT"
-          for name in plurxd plurx-cluster-check; do
-            max_glibc=$(readelf --version-info "release-bin/$name" \
-              | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
-              | sort -V | tail -1)
-            test -n "$max_glibc"
-            test "$(printf '%s\n' "$max_glibc" 2.36 | sort -V | tail -1)" = 2.36 || {
-              echo "::error::${{ matrix.arch }} $name requires GLIBC_$max_glibc; Bookworm provides 2.36"
-              exit 1
-            }
-          done
       - name: Build and export the exact audited Bookworm media package
         if: matrix.arch == 'amd64'
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -142,151 +85,3 @@ jobs:
       - name: Validate and unpack the complete audited media export
         if: matrix.arch == 'amd64'
         run: python3 -m validation.media_export linux-dolby-export.tar linux-dolby-export
-      - name: Build the runtime from only the verified binaries
-        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: Dockerfile.release
-          build-contexts: ${{ matrix.arch == 'amd64' && 'linux-dolby-package=./linux-dolby-export/package' || '' }}
-          push: false
-          load: true
-          platforms: linux/${{ matrix.arch }}
-          tags: plurx/plurxd:ci-${{ matrix.arch }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=99d08f9b5ed0ecfd8992e82ac5d2ff93f59a2b5c
-            tv.plurx.build-ref=99d08f9b5ed0ecfd8992e82ac5d2ff93f59a2b5c
-          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-runtime-{0}', matrix.arch) || '' }}
-          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=min,scope=package-runtime-{0}', matrix.arch) || '' }}
-      - name: Verify architecture, identity, and stop/start runtime
-        env:
-          ARCH: ${{ matrix.arch }}
-          IMAGE: plurx/plurxd:ci-${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = "linux/$ARCH"
-          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$CINEMA_MAIN_COMMIT"
-          version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
-            | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
-          test "$(docker run --rm --platform "linux/$ARCH" "$IMAGE" --version)" = "plurxd $version ($CINEMA_MAIN_COMMIT)"
-          test "$(docker run --rm --platform "linux/$ARCH" \
-            --entrypoint /usr/local/bin/plurx-cluster-check \
-            "$IMAGE" build-identity)" = "$CINEMA_MAIN_COMMIT"
-          scripts/container-smoke "$IMAGE"
-      - name: Back up the running image and restore it into a fresh container
-        env:
-          IMAGE: plurx/plurxd:ci-${{ matrix.arch }}
-        run: scripts/container-restore-smoke "$IMAGE"
-      - name: Record the native image that passed runtime and restore checks
-        env:
-          ARCH: ${{ matrix.arch }}
-          IMAGE: plurx/plurxd:ci-${{ matrix.arch }}
-          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
-        run: |
-          python3 - <<'PYTHON'
-          import json, os, pathlib, re, subprocess
-          def read(*args):
-              return subprocess.check_output(args, text=True).strip()
-          image, = json.loads(read("docker", "image", "inspect", os.environ["IMAGE"]))
-          source = os.environ["CINEMA_MAIN_COMMIT"]
-          identity = read("docker", "run", "--rm", "--entrypoint", "/usr/local/bin/plurx-cluster-check", image["Id"], "build-identity")
-          version = read("docker", "run", "--rm", image["Id"], "--version")
-          labels = image["Config"]["Labels"]
-          assert identity == source == labels["org.opencontainers.image.revision"] == labels["tv.plurx.build-ref"]
-          assert labels["org.opencontainers.image.source"] == os.environ["SOURCE_URL"]
-          assert version.endswith(" (" + source + ")") and image["Os"] == "linux" and image["Architecture"] == os.environ["ARCH"]
-          assert re.fullmatch("sha256:[0-9a-f]{64}", image["Id"])
-          receipt = {"image_id":image["Id"],"os":image["Os"],"arch":image["Architecture"],"source":source,
-                     "source_tree":read("git","rev-parse","HEAD^{tree}"),"source_url":labels["org.opencontainers.image.source"],
-                     "build_ref":labels["tv.plurx.build-ref"],"cluster_check_identity":identity,"plurxd_version":version}
-          raw = json.dumps(receipt, sort_keys=True, separators=(",",":"))
-          pathlib.Path("release-bin/smoked-image.json").write_text(raw + "\n")
-          print("CINEMA_SMOKED_IMAGE=" + raw, flush=True)
-          PYTHON
-      - name: Publish only the image that passed native runtime and restore smoke
-        shell: bash
-        env:
-          REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
-        run: |
-          set -euo pipefail
-          tool="$RUNNER_TEMP/reader-registry"
-          export LD_LIBRARY_PATH="$tool/root/usr/lib/x86_64-linux-gnu"
-          cli="$tool/root/usr/bin/skopeo"
-          image="$REGISTRY/noirr/plurxd"
-          tag="sha-${CINEMA_MAIN_COMMIT:0:12}-amd64"
-          ref="$image:$tag"
-          id=$(python3 -c 'import json;print(json.load(open("release-bin/smoked-image.json"))["image_id"])')
-          [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]]
-          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$id")" = linux/amd64
-          test "$(docker run --rm --entrypoint /usr/local/bin/plurx-cluster-check "$id" build-identity)" = "$CINEMA_MAIN_COMMIT"
-          read_manifest() {
-            "$cli" inspect --tls-verify=false --authfile "$tool/auth.json" --raw "docker://$1"
-          }
-          if read_manifest "$ref" > "$tool/manifest" 2> "$tool/error"; then
-            python3 -c 'import json,sys;assert json.load(open(sys.argv[1]))["config"]["digest"]==sys.argv[2]' "$tool/manifest" "$id"
-          elif grep -Eqi 'unauthorized|denied|forbidden|timeout|connection|TLS|certificate' "$tool/error"; then
-            cat "$tool/error" >&2; exit 1
-          elif grep -Eqi 'manifest unknown|name unknown' "$tool/error"; then
-            local_tag="plurx/plurxd:reader-publish-$GITHUB_RUN_ID"
-            docker tag "$id" "$local_tag"
-            "$cli" --policy "$tool/policy.json" copy --format v2s2 --dest-tls-verify=false --dest-authfile "$tool/auth.json" "docker-daemon:$local_tag" "docker://$ref"
-          else
-            cat "$tool/error" >&2; exit 1
-          fi
-          read_manifest "$ref" > "$tool/manifest"
-          python3 -c 'import json,sys;assert json.load(open(sys.argv[1]))["config"]["digest"]==sys.argv[2]' "$tool/manifest" "$id"
-          digest=$("$cli" manifest-digest "$tool/manifest")
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          exact="$image@$digest"
-          local_proof="plurx/plurxd:reader-pulled-$GITHUB_RUN_ID"
-          "$cli" --policy "$tool/policy.json" copy --src-tls-verify=false --src-authfile "$tool/auth.json" "docker://$exact" "docker-daemon:$local_proof"
-          test "$(docker image inspect --format '{{.Id}}' "$local_proof")" = "$id"
-          test "$(docker run --rm --entrypoint /usr/local/bin/plurx-cluster-check "$local_proof" build-identity)" = "$CINEMA_MAIN_COMMIT"
-          reported=$(docker run --rm "$local_proof" --version)
-          test "$reported" = "$(python3 -c 'import json;print(json.load(open("release-bin/smoked-image.json"))["plurxd_version"])')"
-          echo "CINEMA_IMMUTABLE_IMAGE source=$CINEMA_MAIN_COMMIT arch=amd64 id=$id reference=$ref manifest=$exact"
-      - name: Remove the job-local registry login
-        if: always()
-        shell: bash
-        run: rm -f -- "$RUNNER_TEMP/reader-registry/auth.json"
-      - name: Retain the exact package receipt
-        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
-        with:
-          name: package-smoke-receipt-${{ matrix.arch }}
-          path: |
-            release-bin/smoked-image.json
-            release-bin/build-manifest.json
-            release-bin/*.sha256
-          if-no-files-found: error
-          retention-days: 14
-      - name: Retain candidate binaries for push, tag, and qualification runs
-        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
-        with:
-          name: package-smoke-binaries-${{ matrix.arch }}
-          path: |
-            release-bin/plurxd
-            release-bin/plurx-cluster-check
-            release-bin/*.dwp
-            release-bin/build-manifest.json
-            release-bin/*.sha256
-          if-no-files-found: error
-          retention-days: 1
-      - name: Retain candidate binaries for non-qualification push and tag runs
-        if: github.event_name == 'push'
-        continue-on-error: true
-        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
-        with:
-          name: package-smoke-binaries-${{ matrix.arch }}
-          path: |
-            release-bin/plurxd
-            release-bin/plurx-cluster-check
-            release-bin/*.dwp
-            release-bin/build-manifest.json
-            release-bin/*.sha256
-          if-no-files-found: error
-          retention-days: 1
-      - name: Bound persistent BuildKit state
-        if: always() && steps.buildx-cache.outputs.local == 'true'
-        env:
-          BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
-        run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50
