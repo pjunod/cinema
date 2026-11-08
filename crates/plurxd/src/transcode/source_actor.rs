@@ -110,6 +110,17 @@ impl TranscodeManager {
         .expect("Source fixture body budget stays open")
     }
 
+    /// Park the next Source Start at its cold index, before the scan spawns.
+    #[cfg(test)]
+    pub(crate) fn test_pause_source_index_before_spawn(
+        &self,
+        bound: Duration,
+    ) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.source_workers
+            .index_hooks
+            .pause_before_spawn_for(bound)
+    }
+
     async fn source_start_budget_for_request(
         &self,
         request: &SessionRequest,

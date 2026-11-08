@@ -55,6 +55,7 @@ impl RetirementStep {
             // A Start refusal is never evidence about this End operation.
             | PeerError::DolbyVisionUnsupported
             | PeerError::Busy { .. }
+            | PeerError::StartNotYet { .. }
             | PeerError::Rejected(_) => Self::Retry,
         }
     }

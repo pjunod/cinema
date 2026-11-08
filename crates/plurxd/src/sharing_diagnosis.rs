@@ -380,6 +380,9 @@ fn clone_error(error: &PeerError) -> PeerError {
         PeerError::Busy { retry_after_secs } => PeerError::Busy {
             retry_after_secs: *retry_after_secs,
         },
+        PeerError::StartNotYet { retry_after_secs } => PeerError::StartNotYet {
+            retry_after_secs: *retry_after_secs,
+        },
     }
 }
 

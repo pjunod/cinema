@@ -56,6 +56,10 @@ pub(crate) enum ReceiverStartError {
     Deadline,
     Unsupported,
     DolbyVisionUnsupported,
+    /// Not published yet, with the typed retry a local create gives: the
+    /// Source's own answer passed through, or the viewer's clock running out
+    /// at B. The attempt lives on, and the same `request_id` rejoins it.
+    NotYet(crate::sharing_client::StartRetry),
 }
 fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_client::PeerError) {
     use crate::sharing_client::PeerError;
@@ -68,6 +72,7 @@ fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_cli
         PeerError::Rejected(status) => ("rejected", Some(status.as_u16())),
         PeerError::Busy { .. } => ("busy", Some(429)),
         PeerError::DolbyVisionUnsupported => ("dolby_vision_unsupported", None),
+        PeerError::StartNotYet { .. } => ("start_not_yet", Some(503)),
     };
     tracing::warn!(target: "plurx::sharing", stage, error_class, http_status, "receiver Source status refused");
 }
@@ -117,6 +122,9 @@ struct ReceiverStartInner {
     bodies: Arc<retirement::ReceiverBodyRegistry>,
     retirement_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     changed: tokio::sync::Notify,
+    /// The viewer's start clock from the Start that created this attempt, or
+    /// unset for a client that sent none: it then keeps today's fixed bounds.
+    clock: std::sync::OnceLock<crate::media_pool::CreateStartupBudget>,
 }
 #[derive(Clone, Default)]
 enum ReceiverClaimStage {
@@ -153,6 +161,11 @@ struct ReceiverStartState {
     prepared: Option<successor::PreparedRole>,
     /// Directed-change bookkeeping and the one prepared successor slot.
     handoff: successor::HandoffState,
+    /// The Source's latest typed "not yet", and how many it has given. A
+    /// waiter is answered with one only if it arrived while that waiter was
+    /// waiting, so a retry never takes a stale answer the owner has already
+    /// re-posted past.
+    source_retry: Option<(u64, crate::sharing_client::StartRetry)>,
 }
 // The only constructor joins the exact registry-owned Start task. This is
 // neither Source settlement nor accepted B body/writer completion.
@@ -515,10 +528,15 @@ impl ReceiverStartRegistry {
         request_id: String,
         playback_id: String,
         source_wrapper: String,
+        clock: Option<crate::media_pool::CreateStartupBudget>,
     ) -> Result<ReceiverStartActor, ReceiverStartError> {
         let (entry, created) = self.register(intent, request_id, &playback_id, &source_wrapper)?;
         if !created {
             return Ok(ReceiverStartActor(entry));
+        }
+        // Before the owner exists, so its first Source send already has it.
+        if let Some(clock) = clock {
+            let _ = entry.clock.set(clock);
         }
         Ok(self.spawn_owner(state, entry, source_wrapper))
     }
@@ -667,6 +685,7 @@ impl ReceiverStartRegistry {
             bodies: Arc::new(retirement::ReceiverBodyRegistry::default()),
             retirement_task: Mutex::new(None),
             changed: tokio::sync::Notify::new(),
+            clock: std::sync::OnceLock::new(),
         });
         entries.push(entry.clone());
         Ok((entry, true))
@@ -1385,15 +1404,27 @@ impl ReceiverStartActor {
         Ok(owner.confirmed_source_end.get_or_insert(receipt).clone())
     }
     /// Whether this attempt has been genuinely abandoned: it has no waiter,
-    /// it never published, and its retirement has not already begun. This is
-    /// the one place that decides abandonment; the End it triggers is the
-    /// ordinary retirement owner's, so no timer or watchdog is involved.
+    /// it never published, its retirement has not already begun, and no
+    /// retry can still rejoin it. This is the one place that decides
+    /// abandonment; the End it triggers is the ordinary retirement owner's.
     ///
-    /// A retry that may rejoin the same attempt within a bounded window must
-    /// add its "inside the grace window" condition HERE, so that an End fires
-    /// only after the attempt is abandoned for good.
-    fn abandoned_before_publication(owned: &ReceiverStartState) -> bool {
-        owned.waiters == 0 && owned.start.is_none() && !owned.retirement_started
+    /// The retry grace (S7): a viewer that sent its start clock was answered
+    /// a typed "not yet" and re-posts the same `request_id`, so between its
+    /// waiters there are none. Until the viewer's owner window (its whole
+    /// remaining start plus one re-post's grace, the local create's rule)
+    /// ends, an empty waiter count is that gap, not abandonment.
+    fn abandoned_before_publication(
+        entry: &ReceiverStartInner,
+        owned: &ReceiverStartState,
+    ) -> bool {
+        let rejoinable = entry.clock.get().is_some_and(|clock| {
+            tokio::time::Instant::now()
+                < clock.owner_window(
+                    tokio::time::Instant::now() + Duration::from_secs(305),
+                    crate::http::hls::OWNED_CREATE_REPOST_GRACE,
+                )
+        });
+        owned.waiters == 0 && owned.start.is_none() && !owned.retirement_started && !rejoinable
     }
     /// Register an HTTP waiter. When the last waiter of an unpublished Start
     /// goes away (client disconnect, handler deadline), the guard hands the
@@ -1411,14 +1442,28 @@ impl ReceiverStartActor {
         &self,
         state: &Arc<AppState>,
         deadline: Instant,
+        retryable: bool,
     ) -> Result<ReceiverPublished, ReceiverStartError> {
         let _waiter = self.join_waiter(Arc::clone(state));
-        self.wait_ready(deadline).await
+        self.wait_ready(deadline, retryable).await
     }
+    /// Wait for this attempt's outcome until `deadline`. With `retryable`
+    /// (the viewer sent its start clock), the wait ending first, or a fresh
+    /// Source "not yet" arriving during it, answers [`ReceiverStartError::NotYet`]
+    /// and leaves the attempt running for the viewer's retry to rejoin, as a
+    /// local create answers `startup_timeout`. Without it, today's `Deadline`.
     pub(crate) async fn wait_ready(
         &self,
         deadline: Instant,
+        retryable: bool,
     ) -> Result<ReceiverPublished, ReceiverStartError> {
+        let seen = self
+            .0
+            .state
+            .lock()
+            .expect("receiver owner")
+            .source_retry
+            .map_or(0, |(count, _)| count);
         loop {
             if self.0.stop.is_cancelled() {
                 return Err(ReceiverStartError::Unresolved);
@@ -1426,12 +1471,30 @@ impl ReceiverStartActor {
             let changed = self.0.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if let Some(result) = self.0.state.lock().expect("receiver owner").start.clone() {
-                return result;
+            {
+                let owned = self.0.state.lock().expect("receiver owner");
+                if let Some(result) = owned.start.clone() {
+                    return result;
+                }
+                if let Some((count, retry)) = owned.source_retry {
+                    if retryable && count != seen {
+                        return Err(ReceiverStartError::NotYet(retry));
+                    }
+                }
             }
-            tokio::time::timeout_at(deadline.into(), changed)
+            if tokio::time::timeout_at(deadline.into(), changed)
                 .await
-                .map_err(|_| ReceiverStartError::Deadline)?;
+                .is_err()
+            {
+                return Err(if retryable {
+                    ReceiverStartError::NotYet(crate::sharing_client::StartRetry {
+                        code: crate::sharing_client::StartRetryCode::StartupTimeout,
+                        retry_after_secs: crate::http::hls::CREATE_STILL_STARTING_RETRY_AFTER_SECS,
+                    })
+                } else {
+                    ReceiverStartError::Deadline
+                });
+            }
         }
     }
 }
@@ -1446,7 +1509,7 @@ impl Drop for ReceiverWaiter {
         let abandoned = {
             let mut owned = self.actor.0.state.lock().expect("receiver owner");
             owned.waiters = owned.waiters.saturating_sub(1);
-            ReceiverStartActor::abandoned_before_publication(&owned)
+            ReceiverStartActor::abandoned_before_publication(&self.actor.0, &owned)
         };
         if abandoned {
             self.actor.begin_retirement(
@@ -1586,6 +1649,7 @@ async fn run_owner(
     };
     let dispatch_owner = pending.clone();
     let dispatch_entry = entry.clone();
+    let retry_entry = entry.clone();
     let connection_lifetime: Arc<dyn Send + Sync> = entry.bodies.reserve()?;
     let start = state.sharing.start_file_source(
         &state,
@@ -1600,6 +1664,18 @@ async fn run_owner(
                 endpoint: endpoint.clone(),
             })
         },
+        entry.clock.get(),
+        move |retry| {
+            // The Source keeps its entry for this request alive; so does B.
+            // The waiters present now take this answer, typed, and the owner
+            // re-posts the same Start unless this attempt is being stopped.
+            let mut owned = retry_entry.state.lock().expect("receiver owner");
+            let count = owned.source_retry.map_or(0, |(count, _)| count) + 1;
+            owned.source_retry = Some((count, retry));
+            drop(owned);
+            retry_entry.changed.notify_waiters();
+            !retry_entry.stop.is_cancelled()
+        },
     );
     tokio::pin!(start);
     let mut timer = tokio::time::interval(Duration::from_secs(10));
@@ -1609,10 +1685,31 @@ async fn run_owner(
         tokio::select! {
             result = &mut start => break result.map_err(|error| match error {
                 crate::sharing_client::PeerError::DolbyVisionUnsupported => ReceiverStartError::DolbyVisionUnsupported,
+                // A retryable answer that escaped the re-post loop: the
+                // viewer's whole window is spent, and nobody is left to retry.
+                crate::sharing_client::PeerError::StartNotYet { .. }
+                | crate::sharing_client::PeerError::Busy { .. } => ReceiverStartError::Deadline,
                 _ => ReceiverStartError::Unresolved,
             })?,
             _ = entry.stop.cancelled(), if pending_authorized => pending_authorized = false,
             _ = timer.tick(), if pending_authorized => {
+                // A viewer that left during its retry grace dropped its last
+                // waiter while the attempt was still rejoinable. The grace
+                // ends between waiters, so the owner re-asks the one
+                // abandonment decision on its own lease tick. Only an attempt
+                // with a clock has a grace; without one the last waiter's
+                // drop already decided.
+                let abandoned = entry.clock.get().is_some()
+                    && ReceiverStartActor::abandoned_before_publication(
+                        &entry,
+                        &entry.state.lock().expect("receiver owner"),
+                    );
+                if abandoned {
+                    ReceiverStartActor(entry.clone()).begin_retirement(
+                        state.clone(),
+                        plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked,
+                    );
+                }
                 let renewed = async {
                     let authority = state.store.prepare_receiver_session_authority(intent.clone()).await
                         .map_err(|_| ReceiverStartError::Unresolved)?.ok_or(ReceiverStartError::Unresolved)?;
@@ -2551,7 +2648,7 @@ mod tests {
         let entry = first.expect("first owner");
         let actor = ReceiverStartActor(entry.clone());
         assert!(matches!(
-            actor.wait_ready(Instant::now()).await,
+            actor.wait_ready(Instant::now(), false).await,
             Err(ReceiverStartError::Deadline)
         ));
         drop(actor);
@@ -2562,6 +2659,88 @@ mod tests {
             Err(ReceiverStartError::Capacity)
         ));
         assert_eq!(registry.entries.lock().expect("entries").len(), 8);
+    }
+
+    /// S7 at B: a viewer that sent its start clock is answered with a typed
+    /// retry (B's own `startup_timeout`, or the Source's fresh answer passed
+    /// through) and the attempt stays live for the same `request_id` to
+    /// rejoin; a viewer that sent none keeps today's `Deadline`.
+    #[tokio::test]
+    async fn sharing_receiver_retryable_waiter_answers_not_yet_and_keeps_the_attempt() {
+        use crate::sharing_client::{StartRetry, StartRetryCode};
+        let registry = ReceiverStartRegistry::default();
+        let first = intent("attempt");
+        let (entry, created) = registry
+            .register(first.clone(), "attempt".into(), "player", &wrapper(&first))
+            .expect("owner");
+        assert!(created);
+        let actor = ReceiverStartActor(entry.clone());
+        let startup_timeout = StartRetry {
+            code: StartRetryCode::StartupTimeout,
+            retry_after_secs: crate::http::hls::CREATE_STILL_STARTING_RETRY_AFTER_SECS,
+        };
+        assert!(matches!(
+            actor.wait_ready(Instant::now(), true).await,
+            Err(ReceiverStartError::NotYet(retry)) if retry == startup_timeout
+        ));
+        assert!(matches!(
+            actor.wait_ready(Instant::now(), false).await,
+            Err(ReceiverStartError::Deadline)
+        ));
+        // A Source answer arriving while a viewer waits reaches it at once.
+        let overloaded = StartRetry {
+            code: StartRetryCode::Overloaded,
+            retry_after_secs: 2,
+        };
+        let waiting = {
+            let actor = actor.clone();
+            tokio::spawn(async move {
+                actor
+                    .wait_ready(Instant::now() + Duration::from_secs(60), true)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        entry.state.lock().expect("state").source_retry = Some((1, overloaded));
+        entry.changed.notify_waiters();
+        let answered = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("the Source's answer is passed through, not held to the deadline")
+            .expect("waiter");
+        assert!(matches!(
+            answered,
+            Err(ReceiverStartError::NotYet(retry)) if retry == overloaded
+        ));
+        // An answer already given is never replayed to a later waiter: the
+        // owner has re-posted past it.
+        assert!(matches!(
+            actor.wait_ready(Instant::now() + Duration::from_millis(50), true).await,
+            Err(ReceiverStartError::NotYet(retry)) if retry == startup_timeout
+        ));
+        // The one abandonment decision: with no waiter, an attempt without a
+        // clock is abandoned (S10), but one whose viewer sent a clock is
+        // still rejoinable inside its owner window, so the waiter a typed
+        // "not yet" released does not send the Source its End.
+        assert!(ReceiverStartActor::abandoned_before_publication(
+            &entry,
+            &entry.state.lock().expect("state")
+        ));
+        let _ = entry
+            .clock
+            .set(crate::media_pool::CreateStartupBudget::new(20_000));
+        assert!(!ReceiverStartActor::abandoned_before_publication(
+            &entry,
+            &entry.state.lock().expect("state")
+        ));
+        drop(actor.join_waiter(Arc::new(crate::http::source_actor_test_state())));
+        assert!(!entry.state.lock().expect("state").retirement_started);
+        // The attempt was not retired: the same request rejoins it.
+        let (joined, created) = registry
+            .register(first.clone(), "attempt".into(), "player", &wrapper(&first))
+            .expect("exact retry rejoins");
+        assert!(!created);
+        assert!(Arc::ptr_eq(&entry, &joined));
+        assert!(!entry.state.lock().expect("state").retirement_started);
     }
 
     fn dispatch() -> DispatchedSource {

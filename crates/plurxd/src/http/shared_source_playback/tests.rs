@@ -2935,3 +2935,214 @@ fn sharing_source_start_registry_moves_a_joined_failed_start_to_the_settled_cach
     assert!(!new);
     assert!(std::sync::Arc::ptr_eq(&replay, &failed));
 }
+
+/// S6/S7/S11 at the Source. A Start that carries the viewer's clock is
+/// answered on it: a typed `startup_timeout` with `Retry-After` while the
+/// entry is still working, a rejoin of that same entry and incarnation by the
+/// same request, and owned work bounded by the viewer's window. A Start
+/// without the header (an older receiver) gets today's shapes only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_budgeted_start_answers_not_yet_and_rejoins_the_same_entry() {
+    Box::pin(actual_source_budgeted_start()).await;
+}
+async fn actual_source_budgeted_start() {
+    use std::time::{Duration, Instant};
+    let fixture = real_source_start_fixture().await;
+    // Occupied software capacity: the Source cannot publish until released.
+    let hold = fixture
+        .state
+        .transcode
+        .test_hold_source_software_capacity()
+        .expect("actual occupied software capacity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("private fixture listener");
+    let address = listener.local_addr().expect("private address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let path = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("actual HTTP client");
+    // Three independent requests of the same file: one budgeted Start that
+    // will publish, one whose short budget must end its work early, and one
+    // from a receiver that sends no clock.
+    let body = |request_id: Uuid| {
+        let mut value: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+        value["session"]["request_id"] = json!(request_id.to_string());
+        serde_json::to_vec(&value).expect("recipe bytes")
+    };
+    let (rejoined, bounded, older) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let post = |bytes: Vec<u8>, remaining: Option<u64>| {
+        let mut request = client
+            .post(&path)
+            .headers(fixture.headers.clone())
+            .body(bytes);
+        if let Some(ms) = remaining {
+            request = request.header(super::super::hls::STARTUP_REMAINING_HEADER, ms.to_string());
+        }
+        async move {
+            let response = request.send().await.expect("actual Source answer");
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = response.bytes().await.expect("actual Source body");
+            (status, headers, bytes)
+        }
+    };
+    let typed = |bytes: &[u8]| -> String {
+        serde_json::from_slice::<Value>(bytes)
+            .ok()
+            .and_then(|v| v["code"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    let entry_of = |request_id: Uuid| {
+        fixture
+            .state
+            .transcode
+            .source_http_starts
+            .entries
+            .lock()
+            .expect("registry")
+            .iter()
+            .find(|entry| entry.identity.request_id == request_id)
+            .cloned()
+    };
+    // An older receiver: no header, so no typed retry. It is held exactly as
+    // today, and whatever it is finally told carries none of the new shapes.
+    let older_answer = tokio::spawn(post(body(older), None));
+    // The viewer's window bounds the owned work: 300 ms plus the re-post
+    // grace, then the entry's work ends and a retry is told so, terminally,
+    // long before the 5 s admission queue or the 35 s materialize budget.
+    let began = Instant::now();
+    let (status, headers, bytes) = post(body(bounded), Some(300)).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(typed(&bytes[..]), "startup_timeout");
+    assert_eq!(
+        headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(3),
+        "answered on the viewer's clock"
+    );
+    let terminal = loop {
+        let (status, headers, bytes) = post(body(bounded), Some(300)).await;
+        if typed(&bytes[..]) != "startup_timeout" {
+            break (status, headers, bytes);
+        }
+        assert!(
+            began.elapsed() < Duration::from_millis(4_500),
+            "the viewer's budget, not the 5 s queue or 305 s, ends the owned work"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_ne!(terminal.0, StatusCode::OK);
+    assert!(terminal.1.get("retry-after").is_none());
+    // The older receiver's Start runs on today's bounds (the 5 s admission
+    // queue under held capacity) and is told today's refusal: never a typed
+    // retry it did not ask for.
+    let older = tokio::time::timeout(Duration::from_secs(60), older_answer)
+        .await
+        .expect("the older receiver's Start ends on today's bounds")
+        .expect("older receiver waiter");
+    assert!(
+        older.1.get("retry-after").is_none(),
+        "an older receiver never gets a typed retry"
+    );
+    assert!(
+        !["startup_timeout", "media_session_overloaded"].contains(&typed(&older.2[..]).as_str()),
+        "{}",
+        String::from_utf8_lossy(&older.2)
+    );
+    // The Start that publishes: told "not yet" on its 4 s clock while
+    // capacity is held (inside the 5 s admission queue), its entry and
+    // incarnation retained.
+    let began = Instant::now();
+    let (status, headers, bytes) = post(body(rejoined), Some(4_000)).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(typed(&bytes[..]), "startup_timeout");
+    assert_eq!(
+        headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert!(
+        began.elapsed() < Duration::from_millis(4_900),
+        "answered on the viewer's clock"
+    );
+    let entry = entry_of(rejoined).expect("the not-yet keeps its entry");
+    let incarnation = entry
+        .task
+        .stage
+        .lock()
+        .expect("stage")
+        .incarnation()
+        .expect("the entry owns its claim");
+    assert!(
+        entry
+            .result
+            .lock()
+            .expect("outcome")
+            .as_ref()
+            .is_none_or(Result::is_ok),
+        "a not-yet never settles the entry"
+    );
+    drop(hold);
+    // The client's ladder: re-post the same request until it is published,
+    // inside the owner window (4 s plus the re-post grace).
+    let bytes = loop {
+        let (status, _, bytes) = post(body(rejoined), Some(1_000)).await;
+        if status == StatusCode::OK {
+            break bytes;
+        }
+        assert_eq!(
+            typed(&bytes[..]),
+            "startup_timeout",
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(6),
+            "within the viewer's window"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("complete strict Source envelope");
+    assert_eq!(
+        decoded.incarnation_id(),
+        incarnation,
+        "the retry joined the same Source incarnation"
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        &entry,
+        &entry_of(rejoined).expect("still registered")
+    ));
+    let _ = stop.send(());
+    server
+        .await
+        .expect("server joined")
+        .expect("server drained");
+    fixture.shutdown().await;
+}

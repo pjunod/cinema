@@ -2447,3 +2447,292 @@ async fn b_raw_request(
 
 #[path = "shared_receiver_forwarding_fixture.rs"]
 mod forwarding_fixture;
+
+/// S6/S7/S11 through the real pinned B-to-Source relay. The viewer sends its
+/// start clock; with the Source unable to publish, the client is told a typed
+/// `startup_timeout` with `Retry-After` (the create ladder's code), the B
+/// attempt and the Source entry stay alive, and the client's retry with the
+/// same `request_id` is published from that one Source Start. Against a
+/// Source that does not advertise `start_budget_v1` (an older install), B
+/// sends no header and the Source sees exactly today's single Start.
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_source_not_yet_rejoins_the_same_source_start() {
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    assert!(plurx_core::sharing::is_tailnet_address(address));
+    for older_source in [false, true] {
+        let fixture_body_budget =
+            crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            Box::pin(actual_pinned_not_yet(
+                address,
+                older_source,
+                fixture_body_budget,
+            )),
+        )
+        .await
+        .expect("bounded relayed not-yet fixture");
+    }
+}
+
+async fn actual_pinned_not_yet(
+    address: IpAddr,
+    older_source: bool,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
+) {
+    use axum::http::StatusCode;
+    use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
+    use std::time::{Duration, Instant};
+    let fixture =
+        build_receiver_fixture(address, SourceFixtureMode::Copy, None, fixture_body_budget).await;
+    let tls = Arc::new(
+        LiveNodeTls::open(
+            &fixture.directory().join("source-runtime-tls"),
+            crate::state::clock_ms() / 1000,
+        )
+        .expect("actual Source runtime TLS"),
+    );
+    let (pin, _) = tls.status().expect("actual Source runtime SPKI");
+    let source_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual Source CGNAT listener");
+    let endpoint = Endpoint {
+        ipv4: match address {
+            IpAddr::V4(ip) => ip,
+            _ => panic!("IPv4 CGNAT fixture"),
+        },
+        ipv6: None,
+        ts_fqdn: "source.fixture.ts.net".into(),
+        port: source_listener.local_addr().expect("Source bind").port(),
+        spki_sha256: pin,
+    };
+    // Each Source Start as it arrived: the clock header B sent, and the
+    // status and typed code the Source answered.
+    type Arrival = (Option<String>, u16, String);
+    let arrivals: Arc<std::sync::Mutex<Vec<Arrival>>> = Arc::default();
+    let observed = arrivals.clone();
+    let source_app = super::sharing::peer_router((*fixture.source.state).clone()).layer(
+        axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let observed = observed.clone();
+                async move {
+                    let path = request.uri().path().to_owned();
+                    let is_start =
+                        request.method() == axum::http::Method::POST && path.ends_with("/sessions");
+                    let clock = request
+                        .headers()
+                        .get(super::hls::STARTUP_REMAINING_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    let response = next.run(request).await;
+                    if older_source && path == "/sharing/v1/identity" {
+                        // An older Source install advertises no features.
+                        let (parts, body) = response.into_parts();
+                        let bytes = axum::body::to_bytes(body, 64 * 1024)
+                            .await
+                            .expect("identity body");
+                        let mut identity: Value =
+                            serde_json::from_slice(&bytes).expect("identity JSON");
+                        identity
+                            .as_object_mut()
+                            .expect("identity object")
+                            .remove("features");
+                        let mut parts = parts;
+                        parts.headers.remove("content-length");
+                        return axum::response::Response::from_parts(
+                            parts,
+                            Body::from(identity.to_string()),
+                        );
+                    }
+                    if !is_start {
+                        return response;
+                    }
+                    let (parts, body) = response.into_parts();
+                    if parts.status.is_success() {
+                        observed.lock().expect("arrivals").push((
+                            clock,
+                            parts.status.as_u16(),
+                            String::new(),
+                        ));
+                        return axum::response::Response::from_parts(parts, body);
+                    }
+                    let bytes = axum::body::to_bytes(body, 64 * 1024)
+                        .await
+                        .expect("bounded Start refusal");
+                    let code = serde_json::from_slice::<Value>(&bytes)
+                        .ok()
+                        .and_then(|value| value["code"].as_str().map(str::to_owned))
+                        .unwrap_or_default();
+                    observed
+                        .lock()
+                        .expect("arrivals")
+                        .push((clock, parts.status.as_u16(), code));
+                    axum::response::Response::from_parts(parts, Body::from(bytes))
+                }
+            },
+        ),
+    );
+    let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
+    let source_task = tokio::spawn(crate::serve_http(
+        SharingTlsListener::new(source_listener, tls),
+        source_app,
+        async move {
+            let _ = source_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    fixture.pair(endpoint).await;
+    let b_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual B CGNAT listener");
+    let b_address = b_listener.local_addr().expect("B bind");
+    let (b_stop, b_stopped) = tokio::sync::oneshot::channel();
+    let b_task = tokio::spawn(crate::serve_http(
+        b_listener,
+        fixture_router(fixture.state.clone()),
+        async move {
+            let _ = b_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let (status, _, bytes) = b_request(
+        b_address,
+        false,
+        "GET",
+        &format!(
+            "/api/v1/shared/imports/{}/items/{}",
+            fixture.import_id,
+            fixture.source.reference.item_id.as_str(),
+        ),
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "actual details");
+    let details: Value = serde_json::from_slice(&bytes).expect("details");
+    let base = details["files"][0]["file_base"]
+        .as_str()
+        .expect("signed B file alias")
+        .to_owned();
+    let original: Value = serde_json::from_slice(&fixture.source.request).expect("recipe");
+    let session = serde_json::to_vec(&original["session"]).expect("CreateSession");
+    let request_id = original["session"]["request_id"]
+        .as_str()
+        .expect("request UUID")
+        .to_owned();
+    let start = |remaining: u64| {
+        let path = format!("{base}/hls/sessions");
+        let headers = vec![
+            (
+                "authorization",
+                format!("Bearer {}", fixture.original_login),
+            ),
+            ("content-type", "application/json".to_owned()),
+            (super::hls::STARTUP_REMAINING_HEADER, remaining.to_string()),
+        ];
+        let body = session.clone();
+        async move { b_raw_request(b_address, false, "POST", &path, &headers, body).await }
+    };
+    let code = |bytes: &[u8]| {
+        serde_json::from_slice::<Value>(bytes)
+            .ok()
+            .and_then(|value| value["code"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    // The Source cannot publish while its cold index is parked. The web
+    // client's preparation owner has 20 s; the first answer comes at the
+    // local create's 10 s cap.
+    let pause = fixture
+        .source
+        .state
+        .transcode
+        .test_pause_source_index_before_spawn(Duration::from_secs(40));
+    let began = Instant::now();
+    let (status, headers, bytes) = start(20_000).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "older_source={older_source}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(
+        code(&bytes[..]),
+        "startup_timeout",
+        "the create ladder's own code"
+    );
+    assert_eq!(
+        headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(13),
+        "answered on the viewer's clock, not B's 305 s"
+    );
+    assert!(
+        pause.was_reached(),
+        "the Source Start is parked at its index"
+    );
+    // The client's ladder: release the Source, re-post the same request.
+    pause.release();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let bytes = loop {
+        let remaining = 20_000u64.saturating_sub(began.elapsed().as_millis() as u64);
+        let (status, _, bytes) = start(remaining).await;
+        if status == StatusCode::OK {
+            break bytes;
+        }
+        assert_eq!(
+            code(&bytes[..]),
+            "startup_timeout",
+            "older_source={older_source}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(22),
+            "published inside the viewer's window"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    let published: Value = serde_json::from_slice(&bytes).expect("B Start DTO");
+    assert!(published["session_id"].as_str().is_some());
+    // One B claim and one published B session for the request: every retry
+    // rejoined the attempt instead of meeting a retired tombstone.
+    assert_eq!(
+        serde_json::from_str::<Value>(&receiver_claim_observation(&fixture, &request_id).await)
+            .expect("claim counts")["published"],
+        1
+    );
+    assert_eq!(fixture.source.active_source_sessions().await, 1);
+    let arrivals = arrivals.lock().expect("arrivals").clone();
+    if older_source {
+        // Today's wire exactly: one Start, no clock, held until it published.
+        assert_eq!(arrivals.len(), 1, "{arrivals:?}");
+        assert_eq!(arrivals[0].0, None);
+        assert_eq!(arrivals[0].1, 200);
+    } else {
+        // The clock reached the Source on every post, bounded by the
+        // viewer's 20 s; the Source's own typed "not yet" came back at least
+        // once, and the same Start bytes were re-posted until published.
+        assert!(arrivals.len() >= 2, "{arrivals:?}");
+        assert!(arrivals.iter().all(|(clock, _, _)| clock
+            .as_deref()
+            .and_then(|ms| ms.parse::<u64>().ok())
+            .is_some_and(|ms| ms <= 20_000)));
+        assert!(arrivals
+            .iter()
+            .any(|(_, status, code)| *status == 503 && code == "startup_timeout"));
+        assert_eq!(arrivals.last().expect("last").1, 200);
+    }
+    let _ = b_stop.send(());
+    b_task.await.expect("B joined").expect("B result");
+    let _ = source_stop.send(());
+    source_task
+        .await
+        .expect("Source joined")
+        .expect("Source result");
+    fixture.shutdown().await;
+}

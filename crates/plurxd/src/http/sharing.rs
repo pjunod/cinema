@@ -249,7 +249,7 @@ async fn identity(State(state): State<AppState>) -> Result<Json<Value>, ApiError
         .await
         .map_err(authority)?;
     Ok(Json(
-        json!({"server_id":source.server_id,"catalogue_epoch":source.catalogue_epoch,"name":name(&state).await?,"protocol_min":1,"protocol_max":1}),
+        json!({"server_id":source.server_id,"catalogue_epoch":source.catalogue_epoch,"name":name(&state).await?,"protocol_min":1,"protocol_max":1,"features":[crate::sharing_client::START_BUDGET_FEATURE]}),
     ))
 }
 #[derive(Deserialize)]
@@ -897,6 +897,7 @@ pub(crate) fn peer_error_code(error: &crate::sharing_client::PeerError) -> &'sta
         PeerError::Unavailable
         | PeerError::Rejected(_)
         | PeerError::Busy { .. }
+        | PeerError::StartNotYet { .. }
         | PeerError::DolbyVisionUnsupported => "sharing_peer_unavailable",
     }
 }
