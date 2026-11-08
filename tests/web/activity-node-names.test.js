@@ -160,6 +160,7 @@ let started = 0;
 let finished = 0;
 let failures = 0;
 async function test(name, run) {
+  if (process.env.PLURX_ACTIVITY_TEST_NAME && name !== process.env.PLURX_ACTIVITY_TEST_NAME) return;
   started += 1;
   try {
     await run();
@@ -918,6 +919,10 @@ process.on("beforeExit", () => {
         `something the test never resolves, so it printed no result at all\n`,
     );
   }
+  if (process.env.PLURX_ACTIVITY_TEST_NAME && !started) {
+    process.stdout.write("FAIL requested Activity test did not exist\n");
+    failures += 1;
+  }
   if (failures) process.exitCode = 1;
 });
 
@@ -982,4 +987,23 @@ test("queued library jobs show their local mount problem by library identity", (
   job.state="queued";job.error_code="recorded_failure";
   assert.match(paint(snapshot({scans})), /durable-reason[^>]*>recorded_failure/);
   Object.assign(painter.durable,{rows:[],counts:[]});
+});
+
+
+test("learner worker telemetry contributes capacity independently of voter activity", () => {
+  const data=snapshot({node_hostnames:{voter:"voter",learner:"learner"},
+    activity_nodes:[{node_id:"voter",status:"timed_out"}],
+    worker_observed_nodes:["voter","learner"],
+    workers:{voter:workerObservation(),learner:workerObservation({heavy_in_use:1,
+      heavy_available:0,software_used:2,software_limit:6,hardware_used:1,hardware_limit:2})}});
+  let html=paint(data);
+  assert.match(html, /<b>2 \/ 2<\/b><span>nodes reporting capacity/);
+  assert.match(html, /<td>2 \/ 6<\/td>/);
+  assert.match(html, /<td>1 \/ 2<\/td>/);
+  assert.match(html, /<b>1 \/ 2<\/b><span>heavy slots occupied/);
+  assert.doesNotMatch(html, /partial total/);
+  data.workers.learner.observed_at_ms=Date.now()-60000;
+  html=paint(data);
+  assert.match(html, /<b>1 \/ 2<\/b><span>nodes reporting capacity/);
+  assert.match(html, /partial total/);
 });
