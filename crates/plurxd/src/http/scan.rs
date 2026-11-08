@@ -343,10 +343,18 @@ async fn answer(
             if let Some(correlation_id) = correlation_id {
                 detail.insert("correlation_id".into(), serde_json::json!(correlation_id));
             }
+            // A cancelled request is a failure with its own code, so a
+            // replayed `request_key` answers it rather than `202 queued`
+            // forever, and the caller advances to a new attempt.
+            let (code, message) = if record.code == Some("cancelled") {
+                ("cancelled", "the scan request was cancelled; see `error`")
+            } else {
+                ("scan_failed", "the scan request failed; see `error`")
+            };
             Err(ApiError::TypedDetail {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "scan_failed",
-                message: "the scan request failed; see `error`".into(),
+                code,
+                message: message.into(),
                 detail,
             })
         }

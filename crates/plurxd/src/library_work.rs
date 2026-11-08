@@ -786,6 +786,10 @@ async fn settle_library(fence: &crate::background_jobs::JobFence, settlement: Jo
     }
 }
 
+/// The `error` of a request whose job was cancelled before it finished.
+pub(crate) const SCAN_REQUEST_CANCELLED: &str =
+    "the scan request was cancelled before it finished; send a new attempt";
+
 fn request_record(record: LibraryWorkRecord) -> ScanRequestRecord {
     let (path, correlation_id, source) = match record.input {
         LibraryWorkInput::Targeted {
@@ -808,17 +812,31 @@ fn request_record(record: LibraryWorkRecord) -> ScanRequestRecord {
         && record
             .job_lease_expires_ms
             .is_some_and(|expires| expires > clock_ms());
+    // Contract v2 has exactly four statuses (queued | running | done |
+    // failed). A request whose job was cancelled is a typed failure,
+    // `code: cancelled`, so a caller treats it like any other failed
+    // request and sends a new attempt instead of polling a fifth state.
+    let cancelled = record.state == "cancelled";
     let status = match record.state.as_str() {
         "succeeded" => "done",
-        "pending" if running => "running",
-        "pending" => "queued",
-        other => other,
+        "pending" | "awaiting_hydration" if running => "running",
+        "pending" | "awaiting_hydration" => "queued",
+        _ => "failed",
     };
-    let code = (status == "failed"
-        && error
-            .as_deref()
-            .is_some_and(|error| error.starts_with("path_unreadable")))
-    .then_some("path_unreadable");
+    let error = if cancelled {
+        error.or_else(|| Some(SCAN_REQUEST_CANCELLED.to_owned()))
+    } else {
+        error
+    };
+    let code = if cancelled {
+        Some("cancelled")
+    } else {
+        (status == "failed"
+            && error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("path_unreadable")))
+        .then_some("path_unreadable")
+    };
     ScanRequestRecord {
         request_id: record.request_id,
         at: record.created_at_ms / 1_000,
