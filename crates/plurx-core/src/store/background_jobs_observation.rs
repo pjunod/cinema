@@ -8,6 +8,19 @@ pub struct JobCount {
     pub state: String,
     pub count: i64,
     pub oldest_age_ms: i64,
+    /// Manual library work due for dispatch for at least five minutes.
+    #[serde(default)]
+    pub overdue_manual: i64,
+}
+
+pub const JOB_PROCESSING_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// Completed worker attempts still present in the observation window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeJobCompletions {
+    pub node_id: String,
+    pub succeeded: i64,
+    pub failed: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +40,9 @@ pub struct JobAttemptObservation {
 pub struct SourceIoHolder {
     #[serde(default = "source_occupancy_default")]
     pub active_occupancy: bool,
+    pub origin_node_id: Option<String>,
+    pub origin_job_kind: Option<String>,
+    pub origin_job_state: Option<String>,
     pub resource_key: String,
     pub work_id: String,
     pub kind: String,
@@ -43,6 +59,7 @@ fn source_occupancy_default() -> bool {
 pub(super) const SOURCE_IO_HOLDERS_SQL: &str = r#"
 SELECT json_object('resource_key', resource_key, 'work_id', work_id,
     'kind', kind, 'priority', priority, 'started_at_ms', started_at_ms,
+    'origin_node_id',origin_node_id,'origin_job_kind',origin_job_kind,'origin_job_state',origin_job_state,
     'lease_expires_at_ms', lease_expires_at_ms, 'phase', phase,
     'last_phase_at_ms', last_phase_at_ms, 'active_occupancy',json(CASE WHEN active_occupancy=1 THEN 'true' ELSE 'false' END)) AS result_json
 FROM (
@@ -54,7 +71,7 @@ FROM (
       THEN 'viewer' ELSE 'maintenance' END AS priority,
     COALESCE(attempt.started_at_ms, job.updated_at_ms) AS started_at_ms,
     held.expires_at_ms AS lease_expires_at_ms,
-    NULL AS phase, NULL AS last_phase_at_ms, 1 AS active_occupancy
+    NULL AS phase, NULL AS last_phase_at_ms, 1 AS active_occupancy, job.owner_node_id AS origin_node_id, job.kind AS origin_job_kind, job.state AS origin_job_state
   FROM background_job_reservations held JOIN background_jobs job ON job.id = held.job_id
   LEFT JOIN background_job_attempts attempt ON attempt.job_id = held.job_id
     AND attempt.fence = held.fence
@@ -69,7 +86,7 @@ FROM (
       THEN 'viewer' ELSE 'maintenance' END AS priority,
     COALESCE(attempt.started_at_ms, request.updated_at_ms) AS started_at_ms,
     held.expires_at_ms AS lease_expires_at_ms,
-    attempt.phase AS phase, attempt.phase_updated_at_ms AS last_phase_at_ms, 1 AS active_occupancy
+    attempt.phase AS phase, attempt.phase_updated_at_ms AS last_phase_at_ms, 1 AS active_occupancy,request.owner_node_id,NULL,NULL
   FROM analysis_source_reservations held
   JOIN analysis_requests request ON request.request_id = held.request_id
   LEFT JOIN analysis_attempts attempt ON attempt.request_id = held.request_id
@@ -81,6 +98,7 @@ FROM (
     owner.lease_expires_at_ms,CASE WHEN owner.lease_expires_at_ms<=json_extract($1,'$.now_ms')
       AND json_extract(owner.projection_json,'$.source_quiescent')!=1 THEN 'cleanup_pending' ELSE owner.phase END,owner.updated_at_ms,
     CASE WHEN owner.phase IN ('source_idle','sharing') AND json_extract(owner.projection_json,'$.source_quiescent')=1 THEN 0 ELSE 1 END
+    ,json_extract(owner.identity_json,'$.node_id'),NULL,NULL
   FROM foreground_source_owners owner JOIN foreground_source_required_resources resource ON resource.owner_id=owner.owner_id
   WHERE owner.lease_expires_at_ms>json_extract($1,'$.now_ms') OR json_extract(owner.projection_json,'$.source_quiescent')!=1
   UNION ALL
@@ -88,7 +106,9 @@ FROM (
     CASE WHEN custody.phase='paused' THEN 'source_paused' WHEN custody.authority_expires_at_ms>json_extract($1,'$.now_ms')
       THEN CASE custody.owner_kind WHEN 'lease' THEN 'read_attestation' WHEN 'offline' THEN 'offline_source' ELSE custody.phase END ELSE 'cleanup_pending' END,custody.updated_at_ms,
     CASE WHEN custody.phase='paused' THEN 0 ELSE 1 END
-  FROM background_source_current_owners custody,json_each(custody.resource_keys_json) resource
+    ,COALESCE(json_extract(custody.owner_json,'$.token.node_id'),json_extract(custody.owner_json,'$.node_id'),json_extract(custody.owner_json,'$.lease.owner_node_id')),origin.kind,origin.state
+  FROM background_source_current_owners custody LEFT JOIN background_jobs origin
+    ON custody.owner_kind='job' AND origin.id=custody.work_id,json_each(custody.resource_keys_json) resource
   WHERE NOT EXISTS(SELECT 1 FROM background_job_reservations held WHERE custody.owner_kind='job' AND held.job_id=custody.work_id
       AND held.fence=custody.fence AND held.resource_key=resource.value AND held.expires_at_ms>json_extract($1,'$.now_ms'))
     AND NOT EXISTS(SELECT 1 FROM analysis_source_reservations held WHERE custody.owner_kind='analysis' AND held.request_id=custody.work_id
@@ -96,17 +116,37 @@ FROM (
     AND NOT EXISTS(SELECT 1 FROM background_source_pauses paused WHERE custody.owner_kind='job' AND paused.job_id=custody.work_id
       AND paused.fence=custody.fence AND paused.phase='paused')
   UNION ALL
-  SELECT resource.value,job.id,job.kind,'maintenance',paused.paused_at_ms,job.lease_expires_ms,'source_paused',paused.paused_at_ms,0
+  SELECT resource.value,job.id,job.kind,'maintenance',paused.paused_at_ms,job.lease_expires_ms,'source_paused',paused.paused_at_ms,0,paused.node_id,job.kind,job.state
   FROM background_source_pauses paused JOIN background_jobs job ON job.id=paused.job_id AND job.fence=paused.fence,
     json_each(paused.resource_keys_json) resource
   WHERE paused.phase='paused' AND job.state IN ('running','cancelling') AND job.lease_expires_ms>json_extract($1,'$.now_ms')
-) ORDER BY (priority='foreground') DESC,started_at_ms, work_id LIMIT 128
+) ORDER BY (active_occupancy=1 AND phase='cleanup_pending') DESC,(priority='foreground') DESC,started_at_ms, work_id LIMIT 128
 "#;
 
 pub(super) const COUNTS_SQL: &str = r#"
 SELECT json_object('kind', kind, 'state', state, 'count', COUNT(*),
-    'oldest_age_ms', MAX(0, json_extract($1, '$.now_ms') - MIN(created_at_ms))) AS result_json
-FROM background_jobs GROUP BY kind, state ORDER BY kind, state LIMIT 128
+    'oldest_age_ms', MAX(0, json_extract($1, '$.now_ms') - MIN(created_at_ms)),
+    'overdue_manual', COUNT(CASE WHEN state = 'queued' AND kind IN ('library_scan', 'metadata_refresh')
+        AND not_before_ms <= json_extract($1, '$.manual_due_before_ms')
+        AND EXISTS (
+            SELECT 1 FROM background_job_waiters waiter
+            JOIN background_library_requests intent ON intent.request_id = waiter.request_id
+            WHERE waiter.job_id = job.id AND waiter.request_scope = 'library' AND waiter.state = 'pending'
+              AND waiter.created_at_ms <= json_extract($1, '$.manual_due_before_ms')
+              AND (json_extract(intent.input_json, '$.kind') = 'targeted'
+                   OR json_extract(intent.input_json, '$.trigger') = 'manual'))
+        THEN 1 END)) AS result_json
+FROM background_jobs job GROUP BY kind, state ORDER BY kind, state LIMIT 128
+"#;
+
+pub(super) const NODE_COMPLETIONS_SQL: &str = r#"
+SELECT json_object('node_id', owner_node_id, 'succeeded', SUM(outcome = 'succeeded'),
+    'failed', SUM(outcome = 'failed')) AS result_json
+FROM background_job_attempts
+WHERE finished_at_ms > json_extract($1, '$.after_ms')
+  AND finished_at_ms <= json_extract($1, '$.now_ms')
+  AND outcome IN ('succeeded', 'failed')
+GROUP BY owner_node_id ORDER BY owner_node_id
 "#;
 
 pub(super) const ATTEMPTS_SQL: &str = r#"
@@ -172,6 +212,7 @@ pub struct BackgroundJobMetrics {
     pub counts: [i64; JOB_METRIC_SLOTS],
     pub oldest_age_seconds: [i64; JOB_METRIC_SLOTS],
     pub source_io_reservations: i64,
+    pub source_recovery_pending: i64,
     pub legacy_pending: i64,
 }
 impl Default for BackgroundJobMetrics {
@@ -180,6 +221,7 @@ impl Default for BackgroundJobMetrics {
             counts: [0; JOB_METRIC_SLOTS],
             oldest_age_seconds: [0; JOB_METRIC_SLOTS],
             source_io_reservations: 0,
+            source_recovery_pending: 0,
             legacy_pending: 0,
         }
     }
@@ -194,6 +236,7 @@ pub(crate) fn background_job_metrics(
     struct Aggregate {
         jobs: Vec<JobCount>,
         source_io_reservations: i64,
+        source_recovery_pending: i64,
         legacy_pending: i64,
     }
     let rows: Aggregate = serde_json::from_str(json).map_err(|error| {
@@ -201,6 +244,7 @@ pub(crate) fn background_job_metrics(
     })?;
     let mut metrics = BackgroundJobMetrics {
         source_io_reservations: rows.source_io_reservations,
+        source_recovery_pending: rows.source_recovery_pending,
         legacy_pending: rows.legacy_pending,
         ..Default::default()
     };

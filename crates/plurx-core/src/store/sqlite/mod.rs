@@ -138,6 +138,8 @@ const _: () = assert!(
 /// applied index + 1. Never edit an entry that has shipped — append instead.
 /// Visible to the import inventory guard, which needs to know which migration
 /// first creates each table it plans to read.
+pub(crate) const NATIVE_AUTHORITY_SCHEMA: &str = "CREATE TABLE storage_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance_id TEXT NOT NULL, node_id TEXT NOT NULL, generation TEXT NOT NULL) STRICT; CREATE TABLE sharing_local_census (node_id TEXT NOT NULL PRIMARY KEY CHECK(length(node_id) BETWEEN 1 AND 256),attempt_id TEXT NOT NULL CHECK(length(attempt_id)=36),generation INTEGER NOT NULL CHECK(generation>0),claimed_at_ms INTEGER NOT NULL CHECK(claimed_at_ms>0)) STRICT;";
+
 pub(crate) const MIGRATIONS: &[&str] = &[
     // v1: settings KV — the seed of all replicated durable state.
     "CREATE TABLE settings (
@@ -1340,9 +1342,11 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA,
     // v123: prepared artifact operations do not read original media.
     super::subtitle_managed_schema::PREPARED_MIGRATION,
-    // v124: native storage authority and local boot census. Older binaries
+    // v124: shared dispatch turns for interactive library work.
+    super::background_job_turns::SCHEMA,
+    // v125: native storage authority and local boot census. Older binaries
     // refuse this schema before trying to activate native SQLite into Raft.
-    "CREATE TABLE storage_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance_id TEXT NOT NULL, node_id TEXT NOT NULL, generation TEXT NOT NULL) STRICT; CREATE TABLE sharing_local_census (node_id TEXT NOT NULL PRIMARY KEY CHECK(length(node_id) BETWEEN 1 AND 256),attempt_id TEXT NOT NULL CHECK(length(attempt_id)=36),generation INTEGER NOT NULL CHECK(generation>0),claimed_at_ms INTEGER NOT NULL CHECK(claimed_at_ms>0)) STRICT;",
+    NATIVE_AUTHORITY_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2375,6 +2379,7 @@ impl MetricsStore for SqliteStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)
                             + (SELECT COUNT(*) FROM analysis_source_reservations
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
+                        'source_recovery_pending', (SELECT COUNT(DISTINCT custody_id) FROM source_io_occupancy WHERE custody_id IS NOT NULL AND active_occupancy=1 AND expires_at_ms <= ?2 * 1000),
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import')))
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],

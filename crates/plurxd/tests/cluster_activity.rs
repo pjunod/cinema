@@ -2221,17 +2221,17 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         .collect::<Vec<_>>()
         .join("\n");
     eprintln!("create-path store operations:\n{table}");
-    // (authority reads, local reads, writes) per shape on main fb4397c44
-    // with every reduction of handoff §5.2 (B-M1 measured 36, 46, 41 and 33
-    // there). The window is the create handler's own, plus the activation
-    // task it awaits; the bearer-token read happens before it. Every shape
-    // takes six writes (the reopen two more, to project and hand off its
-    // predecessor); the reductions remove reads only.
+    // (authority reads, local reads, writes) for the create handler and the
+    // activation task it awaits. Bearer-token lookup precedes this window.
+    // Reopen also projects and hands off its predecessor. Auto encode and
+    // rolling copy each register and activate foreground source custody.
+    // Rolling fallback also reads the current source fingerprint and suspends
+    // the viewer's competing analysis demand for that source.
     let expected: [(&str, (u64, u64, u64)); 4] = [
         ("first play, VOD index", (26, 0, 6)),
         ("reopen, new position", (34, 0, 8)),
-        ("Auto encode, VOD", (31, 0, 6)),
-        ("index miss, rolling copy", (25, 0, 6)),
+        ("Auto encode, VOD", (31, 0, 8)),
+        ("index miss, rolling copy", (26, 0, 9)),
     ];
     let observed = measured
         .iter()

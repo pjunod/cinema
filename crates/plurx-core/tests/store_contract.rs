@@ -735,6 +735,36 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "maintain_jobs",
     "publish_transcode_job",
     "publish_fragment_job",
+    "advertise_library_turn",
+    "recent_job_completions",
+    "register_foreground_source",
+    "project_foreground_source",
+    "release_foreground_source",
+    "foreground_source_pressure",
+    "list_foreground_source_owners",
+    "resolve_foreground_source",
+    "activate_foreground_source_custody",
+    "abort_foreground_source_activation",
+    "mark_foreground_source_settled",
+    "reap_settled_source_custody",
+    "settled_foreground_source_custody",
+    "activate_background_source_custody",
+    "abort_background_source_activation",
+    "mark_background_source_settled",
+    "settled_background_source_custody",
+    "resolve_background_source_custody",
+    "register_background_source_custody",
+    "claim_background_source_service",
+    "release_background_source_custody",
+    "close_read_attestation_source_lease",
+    "suspend_playback_analysis_interest",
+    "restore_playback_analysis_interest",
+    "background_source_may_continue",
+    "pause_background_source",
+    "resume_background_source",
+    "source_checkpoint_artifacts",
+    "checkpoint_analysis_source",
+    "checkpoint_job",
 ];
 const PRETRANSCODE_METHODS: &[&str] = &["pretranscode_job", "pretranscode_staging_jobs"];
 const OFFLINE_METHODS: &[&str] = &[
@@ -12845,6 +12875,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
          rows(client, "SELECT json_array(job_id,fence,demand_id,continuity_id) AS payload FROM subtitle_translation_range_continuities ORDER BY job_id,fence,demand_id").await)
     }
     for scenario in [
+        "source-service-epoch",
         "translation-job",
         "translation-data",
         "translation-shape",
@@ -12864,6 +12895,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
         "text-cue",
     ] {
         let (inject, restore) = match scenario {
+            "source-service-epoch" => ("INSERT INTO background_source_service_epochs VALUES('retained-fixture',1,64)".to_owned(), "DELETE FROM background_source_service_epochs WHERE resource_key='retained-fixture'".to_owned()),
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
@@ -12961,7 +12993,7 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
         .await
         .expect("unrelated retained row");
     let queries = [
-        SOURCE_ARBITRATION_FIXTURE_SHAPE,
+        queue_fixture::source_extensions_fixture::SOURCE_TAIL_SHAPE,
         queue_fixture::CURRENT_TAIL_FIXTURE_SHAPE_SQL,
         queue_fixture::TRANSLATION_FIXTURE_SHAPE_SQL,
         queue_fixture::MANAGED_FIXTURE_SHAPE_SQL,
@@ -13053,57 +13085,41 @@ async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, St
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-const SOURCE_ARBITRATION_FIXTURE_SHAPE: &str =
-    "WITH owned(pattern) AS (VALUES ('foreground_source_*'), ('background_source_*'),
-        ('source_io_occupancy*'), ('analysis_source_checkpoint*'), ('playback_analysis_*'))
-     SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND
-        EXISTS(SELECT 1 FROM owned WHERE name GLOB pattern OR tbl_name GLOB pattern)
-     ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 WHEN 'index' THEN 2 ELSE 3 END,name";
-
-/// Both backends install the same source-arbitration declarations. Classify
-/// the whole extension before an older queue fixture drops its parent tables.
-#[cfg(feature = "hiqlite-contract-tests")]
-async fn empty_source_arbitration_fixture_drops(client: &Client) -> Vec<String> {
-    static PUBLISHED: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
-    let expected = PUBLISHED.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("owned SQLite schema witness");
-        let path = dir.path().join("published.sqlite");
-        drop(SqliteStore::open(&path).expect("published SQLite source arbitration"));
-        let connection = rusqlite::Connection::open(path).expect("schema witness");
-        let mut statement = connection
-            .prepare(SOURCE_ARBITRATION_FIXTURE_SHAPE)
-            .expect("source arbitration query");
-        statement
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .expect("source arbitration inventory")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("published source arbitration objects")
-    });
-    assert_eq!(
-        &replicated_fixture_shape(client, SOURCE_ARBITRATION_FIXTURE_SHAPE).await,
-        expected
-    );
-    require_replicated_fixture_marker(client, "background_source_schema", 1).await;
-    let mut drops = Vec::new();
-    for (name, definition) in expected {
-        let kind = definition
-            .split_whitespace()
-            .nth(1)
-            .expect("published object type");
-        if kind == "TABLE" && name != "background_source_schema" {
-            let count: Vec<I64Value> = client
-                .query_consistent_map(
-                    format!("SELECT count(*) AS value FROM {name}"),
-                    hiqlite::params!(),
-                )
-                .await
-                .expect("retained source-arbitration rows");
-            assert_eq!(count.len(), 1);
-            assert_eq!(count[0].value, 0, "refuse retained rows in {name}");
-        }
-        drops.push(format!("DROP {kind} {name}"));
+async fn replicated_source_tail_drops(
+    client: &Client,
+    remove: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    use queue_fixture::source_extensions_fixture::{
+        validated_source_tail_drops, SOURCE_TAIL_SHAPE,
+    };
+    let source_shape: Vec<_> = client
+        .query_consistent(SOURCE_TAIL_SHAPE.to_owned(), hiqlite::params!())
+        .await
+        .expect("replicated source and dispatch inventory")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect();
+    let mut source_counts = Vec::new();
+    for (_, name, _) in source_shape.iter().filter(|(kind, _, _)| kind == "table") {
+        let query = format!(
+            r#"SELECT count(*) AS value FROM "{}""#,
+            name.replace('"', r#""""#)
+        );
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(query, hiqlite::params!())
+            .await
+            .expect("replicated source data inventory");
+        assert_eq!(rows.len(), 1);
+        source_counts.push((name.clone(), rows[0].value));
     }
-    drops
+    require_replicated_fixture_marker(client, "background_source_schema", 1).await;
+    validated_source_tail_drops(&source_shape, &source_counts, true, false, remove)
 }
 
 /// A historical queue fixture cannot retain half of the independent managed
@@ -13123,6 +13139,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
             .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
             .collect()
     }
+    let source_drops = replicated_source_tail_drops(client, |_| true).await;
     let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
     assert_eq!(
         handoff_shape,
@@ -13285,8 +13302,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(jobs.len(), 1);
     let translation_drops =
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
-    let mut statements: Vec<_> = empty_source_arbitration_fixture_drops(client)
-        .await
+    let mut statements: Vec<_> = source_drops
         .into_iter()
         .chain(tail_drops)
         .chain(handoff_drops)
@@ -19029,22 +19045,8 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 74 with the current durable tables, including the Library channel
-    // entities, media classifications, channel subject jobs and decisions,
-    // the three DVR tables, the scoped book file grants (SQLite v68), the
-    // replicated candidate-recovery memory (SQLite v96), and the three
-    // continuous-quality tables that travel with media sessions. A
-    // v14 source has no rows for newer tables — each one's `minimum_schema` is
-    // later — but every table is still reported, because the digest inventory
-    // is over what the import *plans*, not over what the source happened to
-    // hold. The subtitle-source ledgers are node-held facts about local files
-    // and are deliberately not imported, so they are not counted here.
-    // 77: main's replicated candidate recovery, plus Jellyfin compatibility's
-    // wire identities, compatibility logins and bounded negotiations
-    // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
-    // v102–v103).
-    // Plus the item ratings and per-person lists (SQLite v113).
-    // Plus the playback handoff codes and tokens (SQLite v115).
+    // The report covers the entire current import plan, including later families
+    // with no rows in v14. SQLite v122 added seven durable source-arbitration tables.
     let mut imported_tables = report
         .tables
         .iter()
@@ -19057,6 +19059,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "analysis_attempts",
             "analysis_lifecycle_counters",
             "analysis_requests",
+            "analysis_source_checkpoints",
             "api_keys",
             "background_artifact_repairs",
             "background_artwork_locations",
@@ -19072,6 +19075,10 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "background_library_requests",
             "background_predictions",
             "background_provider_budgets",
+            "background_source_custody",
+            "background_source_pauses",
+            "background_source_service_epochs",
+            "background_source_service_grants",
             "background_storage_domains",
             "background_transcode_artifacts",
             "cache_consumer_pins",
@@ -19090,6 +19097,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "dvr_rules",
             "file_grants",
             "files",
+            "foreground_source_owners",
             "items",
             "jellyfin_entity_ids",
             "jellyfin_login_tokens",
@@ -19118,6 +19126,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "media_sessions",
             "offline_package_leases",
             "offline_packages",
+            "playback_analysis_suspensions",
             "playback_handoffs",
             "playback_handoffs_tokens",
             "pretranscode_jobs",
@@ -21185,9 +21194,10 @@ fn contract_inventory_matches_every_store_method() {
     // +5: source-revision title demand/readiness, binding, fenced publication
     // and same-node probe priority, explicitly listed in BACKGROUND_JOB_METHODS.
     // +3: source-fenced FEL verdict write, requalification and verdict counts.
-    // +27: source service's 24 custody/arbitration methods and three retained
-    // checkpoint methods, explicitly listed in BACKGROUND_JOB_METHODS above.
-    assert_eq!(declared.len(), 544, "review the Store method count");
+    // 27 foreground/background source custody, service, and checkpoint methods,
+    // plus library turn readiness and recent job completions.
+    // The recovery sweep checks current authority and settlement in the writer.
+    assert_eq!(declared.len(), 547, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

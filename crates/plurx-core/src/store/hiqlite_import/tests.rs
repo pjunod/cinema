@@ -330,6 +330,151 @@ fn pre_v67_file_projection_supplies_empty_downloaded_subtitles() {
 /// `ALTER` rather than a `CREATE`, have no creating migration to find and
 /// are exempted by name — deliberately a short list that has to be edited
 /// deliberately.
+
+#[test]
+fn dispatch_import_suspension_preserves_verdict_and_restores_admission() {
+    let connection = Connection::open_in_memory().expect("native dispatch witness");
+    crate::store::sqlite::SqliteStore::apply_migrations_for_test(&connection, 125)
+        .expect("current native schema");
+    let triggers = canonical_dispatch_import_triggers().expect("exact canonical dispatch triggers");
+    let actual = || {
+        connection
+            .prepare(DISPATCH_IMPORT_TRIGGERS)
+            .expect("dispatch catalog")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("catalog rows")
+            .collect::<Result<Vec<(String, String)>, _>>()
+            .expect("complete dispatch catalog")
+    };
+    assert_eq!(actual(), triggers);
+    for (name, _) in &triggers {
+        connection
+            .execute_batch(&format!("DROP TRIGGER \"{}\"", name))
+            .expect("suspend canonical admission");
+    }
+    connection
+        .execute_batch(
+            "INSERT INTO dispatch_turn_attempt VALUES(1,'analysis','retained','[]',10,1,0,NULL,0);",
+        )
+        .expect("copy retained verdict without recomputing it");
+    for (_, sql) in &triggers {
+        connection
+            .execute_batch(sql)
+            .expect("restore exact dispatch admission");
+    }
+    assert_eq!(actual(), triggers);
+    assert_eq!(
+        connection
+            .query_row("SELECT allowed FROM dispatch_turn_attempt", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .expect("retained verdict"),
+        0
+    );
+    connection.execute_batch("DELETE FROM dispatch_turn_attempt; INSERT INTO dispatch_turn_attempt VALUES(1,'analysis','new','[]',10,1,0,NULL,0);").expect("ordinary post-import admission");
+    assert_eq!(
+        connection
+            .query_row("SELECT allowed FROM dispatch_turn_attempt", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .expect("fresh admission verdict"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn dispatch_turn_import_preserves_rows_and_respects_the_v124_source_floor() {
+    for version in [123, 124, 125] {
+        let directory = tempfile::tempdir().expect("dispatch import fixture");
+        let path = directory.path().join("source.db");
+        let connection = Connection::open(&path).expect("dispatch source");
+        crate::store::sqlite::SqliteStore::apply_migrations_for_test(&connection, version)
+            .expect("published SQLite source");
+        connection
+            .execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES(?1,'dispatch-import',1)",
+                [keys::INSTANCE_ID],
+            )
+            .expect("source identity");
+        if version >= 124 {
+            connection.execute_batch(r#"
+                INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms)
+                  VALUES('dispatch-job','artifact_hydrate',1,'{}','dispatch-job',1,'queued',0,0,0);
+                INSERT INTO dispatch_turn_ready VALUES('dispatch-job','fixture-node',0,9999,'["/library"]');
+                INSERT INTO dispatch_turn_wait VALUES('maintenance','retained','["source_io"]',1,1000,7);
+                INSERT INTO dispatch_turn_attempt VALUES(1,'analysis','attempt','["source_io"]',10,1,0,NULL,0);
+            "#).expect("retained dispatch demand, fairness and verdict");
+        }
+        drop(connection);
+        let digest = sha256_file(&path).expect("immutable source hash");
+        let (reader, _) = SourceReader::open(&path, &digest, version)
+            .await
+            .expect("source reader");
+        let expected = [
+            (
+                "dispatch_turn_ready",
+                vec![
+                    Param::Text("dispatch-job".into()),
+                    Param::Text("fixture-node".into()),
+                    Param::Integer(0),
+                    Param::Integer(9999),
+                    Param::Text(r#"["/library"]"#.into()),
+                ],
+            ),
+            (
+                "dispatch_turn_wait",
+                vec![
+                    Param::Text("maintenance".into()),
+                    Param::Text("retained".into()),
+                    Param::Text(r#"["source_io"]"#.into()),
+                    Param::Integer(1),
+                    Param::Integer(1000),
+                    Param::Integer(7),
+                ],
+            ),
+            (
+                "dispatch_turn_attempt",
+                vec![
+                    Param::Integer(1),
+                    Param::Text("analysis".into()),
+                    Param::Text("attempt".into()),
+                    Param::Text(r#"["source_io"]"#.into()),
+                    Param::Integer(10),
+                    Param::Integer(1),
+                    Param::Integer(1),
+                    Param::Null,
+                    Param::Integer(0),
+                ],
+            ),
+        ];
+        for (name, row) in expected {
+            let plan = *TABLES
+                .iter()
+                .find(|plan| plan.name == name)
+                .expect("explicit dispatch import plan");
+            assert_eq!(plan.minimum_schema, 124);
+            let count = reader
+                .digest(plan, version)
+                .await
+                .expect("dispatch parity digest")
+                .row_count;
+            assert_eq!(count, u64::from(version >= 124), "v{version} {name}");
+            if version >= 124 {
+                assert_eq!(
+                    reader
+                        .import_chunk(plan, version, SourceChunk::Offset(0))
+                        .await
+                        .expect("dispatch import columns"),
+                    vec![row],
+                    "v{version} {name}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn every_import_plan_names_the_migration_that_creates_its_table() {
     // Tables whose creation predates the migration list, so there is no
@@ -455,9 +600,22 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // Playback handoff codes and tokens are durable account state.
     assert!(names.contains(&"playback_handoffs"));
     assert!(names.contains(&"playback_handoffs_tokens"));
-    // 95 with the three item-annotation tables (SQLite v113), 97 with the
-    // two playback handoff tables (SQLite v115).
-    assert_eq!(names.len(), 97, "review every imported durable table");
+    // SQLite v122 preserves source reservations, suspended work and its service credits.
+    for name in [
+        "foreground_source_owners",
+        "background_source_pauses",
+        "background_source_custody",
+        "background_source_service_epochs",
+        "background_source_service_grants",
+        "analysis_source_checkpoints",
+        "playback_analysis_suspensions",
+    ] {
+        assert!(
+            names.contains(&name),
+            "durable source arbitration table: {name}"
+        );
+    }
+    assert_eq!(names.len(), 104, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its
@@ -1041,6 +1199,10 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 "background_predictions" => 79,
                 "background_embeddings" => 80,
                 "background_artifact_repairs" => 82,
+                "background_source_pauses"
+                | "background_source_custody"
+                | "background_source_service_epochs"
+                | "background_source_service_grants" => 122,
                 _ => 71,
             };
             assert_eq!(table.minimum_schema, introduced, "{}", table.name);

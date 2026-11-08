@@ -635,6 +635,8 @@ mod tests {
 
     #[test]
     fn output_job_owned_call_sites_are_the_audited_set() {
+        // Source-bound pixel, subtitle-offset and VTT probes use
+        // BoundedDiagnosticChild; its spawn remains registered by the launcher.
         let expected = BTreeMap::from([
             // The framemd5 fixture lives in ffmpeg/tests.rs and is not a
             // production caller. The three capability/burst probes are.

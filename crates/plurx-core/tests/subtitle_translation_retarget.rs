@@ -1,6 +1,9 @@
 //! Producer reassignment uses the real writer, preserving root Stop and cached read authority.
 #[path = "support/historical_sqlite.rs"]
 mod historical_sqlite;
+#[path = "support/source_extensions_fixture.rs"]
+mod source_extensions_fixture;
+
 use plurx_core::store::{
     background_jobs::BackgroundJobStore,
     subtitle_translation::{SourceRevision, TranslationProfile},
@@ -204,10 +207,11 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
                 .starts_with("CREATE TRIGGER subtitle_translation_mutate ")
         })
         .expect("known legacy trigger");
+    source_extensions_fixture::rewind_empty_source_extensions_to_v121(&conn);
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .expect("current fixture checkpoint"),
-        124
+        125
     );
     let witness = rusqlite::Connection::open_in_memory().expect("published managed witness");
     witness.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE VIEW background_job_required_resources AS SELECT 1;").expect("closed witness dependencies");
@@ -250,7 +254,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
         canonical_fixture_rows(fixture_schema_rows(&conn, TRANSLATION_SHAPE)),
         canonical_fixture_rows(fixture_schema_rows(&witness, TRANSLATION_SHAPE))
     );
-    let later = historical_sqlite::validated_post_v121_rewind(&conn, 124);
+    let later = historical_sqlite::validated_post_v121_rewind(&conn, 125);
     let retained_continuity: i64 = conn.query_row(
         "SELECT (SELECT count(*) FROM subtitle_translation_range_continuities) +
                 (SELECT count(*) FROM subtitle_translation_demands WHERE continuity_id IS NOT NULL)",
@@ -328,7 +332,12 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
     assert_eq!(store_epoch(&reopened, &id).await, "1");
     let current =
         rusqlite::Connection::open(dir.path().join("store.db")).expect("upgraded fixture");
-    assert_eq!(fixture_schema_rows(&current, MANAGED_SHAPE), expected_v4);
+    assert_eq!(
+        fixture_schema_rows(&current, MANAGED_SHAPE),
+        source_extensions_fixture::managed_fixture_rows(
+            &source_extensions_fixture::managed_fixture_connection(4)
+        )
+    );
     assert_eq!(
         current
             .query_row(

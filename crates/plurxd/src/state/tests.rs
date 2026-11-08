@@ -1711,6 +1711,7 @@ fn metrics_sample(value: i64) -> PrometheusStoreSnapshot {
             counts: [value; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
             oldest_age_seconds: [value; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
             source_io_reservations: value,
+            source_recovery_pending: value,
             legacy_pending: value,
         },
         analysis: plurx_core::store::AnalysisStoreMetrics {

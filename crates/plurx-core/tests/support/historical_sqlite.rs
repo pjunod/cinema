@@ -28,7 +28,7 @@ pub(super) fn install_source_arbitration_fixture(connection: &rusqlite::Connecti
     }
 }
 
-/// Plan the removal of the empty source-arbitration (v122) and native (v124)
+/// Plan the removal of the empty source-arbitration (v122) and dispatch (v124) and native (v125)
 /// extensions. Use their published DDL to classify every object before
 /// counting data; triggers on older tables must also be removed before replay.
 pub(super) fn validated_post_v121_rewind(
@@ -37,16 +37,21 @@ pub(super) fn validated_post_v121_rewind(
 ) -> String {
     let witness = rusqlite::Connection::open_in_memory().expect("post-v121 fixture witness");
     if version >= 122 {
-        witness.execute_batch("CREATE TABLE background_jobs(id TEXT PRIMARY KEY,state TEXT,fence INTEGER); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE TABLE background_job_waiters(request_scope TEXT,request_id TEXT,state TEXT,updated_at_ms INTEGER);")
+        witness.execute_batch("CREATE TABLE background_jobs(id TEXT PRIMARY KEY,state TEXT,fence INTEGER); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE TABLE background_job_waiters(request_scope TEXT,request_id TEXT,state TEXT,updated_at_ms INTEGER); CREATE TABLE analysis_requests(request_id TEXT);")
             .expect("source arbitration dependencies");
         install_source_arbitration_fixture(&witness);
     }
     if version >= 124 {
+        witness
+            .execute_batch(include_str!("../../src/store/background_job_turns.sql"))
+            .expect("published dispatch turns");
+    }
+    if version >= 125 {
         witness.execute_batch("CREATE TABLE storage_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance_id TEXT NOT NULL, node_id TEXT NOT NULL, generation TEXT NOT NULL) STRICT; CREATE TABLE sharing_local_census (node_id TEXT NOT NULL PRIMARY KEY CHECK(length(node_id) BETWEEN 1 AND 256),attempt_id TEXT NOT NULL CHECK(length(attempt_id)=36),generation INTEGER NOT NULL CHECK(generation>0),claimed_at_ms INTEGER NOT NULL CHECK(claimed_at_ms>0)) STRICT;")
             .expect("published native identity and census");
     }
     let inventory = |db: &rusqlite::Connection| {
-        let mut stmt = db.prepare("WITH owned(pattern) AS (VALUES ('foreground_source_*'),('background_source_*'),('source_io_occupancy*'),('analysis_source_checkpoint*'),('playback_analysis_*'),('storage_identity*'),('sharing_local_census*'))
+        let mut stmt = db.prepare("WITH owned(pattern) AS (VALUES ('foreground_source_*'),('background_source_*'),('source_io_occupancy*'),('analysis_source_checkpoint*'),('playback_analysis_*'),('storage_identity*'),('sharing_local_census*'),('dispatch_turn_*'))
             SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND EXISTS (SELECT 1 FROM owned WHERE name GLOB pattern OR tbl_name GLOB pattern)
             ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 WHEN 'index' THEN 2 ELSE 3 END,name").expect("post-v121 inventory");
         stmt.query_map([], |row| {

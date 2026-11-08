@@ -834,8 +834,12 @@ class SelfHost:
         # Developer renders the shipped remote-management card. Enable its
         # server API only in this disposable fixture, so listing an empty
         # account is a valid 200 response rather than a disabled-feature 503.
+        # Developer shows whether a live FEL reconstruction fits its configured
+        # software pool. An auto-sized pool makes the same page depend on the
+        # runner's core count. Seed the real setting on the throwaway server.
         api(self.base_url, "/settings", self.token, "PUT",
-            {"vod_index_mins": 0, "cinema_remote_control": True})
+            {"vod_index_mins": 0, "cinema_remote_control": True,
+             "transcode_software_pool_threads": 4})
         # Auto selects VideoToolbox on some Macs and Software on Linux. Pin a
         # real node-scoped choice, then apply it at the ordinary native restart;
         # the browser still renders the unmodified settings/readiness APIs.
@@ -1613,6 +1617,44 @@ def capture_runtime_readiness(intercepted, problems):
     intercepted.fulfill(response=response, body=json.dumps(document))
 
 
+def capture_activity_clock(intercepted, problems):
+    """Keep the real queue and reader observations on the capture clock."""
+    response = None
+    try:
+        response = intercepted.fetch()
+        if response.status != 200:
+            raise Fail(f"activity fixture: HTTP {response.status}")
+        document = response.json()
+        # The throwaway Store and Python share the host clock. Translate each
+        # timestamp by the same offset so observation age and lease expiry
+        # ordering survive. Zero is the sentinel for an absent deadline.
+        offset_ms = FROZEN_EPOCH * 1000 - time.time_ns() // 1_000_000
+
+        def shift(row, key):
+            value = row.get(key)
+            if type(value) is int and value > 0:
+                row[key] = value + offset_ms
+
+        if urlparse(intercepted.request.url).path.endswith("/cluster/jobs"):
+            shift(document, "observed_at_ms")
+        else:
+            for worker in (document.get("workers") or {}).values():
+                shift(worker, "observed_at_ms")
+            analysis = document.get("analysis")
+            if isinstance(analysis, dict):
+                shift(analysis, "now_ms")
+                for holder in analysis.get("source_io_holders") or []:
+                    for field in ("started_at_ms", "lease_expires_at_ms", "last_phase_at_ms"):
+                        shift(holder, field)
+        intercepted.fulfill(response=response, body=json.dumps(document))
+    except Exception as error:
+        problems.append(str(error))
+        if response is None:
+            intercepted.abort()
+        else:
+            intercepted.fulfill(response=response)
+
+
 def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -1683,6 +1725,9 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     # tests/web/section-nav.test.js. The request itself is still logged.
     # Inspect the actual readiness response, preserving API/schema failures and
     # every unknown/new row. Only the bounded runtime host facts are pinned.
+    if name == "activity":
+        for pattern in ("**/api/v1/activity/detail", "**/api/v1/cluster/jobs?*"):
+            page.route(pattern, lambda request: capture_activity_clock(request, problems))
     page.route("**/api/v1/developer/readiness",
                lambda intercepted: capture_runtime_readiness(intercepted, problems))
     page.route("**/api/v1/features", lambda intercepted: intercepted.fulfill(

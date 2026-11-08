@@ -237,6 +237,7 @@ mod consistent_read_census;
 
 pub mod background_jobs;
 pub use background_jobs::{AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore};
+mod background_job_turns;
 pub mod background_jobs_artwork;
 mod background_jobs_copy_output;
 mod background_jobs_delivery;
@@ -492,8 +493,34 @@ pub(crate) fn local_media_principal_id(
 pub const MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA: &str =
     include_str!("session_principal_rebuild.sql");
 
+/// Triggers on other tables which reference session tables during replacement.
+fn session_dependency_triggers() -> impl Iterator<Item = (&'static str, &'static str, &'static str)>
+{
+    let restore = background_jobs_resources::SOURCE_ARBITRATION_SCHEMA
+        .split("-- next statement")
+        .map(str::trim)
+        .find(|sql| {
+            sql.starts_with("CREATE TRIGGER IF NOT EXISTS playback_analysis_restore_effects\n")
+        })
+        .expect("closed source-interest restore trigger definition");
+    jellyfin_watch::session_dependency_triggers()
+        .map(|(name, sql)| (name, "watch_state", sql))
+        .chain(std::iter::once((
+            "playback_analysis_restore_effects",
+            "background_job_commands",
+            restore,
+        )))
+}
+
+fn session_dependency_guard() -> String {
+    session_dependency_triggers().map(|(name, table, sql)| {
+        let declaration = sql.trim_end_matches(';').replacen("CREATE TRIGGER IF NOT EXISTS", "CREATE TRIGGER", 1).replace('\'', "''");
+        format!("EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='{name}' AND tbl_name='{table}' AND sql='{declaration}')")
+    }).collect::<Vec<_>>().join(" AND ")
+}
+
 /// Current-schema orchestration around the unchanged frozen ownership layout.
-/// Execute every statement atomically; unrelated watch triggers stay installed.
+/// Execute every statement atomically; unrelated triggers stay installed.
 pub fn media_session_principal_rebuild_schema() -> String {
     // The v122 interest trigger reads media_session_requests while attached to
     // background_job_commands. SQLite validates it during each table rename.
@@ -524,13 +551,13 @@ DROP TRIGGER playback_analysis_restore_effects;
 /// with any audited membership triggers, before applying this inner layout.
 fn media_session_principal_rebuild_after_external_detach() -> String {
     let separator = "\n-- next statement\n";
-    let dependencies = jellyfin_watch::session_dependency_triggers().collect::<Vec<_>>();
+    let dependencies = session_dependency_triggers().collect::<Vec<_>>();
     let mut statements = dependencies
         .iter()
-        .map(|(name, _)| format!("DROP TRIGGER {name};"))
+        .map(|(name, _, _)| format!("DROP TRIGGER {name};"))
         .collect::<Vec<_>>();
     statements.push(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.to_owned());
-    statements.extend(dependencies.into_iter().map(|(_, sql)| sql.to_owned()));
+    statements.extend(dependencies.into_iter().map(|(_, _, sql)| sql.to_owned()));
     statements.join(separator)
 }
 

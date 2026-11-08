@@ -139,10 +139,13 @@ fn conversion_fixture(root: &Path, request: &PreparedRequest) -> ConversionInten
         instance_id: "server".into(),
         node_id: "node".into(),
         generation: uuid::Uuid::new_v4().to_string(),
-        schema_version: 124,
+        schema_version: crate::store::SQLITE_SCHEMA_VERSION,
     };
     let database = rusqlite::Connection::open(directory.join("plurx.db")).expect("native target");
-    database.execute_batch("PRAGMA user_version=124; CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT); INSERT INTO settings VALUES('instance.id','server'); CREATE TABLE storage_identity(singleton INTEGER PRIMARY KEY,instance_id TEXT,node_id TEXT,generation TEXT); CREATE TABLE user_changes(value TEXT);").expect("native identity schema");
+    database.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT); INSERT INTO settings VALUES('instance.id','server'); CREATE TABLE storage_identity(singleton INTEGER PRIMARY KEY,instance_id TEXT,node_id TEXT,generation TEXT); CREATE TABLE user_changes(value TEXT);").expect("native identity schema");
+    database
+        .pragma_update(None, "user_version", crate::store::SQLITE_SCHEMA_VERSION)
+        .expect("current native fixture version");
     database
         .execute(
             "INSERT INTO storage_identity VALUES(1,?1,?2,?3)",

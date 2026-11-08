@@ -456,6 +456,50 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "dispatch_turn_ready",
+        columns: &["job_id", "node_id", "revision", "expires_at_ms", "roots"],
+        order_by: "job_id, node_id",
+        minimum_schema: 124,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "dispatch_turn_attempt",
+        columns: &[
+            "singleton",
+            "owner",
+            "work",
+            "keys_json",
+            "now_ms",
+            "queued_ms",
+            "allowed",
+            "winner",
+            "interactive",
+        ],
+        order_by: "singleton",
+        minimum_schema: 124,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "dispatch_turn_wait",
+        columns: &[
+            "owner",
+            "work",
+            "keys_json",
+            "queued_ms",
+            "last_seen_ms",
+            "credits",
+        ],
+        order_by: "owner, work",
+        minimum_schema: 124,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "background_job_migration",
         columns: &["singleton", "format_version", "source_count"],
         order_by: "singleton",
@@ -2464,7 +2508,52 @@ fn param_payload_bytes(param: &Param) -> usize {
     }
 }
 
+struct DispatchImportTriggerRow {
+    name: String,
+    sql: String,
+}
+impl From<&mut Row<'_>> for DispatchImportTriggerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            name: row.get("name"),
+            sql: row.get("sql"),
+        }
+    }
+}
+
+const DISPATCH_IMPORT_TRIGGERS: &str = "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name GLOB 'dispatch_turn_*' ORDER BY name";
+
+fn canonical_dispatch_import_triggers() -> Result<Vec<(String, String)>, StoreError> {
+    let witness = Connection::open_in_memory()?;
+    witness.execute_batch("CREATE TABLE background_jobs(id TEXT); CREATE TABLE analysis_requests(request_id TEXT); CREATE TABLE background_source_custody(custody_id TEXT);")?;
+    witness.execute_batch(super::background_job_turns::SCHEMA)?;
+    let mut statement = witness.prepare(DISPATCH_IMPORT_TRIGGERS)?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.len() != 5 {
+        return Err(import_error(
+            "review the exact dispatch import trigger boundary",
+        ));
+    }
+    Ok(rows)
+}
+
 impl HiqliteAuthStore {
+    async fn import_dispatch_trigger_catalog(&self) -> Result<Vec<(String, String)>, StoreError> {
+        Ok(self
+            .client()
+            // authority: fresh isolated import requires exact committed dispatch guards before suspension and after restoration.
+            .query_consistent_map::<DispatchImportTriggerRow, _>(
+                DISPATCH_IMPORT_TRIGGERS.to_owned(),
+                params!(),
+            )
+            .await?
+            .into_iter()
+            .map(|row| (row.name, row.sql))
+            .collect())
+    }
+
     /// Import one immutable, content-addressed SQLite backup into a fresh
     /// Hiqlite target and prove exact row parity before returning evidence.
     ///
@@ -2547,8 +2636,43 @@ impl HiqliteAuthStore {
             .await?;
         self.import_instance_setting(&metadata).await?;
 
+        // This target is fresh and cannot serve until import succeeds. Its
+        // dispatch triggers are admission code, not data-copy code: replaying
+        // them would recompute retained verdicts and mutate queue fairness.
+        let dispatch_triggers = canonical_dispatch_import_triggers()?;
+        if self.import_dispatch_trigger_catalog().await? != dispatch_triggers {
+            return Err(import_error(
+                "fresh import target has unrecognized dispatch triggers",
+            ));
+        }
+        self.client()
+            .txn(dispatch_triggers.iter().map(|(name, _)| {
+                (
+                    format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\"")),
+                    params!(),
+                )
+            }))
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
         for table in TABLES {
             self.import_table(&source, schema_version, *table).await?;
+        }
+        self.client()
+            .txn(
+                dispatch_triggers
+                    .iter()
+                    .map(|(_, sql)| (sql.clone(), params!())),
+            )
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        if self.import_dispatch_trigger_catalog().await? != dispatch_triggers {
+            return Err(import_error(
+                "dispatch triggers were not restored after import",
+            ));
         }
 
         // This CAS counter is derived coordination state, not application
@@ -3055,7 +3179,7 @@ fn open_validated_source(
 const NATIVE_RUNTIME_TABLES: [&str; 2] = ["storage_identity", "sharing_local_census"];
 
 fn verify_native_runtime_metadata(source: &Connection) -> Result<(), StoreError> {
-    let canonical = super::sqlite::MIGRATIONS[123];
+    let canonical = super::sqlite::NATIVE_AUTHORITY_SCHEMA;
     for name in NATIVE_RUNTIME_TABLES {
         let mut rows = source.prepare("SELECT type,sql FROM sqlite_master WHERE name=?1")?;
         let definitions = rows
@@ -3728,7 +3852,7 @@ mod native_runtime_metadata_tests {
     fn native_boot_metadata_is_classified_by_exact_table_and_shape() {
         let source = Connection::open_in_memory().expect("native metadata fixture");
         source
-            .execute_batch(super::super::sqlite::MIGRATIONS[123])
+            .execute_batch(super::super::sqlite::NATIVE_AUTHORITY_SCHEMA)
             .expect("native metadata fixture");
         source
             .execute(

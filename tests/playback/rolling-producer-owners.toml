@@ -3712,7 +3712,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # joined after an unwind-safe Release guard releases the blocked scan. The
 # actual blocking scan keeps its io_slot credit until it returns. Production
 # warm_inventory awaits the existing refresh owner and spawns no extra task.
-expected_occurrences = 1086
+# Cinema manual-scan dispatch adds the driver in the busy-worker renewal
+# regression. The test releases its BeforeScan barrier and awaits the handle.
+expected_occurrences = 1087
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5457,7 +5459,22 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # create 30s, GET 20s, body 10s, stop 5s, offline decode/probe 20s each, and
 # settlement 10s with 500-ms stop attempts and a 10-ms condition poll. Its
 # caught errors/panics still settle all isolated sessions before offline checks.
-expected_occurrences = 2090
+# PR #1390 (c2a29aac5): two timers belong to the paused-clock test
+# subtitle_pressure_checks_keep_polling_the_write_that_holds_the_fence.
+# Its local interval_at exercises the tick and notification paths. The 20ms
+# timeout bounds the borrowed driver after the write reply; success still
+# requires the work to settle, the token to stay live and the fence to unlock.
+# The production 250ms pressure interval remains owned by the subtitle job.
+# Cinema library dispatch and subtitle pressure ownership, 2026-11-07.
+# The inherited subtitle_work.rs regression (c2a29aac5) owns the paused-clock
+# interval_at and a 20 ms timeout that bounds its awaited write driver.
+# The dispatch worker bounds interactive heavy admission at one second and
+# renews ready successors every three seconds while its library scan runs.
+# Five fixture timers watch the source permission check (2 s), the write
+# commit and pressure-check event ordering (15 s), scan acknowledgement
+# (3 s), and renewal visibility (12 s with a 50 ms poll).
+# The worker's existing idle sleep changes delay in place (zero net sites).
+expected_occurrences = 2097
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

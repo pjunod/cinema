@@ -832,6 +832,9 @@ pub struct TranscodeManager {
     /// Shared by every heavy durable worker, independently of CPU/GPU cost.
     /// The owned guard follows the physical child through cancellation/join.
     background_heavy: Arc<tokio::sync::Semaphore>,
+    /// Readable manual library jobs currently waiting for a local heavy turn.
+    /// A cancelled waiter removes itself before maintenance resumes.
+    interactive_library_waiters: tokio::sync::watch::Sender<usize>,
     offline_waiting: AtomicBool,
     /// Whether this daemon's ffmpeg can strip a Dolby Vision configuration —
     /// probed at boot ([`crate::ffmpeg::has_dovi_rpu`]).
