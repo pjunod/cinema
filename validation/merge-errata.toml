@@ -500,3 +500,87 @@ reason = "Corrective commit 54d6f2da (fix(docker): keep security indexes on the 
 [[errata]]
 commit = "a96f58b5fe87c20a46d01d0426e341adb7b97072"
 reason = "Corrective commit a96f58b5 (fix(ci): validate the selected Python operations workflow branch) reached main without a recognized pull-request landing, as reported by the immutable history audit at c32bf261. Its immutable three-line diff updates tests/operations/test_contracts.py to expect selected Python operations execution and its PYTHON_SELECTION_SHA256 binding; its commit message contains no Regression-Test field. This permanent row records that exact missing regression-publication metadata without inventing retrospective coverage; it changes no implementation, audit boundary or future field checks and claims no additional test execution."
+
+[[errata]]
+commit = "d25a35ea323e432369cd64f76c4dc076fffab0c2"
+reason = "Corrective commit d25a35ea (fix(test): finish pending-media and served-window fixtures [skip ci]) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains no Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "9fde9d14821a12f382c958744739c50a765da8de"
+reason = "Corrective commit 9fde9d14 (fix(test): honor bounded pending native HLS initialization responses) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains no Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "ad4acb07c01971e1dabe123408fc7605b116a6be"
+reason = "Corrective commit ad4acb07 (fix(subtitles): preserve committed completion when pressure observes retirement) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains no Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "79bf8e4785815cd04d8e4892a6635bed68cacbe3"
+reason = "Corrective commit 79bf8e47 (fix(test): declare presentation before testing retained reload margins) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains no Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "3ea9de3e5c10c3d79b33a90cd45866b92af4598e"
+reason = "Corrective commit 3ea9de3e (fix(test): defer source proofs to their owned executor and reap the real publisher) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains no Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "0a33ddc0281d580208b985b79202814debaa96df"
+reason = "Corrective commit 0a33ddc0 (fix(logging): keep source-retirement events in their operator channels) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains no Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "4b85fe759eba55cdd1095c927493a3e4481fc3dc"
+reason = "Corrective commit 4b85fe75 (fix(test): keep private source-bank flow separate from advertised media) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains no Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "00903c2e826906c56a1950d133c21f970b8c4c93"
+reason = "Corrective commit 00903c2e (fix(test): bind source authority and stage the measured rolling runway) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains no Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "c5245d27e950ff6bf206e0dd15beacd486b5707b"
+reason = "Corrective commit c5245d27 (fix(test): declare current source capabilities and complete worker budgets) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains no Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "3e21ab435a00d373e97e0e997d98e4b1231fc423"
+reason = "Corrective commit 3e21ab43 (fix(stream): preserve missing-source responses and child cleanup contracts) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains no Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "8fab88105e5d046e3fc2b29e9f9e9c9a8ef55efe"
+reason = "Corrective commit 8fab8810 (fix(test): give the rolling fixture its own child process group) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains 2 Regression-Test fields. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "25b7bdeca4007040449ebad35b8f69ae986b6202"
+reason = "Corrective commit 25b7bdec (fix(test): honor process-group and private recovery fixture contracts) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains 4 Regression-Test fields. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "3c1321ee9cad8b21530213844d011e39d309a4bc"
+reason = "Corrective commit 3c1321ee (fix(test): give seeded HTTP sources their actual modification times) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains 2 Regression-Test fields. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "37deab2f7e253dd684a2ada6e61b1dc4b5b6f582"
+reason = "Corrective commit 37deab2f (fix(test): distinguish caller timeout from detached collection cancellation) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains 1 Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "67331b733a96b95c8e9c0059c66ce39841fa877e"
+reason = "Corrective commit 67331b73 (fix(test): bind media fixtures to actual file identity and caption task) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains 3 Regression-Test fields. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "c4ade27aee3386f560e3598c617c8e50e2c075c9"
+reason = "Corrective commit c4ade27a (fix(test): echo the caption heartbeat continuity in its fixture) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains 1 Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "b1193ad6525a99f7509ab4da3e16acd9ef6dcec9"
+reason = "Corrective commit b1193ad6 (fix(test): provide current speech-caption fixture authority) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains 1 Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "4f417e8527d7fa54b752969e556b8fd9a751ae38"
+reason = "Corrective commit 4f417e85 (fix(test): align recovery fixtures with joined source ownership) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains 4 Regression-Test fields. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "87770f69abcfeac6c4df137a2663f7177e9c0525"
+reason = "Corrective commit 87770f69 (fix(ci): publish the verified image configuration by digest) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains 1 Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "d9a0ebc7668145a0de0a3851de2c808db1fe77c4"
+reason = "Corrective commit d9a0ebc7 (fix(activity): account for learner workers and preserve HLS retry metadata [skip ci]) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains no Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[errata]]
+commit = "55f84b0e8535336dadb5d9e058d3f093c57cab1c"
+reason = "Corrective commit 55f84b0e (fix(jellyfin): await encoded segment readiness after idle reap [skip ci]) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains 1 Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
