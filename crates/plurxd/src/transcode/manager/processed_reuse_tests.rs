@@ -781,6 +781,83 @@ async fn fixture_with_audio(
     destination: DvDestination,
     audio: Option<(Option<i64>, i64)>,
 ) -> Fixture {
+    fixture_with_encoder(destination, audio, Encoder::Software, None).await
+}
+
+#[tokio::test]
+async fn processed_cache_args_match_the_destination_window_encoder() {
+    use plurx_core::transcode::{Pacing, TranscodeExecution, VaapiHdrPolicy};
+
+    let policy = Some(VaapiHdrPolicy::MesaRadeonsiVbaq);
+    for (destination, encoder, vaapi_policy, compression, transfer) in [
+        (
+            DvDestination::Hdr10,
+            Encoder::Vaapi,
+            policy,
+            Some("19"),
+            "smpte2084",
+        ),
+        (
+            DvDestination::Profile81,
+            Encoder::Vaapi,
+            policy,
+            Some("0"),
+            "smpte2084",
+        ),
+        (
+            DvDestination::Sdr,
+            Encoder::Vaapi,
+            policy,
+            Some("19"),
+            "bt709",
+        ),
+        (
+            DvDestination::Profile81,
+            Encoder::Software,
+            None,
+            None,
+            "smpte2084",
+        ),
+    ] {
+        let f = fixture_with_encoder(destination, None, encoder, vaapi_policy).await;
+        let encoding = &f.encoding;
+        let file = encoding
+            .store
+            .get_file(f.remote.request.file_id)
+            .await
+            .expect("read bound source")
+            .expect("bound source");
+        let runtime = encoding
+            .dv_runtime
+            .as_ref()
+            .expect("admitted processed recipe");
+        let mut options = encoding.options.clone();
+        options.start_seconds = 0.0;
+        let execution = TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), ".")
+            .expect("window execution");
+        let end = file.duration_ms.expect("source duration") as f64 / 1000.0;
+        let window = runtime
+            .window_encoder_args(&file, &encoding.plan, &execution, encoding.grid, end)
+            .expect("actual encoder arguments");
+        let planned = encoding.args(&file, 0.0, end);
+        assert_eq!(planned, window, "{destination:?} {encoder:?}");
+        let flag = |name: &str| {
+            planned
+                .windows(2)
+                .find(|pair| pair[0] == name)
+                .map(|pair| pair[1].as_str())
+        };
+        assert_eq!(flag("-compression_level"), compression);
+        assert_eq!(flag("-color_trc"), Some(transfer));
+    }
+}
+
+async fn fixture_with_encoder(
+    destination: DvDestination,
+    audio: Option<(Option<i64>, i64)>,
+    encoder: Encoder,
+    vaapi_hdr_policy: Option<plurx_core::transcode::VaapiHdrPolicy>,
+) -> Fixture {
     use std::os::unix::fs::MetadataExt;
     let root = crate::test_tempdir().expect("processed lifecycle");
     let store: Arc<dyn Store> =
@@ -1484,8 +1561,8 @@ printf '%s\n' '{}'
         mode: DvProcessingMode::Fel,
         decode: crate::dv_segment::RendererDecode::Software,
         reconstruction_slot: None,
-        encoder: Encoder::Software,
-        vaapi_hdr_policy: None,
+        encoder,
+        vaapi_hdr_policy,
         runtime_cache: root.path().join("runtime"),
         shader_cache: Arc::new(crate::test_tempdir().expect("shader cache")),
         prepared: std::sync::Mutex::new(None),
