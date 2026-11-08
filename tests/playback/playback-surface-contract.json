@@ -239,6 +239,7 @@
         "vod_index_pending",
         "vod_engine_unattested",
         "transcode_capacity_pending",
+        "media_session_overloaded",
         "quality_catalog_unavailable"
       ],
       "retryable": true
@@ -360,8 +361,46 @@
       "id": "log_only",
       "context": "any",
       "class": null
+    },
+    {
+      "id": "create_capacity_terminal",
+      "context": "start",
+      "class": "stopped",
+      "codes": [
+        "transcode_height_unavailable",
+        "transcode_scratch_exhausted",
+        "replacement_expired"
+      ],
+      "requires": {
+        "player_stopped": true
+      }
     }
   ],
+  "create_codes_outside_the_table": {
+    "note": "Codes the session create route answers with that no source row classifies. Each is handled by the caller that asked (a fallback, a re-plan, a handoff it waits on) or ends the start as the owner's own `stopped`; none is retried as a create. tests/validation/test_control_wire_conformance.py fails when the server emits a create code that is neither in a row nor here.",
+    "codes": [
+      "hdr_subtitle_burn_refused",
+      "hevc_configuration_unsupported",
+      "hevc_configuration_unverified",
+      "invalid_capabilities",
+      "live_presentation_removed",
+      "media_session_ended",
+      "media_session_handoff_pending",
+      "media_session_superseded",
+      "playback_target_superseded",
+      "sharing_playback_authority_unavailable",
+      "sharing_playback_response_unavailable",
+      "unsupported_build",
+      "unsupported_hevc_delivery",
+      "vod_audio_track_missing",
+      "vod_frame_cadence_unknown",
+      "vod_invalid_height",
+      "vod_recipe_unresolved",
+      "vod_reopen_required",
+      "vod_subtitle_track_missing",
+      "vod_video_geometry_unknown"
+    ]
+  },
   "errors": {
     "blocking_without_stop": "A source whose CLASS is blocking was raised with player_stopped false. The reducer logs the error and leaves the surface unchanged; it never renders the fault. Every source mapping to a blocking class carries `requires.player_stopped` so the table and the reducer cannot disagree.",
     "source_context_mismatch": "A source was raised in a context no row for that id declares.",
@@ -1643,6 +1682,29 @@
         {
           "t": 500,
           "raise": "vod_transcode_unavailable",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "start"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "stopped"
+        }
+      ]
+    },
+    {
+      "name": "create_capacity_terminal_is_terminal",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "create_capacity_terminal",
           "attached": "g1",
           "player_stopped": true,
           "context": "start"

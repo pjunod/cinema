@@ -160,12 +160,13 @@ pub(crate) const PLAY_FORGET: Duration = Duration::from_secs(24 * 60 * 60);
 /// the web answers for `vod_index_pending` by falling back to a progressive
 /// remux. Such a refusal does not end the attempt: it keeps it pending, so
 /// the retry or the fallback that follows joins it (#559 review, finding 1).
-pub(crate) const START_NOT_YET_CODES: [&str; 6] = [
+pub(crate) const START_NOT_YET_CODES: [&str; 7] = [
     "startup_timeout",
     "media_owner_transition",
     "vod_index_pending",
     "vod_engine_unattested",
     "transcode_capacity_pending",
+    "media_session_overloaded",
     "quality_catalog_unavailable",
 ];
 

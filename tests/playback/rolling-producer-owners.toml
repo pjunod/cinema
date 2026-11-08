@@ -3682,7 +3682,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # `tokio::spawn`, +1 the create handler's `OwnedCreate::spawn` call, +2 the two
 # media_pool tests' `OwnedCreate::spawn`, +1 the joined `tokio::spawn` that
 # runs the waiting re-post in `a_retry_of_a_start_still_in_flight_joins_its_claim`.
-expected_occurrences = 1087
+# Review 1 B1: +1 test-only `OwnedCreate::spawn` in
+# `a_create_cancelled_at_its_claim_await_leaves_the_claim_retryable`; the
+# test drops it before the create owns its claim, which aborts it.
+expected_occurrences = 1088
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5443,7 +5446,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `OwnedCreate::drop` and three test sleeps), http/tests.rs +1 (the joined
 # re-post test's wait before the owner lets go), create.rs -1 (the
 # compatibility-only activation wait folded into the claim join loop).
-expected_occurrences = 2078
+# Review 1 B1: +1 test-only condition poll (`sleep`) in
+# `a_create_cancelled_at_its_claim_await_leaves_the_claim_retryable`, bounded
+# by one settlement budget. The other +5 in this total landed on
+# effort/playback-start with the C1, C3 and G1 merges without a recount; they
+# are counted here so the census is exact, not reviewed by this lane.
+expected_occurrences = 2084
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

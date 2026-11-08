@@ -6236,6 +6236,12 @@ final class PlayerController: ObservableObject {
             return PlaybackSurfaceOutcome(source: "vod_transcode_unavailable")
         case "vod_subtitle_burn_unavailable":
             return PlaybackSurfaceOutcome(source: "vod_subtitle_burn_unavailable")
+        // A capacity refusal no re-post of the same request can outlive: a
+        // height this server cannot encode now, a scratch grant above its
+        // ceiling, a replacement past its deadline. Nothing here re-asks at a
+        // smaller height, so the start ends on the row that names it.
+        case "transcode_height_unavailable", "transcode_scratch_exhausted", "replacement_expired":
+            return PlaybackSurfaceOutcome(source: "create_capacity_terminal")
         case "media_owner_lost":
             guard case .refused(_, _, _, let positionMs) = api else { return nil }
             return PlaybackSurfaceOutcome(source: "media_owner_lost_410", positionMs: positionMs)

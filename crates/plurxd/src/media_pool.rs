@@ -364,7 +364,15 @@ pub(crate) struct CreateStartupBudget {
     /// instant its owned work must be finished by, inside the claim's window.
     /// Before it is set the create's work runs to `deadline`, the viewer's.
     owner: std::sync::Arc<std::sync::OnceLock<tokio::time::Instant>>,
+    /// When the viewer's whole start runs out: what it said it had left as
+    /// this create began, unclamped. `deadline` bounds this create's answer;
+    /// this bounds the work an owner does for it.
+    viewer_end: tokio::time::Instant,
 }
+
+/// Keeps the viewer's end a finite instant whatever a client sends; the
+/// claim's window bounds an owner long before this does.
+const VIEWER_REMAINING_CEILING_MS: u64 = 600_000;
 
 /// The per-phase split of one create, logged on its read-budget line.
 ///
@@ -404,8 +412,10 @@ impl CreatePhaseLedger {
 
 impl CreateStartupBudget {
     pub(crate) fn new(remaining_ms: u64) -> Self {
+        let now = tokio::time::Instant::now();
         Self {
-            deadline: tokio::time::Instant::now() + Duration::from_millis(remaining_ms.min(10_000)),
+            deadline: now + Duration::from_millis(remaining_ms.min(10_000)),
+            viewer_end: now + Duration::from_millis(remaining_ms.min(VIEWER_REMAINING_CEILING_MS)),
             calls: Default::default(),
             binding: Default::default(),
             advisory: Default::default(),
@@ -422,6 +432,21 @@ impl CreateStartupBudget {
     /// When the create's owned work must end, once it owns its claim.
     pub(crate) fn owner_deadline(&self) -> Option<tokio::time::Instant> {
         self.owner.get().copied()
+    }
+    /// How long an owner works for this create's viewer: until the viewer's
+    /// whole remaining start has run out plus `repost` (the wait and round
+    /// trip of the re-post that brings its last retry to the owner), never
+    /// past `claim_limit`. Past it nobody can take the answer, so a producer
+    /// spawned then would run for nobody; the viewer's own answer deadline is
+    /// never later than its end, so it is inside this window too.
+    pub(crate) fn owner_window(
+        &self,
+        claim_limit: tokio::time::Instant,
+        repost: Duration,
+    ) -> tokio::time::Instant {
+        (self.viewer_end + repost)
+            .max(self.deadline)
+            .min(claim_limit)
     }
     pub(crate) fn calls(&self) -> u32 {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
@@ -540,10 +565,22 @@ impl<T: Send + 'static> Drop for OwnedCreate<T> {
 /// Mark the running create as the owner of its durable request claim, with
 /// its owned work bounded by `deadline`; a no-op outside a create. Every
 /// create-stage deadline taken after this runs to it rather than to the
-/// viewer's allowance.
+/// viewer's allowance. Production owns through [`own_create_for_viewer`];
+/// the tests that pin the detached window set it directly.
+#[cfg(test)]
 pub(crate) fn own_create_until(deadline: tokio::time::Instant) {
     let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
         let _ = budget.owner.set(deadline);
+    });
+}
+
+/// Mark the running create as the owner of its durable request claim for as
+/// long as its viewer can still take the answer
+/// ([`CreateStartupBudget::owner_window`]), never past `claim_limit`; a no-op
+/// outside a create.
+pub(crate) fn own_create_for_viewer(claim_limit: tokio::time::Instant, repost: Duration) {
+    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+        let _ = budget.owner.set(budget.owner_window(claim_limit, repost));
     });
 }
 
@@ -2781,6 +2818,41 @@ mod tests {
                 !owned,
                 "owned={owned}: an unowned create is cancelled with its viewer"
             );
+        }
+    }
+
+    /// Review 1, S2: an owner works for as long as its viewer can still take
+    /// the answer (the viewer's whole remaining start plus one re-post), not
+    /// to the end of the claim's window, so a start the viewer abandoned does
+    /// not go on to spawn a producer nobody attaches.
+    #[tokio::test(start_paused = true)]
+    async fn an_owner_works_for_its_viewers_remaining_start_and_one_repost() {
+        let repost = Duration::from_secs(2);
+        let began = tokio::time::Instant::now();
+        let claim_limit = began + Duration::from_secs(55);
+        for (remaining_ms, expected) in [
+            // The web's 20 s start: its last re-post lands by 22 s.
+            (20_000, Duration::from_secs(22)),
+            // Less than one create's own answer window.
+            (3_000, Duration::from_secs(5)),
+            // A client with a minute left is bounded by the claim.
+            (120_000, Duration::from_secs(55)),
+        ] {
+            let budget = CreateStartupBudget::new(remaining_ms);
+            assert_eq!(
+                budget.owner_window(claim_limit, repost) - began,
+                expected,
+                "remaining {remaining_ms} ms"
+            );
+            budget
+                .scope(async { own_create_for_viewer(claim_limit, repost) })
+                .await;
+            assert_eq!(
+                budget.owner_deadline().map(|deadline| deadline - began),
+                Some(expected),
+                "remaining {remaining_ms} ms: the owner deadline is that window"
+            );
+            assert!(budget.owner_deadline() >= Some(budget.deadline));
         }
     }
 

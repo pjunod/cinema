@@ -3396,7 +3396,11 @@ async fn client_release_settles_released_not_authority_fence() {
     );
     assert!(
         manager
-            .stop_session("client-release", "released by client")
+            .stop_session_for_terminal(
+                "client-release",
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            )
             .await
     );
     assert_eq!(settled_retirement_cause(&session), "client_released");
@@ -3435,13 +3439,38 @@ async fn admin_stop_settles_stopped_not_authority_fence() {
     let (_dir, manager, session) = release_cause_fixture("admin-stop-direct", None).await;
     assert!(
         manager
-            .stop_session("admin-stop-direct", "stopped by admin")
+            .stop_session_for_terminal(
+                "admin-stop-direct",
+                crate::vodserve::Terminal::AdminStop,
+                "stopped by admin",
+            )
             .await
     );
     assert_eq!(settled_retirement_cause(&session), "killed");
     assert_eq!(
         actor_terminal(&session).await,
         Some(RollingTerminalCause::Stopped)
+    );
+}
+
+/// Review 1, S12: the cause of a stop is typed by its caller, not read out
+/// of its reason sentence. An internal stop whose reason happens to say
+/// "released" or "admin" is an ordinary retirement under that reason; only
+/// the terminal a release or operator stop won makes it `client_released` or
+/// `killed`.
+#[tokio::test]
+async fn a_reason_sentence_does_not_type_a_stop() {
+    let (_dir, manager, session) = release_cause_fixture("sentence-only", None).await;
+    assert!(
+        manager
+            .stop_session("sentence-only", "released by client")
+            .await
+    );
+    assert_eq!(settled_retirement_cause(&session), "released by client");
+    assert_ne!(
+        actor_terminal(&session).await,
+        Some(crate::playback_control::RollingTerminalCause::Released),
+        "a sentence did not project the viewer's release"
     );
 }
 
@@ -3456,7 +3485,11 @@ async fn serving_fence_before_release_still_settles_authority_fence() {
     manager.fence_sessions(&["fence-first".to_owned()]).await;
     assert!(
         manager
-            .stop_session("fence-first", "released by client")
+            .stop_session_for_terminal(
+                "fence-first",
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            )
             .await
     );
     assert_eq!(settled_retirement_cause(&session), "authority_fence");
@@ -3512,7 +3545,11 @@ async fn release_with_unavailable_actor_settles_the_projected_release() {
     .await;
     assert!(
         manager
-            .stop_session("release-no-actor", "released by client")
+            .stop_session_for_terminal(
+                "release-no-actor",
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            )
             .await
     );
     assert_eq!(settled_retirement_cause(&session), "client_released");

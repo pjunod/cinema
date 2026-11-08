@@ -4840,6 +4840,24 @@ impl MediaSessionStore for HiqliteAuthStore {
             }))
     }
 
+    async fn media_session_request_progress(
+        &self,
+        principal: &crate::playback_principal::PlaybackPrincipal,
+        request_id: &str,
+    ) -> Result<Option<crate::domain::MediaSessionRequestProgress>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
+        if user_id <= 0 || request_id.is_empty() || request_id.len() > 128 {
+            return Ok(None);
+        }
+        Ok(request_row(self, user_id, request_id).await?.map(|row| {
+            crate::domain::MediaSessionRequestProgress {
+                state: row.state,
+                incarnation_id: row.incarnation_id,
+                claim_expires_at_ms: row.claim_expires_at_ms,
+            }
+        }))
+    }
+
     async fn fail_media_session_request(
         &self,
         principal: &crate::playback_principal::PlaybackPrincipal,

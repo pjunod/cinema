@@ -2994,7 +2994,8 @@ async fn create_with_purpose(
         Err(_) => Err(create_still_starting(
             "session creation exceeded its remaining startup allowance",
         )),
-    };
+    }
+    .map_err(coded_create_unavailable);
     crate::telemetry::record_create_seconds(
         result.as_ref().err().map_or(Some("ok"), ApiError::code),
         started.elapsed(),
@@ -3116,6 +3117,37 @@ fn create_still_starting(message: &'static str) -> ApiError {
     }
 }
 
+/// The answer for a create the cluster could not commit right now: this
+/// node's serving authority, the chosen worker or the session's durable owner
+/// is changing. `media_owner_transition` is on every client's create-retry
+/// ladder, and the re-post with the same `request_id` meets whichever owner
+/// holds the claim by then.
+fn create_owner_transition(message: impl Into<String>) -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "media_owner_transition",
+        message: message.into(),
+        retry_after_seconds: CREATE_STILL_STARTING_RETRY_AFTER_SECS,
+    }
+}
+
+/// A create's 503 always names its code: a bare one is a refusal no client
+/// retries, which for a start the next attempt would get is the one answer
+/// that cannot be right. The sites that know their cause say it; a refusal
+/// still bare here came from a step that could not settle a serving
+/// authority, a Store write, a shared-cache pin or a worker's activation in
+/// time, all of which are the cluster changing under this start.
+fn coded_create_unavailable(error: ApiError) -> ApiError {
+    match error {
+        ApiError::ServiceUnavailable(message) => {
+            tracing::debug!(target: "plurxd::http::hls", %message,
+                "create refusal carried no code; answering media_owner_transition");
+            create_owner_transition(message)
+        }
+        error => error,
+    }
+}
+
 /// How long a viewer told `startup_timeout` waits before re-posting: about
 /// one placement step of the owner it is about to join.
 const CREATE_STILL_STARTING_RETRY_AFTER_SECS: u64 = 1;
@@ -3125,6 +3157,14 @@ const MEDIA_SESSION_REQUEST_CLAIM_MS: i64 = 60_000;
 /// write (publication or settlement) lands while the claim is still its own
 /// and no second claimant can re-acquire the same request underneath it.
 const OWNED_CREATE_CLAIM_MARGIN: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long past its viewer's remaining start an owner keeps working: one
+/// re-post's `Retry-After` and its round trip, which is how the viewer's last
+/// retry reaches the owner and takes the answer.
+const OWNED_CREATE_REPOST_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(CREATE_STILL_STARTING_RETRY_AFTER_SECS + 1);
+/// How long a viewer told `media_session_overloaded` waits before re-posting:
+/// the per-user start caps free as this user's other starts activate or end.
+const MEDIA_SESSION_OVERLOADED_RETRY_AFTER_SECS: u64 = 2;
 
 async fn create_with_purpose_inner(
     user: plurx_core::domain::User,
@@ -3224,9 +3264,9 @@ async fn create_with_purpose_inner(
             .await;
     }
     let ingress_serving_authority = state.serving.authority();
-    let ingress_serving_generation = ingress_serving_authority.admit().ok_or_else(|| {
-        ApiError::ServiceUnavailable("the ingress node has no serving authority".to_owned())
-    })?;
+    let ingress_serving_generation = ingress_serving_authority
+        .admit()
+        .ok_or_else(|| create_owner_transition("the ingress node has no serving authority"))?;
     // The source height answers three things now: Auto, the ladder in the
     // response, and the snap's source-height escape. One Authority read: the
     // file row, its probe and the planning settings in one statement.
@@ -3465,36 +3505,84 @@ async fn create_with_purpose_inner(
     // published, or becomes the owner itself if the first one let go.
     let join_deadline = crate::media_pool::create_stage_deadline(START_DEADLINE);
     let mut join_backoff = std::time::Duration::from_millis(50);
-    loop {
-        let claim_now_ms = unix_ms();
-        let claim_window_ends = tokio::time::Instant::now()
-            + std::time::Duration::from_millis(MEDIA_SESSION_REQUEST_CLAIM_MS as u64);
-        match state
-            .store
-            .claim_media_session_request(
-                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
-                &request_claim_id,
-                &fingerprint,
-                &request.playback_id,
-                &incarnation_id,
-                claim_now_ms,
-                claim_now_ms.saturating_add(MEDIA_SESSION_REQUEST_CLAIM_MS),
+    let claim_principal =
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
+    // The in-flight owner this retry has joined. While it is set the retry
+    // waits on reads of the claim row and claims again only once the row says
+    // that owner let go, resolved, or ran out its claim.
+    let mut joined: Option<String> = None;
+    // From the claim on every early return must settle the exact durable
+    // claim; the guard is armed before the claim's await, because a create
+    // cancelled there may already hold it. Once worker placement returns, its
+    // StartedSessionGuard takes over the same responsibility together with
+    // exact worker ownership.
+    let mut request_guard = loop {
+        let claim = if let Some(owner_incarnation) = joined.as_deref() {
+            match state
+                .store
+                .media_session_request_progress(&claim_principal, &request_claim_id)
+                .await
+            {
+                Ok(Some(progress))
+                    if progress.state == "starting"
+                        && progress.incarnation_id == owner_incarnation
+                        && progress.claim_expires_at_ms > unix_ms() =>
+                {
+                    MediaSessionRequestClaim::InFlight {
+                        incarnation_id: progress.incarnation_id,
+                        owner_node_id: None,
+                        claim_expires_at_ms: progress.claim_expires_at_ms,
+                    }
+                }
+                // Resolved, let go, expired, re-owned or unreadable: the claim
+                // itself decides what this retry is now.
+                _ => {
+                    joined = None;
+                    continue;
+                }
+            }
+        } else {
+            let claim_now_ms = unix_ms();
+            let claim_window_ends = tokio::time::Instant::now()
+                + std::time::Duration::from_millis(MEDIA_SESSION_REQUEST_CLAIM_MS as u64);
+            match MediaSessionRequestGuard::claim(
+                state.clone(),
+                claim_principal.clone(),
+                request_claim_id.clone(),
+                incarnation_id.clone(),
+                state.store.claim_media_session_request(
+                    &claim_principal,
+                    &request_claim_id,
+                    &fingerprint,
+                    &request.playback_id,
+                    &incarnation_id,
+                    claim_now_ms,
+                    claim_now_ms.saturating_add(MEDIA_SESSION_REQUEST_CLAIM_MS),
+                ),
             )
             .await
             .map_err(|error| session_store_error("claiming the media-session request", error))?
-        {
-            MediaSessionRequestClaim::Acquired {
-                incarnation_id: acquired,
-            } => {
-                incarnation_id = acquired;
-                // From here this create is the claim's owner, not the viewer's
-                // request: it runs to activation inside the claim's window.
-                crate::media_pool::own_create_until(
-                    claim_window_ends
-                        .checked_sub(OWNED_CREATE_CLAIM_MARGIN)
-                        .unwrap_or(claim_window_ends),
-                );
-                break;
+            {
+                Ok((guard, acquired)) => {
+                    incarnation_id = acquired;
+                    // From here this create is the claim's owner, not the
+                    // viewer's request: it runs to activation for as long as
+                    // its viewer can still take the answer, inside the
+                    // claim's window.
+                    crate::media_pool::own_create_for_viewer(
+                        claim_window_ends
+                            .checked_sub(OWNED_CREATE_CLAIM_MARGIN)
+                            .unwrap_or(claim_window_ends),
+                        OWNED_CREATE_REPOST_GRACE,
+                    );
+                    break guard;
+                }
+                Err(claim) => claim,
+            }
+        };
+        match claim {
+            MediaSessionRequestClaim::Acquired { .. } => {
+                unreachable!("an acquired claim comes back with its armed guard")
             }
             MediaSessionRequestClaim::Resolved(route)
                 if resolved_replay_is_live(&route, unix_ms()) =>
@@ -3676,6 +3764,7 @@ async fn create_with_purpose_inner(
                         "an identical session request is still starting; retry shortly",
                     ));
                 }
+                joined = Some(in_flight_incarnation);
                 tokio::time::sleep_until((now + join_backoff).min(join_deadline)).await;
                 join_backoff = (join_backoff * 2).min(std::time::Duration::from_millis(500));
             }
@@ -3685,22 +3774,16 @@ async fn create_with_purpose_inner(
                 ));
             }
             MediaSessionRequestClaim::Overloaded => {
-                return Err(ApiError::ServiceUnavailable(
-                    "too many session starts are already active for this user".to_owned(),
-                ));
+                return Err(ApiError::TypedRetry {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "media_session_overloaded",
+                    message: "too many session starts are already active for this user".to_owned(),
+                    retry_after_seconds: MEDIA_SESSION_OVERLOADED_RETRY_AFTER_SECS,
+                });
             }
         }
-    }
+    };
     crate::media_pool::mark_create_phase("admission");
-    // From this point every early return must settle the exact durable claim.
-    // Once worker placement returns, its StartedSessionGuard takes over the
-    // same responsibility together with exact worker ownership.
-    let mut request_guard = MediaSessionRequestGuard::new(
-        state.clone(),
-        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
-        request_claim_id.clone(),
-        incarnation_id.clone(),
-    );
     // A typed cause is advisory evidence. Unknown, remote, expired or
     // replayed evidence leaves it unrecorded and the reopen proceeds as an
     // ordinary reopen; it is never a reason to refuse a stalled viewer.
@@ -4207,8 +4290,8 @@ async fn create_with_purpose_inner(
         }
         let result = if candidate == state.node_id {
             if !ingress_serving_authority.is_current(ingress_serving_generation) {
-                last_error = Some(ApiError::ServiceUnavailable(
-                    "the local media worker has no serving authority".to_owned(),
+                last_error = Some(create_owner_transition(
+                    "the local media worker has no serving authority",
                 ));
                 continue;
             }
@@ -4316,26 +4399,21 @@ async fn create_with_purpose_inner(
                 .retained_output_receiver(&candidate)
                 .await
                 .then_some(1);
-            let mut remote_start = state
-                .media_sessions
-                .start_remote(&candidate, &remote_request, placement_deadline)
-                .await;
             // A reply lost in transit leaves the worker holding a session keyed
             // by this create's incarnation (the worker request's id). Asking the
             // same worker again recovers that session (`Recovered`) instead of
             // placing a second producer elsewhere, so the claim keeps one owner.
-            if matches!(
-                remote_start,
-                Err(crate::media_sessions::RemoteStartFailure::Transport(
-                    PeerTransportError::Unreachable | PeerTransportError::TimedOut
-                ))
-            ) && tokio::time::Instant::now() < placement_deadline
-            {
-                remote_start = state
-                    .media_sessions
-                    .start_remote(&candidate, &remote_request, placement_deadline)
-                    .await;
-            }
+            let remote_start = crate::media_sessions::start_remote_recovering_lost_reply(
+                placement_deadline,
+                || {
+                    state.media_sessions.start_remote(
+                        &candidate,
+                        &remote_request,
+                        placement_deadline,
+                    )
+                },
+            )
+            .await;
             match remote_start {
                 Ok(started) => {
                     let target_generation = started.info.activation_generation;
@@ -4386,7 +4464,7 @@ async fn create_with_purpose_inner(
                     ))
                 }
                 Err(crate::media_sessions::RemoteStartFailure::Transport(error)) => {
-                    Err(ApiError::ServiceUnavailable(format!(
+                    Err(create_owner_transition(format!(
                         "media worker {candidate} could not start the session: {error:?}"
                     )))
                 }
@@ -4427,9 +4505,8 @@ async fn create_with_purpose_inner(
         (degraded_processing, processing_note),
     )) = started
     else {
-        return Err(last_error.unwrap_or_else(|| {
-            ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
-        }));
+        return Err(last_error
+            .unwrap_or_else(|| create_owner_transition("no eligible media worker was available")));
     };
     request_guard.disarm();
     if let Some(reason) = degraded_processing {
