@@ -509,6 +509,112 @@ async fn pre_worker_request_guard_releases_an_owned_claim_for_immediate_retry() 
         .expect("settle retry claim"));
 }
 
+/// Review 1, B1: a create cancelled at its claim await, after the Store has
+/// committed the claim but before the create saw the answer, leaves that
+/// claim retryable within one settlement budget. Before the guard was armed
+/// ahead of the await, the cancelled create left a `starting` row that no
+/// guard, worker or owner would settle, and every re-post with the same
+/// `request_id` joined it until the claim expired a minute later.
+#[tokio::test]
+async fn a_create_cancelled_at_its_claim_await_leaves_the_claim_retryable() {
+    let (_app, state) = super::super::tests::test_app_with_state();
+    let user = state
+        .store
+        .create_user("claim-cancelled", "hash", false)
+        .await
+        .expect("create claim-cancelled user");
+    let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
+    let request_id = "claim-cancelled-attempt";
+    let player = "claim-cancelled-player";
+    let owner = uuid::Uuid::new_v4().to_string();
+    let retry = uuid::Uuid::new_v4().to_string();
+    let fingerprint = "d".repeat(64);
+    let now_ms = unix_ms();
+    let (committed, claim_committed) = tokio::sync::oneshot::channel::<()>();
+    let budget = crate::media_pool::CreateStartupBudget::new(10_000);
+    // The viewer's create, as `create_with_purpose` runs it: an owned task that
+    // is cancelled with its viewer until it owns its claim.
+    let create = crate::media_pool::OwnedCreate::spawn(&budget, {
+        let state = state.clone();
+        let principal = principal.clone();
+        let fingerprint = fingerprint.clone();
+        let owner = owner.clone();
+        budget.scope(async move {
+            let claim = async {
+                let claimed = state
+                    .store
+                    .claim_media_session_request(
+                        &principal,
+                        request_id,
+                        &fingerprint,
+                        player,
+                        &owner,
+                        now_ms,
+                        now_ms.saturating_add(60_000),
+                    )
+                    .await;
+                // Committed, and the create is not polled again before its
+                // viewer goes.
+                let _ = committed.send(());
+                std::future::pending::<()>().await;
+                claimed
+            };
+            let _ = MediaSessionRequestGuard::claim(
+                state.clone(),
+                principal.clone(),
+                request_id.to_owned(),
+                owner.clone(),
+                claim,
+            )
+            .await;
+        })
+    });
+    claim_committed.await.expect("the claim committed");
+    assert!(
+        matches!(
+            state
+                .store
+                .media_session_request_progress(&principal, request_id)
+                .await
+                .expect("read the claim"),
+            Some(progress) if progress.state == "starting" && progress.incarnation_id == owner
+        ),
+        "the committed claim belongs to the create that is about to be cancelled"
+    );
+    // The viewer goes before the create owned its claim.
+    drop(create);
+
+    let deadline = tokio::time::Instant::now() + REQUEST_CLAIM_SETTLEMENT_BUDGET;
+    loop {
+        // The original claim stays unexpired: only the cancelled create's own
+        // settlement, never claim expiry, may let this retry acquire it.
+        match state
+            .store
+            .claim_media_session_request(
+                &principal,
+                request_id,
+                &fingerprint,
+                player,
+                &retry,
+                now_ms,
+                now_ms.saturating_add(60_000),
+            )
+            .await
+            .expect("retry the claim")
+        {
+            MediaSessionRequestClaim::Acquired { incarnation_id } if incarnation_id == retry => {
+                break;
+            }
+            MediaSessionRequestClaim::InFlight { .. } if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            other => panic!(
+                "the cancelled create's claim was not retryable within one settlement budget: {other:?}"
+            ),
+        }
+    }
+}
+
 // ---- segment delivery, through the real response ------------------------
 //
 // These drive the handler, not `SegmentDelivery`. The correction under

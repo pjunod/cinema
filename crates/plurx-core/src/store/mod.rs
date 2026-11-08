@@ -5108,6 +5108,18 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         claim_expires_at_ms: i64,
     ) -> Result<MediaSessionRequestClaim, StoreError>;
 
+    /// The claim row of `request_id`, read only. A retry waiting on an owner
+    /// that is still starting reads this between ticks instead of re-running
+    /// [`claim_media_session_request`](Self::claim_media_session_request),
+    /// which maintains the session tables first (a replicated write whenever
+    /// a cleanup is due) and reads the routes; it claims again only once the
+    /// row says the owner let go, resolved, or expired.
+    async fn media_session_request_progress(
+        &self,
+        principal: &crate::playback_principal::PlaybackPrincipal,
+        request_id: &str,
+    ) -> Result<Option<crate::domain::MediaSessionRequestProgress>, StoreError>;
+
     /// Bind a Library-channel start's canonical worker recipe to its claimed
     /// durable identity before producer placement.
     async fn record_library_channel_session_recipe(

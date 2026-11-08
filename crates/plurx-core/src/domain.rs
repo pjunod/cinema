@@ -1203,6 +1203,16 @@ pub enum MediaSessionRequestClaim {
     Overloaded,
 }
 
+/// A request claim's row as it stands, read without maintenance or a write:
+/// what a retry that joined a still-starting owner polls between claims.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionRequestProgress {
+    /// `starting`, `resolved` or `failed`.
+    pub state: String,
+    pub incarnation_id: String,
+    pub claim_expires_at_ms: i64,
+}
+
 /// Inputs committed when a selected worker has created the local session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct MediaSessionActivation {
