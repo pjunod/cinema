@@ -165,7 +165,10 @@ struct PlurxAPI {
            UUID(uuidString: receipt)?.uuidString.lowercased() == receipt {
             req.setValue(receipt, forHTTPHeaderField: "X-Plurx-Link-Receipt")
         }
-        if path.hasPrefix("files/"), path.hasSuffix("/hls/sessions"),
+        // Every create carries the viewer's remaining start, a shared import's
+        // (`shared/imports/<id>/files/<fid>/hls/sessions`) as much as a local
+        // file's: the server bounds its owner's work by it.
+        if path.hasSuffix("/hls/sessions"),
            let remaining = PlaybackStartupRequestContext.remainingMs {
             req.setValue(String(max(0, remaining)), forHTTPHeaderField: "X-Plurx-Startup-Remaining-Ms")
         }

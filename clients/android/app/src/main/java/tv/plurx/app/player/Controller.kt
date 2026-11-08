@@ -4731,6 +4731,12 @@ class Controller internal constructor(
         refusal.code == "vod_transcode_unavailable" -> SurfaceSources.VOD_TRANSCODE_UNAVAILABLE
         refusal.code == "vod_subtitle_burn_unavailable" -> SurfaceSources.VOD_SUBTITLE_BURN_UNAVAILABLE
         refusal.code == "vod_disabled" -> SurfaceSources.VOD_DISABLED
+        // A capacity refusal no re-post of the same request can outlive (a
+        // height this server cannot encode now, a scratch grant above its
+        // ceiling, a replacement past its deadline). Nothing here re-asks at a
+        // smaller height, so the start ends on the row that names it.
+        surfaceSourceForCode(refusal.code, SurfaceContext.Start) ==
+            SurfaceSources.CREATE_CAPACITY_TERMINAL -> SurfaceSources.CREATE_CAPACITY_TERMINAL
         else -> SurfaceSources.OWNER_STOPPED
     }
 
