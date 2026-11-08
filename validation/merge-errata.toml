@@ -492,3 +492,7 @@ reason = "PR #1388 landed corrective commit 1b9087e1 with an immutable Regressio
 [[errata]]
 commit = "a96f58b5fe87c20a46d01d0426e341adb7b97072"
 reason = "Corrective commit a96f58b5 reached main directly without a recognized landing or Regression-Test carrier. Its three-line repair makes tests/operations/test_contracts.py::test_pr_ci_selects_expensive_surfaces_and_has_one_aggregate_gate validate the selected Python operations workflow branch; that anchor resolves in the immutable corrective tree and its test file is unchanged in PR #1437. Main fast lane #6691 reported the missing carrier. This permanent erratum records that specific immutable history omission and retains the existing audit boundary and future regression-field checks."
+
+[[errata]]
+commit = "54d6f2dae1c16b6e39d9b94bc6a01ea2a4060d6a"
+reason = "Corrective commit 54d6f2da reached main directly without a recognized landing. It keeps Debian security indexes on the signed snapshot while fetching only package payloads from live mirrors. Its immutable Regression-Test field uses a dotted class.method name; tests/operations/test_docker_snapshot.py::test_live_mirrors_serve_only_debs_and_indexes_stay_pinned resolves in the corrective tree, and its test file is unchanged in PR #1437. Main fast lane #6691 reported the direct-main carrier omission. This permanent erratum records that specific immutable history gap and retains the existing audit boundary and future regression-field checks."
