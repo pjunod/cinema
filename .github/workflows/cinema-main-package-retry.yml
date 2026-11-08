@@ -5,7 +5,7 @@ env:
   CARGO_TERM_COLOR: always
   CINEMA_MAIN_COMMIT: '8f2585e6b2003e16d40a672aedde002795faaacf'
 concurrency:
-  group: cinema-main-package-8f2585e6b200-amd
+  group: cinema-main-package-8f2585e6b200-amd-affinity
   cancel-in-progress: false
 jobs:
   package_smoke:
@@ -56,13 +56,22 @@ jobs:
           [[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]]
           container="buildx_buildkit_${BUILDER}0"
           test "$(docker inspect --format '{{.Name}}' "$container")" = "/$container"
-          docker update --memory 22g --memory-swap 24g --cpu-period 100000 --cpu-quota 400000 "$container"
-          test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}}' "$container")" = '23622320128 25769803776 400000 100000'
+          docker update --memory 16g --memory-swap 32g --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"
+          test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}}' "$container")" = '17179869184 34359738368 400000 100000 0-3'
       - name: Derive the binary-only Bookworm build
         id: binary-build
         run: |
           python3 -m validation.release_dockerfile --binary-export \
             Dockerfile Dockerfile.binaries
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          file = Path("Dockerfile.binaries")
+          text = file.read_text()
+          needle = "find crates vendor -type f -exec touch {} +"
+          assert text.count(needle) == 1
+          probe = "grep '^Cpus_allowed_list:' /proc/self/status && grep -Eq '^Cpus_allowed_list:[[:space:]]*0-3$' /proc/self/status && "
+          file.write_text(text.replace(needle, probe + needle))
+          PYTHON
           echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
       - name: Compile and export the exact candidate binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
