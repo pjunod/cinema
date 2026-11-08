@@ -206,24 +206,46 @@ class Controller internal constructor(
     }
 
     /** One `prepared_seam` beacon. Observation only; nothing reads it back. */
-    private fun reportPreparedSeam(outcome: String, evidence: PreparedSeamEvidence?) {
-        val seam = preparedSeamReport(outcome, evidence) ?: return
+    private fun reportPreparedSeam(
+        outcome: String,
+        evidence: PreparedSeamEvidence?,
+        reopened: Boolean,
+        session: String?,
+    ) {
+        val seam = preparedSeamReport(outcome, evidence, reopened) ?: return
         postPlaybackClientLog(scope, PlaybackClientLog(level = "info", event = "prepared_seam",
             message = "prepared switch: $outcome", detail = outcome, ua = "Android Media3",
-            sessionId = sessionId, preparedSeam = seam))
+            sessionId = session, preparedSeam = seam))
     }
 
     /**
-     * A committed switch is reported once the successor's side of the ±2 s
-     * window has elapsed, with one last forced counter read, so the report
-     * carries the same coverage the ledger row shows.
+     * Session opens [restartAt] has started. Only its movement matters: a
+     * seam report compares it across its window to say whether the change
+     * also took an ordinary reopen.
      */
-    private fun reportPreparedSeamAfterWindow(successor: ExoPlayer) {
+    private var reopensStarted = 0L
+
+    /**
+     * Every seam outcome is reported once the ±2 s window has elapsed, with
+     * whether an ordinary reopen actually ran inside it (review 3 B2): a
+     * refused or frameless switch owes one and counts as reopened only once it
+     * ran. A committed switch also carries its evidence, with one last forced
+     * counter read on the successor, so the report has the coverage the
+     * ledger row shows; a successor a reopen has already replaced has no
+     * window left to read.
+     */
+    private fun reportPreparedSeamAfterWindow(outcome: String, successor: ExoPlayer?) {
+        val reopensAtOutcome = reopensStarted
+        val session = sessionId
         scope.launch {
             delay(PREPARED_SWITCH_WINDOW_MS + 250L)
-            if (player !== successor) return@launch
-            sampleDecoderDropped(successor, force = true)
-            reportPreparedSeam("committed", preparedSwitch.seamEvidence(monotonicNowMs()))
+            val evidence = if (outcome == "committed" && successor != null && player === successor) {
+                sampleDecoderDropped(successor, force = true)
+                preparedSwitch.seamEvidence(monotonicNowMs())
+            } else {
+                null
+            }
+            reportPreparedSeam(outcome, evidence, reopensStarted != reopensAtOutcome, session)
         }
     }
 
@@ -2458,6 +2480,9 @@ class Controller internal constructor(
         }
         carryDirectedChangeIntoReopen(positionMs)
         if (planReplacement.route(playbackIntent, retry = reason == "presentation-recovery")) return
+        // An ordinary open is starting; a prepared seam report reads whether
+        // one ran inside its window.
+        reopensStarted += 1
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
         stallGuard.invalidateForUserAction()
@@ -5367,7 +5392,6 @@ class Controller internal constructor(
                             mediaMutationEpoch,
                             "prepared successor missed the rendezvous (${step.reason})",
                         )
-                        reportPreparedSeam("refused", null)
                         abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.RENDEZVOUS_EXHAUSTED)
                         return@launch
                     }
@@ -5391,7 +5415,6 @@ class Controller internal constructor(
         val action = preparedLedger.action ?: return false
         val originMs = action.mediaOriginMs ?: return false
         if (monotonicNowMs() - preparedStartedAtMs >= PREPARED_OVERLAP_BOUND_MS) {
-            reportPreparedSeam("refused", null)
             abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.COMMIT_OVERLAP)
             return false
         }
@@ -5640,7 +5663,7 @@ class Controller internal constructor(
             mediaSessionRebindAwaitsFrame = false
             rebindMediaSessionTransport()
         }
-        reportPreparedSeamAfterWindow(player)
+        reportPreparedSeamAfterWindow("committed", player)
         autoDesiredCandidate?.let { requested ->
             if (preparedLedger.action?.effectiveSelection?.candidateId == requested.id) {
                 autoActiveCandidateId = requested.id
@@ -5767,7 +5790,7 @@ class Controller internal constructor(
         if (awaitingCommitFrameSinceMs == null) return false
         awaitingCommitFrameSinceMs = null
         preparedCommitFrameBudget = null
-        reportPreparedSeam("switched_without_a_frame", null)
+        reportPreparedSeamAfterWindow("switched_without_a_frame", null)
         if (mediaSessionRebindAwaitsFrame) {
             mediaSessionRebindAwaitsFrame = false
             rebindMediaSessionTransport()
@@ -5808,6 +5831,12 @@ class Controller internal constructor(
         // untouched, so nothing is drawn and this event is the only trace the
         // viewer's session keeps of it. A deliberate abandonment — a seek, a
         // quality change, a release — is not a failure and says nothing.
+        // A commit that began (the rendezvous owns the preparation) and never
+        // switched is the seam's `refused`, on every failure path that ends
+        // it, reported once: this is the one place they all end (review 3 S8).
+        if (failed && rendezvous != null && !preparedLedger.isSwitched) {
+            reportPreparedSeamAfterWindow("refused", null)
+        }
         if (failed) {
             // Capture before release resets readiness. Diagnostics must not own
             // recovery, extend overlap, or fail teardown if a player read races.
