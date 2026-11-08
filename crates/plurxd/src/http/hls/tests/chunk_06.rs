@@ -5855,8 +5855,8 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
                     let recovery = crate::transcode::SessionRecoveryIdentity {
                         principal: principal.clone(), incarnation_id: "copy-audio-failure".into(), recovery_epoch: String::new(),
                     };
-                    let failure = state.transcode.prepare_processed_hdr10(&request, &recovery, false).await
-                        .expect_err("missing bound source must refuse preparation");
+                    let failure = state.transcode.prepare_processed_upgrade("copy-audio-failure", &request, &recovery, false).await
+                        .err().expect("missing bound source must refuse preparation");
                     assert!(failure.contains("candidate source missing"), "actual failure: {failure}");
                 }
             }

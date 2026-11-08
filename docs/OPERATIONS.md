@@ -6033,6 +6033,39 @@ which reads as a counter reset). **Settings → Developer → Indexing while
 serving** shows what this node's indexer may do right now; it is advisory and
 switches nothing.
 
+### Processed Dolby Vision as an upgrade after the first frame
+
+A create no longer renders or verifies processed Dolby Vision / HDR10-E before
+it answers: it resolves the ordinary plan, and a declined upgrade (setting off,
+no `hvc1` HLS fMP4, burned subtitles, the continuous route) is named on the
+start's enhancement details as before. When the upgrade applies, the node that
+owns the session waits for the viewer's first frame (the `ttff` beacon naming
+the session), then runs one bounded trial (8 s) in its one processed-preparation
+slot. A verified first window is staged as an M6 prepared successor at the
+position the trial verified, and the control exchange offers it like any other
+prepared switch; the client aligns it, proves a decoded frame and switches, or
+keeps the ordinary session. Every refusal — slot busy, trial failure, this
+playback's recovery evidence, Auto's link evidence, a viewer's own quality
+change taking the playback's preparation slot, a release, a newer session —
+leaves the ordinary session playing untouched. A create that names a processed
+candidate (a reopen of a processed session) starts as the ordinary rung it
+enhances and is upgraded again after its first frame. A start the ingress
+placed on another node is not upgraded: the owner does not hold the create's
+catalog scope.
+
+`plurx_playback_preparation_processed_upgrades_total{outcome}` counts the
+upgrades (`scheduled`, `staged`, `not_staged`, `declined`,
+`admission_refused`, `not_applicable`, `cancelled`).
+`plurx_playback_preparation_seams_total{platform,outcome}` counts the prepared
+switches the clients reported at their seam (`committed`, `refused`,
+`switched_without_a_frame`) and
+`plurx_playback_preparation_seams_qualified_total{platform}` the committed ones
+with complete ±2 s frame samples, zero dropped frames, independently observed
+audio continuity and no reopen. **Settings → Developer → Processed DV upgrade**
+reads these per platform against Paul's bar of twenty; until a platform has
+them its row reads `unqualified`. The rows are advisory: the upgrade runs
+either way. The counts are this node's since it started.
+
 ### Putting a failed queue back to work
 
 **Unfinished requests after a worker update:** Open **Activity → Content

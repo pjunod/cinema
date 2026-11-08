@@ -1878,6 +1878,10 @@ pub(super) fn preparation_catalog_workers(
 struct PlanScope<'a> {
     continuous: Option<&'a ContinuousFamilyStart>,
     auto_bootstrap_ceiling: Option<i64>,
+    /// Whether a processed Dolby Vision candidate may be selected. Only a
+    /// prepared successor may: a create resolves the ordinary plan and leaves
+    /// processing to the upgrade after its first frame (plan ruling 3).
+    processed_selectable: bool,
 }
 
 /// Internal preparation policy, never a create-body override. Ordinary creates
@@ -1895,6 +1899,7 @@ pub(super) async fn resolve_plan_for_preparation(
         PlanScope {
             continuous: None,
             auto_bootstrap_ceiling,
+            processed_selectable: true,
         },
     )
     .await
@@ -1913,6 +1918,7 @@ async fn resolve_plan_with_continuous(
         PlanScope {
             continuous,
             auto_bootstrap_ceiling: None,
+            processed_selectable: false,
         },
     )
     .await
@@ -1992,6 +1998,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
     let PlanScope {
         continuous,
         auto_bootstrap_ceiling,
+        processed_selectable,
     } = scope;
     if auto_bootstrap_ceiling.is_some_and(|ceiling| ceiling <= 0)
         || (auto_bootstrap_ceiling.is_some()
@@ -2169,7 +2176,40 @@ async fn resolve_plan_for_principal_with_local_evidence(
                 ));
             }
             let authority_refused = catalogue_result.authority_refused;
-            let worker_catalog = &catalogue_result.candidates;
+            // A create never dispatches a processed candidate: it has no
+            // qualified graph before the first frame. One the viewer named (a
+            // reopen of a processed session) starts as the ordinary rung it
+            // enhances, and the upgrade runs again after the first frame.
+            let unprocessed;
+            let worker_catalog = if processed_selectable {
+                &catalogue_result.candidates
+            } else {
+                unprocessed = catalogue_result
+                    .candidates
+                    .iter()
+                    .filter(|entry| !entry.candidate.processed_dv)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                &unprocessed
+            };
+            let requested = match requested {
+                Some(id) if !processed_selectable => catalogue_result
+                    .candidates
+                    .iter()
+                    .find(|entry| entry.candidate.id == id && entry.candidate.processed_dv)
+                    .map_or(Some(id), |processed| {
+                        worker_catalog
+                            .iter()
+                            .find(|entry| {
+                                entry.candidate.route == processed.candidate.route
+                                    && entry.candidate.target_height
+                                        == processed.candidate.target_height
+                                    && entry.candidate.decoder_compatible
+                            })
+                            .map(|ordinary| ordinary.candidate.id)
+                    }),
+                requested => requested,
+            };
             let initial_auto =
                 requested.is_none() && body.quality_auto == Some(true) && body.height != Some(1440);
             let eligible_workers = preparation_catalog_workers(
@@ -3466,7 +3506,7 @@ async fn create_with_purpose_inner(
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
     }
-    let mut height = resolved.height;
+    let height = resolved.height;
     if burn_would_discard_this_session_hdr(
         &state,
         source.as_ref(),
@@ -3923,164 +3963,38 @@ async fn create_with_purpose_inner(
     } else {
         None
     };
-    // Every catalog start with a DV source is offered processing: Auto or a
-    // chosen rung, any route. The qualifier itself decides applicability and
-    // names every decline. Only a reopen pinned to another node's session is
-    // left to that node, which owns the producer.
-    if pinned_owner
+    // Processed Dolby Vision / HDR10-E is an upgrade after the first frame,
+    // never work before it (plan ruling 3). The create resolves the ordinary
+    // plan only. It runs the upgrade's request-only gates against the planning
+    // snapshot it already holds, so a declined upgrade is reported on this
+    // start's enhancement details; an applicable one is left waiting for the
+    // first frame on the node that owns the session (registered after
+    // activation, below). Only a reopen pinned to another node's session is
+    // left to that node.
+    let processed_upgrade_applies = if pinned_owner
         .as_ref()
         .is_none_or(|owner| owner == &state.node_id)
     {
-        let recovery = crate::transcode::SessionRecoveryIdentity {
-            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                user_id: user.id,
-            },
-            incarnation_id: incarnation_id.clone(),
-            recovery_epoch: recovery_epoch.clone(),
-        };
-        match state
-            .transcode
-            .prepare_processed_hdr10(&request, &recovery, hdr10_requested)
-            .await
-        {
-            Ok(Some((mut processed, candidate))) => {
-                if let Some(source) = source.as_ref() {
-                    // A distinct, strict processed-recipe check stays inside
-                    // the original create deadline. Ordinary catalog/advisory
-                    // allowances are never renewed by qualification.
-                    let advisory =
-                        crate::media_pool::create_stage_deadline(Duration::from_millis(500));
-                    let recovered = super::candidate_recovery::processed_candidate_admissible(
-                        &state,
-                        identity.as_ref(),
-                        source,
-                        &request.playback_id,
-                        &candidate,
-                        activation_predecessor.as_ref(),
-                        advisory,
-                    )
-                    .await;
-                    // Link evidence is Auto's bandwidth policy. A rung the
-                    // viewer chose is not second-guessed by it, exactly as the
-                    // ordinary start above is not.
-                    let link_admitted = !candidate_auto_policy
-                        || link_receipts::processed_candidate_admissible(
-                            &state,
-                            identity.as_ref(),
-                            source,
-                            &candidate,
-                            advisory,
-                        )
-                        .await;
-                    let mut admitted = if recovered && link_admitted {
-                        vec![candidate.clone()]
-                    } else {
-                        Vec::new()
-                    };
-                    if candidate_auto_policy {
-                        admitted = link_receipts::link_starved_catalog(
-                            network_prior.as_ref(),
-                            admitted,
-                            unix_ms(),
-                        );
-                    }
-                    if let Some(receipt) =
-                        link_receipts::requested_receipt(&headers).filter(|_| candidate_auto_policy)
-                    {
-                        admitted = link_receipts::positive_catalog(
-                            &state,
-                            identity.as_ref(),
-                            source,
-                            Some(receipt),
-                            Some(&request.playback_id),
-                            admitted,
-                            None,
-                            advisory,
-                        )
-                        .await;
-                    }
-                    // The processed candidate is an enhancement of the
-                    // ordinary start already resolved above. Whatever keeps it
-                    // from being adopted here leaves that start in place and
-                    // is reported with it, like every other declined
-                    // qualification.
-                    let adopted = if !processed_candidate_is_admitted(&admitted, &candidate) {
-                        Err(if recovered {
-                            "Auto's link evidence for this playback does not admit the \
-                             processed candidate's bitrate"
-                        } else {
-                            "this playback's recovery evidence rejects the processed recipe"
-                        }
-                        .to_owned())
-                    } else {
-                        let context = processed
-                            .candidate_context
-                            .as_ref()
-                            .ok_or_else(|| "qualified HDR context missing".to_owned());
-                        match context {
-                            Ok(context) => match quality_catalog.as_mut() {
-                                Some(catalog) => upsert_processed_worker_candidate(
-                                    catalog,
-                                    crate::media_pool::WorkerQualityCandidate {
-                                        node_id: state.node_id.clone(),
-                                        candidate: candidate.clone(),
-                                        binding: context.planning_binding.clone(),
-                                        partial: false,
-                                        dispatch_supported: true,
-                                    },
-                                )
-                                .map_err(|reason| {
-                                    format!("the quality catalog refused the candidate: {reason}")
-                                }),
-                                None => Ok(()),
-                            },
-                            Err(reason) => Err(reason),
-                        }
-                    };
-                    match adopted {
-                        Ok(()) => {
-                            processed.quality_catalog = quality_catalog
-                                .as_ref()
-                                .map(|catalog| Arc::new(catalog.clone()));
-                            state.transcode.remember_processed_candidate(&processed);
-                            height = i64::from(candidate.target_height);
-                            candidate_route = Some(candidate.route);
-                            ordinary_link_source_binding = link_source_binding.take();
-                            link_source_binding = if let (true, Some(identity)) =
-                                (candidate_auto_policy, identity.as_ref())
-                            {
-                                link_receipts::request_binding_until(
-                                    identity,
-                                    source,
-                                    candidate.recipe_digest,
-                                    candidate.route,
-                                    advisory,
-                                )
-                                .await
-                            } else {
-                                None
-                            };
-                            request = processed;
-                        }
-                        Err(reason) => {
-                            tracing::warn!(target: "plurxd::http::hls", %reason,
-                                "processed Auto candidate not adopted; retaining ordinary candidate");
-                            processing_decline.get_or_insert_with(|| reason.to_string());
-                            plan_notes.push(processing_declined_note(&reason));
-                        }
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(reason) => {
-                tracing::warn!(target: "plurxd::http::hls", %reason,
-                    "processed Auto qualification refused; retaining ordinary candidate");
+        match planning_snapshot.as_ref().map(|snapshot| {
+            crate::transcode::TranscodeManager::processed_upgrade_gates(
+                &request,
+                snapshot,
+                hdr10_requested,
+            )
+        }) {
+            Some(Ok(Some(_))) => true,
+            Some(Ok(None)) | None => false,
+            Some(Err(reason)) => {
+                tracing::info!(target: "plurxd::http::hls", %reason,
+                    "processed upgrade declined; the ordinary start is unchanged");
                 processing_decline.get_or_insert_with(|| reason.to_string());
                 plan_notes.push(processing_declined_note(&reason));
+                false
             }
         }
-        crate::media_pool::mark_create_phase("processed_qualification");
-    }
+    } else {
+        false
+    };
 
     let advertise_control = plurx_core::store::stored_switch(
         planning_snapshot
@@ -5055,6 +4969,20 @@ async fn create_with_purpose_inner(
             .media_sessions
             .seed_owned_lease(&published_route)
             .await;
+        if processed_upgrade_applies && library_channel.is_none() {
+            super::processed_upgrade::register(super::processed_upgrade::UpgradeIntent {
+                user_id: user.id,
+                playback_id: published_route.playback_id.clone(),
+                session_id: published_route.session_id.clone(),
+                incarnation_id: published_route.incarnation_id.clone(),
+                request: request.clone(),
+                hdr10_intent: hdr10_requested,
+                auto_policy: candidate_auto_policy,
+                network: identity.clone(),
+                network_prior: network_prior.clone(),
+                incumbent_receipt: link_receipts::requested_receipt(&headers).map(str::to_owned),
+            });
+        }
         if candidate_auto_policy {
             if let (Some(identity), Some(source), Some(context), Some(candidate_route)) = (
                 identity.as_ref(),

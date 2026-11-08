@@ -187,6 +187,12 @@ impl PendingCandidateGuard {
         }
     }
 
+    /// Set once the successor this candidate planned is registered; see
+    /// [`AcceptedAsk::planning_registration`].
+    pub(super) fn registration(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.registered)
+    }
+
     pub(super) fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
         self.cancelled.clone()
     }
@@ -242,6 +248,60 @@ impl Drop for PendingCandidateGuard {
             pending.remove(&self.playback_id);
         }
     }
+}
+
+/// The ask a processed upgrade claims the playback's pending slot under. No
+/// exchange's desired digest ever equals it, so an upgrade never makes the
+/// emit rule answer `staging` about work the viewer did not ask for.
+pub(super) const PROCESSED_UPGRADE_ASK: &str = "processed-upgrade";
+
+/// Claim the playback's one pending-candidate slot for a processed upgrade,
+/// only if nothing holds it: a viewer's own change in flight, or a successor
+/// already registered for the playback, keeps it. Checked and claimed under
+/// the one lock, so an upgrade never cancels a viewer's ask; a viewer's ask
+/// arriving later overwrites (and so cancels) the upgrade's claim, exactly as
+/// it would an older ask of its own.
+pub(super) fn begin_processed_upgrade(playback_id: &str) -> Option<PendingCandidateGuard> {
+    let successor_registered = active_prepared_successors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .any(|active| active.preparation.playback_id == playback_id);
+    if successor_registered {
+        return None;
+    }
+    let claim = NEXT_PENDING_CANDIDATE_CLAIM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    let registered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut pending = pending_preparation_candidates()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending
+            .get(playback_id)
+            .is_some_and(|entry| !entry.cancelled.is_cancelled())
+        {
+            return None;
+        }
+        pending.insert(
+            playback_id.to_owned(),
+            PendingPreparationCandidate {
+                claim,
+                registered: Arc::clone(&registered),
+                desired_digest: PROCESSED_UPGRADE_ASK.to_owned(),
+                quality_intent: None,
+                cancelled: cancelled.clone(),
+            },
+        );
+    }
+    Some(PendingCandidateGuard {
+        playback_id: playback_id.to_owned(),
+        claim,
+        quality_intent: None,
+        registered,
+        settlement: None,
+        cancelled,
+    })
 }
 
 /// The desired digest a pending candidate is being built for, if one is.
@@ -868,6 +928,7 @@ pub(super) fn cancel_preparations_for_superseded_predecessor(
     playback_id: &str,
     keep: Option<&str>,
 ) {
+    super::processed_upgrade::cancel_for_playback(playback_id, keep);
     cancel_pending_candidate(playback_id);
     for active in take_active_preparations_for_playback(playback_id) {
         if keep.is_some_and(|keep| keep == active.preparation.incarnation_id) {
@@ -2290,6 +2351,24 @@ pub(super) async fn stage_prepared_successor(
     .await;
 }
 
+/// The public and coordination identities a prepared successor is staged
+/// under. Minted here for every ordinary preparation; a processed upgrade
+/// mints them before its trial, because the trial's request and its held root
+/// already name the successor they were verified for.
+pub(super) struct StagedSuccessorIds {
+    pub(super) incarnation_id: String,
+    pub(super) session_id: String,
+}
+
+impl StagedSuccessorIds {
+    pub(super) fn mint() -> Self {
+        Self {
+            incarnation_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn stage_prepared_successor_with_prime(
     state: &AppState,
@@ -2303,6 +2382,38 @@ pub(super) async fn stage_prepared_successor_with_prime(
     accepted: AcceptedAsk,
     prime_worker: bool,
 ) {
+    stage_prepared_successor_as(
+        state,
+        session_id,
+        route,
+        predecessor,
+        candidate,
+        source,
+        successor_owner,
+        purpose,
+        accepted,
+        prime_worker,
+        StagedSuccessorIds::mint(),
+    )
+    .await;
+}
+
+/// [`stage_prepared_successor_with_prime`] under identities the caller minted.
+/// True when the successor was activated (primed) or staged (unprimed).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn stage_prepared_successor_as(
+    state: &AppState,
+    session_id: &str,
+    route: &MediaSessionRoute,
+    predecessor: &RemoteStartRequest,
+    candidate: &crate::transcode::SessionRequest,
+    source: Option<&plurx_core::domain::MediaFile>,
+    successor_owner: &str,
+    purpose: PreparationPurpose,
+    accepted: AcceptedAsk,
+    prime_worker: bool,
+    ids: StagedSuccessorIds,
+) -> bool {
     // Saving the switch off takes the write side, persists the choice, and
     // settles every registered successor before releasing it. Holding this
     // read side through the final setting read and stage closes the race where
@@ -2318,7 +2429,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     if !enabled {
         trace_auto_preparation_stage(candidate, "disabled");
         crate::playback_control::record_preparation_staged(false);
-        return;
+        return false;
     }
     let AcceptedAsk {
         prepared_proof,
@@ -2345,13 +2456,13 @@ pub(super) async fn stage_prepared_successor_with_prime(
                 token.cancel();
             }
             crate::playback_control::record_preparation_staged(false);
-            return;
+            return false;
         }
     }
     if let PreparationPurpose::PlannedRelocation(fence) = purpose {
         if !state.serving.planned_outage_is_current(fence).await {
             crate::playback_control::record_preparation_staged(false);
-            return;
+            return false;
         }
     }
     // The actor owns the slot. No live local worker means no slot to take, and
@@ -2363,18 +2474,20 @@ pub(super) async fn stage_prepared_successor_with_prime(
         // session, and an uncounted return made that indistinguishable from
         // "nothing was admitted".
         crate::playback_control::record_preparation_staged(false);
-        return;
+        return false;
     };
     // The source snapshot has to be the file's real one. `0/0` is this
     // codebase's documented "this placement never read the file" sentinel, and
     // `takeover_source_matches` refuses a takeover on it forever — so writing
     // it as a placeholder would poison the successor the moment it committed.
     let Some(source) = source else {
-        return;
+        return false;
     };
     let now_ms = crate::media_sessions::unix_ms();
-    let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
-    let staged_session_id = uuid::Uuid::new_v4().to_string();
+    let StagedSuccessorIds {
+        incarnation_id: staged_incarnation_id,
+        session_id: staged_session_id,
+    } = ids;
     // Where the successor actually begins: **where the viewer is**, not where
     // the predecessor was created and not how far it has fetched.
     //
@@ -2414,7 +2527,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
         ..candidate.clone()
     };
     let Some(local_user_id) = route.principal.local_user_id() else {
-        return;
+        return false;
     };
     let staged_recipe = RemoteStartRequest {
         retained_output: None,
@@ -2446,7 +2559,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
         request: staged_request.clone(),
     };
     let Ok(recipe_json) = serde_json::to_string(&staged_recipe) else {
-        return;
+        return false;
     };
     // A real `StartResponse`, because every reader of a route's
     // `response_json` parses it as one — and `control_start_response` filters
@@ -2558,7 +2671,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     };
     let mut response_value = match serde_json::to_value(response) {
         Ok(value) => value,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let captures_output = successor_owner_captures_output(
         state,
@@ -2584,7 +2697,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
                 PLANNING_CAPS_RESPONSE_FIELD.to_owned(),
                 match serde_json::to_value(caps) {
                     Ok(value) => value,
-                    Err(_) => return,
+                    Err(_) => return false,
                 },
             );
     }
@@ -2596,7 +2709,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
                 PLANNING_OVERRIDES_RESPONSE_FIELD.to_owned(),
                 match serde_json::to_value(overrides) {
                     Ok(value) => value,
-                    Err(_) => return,
+                    Err(_) => return false,
                 },
             );
     }
@@ -2610,7 +2723,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
             );
     }
     let Ok(response_json) = serde_json::to_string(&response_value) else {
-        return;
+        return false;
     };
     let executor = crate::playback_control::PreparationExecutor::new(
         Arc::clone(&state.store),
@@ -2673,7 +2786,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
             if !state.serving.planned_outage_is_current(fence).await {
                 crate::playback_control::record_preparation_staged(false);
-                return;
+                return false;
             }
         }
         let active = ActivePreparedSuccessor {
@@ -2716,18 +2829,18 @@ pub(super) async fn stage_prepared_successor_with_prime(
                 spawn_cancelled_preparation(active, "predecessor superseded by a new session");
             }
             crate::playback_control::record_preparation_staged(false);
-            return;
+            return false;
         }
         arm_preparation_foreground_watch(active.clone());
         let Some(reservation) = reserve_preparation_before(active.clone()).await else {
             trace_auto_preparation_stage(candidate, "reservation_refused");
             crate::playback_control::record_preparation_staged(false);
-            return;
+            return false;
         };
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
             if !state.serving.planned_outage_is_current(fence).await {
                 crate::playback_control::record_preparation_staged(false);
-                return;
+                return false;
             }
         }
         let prime_deadline = Instant::now() + PREPARATION_PRIME_BUDGET;
@@ -2798,12 +2911,12 @@ pub(super) async fn stage_prepared_successor_with_prime(
         {
             trace_auto_preparation_stage(candidate, "prime_not_ready");
             crate::playback_control::record_preparation_staged(false);
-            return;
+            return false;
         }
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
             if !state.serving.planned_outage_is_current(fence).await {
                 crate::playback_control::record_preparation_staged(false);
-                return;
+                return false;
             }
         }
         let cached_recovery_owner = if successor_owner == state.node_id
@@ -2825,7 +2938,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
             () = active.cancelled.cancelled() => None,
             activated = activate_preparation_before(reservation) => activated,
         };
-        if let Some(guard) = activated {
+        return if let Some(guard) = activated {
             let active = guard.disarm();
             // Arm cleanup before publishing the optional proof or observations.
             arm_preparation_deadline(active.clone());
@@ -2851,20 +2964,23 @@ pub(super) async fn stage_prepared_successor_with_prime(
             }
             trace_auto_preparation_stage(candidate, "activated");
             crate::playback_control::record_preparation_staged(true);
+            true
         } else {
             trace_auto_preparation_stage(candidate, "activation_refused");
             crate::playback_control::record_preparation_staged(false);
-        }
-        return;
+            false
+        };
     }
 
     let staged = tokio::time::timeout(PREPARATION_STORE_BUDGET, executor.stage(&preparation)).await;
     match staged {
         Ok(Ok(true)) => {
             crate::playback_control::record_preparation_staged(true);
+            true
         }
         Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
             crate::playback_control::record_preparation_staged(false);
+            false
         }
     }
 }

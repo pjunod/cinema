@@ -1240,25 +1240,36 @@ async fn admit_native_sdr_window_control(
         incarnation_id,
         recovery_epoch: uuid::Uuid::new_v4().to_string(),
     };
-    let (processed, candidate) = manager
-        .prepare_processed_hdr10(&request, &recovery, false)
+    let crate::transcode::ProcessedUpgradeTrial {
+        request: processed,
+        candidate,
+        root,
+    } = manager
+        .prepare_processed_upgrade("native-sdr-control", &request, &recovery, false)
         .await
+        .map_err(|error| error.to_string())
         .expect("fresh processed owner qualification")
         .expect("SDR processed candidate");
     assert!(candidate.processed_dv);
     assert_eq!(candidate.grade, OutputGrade::Sdr);
-    let root = manager
-        .admit_processed_window_control(&processed, &recovery, file)
-        .await
-        .expect("normal lease and source/recipe validation");
+    assert_eq!(processed.request_id.as_deref(), Some(recovery.incarnation_id.as_str()));
+    // The verified root is held for exactly one successor, once.
+    let context = processed
+        .candidate_context
+        .as_deref()
+        .cloned()
+        .expect("processed context");
+    let _lease = manager.hold_processed_upgrade_root(&recovery.incarnation_id, context, root);
+    let held = manager
+        .take_processed_upgrade_root(&recovery.incarnation_id)
+        .expect("the trial's root is held for its successor");
     assert!(
         manager
-            .admit_processed_window_control(&processed, &recovery, file)
-            .await
-            .is_err(),
-        "same prepared owner lease cannot be consumed twice"
+            .take_processed_upgrade_root(&recovery.incarnation_id)
+            .is_none(),
+        "the same upgrade root cannot be taken twice"
     );
-    root
+    held.into_root()
 }
 
 #[cfg(target_os = "linux")]

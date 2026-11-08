@@ -611,6 +611,54 @@ pub(crate) struct LiveReconstructionFacts {
     pub(crate) slots_in_use: usize,
 }
 
+/// How long a processed upgrade may spend rendering and verifying its first
+/// window. The same 8 s the in-create qualification was allowed at most, now
+/// spent after the viewer's first frame instead of before it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) const PROCESSED_UPGRADE_TRIAL_BUDGET: Duration = Duration::from_secs(8);
+
+/// One verified processed upgrade: the successor request (its incarnation
+/// already the staged successor's), the candidate it plays, and the exact
+/// prepared root its first window was produced on.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct ProcessedUpgradeTrial {
+    pub(crate) request: SessionRequest,
+    pub(crate) candidate: plurx_core::playback::candidate::QualityCandidate,
+    pub(crate) root: crate::vodserve::PreparedRootAdmission,
+}
+
+pub(crate) struct HeldProcessedUpgradeRoot {
+    context: Box<CandidateExecutionContext>,
+    root: crate::vodserve::PreparedRootAdmission,
+    deadline: Instant,
+}
+
+/// The holder's claim on a [`HeldProcessedUpgradeRoot`]. Dropped when staging
+/// ends: a root the successor's first preparation did not take is freed then
+/// (its admission credit and graph allowance with it), not at a timer.
+pub(crate) struct ProcessedUpgradeRootLease {
+    roots: Arc<std::sync::Mutex<HashMap<String, HeldProcessedUpgradeRoot>>>,
+    incarnation_id: String,
+}
+
+impl HeldProcessedUpgradeRoot {
+    #[cfg(test)]
+    pub(crate) fn into_root(self) -> crate::vodserve::PreparedRootAdmission {
+        self.root
+    }
+}
+
+impl Drop for ProcessedUpgradeRootLease {
+    fn drop(&mut self) {
+        let unclaimed = self
+            .roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.incarnation_id);
+        drop(unclaimed);
+    }
+}
+
 pub struct TranscodeManager {
     source_identity: Option<crate::source_custody::SourceIdentity>,
     #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
@@ -675,6 +723,10 @@ pub struct TranscodeManager {
     processed_preparation_slot: Arc<tokio::sync::Semaphore>,
     #[cfg(target_os = "linux")]
     processed_instance_slots: Arc<tokio::sync::Semaphore>,
+    /// Verified processed-upgrade roots waiting for the prepared successor
+    /// they were trialled for, by its incarnation. See
+    /// [`ProcessedUpgradeRootLease`].
+    processed_upgrade_roots: Arc<std::sync::Mutex<HashMap<String, HeldProcessedUpgradeRoot>>>,
     /// Live FEL reconstruction (BL+EL composed on the GPU, then re-encoded):
     /// one graph per worker until concurrent reconstruction is measured. Its
     /// permit lives in the graph's runtime recipe, so it is held exactly as

@@ -165,6 +165,9 @@ pub(super) async fn release_session(
     terminal: crate::vodserve::Terminal,
     reason: &'static str,
 ) -> StatusCode {
+    // A processed upgrade waiting for, or trialling on, this session ends
+    // with it.
+    super::processed_upgrade::cancel_for_session(&session);
     // Close publication before Store latency without choosing the local VOD
     // tombstone cause. The Store CAS below records the first writer; phase two
     // projects that exact durable winner.
