@@ -3705,7 +3705,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # its own: the trial and the successor's prime use the existing owners.
 # Main merged into the effort (2026-11-08): main's and the effort's reviewed
 # additions are both counted; the total is the merged tree's exact count.
-expected_occurrences = 1090
+# Main (8f2585e6b..c32bf261c, jellyfin/activity fixture fixes) landed these
+# without a recount; counted at the 2026-11-08 main→effort merge so the census is exact.
+expected_occurrences = 1091
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5497,7 +5499,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bounds its one route read with `tokio::time::timeout` (250 ms) and starts
 # nothing; the S9 trial-failure test waits one exchange cadence (`sleep`,
 # 260 ms) before its second control exchange. No task or process is added.
-expected_occurrences = 2102
+# Main (8f2585e6b..c32bf261c, jellyfin/activity fixture fixes) landed these
+# without a recount; counted at the 2026-11-08 main→effort merge so the census is exact.
+expected_occurrences = 2105
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6668,7 +6672,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # fleet route and settle tests matched by the launch-method shape; no process.
 # Main merged into the effort (2026-11-08): main's reviewed additions and the
 # effort's are both present; the total is the merged tree's exact count.
-expected_occurrences = 890
+# Main (8f2585e6b..c32bf261c, jellyfin/activity fixture fixes) landed these
+# without a recount; counted at the 2026-11-08 main→effort merge so the census is exact.
+expected_occurrences = 891
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

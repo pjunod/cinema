@@ -16,6 +16,11 @@ bump may break compatibility and a **patch** bump never does.
   release as failover, and a control request racing the stop is answered with
   the existing `deleted` / `admin_stop` reason rather than `authority_fenced`,
   which clients treat as recoverable.
+- Jobs includes fresh CPU, GPU and heavy-worker capacity from learner nodes.
+  Worker observations use the member-scoped operations channel and remain
+  independent of voter-only playback and recording authority.
+- Pending native HLS segments advertise their bounded Retry-After interval.
+
 - Subtitle workers preserve a completed publication when a concurrent pressure
   check observes that its source authority has retired. Changed original files
   retain the existing not-found response instead of returning an internal error.

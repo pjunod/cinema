@@ -52,7 +52,8 @@ function clusterWorkersHtml(d){
   const statuses=new Map((d.activity_nodes||[]).filter(n=>n.node_id).map(n=>[n.node_id,n.status]));
   const jobs=q.activeJobs||[];
   const ids=[...new Set([...Object.keys(names),...Object.keys(workers),...statuses.keys(),...jobs.map(j=>j.owner_node_id).filter(Boolean)])];
-  const fresh=id=>workers[id]&&Date.now()-workers[id].observed_at_ms>=-30000&&Date.now()-workers[id].observed_at_ms<30000&&(!statuses.has(id)||statuses.get(id)==="answered");
+  const workerObserved=new Set(d.worker_observed_nodes||[]);
+  const fresh=id=>workers[id]&&Date.now()-workers[id].observed_at_ms>=-30000&&Date.now()-workers[id].observed_at_ms<30000&&(workerObserved.has(id)||!statuses.has(id)||statuses.get(id)==="answered");
   const known=ids.filter(fresh),sum=key=>known.reduce((n,id)=>n+Number(workers[id][key]||0),0);
   const queued=(q.counts||[]).filter(c=>c.state==="queued").reduce((n,c)=>n+Number(c.count||0),0);
   const clustered=activityIsClustered(d);
