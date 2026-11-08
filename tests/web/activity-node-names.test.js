@@ -565,7 +565,9 @@ test("a waiting targeted library request names what it waits on", () => {
   )();
   const job = (waiting_on) => ({ kind: "library_scan", targeted: true, state: "queued", library_id: 3, waiting_on });
   assert.equal(reason(job("full_scan:Movies")), "Waiting on: full scan of Movies");
-  assert.equal(reason(job("heavy_lane:title scan")), "Waiting on: heavy lane: title scan");
+  // Decision (a) on #1405: a targeted job takes no background reader, so
+  // nothing writes `heavy_lane:`; an unknown value is not labelled.
+  assert.equal(reason(job("heavy_lane:title scan")), "");
   assert.equal(reason(job("root_unreadable:/20t/tv")), "Waiting on: root unreadable: /20t/tv");
   assert.equal(reason(job("queue_position:2")), "Waiting on: queue position 2");
   assert.equal(reason(job("")), "", "nothing in the way, nothing said");

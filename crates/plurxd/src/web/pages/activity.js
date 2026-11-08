@@ -141,7 +141,7 @@ function durableJobReason(job){
   // waiting on; Cancel reaches it like any other queued library job.
   if(job.targeted&&job.waiting_on){
     const w=String(job.waiting_on),at=w.indexOf(":"),detail=w.slice(at+1);
-    const label=at<0?"":{full_scan:`full scan of ${detail}`,heavy_lane:`heavy lane: ${detail}`,root_unreadable:`root unreadable: ${detail}`,queue_position:`queue position ${detail}`}[w.slice(0,at)];
+    const label=at<0?"":{full_scan:`full scan of ${detail}`,root_unreadable:`root unreadable: ${detail}`,queue_position:`queue position ${detail}`}[w.slice(0,at)];
     if(label)return `Waiting on: ${label}`;
   }
   // The title scan also measures a Profile 7 FEL title for the reconstructed

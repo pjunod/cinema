@@ -1181,6 +1181,7 @@ mount point, `ENOTCONN`, `EIO`, or the path missing beneath it — is a transien
 | 200 `{"roots", "visible", "missing", "outside_roots"}` | `probe_paths` with no `path`: which roots plurx can see. Only a configured root or a path under one is looked at; a symlink beneath the root is found with `lstat` and listed as `outside_roots` without being followed; anything else is `outside_roots`. Nothing is scanned or queued |
 | 400 | Relative path, nonpositive `series.tmdb`, invalid `book` fields, a malformed `request_key` or `expected_files`, `{"code":"path_required"}` (neither `path` nor `probe_paths`), or `{"code":"probe_paths_with_path"}` (both) |
 | 500 `{"code":"scan_failed", "status":"failed", "request_id", "error"}` | The request (or the finished request a replayed `request_key` names) failed for a reason other than an unreadable root; the same `request_id` the record carries |
+| 500 `{"code":"cancelled", "status":"failed", "request_id", "error"}` | The same failed shape for a request whose job was cancelled (Activity's Cancel); send a new attempt |
 | 422 `path_outside_roots` | Path under no library root — permanent |
 | 503 `path_unreadable` | Path under a root that cannot be read now — retry after 60 s. Also the answer when a waited-for or replayed request failed because its root dropped mid-scan; then it also carries `request_id` and `status: failed` |
 | 503 (`error` only) | The durable queue refused the request (full, or the same request is cancelling) |
@@ -1218,8 +1219,9 @@ a `probe_paths` test counts there too and never as a scan.
 any request; a `scan:trigger` key reads the requests it created and gets 403
 for any other id — including one that does not exist, so a scan key cannot
 probe which requests exist. `status` is `queued` · `running` · `done` · `failed`; `report` and
-`items` appear at `done`, `error` on failure (with `code: "path_unreadable"`
-when the root dropped mid-scan). A request made through this route also carries
+`items` appear at `done`, `error` on failure, with `code: "path_unreadable"`
+when the root dropped mid-scan or `code: "cancelled"` when the request's job
+was cancelled (a cancelled request is `failed`, never a status of its own). A request made through this route also carries
 `waiting_on` — `full_scan:<library>` while a full scan or a metadata refresh of
 the request's own library holds that library's fence, `root_unreadable:<path>`
 while the claiming node cannot read a root, `queue_position:<n>` when it joined
