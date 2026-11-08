@@ -1126,3 +1126,563 @@ async fn deletion_waits_for_original_native_close_even_after_actual_lease_expiry
         .await
         .expect("fixture operation succeeds: deletion waits for original native close even after actual lease expiry");
 }
+
+struct SqlFixture {
+    manager: Arc<super::super::super::LiveTvManager>,
+    root: Arc<CaptureOwners>,
+    lease: CaptureLease,
+    fence: ServingFence,
+    authority: super::super::super::resource::CaptureAuthority,
+    command: plurx_core::live_tv_resource::Command,
+    row: plurx_core::dvr::DvrRecording,
+    _dir: tempfile::TempDir,
+}
+async fn sql_fixture() -> SqlFixture {
+    let (manager, live, dvr, now, target, dir) =
+        super::super::tests::oversized_scheduler_fixture().await;
+    manager
+        .store
+        .put_settings(&[("live_tv.enabled", "1"), ("live_tv.config_generation", "7")])
+        .await
+        .expect("enable actual SQL capture authority");
+    manager
+        .dvr_expand(&live, &dvr, now)
+        .await
+        .expect("create actual scheduled recording");
+    let row = manager
+        .store
+        .get_dvr_recording_for_airing("63.1", target)
+        .await
+        .expect("read scheduled recording")
+        .expect("actual scheduled row");
+    let (root, lease, fence, _unused) = fixture(&row.id).await;
+    let (mut authority, command) = manager.prepare_capture_claim(
+        &live,
+        &dvr,
+        &row,
+        "original-device",
+        &dir.path().join("original"),
+        "original-storage".into(),
+    );
+    authority.at_ms = Some(row.capture_start * 1000 + 1);
+    SqlFixture {
+        manager,
+        root,
+        lease,
+        fence,
+        authority,
+        command,
+        row,
+        _dir: dir,
+    }
+}
+fn sql_hooks(lease: &CaptureLease) -> Arc<SqlHooks> {
+    Arc::clone(&lease.entry.sql.lock().expect("original SQL cell").hooks)
+}
+async fn sql_held(fence: &ServingFence, root: &CaptureOwners) {
+    root.drive();
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 1);
+}
+
+#[tokio::test]
+async fn cancelled_original_sql_claim_commits_then_detaches_before_admission_release() {
+    let SqlFixture {
+        manager,
+        root,
+        lease,
+        fence,
+        authority,
+        command,
+        row,
+        _dir,
+    } = sql_fixture().await;
+    let hooks = sql_hooks(&lease);
+    hooks.before_claim.enabled.store(true, Ordering::Release);
+    hooks.before_detach.enabled.store(true, Ordering::Release);
+    {
+        let observer = lease.claim(authority, command);
+        tokio::pin!(observer);
+        assert!(observer.as_mut().now_or_never().is_none());
+    }
+    hooks.before_claim.entered().await;
+    drop(lease);
+    sql_held(&fence, &root).await;
+    assert!(manager
+        .resource_capture(&row.id)
+        .await
+        .expect("pre-claim read")
+        .is_none());
+    hooks.before_claim.release.notify_one();
+    hooks.before_detach.entered().await;
+    sql_held(&fence, &root).await;
+    let claimed = manager
+        .resource_capture(&row.id)
+        .await
+        .expect("late actual claim")
+        .expect("claim committed");
+    assert_eq!(claimed.epoch, 1);
+    assert!(!root.permits_finalization(&row.id, 1));
+    hooks.before_detach.release.notify_one();
+    drained(&root).await;
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
+    let capture = manager
+        .resource_capture(&row.id)
+        .await
+        .expect("actual detach")
+        .expect("history remains");
+    assert!(capture.expires_at_ms < claimed.expires_at_ms);
+    let ingest = manager
+        .store
+        .live_tv_resource_lookup(
+            &format!("ingest:{}", claimed.ingest_id),
+            super::super::super::resource::now_ms(),
+        )
+        .await
+        .expect("remaining shared ingest authority")
+        .expect("draining ingest is not fabricated absent");
+    assert!(
+        matches!(ingest, plurx_core::live_tv_resource::Record::Ingest(ref i)
+        if i.draining && !i.consumers.contains_key(&format!("capture:{}", row.id)))
+    );
+    root.shutdown(tokio::time::Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("original SQL drained");
+}
+
+#[tokio::test]
+async fn cancelled_committed_sql_result_keeps_same_original_handle_until_positive_join() {
+    let SqlFixture {
+        manager,
+        root,
+        lease,
+        fence,
+        authority,
+        command,
+        row,
+        _dir,
+    } = sql_fixture().await;
+    let hooks = sql_hooks(&lease);
+    hooks.after_claim.enabled.store(true, Ordering::Release);
+    {
+        let observer = lease.claim(authority, command);
+        tokio::pin!(observer);
+        assert!(observer.as_mut().now_or_never().is_none());
+    }
+    hooks.after_claim.entered().await;
+    assert!(manager
+        .resource_capture(&row.id)
+        .await
+        .expect("committed original claim")
+        .is_some());
+    let original = lease.entry.sql.lock().expect("SQL cell").claim.identity();
+    drop(lease);
+    for _ in 0..32 {
+        root.drive();
+    }
+    sql_held(&fence, &root).await;
+    assert_eq!(
+        root.entries.lock().expect("resident records")[0]
+            .sql
+            .lock()
+            .expect("same SQL cell")
+            .claim
+            .identity(),
+        original
+    );
+    assert!(!root.permits_finalization(&row.id, 1));
+    hooks.after_claim.release.notify_one();
+    drained(&root).await;
+    root.shutdown(tokio::time::Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("original result and detach joined");
+}
+
+#[tokio::test]
+async fn active_sql_claim_is_not_detached_before_original_acquisition_and_native_close() {
+    let SqlFixture {
+        manager,
+        root,
+        lease,
+        fence,
+        authority,
+        command,
+        row,
+        _dir,
+    } = sql_fixture().await;
+    let claim = lease
+        .claim(authority, command)
+        .await
+        .expect("original claim");
+    for _ in 0..32 {
+        root.drive();
+    }
+    assert!(!lease.entry.sql.lock().expect("SQL cell").detach_started);
+    let mut writer = lease
+        .open(_dir.path().join("active.part"))
+        .await
+        .expect("actual original file");
+    writer
+        .write_all(b"original live acquisition")
+        .await
+        .expect("actual bytes");
+    sql_held(&fence, &root).await;
+    assert_eq!(
+        manager
+            .resource_capture(&row.id)
+            .await
+            .expect("live claim")
+            .expect("capture")
+            .expires_at_ms,
+        claim.expires_at_ms
+    );
+    drop(writer);
+    drop(claim);
+    drop(lease);
+    drained(&root).await;
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
+    root.shutdown(tokio::time::Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("native file and exact detach closed");
+}
+
+#[tokio::test]
+async fn concurrent_sql_cleanup_observers_keep_the_same_original_detach() {
+    let SqlFixture {
+        root,
+        lease,
+        fence,
+        authority,
+        command,
+        ..
+    } = sql_fixture().await;
+    let hooks = sql_hooks(&lease);
+    hooks.before_detach.enabled.store(true, Ordering::Release);
+    drop(
+        lease
+            .claim(authority, command)
+            .await
+            .expect("original claim"),
+    );
+    drop(lease);
+    hooks.before_detach.entered().await;
+    let original = root.entries.lock().expect("records")[0]
+        .sql
+        .lock()
+        .expect("SQL cell")
+        .detach
+        .identity();
+    let mut observers = Vec::new();
+    for _ in 0..8 {
+        let root = Arc::clone(&root);
+        observers.push(tokio::spawn(async move {
+            for _ in 0..32 {
+                root.drive();
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+    for observer in observers {
+        observer.await.expect("cleanup observer joined");
+    }
+    sql_held(&fence, &root).await;
+    assert_eq!(
+        root.entries.lock().expect("same records")[0]
+            .sql
+            .lock()
+            .expect("same SQL cell")
+            .detach
+            .identity(),
+        original
+    );
+    hooks.before_detach.release.notify_one();
+    drained(&root).await;
+    root.shutdown(tokio::time::Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("same detach drained");
+}
+
+async fn failed_original_sql_retains_admission(claim_failure: bool, panic: bool) {
+    let SqlFixture {
+        manager,
+        root,
+        lease,
+        fence,
+        authority,
+        command,
+        row,
+        _dir,
+    } = sql_fixture().await;
+    let hooks = sql_hooks(&lease);
+    let flag = match (claim_failure, panic) {
+        (true, true) => &hooks.panic_claim,
+        (true, false) => &hooks.fail_claim,
+        (false, true) => &hooks.panic_detach,
+        (false, false) => &hooks.fail_detach,
+    };
+    flag.store(true, Ordering::Release);
+    let result = lease.claim(authority, command).await;
+    assert_eq!(result.is_err(), claim_failure);
+    drop(result);
+    drop(lease);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            root.drive();
+            let finished = {
+                let records = root.entries.lock().expect("retained original record");
+                let sql = records[0].sql.lock().expect("retained SQL operation");
+                if claim_failure {
+                    sql.failed
+                } else {
+                    sql.detach_started && sql.detach.observe() != JoinState::Pending
+                }
+            };
+            if finished {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("original failed operation completed");
+    // Positive reads and a completed SQL mutation are not the missing original
+    // acknowledgement. The same record and admission must remain Unknown.
+    assert!(manager
+        .resource_capture(&row.id)
+        .await
+        .expect("real committed history")
+        .is_some());
+    for _ in 0..64 {
+        root.drive();
+    }
+    sql_held(&fence, &root).await;
+    assert!(!root.permits_finalization(&row.id, i64::MAX));
+    assert!(root.shutdown(tokio::time::Instant::now()).await.is_err());
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 1);
+}
+#[tokio::test]
+async fn original_claim_panic_after_real_commit_keeps_restart_admission() {
+    failed_original_sql_retains_admission(true, true).await;
+}
+#[tokio::test]
+async fn ambiguous_original_claim_error_after_real_commit_keeps_restart_admission() {
+    failed_original_sql_retains_admission(true, false).await;
+}
+#[tokio::test]
+async fn original_detach_panic_after_real_commit_keeps_restart_admission() {
+    failed_original_sql_retains_admission(false, true).await;
+}
+#[tokio::test]
+async fn ambiguous_original_detach_error_after_real_commit_keeps_restart_admission() {
+    failed_original_sql_retains_admission(false, false).await;
+}
+
+#[tokio::test]
+async fn original_cleanup_detaches_the_claimed_epoch_instead_of_the_requested_attempt() {
+    use plurx_core::live_tv_resource::{Command, Outcome, Record};
+    let SqlFixture {
+        manager,
+        root,
+        lease,
+        fence,
+        authority,
+        command,
+        row,
+        _dir,
+    } = sql_fixture().await;
+    let predecessor = match authority
+        .execute(command.clone())
+        .await
+        .expect("first committed epoch")
+    {
+        Outcome::Record(Record::Capture(c)) => c,
+        other => panic!("actual predecessor capture required: {other:?}"),
+    };
+    assert_eq!(predecessor.epoch, 1);
+    manager
+        .store
+        .live_tv_resource_command(
+            Command::DetachCapture {
+                recording_id: row.id.clone(),
+                epoch: 1,
+                worker: authority.worker.clone(),
+            },
+            0,
+        )
+        .await
+        .expect("expire predecessor without changing its epoch");
+    manager
+        .store
+        .live_tv_resource_command(
+            Command::Release {
+                ingest_id: predecessor.ingest_id,
+                epoch: predecessor.ingest_epoch,
+                worker: predecessor.worker,
+            },
+            0,
+        )
+        .await
+        .expect("positively release the original now-draining ingest");
+    let claim = lease
+        .claim(authority, command)
+        .await
+        .expect("exact successor claim");
+    assert_eq!(claim.epoch, 2);
+    assert_eq!(lease.entry.attempt, 1);
+    let expiry = claim.expires_at_ms;
+    drop(claim);
+    drop(lease);
+    drained(&root).await;
+    let detached = manager
+        .resource_capture(&row.id)
+        .await
+        .expect("exact detached successor")
+        .expect("capture history");
+    assert_eq!(detached.epoch, 2);
+    assert!(detached.expires_at_ms < expiry);
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
+    root.shutdown(tokio::time::Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("claimed epoch drained");
+}
+
+#[tokio::test]
+async fn restart_seal_during_original_sql_claim_does_not_renew_or_release_its_admission() {
+    let SqlFixture {
+        root,
+        lease,
+        fence,
+        authority,
+        command,
+        ..
+    } = sql_fixture().await;
+    let hooks = sql_hooks(&lease);
+    hooks.before_claim.enabled.store(true, Ordering::Release);
+    {
+        let observer = lease.claim(authority, command);
+        tokio::pin!(observer);
+        assert!(observer.as_mut().now_or_never().is_none());
+    }
+    hooks.before_claim.entered().await;
+    let original = lease
+        .entry
+        .sql
+        .lock()
+        .expect("original SQL cell")
+        .claim
+        .identity();
+    let cutoff = tokio::time::Instant::now();
+    root.seal(cutoff);
+    assert!(!lease.demand_alive());
+    drop(lease);
+    assert!(root
+        .shutdown(cutoff + Duration::from_secs(20))
+        .await
+        .is_err());
+    sql_held(&fence, &root).await;
+    assert_eq!(
+        *root.shutdown_deadline.lock().expect("original deadline"),
+        Some(cutoff)
+    );
+    assert_eq!(
+        root.entries.lock().expect("same original record")[0]
+            .sql
+            .lock()
+            .expect("same original claim")
+            .claim
+            .identity(),
+        original
+    );
+    hooks.before_claim.release.notify_one();
+    drained(&root).await;
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
+    // A later observer may see actual completion; it may not extend the cutoff.
+    assert_eq!(
+        *root.shutdown_deadline.lock().expect("unchanged deadline"),
+        Some(cutoff)
+    );
+}
+
+#[tokio::test]
+async fn sealed_capture_refuses_its_first_sql_claim_before_store_effects() {
+    let SqlFixture {
+        manager,
+        root,
+        lease,
+        fence,
+        authority,
+        command,
+        row,
+        _dir,
+    } = sql_fixture().await;
+    let cutoff = tokio::time::Instant::now() + Duration::from_secs(5);
+    root.seal(cutoff);
+    assert!(lease.claim(authority, command).await.is_err());
+    assert!(lease
+        .entry
+        .sql
+        .lock()
+        .expect("unentered original SQL cell")
+        .authority
+        .is_none());
+    assert!(manager
+        .resource_capture(&row.id)
+        .await
+        .expect("no SQL effect after seal")
+        .is_none());
+    sql_held(&fence, &root).await;
+    drop(lease);
+    root.shutdown(cutoff)
+        .await
+        .expect("unentered original admission drained");
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
+}
+
+#[tokio::test]
+async fn changed_incarnation_refuses_entry_but_detaches_the_original_sql_worker() {
+    let SqlFixture {
+        manager,
+        root,
+        lease,
+        fence,
+        authority,
+        command,
+        row,
+        _dir,
+    } = sql_fixture().await;
+    let original_worker = authority.worker.clone();
+    let claim = lease
+        .claim(authority, command)
+        .await
+        .expect("positive original claim");
+    let expiry = claim.expires_at_ms;
+    manager
+        .incarnation
+        .current
+        .lock()
+        .expect("actual manager incarnation")
+        .incarnation = "successor-incarnation".into();
+    assert!(manager.validate_capture_claim(&claim).is_err());
+    assert!(lease
+        .entry
+        .native
+        .state
+        .lock()
+        .expect("unentered original file")
+        .original
+        .is_none());
+    drop(claim);
+    drop(lease);
+    drained(&root).await;
+    let detached = manager
+        .resource_capture(&row.id)
+        .await
+        .expect("actual original detach")
+        .expect("original history");
+    assert_eq!(detached.worker, original_worker);
+    assert_ne!(detached.worker, manager.resource_worker());
+    assert!(detached.expires_at_ms < expiry);
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
+    root.shutdown(tokio::time::Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("original worker drain acknowledged");
+}
