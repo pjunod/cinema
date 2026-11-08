@@ -1,0 +1,16 @@
+# Pipeline contract v2 (cinema slice) — status ledger
+
+**Status:** done — archived on 2026-11-08 by M6 (task T7, the last cinema task
+of `effort/pipeline-v2`). This is the effort's status ledger as it stood in
+[STATUS.md](../../STATUS.md), moved here verbatim. The seam itself is
+documented in [INTEGRATION.md](../INTEGRATION.md) §1–§2, written from
+[the contract](../features/PIPELINE-CONTRACT.md); promotion to `main` is
+recorded on the effort pull request.
+
+## Ledger (from STATUS.md)
+
+Owner Claude (claude-opus-5-5, session 01BCWL9z). Curator→plurx scan seam per [the contract](../features/PIPELINE-CONTRACT.md) §4–§6. M0: [PR #1398](http://forge.lan:3000/noirr/plurx/pulls/1398) merged to `main` on 2026-11-08 (29d61b824). M5 on `effort/pipeline-v2`, six stacked draft task PRs merged bottom-up: T1 sidecar store [#1404](http://forge.lan:3000/noirr/plurx/pulls/1404) · T2 targeted job (`library_scan` kind, generation `library-targeted-v1`, dedupe `library:targeted:{id}`) with probe admission and no background source reader, under the library fence [#1405](http://forge.lan:3000/noirr/plurx/pulls/1405) · T3 typed `422`/`503`, `request_key`, `wait_ms`, `expected_files` [#1406](http://forge.lan:3000/noirr/plurx/pulls/1406) · T4 creating-key status read [#1407](http://forge.lan:3000/noirr/plurx/pulls/1407) · T5 `probe_paths`, six-hourly default in one store write [#1408](http://forge.lan:3000/noirr/plurx/pulls/1408) · T6 Activity and docs [#1409](http://forge.lan:3000/noirr/plurx/pulls/1409). Fable round-5 findings are fixed on each branch (tables on the PRs). Task PRs not merged, not deployed; each awaits re-review at its current head.
+- **Decision (a) on #1405 (Fable for Paul, 2026-11-08):** a targeted probe takes no background source reader. Managed resource view v5 (SQLite v126, guarded Hiqlite upgrade) drops its `source_io` key, so its only wait is its own library's fence (`waiting_on: full_scan:<library>`); a full scan of another library on the same volume does not hold it, and `heavy_lane:*` is never written. The independent formal check (#15422) is done; its scope statements are in `verification/`, with no model change.
+- **Verified (2026-11-08):** under `scripts/voter-build` caps, plurx-core lib tests 1656 pass; the 3 failures are 2 stale pins fixed since (migration count, future-version fixture) and one also failing on `main` (see #1405). `store_contract` bootstrap, migration, rewind, inventory, managed and sidecar cases: 75/75. `cargo fmt --check` clean. **Not run at these heads:** the 11 plurxd regressions. The learner that ran them before has 17 GB free on its root volume, too little for the build.
+- **Decision for Paul:** existing libraries at `scan_interval_mins = 0` are preserved; Settings offers a one-click opt-in to six-hourly and states what "Never" costs. New libraries default to 360 minutes.
+- **Deploy (after promotion):** plurxd to the fleet. SQLite v125 and a guarded hiqlite extension are additive; older nodes never touch the sidecar and leave targeted jobs queued, so a mixed rollout is safe. Post-deploy: Curator's log shows `visible → plurx item <id>`; `GET /api/v1/scan/requests/<id>` with Curator's key returns the record; an unmounted test root answers `503 path_unreadable` and the delivery reaches `visible` after remount.

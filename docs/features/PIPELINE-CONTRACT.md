@@ -1,7 +1,8 @@
 # Pipeline contract v2 — one terminal fact per job, one owner per boundary
 
-**Status:** approved design, revised after three adversarial review rounds (r4),
-not built · **Supersedes:** curator `monarr/docs/plan-integration.md` §3 (contract),
+**Status:** done — the cinema slice (§4–§6) is built on `effort/pipeline-v2`
+and documented in [INTEGRATION.md](../INTEGRATION.md) §1–§2; the approved
+design was revised after three adversarial review rounds (r4) · **Supersedes:** curator `monarr/docs/plan-integration.md` §3 (contract),
 `monarr/docs/DOWNLOAD_LIFECYCLE_PROPOSAL.md` §4.1–4.2 (notification/acknowledgement),
 runner `nzbd/docs/CURATOR_DELIVERY.md` (acknowledgement protocol), the "Durable job
 control contract (v1)" section of curator `monarr/docs/integration.md` · **Decided:**
