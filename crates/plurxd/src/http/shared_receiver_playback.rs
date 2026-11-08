@@ -2474,6 +2474,7 @@ mod tests {
                 "attempt".into(),
                 "player".into(),
                 wrapper(&request),
+                None,
             )
             .expect("owned attempt");
         tokio::time::timeout(Duration::from_secs(5), async {
