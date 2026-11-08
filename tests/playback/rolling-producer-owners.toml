@@ -1,3 +1,19 @@
+# Cluster worker-capacity observer ownership audit (2026-11-08): current
+# merge of main 78544ee against HEAD 7d4c37f8. This is source review, not
+# runtime qualification. One production tokio::spawn is added in
+# cluster_runtime/background.rs, after explicit Cluster mode and real
+# membership/replication checks. The task retains its AppState and the boot
+# BackgroundLoopGuard cancellation token. worker_status_cache_loop selects
+# shutdown while awaiting one one-second local-capacity sample, then selects
+# shutdown while awaiting its existing-cadence sleep_until. These are the
+# only two new timer sites; neither timeout nor cancellation claims a reap.
+# The sampler starts no child/session/source read and adds no detached helper.
+# New cluster cache fixtures add no task, timer-constructor or process site.
+# Per-file structural deltas: background.rs tasks 9->10; cluster_operations.rs
+# timers 12->14; the other four changed Rust files contribute zero sites.
+# Global counts: namespaced tasks 1087->1088, timers 2100->2102. Every other
+# count, root, regex, alias guard, forbidden zero and historical audit stays.
+#
 # Standalone SQLite/helper source ownership audit (2026-11-07), comparing
 # 8c654d37b to e6b7a3de9. This is a source census/review, not a substitute for
 # the runtime qualification recorded in PR #1396 and the build ledger.
@@ -3719,7 +3735,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # warm_inventory awaits the existing refresh owner and spawns no extra task.
 # Cinema manual-scan dispatch adds the driver in the busy-worker renewal
 # regression. The test releases its BeforeScan barrier and awaits the handle.
-expected_occurrences = 1087
+expected_occurrences = 1088
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5485,7 +5501,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Incoming completion pressure test adds one interval; reachable retention
 # history adds one awaited cadence site. Neither introduces a detached owner.
 # Reachable retention history awaits the real 250ms control limit between observations.
-expected_occurrences = 2100
+expected_occurrences = 2102
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

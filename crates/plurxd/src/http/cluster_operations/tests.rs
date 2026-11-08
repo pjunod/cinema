@@ -2351,6 +2351,7 @@ fn test_local_status(node_id: &str, raft_id: Option<u64>) -> ClusterNodeOperatio
         },
         snapshot: SnapshotStatus::from(None),
         transport: None,
+        workers: None,
         media: MediaDrainStatus {
             local_active_sessions: 0,
             drained: true,
@@ -2452,4 +2453,142 @@ fn test_replication_status() -> plurx_core::cluster::migration::status::Replicat
         "explanation": "test"
     }))
     .expect("test replication status")
+}
+
+fn learner_worker_sample() -> super::super::internal_activity::ActivityWorkers {
+    serde_json::from_value(serde_json::json!({
+        "observed_at_ms": unix_ms() as i64, "heavy_limit": 1, "heavy_in_use": 1,
+        "heavy_available": 0, "accepting_work": true, "hardware_used": 1,
+        "hardware_limit": 3, "software_used": 2, "software_limit": 8,
+        "children": [], "child_count": 0
+    }))
+    .expect("worker sample")
+}
+
+#[tokio::test(start_paused = true)]
+async fn learner_workers_require_fresh_answered_bounded_identity() {
+    let cache = PeerStatusCache::default();
+    let mut status = test_local_status("learner-3", Some(4));
+    status.workers = Some(Box::new(learner_worker_sample()));
+    let good = PeerStatusOutcome {
+        node_id: "learner-3".into(),
+        state: ObservationState::Answered,
+        status: Some(status),
+        transport: None,
+    };
+    cache
+        .store(&BTreeMap::from([("learner-3".into(), good.clone())]))
+        .await;
+    let observations = cache.worker_observations().await;
+    assert_eq!(observations["learner-3"].software_used, 2);
+    tokio::time::advance(PEER_STATUS_CACHE_TTL).await;
+    assert!(
+        cache.worker_observations().await.is_empty(),
+        "expired capacity stays unknown"
+    );
+    for corruption in 0..5 {
+        let mut bad = good.clone();
+        match corruption {
+            0 => bad.state = ObservationState::Refused,
+            1 => bad.node_id = "other".into(),
+            2 => {
+                bad.status
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .node_id = "other".into()
+            }
+            3 => {
+                let w = bad
+                    .status
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .workers
+                    .as_mut()
+                    .expect("seeded worker test value");
+                w.children = vec!["child".into(); 33];
+                w.child_count = 33;
+            }
+            _ => {
+                bad.status
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .workers
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .analysis_engine = Some("invalid".into())
+            }
+        }
+        cache
+            .store(&BTreeMap::from([("learner-3".into(), bad)]))
+            .await;
+        assert!(
+            cache.worker_observations().await.is_empty(),
+            "invalid sample {corruption}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn learner_workers_reach_activity_without_voter_activity() {
+    let (_, state) = crate::http::tests::test_app_with_state();
+    let admin = state
+        .store
+        .create_user("worker-admin", "hash", true)
+        .await
+        .expect("admin");
+    let mut status = test_local_status("learner-3", Some(4));
+    status.workers = Some(Box::new(learner_worker_sample()));
+    state
+        .peer_status_cache
+        .store(&BTreeMap::from([(
+            "learner-3".into(),
+            PeerStatusOutcome {
+                node_id: "learner-3".into(),
+                state: ObservationState::Answered,
+                status: Some(status),
+                transport: None,
+            },
+        )]))
+        .await;
+    let axum::Json(reply) = crate::http::system::activity_detail(
+        crate::http::extract::AuthUser(admin),
+        axum::extract::State(state),
+    )
+    .await
+    .expect("activity");
+    assert_eq!(reply["workers"]["learner-3"]["software_used"], 2);
+    assert_eq!(reply["workers"]["learner-3"]["hardware_used"], 1);
+    assert!(reply["worker_observed_nodes"]
+        .as_array()
+        .expect("seeded worker test value")
+        .contains(&serde_json::json!("learner-3")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_operations_reads_cached_worker_capacity_and_never_refreshes_it() {
+    let (_, state) = crate::http::tests::test_app_with_state();
+    let mut sample = learner_worker_sample();
+    sample.children = vec!["private process purpose".into()];
+    sample.child_count = 1;
+    sample.analysis_engine = Some("a".repeat(64));
+    state.peer_status_cache.store_local_workers(sample);
+    state
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "1")
+        .await
+        .expect("setting");
+    let status = local_snapshot(&state).await;
+    let workers = status.workers.expect("cached sample");
+    assert_eq!(
+        workers.software_limit, 8,
+        "handler must not recompute settings"
+    );
+    assert!(workers.children.is_empty());
+    assert!(workers.analysis_engine.is_none());
+    assert_eq!(workers.child_count, 1);
+    tokio::time::advance(PEER_STATUS_CACHE_TTL).await;
+    assert!(
+        local_snapshot(&state).await.workers.is_none(),
+        "stale sample is absent, not idle"
+    );
 }
