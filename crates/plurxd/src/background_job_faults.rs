@@ -69,6 +69,8 @@ pub(crate) mod worker {
         Pressure,
         WorkJoined,
         BeforeCompletion,
+        CompletionCommitted,
+        SourcePermissionCheck,
         CompletionReconciled,
         ReleaseStarted,
         ReleaseFinished,
