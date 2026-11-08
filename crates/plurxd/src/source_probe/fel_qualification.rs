@@ -541,7 +541,7 @@ fn rgb48_args(input: &str, nut: bool) -> Vec<String> {
     let filter = if nut {
         "format=rgb48le"
     } else {
-        "scale=in_color_matrix=bt2020:in_range=tv:out_range=pc,format=rgb48le"
+        q::RGB48_FROM_PQ_YUV_FILTER.trim()
     };
     args.extend(
         [
@@ -920,6 +920,21 @@ mod tests {
         assert_eq!(value("-g"), Some("48"));
         assert_eq!(value("-qmax"), None);
         assert_eq!(args.last().map(String::as_str), Some("/x/served.mp4"));
+    }
+
+    #[test]
+    fn encoded_pictures_use_the_validated_absolute_pq_inverse() {
+        let filter = |args: Vec<String>| {
+            args.windows(2)
+                .find(|pair| pair[0] == "-vf")
+                .expect("filter")[1]
+                .clone()
+        };
+        assert_eq!(filter(rgb48_args("pipe:0", true)), "format=rgb48le");
+        assert_eq!(
+            filter(rgb48_args("/x/served.mp4", false)),
+            q::RGB48_FROM_PQ_YUV_FILTER.trim()
+        );
     }
 
     /// Every stage child runs the threads its charge (`CONSUMER_THREADS`)

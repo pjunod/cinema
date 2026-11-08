@@ -103,7 +103,9 @@ def render(work, source, mode, frames, raster, start, end, origin, export='pq-bi
 
 def rgb48_filter(matrix):
     if matrix:
-        return f'scale=in_color_matrix={matrix}:in_range=tv:out_range=pc,format=rgb48le'
+        if matrix != 'bt2020':
+            raise ValueError('Only the measured BT.2020/PQ inverse is supported')
+        return (HERE.parent.parent / 'dv_quality' / 'bt2020_pq_rgb48.filter').read_text().strip()
     return 'format=rgb48le'
 
 

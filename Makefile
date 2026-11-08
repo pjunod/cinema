@@ -119,6 +119,11 @@ rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 # The fast CI Rust lane owns formatting, Clippy, unit tests, and SQLite
 # contracts. Cluster jobs own WAL, replicated Store, topology, and daemon
 # contracts. Explicit test features keep those processes out of this lane.
+.PHONY: dv-rgb-conversion-check
+dv-rgb-conversion-check: ## Check HDR measurement colour conversion with an explicitly selected FFmpeg
+	@test -n "$(PLURX_FFMPEG)" || { echo >&2 "Set PLURX_FFMPEG to the supported media executable"; exit 1; }
+	PLURX_FFMPEG="$(PLURX_FFMPEG)" python3 -m unittest discover -s tests/media -p test_dv_rgb_conversion.py -v
+
 .PHONY: ci-rust-gate
 ci-rust-gate: fmt-check spike-lock-check lint test-socket-permission-check ## CI Rust gate: format, Clippy, and fast workspace tests
 	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
