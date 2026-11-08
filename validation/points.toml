@@ -831,6 +831,8 @@ paths = [
   "crates/plurxd/src/source_custody.rs",
   "crates/plurxd/src/source_custody/**",
   "scripts/source-custody-recovery",
+  "scripts/source-custody-reader-stop",
+  "tests/operations/test_source_custody_reader_stop.py",
   "tests/operations/test_source_custody_recovery.py",
   "crates/plurxd/src/fragment_index_cluster/source_digest.rs",
   "crates/plurxd/src/library_work.rs",
