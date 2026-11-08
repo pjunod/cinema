@@ -2861,8 +2861,9 @@ pub struct ScanRequestRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<&'static str>,
     /// Contract v2: what a queued request is waiting on (`full_scan:<lib>`,
-    /// `heavy_lane:<holder>`, `root_unreadable:<path>`, `queue_position:<n>`),
-    /// empty when nothing is in its way. Present only on v2 requests.
+    /// `root_unreadable:<path>`, `queue_position:<n>`; the contract's
+    /// `heavy_lane:<holder>` is never written for a targeted job), empty when
+    /// nothing is in its way. Present only on v2 requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_on: Option<String>,
     /// Contract v2: the per-file report for the request's `expected_files`.
