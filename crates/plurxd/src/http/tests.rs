@@ -10897,6 +10897,145 @@ async fn each_create_is_one_start_attempt_and_two_devices_on_a_title_are_two() {
     }
 }
 
+/// Review 2 of G1 (B2, S5). A retry of a create that replays its owner's
+/// session -- here on another ingress, which shares the cluster store but
+/// not the first ingress's ledger -- is tagged like the publishing create,
+/// so the first frame its client reports there settles it. And a direct
+/// request that opens a start writes its own `start_attempt` row (route
+/// `direct`), which the client's first frame settles too.
+#[tokio::test]
+async fn a_replayed_create_and_a_direct_start_are_settled_by_their_first_frame() {
+    use plurx_core::domain::PlaybackEventQuery;
+
+    crate::transcode::require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let s = seed_content(&state).await;
+    prepare_vod_copy_fixture(&state, s.file, 16).await;
+    let ingress = |state: &AppState| {
+        let mut other = state.clone();
+        other.start_attempts = std::sync::Arc::new(crate::playstart::StartAttempts::new());
+        router(other)
+    };
+    let rows_of = |event: &'static str, attempt: String| {
+        let store = std::sync::Arc::clone(&state.store);
+        async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let rows = store
+                    .playback_events(&PlaybackEventQuery {
+                        event: Some(event.to_owned()),
+                        limit: 50,
+                        ..PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("events");
+                let found = rows
+                    .into_iter()
+                    .filter(|row| row.attempt.as_deref() == Some(attempt.as_str()))
+                    .collect::<Vec<_>>();
+                if !found.is_empty() || tokio::time::Instant::now() > deadline {
+                    return found;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    };
+    let ttff = |session: Option<&str>, ms: i64| {
+        let mut body = json!({
+            "level": "info", "event": "ttff", "file_id": s.file, "ms": ms,
+            "reason": "cold-start", "method": "remux",
+        });
+        if let Some(session) = session {
+            body["session_id"] = json!(session);
+        }
+        post("/api/v1/client-log", Some(&admin), body)
+    };
+
+    let create = format!("/api/v1/files/{}/hls/sessions", s.file);
+    let body = json!({ "playback_id": "device-r", "request_id": "claim-r", "copy": true });
+    let (status, first) = call(&app, post(&create, Some(&admin), body.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let session = first["session_id"].as_str().expect("session").to_owned();
+    let retried = ingress(&state);
+    let (status, replay) = call(&retried, post(&create, Some(&admin), body)).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(
+        replay["session_id"], first["session_id"],
+        "the retry replays the owner's session"
+    );
+    let (status, _) = call(&retried, ttff(Some(&session), 2_000)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let presented = rows_of("start_presented", "claim-r".to_owned()).await;
+    assert_eq!(
+        presented.iter().map(|row| row.ms).collect::<Vec<_>>(),
+        [Some(2_000)],
+        "the replayed create's first frame settles it on the ingress that answered it"
+    );
+
+    // A direct start, on an ingress that has seen nothing of this viewer.
+    let direct = ingress(&state);
+    let response = direct
+        .clone()
+        .oneshot(ranged(
+            &format!("/api/v1/files/{}/direct?token={admin}", s.file),
+            0,
+            1_023,
+        ))
+        .await
+        .expect("direct");
+    assert!(response.status().is_success(), "{}", response.status());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let started = loop {
+        let rows = state
+            .store
+            .playback_events(&PlaybackEventQuery {
+                event: Some("start_attempt".to_owned()),
+                limit: 50,
+                ..PlaybackEventQuery::default()
+            })
+            .await
+            .expect("events");
+        if let Some(row) = rows
+            .into_iter()
+            .find(|row| row.method.as_deref() == Some("direct"))
+        {
+            break row;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a direct start writes its row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(started.session_id, None, "a direct start has no session");
+    assert_eq!(started.file_id, Some(s.file));
+    let attempt = started.attempt.clone().expect("attempt");
+    // The direct player's report names no session of this server's.
+    let (status, _) = call(&direct, ttff(None, 900)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let presented = rows_of("start_presented", attempt.clone()).await;
+    assert_eq!(presented.len(), 1, "the direct start is settled");
+    let rows = super::activity_starts::local_page(
+        &state.store,
+        &state.node_id,
+        None,
+        25,
+        crate::state::clock_ms(),
+    )
+    .await
+    .expect("page");
+    let row = rows
+        .iter()
+        .find(|row| row.attempt == attempt)
+        .expect("the direct row");
+    assert_eq!(
+        (row.route.as_deref(), row.outcome.as_str(), row.ttff_ms),
+        (Some("direct"), "presented", Some(900))
+    );
+    state.transcode.stop_session(&session, "test").await;
+}
+
 /// C-08 M5 row 4: a start request the server answers with an error is a
 /// refused start, on each of the three routes that begin one; a HEAD is
 /// not a start.

@@ -207,6 +207,84 @@ pub(crate) fn analysis_cross_node_clause(node: &str) -> String {
     )
 }
 
+/// How many copy-video identities one claim may name as ones its executor
+/// cannot emit. An identity is an argv fingerprint shared by every file of
+/// one pipeline class, so a handful covers a library; the bound keeps the
+/// bound parameter small on every claim.
+pub const MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES: usize = 256;
+
+/// The claim's executor exclusion: another node's row naming a copy-video
+/// identity in `excluded` (a JSON array) is not this executor's to take. The
+/// claimant's own and untargeted rows are never excluded -- an identity its
+/// own node cannot emit is superseded there, not handed on. `node` and
+/// `excluded` are the claim's placeholders.
+pub(crate) fn analysis_executor_exclusion_clause(node: &str, excluded: &str) -> String {
+    format!(
+        "(analysis_requests.target_node_id IN ({node}, '')
+        OR analysis_requests.video_identity NOT IN (SELECT value FROM json_each({excluded})))"
+    )
+}
+
+/// The claim's order: work a viewer is waiting on first, wherever it is
+/// targeted (a foreign row with a live playback waiter outranks this node's
+/// own background rows), then this node's own and untargeted rows, then age
+/// (forced work boosted). `node`, `now` and `boost` are the claim's
+/// placeholders.
+pub(crate) fn analysis_claim_order(node: &str, now: &str, boost: &str) -> String {
+    format!(
+        "CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
+            OR (component = 'fragment_index' AND EXISTS (
+                SELECT 1 FROM background_job_waiters waiter
+                WHERE waiter.request_scope = 'playback-analysis'
+                  AND waiter.job_id = analysis_requests.request_id
+                  AND waiter.state = 'pending' AND waiter.deadline_ms > {now}))
+            THEN 0 ELSE 1 END,
+         CASE WHEN target_node_id IN ({node}, '') THEN 0 ELSE 1 END,
+         created_at_ms - CASE WHEN priority = 'forced' THEN {boost} ELSE 0 END,
+         created_at_ms, request_id"
+    )
+}
+
+/// How many files one [`ClusterFragmentIndexStore::fragment_index_requests_for_files`]
+/// read may name.
+pub const MAX_FILE_REQUEST_LOOKUP: usize = 256;
+
+/// The request per file for `fragment_index_requests_for_files`. `files` is
+/// the JSON array of file ids; columns are `REQUEST_COLS` from `ranked`.
+pub(crate) fn fragment_index_requests_for_files_sql(files: &str, columns: &str) -> String {
+    format!(
+        "WITH ranked AS (
+           SELECT analysis_requests.*, ROW_NUMBER() OVER (
+             PARTITION BY file_id
+             ORDER BY CASE WHEN state IN ('queued', 'running', 'submitted') THEN 0 ELSE 1 END,
+                      created_at_ms DESC, request_id DESC) AS file_rank
+             FROM analysis_requests
+            WHERE component = 'fragment_index'
+              AND file_id IN (SELECT CAST(value AS INTEGER) FROM json_each({files})))
+         SELECT {columns} FROM ranked WHERE file_rank = 1 ORDER BY file_id"
+    )
+}
+
+/// Validate a per-file lookup and bind its file ids as one JSON array.
+pub(crate) fn file_request_lookup_json(file_ids: &[i64]) -> Result<String, StoreError> {
+    if file_ids.len() > MAX_FILE_REQUEST_LOOKUP || file_ids.iter().any(|id| *id <= 0) {
+        return Err(StoreError::Task("invalid file request lookup".to_owned()));
+    }
+    serde_json::to_string(file_ids).map_err(|error| StoreError::Task(error.to_string()))
+}
+
+/// Validate a claim's exclusion list and bind it as one JSON array.
+pub(crate) fn analysis_claim_exclusions_json(excluded: &[String]) -> Result<String, StoreError> {
+    if excluded.len() > MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES
+        || excluded
+            .iter()
+            .any(|identity| identity.is_empty() || identity.len() > 128)
+    {
+        return Err(StoreError::Task("invalid analysis claim".to_owned()));
+    }
+    serde_json::to_string(excluded).map_err(|error| StoreError::Task(error.to_string()))
+}
+
 /// The same rule as [`analysis_source_capacity_clause`], asked of a claimed
 /// request: `"admit"`, the first term's reason, or `"not_owned"` when the
 /// row is no longer this owner's running fence (or membership removed the
@@ -2249,6 +2327,7 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
             false,
             false,
             false,
+            &[],
         )
         .await
     }
@@ -2265,8 +2344,16 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     /// requests targeted at another node that asked for exactly this engine:
     /// an idle node takes a busy one's work, builds the index under the
     /// requester's `target_node_id`, and delivery hydrates the target. This
-    /// node's own rows (and untargeted ones) come first; a target membership
-    /// has removed is never worked for.
+    /// node's own rows (and untargeted ones) come after work a viewer waits
+    /// on, wherever that is targeted; a target membership has removed is
+    /// never worked for.
+    ///
+    /// `excluded_video_identities` (at most
+    /// [`MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES`]) are copy-video identities
+    /// this executor has found it cannot emit: another node's row naming one
+    /// stays queued for a node that can, instead of being claimed, refused
+    /// and requeued uncharged here on every pass. The executor keeps the list
+    /// (node-local); the claimant's own rows are never excluded.
     #[allow(clippy::too_many_arguments)]
     async fn claim_analysis_request_for_capacity(
         &self,
@@ -2277,6 +2364,7 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         viewer_only: bool,
         targeted_only: bool,
         cross_node: bool,
+        excluded_video_identities: &[String],
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     /// Retire the active (queued, running or submitted) requests targeted at
@@ -2354,6 +2442,16 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ) -> Result<u64, StoreError>;
 
     async fn analysis_requests(&self, limit: i64) -> Result<Vec<AnalysisRequest>, StoreError>;
+
+    /// For each of `file_ids` (at most [`MAX_FILE_REQUEST_LOOKUP`]), the
+    /// fragment-index request that says what "index now" would do: an active
+    /// (`queued`, `running`, `submitted`) one when there is any, else the
+    /// newest. Files with no request are absent. An advisory read from this
+    /// node's replica: it labels an action the server re-validates.
+    async fn fragment_index_requests_for_files(
+        &self,
+        file_ids: &[i64],
+    ) -> Result<Vec<AnalysisRequest>, StoreError>;
 
     /// Complete keyset inventory of active requests, including older work.
     async fn analysis_reconciliation_page(

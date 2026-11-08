@@ -853,6 +853,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         viewer_only: bool,
         targeted_only: bool,
         cross_node: bool,
+        excluded_video_identities: &[String],
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if node_id.is_empty()
             || node_id.len() > 128
@@ -861,6 +862,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
         {
             return Err(StoreError::Task("invalid analysis claim".to_owned()));
         }
+        let excluded = super::super::fragment_index_cluster::analysis_claim_exclusions_json(
+            excluded_video_identities,
+        )?;
         let node_id = node_id.to_owned();
         let pipeline_version = pipeline_version.map(str::to_owned);
         self.with_conn(move |conn| {
@@ -879,6 +883,10 @@ impl ClusterFragmentIndexStore for SqliteStore {
             } else {
                 "0".to_owned()
             };
+            let exclusion = super::super::fragment_index_cluster::analysis_executor_exclusion_clause(
+                "?1", "?6",
+            );
+            let order = super::super::fragment_index_cluster::analysis_claim_order("?1", "?3", "?4");
             let max_attempts = configured_max_attempts(conn)?;
             let backoff_base_ms = configured_backoff_base_ms(conn)?;
             let backoff_max_ms = configured_backoff_max_ms(conn)?.max(backoff_base_ms);
@@ -934,18 +942,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                             AND component <> 'subtitle_source' AND attempts < ?2
                             AND state = 'queued' AND not_before_ms <= ?3
                             AND (?5 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?5)
-                            AND {capacity} AND {viewer}
-                          ORDER BY CASE WHEN target_node_id IN (?1, '') THEN 0 ELSE 1 END,
-                                   CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
-                            OR (component = 'fragment_index' AND EXISTS (
-                                SELECT 1 FROM background_job_waiters waiter
-                                WHERE waiter.request_scope = 'playback-analysis'
-                                  AND waiter.job_id = analysis_requests.request_id
-                                  AND waiter.state = 'pending' AND waiter.deadline_ms > ?3))
-                            THEN 0 ELSE 1 END,
-                                   created_at_ms - CASE WHEN priority = 'forced'
-                                     THEN ?4 ELSE 0 END,
-                                   created_at_ms, request_id LIMIT 1"
+                            AND {capacity} AND {viewer} AND {exclusion}
+                          ORDER BY {order} LIMIT 1"
                     ),
                     params![
                         node_id,
@@ -953,6 +951,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         now_ms,
                         super::super::fragment_index_cluster::ANALYSIS_FORCED_PRIORITY_BOOST_MS,
                         pipeline_version.as_deref(),
+                        excluded,
                     ],
                     request_from_row,
                 )
@@ -1544,6 +1543,28 @@ impl ClusterFragmentIndexStore for SqliteStore {
             let rows =
                 statement.query_map(params![component, error_code, limit], request_from_row)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn fragment_index_requests_for_files(
+        &self,
+        file_ids: &[i64],
+    ) -> Result<Vec<AnalysisRequest>, StoreError> {
+        let files = super::super::fragment_index_cluster::file_request_lookup_json(file_ids)?;
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_read(move |conn| {
+            let sql = super::super::fragment_index_cluster::fragment_index_requests_for_files_sql(
+                "?1",
+                REQUEST_COLS,
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let rows = statement
+                .query_map(params![files], request_from_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
         .await
     }

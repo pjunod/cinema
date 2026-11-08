@@ -156,8 +156,20 @@ async function test(name, run) {
     assert.match(html, /1<\/b> nodes did not answer/);
     assert.match(html, /1<\/b> with no client report/);
     assert.match(html, /missing observation/);
+    // The row itself says why: the report and the create landed on different nodes.
+    assert.match(html, /data-starts-attempt="claim-a"[\s\S]*No client report[\s\S]*different node than the create/);
+    assert.doesNotMatch(html.split('data-starts-attempt="w"')[1], /different node than the create/, "a pending start is not explained as unobserved");
     api.ACTIVITY_STARTS.directoryUnavailable = true;
     assert.match(api.activityStartsHtml(api.ACTIVITY_STARTS, {}), /cluster directory could not be read/);
+  });
+
+  await test("a direct or progressive start shows its route and no empty breakdown", () => {
+    const {api} = harness();
+    api.ACTIVITY_STARTS.rows = [row({attempt: "remux", route: "progressive", phases: [], elapsed_ms: 0, authority_reads: 0, local_reads: 0, mutations: 0, store_ms: 0})];
+    api.ACTIVITY_STARTS.observed = 1;
+    const html = api.activityStartsHtml(api.ACTIVITY_STARTS, {});
+    assert.match(html, /<td>progressive<\/td>/);
+    assert.doesNotMatch(html, /Where the time went/);
   });
 
   await test("everything from the wire is escaped", () => {

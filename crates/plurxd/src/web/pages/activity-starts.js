@@ -11,6 +11,10 @@
 const ACTIVITY_STARTS={rows:[],nodes:[],unavailable:[],observation:null,next:null,history:[],cursor:null,names:{},observed:0,busy:false,error:null,epoch:0,acting:null,actionError:null,directoryUnavailable:false};
 const ACTIVITY_STARTS_OUTCOMES={presented:"Presented",failed:"Failed",refused:"Refused",pending:"Waiting for the client",unobserved:"No client report"};
 const ACTIVITY_STARTS_INDEX_STATES={indexed:"Indexed",partial:"Partly indexed",pending:"Not indexed",refused:"Cannot be indexed",unsupported:"Not applicable"};
+// Why a create can end with no report: its first-frame (or failure) beacon is
+// paired on the node that handled the create, and a client that keeps no
+// cookie behind a cluster address can send it to another node.
+const ACTIVITY_STARTS_UNOBSERVED="No first-frame report reached the node that handled this create. The client may have sent it to a different node than the create (a client without a cookie behind a cluster address), or the viewer left before a picture.";
 const ACTIVITY_STARTS_REASONS={unhealthy:"marked unhealthy",unsupported:"cannot be asked",unreachable:"unreachable",timed_out:"timed out",refused:"refused the request",http_error:"returned an error",invalid_response:"sent an unreadable answer"};
 
 function activityStartsMs(ms){
@@ -21,7 +25,8 @@ function activityStartsPhasesHtml(row){
   const phases=Array.isArray(row.phases)?row.phases:[];
   const cost=[["authority reads",row.authority_reads],["local reads",row.local_reads],["writes",row.mutations],["store time",row.store_ms==null?null:activityStartsMs(row.store_ms)]]
     .filter(([,value])=>value!=null).map(([label,value])=>`${esc(label)} ${esc(value)}`).join(" · ");
-  if(!phases.length&&!cost)return "";
+  // A direct or progressive start has no create, so nothing to break down.
+  if(!phases.length&&(!cost||!row.elapsed_ms))return "";
   const total=Number.isFinite(row.elapsed_ms)?row.elapsed_ms:phases.reduce((n,p)=>n+(Number(p.ms)||0),0);
   return `<details class="starts-phases"><summary>Where the time went · ${esc(activityStartsMs(total))}</summary>
     ${phases.length?`<ol>${phases.map(p=>`<li><b>${esc(p.name)}</b> ${esc(activityStartsMs(Number(p.ms)))}<small class="muted"> · ${esc(p.authority_reads)} authority · ${esc(p.local_reads)} local · ${esc(p.mutations)} writes</small></li>`).join("")}</ol>`:""}
@@ -31,7 +36,8 @@ function activityStartsOutcomeHtml(row){
   const label=ACTIVITY_STARTS_OUTCOMES[row.outcome]||row.outcome;
   const why=row.outcome==="refused"
     ?` <code>${esc(row.refusal)}</code>${row.retryable?' <small class="muted">retried by the client</small>':""}${row.refusal_message?`<small class="muted"> ${esc(row.refusal_message)}</small>`:""}`
-    :row.outcome==="failed"?` <code>${esc(row.failure||"")}</code>`:"";
+    :row.outcome==="failed"?` <code>${esc(row.failure||"")}</code>`
+    :row.outcome==="unobserved"?`<small class="muted starts-unobserved-why"> ${esc(ACTIVITY_STARTS_UNOBSERVED)}</small>`:"";
   return `<span class="pill starts-${esc(row.outcome)}">${esc(label)}</span>${why}`;
 }
 function activityStartsIndexHtml(row,i){
@@ -65,7 +71,7 @@ function activityStartsObservationHtml(s){
   if(!o)return "";
   const part=(n,label)=>n?`<span><b>${esc(n)}</b> ${esc(label)}</span>`:"";
   return `<p class="starts-observation" role="status">${[part(o.attempts,"starts"),part(o.presented,"presented"),part(o.failed,"failed"),part(o.refused,"refused"),part(o.pending,"waiting for the client"),part(o.unobserved,"with no client report"),part(o.unavailable_nodes,"nodes did not answer")].filter(Boolean).join(" · ")||"No starts recorded yet."}</p>
-    ${o.unobserved?'<p class="hint">A start with no client report is a missing observation: the client never said it got a picture or failed — it may have left, or reported to another node.</p>':""}`;
+    ${o.unobserved?'<p class="hint">A start with no client report is a missing observation, not a failure: the client never told this create’s node it got a picture or failed — its report may have landed on a different node than the create, or the viewer left.</p>':""}`;
 }
 function activityStartsNodesHtml(s,names){
   const missing=(s.nodes||[]).filter(n=>n.status==="unavailable");

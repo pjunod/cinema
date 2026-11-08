@@ -1841,6 +1841,13 @@ pub struct JobManager {
     /// Content jobs this node cannot currently read. These exclusions remain
     /// node-local so another voter can claim the row immediately.
     fragment_index_refusals: Mutex<HashMap<String, i64>>,
+    /// Copy-video identities this executor found it cannot emit for another
+    /// node's fragment-index request, with when it found that. The claim
+    /// leaves other nodes' rows naming one of them alone, so an idle node
+    /// does not claim, refuse and requeue the same row on every pass; they
+    /// expire after [`ANALYSIS_EXECUTOR_REFUSAL_TTL_MS`], so a capability
+    /// this node gains (a conversion setting turned on) is noticed.
+    analysis_executor_refusals: std::sync::Mutex<HashMap<String, i64>>,
     /// Logical fragment keys whose identity failed a shared read (§5.6):
     /// until the mark expires that identity is built in a pass of its own,
     /// and so is a lead that carries one. Keyed by the logical key, so a new
@@ -3714,6 +3721,11 @@ async fn fragment_index_requested_video_options(
         .unwrap_or_else(|| plurx_core::transcode::CopyVideoOptions::new(have_dovi, false)))
 }
 
+/// How long an executor remembers that it cannot emit a copy-video identity
+/// for another node's request (`JobManager::analysis_executor_refusals`):
+/// one re-check per identity per quarter hour, instead of one per pass.
+const ANALYSIS_EXECUTOR_REFUSAL_TTL_MS: i64 = 15 * 60 * 1_000;
+
 impl JobManager {
     pub(crate) fn configure_source_identity(
         &self,
@@ -3862,6 +3874,7 @@ impl JobManager {
             stop_producing: std::sync::atomic::AtomicBool::new(false),
             pretranscode_refusals: Mutex::new(HashMap::new()),
             fragment_index_refusals: Mutex::new(HashMap::new()),
+            analysis_executor_refusals: std::sync::Mutex::new(HashMap::new()),
             shared_pass_marks: Mutex::new(HashMap::new()),
             last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
             fragment_index_sweep_cursor: Mutex::new(None),
@@ -9637,6 +9650,7 @@ impl JobManager {
             // its own (the authority check above admits learners too).
             let cross_node = transcode.pretranscode_worker_idle();
             let now = clock_ms();
+            let excluded = self.analysis_executor_exclusions(now);
             let request = match self
                 .store
                 .claim_analysis_request_for_capacity(
@@ -9647,6 +9661,7 @@ impl JobManager {
                     transcode.admissions().live_is_waiting(),
                     targeted_only,
                     cross_node,
+                    &excluded,
                 )
                 .await
             {
@@ -9666,6 +9681,43 @@ impl JobManager {
             )
             .await;
         }
+    }
+
+    /// The identities this executor cannot emit, as the claim takes them:
+    /// expired entries dropped, at most the Store's bound.
+    fn analysis_executor_exclusions(&self, now: i64) -> Vec<String> {
+        let Ok(mut refusals) = self.analysis_executor_refusals.lock() else {
+            return Vec::new();
+        };
+        refusals.retain(|_, at| now.saturating_sub(*at) < ANALYSIS_EXECUTOR_REFUSAL_TTL_MS);
+        refusals
+            .keys()
+            .take(plurx_core::store::MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES)
+            .cloned()
+            .collect()
+    }
+
+    /// Remember that this executor cannot emit `identity`. Bounded by the
+    /// Store's limit: at the bound the oldest entry gives way.
+    fn remember_analysis_executor_refusal(&self, identity: &str, now: i64) {
+        if identity.is_empty() || identity.len() > 128 {
+            return;
+        }
+        let Ok(mut refusals) = self.analysis_executor_refusals.lock() else {
+            return;
+        };
+        if !refusals.contains_key(identity)
+            && refusals.len() >= plurx_core::store::MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES
+        {
+            if let Some(oldest) = refusals
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(key, _)| key.clone())
+            {
+                refusals.remove(&oldest);
+            }
+        }
+        refusals.insert(identity.to_owned(), now);
     }
 
     /// Resolve one claimed request under its renewed lease and settle what
@@ -10570,12 +10622,15 @@ impl JobManager {
             // moved, and no number of retries brings the old identity back.
             // On another node's request this node is only the executor: an
             // identity it cannot emit says nothing about the target, so the
-            // row goes back uncharged for a node that can.
+            // row goes back uncharged for a node that can -- and this
+            // executor's claims leave rows naming that identity alone from
+            // now on, rather than taking it back on every pass.
             Err(StoreError::Task(_)) if request.target_node_id != node_id => {
+                self.remember_analysis_executor_refusal(&request.video_identity, clock_ms());
                 return Err(AnalysisResolutionError::Retry {
                     code: "pipeline_version_unavailable",
                     charge_attempt: false,
-                })
+                });
             }
             Err(StoreError::Task(_)) => {
                 return Err(AnalysisResolutionError::Terminal("pipeline_superseded"))
@@ -11155,12 +11210,23 @@ impl JobManager {
         let mut ticks = 0_u8;
         loop {
             attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
-            if permit_lost.is_cancelled()
-                || !self.analysis_source_may_continue(transcode, request).await
-            {
+            if permit_lost.is_cancelled() {
                 return;
             }
-            if ticks == 0 && !self.cluster_fragment_index_enabled().await {
+            // The Store's admission is a linearizable read: during the read it
+            // is asked every fourth tick (2 s), the node-local rule every tick.
+            // The claim, the check before the first byte and the check before
+            // submission each ask it outright.
+            let may_continue = if ticks == 0 {
+                self.analysis_source_may_continue(transcode, request).await
+                    && self.cluster_fragment_index_enabled().await
+            } else {
+                match request {
+                    Some(request) => self.analysis_source_local_rule(transcode, request).await,
+                    None => false,
+                }
+            };
+            if !may_continue {
                 return;
             }
             ticks = (ticks + 1) % 4;

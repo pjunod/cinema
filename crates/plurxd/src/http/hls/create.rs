@@ -3546,6 +3546,14 @@ async fn create_with_purpose_inner(
                     );
                 }
                 crate::playstart::note_create_owner(&route.owner_node_id);
+                crate::playstart::note_replayed_create(
+                    &state,
+                    &user,
+                    id,
+                    &request_claim_id,
+                    (&response.session_id, response.encoder == "copy"),
+                    library_channel.is_some(),
+                );
                 return Ok(Json(response));
             }
             MediaSessionRequestClaim::Resolved(route)
@@ -3647,6 +3655,14 @@ async fn create_with_purpose_inner(
                         );
                     }
                     crate::playstart::note_create_owner(&route.owner_node_id);
+                    crate::playstart::note_replayed_create(
+                        &state,
+                        &user,
+                        id,
+                        &request_claim_id,
+                        (&response.session_id, response.encoder == "copy"),
+                        library_channel.is_some(),
+                    );
                     return Ok(Json(response));
                 }
                 // The owner has not activated yet. Wait on the durable row rather
