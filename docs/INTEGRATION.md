@@ -307,7 +307,9 @@ Both are retryable with a new attempt, and a cancelled request is a failure,
 never a status of its own. Requests made
 through `POST /scan` also carry `waiting_on` and `files`; their absence means a
 request from before contract v2 (or a full scan's own request). `waiting_on`
-is empty once the request's turn starts, and while it is queued is one of:
+is empty once the request's turn starts. While it is queued it is one of the
+values below, or empty when something unnamed holds it (playback protection,
+the provider cap); a worker pass that leaves it queued rewrites it:
 
 | `waiting_on` | Means |
 |---|---|
@@ -728,10 +730,6 @@ work around it and a reader who doesn't will misread the UI:
   way whether you clicked it or Curator asked for it, even though the request
   record carries `source` and `correlation_id`.
 - **No keys UI** (§2). Minting is a curl.
-- **A stale `waiting_on` can outlive its reason.** After a fence refusal wrote
-  `full_scan:<library>`, a later claim refused for another reason (playback's
-  foreground gate) writes nothing. The old value stays until the targeted pass
-  starts. The contract has no value for that wait.
 
 ## Keeping this honest
 
