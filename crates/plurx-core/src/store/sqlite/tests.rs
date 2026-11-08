@@ -862,8 +862,10 @@ async fn v6_rebuild_preserves_everything() {
     // v118 producer retargeting and v119 claim-bound playback continuity;
     // v120 gives artifact-only text model setup its managed v2 resource view;
     // v121 appends the managed v3 view for verified text-artifact inference.
+    // v122 adds source custody; v123 gives prepared artifacts the v4 view;
+    // v124 appends shared dispatch turns.
     assert_eq!(
-        version, 121,
+        version, 124,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );

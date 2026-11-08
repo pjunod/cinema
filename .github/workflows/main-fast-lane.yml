@@ -346,7 +346,7 @@ jobs:
     name: fast Rust gate
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [self-hosted, Linux, lab, high-cpu]
     # The online generic runners currently carry ffmpeg 8. Ubuntu 24.04 is the
     # pinned ffmpeg 6 environment used by this lane, while the host label keeps
     # the job on the high-CPU pool.
@@ -371,12 +371,23 @@ jobs:
             build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
             libgtk-4-dev libdbus-1-dev make nasm ninja-build xz-utils pkg-config python3
           # Forgejo needs Node before checkout; use the patched upstream build.
+          case "$(dpkg --print-architecture)" in
+            amd64)
+              node_arch=x64
+              node_sha=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
+              ;;
+            arm64)
+              node_arch=arm64
+              node_sha=6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b
+              ;;
+            *) echo "Unsupported Node architecture" >&2; exit 1 ;;
+          esac
           node_tmp="$(mktemp -d)"
           trap 'rm -rf "$node_tmp"' EXIT
           curl --fail --silent --show-error --location --retry 3 \
-            https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz \
+            "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-${node_arch}.tar.xz" \
             -o "$node_tmp/node.tar.xz"
-          echo "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce  $node_tmp/node.tar.xz" | sha256sum --check --strict
+          echo "$node_sha  $node_tmp/node.tar.xz" | sha256sum --check --strict
           tar -xJf "$node_tmp/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
           node --version | grep -Fx 'v22.23.4'
       - name: Check out the candidate

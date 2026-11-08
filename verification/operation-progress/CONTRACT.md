@@ -7,6 +7,15 @@ and [WAIT-MAP.md](WAIT-MAP.md) (source waits and external boundaries).
 This contract defines the meaning of `OperationProgress.tla`; it does not
 extend the original [safety contract](../durable-jobs/CONTRACT.md).
 
+## Queue observation source review on 2026-11-07
+
+Compared with `4ddbf1229`, the shared queue adds read-only counts of recent
+worker attempts and waiting manual requests. The SQLite and Hiqlite metrics
+queries count expired source custody, and the daemon caches that count for
+Activity and its sampler warning. These reads have no effect on claim,
+renewal, physical settlement, or any modeled transition. The focused queue
+regressions cover the observable rates and warnings.
+
 ## Artifact-only text translation — scoped source review on 2026-10-28
 
 Managed v3 / SQLite v121 exempts only the new closed
@@ -337,3 +346,7 @@ finite model to caption continuity, playback deadlines or remote-worker
 liveness. Model/configuration bytes, fairness premises and historical
 receipts retain their identities. Offline mapping validation is distinct
 from runtime tests, TLC qualification and a refinement proof.
+
+## November 7 library dispatch and source release
+
+Library discovery now polls during an active scan. Source pressure checks read the original physical claim identity without locking the publisher whose pending write the driver must poll. Current Store authority and the local monotonic deadline still govern source use. The release regression holds a committed acknowledgement pending during a pressure check, then observes the next real scan complete.

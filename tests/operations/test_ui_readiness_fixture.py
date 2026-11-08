@@ -2,6 +2,7 @@
 import copy
 from contextlib import redirect_stdout
 import io
+import json
 from pathlib import Path
 import runpy
 import tempfile
@@ -85,6 +86,33 @@ class UiReadinessFixtureCase(unittest.TestCase):
         for value in variants:
             with self.subTest(value=value), self.assertRaises(self.harness['Fail']):
                 self.normalize(value)
+
+    def test_activity_fixture_preserves_observation_age_and_source_deadlines(self):
+        frozen = self.harness['FROZEN_EPOCH'] * 1000
+        host = frozen + 10_000_000
+        stale = host - 40_000
+        rows = [
+            ('cluster/jobs?state=queued',
+             {'observed_at_ms': stale, 'processing': {'nodes': []}},
+             {'observed_at_ms': frozen - 40_000, 'processing': {'nodes': []}}),
+            ('activity/detail',
+             {'workers': {'a': {'observed_at_ms': stale}},
+              'analysis': {'now_ms': host, 'source_io_holders': [
+                 {'lease_expires_at_ms': host - 2, 'last_phase_at_ms': 0}]}},
+             {'workers': {'a': {'observed_at_ms': frozen - 40_000}},
+              'analysis': {'now_ms': frozen, 'source_io_holders': [
+                 {'lease_expires_at_ms': frozen - 2, 'last_phase_at_ms': 0}]}}),
+        ]
+        for path, document, expected in rows:
+            with self.subTest(path=path), patch('time.time_ns', return_value=host * 1_000_000):
+                intercepted = Mock()
+                intercepted.request.url = 'http://localhost/api/v1/' + path
+                intercepted.fetch.return_value.status = 200
+                intercepted.fetch.return_value.json.return_value = document
+                problems = []
+                self.harness['capture_activity_clock'](intercepted, problems)
+                self.assertEqual(problems, [])
+                self.assertEqual(json.loads(intercepted.fulfill.call_args.kwargs['body']), expected)
 
     def test_http_and_json_failures_are_preserved_and_mark_capture_failed(self):
         for status, document in [(503, self.response()), (200, {'items': []})]:

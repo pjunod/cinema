@@ -3,13 +3,31 @@
 #include <fenv.h>
 #include <math.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-static uint16_t old_pack(float value) {
-  return (uint16_t)lrintf(fminf(1, fmaxf(0, value)) * 65535);
+static uint16_t exact_pack_mode(float value, int mode) {
+  uint32_t bits;
+  memcpy(&bits, &value, sizeof(bits));
+  if (bits == 0 || (bits >> 31))
+    return 0;
+  if (bits >= UINT32_C(0x3f800000))
+    return 65535;
+  unsigned exponent = bits >> 23;
+  if (exponent < 110)
+    return mode == FE_UPWARD ? 1 : 0;
+  uint64_t numerator = (UINT64_C(0x800000) + (bits & 0x7fffffu)) * 65535;
+  uint64_t denominator = UINT64_C(1) << (150 - exponent);
+  unsigned quotient = (unsigned)(numerator / denominator);
+  uint64_t remainder = numerator % denominator;
+  bool increment = mode == FE_UPWARD ? remainder != 0 :
+                   mode == FE_TONEAREST && (remainder * 2 > denominator ||
+                     (remainder * 2 == denominator && (quotient & 1u)));
+  return (uint16_t)(quotient + increment);
 }
+static uint16_t exact_pack(float value) { return exact_pack_mode(value, fegetround()); }
 #include "rgb48.h"
-static void check(float v) { assert(isfinite(v)); assert(old_pack(v)==dv_pack_finite_rgb48(v)); }
+static void check(float v) { assert(isfinite(v)); assert(exact_pack(v)==dv_pack_finite_rgb48(v)); }
 static void check_bulk(float value) {
   float input[13] = {0, value, .25f, .75f, 1, -1, value, 2, -0.0f,
                     .125f, .875f, value, .5f};
@@ -19,7 +37,7 @@ static void check_bulk(float value) {
   assert(output[0] == 0xa5 && output[19] == 0xa5);
   for (size_t pixel = 0; pixel < 3; pixel++)
     for (size_t component = 0; component < 3; component++) {
-      uint16_t code = old_pack(input[1 + 4 * pixel + component]);
+      uint16_t code = exact_pack(input[1 + 4 * pixel + component]);
       assert(output[1 + 6 * pixel + 2 * component] == (uint8_t)code);
       assert(output[2 + 6 * pixel + 2 * component] == (uint8_t)(code >> 8));
     }
@@ -98,4 +116,5 @@ int main(void) {
   }
   assert(fesetround(FE_TONEAREST)==0);
   printf("finite-pack-equivalence-pass %lu inputs across4roundingmodes\n",checked);
+  return 0;
 }
