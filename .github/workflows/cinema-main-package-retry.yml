@@ -1,0 +1,208 @@
+name: Cinema main package checks after snapshot repair
+on:
+  workflow_dispatch:
+env:
+  CARGO_TERM_COLOR: always
+  CINEMA_MAIN_COMMIT: '1d11f0cdfa269e9b56dec0ffe45a10cefcb26712'
+concurrency:
+  group: cinema-main-package-1d11f0cdfa26
+  cancel-in-progress: false
+jobs:
+  package_smoke:
+    name: package and smoke (${{ matrix.arch }})
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
+    concurrency:
+      group: ${{ matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy' || format('plurx-package-{0}-{1}', github.run_id, matrix.arch) }}
+      cancel-in-progress: false
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            kernel_machine: x86_64
+            docker_machine: x86_64
+            runs_on: '["self-hosted","Linux","X64","lab","ci-topology"]'
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            kernel_machine: aarch64
+            docker_machine: aarch64
+            runs_on: '["self-hosted","Linux","ARM64","lab","ci-arm64"]'
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 1d11f0cdfa269e9b56dec0ffe45a10cefcb26712
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify actual merged main source
+        run: |
+          test "$(git rev-parse HEAD)" = "$CINEMA_MAIN_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = 81aaf3e0420b73e4991dc1ab724c94c30c680d83
+
+      - name: Prove the package runner and Docker engine are native
+        env:
+          ARCH: ${{ matrix.arch }}
+          DOCKER_ARCH: ${{ matrix.docker_machine }}
+          KERNEL_ARCH: ${{ matrix.kernel_machine }}
+        run: |
+          set -euo pipefail
+          test "$(uname -s)/$(uname -m)" = "Linux/$KERNEL_ARCH"
+          test "$(docker info --format '{{.OSType}}/{{.Architecture}}')" = "linux/$DOCKER_ARCH"
+      - id: buildx-cache
+        uses: ./.github/actions/buildx-cache
+        with:
+          lane: package-smoke-${{ matrix.arch }}
+      - name: Derive the binary-only Bookworm build
+        id: binary-build
+        run: |
+          python3 -m validation.release_dockerfile --binary-export \
+            Dockerfile Dockerfile.binaries
+          echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Compile and export the exact candidate binaries
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.binaries
+          target: release-binaries
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=local,dest=binary-export
+          build-args: |
+            PLURX_BUILD_REF=1d11f0cdfa269e9b56dec0ffe45a10cefcb26712
+            PLURX_BUILD_SHA=1d11f0cdfa269e9b56dec0ffe45a10cefcb26712
+            SOURCE_DATE_EPOCH=${{ steps.binary-build.outputs.source_date_epoch }}
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-compile-{0}', matrix.arch) || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=max,scope=package-compile-{0}', matrix.arch) || '' }}
+      - name: Bind the binary set to this candidate tree
+        run: |
+          scripts/release-package-candidate \
+            . . binary-export release-bin \
+            "${{ matrix.target }}" "$CINEMA_MAIN_COMMIT" "$CINEMA_MAIN_COMMIT"
+          for name in plurxd plurx-cluster-check; do
+            max_glibc=$(readelf --version-info "release-bin/$name" \
+              | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
+              | sort -V | tail -1)
+            test -n "$max_glibc"
+            test "$(printf '%s\n' "$max_glibc" 2.36 | sort -V | tail -1)" = 2.36 || {
+              echo "::error::${{ matrix.arch }} $name requires GLIBC_$max_glibc; Bookworm provides 2.36"
+              exit 1
+            }
+          done
+      - name: Build and export the exact audited Bookworm media package
+        if: matrix.arch == 'amd64'
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          target: linux-dolby-package-export
+          platforms: linux/amd64
+          outputs: type=tar,dest=linux-dolby-export.tar
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,scope=package-media-amd64' || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,mode=max,scope=package-media-amd64' || '' }}
+      - name: Validate and unpack the complete audited media export
+        if: matrix.arch == 'amd64'
+        run: python3 -m validation.media_export linux-dolby-export.tar linux-dolby-export
+      - name: Build the runtime from only the verified binaries
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.release
+          build-contexts: ${{ matrix.arch == 'amd64' && 'linux-dolby-package=./linux-dolby-export/package' || '' }}
+          push: false
+          load: true
+          platforms: linux/${{ matrix.arch }}
+          tags: plurx/plurxd:ci-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=1d11f0cdfa269e9b56dec0ffe45a10cefcb26712
+            tv.plurx.build-ref=1d11f0cdfa269e9b56dec0ffe45a10cefcb26712
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-runtime-{0}', matrix.arch) || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=min,scope=package-runtime-{0}', matrix.arch) || '' }}
+      - name: Verify architecture, identity, and stop/start runtime
+        env:
+          ARCH: ${{ matrix.arch }}
+          IMAGE: plurx/plurxd:ci-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = "linux/$ARCH"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$CINEMA_MAIN_COMMIT"
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
+            | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          test "$(docker run --rm --platform "linux/$ARCH" "$IMAGE" --version)" = "plurxd $version ($CINEMA_MAIN_COMMIT)"
+          test "$(docker run --rm --platform "linux/$ARCH" \
+            --entrypoint /usr/local/bin/plurx-cluster-check \
+            "$IMAGE" build-identity)" = "$CINEMA_MAIN_COMMIT"
+          scripts/container-smoke "$IMAGE"
+      - name: Back up the running image and restore it into a fresh container
+        env:
+          IMAGE: plurx/plurxd:ci-${{ matrix.arch }}
+        run: scripts/container-restore-smoke "$IMAGE"
+      - name: Record the native image that passed runtime and restore checks
+        env:
+          ARCH: ${{ matrix.arch }}
+          IMAGE: plurx/plurxd:ci-${{ matrix.arch }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, pathlib, re, subprocess
+          def read(*args):
+              return subprocess.check_output(args, text=True).strip()
+          image, = json.loads(read("docker", "image", "inspect", os.environ["IMAGE"]))
+          source = os.environ["CINEMA_MAIN_COMMIT"]
+          identity = read("docker", "run", "--rm", "--entrypoint", "/usr/local/bin/plurx-cluster-check", image["Id"], "build-identity")
+          version = read("docker", "run", "--rm", image["Id"], "--version")
+          labels = image["Config"]["Labels"]
+          assert identity == source == labels["org.opencontainers.image.revision"] == labels["tv.plurx.build-ref"]
+          assert labels["org.opencontainers.image.source"] == os.environ["SOURCE_URL"]
+          assert version.endswith(" (" + source + ")") and image["Os"] == "linux" and image["Architecture"] == os.environ["ARCH"]
+          assert re.fullmatch("sha256:[0-9a-f]{64}", image["Id"])
+          receipt = {"image_id":image["Id"],"os":image["Os"],"arch":image["Architecture"],"source":source,
+                     "source_tree":read("git","rev-parse","HEAD^{tree}"),"source_url":labels["org.opencontainers.image.source"],
+                     "build_ref":labels["tv.plurx.build-ref"],"cluster_check_identity":identity,"plurxd_version":version}
+          raw = json.dumps(receipt, sort_keys=True, separators=(",",":"))
+          pathlib.Path("release-bin/smoked-image.json").write_text(raw + "\n")
+          print("CINEMA_SMOKED_IMAGE=" + raw, flush=True)
+          PYTHON
+      - name: Retain the exact package receipt
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: package-smoke-receipt-${{ matrix.arch }}
+          path: |
+            release-bin/smoked-image.json
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain candidate binaries for push, tag, and qualification runs
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: package-smoke-binaries-${{ matrix.arch }}
+          path: |
+            release-bin/plurxd
+            release-bin/plurx-cluster-check
+            release-bin/*.dwp
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain candidate binaries for non-qualification push and tag runs
+        if: github.event_name == 'push'
+        continue-on-error: true
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: package-smoke-binaries-${{ matrix.arch }}
+          path: |
+            release-bin/plurxd
+            release-bin/plurx-cluster-check
+            release-bin/*.dwp
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 1
+      - name: Bound persistent BuildKit state
+        if: always() && steps.buildx-cache.outputs.local == 'true'
+        env:
+          BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
+        run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50
+
+
