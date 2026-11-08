@@ -14,6 +14,19 @@ source mapping**, not an automatic refinement proof. Source hashes in
 that set complete or that the abstractions are correct.
 
 
+## Pipeline v2 probe and schedule (T5) — scoped correspondence review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed PR #1408
+(`claude/pipeline-v2-m5-t5-probe-interval`) against its parent T4; author
+review awaiting an independent check. The only mapped change is
+[`store_contract.rs`](../../crates/plurx-core/tests/store_contract.rs): it
+registers the `library_schedule` test module and lists
+`create_library_with_scan_interval` in the Store inventory (554). The eight
+selected conformance bodies in `store_contract/formal_publication.rs` and the
+formal-publication module registration are unchanged. `probe_paths` and the
+six-hourly default touch no mapped worker source. No model change; the one
+whole-file pin is refreshed.
+
 ## Pipeline v2 request status (T4) — scoped correspondence review on 2026-11-08
 
 Claude (`claude-opus-5-5`) reviewed PR #1407
