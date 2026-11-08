@@ -325,7 +325,8 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         .replace("MediaSourceId=", "mediaSourceId=")
         .replace("PlaySessionId=", "playSessionId=")
         .replace("ApiKey=", "apiKey=");
-    let response = if duplicate {
+    let startup_started = std::time::Instant::now();
+    let mut response = if duplicate {
         let (first, second) = tokio::join!(
             f.app
                 .clone()
@@ -367,6 +368,30 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
             .await
             .expect("native root")
     };
+    // Encoded init inspection has its own finite response budget. Source
+    // service turns may outlive it, so honor the documented pending response
+    // without changing the server deadline or accepting any other failure.
+    while encoded && response.status() == StatusCode::SERVICE_UNAVAILABLE {
+        let pending = response
+            .into_body()
+            .collect()
+            .await
+            .expect("pending body")
+            .to_bytes();
+        let pending: Value = serde_json::from_slice(&pending).expect("typed pending response");
+        assert_eq!(pending["code"], "startup_timeout", "{pending}");
+        assert!(
+            startup_started.elapsed() < std::time::Duration::from_secs(60),
+            "native encoded initialization never completed: {pending}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        response = f
+            .app
+            .clone()
+            .oneshot(request("GET", &lowered, None, Value::Null))
+            .await
+            .expect("native init retry");
+    }
     let status = response.status();
     let bytes = response
         .into_body()
