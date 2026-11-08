@@ -10,8 +10,9 @@
 //! `fixtures` feature that `plurxd`'s dev-dependencies turn on. It is not part
 //! of the shipped library.
 //!
-//! Everything lands in `target/fixtures/` and is reused across runs. The
-//! sources are small on purpose (12 s of 640x360): CI pays for every x265
+//! Fixtures live in `$CARGO_TARGET_DIR/fixtures/` for an absolute target
+//! override, otherwise the workspace's `target/fixtures/`, and are reused.
+//! Sources are small on purpose (12 s of 640x360): CI pays for every x265
 //! encode, and none of the properties under test — GOP structure, box layout,
 //! sample timing — care how big the picture is.
 
@@ -66,6 +67,14 @@ pub fn run(cmd: &mut Command) -> Vec<u8> {
 }
 
 pub fn fixture_dir() -> PathBuf {
+    // Cargo runs tests from each package, so only an absolute override has
+    // an unambiguous location outside the source-only compiler workspace.
+    if let Some(target) = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .filter(|target| target.is_absolute())
+    {
+        return target.join("fixtures");
+    }
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop(); // crates/
     p.pop(); // repo root
