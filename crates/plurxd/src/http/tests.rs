@@ -12161,7 +12161,14 @@ async fn sharing_http_rejects_secret_bearing_unknown_fields_and_oversized_claims
 #[tokio::test]
 async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
     use plurx_core::{secrets::Secret, sharing::Invitation};
-    let (app, state) = test_app_with_state();
+    let storage = crate::test_tempdir().expect("private network storage");
+    let (_, mut state) = test_app_with_state();
+    state.sharing = Arc::new(crate::sharing::SharingManager::new(
+        state.sharing.key.clone(),
+        storage.path().join("sharing-tls"),
+        Default::default(),
+    ));
+    let app = router(state.clone());
     let admin = setup_admin(&app).await;
     let seeded = seed_content(&state).await;
     let endpoints = json!([{"ipv4":"100.101.102.103","ipv6":null,"ts_fqdn":"source.fixture.ts.net","port":32443,"spki_sha256":"a".repeat(64)}]);
@@ -12196,6 +12203,15 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1["code"], "sharing_invalid_request");
     }
+    // Production creates the node data directory before network storage.
+    std::fs::create_dir_all(
+        state
+            .sharing
+            .host_directory()
+            .parent()
+            .expect("node data directory"),
+    )
+    .expect("node data directory");
     // Combined external invitations are the production default. This owned
     // fixture has no provider authorization and must retain that refusal.
     let (status, denied) = call(
@@ -14131,6 +14147,13 @@ async fn seed_content(state: &AppState) -> Seed {
     const PLACEHOLDER: &[u8] = b"\x00\x00\x00\x18ftypmp42 tiny placeholder bytes";
     std::fs::write(&mpath, PLACEHOLDER).expect("write");
     let placeholder_len = PLACEHOLDER.len() as i64;
+    let placeholder_mtime = std::fs::metadata(&mpath)
+        .expect("fixture metadata")
+        .modified()
+        .expect("fixture mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("fixture epoch")
+        .as_secs() as i64;
     let probe = ProbeResult {
             duration_ms: Some(9_000_000),
             container: Some("mp4".into()),
@@ -14161,7 +14184,13 @@ async fn seed_content(state: &AppState) -> Seed {
         };
     let file = state
         .store
-        .upsert_file(movie, &mpath.to_string_lossy(), placeholder_len, 1, &probe)
+        .upsert_file(
+            movie,
+            &mpath.to_string_lossy(),
+            placeholder_len,
+            placeholder_mtime,
+            &probe,
+        )
         .await
         .expect("file");
     let show = state
@@ -14205,7 +14234,13 @@ async fn seed_content(state: &AppState) -> Seed {
         .expect("ep");
     state
         .store
-        .upsert_file(ep, &mpath.to_string_lossy(), placeholder_len, 1, &probe)
+        .upsert_file(
+            ep,
+            &mpath.to_string_lossy(),
+            placeholder_len,
+            placeholder_mtime,
+            &probe,
+        )
         .await
         .expect("epfile");
     Seed {
@@ -14276,7 +14311,13 @@ async fn seed_home(state: &AppState) -> HomeSeed {
             video,
             &vpath.to_string_lossy(),
             HOME_PLACEHOLDER.len() as i64,
-            1,
+            std::fs::metadata(&vpath)
+                .expect("video metadata")
+                .modified()
+                .expect("video mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("video epoch")
+                .as_secs() as i64,
             &ProbeResult {
                 duration_ms: Some(12_000),
                 container: Some("mp4".into()),
@@ -14298,7 +14339,13 @@ async fn seed_home(state: &AppState) -> HomeSeed {
             photo,
             &ppath.to_string_lossy(),
             photo_bytes.len() as i64,
-            1,
+            std::fs::metadata(&ppath)
+                .expect("photo metadata")
+                .modified()
+                .expect("photo mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("photo epoch")
+                .as_secs() as i64,
             &ProbeResult {
                 container: Some("jpg".into()),
                 width: Some(4032),
@@ -14904,6 +14951,7 @@ async fn the_delivery_plan_carries_a_selected_non_default_audio_track() {
     std::fs::create_dir_all(&dir).expect("media dir");
     let path = dir.join("Dual Language.mp4");
     std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("media file");
+    let metadata = std::fs::metadata(&path).expect("media metadata");
     // Both tracks decode on this client and the container is native, so
     // nothing but the selection can move the verdict off direct play.
     let file = state
@@ -14911,8 +14959,13 @@ async fn the_delivery_plan_carries_a_selected_non_default_audio_track() {
         .upsert_file(
             seeded.movie,
             &path.to_string_lossy(),
-            25,
-            1,
+            metadata.len() as i64,
+            metadata
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix mtime")
+                .as_secs() as i64,
             &ProbeResult {
                 duration_ms: Some(60_000),
                 container: Some("mp4".into()),
@@ -15398,7 +15451,12 @@ async fn android_dv_delivery_http_boundaries_bind_conversion_to_hls_and_narrow_p
             seeded.movie,
             &source.to_string_lossy(),
             metadata.len() as i64,
-            1,
+            metadata
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix mtime")
+                .as_secs() as i64,
             &ProbeResult {
                 duration_ms: Some(12_000),
                 container: Some("mkv".into()),

@@ -3697,7 +3697,7 @@ pub(crate) async fn serve_original_file_range(
     // replicated owner is bound to this exact object before its first read.
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(|_| ApiError::NotFound("file on disk"))?;
     let body = crate::source_custody::file_body(source, start, length, request)
         .await
         .map_err(ApiError::Internal)?;
