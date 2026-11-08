@@ -1879,11 +1879,9 @@ fn a_prepared_seam_counts_toward_graduation_only_when_clean_and_fully_measured()
     assert!(metrics.contains(
         "plurx_playback_preparation_seams_total{platform=\"linux\",processed=\"false\",outcome=\"refused\"}"
     ));
-    assert!(
-        metrics.contains(
-            "plurx_playback_preparation_seams_qualified_total{platform=\"linux\",processed=\"true\"}"
-        )
-    );
+    assert!(metrics.contains(
+        "plurx_playback_preparation_seams_qualified_total{platform=\"linux\",processed=\"true\"}"
+    ));
     assert!(metrics
         .contains("plurx_playback_preparation_processed_upgrades_total{outcome=\"scheduled\"}"));
 }

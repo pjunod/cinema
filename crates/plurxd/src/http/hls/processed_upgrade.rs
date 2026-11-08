@@ -273,12 +273,7 @@ async fn run_upgrade(state: &AppState, intent: &UpgradeIntent, run: &UpgradeRun)
     run_upgrade_with(state, intent, run, |request, recovery| async move {
         state
             .transcode
-            .prepare_processed_upgrade(
-                &intent.session_id,
-                &request,
-                &recovery,
-                intent.hdr10_intent,
-            )
+            .prepare_processed_upgrade(&intent.session_id, &request, &recovery, intent.hdr10_intent)
             .await
     })
     .await

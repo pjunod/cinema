@@ -1179,13 +1179,14 @@ async fn prepared_seam_session_processed(state: &AppState, session_id: &str) -> 
     let Ok(Ok(Some(route))) = read else {
         return false;
     };
-    serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(&route.recipe_json)
-        .is_ok_and(|recipe| {
+    serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(&route.recipe_json).is_ok_and(
+        |recipe| {
             recipe.request.dv_processing_destination.is_some()
                 || recipe
                     .candidate_catalog
                     .is_some_and(|catalog| catalog.candidate.processed_dv)
-        })
+        },
+    )
 }
 
 /// Sustained rate and burst allowance for `/client-log`, in reports per minute.

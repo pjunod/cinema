@@ -114,7 +114,9 @@ fn a_viewer_change_owns_the_playback_slot_over_an_upgrade() {
     let playback = uuid::Uuid::new_v4().to_string();
     // A viewer's own change in flight: the upgrade does not take its slot.
     let viewer = PendingCandidateGuard::begin(&playback, "viewer-ask");
-    assert!(begin_processed_upgrade(&playback, &tokio_util::sync::CancellationToken::new()).is_none());
+    assert!(
+        begin_processed_upgrade(&playback, &tokio_util::sync::CancellationToken::new()).is_none()
+    );
     assert!(
         !viewer.cancelled(),
         "an upgrade never cancels the viewer's ask"

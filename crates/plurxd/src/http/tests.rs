@@ -10509,7 +10509,9 @@ async fn logs_endpoint_is_admin_only() {
 /// a beacon of another kind takes nothing.
 #[tokio::test]
 async fn a_ttff_client_log_schedules_only_the_named_sessions_upgrade() {
-    use super::hls::processed_upgrade::{is_waiting, register, tests::ordinary_request, UpgradeIntent};
+    use super::hls::processed_upgrade::{
+        is_waiting, register, tests::ordinary_request, UpgradeIntent,
+    };
     let (app, state) = test_state();
     let admin = setup_admin(&app).await;
     let user_id = state
@@ -10547,11 +10549,20 @@ async fn a_ttff_client_log_schedules_only_the_named_sessions_upgrade() {
     };
     let (status, _) = call(&app, beacon("playback_failed", &named)).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert!(is_waiting(&named), "a beacon that is not a first frame takes nothing");
+    assert!(
+        is_waiting(&named),
+        "a beacon that is not a first frame takes nothing"
+    );
     let (status, _) = call(&app, beacon("ttff", &named)).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert!(!is_waiting(&named), "the named session's first frame took its upgrade");
-    assert!(is_waiting(&other), "another session's upgrade still waits for its own frame");
+    assert!(
+        !is_waiting(&named),
+        "the named session's first frame took its upgrade"
+    );
+    assert!(
+        is_waiting(&other),
+        "another session's upgrade still waits for its own frame"
+    );
 }
 
 #[tokio::test]
