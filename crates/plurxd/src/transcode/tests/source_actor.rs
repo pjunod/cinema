@@ -2119,9 +2119,6 @@ async fn source_actual_actor(
         // the revision it then reports is local playback's versioned grammar.
         let mut reported = None;
         for attempt in 0..200 {
-            // Each exchange is a new control sequence, as a real client sends.
-            let mut request = request.clone();
-            request.sequence = attempt + 1;
             let opened = actor
                 .control(request.clone(), Instant::now() + Duration::from_secs(10))
                 .await

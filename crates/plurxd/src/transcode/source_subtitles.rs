@@ -159,7 +159,7 @@ impl SourceNativeTracks {
         else {
             return Ok(None);
         };
-        let (bytes, _absolute) = crate::http::hls::source_window_cues(
+        let (bytes, absolute) = crate::http::hls::source_window_cues(
             session,
             &self.subs_dir,
             &self.file,
@@ -170,11 +170,13 @@ impl SourceNativeTracks {
             deadline,
         )
         .await;
-        // A cold answer is an empty document, and it still carries the HLS
-        // timestamp map: a client that pins the segment's time base from the
-        // empty answer must not lose it when the cues arrive on retry.
-        let Some(out) = crate::http::hls::source_native_slice(&bytes, origin, start, end) else {
-            return Ok(None);
+        let out = if absolute {
+            match crate::http::hls::source_native_slice(&bytes, origin, start, end) {
+                Some(out) => out,
+                None => return Ok(None),
+            }
+        } else {
+            bytes
         };
         validate_text(&out)?;
         Ok(Some(out))
