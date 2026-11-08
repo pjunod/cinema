@@ -9,6 +9,7 @@
   - Live reference; maintained with behavior changes. No overall status line.
 - **Read further only for:**
   - install and run (Docker, service, bare metal): `## Running it`
+  - upgrading a cluster one node at a time: `## Rolling upgrades`
   - settings, ports and listeners: `## Configuration surface`; `## Ports`
   - what a pill, scan state, storage number or the stats overlay means: `## Reading the activity pill`; `## Reading library scan status`; `## Reading playback (and the stats overlay)`
   - runbooks: sharing addresses, Curator, channels, Jellyfin, Live TV: `## Sharing Cinema addresses — set up before creating invitations`; `## Pairing another application (Curator) — the runbook`; `## Library channels — the runbook`; `## Jellyfin client compatibility`; `## Live TV (HDHomeRun) — the runbook`
@@ -3306,6 +3307,40 @@ A removed node's old data directory is intentionally tombstoned: startup sees
 that its Raft id is no longer a voter and refuses. To add that machine again,
 stop it, discard its old plurx data directory, and join from a fresh directory
 with a newly issued token. Never copy the removed directory back into service.
+
+## Rolling upgrades
+
+Media placement between nodes compares three facts **independently**, and
+Settings → Cluster shows all three on every node card: the **build** the node
+reports, its **media protocol** (`PROTOCOL_VERSION` in
+`crates/plurxd/src/media_pool.rs`; placement requires an exact match), and
+whether the node you are looking from would place on it now (**eligible
+owner** — a fresh, exact-protocol advertisement with an available egress and
+an encoder; the card names the reason when it is not). A node on another
+protocol never appears in placement at all, so during a protocol-changing
+upgrade the fleet is two placement cohorts: old nodes place among old nodes,
+new among new.
+
+The rule for a rolling upgrade:
+
+1. Upgrade one serving cohort at a time — one node, then confirm on the
+   Cluster card that it reads ready, its new build and protocol, and
+   *eligible owner* before the next.
+2. Keep at least one eligible owner in each cohort. While any old-build
+   ingress still takes requests, at least one old-protocol worker must stay
+   eligible, or that ingress can only start locally.
+3. Drain old ingress before upgrading the last old node: its sessions finish
+   or move first, because no new-protocol worker will accept its placement.
+
+A build skew with the same protocol is ordinary and needs none of this; the
+card flags it so it is noticed, not because placement refuses it.
+
+Protocol changes, newest first. `tests/operations/test_media_pool_wire.py`
+(run by `make paperwork`) refuses a change to a strict media-pool envelope
+without a `PROTOCOL_VERSION` bump and a dated line here naming it:
+
+- 2026-11-07 (recorded): protocol 9 — resolved audio claim and delivery on
+  `SessionRequest`, `QualityCatalogRequest` and `RemoteStartResponse`.
 
 ## Configuration surface
 

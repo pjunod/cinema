@@ -105,15 +105,15 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 
 | Lane | Owner (model, session) | Plan rev | Built on effort | Accepted on fleet (before → after) |
 |---|---|---|---|---|
-| H2 | — | 3 | unclaimed | build/protocol/owner inventory; placement through each mixed cohort → |
-| C2 | — | 3 | unclaimed | verdict idle; 3,878 waiting unreported → |
-| C3 | — | 3 | unclaimed | active 4,097/4,096; retired-digest queued 3,878; ready_24h 0 → |
-| C1 | — | 3 | unclaimed | claims/2.7 d 16 (media1); lab4/lab6 cannot claim → |
-| D2 | — | 3 | unclaimed | codeless 503s; create p99 → |
-| D1 | — | 3 | unclaimed | DV vs non-DV cold TTFF; 20 switches/platform → |
-| G1 | — | 3 | unclaimed | — |
-| R1 | — | 3 | unclaimed | authority_fence won 16/18 → by cause |
-| H1 | — | 3 | unclaimed | — |
+| H2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | built (`claude/ps-h2`) | build/protocol/owner inventory; placement through each mixed cohort → |
+| C2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | built (`claude/ps-c3`) | verdict idle; 3,878 waiting unreported; 2026-11-07 22:3x UTC media1 (`4ddbf1229`): verdict `degraded`, claimable 2, ready_24h 0, claimed_24h 0, claims_since_start 36, depth `retry_wait` fragment_index 3,881 (due rows mislabelled: ms compared to s) → |
+| C3 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | built (`claude/ps-c3`) | active 4,097/4,096; retired-digest queued 3,878; ready_24h 0 → |
+| C1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | claimed | claims/2.7 d 16 (media1); lab4/lab6 cannot claim → |
+| D2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | claimed | codeless 503s; create p99 → |
+| D1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | claimed (last) | DV vs non-DV cold TTFF; 20 switches/platform → |
+| G1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | claimed (after D2) | — |
+| R1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | claimed | authority_fence won 16/18 → by cause |
+| H1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | built (`claude/ps-h1`) | — |
 | A1 | — | 3 | unclaimed (design review first) | vod_index_pending fallbacks 18/29; remux ≤5 s share; p90 → |
 | A2 | — | 3 | unclaimed | HW/SW transcode TTFF → |
 | A3 | — | 3 | unclaimed | — |
@@ -138,3 +138,4 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 | 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Fleet state read (queue wedged at cap; release-as-fence); Fable review applied (rev 2, not what #1401 merged — bridge propagation). |
 | 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Astra review applied; rev 3 is the first revision build agents may claim. |
 | 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Ruling 3 mechanism settled (M6); Phase 1 build contracts written (QUEUE, CREATE). |
+| 2026-11-07 | H2, C2, C3, C1, D2, R1, H1, G1, D1 | claude-opus-5-5 / 01BCWL9xwmpSjitHqZMTRAht | Phase 1 claimed. Lanes integrate on `effort/playback-start`; per Paul (2026-11-07) one adversarial review and one fast-lane run on effort → main rather than per lane. H2/C2/C3 built; H1 built by a Sonnet sub-agent; C1, D2, R1 by Opus sub-agents. |
