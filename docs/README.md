@@ -112,7 +112,7 @@ index rows by status as of 2026-10-17 — the folder index is authoritative.
 | [ci/](ci/README.md) | The build, the gate, and the agents that use it. | 4 live · 16 open · 3 done |
 | [features/](features/README.md) | Whole capabilities planned end to end, including the project backlog. | 4 live · 41 open · 13 built · 6 done |
 | [reviews/](reviews/README.md) | Pull-request and effort review records. | 2 live · 10 open · 7 done · 1 superseded |
-| [archive/](archive/README.md) | Finished work, kept for history. | 2 rows |
+| [archive/](archive/README.md) | Finished work, kept for history. | 3 rows |
 
 ## Adding a document
 
