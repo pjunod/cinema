@@ -143,44 +143,6 @@ const ROW_JSON: &str = "json_object('request_id', request_id, 'key_id', key_id, 
      'waiting_on', waiting_on, 'files', json(files_json), \
      'created_at_ms', created_at_ms, 'updated_at_ms', updated_at_ms)";
 
-pub(super) async fn upsert<T: QueueSql>(store: &T, row: ScanRequestV2) -> Result<(), StoreError> {
-    ScanRequestV2Seed {
-        key_id: row.key_id,
-        request_key: row.request_key.clone(),
-        expected_files: row.expected_files.clone(),
-    }
-    .validate()?;
-    if !request_id_ok(&row.request_id)
-        || !waiting_on_ok(&row.waiting_on)
-        || encode(&row.files)?.len() > MAX_FILES_JSON_BYTES
-    {
-        return Err(StoreError::Task("invalid scan request sidecar".into()));
-    }
-    let rows = store
-        .queue_sql(
-            r#"INSERT INTO background_scan_request_v2
-    (request_id, key_id, request_key, expected_files_json, waiting_on, files_json, created_at_ms, updated_at_ms)
-SELECT json_extract($1, '$.request_id'), json_extract($1, '$.key_id'), json_extract($1, '$.request_key'),
-    json_extract($1, '$.expected_files'), json_extract($1, '$.waiting_on'), json_extract($1, '$.files'),
-    json_extract($1, '$.created_at_ms'), json_extract($1, '$.updated_at_ms')
-WHERE EXISTS (SELECT 1 FROM background_library_requests WHERE request_id = json_extract($1, '$.request_id'))
-ON CONFLICT(request_id) DO UPDATE SET waiting_on = excluded.waiting_on, files_json = excluded.files_json,
-    updated_at_ms = excluded.updated_at_ms
-RETURNING 'true' AS result_json"#
-                .into(),
-            encode(&row)?,
-            true,
-            true,
-        )
-        .await?;
-    if rows.is_empty() {
-        return Err(StoreError::Task(
-            "scan request sidecar needs its durable request".into(),
-        ));
-    }
-    Ok(())
-}
-
 pub(super) async fn get<T: QueueSql>(
     store: &T,
     request_id: &str,

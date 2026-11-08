@@ -122,7 +122,124 @@ pub(crate) fn validated_source_tail_drops(
     statements
 }
 
-/// Rewind an owned, empty v122/v123/v124 source tail to published v121.
+pub(crate) const SCAN_REQUEST_FIXTURE_SHAPE_SQL: &str = "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (name GLOB 'background_scan_request_v2*' OR tbl_name GLOB 'background_scan_request_v2*') ORDER BY type,name";
+
+fn scan_request_fixture_objects(
+    connection: &rusqlite::Connection,
+) -> Vec<(String, String, String)> {
+    connection
+        .prepare(SCAN_REQUEST_FIXTURE_SHAPE_SQL)
+        .expect("scan request sidecar inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("scan request sidecar objects")
+        .collect::<Result<_, _>>()
+        .expect("complete scan request sidecar objects")
+}
+
+/// The published v125 sidecar objects, built from the migration's own SQL.
+pub(crate) fn scan_request_fixture_shape() -> Vec<(String, String, String)> {
+    let expected = rusqlite::Connection::open_in_memory().expect("scan request witness");
+    expected
+        .execute_batch("CREATE TABLE background_library_requests(request_id TEXT PRIMARY KEY);")
+        .expect("scan request sidecar dependency");
+    expected
+        .execute_batch(include_str!("../../src/store/scan_request_v2.sql"))
+        .expect("published v125 scan request sidecar");
+    scan_request_fixture_objects(&expected)
+}
+
+/// The pure removal plan for the v125 contract v2 scan request sidecar: the
+/// exact published DDL, its one marker and no request facts, or no plan. Triggers first, then the tables;
+/// the unique index goes with its table.
+pub(crate) fn validated_scan_request_drops(
+    objects: &[(String, String, String)],
+    marker: (i64, i64),
+    requests: i64,
+) -> Vec<String> {
+    assert_eq!(
+        objects,
+        scan_request_fixture_shape(),
+        "exact published scan request sidecar required"
+    );
+    assert_eq!(
+        marker,
+        (1, 1),
+        "the scan request sidecar requires its exact singleton marker"
+    );
+    assert_eq!(
+        requests, 0,
+        "targeted scan request facts must not be discarded"
+    );
+    let mut statements = Vec::new();
+    for kind in ["trigger", "table"] {
+        for (_, name, _) in objects
+            .iter()
+            .filter(|(object_kind, _, _)| object_kind == kind)
+        {
+            statements.push(format!(
+                "DROP {} \"{}\";",
+                kind.to_ascii_uppercase(),
+                name.replace('"', "\"\"")
+            ));
+        }
+    }
+    statements
+}
+
+/// At v125, the validated sidecar removal; below it the sidecar must be absent.
+fn scan_request_rewind_plan(connection: &rusqlite::Connection, version: i64) -> Vec<String> {
+    let objects = scan_request_fixture_objects(connection);
+    if version < 125 {
+        assert!(
+            objects.is_empty(),
+            "a fixture before v125 cannot carry the scan request sidecar"
+        );
+        return Vec::new();
+    }
+    // Validate DDL before using any table identity in the inventory.
+    assert_eq!(
+        objects,
+        scan_request_fixture_shape(),
+        "exact published scan request sidecar required"
+    );
+    let marker: (i64, i64) = connection
+        .query_row(
+            "SELECT count(*),COALESCE(sum(singleton=1 AND version=1),0) FROM background_scan_request_v2_schema",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("scan request marker inventory");
+    let requests: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM background_scan_request_v2",
+            [],
+            |row| row.get(0),
+        )
+        .expect("scan request data inventory");
+    validated_scan_request_drops(&objects, marker, requests)
+}
+
+/// Rewind an owned v125 fixture to published v124: only the exact empty
+/// scan request sidecar is removed.
+#[allow(dead_code)]
+pub(crate) fn rewind_empty_scan_request_to_v124(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture scan request ordinal");
+    assert_eq!(
+        version, 125,
+        "only the published v125 sidecar may be rewound"
+    );
+    let statements = scan_request_rewind_plan(connection, version).join("\n");
+    connection
+        .execute_batch(&format!(
+            "SAVEPOINT scan_request_fixture; {statements} PRAGMA user_version=124; RELEASE scan_request_fixture;"
+        ))
+        .expect("atomic scan request fixture rewind");
+}
+
+/// Rewind an owned, empty v122-v125 source tail to published v121 (the v125
+/// scan request sidecar first, through its own validated plan).
 /// Managed operations and receipts remain intact while their exact resource
 /// view and marker return to v3. Source custody, grants and checkpoints refuse.
 fn source_extension_rewind_plan(
@@ -133,9 +250,10 @@ fn source_extension_rewind_plan(
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture source extension ordinal");
     assert!(
-        matches!(version, 122..=124),
+        matches!(version, 122..=125),
         "only published source extensions may be rewound"
     );
+    let sidecar = scan_request_rewind_plan(connection, version);
     let objects = source_tail_objects(connection);
     let counts = objects
         .iter()
@@ -151,7 +269,13 @@ fn source_extension_rewind_plan(
             (name.clone(), count)
         })
         .collect::<Vec<_>>();
-    let mut statements = validated_source_tail_drops(&objects, &counts, version == 124, |_| true);
+    let mut statements = sidecar;
+    statements.extend(validated_source_tail_drops(
+        &objects,
+        &counts,
+        version >= 124,
+        |_| true,
+    ));
     let marker: i64 = connection
         .query_row(
             "SELECT count(*) FROM background_source_schema WHERE singleton=1 AND version=1",

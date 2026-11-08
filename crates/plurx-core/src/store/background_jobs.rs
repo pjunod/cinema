@@ -2349,11 +2349,6 @@ pub trait BackgroundJobStore: Send + Sync {
         key_id: i64,
         request_key: &str,
     ) -> Result<Option<String>, StoreError>;
-    /// Later updates only; the row itself is written at admission.
-    async fn upsert_scan_request_v2(
-        &self,
-        row: super::scan_request_v2::ScanRequestV2,
-    ) -> Result<(), StoreError>;
     async fn set_scan_request_waiting_on(
         &self,
         request_id: &str,
@@ -3179,12 +3174,6 @@ LIMIT 1
         request_key: &str,
     ) -> Result<Option<String>, StoreError> {
         super::scan_request_v2::by_key(self, key_id, request_key).await
-    }
-    async fn upsert_scan_request_v2(
-        &self,
-        row: super::scan_request_v2::ScanRequestV2,
-    ) -> Result<(), StoreError> {
-        super::scan_request_v2::upsert(self, row).await
     }
     async fn set_scan_request_waiting_on(
         &self,
