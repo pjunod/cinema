@@ -3553,12 +3553,6 @@ mod tests {
             "a description cannot inherit production permission"
         );
         assert!(matching[0].dispatch_supported && matching[0].binding.is_some());
-        assert!(request
-            .candidate_context
-            .as_ref()
-            .expect("context")
-            .prepared_processing
-            .is_none());
     }
 
     #[tokio::test]

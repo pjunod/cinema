@@ -3256,8 +3256,8 @@ async fn a_candidate_rolling_fallback_refuses_a_source_replaced_after_the_vod_at
 }
 
 /// A processed Auto candidate is an enhancement of the ordinary request the
-/// create already resolved. Dispatched without its prepared graph (here: none
-/// was carried, as after an expired or consumed `PreparedCandidateOnce`), it
+/// create already resolved. A create holds no prepared processing graph since
+/// processed Dolby Vision became an upgrade after the first frame, so it
 /// serves that ordinary request and says why, on both engines the create may
 /// end on; only a processed candidate the client named itself is refused, and
 /// the rolling engine refuses one whatever path hands it over.
