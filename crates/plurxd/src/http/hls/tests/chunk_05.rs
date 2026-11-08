@@ -523,7 +523,8 @@ async fn a_create_cancelled_at_its_claim_await_leaves_the_claim_retryable() {
         .create_user("claim-cancelled", "hash", false)
         .await
         .expect("create claim-cancelled user");
-    let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
+    let principal =
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
     let request_id = "claim-cancelled-attempt";
     let player = "claim-cancelled-player";
     let owner = uuid::Uuid::new_v4().to_string();

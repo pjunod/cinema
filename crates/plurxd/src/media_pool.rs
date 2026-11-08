@@ -444,7 +444,9 @@ impl CreateStartupBudget {
         claim_limit: tokio::time::Instant,
         repost: Duration,
     ) -> tokio::time::Instant {
-        (self.viewer_end + repost).max(self.deadline).min(claim_limit)
+        (self.viewer_end + repost)
+            .max(self.deadline)
+            .min(claim_limit)
     }
     pub(crate) fn calls(&self) -> u32 {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
