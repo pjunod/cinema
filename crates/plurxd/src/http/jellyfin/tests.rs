@@ -555,14 +555,51 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         .await
         .expect("init bytes")
         .to_bytes();
-    let mut range = request("GET", segment_url, Some(&f.token), Value::Null);
-    range.headers_mut().insert(
-        "range",
-        format!("bytes={}-{}", init.len() - 3, init.len() + 4)
-            .parse()
-            .expect("range"),
-    );
-    let response = f.app.clone().oneshot(range).await.expect("crossing range");
+    let crossing_range = || {
+        let mut range = request("GET", segment_url, Some(&f.token), Value::Null);
+        range.headers_mut().insert(
+            "range",
+            format!("bytes={}-{}", init.len() - 3, init.len() + 4)
+                .parse()
+                .expect("range"),
+        );
+        range
+    };
+    let segment_started = std::time::Instant::now();
+    let mut response = f
+        .app
+        .clone()
+        .oneshot(crossing_range())
+        .await
+        .expect("crossing range");
+    while encoded && response.status() == StatusCode::SERVICE_UNAVAILABLE {
+        assert_eq!(
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        let pending = response
+            .into_body()
+            .collect()
+            .await
+            .expect("pending segment body")
+            .to_bytes();
+        let pending: Value = serde_json::from_slice(&pending).expect("typed pending segment");
+        assert_eq!(pending["code"], "segment_pending", "{pending}");
+        assert!(
+            segment_started.elapsed() < std::time::Duration::from_secs(60),
+            "native encoded segment never completed: {pending}"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        response = f
+            .app
+            .clone()
+            .oneshot(crossing_range())
+            .await
+            .expect("crossing range retry");
+    }
     let status = response.status();
     let bytes = response
         .into_body()
