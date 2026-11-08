@@ -3078,13 +3078,14 @@ pub async fn direct(
         // repetition is what keeps a live viewer listed, since a direct play
         // has no session to end and a closed tab announces nothing.
         Ok(response) if method == Method::GET && response.status().is_success() => {
-            crate::playstart::note_playback_started(
+            crate::playstart::note_request_started(
                 &state,
                 user.id,
                 &user.username,
                 id,
                 crate::delivery::Method::Direct,
                 q.stream.as_deref(),
+                crate::playstart::request_client_build(&headers),
             )
         }
         // HEAD and rejected ranges carry no media and are not playback.
@@ -3286,10 +3287,12 @@ pub async fn stream_mp4(
     auth: AuthUser,
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
+    headers: HeaderMap,
     query: Query<StreamQuery>,
 ) -> Result<Response, ApiError> {
     let (user_id, start_attempts) = (auth.0.id, std::sync::Arc::clone(&state.start_attempts));
-    let served = serve_stream_mp4(auth, State(state), AxPath(id), query).await;
+    let client_build = crate::playstart::request_client_build(&headers);
+    let served = serve_stream_mp4(auth, State(state), AxPath(id), query, client_build).await;
     // A start request the server refused (C-08 M5 row 4).
     if let Err(error) = &served {
         start_attempts.refused(
@@ -3308,6 +3311,7 @@ async fn serve_stream_mp4(
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
     Query(q): Query<StreamQuery>,
+    client_build: String,
 ) -> Result<Response, ApiError> {
     let mut file = load_file(&state, id).await?;
     file.audio_offset_ms = if file.audio_streams.is_empty() {
@@ -3374,13 +3378,14 @@ async fn serve_stream_mp4(
         },
         "progressive delivery narrowed requested playback policy"
     );
-    crate::playstart::note_playback_started(
+    crate::playstart::note_request_started(
         &state,
         user.id,
         &user.username,
         id,
         crate::delivery::Method::Remux,
         q.stream.as_deref(),
+        client_build,
     );
     let readrate = readrate_setting(&state).await;
     // A remux copies the video untouched, so the wire and the source read both

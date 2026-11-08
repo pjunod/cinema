@@ -1159,16 +1159,16 @@ pub use fragment_index_cluster::{
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
     ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
     ClusterFragmentIndexStore, ClusterIndexAvailabilityProbe, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
-    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
-    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
+    LiveAnalysisEngines, NewAnalysisRequest, NewClusterFragmentIndexJob, StrandedRemedy,
+    SubtitleBackfillCandidate, SubtitleBackfillDiagnostics, SubtitleSourcePublication,
+    SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
     CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
     DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
     DEFAULT_SUBTITLE_WINDOW_SECS, FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS,
     MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
-    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
-    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
-    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
+    MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES, MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS,
+    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_FILE_REQUEST_LOOKUP, MAX_SUBTITLE_WINDOW_SECS,
+    MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -1362,6 +1362,46 @@ pub const ANALYSIS_LIFECYCLE_METRICS: [(&str, &str); 27] = [
     ("failure", "other"),
     ("publication", "validated"),
 ];
+/// The bounded `code` label set of `plurx_analysis_queue_failed_by_code`:
+/// the failure codes Activity → Analysis explains
+/// (`crates/plurxd/src/web/pages/analysis.js`, `analysisErrorInfo`), with
+/// every other code — including none — counted as the final `other`.
+pub const ANALYSIS_FAILURE_CODES: [&str; 33] = [
+    "foreground_preempted",
+    "request_reconciled",
+    "source_unavailable",
+    "source_catalog_read_failed",
+    "source_attestation_failed",
+    "source_attestation_timeout",
+    "source_record_failed",
+    "source_superseded",
+    "source_changed",
+    "source_deleted",
+    "pipeline_superseded",
+    "invalid_cache_identity",
+    "queue_write_failed",
+    "queue_full_or_busy",
+    "job_terminal",
+    "lease_expired",
+    "queue_expired",
+    "node_local_refusal",
+    "attempt_limit",
+    "index_budget_exceeded",
+    "index_probe_timeout",
+    "index_source_io",
+    "index_process_failed",
+    "index_video_shortfall",
+    "index_completion_unverified",
+    "index_output_malformed",
+    "index_retry_window_expired",
+    "unsupported",
+    "truncated",
+    "encode_failed",
+    "pipeline_version_unavailable",
+    "local_publish_failed",
+    "other",
+];
+pub const ANALYSIS_FAILURE_CODE_SLOTS: usize = ANALYSIS_FAILURE_CODES.len();
 pub const ANALYSIS_QUEUE_METRIC_SLOTS: usize = ANALYSIS_METRIC_COMPONENTS.len()
     * ANALYSIS_METRIC_STATES.len()
     * ANALYSIS_METRIC_PRIORITIES.len()
@@ -1377,6 +1417,9 @@ pub struct AnalysisStoreMetrics {
     pub queue_oldest_age_seconds: [i64; ANALYSIS_QUEUE_METRIC_SLOTS],
     pub lifecycle_counts: [i64; ANALYSIS_LIFECYCLE_METRIC_SLOTS],
     pub marker_counts: [i64; ANALYSIS_MARKER_METRIC_SLOTS],
+    /// Failed analysis rows (requests without a job row, plus jobs) by
+    /// `last_error_code`, slotted by [`ANALYSIS_FAILURE_CODES`].
+    pub failed_by_code: [i64; ANALYSIS_FAILURE_CODE_SLOTS],
     pub health: AnalysisQueueHealth,
 }
 
@@ -1387,6 +1430,7 @@ impl Default for AnalysisStoreMetrics {
             queue_oldest_age_seconds: [0; ANALYSIS_QUEUE_METRIC_SLOTS],
             lifecycle_counts: [0; ANALYSIS_LIFECYCLE_METRIC_SLOTS],
             marker_counts: [0; ANALYSIS_MARKER_METRIC_SLOTS],
+            failed_by_code: [0; ANALYSIS_FAILURE_CODE_SLOTS],
             health: AnalysisQueueHealth::default(),
         }
     }
@@ -1421,6 +1465,49 @@ pub struct AnalysisQueueHealth {
     /// that has not run yet; a standing count is the outage's own signature.
     pub running_past_lease: i64,
     pub last_ready_at_ms: i64,
+    /// Fragment-index work inside a retry wait: pre-worker requests
+    /// (`analysis_requests`, `queued`, no worker cache key yet) before their
+    /// `not_before_ms`, plus queued worker jobs backing off after a failed
+    /// attempt. `claimable` counts neither, so without this a queue whose
+    /// whole backlog is backing off reads `idle`.
+    pub waiting: i64,
+    /// Due pre-worker requests whose `pipeline_version` no live engine runs —
+    /// work that cannot be claimed by anyone until it is reconciled. Zero
+    /// when the caller could not name the live engine set.
+    pub incompatible: i64,
+    /// Due work some live engine can claim: queued jobs past their retry
+    /// wait plus due, compatible pre-worker requests. `claimable` is the
+    /// same number under its historical name.
+    pub eligible: i64,
+    /// `created_at_ms` of the oldest queued pre-worker request, 0 when none.
+    pub oldest_queued_at_ms: i64,
+}
+
+impl AnalysisQueueHealth {
+    /// Assemble the health sample from the jobs-table half (`claimable_jobs`
+    /// = queued jobs past their retry wait) and the pre-worker request half
+    /// (`[waiting, incompatible, eligible_requests, oldest_queued_at_ms]`).
+    #[must_use]
+    pub fn with_requests(
+        jobs: [i64; 6],
+        [waiting, incompatible, eligible_requests, oldest_queued_at_ms]: [i64; 4],
+    ) -> Self {
+        let [ready_24h, attempt_limit_24h, claimed_24h, claimable_jobs, running_past_lease, last_ready_at_ms] =
+            jobs;
+        let eligible = claimable_jobs.saturating_add(eligible_requests);
+        Self {
+            ready_24h,
+            attempt_limit_24h,
+            claimed_24h,
+            claimable: eligible,
+            running_past_lease,
+            last_ready_at_ms,
+            waiting,
+            incompatible,
+            eligible,
+            oldest_queued_at_ms,
+        }
+    }
 }
 
 /// The one-word answer an operator needs before reading anything else.
@@ -1487,17 +1574,21 @@ pub fn analysis_queue_verdict(
     let nothing_happening = health.ready_24h == 0
         && health.claimed_24h == 0
         && health.claimable == 0
-        && health.running_past_lease == 0;
+        && health.running_past_lease == 0
+        && health.waiting == 0
+        && health.incompatible == 0;
     if nothing_happening {
         return AnalysisQueueVerdict::Idle;
     }
     if health.ready_24h == 0 {
-        // Two ways to be sure, and a wedged queue only ever shows one of
+        // Three ways to be sure, and a wedged queue only ever shows one of
         // them: it either claimed plenty and produced nothing, or it never
-        // claimed at all while work piled up in front of it.
+        // claimed at all while work piled up in front of it — claimable work,
+        // or work under an engine digest no live node runs any more.
         let claimed_enough_to_be_sure = health.claimed_24h >= ANALYSIS_DEAD_CLAIM_FLOOR;
-        let backlog_nobody_touched =
-            health.claimed_24h == 0 && health.claimable >= ANALYSIS_DEAD_BACKLOG_FLOOR;
+        let backlog_nobody_touched = health.claimed_24h == 0
+            && (health.claimable >= ANALYSIS_DEAD_BACKLOG_FLOOR
+                || health.incompatible >= ANALYSIS_DEAD_BACKLOG_FLOOR);
         return if claimed_enough_to_be_sure || backlog_nobody_touched {
             AnalysisQueueVerdict::Dead
         } else {
@@ -1517,7 +1608,14 @@ pub fn analysis_queue_verdict(
     // neither and a quiet night shrinks both together.
     let failures_over_budget =
         health.attempt_limit_24h > 0 && health.attempt_limit_24h * 10 >= health.claimed_24h;
-    if losses_over_budget || failures_over_budget || running_past_lease_samples >= 2 {
+    // Producing, but a standing cohort under a retired engine digest is work
+    // nobody will ever claim: not healthy, whatever the rest produces.
+    let stranded_backlog = health.incompatible >= ANALYSIS_DEAD_BACKLOG_FLOOR;
+    if losses_over_budget
+        || failures_over_budget
+        || stranded_backlog
+        || running_past_lease_samples >= 2
+    {
         return AnalysisQueueVerdict::Degraded;
     }
     AnalysisQueueVerdict::Healthy
@@ -1542,6 +1640,12 @@ struct AnalysisMarkerMetricRow {
 }
 
 #[derive(serde::Deserialize)]
+struct AnalysisFailureCodeRow {
+    code: String,
+    count: i64,
+}
+
+#[derive(serde::Deserialize)]
 struct AnalysisLifecycleMetricRow {
     event: String,
     reason: String,
@@ -1555,12 +1659,22 @@ pub(crate) fn analysis_store_metrics(
     queue_json: &str,
     marker_json: &str,
     lifecycle_json: &str,
+    failed_code_json: &str,
     health: AnalysisQueueHealth,
 ) -> AnalysisStoreMetrics {
     let mut metrics = AnalysisStoreMetrics {
         health,
         ..AnalysisStoreMetrics::default()
     };
+    for row in
+        serde_json::from_str::<Vec<AnalysisFailureCodeRow>>(failed_code_json).unwrap_or_default()
+    {
+        let slot = ANALYSIS_FAILURE_CODES
+            .iter()
+            .position(|value| *value == row.code)
+            .unwrap_or(ANALYSIS_FAILURE_CODE_SLOTS - 1);
+        metrics.failed_by_code[slot] += row.count.max(0);
+    }
     for row in serde_json::from_str::<Vec<AnalysisQueueMetricRow>>(queue_json).unwrap_or_default() {
         let Some(component) = ANALYSIS_METRIC_COMPONENTS
             .iter()
@@ -1635,11 +1749,75 @@ pub(crate) fn analysis_store_metrics(
 
 #[async_trait]
 pub trait MetricsStore: Send + Sync + 'static {
+    /// One complete Store-backed metrics sample. `now` is Unix seconds.
+    ///
+    /// `live_fragment_engines` is the last worker inventory (this node's
+    /// engine plus each fresh peer's). It splits due pre-worker requests into
+    /// `eligible` and `incompatible` by the stranded rule the reconciler and
+    /// the enqueue cap share ([`LiveAnalysisEngines`]); `None` means the
+    /// inventory is unknown, and every due request then counts as eligible
+    /// rather than as stranded.
+    async fn prometheus_store_snapshot_with(
+        &self,
+        node_id: &str,
+        now: i64,
+        live_fragment_engines: Option<&LiveAnalysisEngines>,
+    ) -> Result<PrometheusStoreSnapshot, StoreError>;
+
     async fn prometheus_store_snapshot(
         &self,
         node_id: &str,
         now: i64,
-    ) -> Result<PrometheusStoreSnapshot, StoreError>;
+    ) -> Result<PrometheusStoreSnapshot, StoreError> {
+        self.prometheus_store_snapshot_with(node_id, now, None)
+            .await
+    }
+}
+
+/// The JSON-array parameter both backends bind for a live engine set: the
+/// distinct digests, or NULL when the inventory is unknown.
+pub(crate) fn live_engines_param(live: Option<&LiveAnalysisEngines>) -> Option<String> {
+    live.map(|live| serde_json::to_string(&live.digests()).unwrap_or_else(|_| "[]".to_owned()))
+}
+
+/// Shared SQL for the pre-worker request half of [`AnalysisQueueHealth`] and
+/// the failed-by-code breakdown. `{now}` is Unix seconds and `{live}` the
+/// nullable JSON array of live engine digests; each backend substitutes its
+/// own placeholders. Pre-worker means `queued` with no worker cache key: once
+/// a worker claims a request it gains a `cluster_fragment_index_jobs` row and
+/// the jobs-table inputs take over, so the two lifecycles never double count.
+///
+/// `waiting` is every fragment-index row inside a retry wait: pre-worker
+/// requests not yet due, plus worker jobs (`cluster_fragment_index_jobs`)
+/// backing off after a failed attempt. Without the jobs half, 3,000 jobs in
+/// a job-level retry wait read `idle`. `incompatible` and `eligible` split
+/// the due pre-worker requests by the one stranded rule
+/// ([`fragment_index_cluster::analysis_request_stranded_sql`]).
+pub(crate) fn analysis_request_health_sql(now: &str, live: &str) -> String {
+    let pre_worker = "component = 'fragment_index' AND state = 'queued' \
+        AND COALESCE(result_cache_key, '') = ''";
+    let stranded = fragment_index_cluster::analysis_request_stranded_sql(live);
+    format!(
+        "((SELECT COUNT(*) FROM analysis_requests WHERE {pre_worker} \
+            AND not_before_ms > {now} * 1000) \
+          + (SELECT COUNT(*) FROM cluster_fragment_index_jobs WHERE state = 'queued' \
+            AND not_before_ms > {now} * 1000)) AS analysis_waiting, \
+         (SELECT COUNT(*) FROM analysis_requests WHERE {pre_worker} \
+            AND not_before_ms <= {now} * 1000 AND {stranded}) AS analysis_incompatible, \
+         (SELECT COUNT(*) FROM analysis_requests WHERE {pre_worker} \
+            AND not_before_ms <= {now} * 1000 AND NOT {stranded}) AS analysis_eligible_requests, \
+         (SELECT COALESCE(MIN(created_at_ms), 0) FROM analysis_requests WHERE {pre_worker}) \
+            AS analysis_oldest_queued_at_ms, \
+         (SELECT COALESCE(json_group_array(json_object('code', grouped.code, 'count', grouped.n)), '[]') \
+            FROM (SELECT COALESCE(failed.last_error_code, '') AS code, COUNT(*) AS n FROM ( \
+                SELECT last_error_code FROM analysis_requests WHERE state = 'failed' \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs job \
+                     WHERE job.cache_key = analysis_requests.result_cache_key \
+                       AND job.target_node_id = analysis_requests.target_node_id) \
+                UNION ALL \
+                SELECT last_error_code FROM cluster_fragment_index_jobs WHERE state = 'failed' \
+              ) failed GROUP BY code) grouped) AS analysis_failed_code_json"
+    )
 }
 
 /// Replicated owner/term/generation proof attached to every provider artwork
@@ -4957,6 +5135,18 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         now_ms: i64,
         claim_expires_at_ms: i64,
     ) -> Result<MediaSessionRequestClaim, StoreError>;
+
+    /// The claim row of `request_id`, read only. A retry waiting on an owner
+    /// that is still starting reads this between ticks instead of re-running
+    /// [`claim_media_session_request`](Self::claim_media_session_request),
+    /// which maintains the session tables first (a replicated write whenever
+    /// a cleanup is due) and reads the routes; it claims again only once the
+    /// row says the owner let go, resolved, or expired.
+    async fn media_session_request_progress(
+        &self,
+        principal: &crate::playback_principal::PlaybackPrincipal,
+        request_id: &str,
+    ) -> Result<Option<crate::domain::MediaSessionRequestProgress>, StoreError>;
 
     /// Bind a Library-channel start's canonical worker recipe to its claimed
     /// durable identity before producer placement.

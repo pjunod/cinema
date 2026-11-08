@@ -96,6 +96,7 @@ impl TranscodeManager {
             ),
             #[cfg(target_os = "linux")]
             processed_preparation_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            processed_upgrade_roots: Arc::default(),
             #[cfg(target_os = "linux")]
             processed_instance_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(target_os = "linux")]

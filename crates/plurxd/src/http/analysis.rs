@@ -14,6 +14,7 @@ fn summary_value(
     enabled: bool,
     now_ms: i64,
     queue_health: Option<crate::state::AnalysisQueueHealthReport>,
+    failed_by_code: Option<[i64; plurx_core::store::ANALYSIS_FAILURE_CODE_SLOTS]>,
 ) -> serde_json::Value {
     serde_json::json!({
         "available": true,
@@ -48,6 +49,19 @@ fn summary_value(
             "last_ready_at_ms": report.health.last_ready_at_ms,
             "claims_since_start": report.claims_since_start,
             "lease_losses_since_start": report.lease_losses_since_start,
+            "eligible": report.health.eligible,
+            "waiting": report.health.waiting,
+            "incompatible": report.health.incompatible,
+            "oldest_queued_at_ms": report.health.oldest_queued_at_ms,
+            // Bounded codes only, zero rows omitted; `other` collects the rest.
+            "failed_by_code": failed_by_code.map(|counts| {
+                plurx_core::store::ANALYSIS_FAILURE_CODES
+                    .iter()
+                    .zip(counts)
+                    .filter(|(_, count)| *count > 0)
+                    .map(|(code, count)| serde_json::json!({"code": code, "count": count}))
+                    .collect::<Vec<_>>()
+            }).unwrap_or_default(),
         })),
     })
 }
@@ -59,11 +73,13 @@ pub(crate) async fn activity_summary(state: &AppState) -> Result<serde_json::Val
     let now_ms = crate::state::clock_ms();
     let summary = state.store.analysis_status_summary().await?;
     let source_io_holders = state.store.source_io_holders(now_ms).await?;
+    let metrics = state.store_metrics.snapshot();
     let mut value = summary_value(
         summary,
         state.jobs.analysis_queue_enabled().await,
         now_ms,
-        state.store_metrics.snapshot().queue_health,
+        metrics.queue_health,
+        metrics.sample.map(|sample| sample.analysis.failed_by_code),
     );
     if let Some(object) = value.as_object_mut() {
         object.insert(
@@ -814,6 +830,9 @@ pub struct AnalysisReopenParams {
     limit: Option<i64>,
     /// Restrict to one component (`fragment_index`, `skip_markers`, …).
     component: Option<String>,
+    /// Restrict to terminal rows whose last error is exactly this code; one
+    /// of the bounded codes `plurx_analysis_queue_failed_by_code` reports.
+    last_error_code: Option<String>,
     repair_revision: Option<String>,
     cursor: Option<String>,
     candidates: Option<Vec<plurx_core::store::AnalysisIndexRepairCandidate>>,
@@ -922,6 +941,18 @@ pub async fn reopen(
         if !matches!(component, "fragment_index" | "skip_markers") {
             return Err(ApiError::BadRequest(
                 "invalid analysis component".to_owned(),
+            ));
+        }
+    }
+    if let Some(code) = params.last_error_code.as_deref() {
+        if code == "other" || !plurx_core::store::ANALYSIS_FAILURE_CODES.contains(&code) {
+            return Err(ApiError::BadRequest(
+                "unknown analysis error code".to_owned(),
+            ));
+        }
+        if params.repair_revision.is_some() {
+            return Err(ApiError::BadRequest(
+                "the repair mode selects by revision, not by error code".to_owned(),
             ));
         }
     }
@@ -1085,7 +1116,11 @@ pub async fn reopen(
         .max(0);
     let candidates = state
         .store
-        .reopenable_analysis_requests(params.component.as_deref(), ANALYSIS_REOPEN_SCAN_LIMIT)
+        .reopenable_analysis_requests(
+            params.component.as_deref(),
+            params.last_error_code.as_deref(),
+            ANALYSIS_REOPEN_SCAN_LIMIT,
+        )
         .await?;
     let considered = candidates.len() as u64;
 

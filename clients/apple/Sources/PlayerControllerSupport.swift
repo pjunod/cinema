@@ -2673,6 +2673,7 @@ enum PlaybackCreateRetry {
         "vod_index_pending",
         "vod_engine_unattested",
         "transcode_capacity_pending",
+        "media_session_overloaded",
         "quality_catalog_unavailable",
     ]
 

@@ -194,6 +194,61 @@ class Controller internal constructor(
      */
     private val preparedSwitch = PreparedSwitchRecorder()
 
+    /** True between a prepared commit and its successor's proven frame. */
+    private var mediaSessionRebindAwaitsFrame = false
+
+    /** One synchronous `DecoderCounters` read into the seam recorder. */
+    private fun sampleDecoderDropped(pipeline: ExoPlayer, force: Boolean = false) {
+        val counters = runCatching { pipeline.videoDecoderCounters }.getOrNull() ?: return
+        counters.ensureUpdated()
+        preparedSwitch.noteDecoderDropped(monotonicNowMs(), counters.droppedBufferCount.toLong(),
+            System.identityHashCode(pipeline), force)
+    }
+
+    /** One `prepared_seam` beacon. Observation only; nothing reads it back. */
+    private fun reportPreparedSeam(
+        outcome: String,
+        evidence: PreparedSeamEvidence?,
+        reopened: Boolean,
+        session: String?,
+    ) {
+        val seam = preparedSeamReport(outcome, evidence, reopened) ?: return
+        postPlaybackClientLog(scope, PlaybackClientLog(level = "info", event = "prepared_seam",
+            message = "prepared switch: $outcome", detail = outcome, ua = "Android Media3",
+            sessionId = session, preparedSeam = seam))
+    }
+
+    /**
+     * Session opens [restartAt] has started. Only its movement matters: a
+     * seam report compares it across its window to say whether the change
+     * also took an ordinary reopen.
+     */
+    private var reopensStarted = 0L
+
+    /**
+     * Every seam outcome is reported once the ±2 s window has elapsed, with
+     * whether an ordinary reopen actually ran inside it (review 3 B2): a
+     * refused or frameless switch owes one and counts as reopened only once it
+     * ran. A committed switch also carries its evidence, with one last forced
+     * counter read on the successor, so the report has the coverage the
+     * ledger row shows; a successor a reopen has already replaced has no
+     * window left to read.
+     */
+    private fun reportPreparedSeamAfterWindow(outcome: String, successor: ExoPlayer?) {
+        val reopensAtOutcome = reopensStarted
+        val session = sessionId
+        scope.launch {
+            delay(PREPARED_SWITCH_WINDOW_MS + 250L)
+            val evidence = if (outcome == "committed" && successor != null && player === successor) {
+                sampleDecoderDropped(successor, force = true)
+                preparedSwitch.seamEvidence(monotonicNowMs())
+            } else {
+                null
+            }
+            reportPreparedSeam(outcome, evidence, reopensStarted != reopensAtOutcome, session)
+        }
+    }
+
     /**
      * The three rows the info panel shows, computed on demand. A closed panel
      * costs nothing, and the panel cannot change what it is reading.
@@ -2425,6 +2480,9 @@ class Controller internal constructor(
         }
         carryDirectedChangeIntoReopen(positionMs)
         if (planReplacement.route(playbackIntent, retry = reason == "presentation-recovery")) return
+        // An ordinary open is starting; a prepared seam report reads whether
+        // one ran inside its window.
+        reopensStarted += 1
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
         stallGuard.invalidateForUserAction()
@@ -4731,6 +4789,12 @@ class Controller internal constructor(
         refusal.code == "vod_transcode_unavailable" -> SurfaceSources.VOD_TRANSCODE_UNAVAILABLE
         refusal.code == "vod_subtitle_burn_unavailable" -> SurfaceSources.VOD_SUBTITLE_BURN_UNAVAILABLE
         refusal.code == "vod_disabled" -> SurfaceSources.VOD_DISABLED
+        // A capacity refusal no re-post of the same request can outlive (a
+        // height this server cannot encode now, a scratch grant above its
+        // ceiling, a replacement past its deadline). Nothing here re-asks at a
+        // smaller height, so the start ends on the row that names it.
+        surfaceSourceForCode(refusal.code, SurfaceContext.Start) ==
+            SurfaceSources.CREATE_CAPACITY_TERMINAL -> SurfaceSources.CREATE_CAPACITY_TERMINAL
         else -> SurfaceSources.OWNER_STOPPED
     }
 
@@ -5265,6 +5329,7 @@ class Controller internal constructor(
                     abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.RENDEZVOUS_OVERLAP)
                     return@launch
                 }
+                sampleDecoderDropped(player)
                 if (!hold.isReady) {
                     delay(RENDEZVOUS_READY_POLL_MS)
                     val target = hold.rendezvousFilmMs ?: return@launch
@@ -5445,6 +5510,8 @@ class Controller internal constructor(
             predecessor = System.identityHashCode(player),
             successor = System.identityHashCode(successor),
         )
+        sampleDecoderDropped(player, force = true)
+        sampleDecoderDropped(successor, force = true)
         val previous = player
         val previousVolume = previous.volume
         // An ON_STOP owner pause survives the prepared item becoming active;
@@ -5519,7 +5586,10 @@ class Controller internal constructor(
             sessionId = successorSession
             startStatusPolling(successorSession)
         }
-        rebindMediaSessionTransport()
+        // MediaSession.setPlayer waits for the successor's own proven frame
+        // (settleCommitOnFirstFrame): until then the system transport keeps
+        // the predecessor, which stays paused and is the rollback authority.
+        mediaSessionRebindAwaitsFrame = true
         action.effectiveSelection?.let { stallReopenBudget.seed(it.height.toInt()) }
         // The badges and the info panel describe the stream on the screen, and
         // both halves of the grade move together or neither does.
@@ -5588,6 +5658,12 @@ class Controller internal constructor(
         awaitingCommitFrameSinceMs = null
         preparedCommitFrameBudget = null
         preparedSwitch.noteFirstFrame(monotonicNowMs())
+        // The decoded frame is proven: now the system transport may own it.
+        if (mediaSessionRebindAwaitsFrame) {
+            mediaSessionRebindAwaitsFrame = false
+            rebindMediaSessionTransport()
+        }
+        reportPreparedSeamAfterWindow("committed", player)
         autoDesiredCandidate?.let { requested ->
             if (preparedLedger.action?.effectiveSelection?.candidateId == requested.id) {
                 autoActiveCandidateId = requested.id
@@ -5698,6 +5774,7 @@ class Controller internal constructor(
         retiredPlayer = failedSuccessor
         retiredParkedAtMs = monotonicNowMs()
         player = predecessor.player
+        mediaSessionRebindAwaitsFrame = false
         rebindMediaSessionTransport()
         preparedVideoSurfaces?.expose(predecessor.player) { collectRetiredPlayer() }
         return true
@@ -5713,6 +5790,11 @@ class Controller internal constructor(
         if (awaitingCommitFrameSinceMs == null) return false
         awaitingCommitFrameSinceMs = null
         preparedCommitFrameBudget = null
+        reportPreparedSeamAfterWindow("switched_without_a_frame", null)
+        if (mediaSessionRebindAwaitsFrame) {
+            mediaSessionRebindAwaitsFrame = false
+            rebindMediaSessionTransport()
+        }
         publishAcknowledgement(preparedLedger.failedAfterSwitch())
         return fallBackAfterPreparedFailure()
     }
@@ -5749,6 +5831,12 @@ class Controller internal constructor(
         // untouched, so nothing is drawn and this event is the only trace the
         // viewer's session keeps of it. A deliberate abandonment — a seek, a
         // quality change, a release — is not a failure and says nothing.
+        // A commit that began (the rendezvous owns the preparation) and never
+        // switched is the seam's `refused`, on every failure path that ends
+        // it, reported once: this is the one place they all end (review 3 S8).
+        if (failed && rendezvous != null && !preparedLedger.isSwitched) {
+            reportPreparedSeamAfterWindow("refused", null)
+        }
         if (failed) {
             // Capture before release resets readiness. Diagnostics must not own
             // recovery, extend overlap, or fail teardown if a player read races.

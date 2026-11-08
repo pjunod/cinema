@@ -8640,6 +8640,12 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // `met` and the offset and NTP rows `unobservable`.
             "cluster_clock",
             "durable_cluster_work",
+            // C1: what this node's indexer may do while it serves. All four
+            // rows describe an idle standalone node here.
+            "indexing_while_serving",
+            // D1: the processed DV upgrade's per-platform switch
+            // qualification and this node's renderer and slot.
+            "processed_dv_upgrade",
             "bounded_catalogue_reads",
             "cluster_backup",
             "windows_server",
@@ -8740,6 +8746,11 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
                     | "output_node_idle"
                     | "output_storage_ownership"
                     | "retention_same_filesystem"
+                    // D1: the helper is the host's, and the activity row is
+                    // a count rather than a requirement.
+                    | "processed_upgrade_renderer"
+                    | "processed_upgrade_slot"
+                    | "processed_upgrade_activity"
             )
         })
         .collect::<Vec<_>>();
@@ -8865,6 +8876,10 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "rolling_contract_built",
             "runtime",
             "server_preparation_is_real",
+            "serving_cross_node",
+            "serving_domain_readers",
+            "serving_live_waiters",
+            "serving_slots_in_use",
             "source_fencing",
             "stored_source_producer",
             "tuner_reserve",
@@ -10488,6 +10503,68 @@ async fn logs_endpoint_is_admin_only() {
     assert_eq!(body[0]["message"], "cluster-only proof");
 }
 
+/// Review 3 S9: the viewer's first-frame beacon is what starts the processed
+/// upgrade, and only for the session it names. A `ttff` naming one session
+/// takes that session's waiting upgrade and leaves another session's waiting;
+/// a beacon of another kind takes nothing.
+#[tokio::test]
+async fn a_ttff_client_log_schedules_only_the_named_sessions_upgrade() {
+    use super::hls::processed_upgrade::{
+        is_waiting, register, tests::ordinary_request, UpgradeIntent,
+    };
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let user_id = state
+        .store
+        .get_user_by_username("paul")
+        .await
+        .expect("user read")
+        .expect("the admin")
+        .id;
+    let waiting = || {
+        let playback = uuid::Uuid::new_v4().to_string();
+        let session = uuid::Uuid::new_v4().to_string();
+        register(UpgradeIntent {
+            user_id,
+            playback_id: playback.clone(),
+            session_id: session.clone(),
+            incarnation_id: uuid::Uuid::new_v4().to_string(),
+            request: ordinary_request(&playback),
+            hdr10_intent: false,
+            auto_policy: false,
+            network: None,
+            network_prior: None,
+            incumbent_receipt: None,
+        });
+        session
+    };
+    let named = waiting();
+    let other = waiting();
+    let beacon = |event: &str, session: &str| {
+        post(
+            "/api/v1/client-log",
+            Some(&admin),
+            json!({ "level": "info", "event": event, "session_id": session, "file_id": 7, "ms": 850 }),
+        )
+    };
+    let (status, _) = call(&app, beacon("playback_failed", &named)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        is_waiting(&named),
+        "a beacon that is not a first frame takes nothing"
+    );
+    let (status, _) = call(&app, beacon("ttff", &named)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        !is_waiting(&named),
+        "the named session's first frame took its upgrade"
+    );
+    assert!(
+        is_waiting(&other),
+        "another session's upgrade still waits for its own frame"
+    );
+}
+
 #[tokio::test]
 async fn client_log_requires_auth_and_accepts_reports() {
     let app = test_app();
@@ -10720,6 +10797,313 @@ async fn a_first_frame_beacon_settles_the_start_its_direct_play_opened() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(ledger.count("transcode", "failed"), 1);
+}
+
+/// G1: every create leaves one `start_attempt` row in the node-local
+/// sidecar, keyed by the create's claim id (the request's `request_id`), and
+/// the client's first-frame report settles the create it names. Two devices
+/// of one viewer starting one title are two attempts, each settled by its own
+/// session; the (viewer, file)-keyed ledger alone cannot tell them apart.
+#[tokio::test]
+async fn each_create_is_one_start_attempt_and_two_devices_on_a_title_are_two() {
+    use super::test_agents::{CHROME_WINDOWS_UA, FIREFOX_WINDOWS_UA};
+    use plurx_core::domain::PlaybackEventQuery;
+
+    crate::transcode::require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let s = seed_content(&state).await;
+    prepare_vod_copy_fixture(&state, s.file, 16).await;
+    let create = format!("/api/v1/files/{}/hls/sessions", s.file);
+    let with_ua = |mut request: Request<Body>, ua: &'static str| {
+        request.headers_mut().insert(
+            axum::http::header::USER_AGENT,
+            axum::http::HeaderValue::from_static(ua),
+        );
+        request
+    };
+
+    // A refusal with no code of its own is still a row, and says so.
+    let (status, _) = call(
+        &app,
+        post(
+            &create,
+            Some(&admin),
+            json!({ "playback_id": "   ", "request_id": "claim-refused" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let mut sessions = Vec::new();
+    for (device, claim, ua) in [
+        ("device-a", "claim-a", CHROME_WINDOWS_UA),
+        ("device-b", "claim-b", FIREFOX_WINDOWS_UA),
+    ] {
+        let (status, session) = call(
+            &app,
+            with_ua(
+                post(
+                    &create,
+                    Some(&admin),
+                    json!({ "playback_id": device, "request_id": claim, "copy": true }),
+                ),
+                ua,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{session}");
+        sessions.push(session["session_id"].as_str().expect("session").to_owned());
+    }
+
+    let rows_of = |event: &'static str| {
+        let store = std::sync::Arc::clone(&state.store);
+        async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let rows = store
+                    .playback_events(&PlaybackEventQuery {
+                        event: Some(event.to_owned()),
+                        limit: 50,
+                        ..PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("events");
+                let expected = if event == "start_attempt" { 3 } else { 2 };
+                if rows.len() >= expected || tokio::time::Instant::now() > deadline {
+                    return rows;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    };
+    let attempts = rows_of("start_attempt").await;
+    assert_eq!(attempts.len(), 3, "one row per create, refused or not");
+    let by_attempt = |rows: &[plurx_core::domain::PlaybackEvent], claim: &str| {
+        rows.iter()
+            .find(|row| row.attempt.as_deref() == Some(claim))
+            .cloned()
+            .unwrap_or_else(|| panic!("no row for attempt {claim}"))
+    };
+    let refused = by_attempt(&attempts, "claim-refused");
+    assert_eq!(refused.reason.as_deref(), Some("http_400"));
+    assert_eq!(refused.session_id, None);
+    for (claim, session, agent) in [
+        ("claim-a", &sessions[0], "Mozilla"),
+        ("claim-b", &sessions[1], "Mozilla"),
+    ] {
+        let row = by_attempt(&attempts, claim);
+        assert_eq!(row.reason, None, "a served create has no refusal");
+        assert!(matches!(row.method.as_deref(), Some("vod" | "rolling")));
+        assert_eq!(
+            row.session_id,
+            Some(crate::transcode::session_log_id(session)),
+            "the row names the session it answered with"
+        );
+        assert_eq!(row.file_id, Some(s.file));
+        let extra: serde_json::Value =
+            serde_json::from_str(row.extra.as_deref().expect("extra")).expect("extra JSON");
+        assert_eq!(extra["owner_node"], "test-node");
+        assert!(extra["client_build"]
+            .as_str()
+            .expect("client_build")
+            .starts_with(agent));
+        assert!(extra["elapsed_ms"].is_u64() && extra["store_ms"].is_u64());
+        assert!(
+            extra["phases"].as_array().is_some_and(
+                |phases| !phases.is_empty() && phases.iter().all(|p| p["name"].is_string())
+            ),
+            "{extra}"
+        );
+    }
+
+    // Device B's picture arrives first, then A's: each settles its own create.
+    for (session, ms) in [(&sessions[1], 4_200), (&sessions[0], 1_500)] {
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({
+                    "level": "info", "event": "ttff", "file_id": s.file,
+                    "session_id": session, "ms": ms, "reason": "cold-start",
+                    "method": "remux", "attempt": "a1",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    let presented = rows_of("start_presented").await;
+    assert_eq!(presented.len(), 2);
+    assert_eq!(by_attempt(&presented, "claim-a").ms, Some(1_500));
+    assert_eq!(by_attempt(&presented, "claim-b").ms, Some(4_200));
+    // The beacons themselves now carry the create's id, and keep the page's.
+    let beacons = rows_of("ttff").await;
+    let beacon = by_attempt(&beacons, "claim-b");
+    let extra: serde_json::Value =
+        serde_json::from_str(beacon.extra.as_deref().expect("beacon extra")).expect("JSON");
+    assert_eq!(extra["client_attempt"], "a1");
+
+    // The page the Activity tab reads joins them.
+    let rows = super::activity_starts::local_page(
+        &state.store,
+        &state.node_id,
+        None,
+        25,
+        crate::state::clock_ms(),
+    )
+    .await
+    .expect("page");
+    let outcomes = |claim: &str| {
+        let row = rows.iter().find(|row| row.attempt == claim).expect("row");
+        (row.outcome.clone(), row.ttff_ms)
+    };
+    assert_eq!(outcomes("claim-a"), ("presented".to_owned(), Some(1_500)));
+    assert_eq!(outcomes("claim-b"), ("presented".to_owned(), Some(4_200)));
+    assert_eq!(outcomes("claim-refused").0, "refused");
+    for session in &sessions {
+        state.transcode.stop_session(session, "test").await;
+    }
+}
+
+/// Review 2 of G1 (B2, S5). A retry of a create that replays its owner's
+/// session -- here on another ingress, which shares the cluster store but
+/// not the first ingress's ledger -- is tagged like the publishing create,
+/// so the first frame its client reports there settles it. And a direct
+/// request that opens a start writes its own `start_attempt` row (route
+/// `direct`), which the client's first frame settles too.
+#[tokio::test]
+async fn a_replayed_create_and_a_direct_start_are_settled_by_their_first_frame() {
+    use plurx_core::domain::PlaybackEventQuery;
+
+    crate::transcode::require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let s = seed_content(&state).await;
+    prepare_vod_copy_fixture(&state, s.file, 16).await;
+    let ingress = |state: &AppState| {
+        let mut other = state.clone();
+        other.start_attempts = std::sync::Arc::new(crate::playstart::StartAttempts::new());
+        router(other)
+    };
+    let rows_of = |event: &'static str, attempt: String| {
+        let store = std::sync::Arc::clone(&state.store);
+        async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let rows = store
+                    .playback_events(&PlaybackEventQuery {
+                        event: Some(event.to_owned()),
+                        limit: 50,
+                        ..PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("events");
+                let found = rows
+                    .into_iter()
+                    .filter(|row| row.attempt.as_deref() == Some(attempt.as_str()))
+                    .collect::<Vec<_>>();
+                if !found.is_empty() || tokio::time::Instant::now() > deadline {
+                    return found;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    };
+    let ttff = |session: Option<&str>, ms: i64| {
+        let mut body = json!({
+            "level": "info", "event": "ttff", "file_id": s.file, "ms": ms,
+            "reason": "cold-start", "method": "remux",
+        });
+        if let Some(session) = session {
+            body["session_id"] = json!(session);
+        }
+        post("/api/v1/client-log", Some(&admin), body)
+    };
+
+    let create = format!("/api/v1/files/{}/hls/sessions", s.file);
+    let body = json!({ "playback_id": "device-r", "request_id": "claim-r", "copy": true });
+    let (status, first) = call(&app, post(&create, Some(&admin), body.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let session = first["session_id"].as_str().expect("session").to_owned();
+    let retried = ingress(&state);
+    let (status, replay) = call(&retried, post(&create, Some(&admin), body)).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(
+        replay["session_id"], first["session_id"],
+        "the retry replays the owner's session"
+    );
+    let (status, _) = call(&retried, ttff(Some(&session), 2_000)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let presented = rows_of("start_presented", "claim-r".to_owned()).await;
+    assert_eq!(
+        presented.iter().map(|row| row.ms).collect::<Vec<_>>(),
+        [Some(2_000)],
+        "the replayed create's first frame settles it on the ingress that answered it"
+    );
+
+    // A direct start, on an ingress that has seen nothing of this viewer.
+    let direct = ingress(&state);
+    let response = direct
+        .clone()
+        .oneshot(ranged(
+            &format!("/api/v1/files/{}/direct?token={admin}", s.file),
+            0,
+            1_023,
+        ))
+        .await
+        .expect("direct");
+    assert!(response.status().is_success(), "{}", response.status());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let started = loop {
+        let rows = state
+            .store
+            .playback_events(&PlaybackEventQuery {
+                event: Some("start_attempt".to_owned()),
+                limit: 50,
+                ..PlaybackEventQuery::default()
+            })
+            .await
+            .expect("events");
+        if let Some(row) = rows
+            .into_iter()
+            .find(|row| row.method.as_deref() == Some("direct"))
+        {
+            break row;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a direct start writes its row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(started.session_id, None, "a direct start has no session");
+    assert_eq!(started.file_id, Some(s.file));
+    let attempt = started.attempt.clone().expect("attempt");
+    // The direct player's report names no session of this server's.
+    let (status, _) = call(&direct, ttff(None, 900)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let presented = rows_of("start_presented", attempt.clone()).await;
+    assert_eq!(presented.len(), 1, "the direct start is settled");
+    let rows = super::activity_starts::local_page(
+        &state.store,
+        &state.node_id,
+        None,
+        25,
+        crate::state::clock_ms(),
+    )
+    .await
+    .expect("page");
+    let row = rows
+        .iter()
+        .find(|row| row.attempt == attempt)
+        .expect("the direct row");
+    assert_eq!(
+        (row.route.as_deref(), row.outcome.as_str(), row.ttff_ms),
+        (Some("direct"), "presented", Some(900))
+    );
+    state.transcode.stop_session(&session, "test").await;
 }
 
 /// C-08 M5 row 4: a start request the server answers with an error is a
@@ -19293,6 +19677,135 @@ async fn hls_http_endpoints() {
         .await,
         StatusCode::NO_CONTENT
     );
+}
+
+/// D2 item 3(b): a re-post of a start whose owner (on this or any other
+/// ingress) still holds the durable request claim joins that claim. It waits
+/// for the owner's activation within its own allowance and answers
+/// `startup_timeout` with `Retry-After` when that ends first — leaving the
+/// claim, and so the one owner, in place — instead of the old
+/// `media_session_starting` dead end no client retried; and when the owner
+/// lets go, the waiting re-post becomes the owner and starts the session.
+#[tokio::test]
+async fn a_retry_of_a_start_still_in_flight_joins_its_claim() {
+    use plurx_core::domain::MediaSessionRequestClaim;
+    crate::transcode::require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let s = seed_content(&state).await;
+    state
+        .store
+        .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+        .await
+        .expect("stay on immutable VOD");
+    prepare_vod_copy_fixture(&state, s.file, 16).await;
+    let create = |request_id: &str, remaining_ms: u64| {
+        let mut request = post(
+            &format!("/api/v1/files/{}/hls/sessions", s.file),
+            Some(&admin),
+            json!({"playback_id": "d2-join", "request_id": request_id, "copy": true}),
+        );
+        request.headers_mut().insert(
+            "x-plurx-startup-remaining-ms",
+            remaining_ms.to_string().parse().expect("header"),
+        );
+        request
+    };
+    let (status, first) = call(&app, create("d2-first", 10_000)).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let route = state
+        .store
+        .media_session_route(first["session_id"].as_str().expect("session"))
+        .await
+        .expect("route read")
+        .expect("route");
+    let principal = route.principal.clone();
+    let claim = |incarnation: String| {
+        let state = state.clone();
+        let principal = principal.clone();
+        let fingerprint = route.request_fingerprint.clone();
+        async move {
+            let now = crate::media_sessions::unix_ms();
+            state
+                .store
+                .claim_media_session_request(
+                    &principal,
+                    "d2-joined",
+                    &fingerprint,
+                    "d2-join",
+                    &incarnation,
+                    now,
+                    now + 60_000,
+                )
+                .await
+                .expect("claim")
+        }
+    };
+    // An owner elsewhere holds the request and has not activated yet.
+    let owner = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        claim(owner.clone()).await,
+        MediaSessionRequestClaim::Acquired { .. }
+    ));
+
+    let started = std::time::Instant::now();
+    let response = app
+        .clone()
+        .oneshot(create("d2-joined", 1_500))
+        .await
+        .expect("response");
+    let waited = started.elapsed();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1")
+    );
+    let body: Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("json");
+    assert_eq!(body["code"], "startup_timeout", "{body}");
+    assert!(
+        waited >= std::time::Duration::from_millis(1_000),
+        "the retry waited on the claim for its allowance, not answered at once: {waited:?}"
+    );
+    assert!(
+        matches!(
+            claim(uuid::Uuid::new_v4().to_string()).await,
+            MediaSessionRequestClaim::InFlight { incarnation_id, .. } if incarnation_id == owner
+        ),
+        "the joiner left the owner's claim in place"
+    );
+
+    // The owner lets go while a re-post is waiting: that re-post becomes the
+    // owner and starts the session itself.
+    let joined = tokio::spawn({
+        let app = app.clone();
+        let request = create("d2-joined", 8_000);
+        async move { call(&app, request).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(state
+        .store
+        .fail_media_session_request(
+            &principal,
+            "d2-joined",
+            &owner,
+            crate::media_sessions::unix_ms()
+        )
+        .await
+        .expect("owner lets go"));
+    let (status, joined) = joined.await.expect("joined create");
+    assert_eq!(status, StatusCode::OK, "{joined}");
+    assert!(joined["session_id"].as_str().is_some(), "{joined}");
 }
 
 #[tokio::test]

@@ -905,8 +905,13 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     failPreparedReplacement(p,state,"no parallel video presentation proof");
     return false;
   }
-  if(!streamHasVideo(p,spare)||typeof spare.requestVideoFrameCallback!=="function")
+  if(!streamHasVideo(p,spare))
     return exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+  // No frame callbacks: the successor still has to show decoded frames at the
+  // aligned position before it takes the picture. `readyState` and a landed
+  // seek describe the element, not this position.
+  if(typeof spare.requestVideoFrameCallback!=="function")
+    return exposePreparedReplacementAfterDecodedFrames(p,state,v,spare);
   // Buffer readiness can precede the first warm callback. The aligned,
   // advancing frame proof below is the actual presentation evidence; rejecting
   // the handoff here would reopen an otherwise ready successor at the cliff.
@@ -1071,6 +1076,63 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   requestFrame();
   return true;
 }
+// The decoded-frame counter (`getVideoPlaybackQuality().totalVideoFrames`, or
+// WebKit's `webkitDecodedFrameCount`), or null where the engine has neither.
+function preparedDecodedFrameCount(element){
+  try{
+    const quality=typeof element.getVideoPlaybackQuality==="function"
+      ?element.getVideoPlaybackQuality():null;
+    const count=Number(quality?.totalVideoFrames??element.webkitDecodedFrameCount);
+    return Number.isFinite(count)?count:null;
+  }catch(e){ return null; }
+}
+// The proof for an engine without `requestVideoFrameCallback`. A seek into a
+// buffer hole leaves `readyState` at HAVE_FUTURE_DATA about a range the
+// playhead is not in, so readiness was never evidence of a picture. Wait,
+// under the same bound as the callback proof, for the decoder to count
+// PREPARED_MONOTONIC_FRAME_STEPS new frames while the successor's clock
+// advances on the incumbent's second with runway in front of it. An engine
+// with no decoded-frame counter cannot prove a frame and is refused; the
+// incumbent is untouched either way.
+function exposePreparedReplacementAfterDecodedFrames(p,state,v,spare){
+  const initial=preparedDecodedFrameCount(spare);
+  if(initial==null){
+    failPreparedReplacement(p,state,"no decoded-frame observation on this engine");
+    return false;
+  }
+  const live=()=>PLAYER===p&&preparedState(p)===state
+    &&document.getElementById("video")===v&&preparedVideoElement()===spare
+    &&playbackOwnsAttachedMedia(p);
+  const started=performance.now();
+  let priorTime=Number(spare.currentTime)||0;
+  state.overlapPhase="decoded-frames";
+  const observe=()=>{
+    state.exposeFrameTimer=null;
+    if(!live()) return;
+    if(v.paused||v.seeking||spare.paused||spare.seeking||p.wantsPlayback===false){
+      failPreparedReplacement(p,state,"viewer-intent");
+      return;
+    }
+    const count=preparedDecodedFrameCount(spare);
+    const at=Number(spare.currentTime)||0;
+    const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+    const advancing=at>priorTime;
+    priorTime=at;
+    if(count!=null&&count-initial>=PREPARED_MONOTONIC_FRAME_STEPS&&advancing
+      &&Math.abs(at-target)*1000<=preparedClockAlignmentSlackMs(p)&&preparedAlignedBuffered(spare)){
+      exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+      return;
+    }
+    if(performance.now()-started>=PREPARED_FRAME_PROOF_MS){
+      failPreparedReplacement(p,state,`decoded-frame deadline: frames=${count==null?"none":count-initial} `+
+        `drift_ms=${Math.round(Math.abs(at-target)*1000)} ready_state=${spare.readyState}`);
+      return;
+    }
+    state.exposeFrameTimer=setTimeout(observe,40);
+  };
+  state.exposeFrameTimer=setTimeout(observe,40);
+  return true;
+}
 // Phase two: the exposure, unchanged. Intent is sampled at the last reversible
 // boundary, mute and rate are applied before display, the elements swap, and
 // the predecessor stays alive and hidden until a real successor frame proves
@@ -1206,6 +1268,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     deferPreparedPredecessorRetirement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
       {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
+    reportPreparedSeamAfterWindow(p,state,"committed");
     const committedAtMs=performance.now();
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"committed",
       message:`switched to ${state.sessionId} at film ${Math.round(filmMs/1000)}s `+
@@ -1222,6 +1285,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     if(p.preparedCommitting===state) p.preparedCommitting=null;
     rollbackPreparedReplacement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
+    reportPreparedSeamAfterWindow(p,state,"switched_without_a_frame");
     // Rolled back to the incumbent, which is the quality the viewer was
     // already watching -- so the change they asked for still has not happened
     // and still owes them its one reopen.

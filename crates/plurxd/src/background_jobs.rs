@@ -30,6 +30,8 @@ mod metrics;
 use metrics::Event;
 pub(crate) use metrics::{accepted_claims, prometheus};
 
+#[path = "background_jobs/analysis_reconcile.rs"]
+pub(crate) mod analysis_reconcile;
 #[path = "background_jobs/source.rs"]
 mod source;
 pub(crate) use source::{budgeted, source_budget, SourcePacingClock, SourceReadBudget};

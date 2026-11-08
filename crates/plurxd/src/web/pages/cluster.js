@@ -193,13 +193,21 @@ function clusterNodeOperationsHtml(n,ops){
       : `builds ${esc(String(snap.build_ok_count))} ok · ${esc(String(snap.build_error_count))} errors · DB ${snap.db_bytes===null||snap.db_bytes===undefined?"unknown":esc(fmtBytes(snap.db_bytes)||"0 B")}`
     : `<span style="color:var(--bad)">Unavailable</span>`;
   const mediaText=`${esc(String(media.local_active_sessions||0))} session${Number(media.local_active_sessions||0)===1?"":"s"} · ${media.drained?"drained":"draining"}`;
+  const wire=PlurxClusterPanel.clusterWireFacts(ops,n.node_id), skew=PlurxClusterPanel.clusterWireSkew(ops);
+  const protocolText=wire.protocol===null?`<span style="color:var(--warn)">media protocol unreported</span>`:`media protocol ${esc(String(wire.protocol))}`;
+  const ownerText=wire.eligible===null?"":wire.eligible
+    ? ` · <span style="color:var(--good)">eligible owner</span>`
+    : ` · <span style="color:var(--warn)">not an owner: ${esc(wire.reason||"unknown")}</span>`;
+  const skewText=skew.protocolSkew
+    ? `<br><span style="color:var(--bad)">Protocol skew: ${esc(skew.protocols.join(" / "))} — placement splits into cohorts</span>`
+    : "";
   const lastError=wal&&wal.last_error?wal.last_error.message:"None";
   const recovery=wal&&wal.last_recovery?`${wal.last_recovery.operation}: ${wal.last_recovery.outcome}`:"None observed";
   return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
     <div class="clnodeopmeta"><div><span>Process</span>${process}</div><div><span>Serving</span>${serving}</div>
       <div><span>Raft</span>${raftText}</div><div><span>WAL</span>${walText}</div>
       <div><span>Snapshot</span>${snapshotText}</div><div><span>Transport</span>${transportText}</div>
-      <div><span>Media / build</span>${mediaText}<br><span class="clopscode">${esc(s.build)}</span></div></div>
+      <div><span>Media / build</span>${mediaText}<br><span class="clopscode">${esc(s.build)}</span><br>${protocolText}${ownerText}${skewText}</div></div>
     <details class="clnodedetail"><summary>WAL, snapshot, and protocol details</summary>
       <dl class="kvgrid"><dt>Node / Raft id</dt><dd class="clopscode">${esc(n.node_id)} / ${esc(String(n.raft_id))}</dd>
         <dt>Protocol range</dt><dd>${s.protocol_min===undefined?"unknown":esc(String(s.protocol_min))}–${s.protocol_max===undefined?"unknown":esc(String(s.protocol_max))}</dd>

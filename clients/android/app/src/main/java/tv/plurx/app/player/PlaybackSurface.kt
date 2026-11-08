@@ -258,6 +258,7 @@ internal object SurfaceSources {
     const val REPEATED_EARLY_END = "repeated_early_end"
     const val DEGRADED_NOTICE = "degraded_notice"
     const val LOG_ONLY = "log_only"
+    const val CREATE_CAPACITY_TERMINAL = "create_capacity_terminal"
 }
 
 /** The fixture's `sources`, in fixture order. Order is the precedence rule. */
@@ -339,7 +340,8 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
             "media_owner_transition",
             "vod_index_pending",
             "vod_engine_unattested",
-            "transcode_capacity_pending", "quality_catalog_unavailable",
+            "transcode_capacity_pending", "media_session_overloaded",
+            "quality_catalog_unavailable",
         ),
         retryable = true,
     ),
@@ -428,6 +430,17 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
     ),
     SurfaceSourceRow(SurfaceSources.DEGRADED_NOTICE, "any", SurfaceClass.Degraded),
     SurfaceSourceRow(SurfaceSources.LOG_ONLY, "any", null),
+    SurfaceSourceRow(
+        SurfaceSources.CREATE_CAPACITY_TERMINAL,
+        "start",
+        SurfaceClass.Stopped,
+        requiresPlayerStopped = true,
+        codes = listOf(
+            "transcode_height_unavailable",
+            "transcode_scratch_exhausted",
+            "replacement_expired",
+        ),
+    ),
 )
 
 /**

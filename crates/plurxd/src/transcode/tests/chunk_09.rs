@@ -3319,3 +3319,238 @@ async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise
     }
     assert!(crate::transcode::FEL_REQUALIFICATION_INTERVAL >= std::time::Duration::from_secs(3600));
 }
+
+/// One rolling worker registered under `id`, with a real child the
+/// retirement owner must reap, for the release-cause tests below.
+async fn release_cause_fixture(
+    id: &str,
+    control: Option<crate::playback_control::RollingControlHandle>,
+) -> (tempfile::TempDir, Arc<TranscodeManager>, Arc<Session>) {
+    use plurx_core::store::SqliteStore;
+
+    let dir = crate::test_tempdir().expect("release cause root");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let manager = Arc::new(TranscodeManager::new(
+        store,
+        dir.path().join("manager-work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let session = match control {
+        Some(control) => watchdog_session_with_control(
+            dir.path(),
+            Some(long_running_child()),
+            false,
+            false,
+            control,
+            0,
+        ),
+        None => watchdog_session(dir.path(), Some(long_running_child()), false),
+    };
+    manager
+        .sessions
+        .lock()
+        .await
+        .insert(id.to_owned(), Arc::clone(&session));
+    manager.active_session_count.store(1, Relaxed);
+    (dir, manager, session)
+}
+
+fn settled_retirement_cause(session: &Session) -> String {
+    session
+        .retirement_settlement
+        .lock()
+        .expect("retirement settlement")
+        .as_ref()
+        .expect("a retirement owner settled this session")
+        .cause()
+        .to_string()
+}
+
+async fn actor_terminal(
+    session: &Session,
+) -> Option<crate::playback_control::RollingTerminalCause> {
+    session
+        .control
+        .snapshot()
+        .await
+        .expect("retired actor still answers its snapshot")
+        .terminal
+}
+
+/// R1: a client DELETE's phase-one publication fence (as `release_session`
+/// runs it) commits the requester's release, not an authority fence, and the
+/// stop that follows settles `client_released`.
+#[tokio::test]
+async fn client_release_settles_released_not_authority_fence() {
+    use crate::playback_control::RollingTerminalCause;
+
+    let (_dir, manager, session) = release_cause_fixture("client-release", None).await;
+    manager
+        .begin_session_release_fence("client-release", crate::vodserve::Terminal::Deleted)
+        .await;
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::Released),
+        "phase one commits the release, not an authority fence"
+    );
+    assert!(
+        manager
+            .stop_session_for_terminal(
+                "client-release",
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            )
+            .await
+    );
+    assert_eq!(settled_retirement_cause(&session), "client_released");
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::Released)
+    );
+}
+
+/// R1: an operator stop's phase-two projection commits `Stopped`, and its
+/// retirement settles `killed`; the same holds for `stop_session` alone.
+#[tokio::test]
+async fn admin_stop_settles_stopped_not_authority_fence() {
+    use crate::playback_control::RollingTerminalCause;
+
+    let (_dir, manager, session) = release_cause_fixture("admin-stop", None).await;
+    manager
+        .begin_session_terminal(
+            "admin-stop",
+            crate::vodserve::Terminal::AdminStop,
+            "stopped by admin",
+        )
+        .await;
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::Stopped),
+        "the durable winner projects the operator stop"
+    );
+    // Join (or follow) the stop the projection spawned.
+    let outcome = manager
+        .retire_session_until_with_cause("admin-stop", &session, None, "killed")
+        .await
+        .expect("stop retirement settles");
+    assert_eq!(outcome.cause.as_ref(), "killed");
+
+    let (_dir, manager, session) = release_cause_fixture("admin-stop-direct", None).await;
+    assert!(
+        manager
+            .stop_session_for_terminal(
+                "admin-stop-direct",
+                crate::vodserve::Terminal::AdminStop,
+                "stopped by admin",
+            )
+            .await
+    );
+    assert_eq!(settled_retirement_cause(&session), "killed");
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::Stopped)
+    );
+}
+
+/// Review 1, S12: the cause of a stop is typed by its caller, not read out
+/// of its reason sentence. An internal stop whose reason happens to say
+/// "released" or "admin" is an ordinary retirement under that reason; only
+/// the terminal a release or operator stop won makes it `client_released` or
+/// `killed`.
+#[tokio::test]
+async fn a_reason_sentence_does_not_type_a_stop() {
+    let (_dir, manager, session) = release_cause_fixture("sentence-only", None).await;
+    assert!(
+        manager
+            .stop_session("sentence-only", "released by client")
+            .await
+    );
+    assert_eq!(settled_retirement_cause(&session), "released by client");
+    assert_ne!(
+        actor_terminal(&session).await,
+        Some(crate::playback_control::RollingTerminalCause::Released),
+        "a sentence did not project the viewer's release"
+    );
+}
+
+/// R1: a genuine serving fence that retires the worker first keeps its
+/// cause; the client release that follows observes it and cannot relabel
+/// failover as a routine release.
+#[tokio::test]
+async fn serving_fence_before_release_still_settles_authority_fence() {
+    use crate::playback_control::RollingTerminalCause;
+
+    let (_dir, manager, session) = release_cause_fixture("fence-first", None).await;
+    manager.fence_sessions(&["fence-first".to_owned()]).await;
+    assert!(
+        manager
+            .stop_session_for_terminal(
+                "fence-first",
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            )
+            .await
+    );
+    assert_eq!(settled_retirement_cause(&session), "authority_fence");
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::AuthorityFence)
+    );
+}
+
+/// R1: a release that committed first wins over a serving fence racing it,
+/// and the two retirement requests share one cleanup owner.
+#[tokio::test]
+async fn release_before_serving_fence_wins_and_cleanup_runs_once() {
+    use crate::playback_control::RollingTerminalCause;
+
+    let (_dir, manager, session) = release_cause_fixture("release-first", None).await;
+    manager
+        .begin_session_release_fence("release-first", crate::vodserve::Terminal::Deleted)
+        .await;
+    manager.fence_sessions(&["release-first".to_owned()]).await;
+    let (released, fenced) = tokio::join!(
+        manager.retire_session_until_with_cause("release-first", &session, None, "client_released"),
+        manager.retire_session_until_with_cause("release-first", &session, None, "authority_fence"),
+    );
+    let released = released.expect("release retirement settles");
+    let fenced = fenced.expect("fence retirement settles");
+    assert_eq!(
+        [released.participation, fenced.participation]
+            .iter()
+            .filter(|participation| **participation == RollingRetirementParticipation::Won)
+            .count(),
+        1,
+        "exactly one retirement owner runs cleanup"
+    );
+    assert!(released.removed || fenced.removed);
+    assert_eq!(released.cause.as_ref(), "client_released");
+    assert_eq!(fenced.cause.as_ref(), "client_released");
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::Released)
+    );
+}
+
+/// R1: with no actor left to answer a snapshot, the retirement of a
+/// released worker still settles the release it projected rather than the
+/// fail-closed authority-fence default.
+#[tokio::test]
+async fn release_with_unavailable_actor_settles_the_projected_release() {
+    let (_dir, manager, session) = release_cause_fixture(
+        "release-no-actor",
+        Some(crate::playback_control::RollingControlHandle::unavailable_for_test()),
+    )
+    .await;
+    assert!(
+        manager
+            .stop_session_for_terminal(
+                "release-no-actor",
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            )
+            .await
+    );
+    assert_eq!(settled_retirement_cause(&session), "client_released");
+}

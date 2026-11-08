@@ -705,6 +705,8 @@ function developerPanels(){
       // The main-merge defects build (2026-10-04): complete-output
       // preparation and rolling retention arrived with their Developer cards.
       shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
+      shippedSource("indexingWhileServingCard"),
+      shippedSource("processedDvUpgradeCard"),
       shippedSource("subtitleTranscriptionCard"),
       shippedSource("subtitleTranslationCard"),
       shippedSource("clusterClockCard"),
@@ -856,6 +858,24 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     panels.developerPanel({ ...settings, vod_output_preparation: "copy_and_encoded" }, readiness),
     /<option value="copy_and_encoded" selected>/,
   );
+  // C1: indexing while serving has no switch; four advisory rows and the
+  // evidence it graduates on.
+  const indexing = /CARDHEAD:Indexing while serving\|[\s\S]*?(?=<div class="setsection"|$)/.exec(html);
+  assert.ok(indexing, "Developer shows the indexing-while-serving card");
+  for (const id of ["serving_live_waiters", "serving_slots_in_use", "serving_domain_readers", "serving_cross_node"])
+    assert.match(indexing[0], new RegExp(`data-devstat="indexing_while_serving:${id}"`), `indexing reports ${id}`);
+  assert.doesNotMatch(indexing[0], /TOG:|FOOT:/, "advisory only: no switch and no Save");
+  assert.match(indexing[0], /Leaves Developer when/);
+  // D1: the processed DV upgrade has no switch; per-platform switch
+  // qualification rows, this node's renderer and slot, and the bar it
+  // graduates on.
+  const upgrade = /CARDHEAD:Processed DV upgrade\|[\s\S]*?(?=<div class="setsection"|CARDHEAD:|$)/.exec(html);
+  assert.ok(upgrade, "Developer shows the processed DV upgrade card");
+  for (const id of ["processed_upgrade_web", "processed_upgrade_apple", "processed_upgrade_android",
+    "processed_upgrade_renderer", "processed_upgrade_slot", "processed_upgrade_activity"])
+    assert.match(upgrade[0], new RegExp(`data-devstat="processed_dv_upgrade:${id}"`), `upgrade reports ${id}`);
+  assert.doesNotMatch(upgrade[0], /TOG:|FOOT:/, "advisory only: no switch and no Save");
+  assert.match(upgrade[0], /Leaves Developer when[\s\S]*twenty measured switches/);
   const retention = /Rolling output retention[\s\S]*?(?=<div class="setsection")/.exec(html);
   assert.ok(retention, "Developer shows the rolling retention card");
   assert.match(retention[0], /TOG:vod-rolling-retention\|[^|]*\|[^|]*\|checked=false/, "retention is off by default");
@@ -1022,7 +1042,9 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // without saying so fails here, whatever else it renders.
   const developerCards = html.split("CARD[").slice(1);
   assert.ok(developerCards.length >= 15, `Developer renders its cards (${developerCards.length})`);
-  assert.ok(developerCards.length <= 20, `Developer holds only what still waits (${developerCards.length})`);
+  // 21 since D1 (2026-11-07): the processed DV upgrade waits on its measured
+  // switches. The bound still catches a card that should have graduated.
+  assert.ok(developerCards.length <= 21, `Developer holds only what still waits (${developerCards.length})`);
   for (const card of developerCards) {
     const title = (/CARDHEAD:([^|]*)/.exec(card) || [])[1] || card.slice(0, 80);
     assert.match(card, /<b>Leaves Developer when:<\/b> \S[^<]*<b>Then:<\/b> \S/,

@@ -2736,13 +2736,17 @@ mod processed_selection_has_no_software_gates {
     /// once the Developer setting is on and the first window verifies. These
     /// were silent gates (720p clamp, speed qualification, Auto only) that
     /// kept HDR10-E from ever playing; they must not return.
+    ///
+    /// Since plan ruling 3 the entry point is the post-first-frame upgrade:
+    /// its request-only gates (`processed_upgrade_gates`, which the create
+    /// also runs) and its trial (`prepare_processed_upgrade`).
     fn entry_body() -> &'static str {
         let source = include_str!("transcode/manager/create.rs");
         source
-            .split_once("pub(crate) async fn prepare_processed_hdr10(")
-            .expect("processed HDR10 entry point")
+            .split_once("pub(crate) fn processed_upgrade_gates(")
+            .expect("processed upgrade gates")
             .1
-            .split_once("pub(super) async fn prepare_vod_encoding_with_preference(")
+            .split_once("pub(crate) fn hold_processed_upgrade_root(")
             .expect("entry point end")
             .0
     }
@@ -2761,11 +2765,22 @@ mod processed_selection_has_no_software_gates {
         );
         // Every decline after the setting check, to the end of the entry
         // point, is reported, never silent.
-        let after_setting = body
+        let (gates, trial) = body
+            .split_once("pub(crate) async fn prepare_processed_upgrade(")
+            .expect("the trial follows its gates");
+        let after_setting = gates
             .split_once("// The setting is on for a DV source")
             .expect("setting check")
             .1;
         assert!(!after_setting.contains("Ok(None)"), "{after_setting}");
+        let after_gates = trial
+            .split_once("Self::processed_upgrade_gates(request, &planning, hdr10_intent)?")
+            .expect("the trial reruns the gates")
+            .1
+            .split_once("else {\n                return Ok(None);\n            };")
+            .expect("the gates' own silent answer")
+            .1;
+        assert!(!after_gates.contains("Ok(None)"), "{after_gates}");
     }
 
     /// A Dolby Vision display's converted Profile 7 copy never reached the
@@ -2792,10 +2807,12 @@ mod processed_selection_has_no_software_gates {
     fn every_catalog_start_is_offered_processing() {
         let source = include_str!("http/hls/create.rs");
         let guard = source
-            .split_once(".prepare_processed_hdr10(")
-            .expect("processed call")
+            .split_once("let processed_upgrade_applies = if")
+            .expect("processed upgrade guard")
+            .1
+            .split_once("processed_upgrade_gates(")
+            .expect("processed gates call")
             .0;
-        let guard = &guard[guard.rfind("    if ").expect("call guard")..];
         assert!(!guard.contains("candidate_auto_policy"), "{guard}");
         assert!(!guard.contains("continuous.is_none()"), "{guard}");
     }

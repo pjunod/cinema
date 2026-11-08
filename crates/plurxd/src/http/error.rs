@@ -86,6 +86,17 @@ impl ApiError {
         }
     }
 
+    /// The HTTP status this error answers with, for a record of a refusal that
+    /// carries no `code`.
+    pub fn http_status(&self) -> StatusCode {
+        self.parts().0
+    }
+
+    /// The sentence this error answers with.
+    pub fn refusal_text(&self) -> String {
+        self.parts().1
+    }
+
     /// The machine-readable `code` a typed error carries, if it is one.
     pub fn code(&self) -> Option<&'static str> {
         match self {

@@ -10,11 +10,16 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A client releasing a rolling stream, or an operator stopping it from
+  Activity, now retires it as `released` / `stopped` instead of an authority
+  fence. Metrics and session-end events no longer report every ordinary
+  release as failover, and a control request racing the stop is answered with
+  the existing `deleted` / `admin_stop` reason rather than `authority_fenced`,
+  which clients treat as recoverable.
 - New daemon-mediated source readers retain kernel lifetime witnesses on
   native macOS, Linux and containers, allowing exact-owner recovery after
   Cinema exits without rebooting the server. Legacy readers without this
   evidence remain held pending a separate physical stop proof.
-
 - Jobs includes fresh CPU, GPU and heavy-worker capacity from learner nodes.
   Worker observations use the member-scoped operations channel and remain
   independent of voter-only playback and recording authority.

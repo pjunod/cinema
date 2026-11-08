@@ -2875,6 +2875,92 @@
         assert_eq!(mgr.admissions.in_use(), 0);
     }
 
+    /// D2 item 4: with hardware full of live viewers, `Software` and
+    /// `Refused` are already the answer — no background encoder can yield a
+    /// slot to this start. Admission returns them at the first decision
+    /// instead of sleeping out the whole queue window and then returning the
+    /// same thing.
+    #[tokio::test]
+    async fn final_admission_decisions_return_without_waiting_out_the_queue() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps {
+                nvenc: true,
+                ..Default::default()
+            },
+            Pipeline::Cpu,
+        );
+        let viewers = (0..DEFAULT_MAX_HW_SESSIONS)
+            .map(|_| {
+                mgr.admissions
+                    .try_acquire(DEFAULT_MAX_HW_SESSIONS, Priority::Live)
+                    .expect("live hardware permit")
+            })
+            .collect::<Vec<_>>();
+        let window = Duration::from_secs(5);
+        let started = std::time::Instant::now();
+        let admission = mgr
+            .admit_live(
+                Encoder::Nvenc,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                window,
+                Priority::Live,
+            )
+            .await
+            .expect("a class software carries starts there");
+        assert_eq!(admission.encoder, Encoder::Software);
+        assert!(
+            started.elapsed() < ADMISSION_POLL,
+            "a Software decision is final: {:?}",
+            started.elapsed()
+        );
+        drop(admission);
+
+        let started = std::time::Instant::now();
+        let error = mgr
+            .admit_live(
+                Encoder::Nvenc,
+                None,
+                Workload {
+                    source_height: 2160,
+                    codec: "hevc",
+                    hdr: Some("pq"),
+                    target_height: 2160,
+                },
+                window,
+                Priority::Live,
+            )
+            .await
+            .err()
+            .expect("software cannot carry 4K HDR");
+        assert!(
+            started.elapsed() < ADMISSION_POLL,
+            "a Refused decision is final: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(
+                capacity_refusal(&error),
+                Some((CapacityRefusal::Waitable { .. }, _))
+            ),
+            "a full hardware pool frees when a viewer leaves: {error}"
+        );
+        assert!(!mgr.admissions.live_is_waiting(), "the waiter was released");
+        drop(viewers);
+        assert_eq!(mgr.admissions.in_use(), 0);
+    }
+
     /// Cancelling the HTTP request while it is waiting must withdraw the
     /// yield signal. Otherwise one abandoned Play request parks every future
     /// producer even though no live encoder owns capacity.
