@@ -845,6 +845,35 @@ mod tests {
     }
 
     #[test]
+    fn targeted_probe_view_names_the_library_targeted_generation_constant() {
+        // The v5 view's SQL literal and the Rust generation are one value.
+        let literal = format!(
+            "job.generation IS '{}'",
+            super::super::background_jobs_library::LIBRARY_TARGETED_GENERATION
+        );
+        assert!(TARGETED_MIGRATION.contains(&literal), "{literal}");
+    }
+
+    #[test]
+    fn a_v126_store_reopens_without_touching_the_managed_view_or_marker() {
+        let directory = tempfile::tempdir().expect("store directory");
+        let path = directory.path().join("store.db");
+        drop(SqliteStore::open(&path).expect("fresh v126 store"));
+        let snapshot = || {
+            let conn = rusqlite::Connection::open(&path).expect("reopen for snapshot");
+            verify_sqlite(&conn).expect("canonical v5");
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("ordinal");
+            (rows(&conn).expect("managed shape"), version)
+        };
+        let before = snapshot();
+        assert_eq!(before.1, TARGETED_MIGRATION_VERSION);
+        drop(SqliteStore::open(&path).expect("restart"));
+        assert_eq!(snapshot(), before, "a restart is a no-op at v126/v5");
+    }
+
+    #[test]
     fn targeted_probe_upgrade_refuses_drifted_predecessor_without_advancing_ordinal() {
         let conn = rusqlite::Connection::open_in_memory().expect("SQLite");
         SqliteStore::apply_migrations_for_test(&conn, 125).expect("deployed managed v4");

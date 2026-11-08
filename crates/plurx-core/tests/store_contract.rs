@@ -12944,6 +12944,80 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
     }
 }
 
+/// Review #1405 (4): a replicated cluster at managed v4 (the v125 release)
+/// upgrades to v5 on bootstrap — the exact v5 view and marker, with its
+/// managed receipts kept — and a later bootstrap is a no-op.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("managed upgrade client");
+    let telemetry = cluster._root.path().join("managed-v5-upgrade.db");
+    drop(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("bootstrap current"),
+    );
+    // Return exactly the managed view and marker to published v4.
+    let statements = include_str!("../src/store/subtitle_managed_resources_v4.sql")
+        .split("-- next statement")
+        .map(str::trim)
+        .filter(|sql| !sql.is_empty())
+        .map(|sql| (sql.to_owned(), hiqlite::params!()))
+        .collect::<Vec<_>>();
+    for result in client.txn(statements).await.expect("rewind to managed v4") {
+        result.expect("published v4 statement");
+    }
+    for result in client
+        .txn([(
+            "INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')",
+            hiqlite::params!(),
+        )])
+        .await
+        .expect("retained managed receipt")
+    {
+        result.expect("receipt insert");
+    }
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
+    assert_eq!(
+        replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
+        queue_fixture::managed_fixture_shape(4),
+        "exact published managed v4"
+    );
+    for round in ["upgrade", "restart"] {
+        drop(
+            HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+                .await
+                .unwrap_or_else(|error| panic!("{round} bootstrap: {error}")),
+        );
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
+        assert_eq!(
+            replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
+            queue_fixture::managed_fixture_shape(5),
+            "{round}: exact managed v5 view, marker and guards"
+        );
+        let receipts: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT count(*) AS value FROM subtitle_model_receipts",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("managed receipts");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].value, 1, "{round}: managed receipts kept");
+    }
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exactly() {
