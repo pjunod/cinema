@@ -3940,7 +3940,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # D2 start contract: +1 `runtime.spawn` in `OwnedCreate::drop`: the detached
 # owner's bound, which awaits the owned create until its owner deadline and
 # aborts it there; it owns nothing else.
-expected_occurrences = 90
+# Review 2 fixes (#1438): +1 is the fleet route test's server thread in
+# http/activity_starts/tests.rs, joined before the test returns; no production launcher.
+expected_occurrences = 91
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5460,7 +5462,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # by one settlement budget. The other +5 in this total landed on
 # effort/playback-start with the C1, C3 and G1 merges without a recount; they
 # are counted here so the census is exact, not reviewed by this lane.
-expected_occurrences = 2084
+# Review 2 fixes (#1438): +6 are test-only bounds — the fleet route test's two
+# timeouts and one poll sleep, the replay/direct settle test's two poll sleeps,
+# and the cross-node exclusion test's one sleep. No production timer is added.
+expected_occurrences = 2090
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6627,7 +6632,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # D2 start contract: +4, none a process. Three `.status()` reads of HTTP
 # responses in new tests (hls chunk_05, http/tests.rs, media_sessions tests)
 # and `runtime.spawn` in `OwnedCreate::drop` (the task counted by method-spawn).
-expected_occurrences = 883
+# Review 2 fixes (#1438): +5 are `reqwest::Response::status()` calls in the
+# fleet route and settle tests matched by the launch-method shape; no process.
+expected_occurrences = 888
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
