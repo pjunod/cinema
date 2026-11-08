@@ -3676,7 +3676,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # R1: +3 test-only `RollingControlHandle::spawn_for_test` actors in
 # `release_projection_is_the_first_terminal_and_keeps_its_cause`, each owned by
 # its handle and dropped at the end of the test.
-expected_occurrences = 1082
+# D2 start contract: +5. `OwnedCreate` (media_pool.rs) owns the create task
+# it spawns: cancelled with the request until the create holds its durable
+# request claim, then bounded by the claim window and aborted past it. +1 its
+# `tokio::spawn`, +1 the create handler's `OwnedCreate::spawn` call, +2 the two
+# media_pool tests' `OwnedCreate::spawn`, +1 the joined `tokio::spawn` that
+# runs the waiting re-post in `a_retry_of_a_start_still_in_flight_joins_its_claim`.
+expected_occurrences = 1087
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3919,7 +3925,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # the listener owner. Both parent additions are present in the source union.
 # Subtitle cue index (#1340): +1 scope.spawn in mkv_sparse::parallel; the
 # reader threads are scoped and joined by std::thread::scope before it returns.
-expected_occurrences = 89
+# D2 start contract: +1 `runtime.spawn` in `OwnedCreate::drop`: the detached
+# owner's bound, which awaits the owned create until its owner deadline and
+# aborts it there; it owns nothing else.
+expected_occurrences = 90
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -3940,7 +3949,9 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # both use the same retained cancellation/reap owner, not separate launchers.
 # PR1225: +1 is vod/driver.rs:1245's cfg(test) controlled_driver::spawn
 # declaration, not a second task. Its actual task/cancellation is noted above.
-expected_occurrences = 18
+# D2 start contract: +1 the `fn spawn(` declaration of `OwnedCreate`, not a
+# task call.
+expected_occurrences = 19
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5428,7 +5439,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # nothing. The other +2 in this total predate R1 on main (88fa37663..ae779d141:
 # subtitle_work.rs `interval_at`, source_custody/recovery/tests.rs `timeout`);
 # they are counted here so the census is exact, not reviewed by R1.
-expected_occurrences = 2074
+# D2 start contract: media_pool.rs +4 (the owner bound's `timeout_at` in
+# `OwnedCreate::drop` and three test sleeps), http/tests.rs +1 (the joined
+# re-post test's wait before the owner lets go), create.rs -1 (the
+# compatibility-only activation wait folded into the claim join loop).
+expected_occurrences = 2078
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5454,7 +5469,9 @@ expected_occurrences = 2074
 id = "bare-time-constructor"
 pattern = "(?<![:.\\w])(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
 # J4 shared startup: Two calls to the local timeout error factory in the shared-start observer return ApiError only; they construct no timer.
-expected_occurrences = 3
+# D2 start contract: the shared-start observer and its two local `timeout()`
+# factory calls are gone; the claim join loop answers `create_still_starting`.
+expected_occurrences = 1
 
 [[module_structures]]
 id = "tokio-time-import"
@@ -6590,7 +6607,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # are unchanged; the two joined fixture tasks are classified above separately.
 # PR1369: +2 output() calls for the same bounded offline FFmpeg/FFprobe
 # controls inventoried above, not additional children or detached owners.
-expected_occurrences = 879
+# D2 start contract: +4, none a process. Three `.status()` reads of HTTP
+# responses in new tests (hls chunk_05, http/tests.rs, media_sessions tests)
+# and `runtime.spawn` in `OwnedCreate::drop` (the task counted by method-spawn).
+expected_occurrences = 883
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

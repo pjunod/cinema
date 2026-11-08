@@ -5929,9 +5929,15 @@ final class PlayerController: ObservableObject {
                 // Not `started`: that is the controller's own "is this player
                 // running" flag, and shadowing it inside a recovery sequence is
                 // the kind of thing a reader has to stop and check.
-                let opened = try await PlaybackLinkRequestContext.$receipt.withValue(receipt) {
-                    let opened = try await requestHlsSession(model, try contextForFile(file), request)
-                    return opened
+                // Every rung tells the server what the sequence's absolute
+                // deadline still allows, so the server answers inside it.
+                let remainingMs = PlaybackCreateRetry.deadlineMs
+                    - Self.milliseconds(began.duration(to: ContinuousClock.now))
+                let opened = try await PlaybackStartupRequestContext.$remainingMs.withValue(max(0, remainingMs)) {
+                    try await PlaybackLinkRequestContext.$receipt.withValue(receipt) {
+                        let opened = try await requestHlsSession(model, try contextForFile(file), request)
+                        return opened
+                    }
                 }
                 guard createRetryExpiredEpoch != epoch else {
                     await release(session: opened.sessionId)

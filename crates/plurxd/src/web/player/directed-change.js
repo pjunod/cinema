@@ -1010,7 +1010,11 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
     ?await openContinuousQualitySession(playbackFileContext(fileId).source_ref.file_id,body,player,signal,restartSessionId):null;
   if(continuous) return continuous;
   const linkReceipt=typeof candidateLinkReceipt==='function'?candidateLinkReceipt(player,fileId):null;
-  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal,linkReceipt});
+  // Every attempt, the first and each retry of the ladder, tells the server
+  // what this preparation still has, so the server answers inside it rather
+  // than on a 10 s guess.
+  const startupRemainingMs=typeof preparationRemainingMs==='function'?preparationRemainingMs(signal):null;
+  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal,linkReceipt,startupRemainingMs});
 }
 // A cancellable wait. The newer intent's abort is the same signal the create
 // itself is carrying, so a retry sleeping between attempts is cancelled by the

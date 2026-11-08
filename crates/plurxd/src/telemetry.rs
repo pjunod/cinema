@@ -1338,6 +1338,72 @@ fn render_receiver_orphans(out: &mut String) {
     );
 }
 
+/// Upper bounds of `plurx_create_seconds`, in milliseconds: the create
+/// route's own clamp (10 s) and the claim window an owner runs to (60 s) are
+/// both bucket edges.
+const CREATE_SECONDS_BUCKETS_MS: [u64; 11] = [
+    100, 250, 500, 1_000, 2_000, 3_000, 5_000, 8_000, 10_000, 20_000, 60_000,
+];
+
+/// One `code` series of `plurx_create_seconds`: bucket counts (the last is
+/// `+Inf`) and the summed milliseconds.
+#[derive(Default)]
+struct CreateSecondsSeries {
+    buckets: [u64; CREATE_SECONDS_BUCKETS_MS.len() + 1],
+    sum_ms: u64,
+}
+
+/// Keyed by the answer's `code`. Codes are `&'static str`s the server
+/// names, so the label set is bounded by the source.
+static CREATE_SECONDS: Mutex<std::collections::BTreeMap<&'static str, CreateSecondsSeries>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// Time one session create took at the handler boundary, by how it answered:
+/// `ok`, the typed refusal's code, or `none` for a refusal that carried none
+/// (the class this contract drives to zero). Timed-out and refused creates
+/// are recorded like any other answer.
+pub(crate) fn record_create_seconds(code: Option<&'static str>, elapsed: Duration) {
+    let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let slot = CREATE_SECONDS_BUCKETS_MS
+        .iter()
+        .position(|upper| ms <= *upper)
+        .unwrap_or(CREATE_SECONDS_BUCKETS_MS.len());
+    let mut series = CREATE_SECONDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let row = series.entry(code.unwrap_or("none")).or_default();
+    row.buckets[slot] = row.buckets[slot].saturating_add(1);
+    row.sum_ms = row.sum_ms.saturating_add(ms);
+}
+
+fn render_create_seconds(out: &mut String) {
+    out.push_str(
+        "# HELP plurx_create_seconds Session create time at the handler boundary, by the answer's code (ok, a typed refusal's code, or none for a codeless one), including timed-out and refused creates.\n\
+         # TYPE plurx_create_seconds histogram\n",
+    );
+    let series = CREATE_SECONDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (code, row) in series.iter() {
+        let mut cumulative = 0;
+        for (index, count) in row.buckets.iter().enumerate() {
+            cumulative += count;
+            let upper = CREATE_SECONDS_BUCKETS_MS.get(index).map_or_else(
+                || "+Inf".to_owned(),
+                |ms| format!("{}", *ms as f64 / 1_000.0),
+            );
+            out.push_str(&format!(
+                "plurx_create_seconds_bucket{{code=\"{code}\",le=\"{upper}\"}} {cumulative}\n"
+            ));
+        }
+        out.push_str(&format!(
+            "plurx_create_seconds_sum{{code=\"{code}\"}} {:.3}\n\
+             plurx_create_seconds_count{{code=\"{code}\"}} {cumulative}\n",
+            row.sum_ms as f64 / 1_000.0,
+        ));
+    }
+}
+
 fn render_background_overruns(out: &mut String) {
     render_counters(
         out,
@@ -2198,6 +2264,7 @@ pub fn prometheus() -> String {
     metrics.push_str(&SUBTITLE_SOURCE_METRICS.render());
     metrics.push_str(&START_OUTCOME_COUNTERS.render());
     render_background_overruns(&mut metrics);
+    render_create_seconds(&mut metrics);
     render_receiver_orphans(&mut metrics);
     render_rolling_retained_lookup_skips(&mut metrics);
     render_output_preparation_drains(&mut metrics);

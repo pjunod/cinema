@@ -19237,6 +19237,135 @@ async fn hls_http_endpoints() {
     );
 }
 
+/// D2 item 3(b): a re-post of a start whose owner (on this or any other
+/// ingress) still holds the durable request claim joins that claim. It waits
+/// for the owner's activation within its own allowance and answers
+/// `startup_timeout` with `Retry-After` when that ends first — leaving the
+/// claim, and so the one owner, in place — instead of the old
+/// `media_session_starting` dead end no client retried; and when the owner
+/// lets go, the waiting re-post becomes the owner and starts the session.
+#[tokio::test]
+async fn a_retry_of_a_start_still_in_flight_joins_its_claim() {
+    use plurx_core::domain::MediaSessionRequestClaim;
+    crate::transcode::require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let s = seed_content(&state).await;
+    state
+        .store
+        .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+        .await
+        .expect("stay on immutable VOD");
+    prepare_vod_copy_fixture(&state, s.file, 16).await;
+    let create = |request_id: &str, remaining_ms: u64| {
+        let mut request = post(
+            &format!("/api/v1/files/{}/hls/sessions", s.file),
+            Some(&admin),
+            json!({"playback_id": "d2-join", "request_id": request_id, "copy": true}),
+        );
+        request.headers_mut().insert(
+            "x-plurx-startup-remaining-ms",
+            remaining_ms.to_string().parse().expect("header"),
+        );
+        request
+    };
+    let (status, first) = call(&app, create("d2-first", 10_000)).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let route = state
+        .store
+        .media_session_route(first["session_id"].as_str().expect("session"))
+        .await
+        .expect("route read")
+        .expect("route");
+    let principal = route.principal.clone();
+    let claim = |incarnation: String| {
+        let state = state.clone();
+        let principal = principal.clone();
+        let fingerprint = route.request_fingerprint.clone();
+        async move {
+            let now = crate::media_sessions::unix_ms();
+            state
+                .store
+                .claim_media_session_request(
+                    &principal,
+                    "d2-joined",
+                    &fingerprint,
+                    "d2-join",
+                    &incarnation,
+                    now,
+                    now + 60_000,
+                )
+                .await
+                .expect("claim")
+        }
+    };
+    // An owner elsewhere holds the request and has not activated yet.
+    let owner = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        claim(owner.clone()).await,
+        MediaSessionRequestClaim::Acquired { .. }
+    ));
+
+    let started = std::time::Instant::now();
+    let response = app
+        .clone()
+        .oneshot(create("d2-joined", 1_500))
+        .await
+        .expect("response");
+    let waited = started.elapsed();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1")
+    );
+    let body: Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("json");
+    assert_eq!(body["code"], "startup_timeout", "{body}");
+    assert!(
+        waited >= std::time::Duration::from_millis(1_000),
+        "the retry waited on the claim for its allowance, not answered at once: {waited:?}"
+    );
+    assert!(
+        matches!(
+            claim(uuid::Uuid::new_v4().to_string()).await,
+            MediaSessionRequestClaim::InFlight { incarnation_id, .. } if incarnation_id == owner
+        ),
+        "the joiner left the owner's claim in place"
+    );
+
+    // The owner lets go while a re-post is waiting: that re-post becomes the
+    // owner and starts the session itself.
+    let joined = tokio::spawn({
+        let app = app.clone();
+        let request = create("d2-joined", 8_000);
+        async move { call(&app, request).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(state
+        .store
+        .fail_media_session_request(
+            &principal,
+            "d2-joined",
+            &owner,
+            crate::media_sessions::unix_ms()
+        )
+        .await
+        .expect("owner lets go"));
+    let (status, joined) = joined.await.expect("joined create");
+    assert_eq!(status, StatusCode::OK, "{joined}");
+    assert!(joined["session_id"].as_str().is_some(), "{joined}");
+}
+
 #[tokio::test]
 async fn unindexed_copy_uses_live_recovery_when_enabled() {
     crate::transcode::require_ffmpeg();

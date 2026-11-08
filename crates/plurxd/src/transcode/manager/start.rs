@@ -340,13 +340,21 @@ impl TranscodeManager {
                     return Err(capacity_error(why));
                 }
 
-                if let Some(waiting) = queued.as_mut() {
-                    waiting.mark_capacity_blocked();
-                }
-                let now = Instant::now();
-                if now < deadline {
-                    tokio::time::sleep(ADMISSION_POLL.min(deadline - now)).await;
-                    continue;
+                // Poll only while the answer can still become hardware
+                // without this start doing anything: a background encoder
+                // that has not yet checkpointed. `Software` and `Refused` are
+                // already the answer this start will get — sleeping out the
+                // queue window on them only spent the viewer's allowance and
+                // then returned the same thing.
+                if matches!(decision, Admission::WaitingForBackground) {
+                    if let Some(waiting) = queued.as_mut() {
+                        waiting.mark_capacity_blocked();
+                    }
+                    let now = Instant::now();
+                    if now < deadline {
+                        tokio::time::sleep(ADMISSION_POLL.min(deadline - now)).await;
+                        continue;
+                    }
                 }
 
                 return match decision {
@@ -1015,7 +1023,8 @@ impl TranscodeManager {
             && target_height == HDR10_4K_HEIGHT
             && encoder != Encoder::Qsv
         {
-            return Err(capacity_error(
+            return Err(terminal_capacity_error(
+                TRANSCODE_HEIGHT_UNAVAILABLE,
                 "the proved 4K HDR10 QuickSync slot is busy; retry at 1080p",
             ));
         }
