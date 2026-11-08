@@ -2990,8 +2990,28 @@ pub(super) async fn stage_prepared_successor_as(
                     .candidate_context
                     .as_ref()
                     .is_some_and(|context| context.selected_candidate.processed_dv);
+            // The upgrade's own request-only gates, as the create runs them,
+            // where this successor's planning snapshot is in hand; a source
+            // with no Dolby Vision metadata a processed destination could use
+            // is never one. Without a snapshot the trial's own gates decide.
+            let applies = matches!(source.dolby_vision.profile, Some(5 | 7 | 8))
+                && staged_request
+                    .candidate_context
+                    .as_ref()
+                    .and_then(|context| context.planning_snapshot.as_deref())
+                    .is_none_or(|snapshot| {
+                        matches!(
+                            crate::transcode::TranscodeManager::processed_upgrade_gates(
+                                &staged_request,
+                                snapshot,
+                                staged_request.hdr10,
+                            ),
+                            Ok(Some(_))
+                        )
+                    });
             if successor_owner == state.node_id
                 && !processed
+                && applies
                 && staged_request.presentation == crate::transcode::Presentation::Vod
             {
                 super::processed_upgrade::register(super::processed_upgrade::UpgradeIntent {
