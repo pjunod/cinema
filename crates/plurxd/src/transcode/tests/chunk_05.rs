@@ -923,21 +923,104 @@
     async fn retention_keeps_a_reload_margin_above_the_observed_fetch_lead() {
         let dir = crate::test_tempdir().expect("tempdir");
         let p = dir.path();
-        // Begin with the already-served 300s window this steady-state
-        // retention regression observes, then extend writer inventory to 400s.
-        seeded_session_dir(p, 75, 4.0).await;
+        // 100 segments of 4s = 400s of media.
+        seeded_session_dir(p, 100, 4.0).await;
         tokio::fs::write(p.join("init.mp4"), b"i")
             .await
             .expect("write init");
 
         let session = Arc::new(test_session(p.to_path_buf()));
-        install_seeded_served_playlist(&session, 0).await;
-        seeded_session_dir(p, 100, 4.0).await;
         session.refresh_segments().await;
         assert_eq!(
             session.segments.lock().await.produced_playable_end_ms(),
             Some(400_000)
         );
+
+        // Establish real served history before recording any media fetch.
+        // The first publication cannot spend telemetry from an attachment
+        // that has not presented: it earns only the initial 48 s runway.
+        let published_at = Instant::now();
+        session
+            .publication_cycle_at("retained-window", published_at)
+            .await
+            .expect("initial publication");
+        assert_eq!(
+            session
+                .publication
+                .lock()
+                .await
+                .served
+                .as_ref()
+                .expect("initial snapshot")
+                .end_ms,
+            48_000,
+        );
+        // Advance through reachable cuts. Before each observation, commit
+        // media from the currently served window. Its position and five-second
+        // buffer stay within that window and below the fetched frontier. No
+        // forced presentation verdict or prepublication telemetry earns credit.
+        for (sequence, position_ms, expected_end_ms) in [
+            (1, 40_000, 88_000),
+            (2, 80_000, 128_000),
+            (3, 120_000, 168_000),
+            (4, 160_000, 208_000),
+            (5, 200_000, 248_000),
+            (6, 240_000, 288_000),
+            (7, 252_000, 300_000),
+        ] {
+            let (last_segment, end_ms) = {
+                let clock = session.publication.lock().await;
+                let served = clock.served.as_ref().expect("current served cut");
+                assert!(position_ms >= served.first_segment * 4_000);
+                assert!(position_ms + 5_000 <= served.end_ms);
+                (served.last_segment, served.end_ms)
+            };
+            assert!(commit_rolling_publication_media(&session, last_segment, end_ms).await);
+            accept_rolling_publication_demand(
+                &session,
+                sequence,
+                position_ms,
+                1.0,
+                crate::playback_control::PlaybackDemand::Active,
+                crate::playback_control::RenderState::Waiting,
+            )
+            .await;
+            session
+                .publication_cycle_at(
+                    "retained-window",
+                    Instant::now() + ROLLING_PUBLICATION_TARGET,
+                )
+                .await
+                .expect("earned publication");
+            assert_eq!(
+                session
+                    .publication
+                    .lock()
+                    .await
+                    .served
+                    .as_ref()
+                    .expect("next served cut")
+                    .end_ms,
+                expected_end_ms,
+            );
+            // The real control actor uses a monotonic 250 ms admission limit.
+            // Respect it between fixture observations, including the final
+            // in-window playhead report; do not bypass its ownership checks.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        {
+            let clock = session.publication.lock().await;
+            let served = clock.served.as_ref().expect("earned snapshot");
+            assert_eq!(served.first_segment, 30);
+            assert_eq!(served.last_segment, 74);
+            assert_eq!(served.end_ms, 300_000);
+        }
+        let accepted = session
+            .control
+            .snapshot()
+            .await
+            .expect("publication accepted by actor");
+        assert_eq!(accepted.delivery.published_end_ms, Some(300_000));
 
         // Physical-iPad regression: AVPlayer fetched through 300s while its
         // playhead was around 180s, despite a 60s preferred forward buffer.
@@ -949,35 +1032,37 @@
         session
             .fetched_end_ms
             .store(observed_fetched_end_ms, Relaxed);
+        // Retention is measured against this exact observed playhead. A
+        // Rendering report would project consumption as the actor and future
+        // publication tick advance; Waiting keeps the 180 s coordinate fixed.
         accept_rolling_publication_demand(
             &session,
-            1,
+            8,
             observed_playhead_ms,
             1.0,
             crate::playback_control::PlaybackDemand::Active,
-            crate::playback_control::RenderState::Rendering,
+            crate::playback_control::RenderState::Waiting,
         )
         .await;
         assert!(
             commit_rolling_publication_media(&session, 74, observed_fetched_end_ms).await,
             "download frontier must reach the publication actor"
         );
-        // This regression starts after presentation; the hand-built segment
-        // inventory does not emit the actor's real advancing frame reports.
-        session.control.mark_startup_presented_for_test().await;
         expire_seeded_prefix(&session, 30).await;
         gc_expired_segments(&session).await;
-        // This fixture expires files directly instead of advancing them
-        // through the publication transition, so mirror the logical retention
-        // boundary that production installs before selecting a new snapshot.
-        session.publication.lock().await.retention_first_segment = Some(30);
-        session
-            .publication_cycle_at(
-                "retained-window",
-                Instant::now() + ROLLING_PUBLICATION_TARGET,
-            )
-            .await
-            .expect("retention boundary reaches the served snapshot");
+        // GC does not spend the viewer's publication allowance. The real
+        // 120..300 s snapshot remains the advertised window while its expired
+        // prefix is collected; a new publication would test a different window.
+        assert_eq!(session.fetched_end_ms.load(Relaxed), observed_fetched_end_ms);
+        {
+            let clock = session.publication.lock().await;
+            let served = clock.served.as_ref().expect("retained served snapshot");
+            assert_eq!(
+                (served.first_segment, served.last_segment, served.end_ms),
+                (30, 74, 300_000),
+                "retention must preserve the existing accepted publication",
+            );
+        }
 
         // The retained/pruned segment boundary is the behavior under test.
         // Segment 30 begins at 120s, leaving 60s behind the observed 180s
