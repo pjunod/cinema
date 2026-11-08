@@ -348,6 +348,22 @@ function indexingWhileServingCard(readiness){
     <p class="hint">Advisory: nothing here switches anything on or off.</p>
     ${devGraduation("after a deploy, idle nodes' analysis claims rise while another node serves, plurx_analysis_completed_total shows completions that reached their target, and no storage domain holds more than its two readers.","this card goes; indexing while serving is simply how analysis works.")}`,{id:"indexing-while-serving-card"});
 }
+// D1 (playback start, plan ruling 3): processed Dolby Vision / HDR10-E is an
+// upgrade after the first frame, switched in through the prepared
+// replacement. It always runs when Dolby Vision processing is on; the rows
+// say whether the switch is qualified on each platform and whether this node
+// can run one now. Nothing here switches anything.
+function processedDvUpgradeCard(readiness){
+  return setCard(`${cardHead("Processed DV upgrade","Playback starts ordinary; once the first frame is on screen this node may render processed Dolby Vision and offer it as a prepared switch. The switch is unqualified until each platform has measured twenty clean ones.",'<span class="pill">unqualified until measured</span>')}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_web","Web switches measured","Committed switches with complete ±2 s frame samples, zero dropped frames, observed audio continuity and no reopen, of twenty.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_apple","Apple switches measured","The same bar, from the Apple access log's dropped frames and stalls.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_android","Android switches measured","The same bar, from Media3 decoder counters and audio underruns.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_renderer","Renderer present","Without the processing helper a node's sessions start ordinary and stay so.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_slot","Slot free","One processed preparation per node; an upgrade that finds it busy declines and the session keeps playing.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_activity","Upgrades on this node","Scheduled, staged, declined and cancelled since this node started.")}
+    <p class="hint">Advisory: the upgrade runs whether or not these rows are met.</p>
+    ${devGraduation("each platform has recorded twenty measured switches with complete ±2 s frame samples, independently observed audio continuity and no reopen.","this card goes; the upgrade is simply how Dolby Vision processing plays.")}`,{id:"processed-dv-upgrade-card"});
+}
 function developerPanel(settings,readiness,httpsCard=""){
   // Only features that are not yet fully active or fully tested wait here,
   // each saying what it waits on (devGraduation). Everything that graduated
@@ -364,7 +380,7 @@ function developerPanel(settings,readiness,httpsCard=""){
       <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
-      <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}
+      <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}${processedDvUpgradeCard(readiness)}
       <div class="setsection" id="enable-display-target-hdr10"><h2>Display-targeted HDR10-E / SDR</h2><p>Per-shot L1 mapping for the viewer's reported HDR peak or explicit SDR capability. Readiness is advisory; the saved choice always applies to new playback.</p></div>${displayTargetHdr10Card(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
