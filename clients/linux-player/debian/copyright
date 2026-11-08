@@ -32,6 +32,16 @@ Comment: mpv is built with -Dgpl=true and compiles plurx's Apache-2.0
  Apache-2.0 is compatible with GPL-3.0). Some of its source files are also
  available under LGPL-2.1-or-later; see upstream's Copyright file.
 
+Files: mpv/video/out/placebo/dv_upload.h
+ mpv/video/out/placebo/dv_reconstruction.h
+ mpv/video/out/placebo/dv_unorm16.h
+ packaging/patches/mpv/0006-vo_gpu_next-normalize-DV-reconstruction-metadata.patch
+ packaging/patches/mpv/0007-vo_gpu_next-preserve-DV-software-sampling-precision.patch
+ packaging/patches/mpv/0008-vo_gpu_next-round-the-final-DV-UNORM16-cache-exactly.patch
+Copyright: 2026 plurx contributors
+License: LGPL-2.1+
+Comment: Dolby Vision reconstruction, upload precision and terminal RGB rounding.
+
 Files: dm/*
 Copyright: 2026 Paul Junod
 License: Apache-2.0
