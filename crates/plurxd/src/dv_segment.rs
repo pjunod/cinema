@@ -1301,7 +1301,7 @@ async fn run_streaming(
                 progress: Progress::Stderr,
                 descriptors: Descriptors::from_files(
                     Some(&read),
-                    Some(&resources.source.handle),
+                    source_input.is_none().then_some(&resources.source.handle),
                     None,
                     false,
                 ),

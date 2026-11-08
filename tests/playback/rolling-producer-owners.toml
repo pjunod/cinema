@@ -1,3 +1,28 @@
+# Mediated reader/FEL close ownership audit (2026-11-08), relative to
+# main 29d61 plus source commits 51bc2fb3e/5cff6f430. Authored static review
+# only; this does not assert runtime qualification or legacy-reader settlement.
+# FEL QualificationStage owns both Child/ChildJob pairs and SourceInput. Its
+# two production tasks retain bridge-close ownership and transfer cancellation
+# cleanup through actual child reap and physical bridge join. The added three
+# kill calls never substitute for wait; the 100ms reap-error retry retains the
+# exact child and job. Two fixture tasks check cancellation ordering; three
+# deadlines, two polls and one isolated child sleep have test-only owners.
+# Two FEL fixture Commands are self-execs with owned kill/wait supervision;
+# the output-only descriptor handoff cannot export the original source FD.
+# Reader fixtures add four Commands, one direct spawn and three child lifecycle
+# calls. OwnedChild kills/reaps its exact fixture process on Drop. Two bounded
+# pipe-drainer threads carry no source/process authority and terminate on EOF
+# or receiver closure. A deliberately parked physical-reader thread lives only
+# in the isolated fixture process, whose actual death is the recovery boundary.
+# The fourth reader thread owns the HTTP source bridge and is explicitly joined;
+# its nested consumer goes through the shared owned-child launcher. The added
+# reader invalidation sleep is a synchronous 10ms retry with a two-second
+# refusal deadline; inability to advance kernel ctime rejects exec, never custody.
+# Exact structural deltas: tasks +8, method-spawn +1, time constructors +8,
+# Commands +6, launch shapes +1, lifecycle methods +6, kill-on-drop +2.
+# Existing lower census scopes, exclusions, aliases, forbidden zeroes and all
+# other counts are unchanged. Kill-on-drop and fixture timeouts prove no release.
+#
 # P42 source-custody recovery ownership audit (2026-11-04), relative to
 # edf6d08fa. This is authored source review, including Astra's fixture-cleanup
 # corrections; it establishes no runtime or host-reboot qualification.
@@ -3668,7 +3693,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # `http::cluster_operations::worker_status_cache_loop`, a read-only refresh of local worker
 # capacity for Activity. It owns no child or source, and returns on `background_shutdown`, the
 # same cancellation as its sibling peer-status loop.
-expected_occurrences = 1081
+expected_occurrences = 1089
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3911,7 +3936,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # the listener owner. Both parent additions are present in the source union.
 # Subtitle cue index (#1340): +1 scope.spawn in mkv_sparse::parallel; the
 # reader threads are scoped and joined by std::thread::scope before it returns.
-expected_occurrences = 89
+expected_occurrences = 90
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5435,7 +5460,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # (`foreground_admission_tests`). Three are Jellyfin native-HLS test retries (d25a35ea3,
 # 9fde9d148, 55f84b0e8): 250 ms and 1 s sleeps while a fixture response is `503` pending.
 # No production producer, child or detached owner is added.
-expected_occurrences = 2086
+expected_occurrences = 2094
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5926,7 +5951,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # normal exit under a 20-second timeout with kill_on_drop as cancellation's
 # backstop. They run only after the session and reconstruction slot settle;
 # neither launches a production producer or turns timeout into valid evidence.
-expected_occurrences = 325
+expected_occurrences = 331
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6600,7 +6625,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +3 in `http/jellyfin/tests.rs` (d25a35ea3, 9fde9d148, 55f84b0e8): HTTP
 # `response.status()` reads in the pending-segment retry loops above. They match the
 # `.status(` shape but launch no process.
-expected_occurrences = 882
+expected_occurrences = 883
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6896,7 +6921,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Subtitle completion adds two installer qualification child lifecycle calls;
 # the child remains owned through wait or kill-and-wait on its 60s bound.
 # Main retains the HTTPS transport listener's awaited task/connection boundary.
-expected_occurrences = 378
+expected_occurrences = 384
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7125,7 +7150,7 @@ pattern = "kill_on_drop\\s*\\("
 # PR1369: +2 cancellation backstops on those same physical-control diagnostics.
 # Successful evidence requires collected exit status and decoded/probed media;
 # a timeout drops the guarded child and fails the control.
-expected_occurrences = 122
+expected_occurrences = 124
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

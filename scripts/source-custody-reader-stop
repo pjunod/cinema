@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+"""Verify a finite legacy reader stop on the actual Linux host; never stop services.
+
+The caller must supply an independently trusted actual-host enrollment. Matching
+its PID/user namespace and root identities is required; NS_GET_PARENT's EPERM
+alone does not establish the initial PID namespace. No argv, environment or
+process memory is inspected. Unknown/partial observations refuse the verdict.
+"""
+from __future__ import annotations
+import argparse,contextlib,ctypes,datetime,errno,fcntl,hashlib,json,os,stat,sys,time,uuid
+from pathlib import Path
+
+MARKERS={
+    'daemon':b'plurx_build_info',
+    'scanner':b'held regular title source or private source capability',
+    'renderer':b'held seekable movie source or private source capability',
+}
+OVERLAP=max(map(len,MARKERS.values()))-1
+PROC_SUPER_MAGIC=0x9fa0
+PF_KTHREAD=0x00200000
+CHUNK=1024*1024
+MAX_EXE=1024*1024*1024
+MAX_TOTAL=8*1024*1024*1024
+MAX_PIDS=32768
+MAX_THREADS=65536
+MAX_IMAGES=512
+MAX_SECONDS=90
+
+class Refused(Exception):pass
+class Unstable(Refused):pass
+
+def require(ok,why):
+    if not ok:raise Refused(why)
+
+def read_at(fd,name,maximum=65536):
+    handle=os.open(name,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=fd)
+    try:
+        raw=os.read(handle,maximum+1)
+        require(len(raw)<=maximum,'kernel metadata exceeds bound')
+        return raw
+    finally:os.close(handle)
+
+def status_at(fd):
+    raw=read_at(fd,'status')
+    return {line.split(b':',1)[0].decode('ascii'):line.split(b':',1)[1].strip().decode('ascii') for line in raw.splitlines() if b':' in line}
+
+def stat_at(fd,expected):
+    raw=read_at(fd,'stat');stop=raw.rfind(b') ')
+    require(stop>0,'invalid kernel task stat')
+    require(int(raw.split(b' ',1)[0])==expected,'task identity changed')
+    fields=raw[stop+2:].split()
+    require(len(fields)>=20,'truncated kernel task stat')
+    return {'state':fields[0].decode('ascii'),'flags':int(fields[6]),'start_ticks':int(fields[19])}
+
+def directory_at(fd,name):
+    return os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=fd)
+
+def numeric_entries(fd,limit):
+    values=sorted(int(s) for s in os.listdir(fd) if s.isdecimal())
+    require(0<len(values)<=limit,'empty or excessive kernel task inventory')
+    return values
+
+def fd_stamp(fd):
+    s=os.fstat(fd)
+    return (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+
+class Census:
+    def __init__(self):
+        self.started=time.monotonic();self.cache={};self.images=[];self.bytes=0
+    def deadline(self):require(time.monotonic()-self.started<MAX_SECONDS,'census time bound exceeded')
+    def close(self):
+        for fd,_,_ in self.cache.values():os.close(fd)
+    def image(self,taskfd,pid,tid):
+        self.deadline()
+        # This is the kernel procfs exe magic-link, not a user-supplied path.
+        # Open it directly so unlinked/renamed/memfd images remain inspectable.
+        try:fd=os.open('exe',os.O_RDONLY|os.O_CLOEXEC,dir_fd=taskfd)
+        except FileNotFoundError as e:
+            try:status_at(taskfd)
+            except OSError as gone:
+                if gone.errno in (errno.ENOENT,errno.ESRCH):raise Unstable('task exited during executable inspection') from gone
+                raise
+            raise Refused(f'live task {pid}/{tid} has no inspectable executable') from e
+        try:
+            before=fd_stamp(fd);info=os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and 0<info.st_size<=MAX_EXE,'unknown or excessive executable image')
+            key=before[:2]
+            if key in self.cache:
+                _,stamp,row=self.cache[key]
+                require(stamp==before,'pinned executable image changed')
+                return row
+            require(len(self.cache)<MAX_IMAGES,'executable inventory exceeds bound')
+            h=hashlib.sha256();tail=b'';matched=set();total=0
+            while True:
+                self.deadline();chunk=os.read(fd,CHUNK)
+                if not chunk:break
+                total+=len(chunk);self.bytes+=len(chunk)
+                require(total<=MAX_EXE and self.bytes<=MAX_TOTAL,'executable byte bound exceeded')
+                h.update(chunk);window=tail+chunk
+                matched.update(role for role,marker in MARKERS.items() if marker in window)
+                tail=window[-OVERLAP:]
+            require(total==before[2] and fd_stamp(fd)==before,'executable changed during inspection')
+            row={'device':before[0],'inode':before[1],'bytes':total,'sha256':h.hexdigest(),'matched_roles':sorted(matched)}
+            self.cache[key]=(fd,before,row);fd=-1
+            self.images.append(row)
+            return row
+        finally:
+            if fd>=0:os.close(fd)
+    def collect(self,proc):
+        rows=[];thread_total=0
+        pids=numeric_entries(proc,MAX_PIDS)
+        require(1 in pids and os.getpid() in pids,'procfs does not expose verifier and init')
+        for pid in pids:
+            self.deadline()
+            try:pfd=directory_at(proc,str(pid))
+            except OSError as e:
+                if e.errno in (errno.ENOENT,errno.ESRCH):raise Unstable('process inventory changed') from e
+                raise
+            try:
+                first=stat_at(pfd,pid);status=status_at(pfd)
+                require(int(status['Tgid'])==pid and int(status['Pid'])==pid,'invalid process group identity')
+                if first['flags']&PF_KTHREAD:
+                    require(status.get('Kthread','1')=='1','kernel thread identity mismatch')
+                    rows.append({'pid':pid,'start_ticks':first['start_ticks'],'kernel_thread':True})
+                    continue
+                require(first['state'] not in {'Z','X','x'},f'zombie/exiting group {pid} is not a complete reader census')
+                require(status.get('Kthread','0')=='0','unexpected task type')
+                tfd=directory_at(pfd,'task')
+                try:
+                    tids=numeric_entries(tfd,MAX_THREADS)
+                    if len(tids)!=int(status['Threads']):raise Unstable('thread inventory changed')
+                    threads=[]
+                    for tid in tids:
+                        self.deadline();thread_total+=1
+                        require(thread_total<=MAX_THREADS,'thread census exceeds bound')
+                        one=directory_at(tfd,str(tid))
+                        try:
+                            identity=stat_at(one,tid);ts=status_at(one)
+                            require(int(ts['Tgid'])==pid and int(ts['Pid'])==tid,'thread group changed')
+                            require(identity['state'] not in {'Z','X','x'},f'zombie/exiting thread {pid}/{tid} is unknown')
+                            image=self.image(one,pid,tid)
+                            if image['matched_roles']:
+                                raise Refused(f'Cinema executable class is present at task {pid}/{tid}; sha256={image["sha256"]}')
+                            final=stat_at(one,tid)
+                            if final['start_ticks']!=identity['start_ticks']:raise Unstable('thread identity changed')
+                            threads.append({'tid':tid,'start_ticks':identity['start_ticks'],'exe_device':image['device'],'exe_inode':image['inode'],'exe_sha256':image['sha256']})
+                        finally:os.close(one)
+                    after=status_at(pfd)
+                    if numeric_entries(tfd,MAX_THREADS)!=tids or int(after['Threads'])!=len(tids):raise Unstable('thread inventory changed')
+                    if stat_at(pfd,pid)['start_ticks']!=first['start_ticks']:raise Unstable('process identity changed')
+                    rows.append({'pid':pid,'start_ticks':first['start_ticks'],'threads':threads})
+                finally:os.close(tfd)
+            finally:os.close(pfd)
+        if numeric_entries(proc,MAX_PIDS)!=pids:raise Unstable('process inventory changed')
+        return rows
+
+def host_context(expected,proc):
+    require(sys.platform=='linux' and os.geteuid()==0,'actual Linux host root is required')
+    libc=ctypes.CDLL(None,use_errno=True);storage=ctypes.create_string_buffer(256)
+    require(libc.fstatfs(proc,ctypes.byref(storage))==0,'cannot verify procfs type')
+    require(ctypes.c_long.from_buffer(storage).value==PROC_SUPER_MAGIC,'process directory is not procfs')
+    mountlines=read_at(proc,'self/mountinfo',1024*1024).decode().splitlines()
+    mounts=[]
+    for line in mountlines:
+        a,b=line.split(' - ',1);left=a.split();right=b.split()
+        if left[4]=='/proc':mounts.append((left,right))
+    require(len(mounts)==1,'procfs mount selection is ambiguous')
+    left,right=mounts[0]
+    require(left[3]=='/' and right[0]=='proc','procfs is not a full namespace-root mount')
+    options=set(left[5].split(','))|set(right[2].split(','))
+    require(not any(v.startswith('hidepid=') and v!='hidepid=0' for v in options),'hidden-PID procfs is unsupported')
+    pidns=os.stat('/proc/self/ns/pid').st_ino;userns=os.stat('/proc/self/ns/user').st_ino
+    require(pidns==expected['initial_pid_namespace_inode']==os.stat('/proc/1/ns/pid').st_ino,'trusted initial host PID namespace differs')
+    require(userns==expected['initial_user_namespace_inode']==os.stat('/proc/1/ns/user').st_ino,'trusted initial host user namespace differs')
+    root=os.stat('/');initroot=os.stat('/proc/1/root')
+    require([root.st_dev,root.st_ino]==expected['host_root_device_inode']==[initroot.st_dev,initroot.st_ino],'trusted host filesystem root differs')
+    etcfd=os.open('/etc',os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
+    try:machine=read_at(etcfd,'machine-id',128).strip()
+    finally:os.close(etcfd)
+    require(hashlib.sha256(machine).hexdigest()==expected['machine_id_sha256'],'host machine identity differs')
+    boot=read_at(proc,'sys/kernel/random/boot_id',128).decode().strip()
+    require(boot==expected['boot_id'],'host kernel boot differs')
+    node=expected['node_id'];require(isinstance(node,str) and len(node)==36,'invalid host/node enrollment')
+    datafd=os.open(expected['data_dir'],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:require(read_at(datafd,'node.id',128).decode().strip()==node,'actual persistent node identity differs')
+    finally:os.close(datafd)
+    fd=os.open('/proc/self/ns/pid',os.O_RDONLY|os.O_CLOEXEC)
+    try:
+        try:parent=fcntl.ioctl(fd,0xb702)
+        except OSError as e:
+            require(e.errno==errno.EPERM,'unexpected PID namespace relation failure');relation='EPERM; initial namespace established by trusted enrollment, not this errno'
+        else:
+            os.close(parent);raise Refused('visible parent PID namespace; not the initial host boundary')
+    finally:os.close(fd)
+    return {'node_id':node,'machine_id_sha256':expected['machine_id_sha256'],'boot_id':boot,'pid_namespace_inode':pidns,'user_namespace_inode':userns,'root_device_inode':[root.st_dev,root.st_ino],'proc_mount_id':int(left[0]),'namespace_relation_observation':relation}
+
+# This migration is deliberately finite. Its raw activation hash names the
+# reviewed record without embedding private host names, paths or node IDs.
+ACTIVATION_SHA256='50f069fbc8662aa7e3e43fdf9368d7ee1dc9b5356783291f4105e5541a4deb78'
+CLOSURE={
+    'source_commit':'1d11f0cdfa269e9b56dec0ffe45a10cefcb26712',
+    'native_source_sha256':'4e893cee571416198b3dc1103f993530bc1168035e26dd6e6f045afd06385f13',
+    'manifest_sha256':'0169c14ae9016916cb02f2dce964d78ab53cdf1f8558859af93e61a4346d22a8',
+    'daemon_sha256':'ff7be59be5796404b5a904f563d38fc0decae683d6b5c46e26d089a4ecb8472a',
+    'scanner_sha256':'c8833ae35a60443e82924d18b6b53b53cc43ee46e29cae7733630146c5e17035',
+    'renderer_sha256':'626f130b25707c01ccd22d082f465465b7037d3d7df792b31edce216bab35d6f',
+}
+ADMIN_UID=0
+PROOF_DIRECTORY=Path('/run/plurx-physical-stop')
+PROOF_NAME='legacy-dv-title-v1.json'
+MAX_PROOF=256*1024
+MAX_INPUT=1024*1024
+LOCAL_FILESYSTEMS={0xef53,0x58465342,0x9123683e,0x01021994,0x794c7630}
+DIRECTORY_FLAGS=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+
+
+def strict_json(raw):
+    def pairs(items):
+        result={}
+        for key,value in items:
+            require(key not in result,'duplicate JSON field')
+            result[key]=value
+        return result
+    def invalid(value):raise Refused('non-finite JSON value')
+    return json.loads(raw,object_pairs_hook=pairs,parse_constant=invalid)
+
+
+def exact(value,keys,label):
+    require(isinstance(value,dict) and set(value)==set(keys),'unsupported '+label+' shape')
+
+
+def canonical_uuid(value):
+    require(isinstance(value,str),'UUID must be text')
+    parsed=uuid.UUID(value)
+    require(parsed.int!=0 and str(parsed)==value,'noncanonical UUID')
+    return value
+
+
+def local_filesystem(fd):
+    storage=ctypes.create_string_buffer(256);libc=ctypes.CDLL(None,use_errno=True)
+    require(libc.fstatfs(fd,ctypes.byref(storage))==0,'cannot inspect filesystem type')
+    return ctypes.c_long.from_buffer(storage).value & 0xffffffff in LOCAL_FILESYSTEMS
+
+
+def admin_directory(fd):
+    s=os.fstat(fd)
+    require(stat.S_ISDIR(s.st_mode) and s.st_uid==ADMIN_UID and s.st_mode&0o022==0,
+            'administrator input directory is writable by a worker')
+
+
+@contextlib.contextmanager
+def walk_directory(path,administrator=False):
+    path=Path(path)
+    require(path.is_absolute() and '..' not in path.parts,'an absolute nontraversing directory is required')
+    fd=os.open('/',DIRECTORY_FLAGS)
+    try:
+        if administrator:admin_directory(fd)
+        for part in path.parts[1:]:
+            nextfd=directory_at(fd,part)
+            os.close(fd);fd=nextfd
+            if administrator:admin_directory(fd)
+        yield fd
+    finally:os.close(fd)
+
+
+class PinnedInput:
+    def __init__(self,parent,name,administrator=False,private_owner=None):
+        self.parent=parent;self.name=name;self.fd=-1
+        self.fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=parent)
+        try:
+            s=os.fstat(self.fd)
+            require(stat.S_ISREG(s.st_mode) and s.st_nlink==1 and 0<s.st_size<=MAX_INPUT,
+                    'input is not a bounded single-link regular file')
+            if administrator:
+                require(s.st_uid==ADMIN_UID and s.st_mode&0o022==0,'input is not protected by host root')
+            if private_owner is not None:
+                require(s.st_uid==private_owner and stat.S_IMODE(s.st_mode)==0o600,
+                        'activation is not private to the data owner')
+            self.stamp=fd_stamp(self.fd);self.raw=os.read(self.fd,MAX_INPUT+1)
+            require(len(self.raw)==s.st_size,'input changed during its read')
+            self.verify()
+        except BaseException:
+            os.close(self.fd);self.fd=-1;raise
+    def verify(self):
+        require(fd_stamp(self.fd)==self.stamp,'pinned input changed')
+        s=os.stat(self.name,dir_fd=self.parent,follow_symlinks=False)
+        require(stat.S_ISREG(s.st_mode) and s.st_nlink==1 and (s.st_dev,s.st_ino)==self.stamp[:2],
+                'input pathname was substituted')
+    def close(self):
+        if self.fd>=0:os.close(self.fd);self.fd=-1
+
+
+@contextlib.contextmanager
+def admin_input(path):
+    path=Path(path)
+    with walk_directory(path.parent,True) as directory:
+        value=PinnedInput(directory,path.name,administrator=True)
+        try:yield value
+        finally:value.close()
+
+
+@contextlib.contextmanager
+def launch_fence(data):
+    # This is the existing SelectedStore launch lock. It is only an admission
+    # fence: its availability never establishes physical reader termination.
+    fd=os.open('.plurxd.lock',os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=data)
+    try:
+        s=os.fstat(fd);owner=os.fstat(data).st_uid
+        require(stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_uid in {0,owner}
+                and s.st_mode&0o022==0,'invalid data-directory launch lock')
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        identity=(s.st_dev,s.st_ino)
+        def verify():
+            actual=os.stat('.plurxd.lock',dir_fd=data,follow_symlinks=False)
+            require(stat.S_ISREG(actual.st_mode) and actual.st_nlink==1
+                    and (actual.st_dev,actual.st_ino)==identity,'launch lock pathname changed')
+        verify();yield verify;verify()
+    finally:os.close(fd)
+
+
+def activation_owner(raw,node,custody):
+    require(hashlib.sha256(raw).hexdigest()==ACTIVATION_SHA256,'activation is outside the reviewed finite migration')
+    value=strict_json(raw)
+    exact(value,{'version','machine_id','boot_id','node_id','records'},'legacy activation')
+    require(type(value['version']) is int and value['version']==1 and value['node_id']==node,'wrong activation node/version')
+    require(isinstance(value['records'],list) and len(value['records'])==1,'activation must name exactly one owner')
+    record=value['records'][0];exact(record,{'kind','token'},'activation record')
+    require(record['kind']=='background','legacy reader is not a background job')
+    token=record['token'];exact(token,{'custody_id','owner'},'custody token')
+    require(token['custody_id']==custody,'another custody was selected')
+    owner=token['owner'];exact(owner,{'kind','token'},'background owner')
+    require(owner['kind']=='job','only the reviewed job owner is supported')
+    job=owner['token']
+    exact(job,{'job_id','node_id','boot_id','claim_id','fence','revision','lease_expires_ms'},'job token')
+    for key in ('job_id','node_id','boot_id','claim_id'):canonical_uuid(job[key])
+    require(job['node_id']==node and all(type(job[k]) is int and job[k]>0 for k in ('fence','revision','lease_expires_ms')),'invalid exact job owner')
+    return {'custody_id':custody,**{key:job[key] for key in ('job_id','node_id','boot_id','claim_id','fence')}},job['lease_expires_ms']
+
+
+def reference_closure(raw):
+    require(hashlib.sha256(raw).hexdigest()==CLOSURE['manifest_sha256'],'reference manifest differs from the audited artifact')
+    manifest=strict_json(raw)
+    require(manifest['source_sha256']==CLOSURE['native_source_sha256']
+            and manifest['tools']['scanner']['sha256']==CLOSURE['scanner_sha256']
+            and manifest['tools']['renderer']['sha256']==CLOSURE['renderer_sha256'],
+            'reference source/tool closure differs')
+    return dict(CLOSURE)
+
+
+def perform_census(expected):
+    census=Census();proc=os.open('/proc',DIRECTORY_FLAGS)
+    try:
+        context=host_context(expected,proc)
+        first=census.collect(proc);second=census.collect(proc)
+        require(first==second,'two complete executable census passes differ')
+        for fd,stamp,_ in census.cache.values():require(fd_stamp(fd)==stamp,'pinned executable changed')
+        require(host_context(expected,proc)==context,'host context changed')
+        def measure(rows):
+            images={(t['exe_device'],t['exe_inode']) for row in rows for t in row.get('threads',[])}
+            return {'tasks':sum(1 if row.get('kernel_thread') else len(row['threads']) for row in rows),
+                    'executables':len(images),'matched_readers':0,
+                    'snapshot_sha256':hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest()}
+        passes=[measure(first),measure(second)]
+        require(passes[0]==passes[1] and passes[0]['executables']==len(census.images)>0,
+                'executable census accounting differs')
+        return context,{'backend':'linux_initial_pidns_executable_markers_v1','passes':passes,'images':list(census.images)}
+    finally:os.close(proc);census.close()
+
+
+def publish_at(directory,raw):
+    admin_directory(directory);require(local_filesystem(directory),'proof must live on a local filesystem')
+    require(len(raw)<=MAX_PROOF,'proof exceeds consumer bound')
+    try:
+        existing=PinnedInput(directory,PROOF_NAME,administrator=True)
+    except FileNotFoundError:existing=None
+    if existing is not None:
+        try:require(existing.raw==raw,'a different proof already exists; nothing overwritten');existing.verify()
+        finally:existing.close()
+        os.fsync(directory);return
+    temporary='.'+str(uuid.uuid4())+'.tmp'
+    fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o644,dir_fd=directory)
+    try:
+        os.fchmod(fd,0o644)
+        with os.fdopen(fd,'wb') as stream:
+            stream.write(raw);stream.flush();os.fsync(stream.fileno())
+        # Linking a complete temporary never replaces an existing proof. The
+        # consumer also refuses the transient two-link state before cleanup.
+        os.link(temporary,PROOF_NAME,src_dir_fd=directory,dst_dir_fd=directory,follow_symlinks=False)
+        os.unlink(temporary,dir_fd=directory);os.fsync(directory)
+    finally:
+        try:os.unlink(temporary,dir_fd=directory)
+        except FileNotFoundError:pass
+
+
+def publish_fixed(raw):
+    with walk_directory(PROOF_DIRECTORY.parent,True) as parent:
+        require(local_filesystem(parent),'proof parent must be a local filesystem')
+        try:os.mkdir(PROOF_DIRECTORY.name,0o755,dir_fd=parent);os.fsync(parent)
+        except FileExistsError:pass
+        directory=directory_at(parent,PROOF_DIRECTORY.name)
+        try:publish_at(directory,raw)
+        finally:os.close(directory)
+
+
+def verify(data_dir,node,custody,enrollment_path,manifest_path,publish=False):
+    require(sys.platform=='linux' and os.geteuid()==0,'run on the actual Linux host as root')
+    canonical_uuid(node);canonical_uuid(custody)
+    with walk_directory(data_dir) as data,admin_input(enrollment_path) as enrollment,admin_input(manifest_path) as manifest:
+        expected=strict_json(enrollment.raw)
+        exact(expected,{'version','node_id','data_dir','machine_id_sha256','boot_id','initial_pid_namespace_inode','initial_user_namespace_inode','host_root_device_inode'},'host enrollment')
+        require(type(expected['version']) is int and expected['version']==1 and expected['node_id']==node
+                and expected['data_dir']==str(data_dir),'trusted host enrollment does not name this data/node')
+        closure=reference_closure(manifest.raw)
+        with launch_fence(data) as launch,contextlib.ExitStack() as stack:
+            journal=stack.enter_context(walk_directory(Path(data_dir)/'source-custody-recovery'/'v1'))
+            owner_uid=os.fstat(data).st_uid
+            active=PinnedInput(journal,'background-'+custody+'.json',private_owner=owner_uid)
+            stack.callback(active.close)
+            owner,prior_expiry=activation_owner(active.raw,node,custody)
+            context,census=perform_census(expected)
+            enrollment.verify();manifest.verify();active.verify();launch()
+            observed=time.time_ns()//1_000_000
+            require(observed>prior_expiry,'census predates the exact old token expiry')
+            proof={'version':1,'model':'legacy_dv_title_reader_class_zero_v1',
+                   'kernel_instance':'linux:'+context['boot_id'],'observed_at_ms':observed,
+                   'activation_sha256':ACTIVATION_SHA256,'owner':owner,'closure':closure,'census':census}
+            raw=(json.dumps(proof,sort_keys=True,separators=(',',':'))+'\n').encode()
+            require(len(raw)<=MAX_PROOF,'proof exceeds consumer bound')
+            if publish:publish_fixed(raw)
+            active.verify();launch()
+            return proof
+
+
+def main(argv=None):
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--data-dir',type=Path,required=True)
+    parser.add_argument('--node-id',required=True)
+    parser.add_argument('--custody-id',required=True)
+    parser.add_argument('--host-enrollment',type=Path,required=True,help='Root-protected independently trusted actual-host namespace/node enrollment')
+    parser.add_argument('--reference-manifest',type=Path,required=True,help='Root-protected exact audited native build-identity.json')
+    mode=parser.add_mutually_exclusive_group();mode.add_argument('--check',action='store_true');mode.add_argument('--publish',action='store_true')
+    args=parser.parse_args(argv)
+    try:
+        proof=verify(args.data_dir,args.node_id,args.custody_id,args.host_enrollment,args.reference_manifest,args.publish)
+        print(json.dumps({'result':'published' if args.publish else 'checked; no proof published','model':proof['model'],
+                          'custody_id':args.custody_id,'census':proof['census']['passes'],
+                          'proof_sha256':hashlib.sha256((json.dumps(proof,sort_keys=True,separators=(',',':'))+'\n').encode()).hexdigest()}))
+        return 0
+    except (Refused,OSError,ValueError,KeyError,TypeError) as error:
+        print('source-custody-reader-stop: refused: '+str(error),file=sys.stderr);return 1
+
+if __name__=='__main__':raise SystemExit(main())

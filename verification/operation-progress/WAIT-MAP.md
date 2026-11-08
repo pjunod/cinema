@@ -539,3 +539,22 @@ Faithfully model one request's queue claim, domain lease, exact binding, finite 
 For useful completion, require readable roots, available physical admission, authority, finite filesystem/provider calls, and an eventual Store/Raft reply or explicit timeout outcome. Model queue-token and publication-lock grants as atomic FIFO transitions with the actual holder and the dependency whose return releases it; do not assume that a lock holder or the cleanup it performs eventually finishes. Derive cleanup/join progress from those held resources and their external-return edges, rather than assuming unconditional eventual cleanup. A blocked filesystem syscall can outlive cancellation, and a lease heartbeat's expiry path still drains its renewal future. These remain explicit liveness premises.
 
 No concrete lock cycle was found within this inspected application path. This is not a transitive deadlock proof: lower Raft/network/leader recovery, remote authority construction, kernel filesystem waits and process-runtime shutdown remain outside scope. Ripwire refused because `target` was inaccessible; claims were checked directly. The JSON file is a drift receipt, not a liveness proof.
+
+## November 8 reader recovery wait
+
+A live lock holder keeps its source slot. On the same kernel, replay must
+acquire the original armed anchor and verify its inode, change time and
+nonce. A raw descriptor handoff disqualifies that witness, including when
+a bounded command clears its environment. For one audited legacy DV
+activation, the Linux host helper instead requires two complete matching
+reader censuses under the launch fence. An unknown reader keeps the slot.
+[Witness replay](../../crates/plurxd/src/source_custody/recovery/reader.rs) ·
+[Child launch](../../crates/plurx-core/src/process/bounded.rs) ·
+[Host census](../../scripts/source-custody-reader-stop)
+
+Each recovery path still waits for the exact Store settlement and release.
+A lost acknowledgement leaves evidence for retry. These kernel and host
+checks are covered by focused implementation tests. Their success and the
+time until a slot reopens lie outside the modeled request's progress guarantee.
+[Native witness tests](../../crates/plurxd/src/source_custody/recovery/reader/tests.rs) ·
+[Legacy custody tests](../../crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs)
