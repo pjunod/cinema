@@ -5,25 +5,25 @@ env:
   CARGO_TERM_COLOR: always
   CINEMA_MAIN_COMMIT: '8f2585e6b2003e16d40a672aedde002795faaacf'
 concurrency:
-  group: cinema-main-package-8f2585e6b200-arm
+  group: cinema-main-package-8f2585e6b200-amd
   cancel-in-progress: false
 jobs:
   package_smoke:
     name: package and smoke (${{ matrix.arch }})
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     concurrency:
-      group: ${{ matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy' || format('plurx-package-{0}-{1}', github.run_id, matrix.arch) }}
+      group: plurx-cinema-amd-package
       cancel-in-progress: false
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: arm64
-            target: aarch64-unknown-linux-gnu
-            kernel_machine: aarch64
-            docker_machine: aarch64
-            runs_on: '["self-hosted","Linux","ARM64","lab","ci-arm64"]'
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            kernel_machine: x86_64
+            docker_machine: x86_64
+            runs_on: '["self-hosted","Linux","X64","lab","ci-topology"]'
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -48,6 +48,16 @@ jobs:
         uses: ./.github/actions/buildx-cache
         with:
           lane: package-smoke-${{ matrix.arch }}
+      - name: Bound this runner-owned package builder
+        env:
+          BUILDER: ${{ steps.buildx-cache.outputs.builder-name }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]]
+          container="buildx_buildkit_${BUILDER}0"
+          test "$(docker inspect --format '{{.Name}}' "$container")" = "/$container"
+          docker update --memory 22g --memory-swap 24g --cpu-period 100000 --cpu-quota 400000 "$container"
+          test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}}' "$container")" = '23622320128 25769803776 400000 100000'
       - name: Derive the binary-only Bookworm build
         id: binary-build
         run: |
