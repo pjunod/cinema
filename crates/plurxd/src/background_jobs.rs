@@ -3038,7 +3038,9 @@ async fn targeted_claim_blocker(
     };
     let mut heavy = None;
     for holder in store.source_io_holders(now_ms).await? {
-        if holder.work_id == job_id || holder.priority == "viewer" || !conflicts(&holder.resource_key)
+        if holder.work_id == job_id
+            || holder.priority == "viewer"
+            || !conflicts(&holder.resource_key)
         {
             continue;
         }
