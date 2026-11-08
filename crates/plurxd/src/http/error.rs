@@ -7,6 +7,10 @@ use axum::Json;
 use plurx_core::error::StoreError;
 use serde_json::json;
 
+#[cfg(target_os = "linux")]
+pub(super) static ADAPTIVE_ORIGIN_UNAVAILABLE_JSON: [u8; 68] =
+    *br#"{"error":"adaptive origin error response exceeded its paid storage"}"#;
+
 #[derive(Debug)]
 pub enum ApiError {
     NotFound(&'static str),
@@ -48,6 +52,18 @@ pub enum ApiError {
     /// Shares the original charged diagnostic through HTTP body cancellation.
     FiniteMaterialization(std::sync::Arc<crate::waitpool::FiniteWaitFailure>),
     Internal(String),
+    /// Adaptive activation errors use the original core-held backing. Rich
+    /// task output has already been destroyed before its funding alias leaves.
+    #[cfg(target_os = "linux")]
+    AdaptiveOrigin {
+        status: StatusCode,
+        code: Option<&'static str>,
+        retry_after_seconds: Option<u64>,
+        body: bytes::Bytes,
+    },
+    /// Scalar failure when the original paid response cannot be published.
+    #[cfg(target_os = "linux")]
+    AdaptiveOriginUnavailable,
 }
 
 impl ApiError {
@@ -95,6 +111,8 @@ impl ApiError {
             | ApiError::TypedRetry { code, .. }
             | ApiError::TypedDetail { code, .. } => Some(code),
             ApiError::FiniteMaterialization(failure) => Some(failure.code()),
+            #[cfg(target_os = "linux")]
+            ApiError::AdaptiveOrigin { code, .. } => *code,
             _ => None,
         }
     }
@@ -122,6 +140,13 @@ impl ApiError {
             ApiError::FiniteMaterialization(failure) => {
                 (failure.status(), failure.message().to_owned())
             }
+            #[cfg(target_os = "linux")]
+            ApiError::AdaptiveOrigin { status, .. } => (*status, "adaptive origin error".into()),
+            #[cfg(target_os = "linux")]
+            ApiError::AdaptiveOriginUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "adaptive origin error response exceeded its paid storage".into(),
+            ),
             ApiError::Internal(msg) => {
                 // Detail is logged, not leaked to the client.
                 tracing::error!(error = %msg, "internal error");
@@ -152,7 +177,113 @@ impl IntoResponse for ApiError {
 }
 
 impl ApiError {
+    #[cfg(target_os = "linux")]
+    pub(super) fn fund_origin(
+        self,
+        funding: plurx_core::adaptive_resources::runtime::attempt_root::ReplyPermit,
+    ) -> Self {
+        // Keep the permit outside the rich error and every temporary JSON DTO.
+        // The existing wire status/code/retry/body are retained exactly. The
+        // core then owns the original bytes independently of task completion.
+        let code = self.code();
+        let retry_after_seconds = match &self {
+            Self::TypedRetry {
+                retry_after_seconds,
+                ..
+            } => Some(*retry_after_seconds),
+            Self::AdaptiveOrigin {
+                retry_after_seconds,
+                ..
+            } => *retry_after_seconds,
+            _ => None,
+        };
+        let (status, encoded) = match &self {
+            Self::FiniteMaterialization(failure) => (failure.status(), Ok(failure.body().to_vec())),
+            Self::AdaptiveOrigin { status, body, .. } => (*status, Ok(body.to_vec())),
+            Self::Unprocessable(body) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, serde_json::to_vec(body))
+            }
+            Self::Typed {
+                status,
+                code,
+                message,
+            }
+            | Self::TypedRetry {
+                status,
+                code,
+                message,
+                ..
+            } => (
+                *status,
+                serde_json::to_vec(&json!({ "code": code, "message": message })),
+            ),
+            Self::TypedDetail {
+                status,
+                code,
+                message,
+                detail,
+            } => {
+                let mut detail = detail.clone();
+                detail.insert("code".to_owned(), json!(code));
+                detail.insert("message".to_owned(), json!(message));
+                (*status, serde_json::to_vec(&detail))
+            }
+            _ => {
+                let (status, message) = self.parts();
+                (status, serde_json::to_vec(&json!({ "error": message })))
+            }
+        };
+        drop(self); // Actual rich output precedes publish and permit release.
+        match encoded
+            .ok()
+            .and_then(|bytes| funding.publish_serialized(bytes).ok())
+        {
+            Some(body) => Self::AdaptiveOrigin {
+                status,
+                code,
+                retry_after_seconds,
+                body,
+            },
+            None => Self::AdaptiveOriginUnavailable,
+        }
+    }
+
     fn render(self) -> Response {
+        #[cfg(target_os = "linux")]
+        if matches!(self, Self::AdaptiveOriginUnavailable) {
+            // Publication already refused and consumed the original permit.
+            // Keep this fixed fallback in static storage through transport;
+            // constructing another Json body would create unprotected heap.
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                bytes::Bytes::from_static(&ADAPTIVE_ORIGIN_UNAVAILABLE_JSON),
+            )
+                .into_response();
+        }
+        #[cfg(target_os = "linux")]
+        if let Self::AdaptiveOrigin {
+            status,
+            retry_after_seconds,
+            body,
+            ..
+        } = self
+        {
+            let mut response = (
+                status,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response();
+            if let Some(seconds) = retry_after_seconds {
+                if let Ok(value) = seconds.to_string().parse() {
+                    response
+                        .headers_mut()
+                        .insert(axum::http::header::RETRY_AFTER, value);
+                }
+            }
+            return response;
+        }
         if let ApiError::FiniteMaterialization(failure) = self {
             return (
                 failure.status(),

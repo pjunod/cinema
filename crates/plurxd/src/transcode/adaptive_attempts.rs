@@ -8,6 +8,9 @@
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
+use plurx_core::adaptive_resources::runtime::attempt_root::{
+    self, AttemptRootClient, AttemptRootLifecycle,
+};
 use plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease;
 use plurx_core::adaptive_resources::runtime::planning_probe::{
     FixedPlanningProbeCleanup, FixedPlanningProbeOwner,
@@ -18,6 +21,7 @@ use plurx_core::store::adaptive_resource_attempts::{
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+type AttemptRef = attempt_root::AttemptRef<AttemptEntry>;
 
 use crate::vodserve::{
     PreparedAttemptCleanup, PreparedAttemptCleanupTask, PreparedAttemptRendition,
@@ -33,27 +37,154 @@ pub(crate) const MAX_LOCAL_ATTEMPTS: usize = 64;
 /// or allocator upper bound.
 pub(super) const PLANNING_TO_R_HANDOFF_BYTES: usize = 16 * 1024 * 1024;
 
+/// One independently admitted original/replay response. DTO destruction
+/// precedes its copy permit, including HTTP serialization.
+pub(crate) struct FundedPreparedReply {
+    reply: crate::media_sessions::AdaptiveAttemptPreparedV1,
+    permit: attempt_root::ReplyPermit,
+}
+impl std::fmt::Debug for FundedPreparedReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.reply.fmt(f)
+    }
+}
+impl FundedPreparedReply {
+    pub(crate) fn into_http_response(self) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let Self { reply, permit } = self;
+        let bytes = serde_json::to_vec(&reply);
+        drop(reply);
+        let Ok(bytes) = bytes else {
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        let bytes = match permit.publish_serialized(bytes) {
+            Ok(bytes) => bytes,
+            Err(_) => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            axum::body::Body::from(bytes),
+        )
+            .into_response()
+    }
+    pub(crate) fn into_origin_parts(
+        self,
+    ) -> (
+        crate::media_sessions::AdaptiveAttemptPreparedV1,
+        attempt_root::ReplyPermit,
+    ) {
+        (self.reply, self.permit)
+    }
+}
+fn prepared_reply_heap(worker: &WorkerBinding, recipe: &String, preview: &String) -> Option<usize> {
+    checked_caps([
+        worker.node_id.capacity(),
+        worker.planning_source_digest.capacity(),
+        worker.selected_recipe_digest.capacity(),
+        worker.prepared_handle_digest.capacity(),
+        worker.output_digest.capacity(),
+        recipe.capacity(),
+        preview.capacity(),
+        std::mem::size_of::<FundedPreparedReply>(),
+    ])
+}
+
 /// Original registered reply only; never a newly launched coordinator.
 #[expect(
     clippy::large_enum_variant,
     reason = "Keep the same bounded prepared acknowledgment inline during replay; no new Box allocation beside the original registered owner."
 )]
 pub(crate) enum AdaptivePrepareReplay {
-    Prepared(crate::media_sessions::AdaptiveAttemptPreparedV1),
+    Prepared(FundedPreparedReply),
     Pending,
+}
+
+/// Only a static diagnostic category may escape the original task. Rich
+/// diagnostic text is logged and destroyed before publication; unlike an
+/// inline byte array, these scalar metadata do not extend the channel cell
+/// with a known diagnostic payload after the original debit is released.
+#[derive(Debug)]
+pub(crate) struct ScalarAdaptiveDiagnostic(&'static str);
+impl ScalarAdaptiveDiagnostic {
+    fn from_static(message: &'static str) -> Self {
+        Self(message)
+    }
+    pub(crate) fn as_str(&self) -> &'static str {
+        self.0
+    }
+    pub(crate) fn into_string(self) -> String {
+        self.0.to_owned()
+    }
+}
+impl From<String> for ScalarAdaptiveDiagnostic {
+    fn from(message: String) -> Self {
+        tracing::warn!(target: "plurxd::adaptive_attempts", diagnostic = %message,
+            "adaptive operation failed; retaining only its static diagnostic category in the reply");
+        let category = match message.as_str() {
+            "adaptive Adopt was refused; owner remains held" => {
+                "adaptive Adopt was refused; owner remains held"
+            }
+            "adaptive Adopt outcome must be reconciled before cancellation" => {
+                "adaptive Adopt outcome must be reconciled before cancellation"
+            }
+            "adaptive original coordinator frame was not registered" => {
+                "adaptive original coordinator frame was not registered"
+            }
+            _ => "adaptive operation failed; original diagnostic recorded by worker",
+        };
+        drop(message); // Actual original String precedes the scalar output.
+        Self::from_static(category)
+    }
+}
+impl From<&'static str> for ScalarAdaptiveDiagnostic {
+    fn from(message: &'static str) -> Self {
+        Self::from_static(message)
+    }
+}
+impl std::fmt::Display for ScalarAdaptiveDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl PartialEq<&str> for ScalarAdaptiveDiagnostic {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+/// The original VodStart heap is destroyed in its paid control task. Only
+/// scalar session identity and duration can outlive that task via its channel.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct AdaptiveAdopted {
+    pub(crate) session_id: Uuid,
+    pub(crate) duration_ms: i64,
+}
+impl AdaptiveAdopted {
+    fn from_start(start: crate::vodserve::VodStart) -> Result<Self, ScalarAdaptiveDiagnostic> {
+        let session_id = Uuid::parse_str(&start.session_id).map_err(|_| {
+            ScalarAdaptiveDiagnostic::from_static("adaptive original session identity is invalid")
+        })?;
+        let result = Self {
+            session_id,
+            duration_ms: start.duration_ms,
+        };
+        drop(start);
+        Ok(result)
+    }
 }
 
 /// A failure from the SAME registered preparation, retaining authoritative
 /// policy evidence separately from its diagnostic. This never certifies cleanup.
 #[derive(Debug)]
 pub(crate) struct AdaptivePrepareError {
-    pub(crate) message: String,
+    pub(crate) message: ScalarAdaptiveDiagnostic,
     pub(crate) trial_refusal: Option<plurx_core::resource_policy::TrialRefusal>,
 }
 impl From<String> for AdaptivePrepareError {
     fn from(message: String) -> Self {
         Self {
-            message,
+            message: message.into(),
             trial_refusal: None,
         }
     }
@@ -65,15 +196,13 @@ impl From<&str> for AdaptivePrepareError {
 }
 impl std::fmt::Display for AdaptivePrepareError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        f.write_str(self.message.as_str())
     }
 }
 /// Requested inline channel payload, separate from the measured coordinator
 /// frame. Tokio's private channel allocation/producer peak remains unproven.
 fn adaptive_prepare_reply_payload_bytes() -> usize {
-    std::mem::size_of::<
-        Result<crate::media_sessions::AdaptiveAttemptPreparedV1, AdaptivePrepareError>,
-    >()
+    std::mem::size_of::<Result<FundedPreparedReply, AdaptivePrepareError>>()
 }
 
 #[expect(
@@ -81,13 +210,9 @@ fn adaptive_prepare_reply_payload_bytes() -> usize {
     reason = "Keep the original prepared acknowledgment inline in the bounded coordinator handoff; boxing introduces a new allocation beside the measured owner frame."
 )]
 pub(crate) enum AdaptivePrepareStart {
-    Prepared(crate::media_sessions::AdaptiveAttemptPreparedV1),
+    Prepared(FundedPreparedReply),
     Pending,
-    Started(
-        tokio::sync::oneshot::Receiver<
-            Result<crate::media_sessions::AdaptiveAttemptPreparedV1, AdaptivePrepareError>,
-        >,
-    ),
+    Started(tokio::sync::oneshot::Receiver<Result<FundedPreparedReply, AdaptivePrepareError>>),
 }
 
 /// Original remote registration disposition; the ACK contains no native or
@@ -97,7 +222,7 @@ pub(crate) enum AdaptiveRemoteRegistrationStart {
     Pending,
     Started {
         reply: tokio::sync::oneshot::Receiver<
-            Result<crate::media_sessions::AdaptiveAttemptRegisteredV2, String>,
+            Result<crate::media_sessions::AdaptiveAttemptRegisteredV2, ()>,
         >,
         deadline: std::time::Instant,
     },
@@ -184,7 +309,7 @@ impl RemoteRegistration {
 
 pub(super) struct RemoteGrantWait {
     reply: tokio::sync::oneshot::Sender<
-        Result<crate::media_sessions::AdaptiveAttemptRegisteredV2, String>,
+        Result<crate::media_sessions::AdaptiveAttemptRegisteredV2, ()>,
     >,
     grant: tokio::sync::oneshot::Receiver<plurx_core::cluster::clock::ContinuousDeadline>,
 }
@@ -194,6 +319,22 @@ pub(crate) struct PreparedAdaptiveWorkerRecipe {
     pub(crate) prepared: crate::vodserve::PreparedAdaptiveRecipe,
     pub(crate) settings: crate::vodserve::VodSettings,
     pub(crate) planning_application_limit_bytes: usize,
+}
+
+fn preflight_attempt_payload(
+    request: &crate::media_sessions::AdaptiveAttemptPrepareV1,
+) -> Result<(), String> {
+    if claim_requested_heap_bytes(&request.claim).is_none_or(|n| n > attempt_root::CLAIM_BYTES)
+        || request
+            .recipe
+            .requested_heap_bytes()
+            .is_none_or(|n| n > attempt_root::ENVELOPE_BYTES)
+    {
+        return Err(
+            "adaptive request actual heap capacities exceed the paid pre-P root partitions".into(),
+        );
+    }
+    Ok(())
 }
 
 fn checked_caps(capacities: impl IntoIterator<Item = usize>) -> Option<usize> {
@@ -350,6 +491,45 @@ pub(super) fn fixed_planning_request(
     })
 }
 
+pub(crate) fn origin_activation_requested_bytes(
+    activation: &plurx_core::domain::MediaSessionActivation,
+) -> Option<usize> {
+    activation.principal.local_user_id()?;
+    checked_caps([
+        std::mem::size_of::<plurx_core::domain::MediaSessionActivation>(),
+        activation.incarnation_id.capacity(),
+        activation.session_id.capacity(),
+        activation.playback_id.capacity(),
+        activation.recovery_epoch.capacity(),
+        activation
+            .expected_predecessor_incarnation_id
+            .as_ref()
+            .map_or(0, String::capacity),
+        activation.request_id.as_ref().map_or(0, String::capacity),
+        activation.request_fingerprint.capacity(),
+        activation.owner_node_id.capacity(),
+        activation.recipe_json.capacity(),
+        activation.response_json.capacity(),
+    ])
+}
+
+pub(crate) fn preflight_origin_reply(
+    claim: &AttemptClaim,
+    reply: &crate::media_sessions::AdaptiveAttemptPreparedV1,
+) -> Result<(), String> {
+    if claim_requested_heap_bytes(claim).is_none_or(|n| n > attempt_root::CLAIM_BYTES)
+        || prepared_reply_heap(
+            &reply.worker,
+            &reply.selected_recipe_json,
+            &reply.preview_json,
+        )
+        .is_none_or(|n| n > attempt_root::REPLY_BYTES)
+    {
+        return Err("adaptive origin actual DTO capacities exceed the paid partitions".into());
+    }
+    Ok(())
+}
+
 fn adoption_requested_bytes(
     adoption: &plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
 ) -> Option<usize> {
@@ -402,6 +582,11 @@ pub(super) fn projected_application_owner_bytes(
     control_frame_bytes: usize,
 ) -> Option<usize> {
     claim.binding.principal.local_user_id()?;
+    if coordinator_frame_bytes > attempt_root::COORDINATOR_BYTES
+        || control_frame_bytes > attempt_root::CONTROL_BYTES
+    {
+        return None;
+    }
     let binding = &claim.binding;
     let key = &claim.key;
     let strings = [
@@ -415,11 +600,8 @@ pub(super) fn projected_application_owner_bytes(
         key.worker_node_id.capacity(),
         selected_recipe_json.capacity(),
     ];
-    let mut bytes = std::mem::size_of::<AttemptEntry>()
-        .checked_add(2 * std::mem::size_of::<usize>())? // Arc entry header
-        .checked_add(std::mem::size_of::<RichAttempt>())?
+    let mut bytes = std::mem::size_of::<RichAttempt>()
         .checked_add(std::mem::size_of::<HandoffAttempt>())?
-        .checked_add(std::mem::size_of::<ClosingAttempt>())?
         .checked_add(crate::vodserve::prepared_attempt_cleanup_frame_bytes())?
         .checked_add(
             claim
@@ -428,9 +610,7 @@ pub(super) fn projected_application_owner_bytes(
                 .checked_mul(std::mem::size_of::<String>())?,
         )?
         .checked_add(rendition_key_capacity)?
-        .checked_add(coordinator_frame_bytes)?
         .checked_add(adaptive_prepare_reply_payload_bytes())?
-        .checked_add(control_frame_bytes)?
         // One dormant-plan object and its canonical JSON are constructed
         // before Prepared; the retained original and one response copy can
         // coexist. Each is separately capped by ADAPTIVE_PREVIEW_BYTES.
@@ -458,7 +638,8 @@ pub(super) fn projected_application_owner_bytes(
 }
 
 pub(super) struct AdaptiveAttemptRegistry {
-    slots: Mutex<[Option<Arc<AttemptEntry>>; MAX_LOCAL_ATTEMPTS]>,
+    slots: Mutex<[Option<AttemptRef>; MAX_LOCAL_ATTEMPTS]>,
+    client: Mutex<Option<AttemptRootClient>>,
 }
 
 #[cfg(test)]
@@ -475,6 +656,9 @@ pub(super) struct AttemptEntry {
     // Inline reason belongs to this original owner, including failed replay.
     trial_refusal: Mutex<Option<plurx_core::resource_policy::TrialRefusal>>,
     coordinator_frame_bytes: std::sync::atomic::AtomicUsize,
+    task_join_failed: std::sync::atomic::AtomicBool,
+    coordinator_started: std::sync::atomic::AtomicBool,
+    task_admission_sealed: std::sync::atomic::AtomicBool,
     attempt_id: Uuid,
     request_incarnation_id: Uuid,
     worker_instance_id: Uuid,
@@ -610,6 +794,7 @@ impl Default for AdaptiveAttemptRegistry {
     fn default() -> Self {
         Self {
             slots: Mutex::new(std::array::from_fn(|_| None)),
+            client: Mutex::new(None),
         }
     }
 }
@@ -625,7 +810,7 @@ impl AdaptiveAttemptRegistry {
         serving_generation: u64,
         local_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
         local_activation_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
-    ) -> Result<Arc<AttemptEntry>, &'static str> {
+    ) -> Result<AttemptRef, &'static str> {
         if attempt_id.is_nil() || request_incarnation_id.is_nil() || worker_instance_id.is_nil() {
             return Err("adaptive attempt has a nil identity");
         }
@@ -642,7 +827,7 @@ impl AdaptiveAttemptRegistry {
                 && existing.worker_instance_id == worker_instance_id
                 && existing.serving_generation == serving_generation
             {
-                Ok(Arc::clone(existing))
+                Ok(existing.clone())
             } else {
                 Err("adaptive attempt identity collided with an existing owner")
             };
@@ -651,28 +836,44 @@ impl AdaptiveAttemptRegistry {
             .iter_mut()
             .find(|slot| slot.is_none())
             .ok_or("adaptive attempt owner registry is full")?;
-        let entry = Arc::new(AttemptEntry {
-            #[cfg(test)]
-            adopt_commit_pause: Mutex::new(None),
-            remote_changed: tokio::sync::Notify::new(),
-            remote_registration: Mutex::new(None),
-            trial_refusal: Mutex::new(None),
-            coordinator_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
-            attempt_id,
-            request_incarnation_id,
-            worker_instance_id,
-            serving_generation,
-            state: tokio::sync::Mutex::new(AttemptState::Reserved),
-            planning: tokio::sync::Mutex::new(PlanningState::Empty),
-            planning_application_lease: Mutex::new(None),
-            coordinator: Mutex::new(None),
-            control: Mutex::new(None),
-            finishing_lease: Mutex::new(None),
-            charged_control_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
-            local_cutoff,
-            local_activation_cutoff,
-        });
-        *vacant = Some(Arc::clone(&entry));
+        let client = self
+            .client
+            .lock()
+            .map_err(|_| "adaptive attempt root is uncertain")?
+            .clone()
+            .ok_or("adaptive attempt root is unavailable")?;
+        let permit = client
+            .reserve()
+            .map_err(|_| "adaptive attempt root admission refused")?;
+        let entry = permit
+            .install(|| AttemptEntry {
+                #[cfg(test)]
+                adopt_commit_pause: Mutex::new(None),
+                remote_changed: tokio::sync::Notify::new(),
+                remote_registration: Mutex::new(None),
+                trial_refusal: Mutex::new(None),
+                coordinator_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
+                attempt_id,
+                request_incarnation_id,
+                worker_instance_id,
+                serving_generation,
+                state: tokio::sync::Mutex::new(AttemptState::Reserved),
+                planning: tokio::sync::Mutex::new(PlanningState::Empty),
+                planning_application_lease: Mutex::new(None),
+                coordinator: Mutex::new(None),
+                control: Mutex::new(None),
+                finishing_lease: Mutex::new(None),
+                charged_control_frame_bytes: std::sync::atomic::AtomicUsize::new(
+                    attempt_root::CONTROL_BYTES,
+                ),
+                task_join_failed: std::sync::atomic::AtomicBool::new(false),
+                coordinator_started: std::sync::atomic::AtomicBool::new(false),
+                task_admission_sealed: std::sync::atomic::AtomicBool::new(false),
+                local_cutoff,
+                local_activation_cutoff,
+            })
+            .map_err(|_| "adaptive attempt root allocation refused")?;
+        *vacant = Some(entry.clone());
         Ok(entry)
     }
 
@@ -684,7 +885,7 @@ impl AdaptiveAttemptRegistry {
         &self,
         claim: &AttemptClaim,
         deadline: std::time::Instant,
-    ) -> Result<(Arc<AttemptEntry>, std::time::Instant), String> {
+    ) -> Result<(AttemptRef, std::time::Instant), String> {
         let original_cutoff = crate::media_pool::create_preparation_deadline()
             .ok_or("insufficient_evidence: original local create deadline is absent")?
             .into_std();
@@ -703,13 +904,13 @@ impl AdaptiveAttemptRegistry {
         Ok((entry, deadline))
     }
 
-    pub(super) fn get(&self, attempt_id: Uuid) -> Option<Arc<AttemptEntry>> {
+    pub(super) fn get(&self, attempt_id: Uuid) -> Option<AttemptRef> {
         self.slots
             .lock()
             .ok()?
             .iter()
             .flatten()
-            .find_map(|entry| (entry.attempt_id == attempt_id).then(|| Arc::clone(entry)))
+            .find_map(|entry| (entry.attempt_id == attempt_id).then(|| entry.clone()))
     }
 
     fn drain_registered(&self) -> Result<usize, crate::serving_fence::OwnedWorkUnknown> {
@@ -722,7 +923,7 @@ impl AdaptiveAttemptRegistry {
         Ok(slots.iter().flatten().count())
     }
 
-    pub(super) fn entries(&self) -> [Option<Arc<AttemptEntry>>; MAX_LOCAL_ATTEMPTS] {
+    pub(super) fn entries(&self) -> [Option<AttemptRef>; MAX_LOCAL_ATTEMPTS] {
         self.slots
             .lock()
             .map(|slots| std::array::from_fn(|index| slots[index].clone()))
@@ -731,26 +932,93 @@ impl AdaptiveAttemptRegistry {
 
     /// Remove only a terminal exact entry. The caller has already joined its
     /// original coordinator and verified known Store/physical disposition.
-    pub(super) fn remove_terminal(&self, entry: &Arc<AttemptEntry>) -> Result<(), &'static str> {
+    pub(super) fn remove_terminal(&self, entry: &AttemptRef) -> Result<(), &'static str> {
         let mut slots = self
             .slots
             .lock()
             .map_err(|_| "adaptive attempt registry is uncertain")?;
         let Some(slot) = slots.iter_mut().find(|slot| {
             slot.as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, entry))
+                .is_some_and(|current| current.same_original(entry))
         }) else {
             return Err("adaptive attempt original registry entry disappeared");
         };
+        // A stale caller may already hold this exact AttemptRef. Seal while
+        // BOTH task slots are locked: outstanding admission guards count as
+        // reserved work, and a handle installed before sealing must be joined.
+        entry.seal_original_task_admission()?;
+        entry
+            .retire()
+            .map_err(|_| "adaptive attempt root retirement refused")?;
         *slot = None;
         Ok(())
     }
 }
 
+struct TaskAdmission<'a> {
+    held: std::sync::MutexGuard<'a, Option<JoinHandle<()>>>,
+}
+
 impl AttemptEntry {
+    fn admit_coordinator(&self) -> Result<TaskAdmission<'_>, &'static str> {
+        let admission = self.admit_task(true)?;
+        if self
+            .coordinator_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err("adaptive coordinator original already admitted");
+        }
+        Ok(admission)
+    }
+    fn admit_control(&self) -> Result<TaskAdmission<'_>, &'static str> {
+        self.admit_task(false)
+    }
+    fn admit_task(&self, coordinator: bool) -> Result<TaskAdmission<'_>, &'static str> {
+        let held = if coordinator {
+            &self.coordinator
+        } else {
+            &self.control
+        }
+        .lock()
+        .map_err(|_| "adaptive original task registry is uncertain")?;
+        if self
+            .task_admission_sealed
+            .load(std::sync::atomic::Ordering::Acquire)
+            || held.is_some()
+            || self
+                .task_join_failed
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("adaptive original task slot is occupied or sealed");
+        }
+        Ok(TaskAdmission { held })
+    }
+    fn seal_original_task_admission(&self) -> Result<(), &'static str> {
+        let coordinator = self
+            .coordinator
+            .lock()
+            .map_err(|_| "original coordinator slot is uncertain")?;
+        let control = self
+            .control
+            .lock()
+            .map_err(|_| "original control slot is uncertain")?;
+        if coordinator.is_some()
+            || control.is_some()
+            || self
+                .task_join_failed
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(
+                "original adaptive tasks must be positively joined before terminal sealing",
+            );
+        }
+        self.task_admission_sealed
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
     fn prepare_error(&self, message: String) -> AdaptivePrepareError {
         AdaptivePrepareError {
-            message,
+            message: message.into(),
             trial_refusal: *self
                 .trial_refusal
                 .lock()
@@ -763,7 +1031,7 @@ impl AttemptEntry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reason.map(|reason| AdaptivePrepareError {
-            message: format!("adaptive trial refused: {reason:?}"),
+            message: format!("adaptive trial refused: {reason:?}").into(),
             trial_refusal: Some(reason),
         })
     }
@@ -845,7 +1113,11 @@ impl AttemptEntry {
     }
     // SAME original coordinator/start latch. Inline frame publication lets
     // the existing frame-channel allocation carry the original grant instead.
-    fn spawn_remote_coordinator<F>(self: &Arc<Self>, future: F) -> Result<(), &'static str>
+    fn spawn_remote_coordinator<F>(
+        &self,
+        mut admission: TaskAdmission<'_>,
+        future: F,
+    ) -> Result<(), &'static str>
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -859,10 +1131,11 @@ impl AttemptEntry {
             std::mem::size_of_val(&original),
             std::sync::atomic::Ordering::Release,
         );
-        let task = tokio::spawn(original);
-        if self.install_coordinator(task).is_err() {
-            return Err("adaptive attempt already has an original coordinator");
+        if std::mem::size_of_val(&original) > attempt_root::COORDINATOR_BYTES {
+            return Err("adaptive coordinator exceeds the paid attempt root frame");
         }
+        let task = tokio::spawn(original);
+        *admission.held = Some(task);
         let _ = start_tx.send(());
         Ok(())
     }
@@ -922,36 +1195,50 @@ impl AttemptEntry {
     /// The task was spawned only after this entry was visible in the fixed
     /// table. Its handle stays here through request cancellation and is joined
     /// by the existing manager maintenance cadence.
-    pub(super) fn install_coordinator(&self, task: JoinHandle<()>) -> Result<(), JoinHandle<()>> {
-        let Ok(mut held) = self.coordinator.lock() else {
-            return Err(task);
-        };
-        if held.is_some() {
-            return Err(task);
+    async fn join_finished_original(&self, coordinator: bool) -> Result<(), &'static str> {
+        if self
+            .task_join_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("original adaptive task failure remains held");
         }
-        *held = Some(task);
-        Ok(())
+        std::future::poll_fn(|cx| {
+            let held = if coordinator {
+                &self.coordinator
+            } else {
+                &self.control
+            };
+            let Ok(mut held) = held.lock() else {
+                return std::task::Poll::Ready(Err("original task registry is uncertain"));
+            };
+            let Some(task) = held.as_mut() else {
+                return std::task::Poll::Ready(Ok(()));
+            };
+            if !task.is_finished() {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            match std::pin::Pin::new(task).poll(cx) {
+                std::task::Poll::Pending => std::task::Poll::Pending,
+                std::task::Poll::Ready(Ok(())) => {
+                    *held = None;
+                    std::task::Poll::Ready(Ok(()))
+                }
+                std::task::Poll::Ready(Err(_)) => {
+                    self.task_join_failed
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    // Preserve failed original handle; never repoll a completed failure.
+                    std::task::Poll::Ready(Err("original adaptive task failed"))
+                }
+            }
+        })
+        .await
     }
 
-    pub(super) fn take_finished_coordinator(&self) -> Option<JoinHandle<()>> {
-        let mut held = self.coordinator.lock().ok()?;
-        if held.as_ref().is_some_and(JoinHandle::is_finished) {
-            held.take()
-        } else {
-            None
-        }
-    }
-
-    pub(super) fn take_finished_control(&self) -> Option<JoinHandle<()>> {
-        let mut held = self.control.lock().ok()?;
-        if held.as_ref().is_some_and(JoinHandle::is_finished) {
-            held.take()
-        } else {
-            None
-        }
-    }
-
-    pub(super) fn spawn_control<F>(self: &Arc<Self>, future: F) -> Result<(), &'static str>
+    fn spawn_control<F>(
+        &self,
+        mut admission: TaskAdmission<'_>,
+        future: F,
+    ) -> Result<(), &'static str>
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -969,18 +1256,15 @@ impl AttemptEntry {
             return Err("adaptive control frame exceeds its charged partition");
         }
         let task = tokio::spawn(original);
-        let Ok(mut held) = self.control.lock() else {
-            return Err("adaptive control registry is uncertain");
-        };
-        if held.is_some() {
-            return Err("adaptive control already owns the original task slot");
-        }
-        *held = Some(task);
+        *admission.held = Some(task);
         let _ = start_tx.send(());
         Ok(())
     }
 
-    pub(super) fn release_finished_application(&self) -> Result<(), &'static str> {
+    pub(super) fn release_finished_application(
+        &self,
+        original: &AttemptRef,
+    ) -> Result<(), &'static str> {
         let coordinator = self
             .coordinator
             .lock()
@@ -996,26 +1280,31 @@ impl AttemptEntry {
             .finishing_lease
             .lock()
             .map_err(|_| "application hold is uncertain")?;
-        lease.take();
-        // The P/M controller still owns its compact Claim/Fence/Close record
-        // until the logical StoreClose is known. A native seal is not a memory
-        // refund: only terminal state and joined original tasks release this
-        // application's one-shot M fence.
-        if self
-            .state
-            .try_lock()
-            .is_ok_and(|state| matches!(*state, AttemptState::Closed | AttemptState::Adopted))
-        {
-            self.planning_application_lease
-                .lock()
-                .map_err(|_| "planning application hold is uncertain")?
-                .take();
+        drop(lease.take());
+        // R rich storage and original F are gone. Entry/header, initial/control
+        // frame partitions and terminal Claim/Fence/Close are independently paid
+        // by the root BEFORE R admission (and excluded from R's projection).
+        // R can now retire natively; StoreClose then makes Entry terminal.
+        // The original P/M fence moves OUTSIDE Entry and survives its actual
+        // header/payload destruction; releasing it here would refund live storage.
+        let mut planning = self
+            .planning_application_lease
+            .lock()
+            .map_err(|_| "planning application hold is uncertain")?;
+        if let Some(lease) = planning.take() {
+            if let Err(lease) = original.retain_planning_application(lease) {
+                *planning = Some(lease);
+                return Err("attempt root could not retain the original planning fence");
+            }
         }
         Ok(())
     }
 
     pub(super) fn no_original_tasks_or_application(&self) -> bool {
-        self.coordinator.lock().is_ok_and(|held| held.is_none())
+        !self
+            .task_join_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+            && self.coordinator.lock().is_ok_and(|held| held.is_none())
             && self.control.lock().is_ok_and(|held| held.is_none())
             && self
                 .planning_application_lease
@@ -1027,8 +1316,9 @@ impl AttemptEntry {
     /// The start latch keeps the original task inert until its JoinHandle is
     /// retained by the already registered entry. Failure cannot enter native
     /// work and never requires abort-as-closure.
-    pub(super) fn spawn_coordinator<F>(
-        self: &Arc<Self>,
+    fn spawn_coordinator<F>(
+        &self,
+        mut admission: TaskAdmission<'_>,
         future: F,
         frame_tx: tokio::sync::oneshot::Sender<usize>,
     ) -> Result<(), &'static str>
@@ -1042,10 +1332,11 @@ impl AttemptEntry {
             }
         };
         let frame_bytes = std::mem::size_of_val(&original);
-        let task = tokio::spawn(original);
-        if self.install_coordinator(task).is_err() {
-            return Err("adaptive attempt already has an original coordinator");
+        if std::mem::size_of_val(&original) > attempt_root::COORDINATOR_BYTES {
+            return Err("adaptive coordinator exceeds the paid attempt root frame");
         }
+        let task = tokio::spawn(original);
+        *admission.held = Some(task);
         let _ = frame_tx.send(frame_bytes);
         let _ = start_tx.send(());
         Ok(())
@@ -1053,6 +1344,75 @@ impl AttemptEntry {
 }
 
 impl super::TranscodeManager {
+    pub(crate) fn reserve_adaptive_origin_reply(
+        &self,
+    ) -> Result<attempt_root::ReplyPermit, String> {
+        self.adaptive_attempts
+            .client
+            .lock()
+            .map_err(|_| "adaptive origin root is uncertain")?
+            .as_ref()
+            .ok_or("adaptive origin root is unavailable")?
+            .reserve_reply()
+            .map_err(|_| "adaptive origin response copy admission refused".into())
+    }
+
+    pub(crate) async fn initialize_adaptive_attempt_root(
+        &self,
+        lifecycle: &mut AttemptRootLifecycle,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
+        let Some(runtime) = self.resource_runtime.as_ref() else {
+            return Ok(());
+        };
+        let client = lifecycle
+            .start(runtime, deadline)
+            .await
+            .map_err(|error| format!("starting adaptive attempt root: {error:?}"))?;
+        *self
+            .adaptive_attempts
+            .client
+            .lock()
+            .map_err(|_| "adaptive attempt publication is uncertain")? = Some(client);
+        Ok(())
+    }
+    pub(crate) async fn shutdown_adaptive_attempt_root(
+        &self,
+        lifecycle: &mut AttemptRootLifecycle,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
+        lifecycle.begin_drain();
+        loop {
+            self.vod.maintain().await;
+            self.reconcile_adaptive_attempt_tasks().await;
+            let held = self
+                .adaptive_attempts
+                .client
+                .lock()
+                .map_err(|_| "adaptive attempt root is uncertain")?
+                .as_ref()
+                .map_or(0, AttemptRootClient::held);
+            if held == 0 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(
+                    "adaptive attempt original tasks, entries or aliases remain held".into(),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        self.adaptive_attempts
+            .client
+            .lock()
+            .map_err(|_| "adaptive attempt publication is uncertain")?
+            .take();
+        lifecycle
+            .shutdown(deadline)
+            .await
+            .map_err(|error| format!("closing adaptive attempt root: {error:?}"))
+    }
+
     pub(crate) fn adaptive_attempt_drain_count(
         &self,
     ) -> Result<usize, crate::serving_fence::OwnedWorkUnknown> {
@@ -1061,7 +1421,7 @@ impl super::TranscodeManager {
 
     async fn admit_adaptive_fixed_probe(
         &self,
-        entry: &Arc<AttemptEntry>,
+        entry: &AttemptRef,
         claim: &AttemptClaim,
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         application_metadata_bytes: usize,
@@ -1231,7 +1591,7 @@ impl super::TranscodeManager {
         _state: &crate::state::AppState,
         envelope: &mut crate::media_sessions::RemoteStartRequest,
         claim: &AttemptClaim,
-        entry: &Arc<AttemptEntry>,
+        entry: &AttemptRef,
         coordinator_frame_bytes: usize,
         deadline: std::time::Instant,
         remote_grant: Option<RemoteGrantWait>,
@@ -1271,6 +1631,11 @@ impl super::TranscodeManager {
             || snapshot.file.mtime != envelope.source_mtime
         {
             return Err("adaptive source scanner row changed before native admission".into());
+        }
+        if planning_snapshot_requested_heap_bytes(&snapshot)
+            .is_none_or(|bytes| bytes > attempt_root::SNAPSHOT_BYTES)
+        {
+            return Err("adaptive planning snapshot exceeds the paid pre-P root partition".into());
         }
         let application_metadata_bytes = planning_application_metadata_bytes(
             envelope,
@@ -1388,7 +1753,7 @@ impl super::TranscodeManager {
     pub(crate) async fn wait_remote_adaptive_prepared(
         &self,
         attempt_id: Uuid,
-    ) -> Result<crate::media_sessions::AdaptiveAttemptPreparedV1, AdaptivePrepareError> {
+    ) -> Result<FundedPreparedReply, AdaptivePrepareError> {
         let entry = self
             .adaptive_attempts
             .get(attempt_id)
@@ -1432,6 +1797,7 @@ impl super::TranscodeManager {
         request: crate::media_sessions::AdaptiveAttemptPrepareV1,
         restart_admission: crate::serving_fence::RestartAdmission,
     ) -> Result<AdaptiveRemoteRegistrationStart, String> {
+        preflight_attempt_payload(&request)?;
         self.verify_adaptive_claim(&request.claim)
             .await
             .map_err(str::to_owned)?;
@@ -1465,6 +1831,7 @@ impl super::TranscodeManager {
                 None,
             )
             .map_err(str::to_owned)?;
+        let admission = entry.admit_coordinator().map_err(str::to_owned)?;
         let (grant_tx, grant_rx) = tokio::sync::oneshot::channel();
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         {
@@ -1489,9 +1856,9 @@ impl super::TranscodeManager {
             });
         }
         let manager = Arc::clone(self);
-        let original = Arc::clone(&entry);
+        let original = entry.clone();
         entry
-            .spawn_remote_coordinator(async move {
+            .spawn_remote_coordinator(admission, async move {
                 let _restart_admission = restart_admission;
                 let frame = original
                     .coordinator_frame_bytes
@@ -1500,7 +1867,7 @@ impl super::TranscodeManager {
                     .run_adaptive_prepare_with_frame(
                         state,
                         request,
-                        Arc::clone(&original),
+                        original.clone(),
                         deadline,
                         frame,
                         Some(RemoteGrantWait {
@@ -1587,6 +1954,7 @@ impl super::TranscodeManager {
         deadline: std::time::Instant,
         restart_admission: crate::serving_fence::RestartAdmission,
     ) -> Result<AdaptivePrepareStart, AdaptivePrepareError> {
+        preflight_attempt_payload(&request)?;
         self.verify_adaptive_claim(&request.claim)
             .await
             .map_err(str::to_owned)?;
@@ -1614,22 +1982,18 @@ impl super::TranscodeManager {
         let (entry, deadline) = self
             .adaptive_attempts
             .reserve_local(&request.claim, deadline)?;
+        let admission = entry.admit_coordinator().map_err(str::to_owned)?;
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
         let manager = Arc::clone(self);
-        let original = Arc::clone(&entry);
+        let original = entry.clone();
         entry
             .spawn_coordinator(
+                admission,
                 async move {
                     let _restart_admission = restart_admission;
                     let result = manager
-                        .run_adaptive_prepare(
-                            state,
-                            request,
-                            Arc::clone(&original),
-                            deadline,
-                            frame_rx,
-                        )
+                        .run_adaptive_prepare(state, request, original.clone(), deadline, frame_rx)
                         .await;
                     let _ = reply_tx.send(result.map_err(|error| original.prepare_error(error)));
                 },
@@ -1643,10 +2007,10 @@ impl super::TranscodeManager {
         &self,
         state: crate::state::AppState,
         request: crate::media_sessions::AdaptiveAttemptPrepareV1,
-        entry: Arc<AttemptEntry>,
+        entry: AttemptRef,
         deadline: std::time::Instant,
         frame_rx: tokio::sync::oneshot::Receiver<usize>,
-    ) -> Result<crate::media_sessions::AdaptiveAttemptPreparedV1, String> {
+    ) -> Result<FundedPreparedReply, String> {
         let coordinator_frame_bytes = match frame_rx.await {
             Ok(bytes) => bytes,
             Err(_) => {
@@ -1674,11 +2038,11 @@ impl super::TranscodeManager {
         &self,
         state: crate::state::AppState,
         mut request: crate::media_sessions::AdaptiveAttemptPrepareV1,
-        entry: Arc<AttemptEntry>,
+        entry: AttemptRef,
         mut deadline: std::time::Instant,
         coordinator_frame_bytes: usize,
         remote_grant: Option<RemoteGrantWait>,
-    ) -> Result<crate::media_sessions::AdaptiveAttemptPreparedV1, String> {
+    ) -> Result<FundedPreparedReply, String> {
         if std::time::Instant::now() >= deadline
             || !state
                 .serving
@@ -1855,8 +2219,10 @@ impl super::TranscodeManager {
         preview_json: String,
         authority: crate::serving_fence::ServingAuthority,
         deadline: std::time::Instant,
-    ) -> Result<tokio::sync::oneshot::Receiver<Result<crate::vodserve::VodStart, String>>, String>
-    {
+    ) -> Result<
+        tokio::sync::oneshot::Receiver<Result<AdaptiveAdopted, ScalarAdaptiveDiagnostic>>,
+        String,
+    > {
         if preview_json.len() > crate::media_sessions::ADAPTIVE_PREVIEW_BYTES
             || adoption_requested_bytes(&adoption)
                 .and_then(|bytes| bytes.checked_add(preview_json.capacity()))
@@ -1875,11 +2241,12 @@ impl super::TranscodeManager {
         {
             return Err("adaptive Adopt targets a different process owner".into());
         }
+        let admission = entry.admit_control().map_err(str::to_owned)?;
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let manager = Arc::clone(self);
-        let original = Arc::clone(&entry);
+        let original = entry.clone();
         entry
-            .spawn_control(async move {
+            .spawn_control(admission, async move {
                 // No Store mutation or native adoption is polled before the fence.
                 let result = restart_guarded_adoption(
                     authority.clone(),
@@ -1892,7 +2259,11 @@ impl super::TranscodeManager {
                     ),
                 )
                 .await;
-                let _ = sender.send(result);
+                let _ = sender.send(
+                    result
+                        .map_err(ScalarAdaptiveDiagnostic::from)
+                        .and_then(AdaptiveAdopted::from_start),
+                );
             })
             .map_err(str::to_owned)?;
         Ok(receiver)
@@ -1963,7 +2334,7 @@ impl super::TranscodeManager {
     pub(crate) fn begin_adaptive_cancel(
         self: &Arc<Self>,
         fence: plurx_core::store::adaptive_resource_attempts::AttemptFence,
-    ) -> Result<tokio::sync::oneshot::Receiver<Result<(), String>>, String> {
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<(), ScalarAdaptiveDiagnostic>>, String> {
         if fence_requested_bytes(&fence)
             .is_none_or(|bytes| bytes > crate::media_sessions::MAX_CONTROL_REQUEST_BYTES)
         {
@@ -1973,6 +2344,7 @@ impl super::TranscodeManager {
             .adaptive_attempts
             .get(fence.key.attempt_id)
             .ok_or("adaptive Fence has no local original owner")?;
+        let admission = entry.admit_control().map_err(str::to_owned)?;
         {
             let mut held = entry
                 .remote_registration
@@ -2001,11 +2373,11 @@ impl super::TranscodeManager {
         }
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let manager = Arc::clone(self);
-        let original = Arc::clone(&entry);
+        let original = entry.clone();
         entry
-            .spawn_control(async move {
+            .spawn_control(admission, async move {
                 let result = manager.cancel_adaptive_attempt(&original, fence).await;
-                let _ = sender.send(result);
+                let _ = sender.send(result.map_err(ScalarAdaptiveDiagnostic::from));
             })
             .map_err(str::to_owned)?;
         Ok(receiver)
@@ -2015,7 +2387,7 @@ impl super::TranscodeManager {
     /// result lets this worker publish the already prepared Rendition.
     pub(super) async fn adopt_adaptive_attempt(
         &self,
-        entry: &Arc<AttemptEntry>,
+        entry: &AttemptRef,
         adoption: plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
         preview_json: String,
         authority: crate::serving_fence::ServingAuthority,
@@ -2209,7 +2581,7 @@ impl super::TranscodeManager {
     /// Only the actual finite closing owner's known result and destruction of
     /// all charged M4 task frames allow the Store's logical Close. The close
     /// record is retained before its await and replayed with the same UUID.
-    async fn finish_adaptive_close(&self, entry: &Arc<AttemptEntry>) -> Result<bool, String> {
+    async fn finish_adaptive_close(&self, entry: &AttemptRef) -> Result<bool, String> {
         let mut state = entry.state().await;
         let AttemptState::Closing(closing) = &mut *state else {
             return Ok(false);
@@ -2300,10 +2672,7 @@ impl super::TranscodeManager {
     /// provisional Store row, then close it only after the original P/M
     /// native and metadata book has positively settled. Unknown Store replies
     /// retain the same operation and local selector for the next reap pass.
-    async fn finish_failed_adaptive_planning(
-        &self,
-        entry: &Arc<AttemptEntry>,
-    ) -> Result<(), String> {
+    async fn finish_failed_adaptive_planning(&self, entry: &AttemptRef) -> Result<(), String> {
         let mut state = entry.state().await;
         let AttemptState::PlanningFailed(failed) = &mut *state else {
             return Ok(());
@@ -2438,7 +2807,7 @@ impl super::TranscodeManager {
     /// retained on `AttemptEntry`; HTTP cancellation cannot drop the owner.
     pub(super) async fn cancel_adaptive_attempt(
         &self,
-        entry: &Arc<AttemptEntry>,
+        entry: &AttemptRef,
         fence: plurx_core::store::adaptive_resource_attempts::AttemptFence,
     ) -> Result<(), String> {
         fence
@@ -2492,7 +2861,7 @@ impl super::TranscodeManager {
         self.handoff_adaptive_loser(entry).await
     }
 
-    async fn handoff_adaptive_loser(&self, entry: &Arc<AttemptEntry>) -> Result<(), String> {
+    async fn handoff_adaptive_loser(&self, entry: &AttemptRef) -> Result<(), String> {
         let mut state = entry.state().await;
         if !matches!(*state, AttemptState::Rich(_)) {
             return Err("adaptive loser has no original prepared owner".into());
@@ -2526,7 +2895,7 @@ impl super::TranscodeManager {
         Ok(())
     }
 
-    async fn reconcile_adaptive_handoff(&self, entry: &Arc<AttemptEntry>) -> Result<(), String> {
+    async fn reconcile_adaptive_handoff(&self, entry: &AttemptRef) -> Result<(), String> {
         let mut state = entry.state().await;
         let AttemptState::Handoff(handoff) = &mut *state else {
             return Ok(());
@@ -2567,7 +2936,7 @@ impl super::TranscodeManager {
         Ok(())
     }
 
-    async fn reconcile_adaptive_loser(&self, entry: &Arc<AttemptEntry>) -> Result<(), String> {
+    async fn reconcile_adaptive_loser(&self, entry: &AttemptRef) -> Result<(), String> {
         let mut state = entry.state().await;
         let AttemptState::Rich(rich) = &mut *state else {
             return Ok(());
@@ -2777,13 +3146,32 @@ impl super::TranscodeManager {
     pub(crate) async fn replay_adaptive_prepared(
         &self,
         attempt_id: Uuid,
-    ) -> Option<Result<crate::media_sessions::AdaptiveAttemptPreparedV1, String>> {
+    ) -> Option<Result<FundedPreparedReply, String>> {
         let entry = self.adaptive_attempts.get(attempt_id)?;
         let state = entry.state().await;
         let AttemptState::Rich(rich) = &*state else {
             return None;
         };
         let prepared = rich.prepared.as_ref()?;
+        let preview = rich.preview_json.as_ref()?;
+        if prepared_reply_heap(&prepared.worker, &rich.selected_recipe_json, preview)
+            .is_none_or(|n| n > attempt_root::REPLY_BYTES)
+        {
+            return Some(Err(
+                "adaptive replay actual capacities exceed its response partition".into(),
+            ));
+        }
+        let permit = match self
+            .adaptive_attempts
+            .client
+            .lock()
+            .ok()
+            .and_then(|client| client.as_ref().cloned())
+            .and_then(|client| client.reserve_reply().ok())
+        {
+            Some(permit) => permit,
+            None => return Some(Err("adaptive replay response copy admission refused".into())),
+        };
         let preview_json = match &rich.preview_json {
             Some(preview) => preview.clone(),
             None => return Some(Err("adaptive original preview is absent".into())),
@@ -2798,11 +3186,14 @@ impl super::TranscodeManager {
                             && attempt.phase == AttemptPhase::Prepared
                     }) =>
             {
-                Ok(crate::media_sessions::AdaptiveAttemptPreparedV1 {
-                    version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
-                    worker: prepared.worker.clone(),
-                    selected_recipe_json: rich.selected_recipe_json.clone(),
-                    preview_json,
+                Ok(FundedPreparedReply {
+                    reply: crate::media_sessions::AdaptiveAttemptPreparedV1 {
+                        version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
+                        worker: prepared.worker.clone(),
+                        selected_recipe_json: rich.selected_recipe_json.clone(),
+                        preview_json,
+                    },
+                    permit,
                 })
             }
             Ok(_) => Err("adaptive Prepared replay conflicts with the Store row".into()),
@@ -2819,14 +3210,14 @@ impl super::TranscodeManager {
     )]
     pub(super) async fn record_adaptive_prepared(
         &self,
-        entry: &Arc<AttemptEntry>,
+        entry: &AttemptRef,
         claim: AttemptClaim,
         selected_recipe_json: String,
         mut pending: PreparedAttemptRendition,
         settings: crate::vodserve::VodSettings,
         deadline: std::time::Instant,
         projected_application_bytes: usize,
-    ) -> Result<crate::media_sessions::AdaptiveAttemptPreparedV1, String> {
+    ) -> Result<FundedPreparedReply, String> {
         let actual = pending
             .requested_heap_bytes()
             .and_then(|bytes| bytes.checked_add(selected_recipe_json.capacity()))
@@ -2944,14 +3335,37 @@ impl super::TranscodeManager {
                             && attempt.phase == AttemptPhase::Prepared
                     }) =>
             {
-                Ok(crate::media_sessions::AdaptiveAttemptPreparedV1 {
-                    version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
-                    worker,
-                    selected_recipe_json: rich.selected_recipe_json.clone(),
-                    preview_json: rich
-                        .preview_json
-                        .clone()
-                        .ok_or("adaptive original preview is absent")?,
+                let preview = rich
+                    .preview_json
+                    .as_ref()
+                    .ok_or("adaptive original preview is absent")?;
+                if prepared_reply_heap(&worker, &rich.selected_recipe_json, preview)
+                    .is_none_or(|n| n > attempt_root::REPLY_BYTES)
+                {
+                    return Err(
+                        "adaptive response actual capacities exceed its paid partition".into(),
+                    );
+                }
+                let permit = self
+                    .adaptive_attempts
+                    .client
+                    .lock()
+                    .map_err(|_| "adaptive response root is uncertain")?
+                    .as_ref()
+                    .ok_or("adaptive response root is absent")?
+                    .reserve_reply()
+                    .map_err(|_| "adaptive response copy admission refused")?;
+                Ok(FundedPreparedReply {
+                    reply: crate::media_sessions::AdaptiveAttemptPreparedV1 {
+                        version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
+                        worker,
+                        selected_recipe_json: rich.selected_recipe_json.clone(),
+                        preview_json: rich
+                            .preview_json
+                            .clone()
+                            .ok_or("adaptive original preview is absent")?,
+                    },
+                    permit,
                 })
             }
             Ok(_) => Err("adaptive Prepared was refused or its committed row differs".into()),
@@ -3062,23 +3476,13 @@ impl super::TranscodeManager {
             }
         }
         for entry in self.adaptive_attempts.entries().into_iter().flatten() {
-            if let Some(task) = entry.take_finished_coordinator() {
-                if let Err(error) = task.await {
-                    tracing::error!(attempt_id = %entry.attempt_id(), %error,
-                        "adaptive attempt coordinator ended without a known disposition");
-                    let mut state = entry.state().await;
-                    if matches!(*state, AttemptState::Reserved) {
-                        *state = AttemptState::Unknown;
-                    }
+            for coordinator in [true, false] {
+                if let Err(error) = entry.join_finished_original(coordinator).await {
+                    entry.mark_unknown();
+                    tracing::error!(attempt_id = %entry.attempt_id(), error, "adaptive original task failure remains held");
                 }
             }
-            if let Some(task) = entry.take_finished_control() {
-                if let Err(error) = task.await {
-                    tracing::error!(attempt_id = %entry.attempt_id(), %error,
-                        "adaptive control ended without a known disposition");
-                }
-            }
-            if let Err(error) = entry.release_finished_application() {
+            if let Err(error) = entry.release_finished_application(&entry) {
                 tracing::warn!(attempt_id = %entry.attempt_id(), error,
                     "adaptive application fence remains held");
             }
@@ -3138,7 +3542,18 @@ impl super::TranscodeManager {
     pub(crate) async fn retain_empty_failed_adaptive_coordinator_for_test(
         self: &Arc<Self>,
         claim: AttemptClaim,
-    ) -> tokio::sync::oneshot::Sender<()> {
+    ) -> (
+        tokio::sync::oneshot::Sender<()>,
+        tempfile::TempDir,
+        Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
+        AttemptRootLifecycle,
+    ) {
+        let (root_dir, runtime, lifecycle, client) = attempt_root::bookkeeping_fixture().await;
+        *self
+            .adaptive_attempts
+            .client
+            .lock()
+            .expect("actual fixture root publication") = Some(client);
         let entry = self
             .adaptive_attempts
             .reserve(
@@ -3157,10 +3572,14 @@ impl super::TranscodeManager {
             close: None,
         }));
         let (release, released) = tokio::sync::oneshot::channel();
+        let admission = entry
+            .admit_coordinator()
+            .expect("original coordinator admission before channels");
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         entry
             .spawn_coordinator(
+                admission,
                 async move {
                     frame_rx.await.expect("original registered frame");
                     entered_tx.send(()).expect("original coordinator entered");
@@ -3170,7 +3589,7 @@ impl super::TranscodeManager {
             )
             .expect("retain original task handle");
         entered_rx.await.expect("registered coordinator is running");
-        release
+        (release, root_dir, runtime, lifecycle)
     }
 }
 
@@ -3206,6 +3625,13 @@ impl super::TranscodeManager {
             .resource_runtime
             .as_ref()
             .expect("actual selected runtime");
+        let mut attempt_root = AttemptRootLifecycle::default();
+        self.initialize_adaptive_attempt_root(
+            &mut attempt_root,
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("production paid pre-P root");
         let baseline = runtime.accounting().expect("actual baseline accounting");
         assert!(matches!(
             self.store
@@ -3258,17 +3684,59 @@ impl super::TranscodeManager {
                 None,
             )
             .expect("original bounded worker slot");
+        let admission = entry
+            .admit_coordinator()
+            .expect("original coordinator admission before channels");
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
         let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let manager = Arc::clone(self);
-        let original = Arc::clone(&entry);
+        let original = entry.clone();
         let original_claim = claim.clone();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
         entry
             .spawn_coordinator(
+                admission,
                 async move {
                     let actual_frame = frame_rx.await.expect("same registered frame measurement");
+                    // Actual P/M precedes real R; M remains after native P joins.
+                    let envelope: crate::media_sessions::RemoteStartRequest =
+                        serde_json::from_str(&selected_recipe_json)
+                            .expect("actual selected worker envelope");
+                    let snapshot = manager
+                        .store
+                        .playback_planning_snapshot(
+                            envelope.request.file_id,
+                            &super::QUALITY_PLANNING_KEYS,
+                        )
+                        .await
+                        .expect("actual source planning read")
+                        .expect("same actual source");
+                    assert!(planning_snapshot_requested_heap_bytes(&snapshot)
+                        .is_some_and(|n| n <= attempt_root::SNAPSHOT_BYTES));
+                    let metadata = planning_application_metadata_bytes(
+                        &envelope,
+                        &snapshot,
+                        &original_claim,
+                        actual_frame,
+                    )
+                    .expect("actual P/M capacities");
+                    let (report, _) = manager
+                        .admit_adaptive_fixed_probe(
+                            &original,
+                            &original_claim,
+                            &snapshot,
+                            metadata,
+                            deadline,
+                            None,
+                        )
+                        .await
+                        .expect("actual fixed P/M admission and native report");
+                    drop((report, snapshot, envelope));
+                    original
+                        .finish_adaptive_fixed_planning(deadline)
+                        .await
+                        .expect("same original native P join before real R");
                     let application_bytes = projected_application_owner_bytes(
                         &original_claim,
                         &selected_recipe_json,
@@ -3390,8 +3858,16 @@ impl super::TranscodeManager {
             // before asking the bounded registry for another original control.
             tokio::time::timeout_at(deadline.into(), async {
                 loop {
-                    if let Some(task) = entry.take_finished_control() {
-                        task.await.expect("same original Adopt control joined");
+                    entry
+                        .join_finished_original(false)
+                        .await
+                        .expect("same original Adopt control joined");
+                    if entry
+                        .control
+                        .lock()
+                        .expect("original control registry")
+                        .is_none()
+                    {
                         break;
                     }
                     tokio::task::yield_now().await;
@@ -3662,12 +4138,67 @@ impl super::TranscodeManager {
         })
         .await
         .expect("actual original native/app close permits Store Close using B");
-        let settled = runtime.accounting().expect("actual original known refund");
-        assert_eq!(settled.used, baseline.used);
+        let held_entry = runtime
+            .accounting()
+            .expect("actual native R retired, original M held");
         assert_eq!(
-            settled.unknown_peak_producers,
+            held_entry.unknown_peak_producers,
             baseline.unknown_peak_producers
         );
+        assert!(held_entry.planning_metadata_held > baseline.planning_metadata_held,
+            "escaped AttemptRef blocks positive M final closure after native R retirement and StoreClose");
+        let client = self
+            .adaptive_attempts
+            .client
+            .lock()
+            .expect("root publication")
+            .as_ref()
+            .expect("paid root")
+            .clone();
+        assert_eq!(
+            client.held(),
+            1,
+            "registry removal is not actual outer destruction"
+        );
+        assert!(self.adaptive_attempts.get(claim.key.attempt_id).is_none());
+        let escaped_attempt = entry.clone();
+        drop(entry);
+        for _ in 0..5 {
+            self.reconcile_adaptive_attempt_tasks().await;
+        }
+        assert_eq!(client.held(), 1);
+        assert!(
+            runtime
+                .accounting()
+                .expect("M still held")
+                .planning_metadata_held
+                > baseline.planning_metadata_held
+        );
+        drop(escaped_attempt);
+        tokio::time::timeout_at(deadline.into(), async {
+            loop {
+                self.reconcile_adaptive_attempt_tasks().await;
+                let settled = runtime.accounting().expect("actual final closure");
+                if client.held() == 0
+                    && settled.planning_metadata_held == baseline.planning_metadata_held
+                {
+                    assert_eq!(settled.used, baseline.used);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect(
+            "actual Entry header/payload destruction releases M fence and permits positive close",
+        );
+        let reuse = client
+            .reserve()
+            .expect("actual outer destruction permits slot reuse");
+        drop((reuse, client));
+        self.shutdown_adaptive_attempt_root(&mut attempt_root, deadline)
+            .await
+            .expect("external root original join and actual release");
     }
 }
 
@@ -3694,6 +4225,13 @@ impl super::TranscodeManager {
             + 'static,
     {
         use plurx_core::store::adaptive_resource_attempts::WinnerSelection;
+        let mut attempt_root = AttemptRootLifecycle::default();
+        self.initialize_adaptive_attempt_root(
+            &mut attempt_root,
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("production paid pre-P root");
         assert!(matches!(
             self.store
                 .claim_media_session_request(
@@ -3727,15 +4265,19 @@ impl super::TranscodeManager {
                 None,
             )
             .expect("original bounded worker slot");
+        let admission = entry
+            .admit_coordinator()
+            .expect("original coordinator admission before channels");
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
         let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let manager = Arc::clone(self);
-        let original = Arc::clone(&entry);
+        let original = entry.clone();
         let original_claim = claim.clone();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
         entry
             .spawn_coordinator(
+                admission,
                 async move {
                     let actual_frame = frame_rx.await.expect("same registered frame measurement");
                     let application_bytes = projected_application_owner_bytes(
@@ -3916,7 +4458,7 @@ impl super::TranscodeManager {
             crate::media_sessions::unix_ms(),
         )
         .await;
-        assert_eq!(start.session_id, claim.key.session_id.to_string());
+        assert_eq!(start.session_id, claim.key.session_id);
         let route = self
             .store
             .media_session_route_by_incarnation(&claim.key.route_incarnation_id.to_string())
@@ -3948,6 +4490,10 @@ impl super::TranscodeManager {
         assert_eq!(ingress.incarnation_id, route.incarnation_id);
         release_tx.send(()).expect("release same original frame");
         drop(escaped);
+        drop(entry);
+        self.shutdown_adaptive_attempt_root(&mut attempt_root, deadline)
+            .await
+            .expect("actual adopted entry/root destruction after original joins");
     }
 }
 
@@ -4049,12 +4595,14 @@ mod tests {
         )
     }
 
-    #[test]
-    fn original_attempt_retains_trial_refusal_without_asserting_cleanup_or_growing_payload() {
+    #[tokio::test]
+    async fn original_attempt_retains_trial_refusal_without_asserting_cleanup_or_growing_payload() {
         use plurx_core::resource_policy::TrialRefusal;
         let (fixture, _receiver) = remote_control_fixture();
         let claim = fixture.claim;
+        let (_root_dir, _runtime, _root, client) = attempt_root::bookkeeping_fixture().await;
         let registry = AdaptiveAttemptRegistry::default();
+        *registry.client.lock().expect("fixture publication") = Some(client);
         let entry = registry
             .reserve(
                 claim.key.attempt_id,
@@ -4068,12 +4616,14 @@ mod tests {
         assert!(entry.retained_trial_refusal().is_none());
         *entry.trial_refusal.lock().expect("inline reason") = Some(TrialRefusal::UnknownBounds);
         let message = String::from("actual admission failure");
-        let allocation = message.as_ptr();
         let error = entry.prepare_error(message);
         assert_eq!(
-            error.message.as_ptr(),
-            allocation,
-            "move the existing diagnostic allocation"
+            error.message.as_str(),
+            "adaptive operation failed; original diagnostic recorded by worker"
+        );
+        assert!(
+            !std::mem::needs_drop::<ScalarAdaptiveDiagnostic>(),
+            "error output owns no heap after the task/Entry dies"
         );
         assert_eq!(error.trial_refusal, Some(TrialRefusal::UnknownBounds));
         assert_eq!(
@@ -4093,10 +4643,10 @@ mod tests {
         assert!(
             adaptive_prepare_reply_payload_bytes() >= std::mem::size_of::<AdaptivePrepareError>()
         );
-        assert_eq!(
-            adaptive_prepare_reply_payload_bytes(),
-            std::mem::size_of::<Result<crate::media_sessions::AdaptiveAttemptPreparedV1, String>>(),
-            "the larger prepared reply already determines the result payload layout"
+        assert!(
+            adaptive_prepare_reply_payload_bytes()
+                >= std::mem::size_of::<ScalarAdaptiveDiagnostic>(),
+            "the actual scalar diagnostic metadata is included in channel precharge"
         );
         println!(
             "adaptive prepare layout: error={} reply_payload={} entry={}",
@@ -4144,7 +4694,9 @@ mod tests {
     async fn local_attempt_carries_the_create_cutoff_into_entry_deadline() {
         let (fixture, _receiver) = remote_control_fixture();
         let claim = fixture.claim;
+        let (_root_dir, _runtime, _root, client) = attempt_root::bookkeeping_fixture().await;
         let registry = AdaptiveAttemptRegistry::default();
+        *registry.client.lock().expect("fixture publication") = Some(client);
         let later = std::time::Instant::now() + std::time::Duration::from_secs(30);
         assert!(registry.reserve_local(&claim, later).is_err());
         // An unproved replicated cluster: local evidence alone carries the cutoff.
@@ -4178,7 +4730,7 @@ mod tests {
             .scope(async { registry.reserve_local(&claim, later) })
             .await
             .expect("replay of the same attempt");
-        assert!(Arc::ptr_eq(&entry, &replay));
+        assert!(entry.same_original(&replay));
         assert_eq!(
             replay
                 .continuous_entry_deadline()
@@ -4194,7 +4746,9 @@ mod tests {
     async fn local_adopt_inside_the_activation_allowance_survives_the_prepare_cutoff() {
         let (fixture, _receiver) = remote_control_fixture();
         let claim = fixture.claim;
+        let (_root_dir, _runtime, _root, client) = attempt_root::bookkeeping_fixture().await;
         let registry = AdaptiveAttemptRegistry::default();
+        *registry.client.lock().expect("fixture publication") = Some(client);
         let later = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let clock = Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(true));
         // 600 ms create: P/R entry closes at 350 ms, activation at 600 ms.
@@ -4261,6 +4815,13 @@ mod tests {
         // the existing ungranted branch drops the unsent grant so the SAME
         // original coordinator closes its own P/M.
         let state = crate::http::internal_media_sessions::output_capture_test_state();
+        let (_root_dir, _runtime, mut root, client) = attempt_root::bookkeeping_fixture().await;
+        *state
+            .transcode
+            .adaptive_attempts
+            .client
+            .lock()
+            .expect("fixture root") = Some(client.clone());
         let entry = state
             .transcode
             .adaptive_attempts
@@ -4285,22 +4846,193 @@ mod tests {
             key: claim.key.clone(),
             cancel_request: false,
         };
+        client.seal(); // Cleanup must not require a fresh reply admission.
+        assert!(client.reserve_reply().is_err());
         let cancelled = state
             .transcode
             .begin_adaptive_cancel(fence.clone())
             .expect("the original worker accepts its own Fence");
         assert!(
-            cancelled.await.expect("cancel answer").is_err(),
-            "the answer never asserts native extinction"
-        );
-        assert!(
             receiver.await.is_err(),
             "the unsent original grant is dropped, so the coordinator closes P/M"
         );
-        let held = entry.remote_registration.lock().expect("registration");
-        let remote = held.as_ref().expect("same original registration");
-        assert_eq!(remote.fence.as_ref(), Some(&fence));
-        assert!(remote.grant.is_none() && remote.granted_ms.is_none());
+        {
+            let held = entry.remote_registration.lock().expect("registration");
+            let remote = held.as_ref().expect("same original registration");
+            assert_eq!(remote.fence.as_ref(), Some(&fence));
+            assert!(remote.grant.is_none() && remote.granted_ms.is_none());
+        }
+        *entry.state().await = AttemptState::Closed; // No native owner was admitted in this control-only fixture.
+        state
+            .transcode
+            .adaptive_attempts
+            .remove_terminal(&entry)
+            .expect("same bookkeeping original");
+        drop(entry);
+        state
+            .transcode
+            .adaptive_attempts
+            .client
+            .lock()
+            .expect("fixture publication")
+            .take();
+        drop(client);
+        root.shutdown(std::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await
+            .expect("original root closes after scalar cancel output");
+        assert!(
+            cancelled
+                .await
+                .expect("same buffered cancel answer after actual Entry/root destruction")
+                .is_err(),
+            "the scalar answer never asserts native extinction"
+        );
+    }
+
+    #[tokio::test]
+    async fn actual_causal_grant_endpoint_refuses_full_reply_pool_before_original_grant_mutation() {
+        let (_dir, runtime, mut root, client) = attempt_root::bookkeeping_fixture().await;
+        let mut state = crate::http::internal_media_sessions::output_capture_test_state();
+        state.resource_runtime = Some(Arc::clone(&runtime));
+        *state
+            .transcode
+            .adaptive_attempts
+            .client
+            .lock()
+            .expect("actual original root publication") = Some(client.clone());
+        let (mut original, mut granted) = remote_control_fixture();
+        original.claim.key.worker_node_id = state.node_id.clone();
+        original.claim.worker_instance_id = runtime.owner().owner_id;
+        original.claim.domains = vec![state.node_id.clone()];
+        let user = state
+            .store
+            .create_user("actual-grant-order", "unused-fixture-hash", false)
+            .await
+            .expect("actual SQLite user");
+        original.claim.binding.principal =
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
+        let claim = original.claim.clone();
+        assert!(matches!(
+            state
+                .store
+                .claim_media_session_request(
+                    &claim.binding.principal,
+                    &claim.binding.key.request_id,
+                    &claim.binding.request_fingerprint,
+                    &claim.binding.playback_id,
+                    &claim.binding.key.request_incarnation_id.to_string(),
+                    claim.context.now_ms,
+                    claim.binding.original_deadline_ms,
+                )
+                .await
+                .expect("actual original root Claim"),
+            plurx_core::domain::MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(matches!(
+            state
+                .store
+                .claim_adaptive_attempt(&claim)
+                .await
+                .expect("actual Store Attempt Claim"),
+            AttemptMutation::Applied(_)
+        ));
+        state
+            .transcode
+            .verify_adaptive_claim(&claim)
+            .await
+            .expect("actual endpoint Store/route prerequisites pass");
+        let entry = state
+            .transcode
+            .adaptive_attempts
+            .reserve(
+                claim.key.attempt_id,
+                claim.key.request.request_incarnation_id,
+                claim.worker_instance_id,
+                claim.serving_generation,
+                None,
+                None,
+            )
+            .expect("same retained original control entry");
+        original.ready = true; // Control-only premise; this fixture claims no P/native admission.
+        let nonce = original.nonce;
+        *entry
+            .remote_registration
+            .lock()
+            .expect("same original registration") = Some(original);
+        // Once admitted, a retained refusal lets the actual endpoint return
+        // immediately after its real grant mutation, without inventing Prepared.
+        *entry.trial_refusal.lock().expect("inline refusal") =
+            Some(plurx_core::resource_policy::TrialRefusal::UnknownBounds);
+        let control = crate::media_sessions::AdaptiveAttemptPrepareControlV2::Grant {
+            version: crate::media_sessions::ADAPTIVE_CAUSAL_PREPARE_VERSION,
+            claim,
+            nonce,
+            allowance_ms: 5000,
+        };
+        let mut outputs: Vec<_> = (0..64)
+            .map(|_| {
+                client
+                    .reserve_reply()
+                    .expect("saturate actual independent reply records")
+            })
+            .collect();
+        let response =
+            crate::http::internal_media_sessions::adaptive_attempt_causal_prepare_for_test(
+                &state,
+                control.clone(),
+            )
+            .await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(response);
+        assert!(
+            matches!(
+                granted.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "actual causal endpoint must not consume the original grant before reply admission"
+        );
+        assert!(entry
+            .remote_registration
+            .lock()
+            .expect("same original")
+            .as_ref()
+            .expect("retained")
+            .granted_ms
+            .is_none());
+        drop(outputs.pop());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let response = crate::http::internal_media_sessions::adaptive_attempt_causal_prepare_for_test(&state, control.clone()).await;
+                assert_eq!(response.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+                drop(response);
+                if entry.remote_registration.lock().expect("same original").as_ref().expect("retained").granted_ms.is_some() { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("freeing response custody permits that SAME endpoint/same nonce to mutate the original grant");
+        granted
+            .try_recv()
+            .expect("the original grant is now actually delivered");
+        *entry.state().await = AttemptState::Closed; // No P/native owner was admitted by this control-only fixture.
+        state
+            .transcode
+            .adaptive_attempts
+            .remove_terminal(&entry)
+            .expect("same control-only original");
+        drop(entry);
+        state
+            .transcode
+            .adaptive_attempts
+            .client
+            .lock()
+            .expect("publication")
+            .take();
+        drop((outputs, client));
+        root.shutdown(std::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await
+            .expect("actual original root and all response backing close");
     }
 
     #[tokio::test]
@@ -4371,9 +5103,240 @@ mod tests {
         assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
     }
 
+    // Task/channel lifetime fixture only: no Store or native close credit.
+    async fn unobserved_scalar_output_after_original_destruction<T: Send + 'static>(
+        coordinator: bool,
+        make: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (_dir, runtime, mut root, client) = attempt_root::bookkeeping_fixture().await;
+        let registry = AdaptiveAttemptRegistry::default();
+        *registry.client.lock().expect("original root publication") = Some(client.clone());
+        let entry = registry
+            .reserve(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                7,
+                None,
+                None,
+            )
+            .expect("actual original Entry");
+        let admission = entry
+            .admit_task(coordinator)
+            .expect("before original channel/task");
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let task = async move {
+            let _ = sender.send(make());
+        };
+        if coordinator {
+            let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
+            entry
+                .spawn_coordinator(admission, task, frame_tx)
+                .expect("original coordinator retained");
+            frame_rx.await.expect("actual original frame measurement");
+        } else {
+            entry
+                .spawn_control(admission, task)
+                .expect("original control retained");
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                entry
+                    .join_finished_original(coordinator)
+                    .await
+                    .expect("positive original join");
+                if entry.no_original_tasks_or_application() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual task joins while channel output remains unobserved");
+        *entry.state().await = AttemptState::Closed;
+        registry
+            .remove_terminal(&entry)
+            .expect("terminal bookkeeping-only original");
+        drop(entry);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while client.held() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual Entry and Arc header destroyed before observing output");
+        registry.client.lock().expect("publication").take();
+        drop(client);
+        root.shutdown(std::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await
+            .expect("root may close with only scalar channel metadata outstanding");
+        assert!(runtime
+            .accounting()
+            .expect("actual release")
+            .attempt_support
+            .is_none());
+        receiver
+            .await
+            .expect("same buffered original output survives original destruction")
+    }
+
+    #[tokio::test]
+    async fn unobserved_prepare_adopt_and_cancel_outputs_own_no_heap_after_original_join_and_destruction(
+    ) {
+        let prepare: Result<FundedPreparedReply, AdaptivePrepareError> =
+            unobserved_scalar_output_after_original_destruction(true, || {
+                Err(String::from("actual completed Prepare failure").into())
+            })
+            .await;
+        assert_eq!(
+            prepare
+                .expect_err("original Prepare error")
+                .message
+                .as_str(),
+            "adaptive operation failed; original diagnostic recorded by worker"
+        );
+        let session_id = Uuid::new_v4();
+        let adopted = unobserved_scalar_output_after_original_destruction(false, move || {
+            AdaptiveAdopted::from_start(crate::vodserve::VodStart {
+                session_id: session_id.to_string(),
+                duration_ms: 1234,
+            })
+        })
+        .await
+        .expect("same original success, scalar after its task");
+        assert_eq!(adopted.session_id, session_id);
+        assert_eq!(adopted.duration_ms, 1234);
+        assert!(!std::mem::needs_drop::<AdaptiveAdopted>());
+        let refused: Result<AdaptiveAdopted, ScalarAdaptiveDiagnostic> =
+            unobserved_scalar_output_after_original_destruction(false, || {
+                Err(String::from("original Adopt refusal").into())
+            })
+            .await;
+        assert_eq!(
+            refused.expect_err("actual scalar Adopt error").as_str(),
+            "adaptive operation failed; original diagnostic recorded by worker"
+        );
+        let cancelled: Result<(), ScalarAdaptiveDiagnostic> =
+            unobserved_scalar_output_after_original_destruction(false, || {
+                Err(String::from("original Cancel remains pending").into())
+            })
+            .await;
+        assert_eq!(
+            cancelled.expect_err("actual scalar Cancel error").as_str(),
+            "adaptive operation failed; original diagnostic recorded by worker"
+        );
+    }
+
+    #[test]
+    fn rich_diagnostic_is_destroyed_before_only_static_scalar_category_escapes() {
+        let message = "é".repeat(4096);
+        let scalar = ScalarAdaptiveDiagnostic::from(message);
+        assert_eq!(
+            scalar.as_str(),
+            "adaptive operation failed; original diagnostic recorded by worker"
+        );
+        assert_eq!(
+            std::mem::size_of::<ScalarAdaptiveDiagnostic>(),
+            std::mem::size_of::<&'static str>()
+        );
+        assert!(!std::mem::needs_drop::<ScalarAdaptiveDiagnostic>());
+        assert!(!std::mem::needs_drop::<AdaptivePrepareError>());
+    }
+
+    #[tokio::test]
+    async fn terminal_retirement_seals_stale_control_refs_and_preserves_reserved_original_tasks() {
+        let (_dir, runtime, mut root, client) = attempt_root::bookkeeping_fixture().await;
+        let registry = AdaptiveAttemptRegistry::default();
+        *registry.client.lock().expect("published paid root") = Some(client.clone());
+        let entry = registry
+            .reserve(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                7,
+                None,
+                None,
+            )
+            .expect("original attempt");
+        let stale = registry
+            .get(entry.attempt_id())
+            .expect("caller acquired exact original before terminal removal");
+        assert!(
+            entry.no_original_tasks_or_application(),
+            "maintenance's earlier observation"
+        );
+        let reserved = stale
+            .admit_control()
+            .expect("race: admitted before terminal sealing, before any channel or task");
+        let (release, released) = tokio::sync::oneshot::channel();
+        stale
+            .spawn_control(reserved, async move {
+                let _ = released.await;
+            })
+            .expect("same reserved original becomes registered task");
+        *entry.state().await = AttemptState::Closed;
+        assert!(
+            registry.remove_terminal(&entry).is_err(),
+            "terminal removal rechecks the reserved/registered slot atomically"
+        );
+        assert_eq!(client.held(), 1);
+        assert!(registry.get(entry.attempt_id()).is_some());
+        release.send(()).expect("release exact original control");
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                entry
+                    .join_finished_original(false)
+                    .await
+                    .expect("same original control positively joined");
+                if entry.control.lock().expect("control slot").is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("original control completes");
+        registry
+            .remove_terminal(&entry)
+            .expect("atomic terminal seal and structural retirement");
+        assert!(
+            stale.admit_control().is_err(),
+            "stale acquired reference cannot register after removal"
+        );
+        assert!(
+            stale.admit_coordinator().is_err(),
+            "all task admissions are sealed"
+        );
+        assert_eq!(
+            client.held(),
+            1,
+            "stale actual alias still blocks destruction"
+        );
+        drop((entry, stale));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while client.held() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual original entry destroyed");
+        registry.client.lock().expect("publication").take();
+        drop(client);
+        root.shutdown(std::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await
+            .expect("same original root closes");
+        assert!(runtime
+            .accounting()
+            .expect("actual release")
+            .attempt_support
+            .is_none());
+    }
+
     #[tokio::test]
     async fn registered_attempt_starts_once_and_replay_selects_same_owner() {
+        let (_root_dir, _runtime, _root, client) = attempt_root::bookkeeping_fixture().await;
         let registry = AdaptiveAttemptRegistry::default();
+        *registry.client.lock().expect("fixture publication") = Some(client);
         let attempt = Uuid::new_v4();
         let request = Uuid::new_v4();
         let worker = Uuid::new_v4();
@@ -4383,35 +5346,129 @@ mod tests {
         let replay = registry
             .reserve(attempt, request, worker, 7, None, None)
             .expect("replay");
-        assert!(Arc::ptr_eq(&entry, &replay));
+        assert!(entry.same_original(&replay));
         assert!(registry
             .reserve(attempt, request, Uuid::new_v4(), 7, None, None)
             .is_err());
+        let admission = entry
+            .admit_coordinator()
+            .expect("original coordinator admission before channels");
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         entry
             .spawn_coordinator(
+                admission,
                 async move {
                     let _ = entered_tx.send(());
                 },
                 frame_tx,
             )
             .expect("retain original coordinator before entry");
+        let original_task_id = entry
+            .coordinator
+            .lock()
+            .expect("original task slot")
+            .as_ref()
+            .expect("original handle retained")
+            .id();
+        assert!(
+            entry.admit_coordinator().is_err(),
+            "duplicate admission refuses before a second channel or future is constructed"
+        );
+        assert_eq!(
+            entry
+                .coordinator
+                .lock()
+                .expect("original task slot")
+                .as_ref()
+                .expect("same original handle")
+                .id(),
+            original_task_id
+        );
+        let control = entry
+            .admit_control()
+            .expect("independent original control admission");
+        let (release_control, control_released) = tokio::sync::oneshot::channel();
+        entry
+            .spawn_control(control, async move {
+                let _ = control_released.await;
+            })
+            .expect("registered original control");
+        let original_control_id = entry
+            .control
+            .lock()
+            .expect("original control slot")
+            .as_ref()
+            .expect("original control retained")
+            .id();
+        assert!(
+            entry.admit_control().is_err(),
+            "duplicate control refuses before a second channel or future is constructed"
+        );
+        assert_eq!(
+            entry
+                .control
+                .lock()
+                .expect("original control slot")
+                .as_ref()
+                .expect("same original control")
+                .id(),
+            original_control_id
+        );
         assert!(frame_rx.await.expect("measured original frame") > 0);
         entered_rx.await.expect("entered after registration");
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
-                if let Some(task) = entry.take_finished_coordinator() {
-                    break tokio::time::timeout(std::time::Duration::from_secs(1), task)
-                        .await
-                        .expect("original task join deadline")
-                        .expect("original task joined");
+                entry
+                    .join_finished_original(true)
+                    .await
+                    .expect("original task joined");
+                if entry
+                    .coordinator
+                    .lock()
+                    .expect("original registry")
+                    .is_none()
+                {
+                    break;
                 }
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("original task finished");
+        assert!(
+            entry.admit_coordinator().is_err(),
+            "joining never authorizes another coordinator for the same attempt"
+        );
+        assert!(
+            !entry.no_original_tasks_or_application(),
+            "same original control is still held"
+        );
+        release_control.send(()).expect("release original control");
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                entry
+                    .join_finished_original(false)
+                    .await
+                    .expect("original control joined");
+                if entry
+                    .control
+                    .lock()
+                    .expect("original control slot")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("original control finished");
+        drop(
+            entry
+                .admit_control()
+                .expect("only positive original join permits another control admission"),
+        );
         assert!(entry.no_original_tasks_or_application());
     }
 }

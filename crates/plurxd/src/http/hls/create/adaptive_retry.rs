@@ -32,7 +32,7 @@ pub(super) fn local_prepare_refusal(
 ) -> AdaptivePrepareFailure {
     AdaptivePrepareFailure::Retry(match error.trial_refusal {
         Some(reason) => crate::media_sessions::AdaptiveTrialRefusalV1::new(reason).into_api_error(),
-        None => ApiError::ServiceUnavailable(error.message),
+        None => ApiError::ServiceUnavailable(error.message.into_string()),
     })
 }
 pub(super) fn prepare_http_refusal(status: reqwest::StatusCode) -> AdaptivePrepareFailure {

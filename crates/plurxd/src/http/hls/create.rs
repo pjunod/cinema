@@ -1,5 +1,165 @@
 use super::*;
 
+/// Consuming response custody; no Clone, Deref, or raw funded DTO accessor.
+/// Ordinary starts retain the existing Json response representation.
+pub struct FundedStartReply {
+    response: StartResponse,
+    #[cfg(target_os = "linux")]
+    funding: Option<plurx_core::adaptive_resources::runtime::attempt_root::ReplyPermit>,
+}
+impl FundedStartReply {
+    fn ordinary(response: StartResponse) -> Self {
+        Self {
+            response,
+            #[cfg(target_os = "linux")]
+            funding: None,
+        }
+    }
+    fn into_ordinary(self) -> Result<StartResponse, ApiError> {
+        #[cfg(target_os = "linux")]
+        if self.funding.is_some() {
+            return Err(ApiError::Internal(
+                "funded adaptive response requires its consuming response adapter".into(),
+            ));
+        }
+        Ok(self.response)
+    }
+    pub(crate) fn session_id(&self) -> &str {
+        &self.response.session_id
+    }
+}
+impl axum::response::IntoResponse for FundedStartReply {
+    fn into_response(self) -> axum::response::Response {
+        let Self {
+            response,
+            #[cfg(target_os = "linux")]
+            funding,
+        } = self;
+        #[cfg(target_os = "linux")]
+        if let Some(funding) = funding {
+            let bytes = serde_json::to_vec(&response);
+            drop(response); // Actual DTO storage precedes its token alias.
+            let Ok(bytes) = bytes else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            return match funding.publish_serialized(bytes) {
+                Ok(bytes) => (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    axum::body::Body::from(bytes),
+                )
+                    .into_response(),
+                Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            };
+        }
+        Json(response).into_response()
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct FundedActivation<F> {
+    // The actual future and its Box header die before the last token field.
+    future: Option<std::pin::Pin<Box<F>>>,
+    _funding: Option<plurx_core::adaptive_resources::runtime::attempt_root::ReplyPermit>,
+}
+#[cfg(target_os = "linux")]
+impl<F: std::future::Future<Output = Result<(), ApiError>>> std::future::Future
+    for FundedActivation<F>
+{
+    type Output = Result<(), ApiError>;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        match this
+            .future
+            .as_mut()
+            .expect("original activation future")
+            .as_mut()
+            .poll(cx)
+        {
+            std::task::Poll::Ready(result) => {
+                // A completed JoinHandle may remain unobserved or be abandoned.
+                // Normalize rich errors while the actual F and token are alive;
+                // only scalar metadata + core-held original Bytes can escape.
+                drop(this.future.take()); // Actual F + original Box header first.
+                let result = match (result, this._funding.take()) {
+                    (Err(error), Some(funding)) => Err(error.fund_origin(funding)),
+                    (result, funding) => {
+                        drop(funding);
+                        result
+                    }
+                };
+                std::task::Poll::Ready(result)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+fn clone_origin_activation(
+    activation: &MediaSessionActivation,
+    funded: bool,
+) -> Result<MediaSessionActivation, ApiError> {
+    #[cfg(target_os = "linux")]
+    if funded
+        && crate::transcode::adaptive_attempts::origin_activation_requested_bytes(activation)
+            .is_none_or(|n| {
+                n > plurx_core::adaptive_resources::runtime::attempt_root::CONTROL_BYTES
+            })
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive origin activation actual copy capacities exceed the paid partition".into(),
+        ));
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = funded;
+    Ok(activation.clone())
+}
+
+#[cfg(target_os = "linux")]
+async fn run_funded_origin_activation(
+    state: AppState,
+    selected: AdaptiveOriginPrepared,
+    activation: MediaSessionActivation,
+    deadline: tokio::time::Instant,
+    counts: plurx_core::store::HttpStoreOperationCounts,
+) -> Result<(), ApiError> {
+    plurx_core::store::scope_http_store_operations(
+        counts,
+        adopt_adaptive_origin(state, selected, activation, deadline),
+    )
+    .await
+}
+
+#[cfg(target_os = "linux")]
+fn origin_activation_frame_bytes() -> Option<usize> {
+    fn inner<F>(
+        _: fn(AppState, AdaptiveOriginPrepared, MediaSessionActivation, tokio::time::Instant) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+    fn outer<F>(
+        _: fn(
+            AppState,
+            AdaptiveOriginPrepared,
+            MediaSessionActivation,
+            tokio::time::Instant,
+            plurx_core::store::HttpStoreOperationCounts,
+        ) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+    // scope_http_store_operations boxes the INNER future. Count it as well as
+    // the exact OUTER future before either capture or Box construction.
+    inner(adopt_adaptive_origin)
+        .checked_add(outer(run_funded_origin_activation))?
+        .checked_add(std::mem::size_of::<
+            FundedActivation<std::future::Ready<Result<(), ApiError>>>,
+        >())
+}
+
 #[cfg(target_os = "linux")]
 #[path = "create/adaptive_retry.rs"]
 mod adaptive_retry;
@@ -13,6 +173,8 @@ struct AdaptiveOriginPrepared {
     selected_recipe_json: String,
     preview_json: String,
     preview: RemoteStartResponse,
+    // Last: local response fields transfer to charged control DTOs or die first.
+    _reply_permit: Option<plurx_core::adaptive_resources::runtime::attempt_root::ReplyPermit>,
 }
 
 /// Store Winner only selects the dormant original worker. The exact Adopt
@@ -63,7 +225,7 @@ async fn adopt_adaptive_origin(
         binding: selected.claim.binding.clone(),
         key: selected.claim.key.clone(),
         worker: selected.worker.clone(),
-        activation: activation.clone(),
+        activation: clone_origin_activation(&activation, true)?,
     };
     let worker_deadline = selected
         .claim
@@ -93,7 +255,7 @@ async fn adopt_adaptive_origin(
             .map_err(ApiError::ServiceUnavailable)?;
         match tokio::time::timeout_at(first_reply_deadline, receiver).await {
             Ok(Ok(Ok(start)))
-                if start.session_id == activation.session_id
+                if start.session_id.to_string() == activation.session_id
                     && Some(start.duration_ms) == selected.preview.duration_ms =>
             {
                 attached = true
@@ -103,7 +265,7 @@ async fn adopt_adaptive_origin(
                     "adaptive worker attached a different session".into(),
                 ))
             }
-            Ok(Ok(Err(error))) => return Err(ApiError::ServiceUnavailable(error)),
+            Ok(Ok(Err(error))) => return Err(ApiError::ServiceUnavailable(error.into_string())),
             Ok(Err(_)) | Err(_) => {} // The registered original task may still complete.
         }
     } else {
@@ -271,6 +433,40 @@ fn adaptive_digest<T: serde::Serialize>(value: &T) -> Result<String, ApiError> {
     crate::media_sessions::bounded_adaptive_digest(value).map_err(ApiError::ServiceUnavailable)
 }
 
+#[cfg(target_os = "linux")]
+struct FundedOriginRecipe {
+    // Actual cloned storage dies before its original funding alias, including
+    // cancellation while Claim/Register/Prepare is awaiting an answer.
+    recipe: RemoteStartRequest,
+    funding: plurx_core::adaptive_resources::runtime::attempt_root::ReplyPermit,
+}
+
+#[cfg(target_os = "linux")]
+fn clone_adaptive_origin_recipe(
+    recipe: &RemoteStartRequest,
+    reserve: impl FnOnce() -> Result<
+        plurx_core::adaptive_resources::runtime::attempt_root::ReplyPermit,
+        String,
+    >,
+) -> Result<FundedOriginRecipe, ApiError> {
+    // Wire length does not bound a decoded value's retained capacities. Check
+    // the actual original before ANY derivative clone, then acquire custody.
+    if recipe
+        .requested_heap_bytes()
+        .and_then(|n| n.checked_add(std::mem::size_of::<RemoteStartRequest>()))
+        .is_none_or(|n| n > plurx_core::adaptive_resources::runtime::attempt_root::ENVELOPE_BYTES)
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive origin recipe actual capacities exceed its paid partition".into(),
+        ));
+    }
+    let funding = reserve().map_err(ApiError::ServiceUnavailable)?;
+    Ok(FundedOriginRecipe {
+        recipe: recipe.clone(),
+        funding,
+    })
+}
+
 /// Every candidate shares one immutable request binding and original deadline.
 /// Retry requires a fresh durable predecessor fence; physical closure remains
 /// exclusively with the original worker's native/application owners.
@@ -283,7 +479,7 @@ async fn prepare_adaptive_origin(
     quote: crate::media_pool::AdaptiveWorkerQuote,
     source: &MediaFile,
     snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
-    mut recipe: RemoteStartRequest,
+    recipe: &RemoteStartRequest,
     request_claim_id: &str,
     root_incarnation_id: &str,
     request_fingerprint: &str,
@@ -303,21 +499,24 @@ async fn prepare_adaptive_origin(
         )
         .into());
     }
+    let mut funded =
+        clone_adaptive_origin_recipe(recipe, || state.transcode.reserve_adaptive_origin_reply())?;
     let root_id = uuid::Uuid::parse_str(root_incarnation_id)
         .map_err(|_| ApiError::ServiceUnavailable("adaptive root incarnation is invalid".into()))?;
     let recovery_id = uuid::Uuid::parse_str(recovery_epoch)
         .map_err(|_| ApiError::ServiceUnavailable("adaptive recovery epoch is invalid".into()))?;
     // Immutable request intent precedes per-attempt route/request identity.
-    let intent_digest = recipe
+    let intent_digest = funded
+        .recipe
         .adaptive_intent_digest()
         .map_err(ApiError::ServiceUnavailable)?;
     let route_id = uuid::Uuid::new_v4();
     let session_id = uuid::Uuid::new_v4();
-    recipe.incarnation_id = route_id.to_string();
-    recipe.request.request_id = Some(recipe.incarnation_id.clone());
-    if !recipe.is_valid()
-        || recipe.source_size != source.size
-        || recipe.source_mtime != source.mtime
+    funded.recipe.incarnation_id = route_id.to_string();
+    funded.recipe.request.request_id = Some(funded.recipe.incarnation_id.clone());
+    if !funded.recipe.is_valid()
+        || funded.recipe.source_size != source.size
+        || funded.recipe.source_mtime != source.mtime
     {
         return Err(ApiError::ServiceUnavailable(
             "adaptive source intent changed before Claim".into(),
@@ -332,9 +531,9 @@ async fn prepare_adaptive_origin(
         let binding = RequestBinding {
             version: 1,
             key: key.clone(),
-            principal: recipe.principal.clone(),
+            principal: funded.recipe.principal.clone(),
             request_fingerprint: request_fingerprint.to_owned(),
-            playback_id: recipe.request.playback_id.clone(),
+            playback_id: funded.recipe.request.playback_id.clone(),
             recovery_epoch: recovery_id,
             planning_generation: snapshot.generation,
             planning_source_digest: adaptive_digest(&(source.id, source.size, source.mtime))?,
@@ -389,7 +588,7 @@ async fn prepare_adaptive_origin(
         prepare_claimed_adaptive_origin(
             state,
             claim.clone(),
-            recipe,
+            funded,
             quote.serving_generation,
             deadline,
         ),
@@ -430,7 +629,7 @@ async fn prepare_adaptive_origin(
 async fn prepare_claimed_adaptive_origin(
     state: &AppState,
     claim: plurx_core::store::adaptive_resource_attempts::AttemptClaim,
-    recipe: RemoteStartRequest,
+    funded: FundedOriginRecipe,
     serving_generation: u64,
     deadline: tokio::time::Instant,
 ) -> Result<AdaptiveOriginPrepared, AdaptivePrepareFailure> {
@@ -441,7 +640,7 @@ async fn prepare_claimed_adaptive_origin(
     let prepare = crate::media_sessions::AdaptiveAttemptPrepareV1 {
         version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
         claim: claim.clone(),
-        recipe,
+        recipe: funded.recipe,
     };
     let mut prepared = None;
     // Frozen only after the authenticated original registration receipt. A
@@ -467,12 +666,20 @@ async fn prepare_claimed_adaptive_origin(
                 .map_err(adaptive_retry::local_prepare_refusal)?
             {
                 crate::transcode::adaptive_attempts::AdaptivePrepareStart::Prepared(reply) => {
+                    let (reply, permit) = reply.into_origin_parts();
+                    // The origin already paid before its first recipe clone.
+                    // Transfer this actual reply under that existing custody.
+                    drop(permit);
                     prepared = Some(reply);
                     break;
                 }
                 crate::transcode::adaptive_attempts::AdaptivePrepareStart::Started(receiver) => {
                     match tokio::time::timeout_at(deadline, receiver).await {
                         Ok(Ok(Ok(reply))) => {
+                            let (reply, permit) = reply.into_origin_parts();
+                            // The origin already paid before its first recipe clone.
+                            // Transfer this actual reply under that existing custody.
+                            drop(permit);
                             prepared = Some(reply);
                             break;
                         }
@@ -615,9 +822,15 @@ async fn prepare_claimed_adaptive_origin(
             "adaptive Prepared binding is invalid".into(),
         )));
     }
+    crate::transcode::adaptive_attempts::preflight_origin_reply(&claim, &prepared)
+        .map_err(ApiError::ServiceUnavailable)?;
     let preview: RemoteStartResponse =
         serde_json::from_str(&prepared.preview_json).map_err(ApiError::from)?;
-    if !preview.is_valid()
+    if preview
+        .adaptive_preview_requested_heap_bytes()
+        .and_then(|n| n.checked_add(std::mem::size_of::<RemoteStartResponse>()))
+        .is_none_or(|n| n > crate::media_sessions::ADAPTIVE_PREVIEW_BYTES)
+        || !preview.is_valid()
         || preview.session_id != claim.key.session_id.to_string()
         || preview.activation_generation != Some(serving_generation)
     {
@@ -677,6 +890,7 @@ async fn prepare_claimed_adaptive_origin(
         selected_recipe_json: prepared.selected_recipe_json,
         preview_json: prepared.preview_json,
         preview,
+        _reply_permit: Some(funded.funding),
     })
 }
 
@@ -3315,7 +3529,7 @@ pub async fn create(
     headers: HeaderMap,
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
     Json(req): Json<CreateSession>,
-) -> Result<Json<StartResponse>, ApiError> {
+) -> Result<FundedStartReply, ApiError> {
     let (user_id, start_attempts) = (user.id, Arc::clone(&state.start_attempts));
     let created = create_with_purpose(
         user,
@@ -3382,7 +3596,7 @@ pub async fn create_continuous(
     if let Err(error) = &created {
         start_attempts.refused(user_id, id, None, error.code(), Instant::now());
     }
-    let Json(playback) = created?;
+    let playback = created?.into_ordinary()?;
     let route = tokio::time::timeout(
         ACTIVATION_STORE_DEADLINE,
         state.media_sessions.control_route(&playback.session_id),
@@ -3422,7 +3636,7 @@ pub(crate) async fn create_for_library_channel(
         ServiceCreatePurpose::LibraryChannel(purpose),
     )
     .await
-    .map(|Json(response)| response)
+    .and_then(FundedStartReply::into_ordinary)
 }
 
 // The service caller chooses policy; the public create body cannot request it.
@@ -3574,7 +3788,7 @@ pub(crate) async fn create_for_compatibility(
     remote: Option<std::net::SocketAddr>,
     req: CreateSession,
     policy: CompatibilityVodPolicy,
-) -> Result<StartResponse, ApiError> {
+) -> Result<FundedStartReply, ApiError> {
     Box::pin(create_with_purpose(
         user,
         state,
@@ -3588,7 +3802,6 @@ pub(crate) async fn create_for_compatibility(
         },
     ))
     .await
-    .map(|Json(response)| response)
 }
 
 async fn create_with_purpose(
@@ -3599,7 +3812,7 @@ async fn create_with_purpose(
     remote: Option<std::net::SocketAddr>,
     req: CreateSession,
     purpose: ServiceCreatePurpose,
-) -> Result<Json<StartResponse>, ApiError> {
+) -> Result<FundedStartReply, ApiError> {
     let remaining = headers
         .get("x-plurx-startup-remaining-ms")
         .and_then(|value| value.to_str().ok())
@@ -3719,7 +3932,12 @@ async fn create_with_purpose_inner(
     remote: Option<std::net::SocketAddr>,
     req: CreateSession,
     purpose: ServiceCreatePurpose,
-) -> Result<Json<StartResponse>, ApiError> {
+) -> Result<FundedStartReply, ApiError> {
+    #[cfg(target_os = "linux")]
+    let mut adaptive_origin_funding: Option<
+        plurx_core::adaptive_resources::runtime::attempt_root::ReplyPermit,
+    > = None;
+
     let library_channel = match &purpose {
         ServiceCreatePurpose::LibraryChannel(channel) => Some(channel),
         _ => None,
@@ -4105,7 +4323,7 @@ async fn create_with_purpose_inner(
                 response.control =
                     control.refreshed(&route.session_id, &route.incarnation_id, route.owner_epoch);
             }
-            return Ok(Json(response));
+            return Ok(FundedStartReply::ordinary(response));
         }
         MediaSessionRequestClaim::Resolved(route)
             if route.state == "active" && route.publication_ready_at_ms != 0 =>
@@ -4213,7 +4431,7 @@ async fn create_with_purpose_inner(
                         route.owner_epoch,
                     );
                 }
-                return Ok(Json(response));
+                return Ok(FundedStartReply::ordinary(response));
             }
             return Err(ApiError::typed(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -4830,7 +5048,7 @@ async fn create_with_purpose_inner(
                 planning_snapshot
                     .as_ref()
                     .expect("adaptive snapshot was checked"),
-                remote_request.clone(),
+                &remote_request,
                 &request_claim_id,
                 &incarnation_id,
                 &fingerprint,
@@ -4842,7 +5060,7 @@ async fn create_with_purpose_inner(
                 placement_deadline,
             )
             .await;
-            let selection = match selection {
+            let mut selection = match selection {
                 Ok(selection) => {
                     if candidate != state.node_id {
                         crate::media_pool::record_remote_placement(
@@ -4857,6 +5075,25 @@ async fn create_with_purpose_inner(
                 }
                 Err(AdaptiveOriginFailure::Hold(error)) => return Err(error),
             };
+            // The parsed preview's actual capacities were checked before
+            // retention. Admit the second and final origin holder BEFORE
+            // cloning preview/recipe-derived data into the create frame.
+            adaptive_origin_funding = Some(
+                selection
+                    ._reply_permit
+                    .as_mut()
+                    .ok_or_else(|| {
+                        ApiError::ServiceUnavailable(
+                            "adaptive origin response funding is absent".into(),
+                        )
+                    })?
+                    .fork_origin()
+                    .map_err(|_| {
+                        ApiError::ServiceUnavailable(
+                            "adaptive origin response handoff refused".into(),
+                        )
+                    })?,
+            );
             let info = selection.preview.clone();
             let generation = selection.worker.serving_generation;
             adaptive_selection = Some(selection);
@@ -5072,7 +5309,19 @@ async fn create_with_purpose_inner(
     #[cfg(target_os = "linux")]
     if let Some(selected) = adaptive_selection.as_ref() {
         incarnation_id = selected.claim.key.route_incarnation_id.to_string();
-        remote_request = serde_json::from_str(&selected.selected_recipe_json)?;
+        let parsed: RemoteStartRequest = serde_json::from_str(&selected.selected_recipe_json)?;
+        if parsed
+            .requested_heap_bytes()
+            .and_then(|n| n.checked_add(std::mem::size_of::<RemoteStartRequest>()))
+            .is_none_or(|n| {
+                n > plurx_core::adaptive_resources::runtime::attempt_root::ENVELOPE_BYTES
+            })
+        {
+            return Err(ApiError::ServiceUnavailable(
+                "adaptive origin decoded recipe exceeds its actual capacity partition".into(),
+            ));
+        }
+        remote_request = parsed;
     }
     request_guard.disarm();
     if let Some(reason) = degraded_processing {
@@ -5415,9 +5664,27 @@ async fn create_with_purpose_inner(
         media_origin_ms: (info.media_origin_seconds * 1_000.0).round() as i64,
         now_ms: activation_now_ms,
     };
-    let publication_activation = activation.clone();
-    let mut publication_guard =
-        ActivationPublicationGuard::new(state.clone(), publication_activation.clone());
+    #[cfg(target_os = "linux")]
+    if adaptive_selected
+        && crate::transcode::adaptive_attempts::origin_activation_requested_bytes(&activation)
+            .is_none_or(|n| {
+                n > plurx_core::adaptive_resources::runtime::attempt_root::CONTROL_BYTES
+            })
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive origin activation actual capacities exceed its paid copy partition".into(),
+        ));
+    }
+    // Actual adapter holders are: original activation, publication copy,
+    // temporary guard copy (dropped immediately for adaptive), captured task
+    // copy, and adoption copy. Five live adapter DTOs at most; eight paid
+    // partitions leave explicit policy headroom, not extra proof for Store
+    // command/cache graphs. EVERY clone checks actual capacities first.
+    let publication_activation = clone_origin_activation(&activation, adaptive_selected)?;
+    let mut publication_guard = ActivationPublicationGuard::new(
+        state.clone(),
+        clone_origin_activation(&publication_activation, adaptive_selected)?,
+    );
     // An adopted adaptive route remains blocked until this ingress publishes
     // it. Its original worker owns any uncertain Adopt and cleanup; the
     // legacy guard must not independently abort that same route on timeout.
@@ -5445,18 +5712,39 @@ async fn create_with_purpose_inner(
     #[cfg(not(target_os = "linux"))]
     let adoption_key: Option<plurx_core::store::adaptive_resource_attempts::AttemptKey> = None;
     #[cfg(target_os = "linux")]
-    let adaptive_activation_task =
-        adaptive_selection.map(|selected| {
-            let activation_state = state.clone();
-            let deadline = activation_lease_deadline(&activation);
-            let activation = activation.clone();
-            tokio::spawn(plurx_core::store::scope_http_store_operations(
-                activation_counts.clone(),
-                async move {
-                    adopt_adaptive_origin(activation_state, selected, activation, deadline).await
-                },
-            ))
-        });
+    let adaptive_activation_task = if let Some(mut selected) = adaptive_selection {
+        let funding = selected._reply_permit.take();
+        if origin_activation_frame_bytes().is_none_or(|n| {
+            n > plurx_core::adaptive_resources::runtime::attempt_root::COORDINATOR_BYTES
+        }) {
+            return Err(ApiError::ServiceUnavailable(
+                "adaptive origin activation frame exceeds its paid partition".into(),
+            ));
+        }
+        let activation_state = state.clone();
+        let deadline = activation_lease_deadline(&activation);
+        let activation = clone_origin_activation(&activation, true)?;
+        let future = run_funded_origin_activation(
+            activation_state,
+            selected,
+            activation,
+            deadline,
+            activation_counts.clone(),
+        );
+        if std::mem::size_of_val(&future)
+            > plurx_core::adaptive_resources::runtime::attempt_root::COORDINATOR_BYTES
+        {
+            return Err(ApiError::ServiceUnavailable(
+                "adaptive origin activation frame exceeds its paid partition".into(),
+            ));
+        }
+        Some(tokio::spawn(FundedActivation {
+            future: Some(Box::pin(future)),
+            _funding: funding,
+        }))
+    } else {
+        None
+    };
     #[cfg(not(target_os = "linux"))]
     let adaptive_activation_task: Option<tokio::task::JoinHandle<Result<(), ApiError>>> = None;
     let mut activation_task = if let Some(task) = adaptive_activation_task {
@@ -5699,7 +5987,11 @@ async fn create_with_purpose_inner(
     }
     crate::media_pool::mark_create_phase("registration");
     publication_guard.disarm();
-    Ok(Json(response))
+    Ok(FundedStartReply {
+        response,
+        #[cfg(target_os = "linux")]
+        funding: adaptive_origin_funding.take(),
+    })
 }
 
 pub(super) fn resolved_replay_is_live(route: &MediaSessionRoute, now_ms: i64) -> bool {
@@ -7368,3 +7660,369 @@ mod source_fingerprint_tests;
 
 #[cfg(test)]
 mod compatibility_service_policy_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod funded_origin_response_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn origin_recipe() -> RemoteStartRequest {
+        RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
+            candidate_catalog: None,
+            candidate_id: None,
+            presentation_target: None,
+            decoder_caps: None,
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
+            incarnation_id: "00000000-0000-4000-8000-0000000000a1".to_owned(),
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+            source_size: 123_456,
+            source_mtime: 1_700_000_000,
+            typeless_playlist: true,
+            library_channel: None,
+            request: crate::transcode::SessionRequest {
+                dv_processing_destination: None,
+                sdr_master_codecs: None,
+                continuous_media: None,
+                quality_catalog: None,
+                candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
+                control_sequence: None,
+                file_id: 11,
+                playback_id: "player-a".to_owned(),
+                request_id: Some("00000000-0000-4000-8000-0000000000a1".to_owned()),
+                automatic: true,
+                previous_session_id: None,
+                reopen_reason: None,
+                kind: crate::transcode::SessionKind::Transcode { height: 720 },
+                start_seconds: 12.5,
+                audio_index: Some(1),
+                audio_delivery: None,
+                audio_claim: None,
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                hdr10: false,
+                presentation: crate::transcode::Presentation::Vod,
+                block_budget_secs: None,
+                transport: None,
+            },
+        }
+    }
+
+    #[test]
+    fn origin_recipe_checks_actual_capacity_before_reservation_or_first_clone() {
+        let mut recipe = origin_recipe();
+        recipe
+            .request
+            .playback_id
+            .reserve(plurx_core::adaptive_resources::runtime::attempt_root::ENVELOPE_BYTES);
+        assert!(
+            serde_json::to_vec(&recipe).expect("small wire value").len() < 4096,
+            "small serialized length cannot hide the original heap capacity"
+        );
+        let reserved = std::cell::Cell::new(false);
+        let result = clone_adaptive_origin_recipe(&recipe, || {
+            reserved.set(true);
+            Err("reservation must not run for the oversized original".into())
+        });
+        assert!(result.is_err());
+        assert!(
+            !reserved.get(),
+            "actual source capacity is checked before reservation and clone"
+        );
+        let bounded = origin_recipe();
+        assert!(clone_adaptive_origin_recipe(&bounded, || {
+            reserved.set(true);
+            Err("fixed original reply records are full".into())
+        })
+        .is_err());
+        assert!(
+            reserved.get(),
+            "a bounded original still requires paid admission before clone"
+        );
+    }
+
+    struct CompletedActivation {
+        output: Option<ApiError>,
+        dropped: Arc<AtomicBool>,
+    }
+    impl std::future::Future for CompletedActivation {
+        type Output = Result<(), ApiError>;
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Ready(Err(self.output.take().expect("same original rich result")))
+        }
+    }
+    impl Drop for CompletedActivation {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn unobserved_completed_activation_keeps_actual_error_backing_charged() {
+        let (_dir, runtime, mut root, client) =
+            plurx_core::adaptive_resources::runtime::attempt_root::bookkeeping_fixture().await;
+        let before = runtime.accounting().expect("actual paid root").used;
+        let permit = client.reserve_reply().expect("original activation custody");
+        let others: Vec<_> = (1..64)
+            .map(|_| client.reserve_reply().expect("remaining paid records"))
+            .collect();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn(FundedActivation {
+            future: Some(Box::pin(CompletedActivation {
+                output: Some(ApiError::typed_detail(
+                    StatusCode::CONFLICT,
+                    "original-activation",
+                    "same rich output",
+                    serde_json::json!({"reason": "x".repeat(4096)}),
+                )),
+                dropped: Arc::clone(&dropped),
+            })),
+            _funding: Some(permit),
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("original task actually completes");
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "actual F and its Box are destroyed at Ready"
+        );
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            client.reserve_reply().is_err(),
+            "unobserved JoinHandle retains the actual funded error backing after F destruction"
+        );
+        assert_eq!(runtime.accounting().expect("same charge").used, before);
+        drop(task); // Models cancellation of ingress without observing output.
+        let reuse = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(permit) = client.reserve_reply() {
+                    break permit;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual unobserved output destruction permits reuse");
+        drop((reuse, others, client));
+        root.shutdown(std::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("original root closes");
+    }
+
+    #[tokio::test]
+    async fn activation_error_preserves_wire_contract_and_oversize_failure_is_scalar() {
+        let (_dir, _runtime, mut root, client) =
+            plurx_core::adaptive_resources::runtime::attempt_root::bookkeeping_fixture().await;
+        let error = ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "activation-retry",
+            message: "same original error".into(),
+            retry_after_seconds: 3,
+        };
+        let error = FundedActivation {
+            future: Some(Box::pin(std::future::ready(Err(error)))),
+            _funding: Some(client.reserve_reply().expect("paid original result")),
+        }
+        .await
+        .expect_err("same original error");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .expect("retry header"),
+            "3"
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("real response body")
+            .to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).expect("same wire shape"),
+            serde_json::json!({"code": "activation-retry", "message": "same original error"})
+        );
+        drop(body);
+        let oversized = ApiError::ServiceUnavailable(
+            "x".repeat(plurx_core::adaptive_resources::runtime::attempt_root::REPLY_WIRE_BYTES),
+        );
+        let error = FundedActivation {
+            future: Some(Box::pin(std::future::ready(Err(oversized)))),
+            _funding: Some(client.reserve_reply().expect("paid oversize result")),
+        }
+        .await
+        .expect_err("fixed response limit refuses actual backing");
+        assert!(
+            matches!(error, ApiError::AdaptiveOriginUnavailable),
+            "failed publication cannot leave a heap-owning output after its permit dies"
+        );
+        drop((error, client));
+        root.shutdown(std::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("original root closes");
+    }
+
+    #[tokio::test]
+    async fn oversize_activation_fallback_http_body_keeps_exact_static_backing_after_root_release()
+    {
+        let (_dir, runtime, mut root, client) =
+            plurx_core::adaptive_resources::runtime::attempt_root::bookkeeping_fixture().await;
+        let oversized = ApiError::ServiceUnavailable(
+            "x".repeat(plurx_core::adaptive_resources::runtime::attempt_root::REPLY_WIRE_BYTES),
+        );
+        let error = FundedActivation {
+            future: Some(Box::pin(std::future::ready(Err(oversized)))),
+            _funding: Some(client.reserve_reply().expect("paid original error output")),
+        }
+        .await
+        .expect_err("actual serialized error exceeds its paid backing limit");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let fallback = response
+            .into_body()
+            .collect()
+            .await
+            .expect("actual fallback body")
+            .to_bytes();
+        let original_static = &crate::http::error::ADAPTIVE_ORIGIN_UNAVAILABLE_JSON;
+        assert_eq!(
+            fallback.as_ref(),
+            original_static.as_slice(),
+            "same fallback wire contract"
+        );
+        assert_eq!(fallback.as_ptr(), original_static.as_ptr(),
+            "actual fallback transport uses static backing, not a fresh unprotected heap allocation");
+        drop(client);
+        root.shutdown(std::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("original root closes while only static fallback bytes remain");
+        assert!(runtime
+            .accounting()
+            .expect("actual support released")
+            .attempt_support
+            .is_none());
+        assert_eq!(fallback.as_ptr(), original_static.as_ptr());
+        drop(fallback);
+    }
+
+    struct ActualActivation {
+        dropped: Arc<AtomicBool>,
+    }
+    impl std::future::Future for ActualActivation {
+        type Output = Result<(), ApiError>;
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Pending
+        }
+    }
+    impl Drop for ActualActivation {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn origin_adapter_retains_actual_activation_and_http_backing_until_last_alias() {
+        let (_dir, runtime, mut root, client) =
+            plurx_core::adaptive_resources::runtime::attempt_root::bookkeeping_fixture().await;
+        let before = runtime.accounting().expect("actual paid root").used;
+        let mut activation_permit = client.reserve_reply().expect("one paid original response");
+        let response_permit = activation_permit
+            .fork_origin()
+            .expect("one explicit origin handoff");
+        assert!(
+            activation_permit.fork_origin().is_err(),
+            "cannot manufacture a third holder"
+        );
+        let dropped = Arc::new(AtomicBool::new(false));
+        let activation = FundedActivation {
+            future: Some(Box::pin(ActualActivation {
+                dropped: Arc::clone(&dropped),
+            })),
+            _funding: Some(activation_permit),
+        };
+        let response: StartResponse = serde_json::from_value(serde_json::json!({
+            "session_id": "funded-session", "playlist_url": "/api/v1/hls/funded-session/index.m3u8",
+            "duration_ms": 1000, "start_seconds": 0.0, "height": 360, "encoder": "software", "vod": true, "ladder": []
+        })).expect("actual ordinary wire DTO");
+        let expected = serde_json::to_value(&response).expect("same ordinary JSON representation");
+        let response = FundedStartReply {
+            response,
+            funding: Some(response_permit),
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("actual axum transport body")
+            .to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("same wire JSON"),
+            expected
+        );
+        let escaped = bytes.slice(1..4);
+        drop(bytes);
+        let others: Vec<_> = (1..64)
+            .map(|_| client.reserve_reply().expect("other fixed reply records"))
+            .collect();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(!dropped.load(Ordering::Acquire));
+        assert!(
+            client.reserve_reply().is_err(),
+            "actual activation capture keeps the original record"
+        );
+        drop(activation);
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "actual future/Box destruction precedes its funding alias"
+        );
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            client.reserve_reply().is_err(),
+            "HTTP backing alias still blocks actual header/backing destruction"
+        );
+        assert_eq!(
+            runtime.accounting().expect("same fixed charge").used,
+            before
+        );
+        drop(escaped);
+        let reuse = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(permit) = client.reserve_reply() {
+                    break permit;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual final backing destruction permits reuse");
+        drop((reuse, others, client));
+        root.shutdown(std::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("same original root fully closes");
+        assert!(runtime
+            .accounting()
+            .expect("actual support released")
+            .attempt_support
+            .is_none());
+    }
+}

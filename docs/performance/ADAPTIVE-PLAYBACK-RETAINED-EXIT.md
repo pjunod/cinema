@@ -130,8 +130,14 @@ of one restart case.
 There are 14 distinct source-scoped passes: ten unchanged reader cases at
 `2a636915`; the corrected reader-lifetime case at `48150480`; and the three
 restart, closing and acknowledgement cases at `e771599e`. Reruns add no new
-distinct cases. The earlier failed runs remain failures. Normal hooks, exact
-committed-candidate validation and the manual effort gate remain pending.
+distinct cases. The earlier failed runs remain failures.
+
+[Task PR #1419](http://forge.lan:3000/noirr/plurx/pulls/1419) merged into the
+effort at `66461276151bc3b3eb5e614d6d006ff96a2d0da4` after all eight jobs of
+gate 6591 passed on candidate `b57d255f`. Normal commit/push hooks and the
+exact committed-source check passed. Candidate and landing trees are both
+`559568495be86f9e3a4cf6a3d7daf6636c23b6c9`; all seven regression trailers
+remain in the landing message. Full M0 and real-trial eligibility stay open.
 
 The qualification includes reader lifetime and retirement cases; full-pool,
 stale-binding and partial-prefix refusal/retry; rejection of partial or failed

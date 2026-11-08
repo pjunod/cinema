@@ -140,7 +140,7 @@ pub async fn start(
     Query(q): Query<StartQuery>,
     headers: HeaderMap,
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
-) -> Result<Json<StartResponse>, ApiError> {
+) -> Result<super::create::FundedStartReply, ApiError> {
     let legacy = CreateSession {
         intent: None,
         // No control exchange precedes a legacy start, so there is no

@@ -8,12 +8,27 @@
     )
 )]
 use super::*;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 const FRESH_FOR: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SupportKind {
+    Ordinary,
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Portable accounting retains the separate kind; only Linux constructs the pre-P attempt root."
+        )
+    )]
+    Attempt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct SupportIdentity {
+    pub(super) kind: SupportKind,
     pub(super) ledger: u64,
     pub(super) owner: Uuid,
     pub(super) original: Uuid,
@@ -22,6 +37,7 @@ pub(super) struct SupportIdentity {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct FinalizationSupportProfile {
+    pub(super) kind: SupportKind,
     requested_bytes: u64,
     record_slots: u16,
     task_slots: u16,
@@ -30,6 +46,7 @@ impl FinalizationSupportProfile {
     #[cfg(test)]
     pub(super) fn fixture() -> Self {
         Self {
+            kind: SupportKind::Ordinary,
             requested_bytes: 64 * 1024,
             record_slots: 1,
             task_slots: 1,
@@ -39,9 +56,23 @@ impl FinalizationSupportProfile {
     #[cfg(unix)]
     pub(super) fn ordinary(requested: usize) -> Result<Self, AdmissionRefusal> {
         Ok(Self {
+            kind: SupportKind::Ordinary,
             requested_bytes: u64::try_from(requested)
                 .map_err(|_| AdmissionRefusal::ArithmeticOverflow)?,
             record_slots: 256,
+            task_slots: 1,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn attempt() -> Result<Self, AdmissionRefusal> {
+        Ok(Self {
+            kind: SupportKind::Attempt,
+            requested_bytes: u64::try_from(
+                crate::adaptive_resources::runtime::attempt_root::requested_storage_bytes()?,
+            )
+            .map_err(|_| AdmissionRefusal::ArithmeticOverflow)?,
+            record_slots: 64,
             task_slots: 1,
         })
     }
@@ -98,6 +129,21 @@ impl SupportEntry {
 }
 
 impl State {
+    fn support_entry(&self, kind: SupportKind) -> Option<SupportEntry> {
+        match kind {
+            SupportKind::Ordinary => self.support,
+            SupportKind::Attempt => self.attempt_support,
+        }
+    }
+    fn support_entry_mut(&mut self, kind: SupportKind) -> &mut Option<SupportEntry> {
+        match kind {
+            SupportKind::Ordinary => &mut self.support,
+            SupportKind::Attempt => &mut self.attempt_support,
+        }
+    }
+    pub(super) fn any_support(&self) -> bool {
+        self.support.is_some() || self.attempt_support.is_some()
+    }
     fn support_preflight(
         &self,
         profile: FinalizationSupportProfile,
@@ -110,7 +156,7 @@ impl State {
         if epoch != self.epoch {
             return Err(AdmissionRefusal::StaleEpoch);
         }
-        if self.support.is_some() {
+        if self.support_entry(profile.kind).is_some() {
             return Err(AdmissionRefusal::InvalidTransition);
         }
         if self.trial.is_some() {
@@ -124,7 +170,7 @@ impl State {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
         if profile.requested_bytes == 0
-            || !matches!(profile.record_slots, 1 | 256)
+            || !matches!(profile.record_slots, 1 | 64 | 256)
             || profile.task_slots != 1
         {
             return Err(AdmissionRefusal::InvalidBundle);
@@ -150,6 +196,13 @@ impl State {
 }
 
 impl ResourceLedger {
+    pub(super) fn support_marker(&self, kind: SupportKind) -> &Arc<AtomicBool> {
+        match kind {
+            SupportKind::Ordinary => &self.support_unknown,
+            SupportKind::Attempt => &self.attempt_support_unknown,
+        }
+    }
+
     /// Caller already owns census -> support-slot; no external allocation or
     /// await occurs while the final ledger validation/commit is held.
     pub(in crate::adaptive_resources) fn reserve_finalization_support<T>(
@@ -173,6 +226,7 @@ impl ResourceLedger {
             .checked_add(1)
             .ok_or(AdmissionRefusal::IdentityExhausted)?;
         let identity = SupportIdentity {
+            kind: profile.kind,
             ledger: self.id,
             owner,
             original,
@@ -181,14 +235,15 @@ impl ResourceLedger {
         // Every fallible ledger check precedes census insertion. Nothing
         // fallible follows the matching context's successful registration.
         let registered = register(identity)?;
-        state.support = Some(SupportEntry {
+        *state.support_entry_mut(profile.kind) = Some(SupportEntry {
             identity,
             profile,
             phase: FinalizationSupportPhase::ReservedUnallocated,
         });
         state.used = used;
         state.next_support_generation = next;
-        self.support_unknown.store(false, Ordering::Release);
+        self.support_marker(profile.kind)
+            .store(false, Ordering::Release);
         Ok((identity, registered))
     }
 
@@ -204,12 +259,12 @@ impl ResourceLedger {
             .lock()
             .map_err(|_| AdmissionRefusal::Unavailable)?;
         let entry = state
-            .support
+            .support_entry_mut(identity.kind)
             .as_mut()
             .ok_or(AdmissionRefusal::UnknownReservation)?;
         if entry.identity != identity
             || entry.phase != from
-            || self.support_unknown.load(Ordering::Acquire)
+            || self.support_marker(identity.kind).load(Ordering::Acquire)
         {
             return Err(AdmissionRefusal::ReceiptMismatch);
         }
@@ -219,9 +274,7 @@ impl ResourceLedger {
     }
 
     pub(in crate::adaptive_resources) fn finalization_support_present(&self) -> bool {
-        self.inner
-            .lock()
-            .map_or(true, |state| state.support.is_some())
+        self.inner.lock().map_or(true, |state| state.any_support())
     }
 
     pub(in crate::adaptive_resources) fn finish_finalization_support<T>(
@@ -234,10 +287,12 @@ impl ResourceLedger {
             .inner
             .lock()
             .map_err(|_| AdmissionRefusal::Unavailable)?;
-        let entry = state.support.ok_or(AdmissionRefusal::UnknownReservation)?;
+        let entry = state
+            .support_entry(identity.kind)
+            .ok_or(AdmissionRefusal::UnknownReservation)?;
         if entry.identity != identity
             || entry.phase != FinalizationSupportPhase::Closing
-            || self.support_unknown.load(Ordering::Acquire)
+            || self.support_marker(identity.kind).load(Ordering::Acquire)
         {
             return Err(AdmissionRefusal::ReceiptMismatch);
         }
@@ -246,7 +301,7 @@ impl ResourceLedger {
             .checked_sub(entry.profile.resources())
             .ok_or(AdmissionRefusal::Unavailable)?;
         let result = close_census()?;
-        state.support = None;
+        *state.support_entry_mut(identity.kind) = None;
         state.used = used;
         Ok(result)
     }

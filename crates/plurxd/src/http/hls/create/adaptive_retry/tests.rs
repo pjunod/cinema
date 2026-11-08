@@ -611,7 +611,7 @@ async fn trial_policy_retry_waits_for_original_join_and_close_within_same_cutoff
     let (mut context, first) = request(state).await;
     let first = claim(state, &mut context, first, deadline).await;
     let original_binding = first.binding.clone();
-    let release = state
+    let (release, _attempt_dir, _attempt_runtime, _attempt_root) = state
         .transcode
         .retain_empty_failed_adaptive_coordinator_for_test(first.clone())
         .await;

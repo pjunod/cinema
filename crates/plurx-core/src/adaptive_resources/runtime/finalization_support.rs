@@ -9,7 +9,7 @@
 
 use super::*;
 use crate::adaptive_resources::finalization_support::{
-    FinalizationSupportProfile, SupportIdentity,
+    FinalizationSupportProfile, SupportIdentity, SupportKind,
 };
 use crate::adaptive_resources::owner_inventory::{
     OwnerPhase, SupportInventoryMarker, SupportInventoryOwner,
@@ -187,6 +187,13 @@ fn inventory_error(_: super::super::owner_inventory::InventoryError) -> Admissio
 }
 
 impl NodeResourceRuntime {
+    fn support_slot(&self, kind: SupportKind) -> &Mutex<SupportSlot> {
+        match kind {
+            SupportKind::Ordinary => &self.finalization_support,
+            SupportKind::Attempt => &self.attempt_support,
+        }
+    }
+
     fn reserve_support(
         self: &Arc<Self>,
         profile: FinalizationSupportProfile,
@@ -196,7 +203,7 @@ impl NodeResourceRuntime {
         self.affected_owners
             .with_runtime_mutation(|inventory| {
                 let mut slot = self
-                    .finalization_support
+                    .support_slot(profile.kind)
                     .lock()
                     .map_err(|_| AdmissionRefusal::Unavailable)?;
                 if !matches!(slot.inner, SupportCustody::Empty) {
@@ -219,7 +226,7 @@ impl NodeResourceRuntime {
                 // No fallible work between the accounting/census commit and pinning
                 // this original runtime's actual journal/daemon-lock lifetime.
                 let marker = SupportFailureMarker {
-                    ledger: Arc::clone(&self.ledger.support_unknown),
+                    ledger: Arc::clone(self.ledger.support_marker(profile.kind)),
                     census: owner.marker(),
                 };
                 slot.inner = SupportCustody::Held {
@@ -310,7 +317,7 @@ impl FinalizationSupportLease {
             .with_runtime_mutation(|inventory| {
                 let mut slot = self
                     .runtime
-                    .finalization_support
+                    .support_slot(self.identity.kind)
                     .lock()
                     .map_err(|_| AdmissionRefusal::Unavailable)?;
                 let SupportCustody::Held {
@@ -370,7 +377,7 @@ impl FinalizationSupportLease {
         {
             let mut slot = self
                 .runtime
-                .finalization_support
+                .support_slot(self.identity.kind)
                 .lock()
                 .map_err(|_| AdmissionRefusal::Unavailable)?;
             let SupportCustody::Held {
@@ -403,7 +410,7 @@ impl FinalizationSupportLease {
     fn original_state(&self) -> Result<Arc<SupportState>, AdmissionRefusal> {
         let slot = self
             .runtime
-            .finalization_support
+            .support_slot(self.identity.kind)
             .lock()
             .map_err(|_| AdmissionRefusal::Unavailable)?;
         match &slot.inner {
@@ -445,7 +452,7 @@ impl FinalizationSupportLease {
             .with_runtime_mutation(|inventory| {
                 let mut slot = self
                     .runtime
-                    .finalization_support
+                    .support_slot(self.identity.kind)
                     .lock()
                     .map_err(|_| AdmissionRefusal::Unavailable)?;
                 let SupportCustody::Held {
@@ -461,7 +468,11 @@ impl FinalizationSupportLease {
                     return Err(AdmissionRefusal::UnknownReservation);
                 };
                 if *identity != self.identity
-                    || self.runtime.ledger.support_unknown.load(Ordering::Acquire)
+                    || self
+                        .runtime
+                        .ledger
+                        .support_marker(self.identity.kind)
+                        .load(Ordering::Acquire)
                 {
                     return Err(AdmissionRefusal::ReceiptMismatch);
                 }
@@ -506,7 +517,7 @@ impl FinalizationSupportLease {
                 Err((error, state)) => {
                     // Restore exactly the same Arc; the inline Closing barrier
                     // already pins runtime/census/charge independently.
-                    let mut slot = match self.runtime.finalization_support.lock() {
+                    let mut slot = match self.runtime.support_slot(self.identity.kind).lock() {
                         Ok(slot) => slot,
                         Err(_) => {
                             std::mem::forget(state);
@@ -533,7 +544,7 @@ impl FinalizationSupportLease {
             None => {
                 let slot = self
                     .runtime
-                    .finalization_support
+                    .support_slot(self.identity.kind)
                     .lock()
                     .map_err(|_| AdmissionRefusal::Unavailable)?;
                 match &slot.inner {
@@ -556,7 +567,7 @@ impl FinalizationSupportLease {
         {
             let mut slot = self
                 .runtime
-                .finalization_support
+                .support_slot(self.identity.kind)
                 .lock()
                 .map_err(|_| AdmissionRefusal::Unavailable)?;
             let SupportCustody::Held {
@@ -580,7 +591,7 @@ impl FinalizationSupportLease {
             .with_runtime_mutation(|inventory| {
                 let mut slot = self
                     .runtime
-                    .finalization_support
+                    .support_slot(self.identity.kind)
                     .lock()
                     .map_err(|_| AdmissionRefusal::Unavailable)?;
                 let SupportCustody::Held {
@@ -748,3 +759,6 @@ pub mod collector;
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(target_os = "linux")]
+pub mod attempt_root;

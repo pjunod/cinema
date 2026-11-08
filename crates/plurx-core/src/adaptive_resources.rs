@@ -385,6 +385,7 @@ struct State {
     draining: bool,
     // Ephemeral daemon support is not a native role or persisted producer claim.
     support: Option<finalization_support::SupportEntry>,
+    attempt_support: Option<finalization_support::SupportEntry>,
     next_support_generation: u64,
 }
 
@@ -394,6 +395,7 @@ pub struct ResourceLedger {
     inner: Arc<Mutex<State>>,
     // Startup-owned marker: active Drop never takes the ledger/census locks.
     support_unknown: Arc<std::sync::atomic::AtomicBool>,
+    attempt_support_unknown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct ResourceReservation {
@@ -436,6 +438,9 @@ pub struct LedgerSnapshot {
     /// Separate non-native structural allowance; absent keeps the old wire shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalization_support: Option<finalization_support::FinalizationSupportSnapshot>,
+    /// Independently charged pre-P attempt custody, never ordinary collector credit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_support: Option<finalization_support::FinalizationSupportSnapshot>,
     /// Cumulative extra charge observed by native-I/O snapshots. Overflowed
     /// cumulative accounting reports Unknown rather than a misleading value.
     pub native_overage_debt: Metric<ResourceVector>,
@@ -597,9 +602,11 @@ impl ResourceLedger {
                 invalid: false,
                 draining: false,
                 support: None,
+                attempt_support: None,
                 next_support_generation: 1,
             })),
             support_unknown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            attempt_support_unknown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -715,7 +722,7 @@ impl ResourceLedger {
         if state.invalid {
             return Err(AdmissionRefusal::Unavailable);
         }
-        if state.support.is_some() && roles.iter().any(|(_, demand, _)| demand.trial) {
+        if state.any_support() && roles.iter().any(|(_, demand, _)| demand.trial) {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
         for (family_role, demand, retained) in roles {
@@ -1026,7 +1033,7 @@ impl ResourceLedger {
                     Metric::Known(u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
                 })
                 .unwrap_or(Metric::Unknown(UnknownReason::InsufficientEvidence)),
-            managed_memory_peak_bytes: if state.support.is_some()
+            managed_memory_peak_bytes: if state.any_support()
                 || state
                     .entries
                     .values()
@@ -1063,7 +1070,7 @@ impl ResourceLedger {
                         == TaskClaim::UnknownProducerPeak
                 })
                 .count(),
-            managed_kernel_task_peak: if state.support.is_some()
+            managed_kernel_task_peak: if state.any_support()
                 || state.entries.values().any(|entry| {
                     TaskClaim::from_processes(entry.resources.processes)
                         == TaskClaim::UnknownProducerPeak
@@ -1088,6 +1095,9 @@ impl ResourceLedger {
             finalization_support: state
                 .support
                 .map(|entry| entry.snapshot(self.support_unknown.load(Ordering::Acquire))),
+            attempt_support: state
+                .attempt_support
+                .map(|entry| entry.snapshot(self.attempt_support_unknown.load(Ordering::Acquire))),
             native_overage_debt: if state.invalid && state.native_overage_fenced {
                 Metric::Unknown(UnknownReason::Unbounded)
             } else {

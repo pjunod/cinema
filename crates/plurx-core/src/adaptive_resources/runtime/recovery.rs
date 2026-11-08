@@ -816,7 +816,7 @@ impl NodeResourceRuntime {
         let Ok(state) = self.ledger.inner.lock() else {
             return true;
         };
-        if state.invalid || state.native_overage_fenced || state.support.is_some() {
+        if state.invalid || state.native_overage_fenced || state.any_support() {
             return true;
         }
         let active: Vec<_> = self

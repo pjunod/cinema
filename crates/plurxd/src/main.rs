@@ -2460,6 +2460,20 @@ async fn boot_observing(
         // refused; captured static S can still serve without a new encoder.
         tracing::warn!(%error, "ordinary finite finalizer is unavailable");
     }
+    #[cfg(target_os = "linux")]
+    let mut adaptive_attempt_root =
+        plurx_core::adaptive_resources::runtime::attempt_root::AttemptRootLifecycle::default();
+    #[cfg(target_os = "linux")]
+    if let Err(error) = state
+        .transcode
+        .initialize_adaptive_attempt_root(
+            &mut adaptive_attempt_root,
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .await
+    {
+        tracing::warn!(%error, "adaptive attempt root is unavailable");
+    }
     state.live_tv.start_caption_probe();
     // Which artifact identity this node plans into, before anything can plan,
     // and the only time it is decided. It is part of every cache key the node
@@ -2633,6 +2647,31 @@ async fn boot_observing(
     // and be counted after this write, and a serving error says nothing about
     // them, so both write an unclean final record and the next start counts an
     // unclean stop. A failed write is read the same way, which is honest too.
+    // Attempt originals still need ordinary collector services and gates. Their
+    // external root must drain before ordinary finalizer seals those services.
+    #[cfg(target_os = "linux")]
+    let attempt_root_result = ordinary_finalizer_root
+        .shutdown_adaptive_attempt_root(
+            &mut adaptive_attempt_root,
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .await;
+    #[cfg(target_os = "linux")]
+    if let Err(error) = &attempt_root_result {
+        tracing::warn!(%error, "adaptive attempt shutdown retains original custody");
+    }
+    #[cfg(target_os = "linux")]
+    let ordinary_finalizer_result = if attempt_root_result.is_ok() {
+        ordinary_finalizer_root
+            .shutdown_ordinary_finalizer(std::time::Instant::now() + Duration::from_secs(30))
+            .await
+    } else {
+        Err(
+            "adaptive attempt originals remain held; ordinary cleanup services retain custody"
+                .to_owned(),
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
     let ordinary_finalizer_result = ordinary_finalizer_root
         .shutdown_ordinary_finalizer(std::time::Instant::now() + Duration::from_secs(30))
         .await;
@@ -2644,6 +2683,8 @@ async fn boot_observing(
         tracing::warn!(%error, "ordinary finalizer shutdown retains unresolved ownership");
     }
     let clean = matches!(served, Ok(HttpDrain::Complete)) && ordinary_finalizer_result.is_ok();
+    #[cfg(target_os = "linux")]
+    let clean = clean && attempt_root_result.is_ok();
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         if let Some(server) = desktop_server {

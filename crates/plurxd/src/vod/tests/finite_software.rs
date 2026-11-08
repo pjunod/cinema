@@ -1735,6 +1735,13 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
         AttemptClaim, AttemptKey, MutationContext, RequestBinding, RequestKey,
     };
     let fixture = finite_cancellation_fixture().await;
+    // Match main: both support services exist before an adaptive R is built.
+    // An uncollected R correctly refuses once any support service is present.
+    fixture
+        .serve
+        .initialize_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("actual production ordinary collector before attempt root");
     let store = Arc::clone(&fixture.serve.shared.store);
     let user = store
         .create_user(
@@ -1932,6 +1939,11 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
                 },
             )
             .await;
+        fixture
+            .serve
+            .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+            .await
+            .expect("same original ordinary collector closes adopted fixture R/S");
         return;
     }
     let make_pending = move |application_bytes| async move {
@@ -1966,6 +1978,11 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
             make_pending,
         )
         .await;
+    fixture
+        .serve
+        .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("same original ordinary collector closes after fenced fixture R/S");
 }
 
 #[tokio::test]

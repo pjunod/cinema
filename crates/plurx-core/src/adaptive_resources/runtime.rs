@@ -23,6 +23,8 @@ use crate::resource_custody::{
 pub mod application;
 mod capacity_observer;
 pub(in crate::adaptive_resources) mod finalization_support;
+#[cfg(target_os = "linux")]
+pub use finalization_support::attempt_root;
 #[cfg(unix)]
 pub use finalization_support::collector as ordinary_finite_collector;
 #[cfg(target_os = "linux")]
@@ -148,6 +150,7 @@ pub struct NodeResourceRuntime {
     #[cfg(target_os = "linux")]
     direct_read_domain: Mutex<Option<Arc<direct_source::DirectReadDomain>>>,
     finalization_support: Mutex<finalization_support::SupportSlot>,
+    attempt_support: Mutex<finalization_support::SupportSlot>,
     capacity_observer: tokio::sync::Mutex<capacity_observer::CapacityObserver>,
     #[cfg(target_os = "linux")]
     mount_namespace_inode: Option<u64>,
@@ -230,6 +233,7 @@ impl NodeResourceRuntime {
             #[cfg(target_os = "linux")]
             direct_read_domain: Mutex::new(None),
             finalization_support: Mutex::new(finalization_support::SupportSlot::new()),
+            attempt_support: Mutex::new(finalization_support::SupportSlot::new()),
             capacity_observer: tokio::sync::Mutex::new(capacity_observer::CapacityObserver::new()),
             #[cfg(target_os = "linux")]
             mount_namespace_inode: {

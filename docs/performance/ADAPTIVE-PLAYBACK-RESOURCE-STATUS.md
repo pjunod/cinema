@@ -7,7 +7,8 @@ Effort #1248 remains draft; release qualification and deployment are open.
 [finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) ·
 [policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) · [containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md) ·
 [support ADR](ADAPTIVE-PLAYBACK-FINALIZATION-SUPPORT.md) ·
-[ordinary collector](ADAPTIVE-PLAYBACK-ORDINARY-COLLECTOR.md) ·
+[collector](ADAPTIVE-PLAYBACK-ORDINARY-COLLECTOR.md) ·
+[attempt root](ADAPTIVE-PLAYBACK-ATTEMPT-ROOT.md) ·
 [retained exit](ADAPTIVE-PLAYBACK-RETAINED-EXIT.md).
 
 ## Current continuation — source-bound task qualification

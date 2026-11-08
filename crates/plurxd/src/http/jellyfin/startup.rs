@@ -37,6 +37,10 @@ fn public_failure(error: ApiError) -> ApiError {
         ApiError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         ApiError::Internal(_) => StatusCode::BAD_GATEWAY,
         ApiError::FiniteMaterialization(failure) => failure.status(),
+        #[cfg(target_os = "linux")]
+        ApiError::AdaptiveOrigin { status, .. } => *status,
+        #[cfg(target_os = "linux")]
+        ApiError::AdaptiveOriginUnavailable => StatusCode::SERVICE_UNAVAILABLE,
     };
     ApiError::typed(
         status,
@@ -48,7 +52,7 @@ pub(super) async fn create(
     state: &AppState,
     play: &JellyfinPlay,
     vod: &Value,
-) -> Result<super::super::hls::StartResponse, ApiError> {
+) -> Result<super::super::hls::FundedStartReply, ApiError> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
     let exhausted = || {
         ApiError::typed(

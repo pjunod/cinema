@@ -1,9 +1,15 @@
 # Ordinary finite collector — who owns close after native refund?
 
-**Status:** open · bounded native qualification passed; task integration pending · 2026-11-04.
+**Status:** open · production collector merged; broader ownership open · 2026-11-07.
 The [canonical ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) tracks effort #1248.
 This extends the [support ADR](ADAPTIVE-PLAYBACK-FINALIZATION-SUPPORT.md);
 complete M0, affected-work inventory, production containment and trials remain open.
+
+[PR #1392](http://forge.lan:3000/noirr/plurx/pulls/1392) merged into the effort
+at `b4423b1ec5c94dc33d93972e85eee002693bf266` after all eight jobs of gate
+6512 passed on `e0c379ad1cd8bcef37a27dbda808d01131658a44`. Candidate and
+landing trees match; all 18 regression trailers and post-merge paperwork pass.
+The [attempt-root continuation](ADAPTIVE-PLAYBACK-ATTEMPT-ROOT.md) is open.
 
 ## Installation and ordinary admission
 
