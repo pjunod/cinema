@@ -39,7 +39,11 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Translation, annotations, title jobs and handoffs validate committed
     // extension shape and singleton authority: eight consistent reads.
     // Text translation and shared captions add four more schema/marker reads.
-    ("hiqlite.rs", 60),
+    // Source arbitration verifies both the committed object shape and marker.
+    // The contract v2 scan request sidecar does the same: two more.
+    ("hiqlite.rs", 64),
+    // Dispatch installation and lost-ack reconciliation share one catalog probe.
+    ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
     ("hiqlite_annotations.rs", 5),
     // Managed bootstrap validates committed shape and the singleton marker.
