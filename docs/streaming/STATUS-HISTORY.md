@@ -1,6 +1,7 @@
 # Streaming — status history
 
-**Status:** done · records moved verbatim from `STATUS.md` on 2026-09-24
+**Status:** done · historical records moved verbatim from `STATUS.md`
+**Updated:** 2026-11-08 (America/New_York)
 
 **Moved here from [STATUS.md](../../STATUS.md) on 2026-09-24**, verbatim, by
 [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](../ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
@@ -11,6 +12,30 @@ describes the state on the day it was written, and
 `tests/operations/test_status_pr_claims.py` keeps holding it to the same
 merged-pull-request rule it held in `STATUS.md`.
 
+
+**First recorded:** 2026-10-10 · **Moved:** 2026-11-08 (America/New_York),
+verbatim from [STATUS.md](../../STATUS.md).
+
+## HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity
+
+**Branch `effort/macos-gpu-tonemap-parity`.** An Apple M4 node's Transcoding
+backend row read "CPU tone-map — fell back" over a Vulkan `Cannot allocate
+memory` and an OpenCL graph 59 levels from the CPU picture. Causes, each
+reproduced on that node's Jellyfin FFmpeg 8.1.3: the macOS build has no
+Vulkan compiled in, and the probe ran the graph anyway; the OpenCL graph
+named `hable` but left Jellyfin's `tonemap_mode=auto` and desaturation on;
+and the probe never tried the native Metal graph, whose BT.2390/ITP spelling
+the Mac processing context used without any CPU comparison (29.5 levels
+away). Now: the probe reads the build's device types and filters and reports
+what it cannot express as not available; CUDA, OpenCL and Metal-on-PQ take
+the CPU chain's operator from one source that also keys plan identity; the
+Metal graph is the first VideoToolbox candidate (≈2.2× the CPU chain within
+10.3 levels), and a pass ends the race with node routing left on the CPU
+chain; and the Mac context offers its HDR10 Metal graphs only when that
+parity passed. GPU graphs now get the CPU chain's peak. HLG through Metal is
+unchanged. Use still goes through Mac video processing in Developer. Plan
+identity gains the curve terms, so CUDA HDR and Mac Metal renditions (HLG
+included) are made once more under new keys.
 
 ## 2026-10-04 · A leader restart no longer ends progressive or Live TV playback
 

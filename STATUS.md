@@ -1,6 +1,6 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-07 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-08 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
 - **2026-11-07 · HDR enhancement source budget:** [scope and validation](docs/streaming/HDR-ENHANCEMENT-SOURCE-BUDGET.md). Owner Codex. Current-main port preserves measured Original video rates, carries one coded envelope through admission/encoding/authoring, and binds FEL receipts to the exact backend recipe. Source reviewed; standalone/cluster compiler checks and all 32 focused regressions pass. Picture fidelity and deployment remain open.
@@ -80,33 +80,13 @@ rev 6.
   - the two-build B-M4 measurement (§9.1).
 - **Waiting on those:** Part A's A-M1/A-M2 waits on B, and C-M2/C-M3 wait on R2.
 
-## HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity
-
-**Branch `effort/macos-gpu-tonemap-parity`.** An Apple M4 node's Transcoding
-backend row read "CPU tone-map — fell back" over a Vulkan `Cannot allocate
-memory` and an OpenCL graph 59 levels from the CPU picture. Causes, each
-reproduced on that node's Jellyfin FFmpeg 8.1.3: the macOS build has no
-Vulkan compiled in, and the probe ran the graph anyway; the OpenCL graph
-named `hable` but left Jellyfin's `tonemap_mode=auto` and desaturation on;
-and the probe never tried the native Metal graph, whose BT.2390/ITP spelling
-the Mac processing context used without any CPU comparison (29.5 levels
-away). Now: the probe reads the build's device types and filters and reports
-what it cannot express as not available; CUDA, OpenCL and Metal-on-PQ take
-the CPU chain's operator from one source that also keys plan identity; the
-Metal graph is the first VideoToolbox candidate (≈2.2× the CPU chain within
-10.3 levels), and a pass ends the race with node routing left on the CPU
-chain; and the Mac context offers its HDR10 Metal graphs only when that
-parity passed. GPU graphs now get the CPU chain's peak. HLG through Metal is
-unchanged. Use still goes through Mac video processing in Developer. Plan
-identity gains the curve terms, so CUDA HDR and Mac Metal renditions (HLG
-included) are made once more under new keys.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19 and 2026-10-26 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19, 2026-10-26 and 2026-11-08 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-10-10 | HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md#hdr-tone-map-on-apple-silicon-runs-on-the-gpu-held-to-cpu-parity) |
 | 2026-10-04 | Live TV station logos on Apple TV, iOS and Android | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
 | 2026-10-17 | Agent efficiency: smaller searches, a docs router, paperwork first | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-10-04 | A leader restart no longer ends progressive or Live TV playback | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
