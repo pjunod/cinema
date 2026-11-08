@@ -1,7 +1,7 @@
 # Cinema job queue — why scans stop and how to restore useful scheduling
 
-**Status:** open · root cause verified; proposed fix reviewed by Astra ·
-**Written:** 2026-11-04 · **Source baseline:** `edf6d08faf549554b9892dee582406ff79af1c97`
+**Status:** open · queue recovered, bounded dispatch and Activity fixes implemented on the incident effort ·
+**Updated:** 2026-11-07 · **Original source baseline:** `edf6d08faf549554b9892dee582406ff79af1c97`
 
 Companion to [the API reference](../API.md#56-activity) (existing operator
 surfaces), [scan hygiene](SCAN-AND-ENRICHMENT-HYGIENE.md) (walker and provider
@@ -10,10 +10,13 @@ bounds), and [worker refinement](../cluster/WORKER-REFINEMENT-STATUS.md)
 proposed repair, scheduling contract, queue management design, and remaining
 work. It is the canonical ledger for backlog project P42.
 
-Read §1–3 before implementing §4–7. The initial bounded recovery fix is now
-tracked in [its implementation ledger](SOURCE-CUSTODY-RECOVERY.md); remaining
-scheduling work and runtime acceptance are open. Do not replace physical reader-stop
-proof with lease expiry, job deletion, or a higher priority number.
+## November 7 recovery and release status
+
+Nine manual Movies requests joined one library scan, which completed at 18:19:41 UTC. TV completed at 18:19:43 UTC. Three remaining metadata refreshes had scheduled origins. Each accepted request retains a waiter on its shared job.
+
+A completed subtitle job retained a reader. A second failure at library completion held the job-fence lock while a source-pressure check waited for it. The repair verifies the immutable claim identity in the Store. The active Dolby Vision scan finished its pass.
+
+Refused claims create no running attempts. The incident changes identify the blocking reader in both Activity views and monitoring, flag manual library requests after five eligible minutes, and report five-minute successful and failed attempts per minute for the cluster and each worker. Ready manual requests get the next eligible source turn across job types, subject to playback and bounded maintenance service. Main qualification and installed handoff are pending. [Activity API](../API.md#56-activity) · [Recovery ledger](SOURCE-CUSTODY-RECOVERY.md)
 
 ## 1. The immediate failure is an abandoned shared reader
 

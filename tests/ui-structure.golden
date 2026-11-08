@@ -86,6 +86,7 @@ catalog|activity@1280x860|dom|div#cluster-workers > h2.section[text]|1
 catalog|activity@1280x860|dom|div#cluster-workers > p.hint[text]|1
 catalog|activity@1280x860|dom|div#durable-activity > div.activity-jobs-layout|1
 catalog|activity@1280x860|dom|div#durable-activity > h2.section[text]|1
+catalog|activity@1280x860|dom|div#durable-activity > section.card[aria-label=*]|1
 catalog|activity@1280x860|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|activity@1280x860|dom|div#pxnav.px-scroll > div#pxlibs|1
 catalog|activity@1280x860|dom|div#pxnav.px-scroll > div.px-sec[text]|1
@@ -159,6 +160,7 @@ catalog|activity@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|4
 catalog|activity@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|activity@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|activity@1280x860|dom|p.muted[text] > a[text]|1
+catalog|activity@1280x860|dom|p[text] > b[text]|1
 catalog|activity@1280x860|dom|section > div.dvr-section-head|1
 catalog|activity@1280x860|dom|section > div.empty[text]|1
 catalog|activity@1280x860|dom|section > div.lt-recs|1
@@ -166,6 +168,9 @@ catalog|activity@1280x860|dom|section#activity-jobs[role=tabpanel aria-labelledb
 catalog|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > details.activity-section|5
 catalog|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div#cluster-workers|1
 catalog|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div.activity-idle[text]|1
+catalog|activity@1280x860|dom|section.card[aria-label=*] > h3[text]|1
+catalog|activity@1280x860|dom|section.card[aria-label=*] > p.hint[text]|1
+catalog|activity@1280x860|dom|section.card[aria-label=*] > p[text]|1
 catalog|activity@1280x860|dom|section[aria-label=*] > div.dvr-layout|1
 catalog|activity@1280x860|dom|section[aria-label=*] > div.dvr-section-head|1
 catalog|activity@1280x860|dom|select[aria-label=*] > option[text]|9
@@ -265,6 +270,7 @@ catalog|activity@390x780|dom|div#cluster-workers > h2.section[text]|1
 catalog|activity@390x780|dom|div#cluster-workers > p.hint[text]|1
 catalog|activity@390x780|dom|div#durable-activity > div.activity-jobs-layout|1
 catalog|activity@390x780|dom|div#durable-activity > h2.section[text]|1
+catalog|activity@390x780|dom|div#durable-activity > section.card[aria-label=*]|1
 catalog|activity@390x780|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|activity@390x780|dom|div#pxnav.px-scroll > div#pxlibs|1
 catalog|activity@390x780|dom|div#pxnav.px-scroll > div.px-sec[text]|1
@@ -338,6 +344,7 @@ catalog|activity@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|4
 catalog|activity@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|activity@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|activity@390x780|dom|p.muted[text] > a[text]|1
+catalog|activity@390x780|dom|p[text] > b[text]|1
 catalog|activity@390x780|dom|section > div.dvr-section-head|1
 catalog|activity@390x780|dom|section > div.empty[text]|1
 catalog|activity@390x780|dom|section > div.lt-recs|1
@@ -345,6 +352,9 @@ catalog|activity@390x780|dom|section#activity-jobs[role=tabpanel aria-labelledby
 catalog|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > details.activity-section|5
 catalog|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div#cluster-workers|1
 catalog|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div.activity-idle[text]|1
+catalog|activity@390x780|dom|section.card[aria-label=*] > h3[text]|1
+catalog|activity@390x780|dom|section.card[aria-label=*] > p.hint[text]|1
+catalog|activity@390x780|dom|section.card[aria-label=*] > p[text]|1
 catalog|activity@390x780|dom|section[aria-label=*] > div.dvr-layout|1
 catalog|activity@390x780|dom|section[aria-label=*] > div.dvr-section-head|1
 catalog|activity@390x780|dom|select[aria-label=*] > option[text]|9
@@ -640,7 +650,6 @@ catalog|auth@1280x860|dom|details.connectqr > summary[text]|1
 catalog|auth@1280x860|dom|div#app > div.center|1
 catalog|auth@1280x860|dom|div.center > form#af.auth.card|1
 catalog|auth@1280x860|dom|form#af.auth.card > button#ab[text]|1
-catalog|auth@1280x860|dom|form#af.auth.card > button[type=button text]|1
 catalog|auth@1280x860|dom|form#af.auth.card > details.connectqr|1
 catalog|auth@1280x860|dom|form#af.auth.card > div#aerr.err|1
 catalog|auth@1280x860|dom|form#af.auth.card > div.logo[text]|1
@@ -654,8 +663,7 @@ catalog|auth@1280x860|focus|000|input#u
 catalog|auth@1280x860|focus|001|input#p
 catalog|auth@1280x860|focus|002|summary "Connect an app with a QR code"
 catalog|auth@1280x860|focus|003|button#ab "Sign in"
-catalog|auth@1280x860|focus|004|button "Help · Report a problem"
-catalog|auth@1280x860|focus|005|<wrap>
+catalog|auth@1280x860|focus|004|<wrap>
 catalog|auth@1280x860|req|GET /api/v1/server|1
 catalog|auth@390x780|dom|^ > div#app|1
 catalog|auth@390x780|dom|details.connectqr > img|1
@@ -664,7 +672,6 @@ catalog|auth@390x780|dom|details.connectqr > summary[text]|1
 catalog|auth@390x780|dom|div#app > div.center|1
 catalog|auth@390x780|dom|div.center > form#af.auth.card|1
 catalog|auth@390x780|dom|form#af.auth.card > button#ab[text]|1
-catalog|auth@390x780|dom|form#af.auth.card > button[type=button text]|1
 catalog|auth@390x780|dom|form#af.auth.card > details.connectqr|1
 catalog|auth@390x780|dom|form#af.auth.card > div#aerr.err|1
 catalog|auth@390x780|dom|form#af.auth.card > div.logo[text]|1
@@ -678,8 +685,7 @@ catalog|auth@390x780|focus|000|input#u
 catalog|auth@390x780|focus|001|input#p
 catalog|auth@390x780|focus|002|summary "Connect an app with a QR code"
 catalog|auth@390x780|focus|003|button#ab "Sign in"
-catalog|auth@390x780|focus|004|button "Help · Report a problem"
-catalog|auth@390x780|focus|005|<wrap>
+catalog|auth@390x780|focus|004|<wrap>
 catalog|auth@390x780|req|GET /api/v1/server|1
 catalog|category@1280x860|dom|^ > div#app|1
 catalog|category@1280x860|dom|a > span.px-lbl[text]|10
@@ -2476,7 +2482,7 @@ catalog|player@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* ty
 catalog|player@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|player@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|player@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|player@1280x860|dom|dd > button.ghost.sm[type=button text]|4
+catalog|player@1280x860|dom|dd > button.ghost.sm[type=button text]|6
 catalog|player@1280x860|dom|dd > div.watch-trks|4
 catalog|player@1280x860|dom|dd > span.mode-chip[text]|2
 catalog|player@1280x860|dom|dd > span.mode-detail[text]|2
@@ -2602,7 +2608,9 @@ catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 catalog|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 catalog|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -2615,12 +2623,13 @@ catalog|player@1280x860|dom|svg.px-ico[aria-hidden=true] > path|14
 catalog|player@1280x860|dom|svg.px-ico[aria-hidden=true] > rect|18
 catalog|player@1280x860|focus|000|button#pbforward.picon "Forward 10 seconds"
 catalog|player@1280x860|focus|001|button#pbforward30.picon "Forward 30 seconds"
-catalog|player@1280x860|focus|002|button#pbquality.picon "Playback quality"
-catalog|player@1280x860|focus|003|button#pbsettings.picon "Playback settings"
-catalog|player@1280x860|focus|004|button#pbpip.picon "Picture in picture"
-catalog|player@1280x860|focus|005|button#pblarger.picon "Larger"
-catalog|player@1280x860|focus|006|button#pbfs.picon "Fullscreen"
-catalog|player@1280x860|focus|007|<wrap>
+catalog|player@1280x860|focus|002|button#pbsubs.picon.pcc "Subtitles"
+catalog|player@1280x860|focus|003|button#pbquality.picon "Playback quality"
+catalog|player@1280x860|focus|004|button#pbsettings.picon "Playback settings"
+catalog|player@1280x860|focus|005|button#pbpip.picon "Picture in picture"
+catalog|player@1280x860|focus|006|button#pblarger.picon "Larger"
+catalog|player@1280x860|focus|007|button#pbfs.picon "Fullscreen"
+catalog|player@1280x860|focus|008|<wrap>
 catalog|player@1280x860|req|GET /api/v1/activity|2
 catalog|player@1280x860|req|GET /api/v1/features|1
 catalog|player@1280x860|req|GET /api/v1/files/<id>/direct|1
@@ -2659,7 +2668,7 @@ catalog|player@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* typ
 catalog|player@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|player@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|player@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|player@390x780|dom|dd > button.ghost.sm[type=button text]|4
+catalog|player@390x780|dom|dd > button.ghost.sm[type=button text]|6
 catalog|player@390x780|dom|dd > div.watch-trks|4
 catalog|player@390x780|dom|dd > span.mode-chip[text]|2
 catalog|player@390x780|dom|dd > span.mode-detail[text]|2
@@ -2784,7 +2793,9 @@ catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 catalog|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 catalog|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -2797,11 +2808,12 @@ catalog|player@390x780|dom|svg.px-ico[aria-hidden=true] > path|14
 catalog|player@390x780|dom|svg.px-ico[aria-hidden=true] > rect|18
 catalog|player@390x780|focus|000|button#pbforward.picon "Forward 10 seconds"
 catalog|player@390x780|focus|001|button#pbforward30.picon "Forward 30 seconds"
-catalog|player@390x780|focus|002|button#pbquality.picon "Playback quality"
-catalog|player@390x780|focus|003|button#pbsettings.picon "Playback settings"
-catalog|player@390x780|focus|004|button#pbpip.picon "Picture in picture"
-catalog|player@390x780|focus|005|button#pbfs.picon "Fullscreen"
-catalog|player@390x780|focus|006|<wrap>
+catalog|player@390x780|focus|002|button#pbsubs.picon.pcc "Subtitles"
+catalog|player@390x780|focus|003|button#pbquality.picon "Playback quality"
+catalog|player@390x780|focus|004|button#pbsettings.picon "Playback settings"
+catalog|player@390x780|focus|005|button#pbpip.picon "Picture in picture"
+catalog|player@390x780|focus|006|button#pbfs.picon "Fullscreen"
+catalog|player@390x780|focus|007|<wrap>
 catalog|player@390x780|req|GET /api/v1/activity|2
 catalog|player@390x780|req|GET /api/v1/features|1
 catalog|player@390x780|req|GET /api/v1/files/<id>/direct|1
@@ -3299,7 +3311,7 @@ catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup
 catalog|settings-developer@1280x860|dom|p.devcheck-description[text] > a[text]|1
 catalog|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|46
 catalog|settings-developer@1280x860|dom|p.hint[text] > code[text]|2
-catalog|settings-developer@1280x860|dom|p[text] > code[text]|2
+catalog|settings-developer@1280x860|dom|p[text] > code[text]|4
 catalog|settings-developer@1280x860|dom|select#vod-output-preparation > option[text]|3
 catalog|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|4
 catalog|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|18
@@ -3682,7 +3694,7 @@ catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[
 catalog|settings-developer@390x780|dom|p.devcheck-description[text] > a[text]|1
 catalog|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|46
 catalog|settings-developer@390x780|dom|p.hint[text] > code[text]|2
-catalog|settings-developer@390x780|dom|p[text] > code[text]|2
+catalog|settings-developer@390x780|dom|p[text] > code[text]|4
 catalog|settings-developer@390x780|dom|select#vod-output-preparation > option[text]|3
 catalog|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|4
 catalog|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|18
@@ -4140,6 +4152,7 @@ classic|activity@1280x860|dom|div#cluster-workers > h2.section[text]|1
 classic|activity@1280x860|dom|div#cluster-workers > p.hint[text]|1
 classic|activity@1280x860|dom|div#durable-activity > div.activity-jobs-layout|1
 classic|activity@1280x860|dom|div#durable-activity > h2.section[text]|1
+classic|activity@1280x860|dom|div#durable-activity > section.card[aria-label=*]|1
 classic|activity@1280x860|dom|div.activity-job-list > div.card.durable-queue|1
 classic|activity@1280x860|dom|div.activity-jobs-layout > aside.activity-job-types|1
 classic|activity@1280x860|dom|div.activity-jobs-layout > div.activity-job-list|1
@@ -4200,6 +4213,7 @@ classic|activity@1280x860|dom|nav > a[text]|6
 classic|activity@1280x860|dom|nav.durable-pagination[aria-label=*] > div.row|1
 classic|activity@1280x860|dom|nav.durable-pagination[aria-label=*] > span[role=status text]|1
 classic|activity@1280x860|dom|p.muted[text] > a[text]|1
+classic|activity@1280x860|dom|p[text] > b[text]|1
 classic|activity@1280x860|dom|section > div.dvr-section-head|1
 classic|activity@1280x860|dom|section > div.empty[text]|1
 classic|activity@1280x860|dom|section > div.lt-recs|1
@@ -4207,6 +4221,9 @@ classic|activity@1280x860|dom|section#activity-jobs[role=tabpanel aria-labelledb
 classic|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > details.activity-section|5
 classic|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div#cluster-workers|1
 classic|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div.activity-idle[text]|1
+classic|activity@1280x860|dom|section.card[aria-label=*] > h3[text]|1
+classic|activity@1280x860|dom|section.card[aria-label=*] > p.hint[text]|1
+classic|activity@1280x860|dom|section.card[aria-label=*] > p[text]|1
 classic|activity@1280x860|dom|section[aria-label=*] > div.dvr-layout|1
 classic|activity@1280x860|dom|section[aria-label=*] > div.dvr-section-head|1
 classic|activity@1280x860|dom|select[aria-label=*] > option[text]|9
@@ -4292,6 +4309,7 @@ classic|activity@390x780|dom|div#cluster-workers > h2.section[text]|1
 classic|activity@390x780|dom|div#cluster-workers > p.hint[text]|1
 classic|activity@390x780|dom|div#durable-activity > div.activity-jobs-layout|1
 classic|activity@390x780|dom|div#durable-activity > h2.section[text]|1
+classic|activity@390x780|dom|div#durable-activity > section.card[aria-label=*]|1
 classic|activity@390x780|dom|div.activity-job-list > div.card.durable-queue|1
 classic|activity@390x780|dom|div.activity-jobs-layout > aside.activity-job-types|1
 classic|activity@390x780|dom|div.activity-jobs-layout > div.activity-job-list|1
@@ -4352,6 +4370,7 @@ classic|activity@390x780|dom|nav > a[text]|6
 classic|activity@390x780|dom|nav.durable-pagination[aria-label=*] > div.row|1
 classic|activity@390x780|dom|nav.durable-pagination[aria-label=*] > span[role=status text]|1
 classic|activity@390x780|dom|p.muted[text] > a[text]|1
+classic|activity@390x780|dom|p[text] > b[text]|1
 classic|activity@390x780|dom|section > div.dvr-section-head|1
 classic|activity@390x780|dom|section > div.empty[text]|1
 classic|activity@390x780|dom|section > div.lt-recs|1
@@ -4359,6 +4378,9 @@ classic|activity@390x780|dom|section#activity-jobs[role=tabpanel aria-labelledby
 classic|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > details.activity-section|5
 classic|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div#cluster-workers|1
 classic|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div.activity-idle[text]|1
+classic|activity@390x780|dom|section.card[aria-label=*] > h3[text]|1
+classic|activity@390x780|dom|section.card[aria-label=*] > p.hint[text]|1
+classic|activity@390x780|dom|section.card[aria-label=*] > p[text]|1
 classic|activity@390x780|dom|section[aria-label=*] > div.dvr-layout|1
 classic|activity@390x780|dom|section[aria-label=*] > div.dvr-section-head|1
 classic|activity@390x780|dom|select[aria-label=*] > option[text]|9
@@ -4597,7 +4619,6 @@ classic|auth@1280x860|dom|details.connectqr > summary[text]|1
 classic|auth@1280x860|dom|div#app > div.center|1
 classic|auth@1280x860|dom|div.center > form#af.auth.card|1
 classic|auth@1280x860|dom|form#af.auth.card > button#ab[text]|1
-classic|auth@1280x860|dom|form#af.auth.card > button[type=button text]|1
 classic|auth@1280x860|dom|form#af.auth.card > details.connectqr|1
 classic|auth@1280x860|dom|form#af.auth.card > div#aerr.err|1
 classic|auth@1280x860|dom|form#af.auth.card > div.logo[text]|1
@@ -4611,8 +4632,7 @@ classic|auth@1280x860|focus|000|input#u
 classic|auth@1280x860|focus|001|input#p
 classic|auth@1280x860|focus|002|summary "Connect an app with a QR code"
 classic|auth@1280x860|focus|003|button#ab "Sign in"
-classic|auth@1280x860|focus|004|button "Help · Report a problem"
-classic|auth@1280x860|focus|005|<wrap>
+classic|auth@1280x860|focus|004|<wrap>
 classic|auth@1280x860|req|GET /api/v1/server|1
 classic|auth@390x780|dom|^ > div#app|1
 classic|auth@390x780|dom|details.connectqr > img|1
@@ -4621,7 +4641,6 @@ classic|auth@390x780|dom|details.connectqr > summary[text]|1
 classic|auth@390x780|dom|div#app > div.center|1
 classic|auth@390x780|dom|div.center > form#af.auth.card|1
 classic|auth@390x780|dom|form#af.auth.card > button#ab[text]|1
-classic|auth@390x780|dom|form#af.auth.card > button[type=button text]|1
 classic|auth@390x780|dom|form#af.auth.card > details.connectqr|1
 classic|auth@390x780|dom|form#af.auth.card > div#aerr.err|1
 classic|auth@390x780|dom|form#af.auth.card > div.logo[text]|1
@@ -4635,8 +4654,7 @@ classic|auth@390x780|focus|000|input#u
 classic|auth@390x780|focus|001|input#p
 classic|auth@390x780|focus|002|summary "Connect an app with a QR code"
 classic|auth@390x780|focus|003|button#ab "Sign in"
-classic|auth@390x780|focus|004|button "Help · Report a problem"
-classic|auth@390x780|focus|005|<wrap>
+classic|auth@390x780|focus|004|<wrap>
 classic|auth@390x780|req|GET /api/v1/server|1
 classic|category@1280x860|dom|^ > div#app|1
 classic|category@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
@@ -6085,7 +6103,7 @@ classic|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-labe
 classic|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
-classic|player@1280x860|dom|dd > button.ghost.sm[type=button text]|4
+classic|player@1280x860|dom|dd > button.ghost.sm[type=button text]|6
 classic|player@1280x860|dom|dd > div.watch-trks|4
 classic|player@1280x860|dom|dd > span.mode-chip[text]|2
 classic|player@1280x860|dom|dd > span.mode-detail[text]|2
@@ -6201,7 +6219,9 @@ classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 classic|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 classic|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -6211,12 +6231,13 @@ classic|player@1280x860|dom|svg.pseek-arrows[aria-hidden=true] > g|2
 classic|player@1280x860|dom|svg.pseek-arrows[aria-hidden=true] > path|5
 classic|player@1280x860|focus|000|button#pbforward.picon "Forward 10 seconds"
 classic|player@1280x860|focus|001|button#pbforward30.picon "Forward 30 seconds"
-classic|player@1280x860|focus|002|button#pbquality.picon "Playback quality"
-classic|player@1280x860|focus|003|button#pbsettings.picon "Playback settings"
-classic|player@1280x860|focus|004|button#pbpip.picon "Picture in picture"
-classic|player@1280x860|focus|005|button#pblarger.picon "Larger"
-classic|player@1280x860|focus|006|button#pbfs.picon "Fullscreen"
-classic|player@1280x860|focus|007|<wrap>
+classic|player@1280x860|focus|002|button#pbsubs.picon.pcc "Subtitles"
+classic|player@1280x860|focus|003|button#pbquality.picon "Playback quality"
+classic|player@1280x860|focus|004|button#pbsettings.picon "Playback settings"
+classic|player@1280x860|focus|005|button#pbpip.picon "Picture in picture"
+classic|player@1280x860|focus|006|button#pblarger.picon "Larger"
+classic|player@1280x860|focus|007|button#pbfs.picon "Fullscreen"
+classic|player@1280x860|focus|008|<wrap>
 classic|player@1280x860|req|GET /api/v1/activity|2
 classic|player@1280x860|req|GET /api/v1/features|1
 classic|player@1280x860|req|GET /api/v1/files/<id>/direct|1
@@ -6244,7 +6265,7 @@ classic|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label
 classic|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
-classic|player@390x780|dom|dd > button.ghost.sm[type=button text]|4
+classic|player@390x780|dom|dd > button.ghost.sm[type=button text]|6
 classic|player@390x780|dom|dd > div.watch-trks|4
 classic|player@390x780|dom|dd > span.mode-chip[text]|2
 classic|player@390x780|dom|dd > span.mode-detail[text]|2
@@ -6359,7 +6380,9 @@ classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 classic|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 classic|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -6369,11 +6392,12 @@ classic|player@390x780|dom|svg.pseek-arrows[aria-hidden=true] > g|2
 classic|player@390x780|dom|svg.pseek-arrows[aria-hidden=true] > path|5
 classic|player@390x780|focus|000|button#pbforward.picon "Forward 10 seconds"
 classic|player@390x780|focus|001|button#pbforward30.picon "Forward 30 seconds"
-classic|player@390x780|focus|002|button#pbquality.picon "Playback quality"
-classic|player@390x780|focus|003|button#pbsettings.picon "Playback settings"
-classic|player@390x780|focus|004|button#pbpip.picon "Picture in picture"
-classic|player@390x780|focus|005|button#pbfs.picon "Fullscreen"
-classic|player@390x780|focus|006|<wrap>
+classic|player@390x780|focus|002|button#pbsubs.picon.pcc "Subtitles"
+classic|player@390x780|focus|003|button#pbquality.picon "Playback quality"
+classic|player@390x780|focus|004|button#pbsettings.picon "Playback settings"
+classic|player@390x780|focus|005|button#pbpip.picon "Picture in picture"
+classic|player@390x780|focus|006|button#pbfs.picon "Fullscreen"
+classic|player@390x780|focus|007|<wrap>
 classic|player@390x780|req|GET /api/v1/activity|2
 classic|player@390x780|req|GET /api/v1/features|1
 classic|player@390x780|req|GET /api/v1/files/<id>/direct|1
@@ -6809,7 +6833,7 @@ classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup
 classic|settings-developer@1280x860|dom|p.devcheck-description[text] > a[text]|1
 classic|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|46
 classic|settings-developer@1280x860|dom|p.hint[text] > code[text]|2
-classic|settings-developer@1280x860|dom|p[text] > code[text]|2
+classic|settings-developer@1280x860|dom|p[text] > code[text]|4
 classic|settings-developer@1280x860|dom|select#vod-output-preparation > option[text]|3
 classic|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|4
 classic|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|18
@@ -7168,7 +7192,7 @@ classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[
 classic|settings-developer@390x780|dom|p.devcheck-description[text] > a[text]|1
 classic|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|46
 classic|settings-developer@390x780|dom|p.hint[text] > code[text]|2
-classic|settings-developer@390x780|dom|p[text] > code[text]|2
+classic|settings-developer@390x780|dom|p[text] > code[text]|4
 classic|settings-developer@390x780|dom|select#vod-output-preparation > option[text]|3
 classic|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|4
 classic|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|18
@@ -7581,6 +7605,7 @@ meridian|activity@1280x860|dom|div#cluster-workers > h2.section[text]|1
 meridian|activity@1280x860|dom|div#cluster-workers > p.hint[text]|1
 meridian|activity@1280x860|dom|div#durable-activity > div.activity-jobs-layout|1
 meridian|activity@1280x860|dom|div#durable-activity > h2.section[text]|1
+meridian|activity@1280x860|dom|div#durable-activity > section.card[aria-label=*]|1
 meridian|activity@1280x860|dom|div.activity-job-list > div.card.durable-queue|1
 meridian|activity@1280x860|dom|div.activity-jobs-layout > aside.activity-job-types|1
 meridian|activity@1280x860|dom|div.activity-jobs-layout > div.activity-job-list|1
@@ -7648,6 +7673,7 @@ meridian|activity@1280x860|dom|nav.durable-pagination[aria-label=*] > span[role=
 meridian|activity@1280x860|dom|nav.md-bottom[aria-label=*] > a|1
 meridian|activity@1280x860|dom|nav.md-bottom[aria-label=*] > button.ghost[type=button]|3
 meridian|activity@1280x860|dom|p.muted[text] > a[text]|1
+meridian|activity@1280x860|dom|p[text] > b[text]|1
 meridian|activity@1280x860|dom|section > div.dvr-section-head|1
 meridian|activity@1280x860|dom|section > div.empty[text]|1
 meridian|activity@1280x860|dom|section > div.lt-recs|1
@@ -7655,6 +7681,9 @@ meridian|activity@1280x860|dom|section#activity-jobs[role=tabpanel aria-labelled
 meridian|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > details.activity-section|5
 meridian|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div#cluster-workers|1
 meridian|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div.activity-idle[text]|1
+meridian|activity@1280x860|dom|section.card[aria-label=*] > h3[text]|1
+meridian|activity@1280x860|dom|section.card[aria-label=*] > p.hint[text]|1
+meridian|activity@1280x860|dom|section.card[aria-label=*] > p[text]|1
 meridian|activity@1280x860|dom|section[aria-label=*] > div.dvr-layout|1
 meridian|activity@1280x860|dom|section[aria-label=*] > div.dvr-section-head|1
 meridian|activity@1280x860|dom|select[aria-label=*] > option[text]|9
@@ -7750,6 +7779,7 @@ meridian|activity@390x780|dom|div#cluster-workers > h2.section[text]|1
 meridian|activity@390x780|dom|div#cluster-workers > p.hint[text]|1
 meridian|activity@390x780|dom|div#durable-activity > div.activity-jobs-layout|1
 meridian|activity@390x780|dom|div#durable-activity > h2.section[text]|1
+meridian|activity@390x780|dom|div#durable-activity > section.card[aria-label=*]|1
 meridian|activity@390x780|dom|div.activity-job-list > div.card.durable-queue|1
 meridian|activity@390x780|dom|div.activity-jobs-layout > aside.activity-job-types|1
 meridian|activity@390x780|dom|div.activity-jobs-layout > div.activity-job-list|1
@@ -7817,6 +7847,7 @@ meridian|activity@390x780|dom|nav.durable-pagination[aria-label=*] > span[role=s
 meridian|activity@390x780|dom|nav.md-bottom[aria-label=*] > a|1
 meridian|activity@390x780|dom|nav.md-bottom[aria-label=*] > button.ghost[type=button]|3
 meridian|activity@390x780|dom|p.muted[text] > a[text]|1
+meridian|activity@390x780|dom|p[text] > b[text]|1
 meridian|activity@390x780|dom|section > div.dvr-section-head|1
 meridian|activity@390x780|dom|section > div.empty[text]|1
 meridian|activity@390x780|dom|section > div.lt-recs|1
@@ -7824,6 +7855,9 @@ meridian|activity@390x780|dom|section#activity-jobs[role=tabpanel aria-labelledb
 meridian|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > details.activity-section|5
 meridian|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div#cluster-workers|1
 meridian|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div.activity-idle[text]|1
+meridian|activity@390x780|dom|section.card[aria-label=*] > h3[text]|1
+meridian|activity@390x780|dom|section.card[aria-label=*] > p.hint[text]|1
+meridian|activity@390x780|dom|section.card[aria-label=*] > p[text]|1
 meridian|activity@390x780|dom|section[aria-label=*] > div.dvr-layout|1
 meridian|activity@390x780|dom|section[aria-label=*] > div.dvr-section-head|1
 meridian|activity@390x780|dom|select[aria-label=*] > option[text]|9
@@ -8090,7 +8124,6 @@ meridian|auth@1280x860|dom|details.connectqr > summary[text]|1
 meridian|auth@1280x860|dom|div#app > div.center|1
 meridian|auth@1280x860|dom|div.center > form#af.auth.card|1
 meridian|auth@1280x860|dom|form#af.auth.card > button#ab[text]|1
-meridian|auth@1280x860|dom|form#af.auth.card > button[type=button text]|1
 meridian|auth@1280x860|dom|form#af.auth.card > details.connectqr|1
 meridian|auth@1280x860|dom|form#af.auth.card > div#aerr.err|1
 meridian|auth@1280x860|dom|form#af.auth.card > div.logo[text]|1
@@ -8104,8 +8137,7 @@ meridian|auth@1280x860|focus|000|input#u
 meridian|auth@1280x860|focus|001|input#p
 meridian|auth@1280x860|focus|002|summary "Connect an app with a QR code"
 meridian|auth@1280x860|focus|003|button#ab "Sign in"
-meridian|auth@1280x860|focus|004|button "Help · Report a problem"
-meridian|auth@1280x860|focus|005|<wrap>
+meridian|auth@1280x860|focus|004|<wrap>
 meridian|auth@1280x860|req|GET /api/v1/server|1
 meridian|auth@390x780|dom|^ > div#app|1
 meridian|auth@390x780|dom|details.connectqr > img|1
@@ -8114,7 +8146,6 @@ meridian|auth@390x780|dom|details.connectqr > summary[text]|1
 meridian|auth@390x780|dom|div#app > div.center|1
 meridian|auth@390x780|dom|div.center > form#af.auth.card|1
 meridian|auth@390x780|dom|form#af.auth.card > button#ab[text]|1
-meridian|auth@390x780|dom|form#af.auth.card > button[type=button text]|1
 meridian|auth@390x780|dom|form#af.auth.card > details.connectqr|1
 meridian|auth@390x780|dom|form#af.auth.card > div#aerr.err|1
 meridian|auth@390x780|dom|form#af.auth.card > div.logo[text]|1
@@ -8128,8 +8159,7 @@ meridian|auth@390x780|focus|000|input#u
 meridian|auth@390x780|focus|001|input#p
 meridian|auth@390x780|focus|002|summary "Connect an app with a QR code"
 meridian|auth@390x780|focus|003|button#ab "Sign in"
-meridian|auth@390x780|focus|004|button "Help · Report a problem"
-meridian|auth@390x780|focus|005|<wrap>
+meridian|auth@390x780|focus|004|<wrap>
 meridian|auth@390x780|req|GET /api/v1/server|1
 meridian|category@1280x860|dom|^ > div#app|1
 meridian|category@1280x860|dom|a > span.md-label[text]|6
@@ -9858,7 +9888,7 @@ meridian|player@1280x860|dom|button.ghost[aria-label=* type=button] > span.md-la
 meridian|player@1280x860|dom|button.ghost[aria-label=* type=button] > svg.px-ico[aria-hidden=true]|3
 meridian|player@1280x860|dom|button.ghost[type=button] > span[text]|3
 meridian|player@1280x860|dom|button.ghost[type=button] > svg.px-ico[aria-hidden=true]|3
-meridian|player@1280x860|dom|dd > button.ghost.sm[type=button text]|4
+meridian|player@1280x860|dom|dd > button.ghost.sm[type=button text]|6
 meridian|player@1280x860|dom|dd > div.watch-trks|4
 meridian|player@1280x860|dom|dd > span.mode-chip[text]|2
 meridian|player@1280x860|dom|dd > span.mode-detail[text]|2
@@ -9979,7 +10009,9 @@ meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] >
 meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
 meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 meridian|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 meridian|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -9992,12 +10024,13 @@ meridian|player@1280x860|dom|svg.px-ico[aria-hidden=true] > path|11
 meridian|player@1280x860|dom|svg.px-ico[aria-hidden=true] > rect|13
 meridian|player@1280x860|focus|000|button#pbforward.picon "Forward 10 seconds"
 meridian|player@1280x860|focus|001|button#pbforward30.picon "Forward 30 seconds"
-meridian|player@1280x860|focus|002|button#pbquality.picon "Playback quality"
-meridian|player@1280x860|focus|003|button#pbsettings.picon "Playback settings"
-meridian|player@1280x860|focus|004|button#pbpip.picon "Picture in picture"
-meridian|player@1280x860|focus|005|button#pblarger.picon "Larger"
-meridian|player@1280x860|focus|006|button#pbfs.picon "Fullscreen"
-meridian|player@1280x860|focus|007|<wrap>
+meridian|player@1280x860|focus|002|button#pbsubs.picon.pcc "Subtitles"
+meridian|player@1280x860|focus|003|button#pbquality.picon "Playback quality"
+meridian|player@1280x860|focus|004|button#pbsettings.picon "Playback settings"
+meridian|player@1280x860|focus|005|button#pbpip.picon "Picture in picture"
+meridian|player@1280x860|focus|006|button#pblarger.picon "Larger"
+meridian|player@1280x860|focus|007|button#pbfs.picon "Fullscreen"
+meridian|player@1280x860|focus|008|<wrap>
 meridian|player@1280x860|req|GET /api/v1/activity|2
 meridian|player@1280x860|req|GET /api/v1/features|1
 meridian|player@1280x860|req|GET /api/v1/files/<id>/direct|1
@@ -10037,7 +10070,7 @@ meridian|player@390x780|dom|button.ghost[aria-label=* type=button] > span.md-lab
 meridian|player@390x780|dom|button.ghost[aria-label=* type=button] > svg.px-ico[aria-hidden=true]|3
 meridian|player@390x780|dom|button.ghost[type=button] > span[text]|3
 meridian|player@390x780|dom|button.ghost[type=button] > svg.px-ico[aria-hidden=true]|3
-meridian|player@390x780|dom|dd > button.ghost.sm[type=button text]|4
+meridian|player@390x780|dom|dd > button.ghost.sm[type=button text]|6
 meridian|player@390x780|dom|dd > div.watch-trks|4
 meridian|player@390x780|dom|dd > span.mode-chip[text]|2
 meridian|player@390x780|dom|dd > span.mode-detail[text]|2
@@ -10157,7 +10190,9 @@ meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > 
 meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
 meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 meridian|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 meridian|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -10170,11 +10205,12 @@ meridian|player@390x780|dom|svg.px-ico[aria-hidden=true] > path|11
 meridian|player@390x780|dom|svg.px-ico[aria-hidden=true] > rect|13
 meridian|player@390x780|focus|000|button#pbforward.picon "Forward 10 seconds"
 meridian|player@390x780|focus|001|button#pbforward30.picon "Forward 30 seconds"
-meridian|player@390x780|focus|002|button#pbquality.picon "Playback quality"
-meridian|player@390x780|focus|003|button#pbsettings.picon "Playback settings"
-meridian|player@390x780|focus|004|button#pbpip.picon "Picture in picture"
-meridian|player@390x780|focus|005|button#pbfs.picon "Fullscreen"
-meridian|player@390x780|focus|006|<wrap>
+meridian|player@390x780|focus|002|button#pbsubs.picon.pcc "Subtitles"
+meridian|player@390x780|focus|003|button#pbquality.picon "Playback quality"
+meridian|player@390x780|focus|004|button#pbsettings.picon "Playback settings"
+meridian|player@390x780|focus|005|button#pbpip.picon "Picture in picture"
+meridian|player@390x780|focus|006|button#pbfs.picon "Fullscreen"
+meridian|player@390x780|focus|007|<wrap>
 meridian|player@390x780|req|GET /api/v1/activity|2
 meridian|player@390x780|req|GET /api/v1/features|1
 meridian|player@390x780|req|GET /api/v1/files/<id>/direct|1
@@ -10656,7 +10692,7 @@ meridian|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgrou
 meridian|settings-developer@1280x860|dom|p.devcheck-description[text] > a[text]|1
 meridian|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|46
 meridian|settings-developer@1280x860|dom|p.hint[text] > code[text]|2
-meridian|settings-developer@1280x860|dom|p[text] > code[text]|2
+meridian|settings-developer@1280x860|dom|p[text] > code[text]|4
 meridian|settings-developer@1280x860|dom|select#vod-output-preparation > option[text]|3
 meridian|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|4
 meridian|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|18
@@ -11031,7 +11067,7 @@ meridian|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup
 meridian|settings-developer@390x780|dom|p.devcheck-description[text] > a[text]|1
 meridian|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|46
 meridian|settings-developer@390x780|dom|p.hint[text] > code[text]|2
-meridian|settings-developer@390x780|dom|p[text] > code[text]|2
+meridian|settings-developer@390x780|dom|p[text] > code[text]|4
 meridian|settings-developer@390x780|dom|select#vod-output-preparation > option[text]|3
 meridian|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|4
 meridian|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|18
@@ -11462,6 +11498,7 @@ theater|activity@1280x860|dom|div#cluster-workers > h2.section[text]|1
 theater|activity@1280x860|dom|div#cluster-workers > p.hint[text]|1
 theater|activity@1280x860|dom|div#durable-activity > div.activity-jobs-layout|1
 theater|activity@1280x860|dom|div#durable-activity > h2.section[text]|1
+theater|activity@1280x860|dom|div#durable-activity > section.card[aria-label=*]|1
 theater|activity@1280x860|dom|div.activity-job-list > div.card.durable-queue|1
 theater|activity@1280x860|dom|div.activity-jobs-layout > aside.activity-job-types|1
 theater|activity@1280x860|dom|div.activity-jobs-layout > div.activity-job-list|1
@@ -11528,6 +11565,7 @@ theater|activity@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|6
 theater|activity@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|activity@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|6
 theater|activity@1280x860|dom|p.muted[text] > a[text]|1
+theater|activity@1280x860|dom|p[text] > b[text]|1
 theater|activity@1280x860|dom|section > div.dvr-section-head|1
 theater|activity@1280x860|dom|section > div.empty[text]|1
 theater|activity@1280x860|dom|section > div.lt-recs|1
@@ -11535,6 +11573,9 @@ theater|activity@1280x860|dom|section#activity-jobs[role=tabpanel aria-labelledb
 theater|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > details.activity-section|5
 theater|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div#cluster-workers|1
 theater|activity@1280x860|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div.activity-idle[text]|1
+theater|activity@1280x860|dom|section.card[aria-label=*] > h3[text]|1
+theater|activity@1280x860|dom|section.card[aria-label=*] > p.hint[text]|1
+theater|activity@1280x860|dom|section.card[aria-label=*] > p[text]|1
 theater|activity@1280x860|dom|section[aria-label=*] > div.dvr-layout|1
 theater|activity@1280x860|dom|section[aria-label=*] > div.dvr-section-head|1
 theater|activity@1280x860|dom|select[aria-label=*] > option[text]|9
@@ -11616,6 +11657,7 @@ theater|activity@390x780|dom|div#cluster-workers > h2.section[text]|1
 theater|activity@390x780|dom|div#cluster-workers > p.hint[text]|1
 theater|activity@390x780|dom|div#durable-activity > div.activity-jobs-layout|1
 theater|activity@390x780|dom|div#durable-activity > h2.section[text]|1
+theater|activity@390x780|dom|div#durable-activity > section.card[aria-label=*]|1
 theater|activity@390x780|dom|div.activity-job-list > div.card.durable-queue|1
 theater|activity@390x780|dom|div.activity-jobs-layout > aside.activity-job-types|1
 theater|activity@390x780|dom|div.activity-jobs-layout > div.activity-job-list|1
@@ -11682,6 +11724,7 @@ theater|activity@390x780|dom|nav.th-nav[aria-label=*] > a[text]|6
 theater|activity@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|activity@390x780|dom|nav.th-pills[aria-label=*] > a[text]|6
 theater|activity@390x780|dom|p.muted[text] > a[text]|1
+theater|activity@390x780|dom|p[text] > b[text]|1
 theater|activity@390x780|dom|section > div.dvr-section-head|1
 theater|activity@390x780|dom|section > div.empty[text]|1
 theater|activity@390x780|dom|section > div.lt-recs|1
@@ -11689,6 +11732,9 @@ theater|activity@390x780|dom|section#activity-jobs[role=tabpanel aria-labelledby
 theater|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > details.activity-section|5
 theater|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div#cluster-workers|1
 theater|activity@390x780|dom|section#activity-status[role=tabpanel aria-labelledby=*] > div.activity-idle[text]|1
+theater|activity@390x780|dom|section.card[aria-label=*] > h3[text]|1
+theater|activity@390x780|dom|section.card[aria-label=*] > p.hint[text]|1
+theater|activity@390x780|dom|section.card[aria-label=*] > p[text]|1
 theater|activity@390x780|dom|section[aria-label=*] > div.dvr-layout|1
 theater|activity@390x780|dom|section[aria-label=*] > div.dvr-section-head|1
 theater|activity@390x780|dom|select[aria-label=*] > option[text]|9
@@ -11931,7 +11977,6 @@ theater|auth@1280x860|dom|details.connectqr > summary[text]|1
 theater|auth@1280x860|dom|div#app > div.center|1
 theater|auth@1280x860|dom|div.center > form#af.auth.card|1
 theater|auth@1280x860|dom|form#af.auth.card > button#ab[text]|1
-theater|auth@1280x860|dom|form#af.auth.card > button[type=button text]|1
 theater|auth@1280x860|dom|form#af.auth.card > details.connectqr|1
 theater|auth@1280x860|dom|form#af.auth.card > div#aerr.err|1
 theater|auth@1280x860|dom|form#af.auth.card > div.logo[text]|1
@@ -11945,8 +11990,7 @@ theater|auth@1280x860|focus|000|input#u
 theater|auth@1280x860|focus|001|input#p
 theater|auth@1280x860|focus|002|summary "Connect an app with a QR code"
 theater|auth@1280x860|focus|003|button#ab "Sign in"
-theater|auth@1280x860|focus|004|button "Help · Report a problem"
-theater|auth@1280x860|focus|005|<wrap>
+theater|auth@1280x860|focus|004|<wrap>
 theater|auth@1280x860|req|GET /api/v1/server|1
 theater|auth@390x780|dom|^ > div#app|1
 theater|auth@390x780|dom|details.connectqr > img|1
@@ -11955,7 +11999,6 @@ theater|auth@390x780|dom|details.connectqr > summary[text]|1
 theater|auth@390x780|dom|div#app > div.center|1
 theater|auth@390x780|dom|div.center > form#af.auth.card|1
 theater|auth@390x780|dom|form#af.auth.card > button#ab[text]|1
-theater|auth@390x780|dom|form#af.auth.card > button[type=button text]|1
 theater|auth@390x780|dom|form#af.auth.card > details.connectqr|1
 theater|auth@390x780|dom|form#af.auth.card > div#aerr.err|1
 theater|auth@390x780|dom|form#af.auth.card > div.logo[text]|1
@@ -11969,8 +12012,7 @@ theater|auth@390x780|focus|000|input#u
 theater|auth@390x780|focus|001|input#p
 theater|auth@390x780|focus|002|summary "Connect an app with a QR code"
 theater|auth@390x780|focus|003|button#ab "Sign in"
-theater|auth@390x780|focus|004|button "Help · Report a problem"
-theater|auth@390x780|focus|005|<wrap>
+theater|auth@390x780|focus|004|<wrap>
 theater|auth@390x780|req|GET /api/v1/server|1
 theater|category@1280x860|dom|^ > div#app|1
 theater|category@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
@@ -13457,7 +13499,7 @@ theater|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-labe
 theater|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|player@1280x860|dom|dd > button.ghost.sm[type=button text]|4
+theater|player@1280x860|dom|dd > button.ghost.sm[type=button text]|6
 theater|player@1280x860|dom|dd > div.watch-trks|4
 theater|player@1280x860|dom|dd > span.mode-chip[text]|2
 theater|player@1280x860|dom|dd > span.mode-detail[text]|2
@@ -13573,7 +13615,9 @@ theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 theater|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 theater|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -13583,12 +13627,13 @@ theater|player@1280x860|dom|svg.pseek-arrows[aria-hidden=true] > g|2
 theater|player@1280x860|dom|svg.pseek-arrows[aria-hidden=true] > path|5
 theater|player@1280x860|focus|000|button#pbforward.picon "Forward 10 seconds"
 theater|player@1280x860|focus|001|button#pbforward30.picon "Forward 30 seconds"
-theater|player@1280x860|focus|002|button#pbquality.picon "Playback quality"
-theater|player@1280x860|focus|003|button#pbsettings.picon "Playback settings"
-theater|player@1280x860|focus|004|button#pbpip.picon "Picture in picture"
-theater|player@1280x860|focus|005|button#pblarger.picon "Larger"
-theater|player@1280x860|focus|006|button#pbfs.picon "Fullscreen"
-theater|player@1280x860|focus|007|<wrap>
+theater|player@1280x860|focus|002|button#pbsubs.picon.pcc "Subtitles"
+theater|player@1280x860|focus|003|button#pbquality.picon "Playback quality"
+theater|player@1280x860|focus|004|button#pbsettings.picon "Playback settings"
+theater|player@1280x860|focus|005|button#pbpip.picon "Picture in picture"
+theater|player@1280x860|focus|006|button#pblarger.picon "Larger"
+theater|player@1280x860|focus|007|button#pbfs.picon "Fullscreen"
+theater|player@1280x860|focus|008|<wrap>
 theater|player@1280x860|req|GET /api/v1/activity|2
 theater|player@1280x860|req|GET /api/v1/features|1
 theater|player@1280x860|req|GET /api/v1/files/<id>/direct|1
@@ -13616,7 +13661,7 @@ theater|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label
 theater|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|player@390x780|dom|dd > button.ghost.sm[type=button text]|4
+theater|player@390x780|dom|dd > button.ghost.sm[type=button text]|6
 theater|player@390x780|dom|dd > div.watch-trks|4
 theater|player@390x780|dom|dd > span.mode-chip[text]|2
 theater|player@390x780|dom|dd > span.mode-detail[text]|2
@@ -13731,7 +13776,9 @@ theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 theater|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 theater|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -13741,11 +13788,12 @@ theater|player@390x780|dom|svg.pseek-arrows[aria-hidden=true] > g|2
 theater|player@390x780|dom|svg.pseek-arrows[aria-hidden=true] > path|5
 theater|player@390x780|focus|000|button#pbforward.picon "Forward 10 seconds"
 theater|player@390x780|focus|001|button#pbforward30.picon "Forward 30 seconds"
-theater|player@390x780|focus|002|button#pbquality.picon "Playback quality"
-theater|player@390x780|focus|003|button#pbsettings.picon "Playback settings"
-theater|player@390x780|focus|004|button#pbpip.picon "Picture in picture"
-theater|player@390x780|focus|005|button#pbfs.picon "Fullscreen"
-theater|player@390x780|focus|006|<wrap>
+theater|player@390x780|focus|002|button#pbsubs.picon.pcc "Subtitles"
+theater|player@390x780|focus|003|button#pbquality.picon "Playback quality"
+theater|player@390x780|focus|004|button#pbsettings.picon "Playback settings"
+theater|player@390x780|focus|005|button#pbpip.picon "Picture in picture"
+theater|player@390x780|focus|006|button#pbfs.picon "Fullscreen"
+theater|player@390x780|focus|007|<wrap>
 theater|player@390x780|req|GET /api/v1/activity|2
 theater|player@390x780|req|GET /api/v1/features|1
 theater|player@390x780|req|GET /api/v1/files/<id>/direct|1
@@ -14182,7 +14230,7 @@ theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|6
 theater|settings-developer@1280x860|dom|p.devcheck-description[text] > a[text]|1
 theater|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|46
 theater|settings-developer@1280x860|dom|p.hint[text] > code[text]|2
-theater|settings-developer@1280x860|dom|p[text] > code[text]|2
+theater|settings-developer@1280x860|dom|p[text] > code[text]|4
 theater|settings-developer@1280x860|dom|select#vod-output-preparation > option[text]|3
 theater|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|4
 theater|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|18
@@ -14543,7 +14591,7 @@ theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a[text]|6
 theater|settings-developer@390x780|dom|p.devcheck-description[text] > a[text]|1
 theater|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|46
 theater|settings-developer@390x780|dom|p.hint[text] > code[text]|2
-theater|settings-developer@390x780|dom|p[text] > code[text]|2
+theater|settings-developer@390x780|dom|p[text] > code[text]|4
 theater|settings-developer@390x780|dom|select#vod-output-preparation > option[text]|3
 theater|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|4
 theater|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|18

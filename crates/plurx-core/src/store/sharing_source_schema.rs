@@ -121,7 +121,7 @@ pub(crate) fn boot_authority_guard(parameter: usize) -> String {
 fn installed_shape_guard_at(version: i64) -> String {
     format!(
         "({}) AND ({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={version}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version={SOURCE_LAYOUT_VERSION}) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",
-        super::jellyfin_watch::session_dependency_guard(),
+        super::session_dependency_guard(),
         boot_shape_guard(),
         exact_object(INSTALLATION_SCHEMA),
         exact_object(TRANSACTION_SCHEMA),
@@ -274,7 +274,7 @@ pub(crate) fn predecessor_layout_guard() -> String {
         guards.push(format!("(SELECT count(*) FROM pragma_table_info('{table}'))={} AND NOT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE NOT ({expected})) AND EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='user_id' AND \"notnull\"=1) AND EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='main' AND name='{table}' AND strict=1)",columns.len()));
     }
     guards.push(legacy_object_guard());
-    guards.push(super::jellyfin_watch::session_dependency_guard());
+    guards.push(super::session_dependency_guard());
     format!("({})", guards.join(") AND ("))
 }
 pub(crate) fn predecessor_guard(now_parameter: usize) -> String {
