@@ -1683,15 +1683,19 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertEqual(
             production.count("recovery_epoch: recovery_epoch.clone(),"),
-            3,
-            "processed qualification, worker identity and durable activation share one epoch",
+            2,
+            "worker identity and durable activation share the one epoch the start minted",
         )
-        # Processed Auto qualification borrows the same admitted identity;
-        # it must not mint a second recovery allowance before worker creation.
-        qualification = production.split(
-            "let recovery = crate::transcode::SessionRecoveryIdentity {", 1
-        )[1].split(".prepare_processed_hdr10(", 1)[0]
-        self.assertIn("recovery_epoch: recovery_epoch.clone(),", qualification)
+        # Processed Dolby Vision is an upgrade after the first frame (playback
+        # start D1): the create no longer qualifies it. The upgrade's trial
+        # borrows the admitted identity of the session the start made, read
+        # from its durable route, so it cannot mint a second recovery
+        # allowance for the same play.
+        upgrade = (ROOT / "crates/plurxd/src/http/hls/processed_upgrade.rs").read_text()
+        qualification = upgrade.split(
+            "pub(in crate::http) async fn run_upgrade_with<", 1
+        )[1].split("run_trial(trial_request, recovery)", 1)[0]
+        self.assertIn("recovery_epoch: route.recovery_epoch.clone(),", qualification)
         self.assertNotIn("recovery_epoch_for(", qualification)
         self.assertIn(
             "fn one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row",
