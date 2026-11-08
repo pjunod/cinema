@@ -16,6 +16,10 @@ bump may break compatibility and a **patch** bump never does.
   instead of the permanent `422` that discarded a valid Curator notification.
   A path under no root is `422 {"code":"path_outside_roots"}`, decided lexically
   before the filesystem is consulted; the body still names every root.
+- New daemon-mediated source readers retain kernel lifetime witnesses on
+  native macOS, Linux and containers, allowing exact-owner recovery after
+  Cinema exits without rebooting the server. Legacy readers without this
+  evidence remain held pending a separate physical stop proof.
 - Jobs includes fresh CPU, GPU and heavy-worker capacity from learner nodes.
   Worker observations use the member-scoped operations channel and remain
   independent of voter-only playback and recording authority.
