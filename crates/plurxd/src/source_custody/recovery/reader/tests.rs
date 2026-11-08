@@ -469,8 +469,12 @@ fn reader_process_fixture() {
             // SAFETY: fstat neither owns nor closes the descriptor; success initializes info.
             if unsafe { libc::fstat(descriptor, info.as_mut_ptr()) } == 0 {
                 let info = unsafe { info.assume_init() };
+                #[cfg(target_os = "linux")]
+                let actual_device = info.st_dev;
+                #[cfg(target_os = "macos")]
+                let actual_device = info.st_dev as u64;
                 assert!(
-                    info.st_dev as u64 != expected_device || info.st_ino != expected_inode,
+                    actual_device != expected_device || info.st_ino != expected_inode,
                     "original source descriptor escaped into mediated child"
                 );
             }

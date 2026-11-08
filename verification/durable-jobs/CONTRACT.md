@@ -14,6 +14,21 @@ source mapping**, not an automatic refinement proof. Source hashes in
 that set complete or that the abstractions are correct.
 
 
+## Main direct-push source drift — scoped review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed the authority-source drift that direct
+pushes left on main `ce11e8fd2`, against the last reviewed bytes. This is an
+author review awaiting an independent check, not execution evidence.
+
+| Changed source (commit) | Change | Model action or property | Still holds? |
+|---|---|---|---|
+| `plurxd/background_jobs.rs` (4f417e852) | Test-only: inside `#[cfg(test)] mod tests`, the fixture `lost_claim_acknowledgement_resolves_the_original_attempt` stops the heartbeat and settles joined source custody before reading the candidate | None; no production code changes. `ReplayClaim`/`ResolveClaim` correspondence and every claim/settlement body are unchanged | Yes |
+| `plurxd/main.rs` (d9a0ebc76) | `spawn_background_loops` also starts `worker_status_cache_loop`, a read-only, cancellable once-per-interval refresh of local worker capacity for Activity | None; the selected worker spawn, its wait/lock order and the queue/domain authority paths are unchanged | Yes |
+| `plurxd/transcode/manager/produce.rs` (0a33ddc02) | One `tracing::warn!` gains `target: "plurxd::transcode"` | None; no control flow change | Yes |
+
+No model, configuration or property changes; only whole-file pins are
+refreshed.
+
 ## Source custody replay on 2026-11-07
 
 Against `cc2ca1338`, scheduler upkeep now rechecks settlement proof and
@@ -876,3 +891,20 @@ from runtime tests, TLC qualification and a refinement proof.
 ## November 7 library dispatch and source release
 
 A fresh, readable manual library request now participates in the next shared resource grant. The write still uses the existing claim identity, fence and physical source limits. The source controller can inspect that immutable identity while a completion holds its publication mutex. The durable model covers the resulting claim and settlement, while the dispatch classes, timing and physical file operations are exercised in the Store and worker tests.
+
+## November 8 physical reader recovery
+
+Before exposing input, the worker persists an activation intent and requires
+the Store to acknowledge its exact token and activation nonce. A mediated
+reader witness is armed only after that acknowledgement. Recovery uses the
+same typed settlement and release selectors as normal cleanup. A lost Store
+reply leaves evidence for retry. Physical-stop evidence cannot grant a new
+activation or stand in for a worker join.
+[Activation](../../crates/plurxd/src/source_custody.rs) ·
+[Settlement](../../crates/plurxd/src/source_custody/recovery.rs)
+
+The model takes reader termination as a premise. Separate runtime tests cover
+the native same-kernel witness and the Linux host census for one audited
+legacy DV activation. An unknown reader or inconclusive witness keeps custody
+held. [Native witness tests](../../crates/plurxd/src/source_custody/recovery/reader/tests.rs) ·
+[Legacy custody tests](../../crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs)
