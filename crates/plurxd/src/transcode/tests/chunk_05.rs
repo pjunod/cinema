@@ -957,6 +957,9 @@
             commit_rolling_publication_media(&session, 74, observed_fetched_end_ms).await,
             "download frontier must reach the publication actor"
         );
+        // This regression starts after presentation; the hand-built segment
+        // inventory does not emit the actor's real advancing frame reports.
+        session.control.mark_startup_presented_for_test().await;
         expire_seeded_prefix(&session, 30).await;
         gc_expired_segments(&session).await;
         // This fixture expires files directly instead of advancing them
