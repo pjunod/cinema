@@ -122,8 +122,10 @@ pub struct ScanRequestV2 {
     pub key_id: i64,
     pub request_key: String,
     pub expected_files: Vec<ExpectedFile>,
-    /// `full_scan:<library>` · `heavy_lane:<holder>` · `root_unreadable:<path>`
-    /// · `queue_position:<n>`, or empty when nothing is in the way.
+    /// `full_scan:<library>` · `root_unreadable:<path>` · `queue_position:<n>`,
+    /// or empty when nothing is in the way. The contract also names
+    /// `heavy_lane:<holder>`; a targeted job takes no background source
+    /// reader, so nothing writes it.
     pub waiting_on: String,
     pub files: Vec<PlacedReport>,
     pub created_at_ms: i64,

@@ -305,7 +305,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
     assert_eq!(
         fixture_schema_rows(&current, MANAGED_SHAPE),
         source_extensions_fixture::managed_fixture_rows(
-            &source_extensions_fixture::managed_fixture_connection(4)
+            &source_extensions_fixture::managed_fixture_connection(5)
         )
     );
     assert_eq!(
