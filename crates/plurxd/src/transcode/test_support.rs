@@ -713,7 +713,11 @@ fn test_session_with_optional_child(
     stand_in_child: bool,
 ) -> Session {
     let child = stand_in_child.then(|| {
-        let child = tokio::process::Command::new("sleep")
+        let mut command = tokio::process::Command::new("sleep");
+        // AttemptChild signals the producer's process group on Linux.
+        #[cfg(target_os = "linux")]
+        command.process_group(0);
+        let child = command
             .arg("30")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

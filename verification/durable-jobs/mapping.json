@@ -505,7 +505,7 @@
       },
       {
         "anchor": "struct JobFence",
-        "sha256": "a394b8392e043a0c7922fe70d0905d49b094f218f5cb5eae8784b878bcc9a478",
+        "sha256": "fdb53a19bf3d49ec8a35c873f93e9b31dd28f1666f6733db7c8ed6015d949e93",
         "source": "crates/plurxd/src/background_jobs.rs",
         "table": "proposal \u00a74.1 runtime fence"
       },

@@ -3737,7 +3737,18 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn lost_claim_acknowledgement_resolves_the_original_attempt() {
-        let (store, id, active) = active().await;
+        let (store, id, mut active) = active().await;
+        // This fixture has no child or open source reader. Stop and join its
+        // heartbeat before modelling an abandoned lease, so it cannot renew
+        // the predecessor while the replacement claim is being resolved.
+        active.fence.loss_token().cancel();
+        active.stop.cancel();
+        active
+            .heartbeat
+            .take()
+            .expect("predecessor heartbeat")
+            .await
+            .expect("predecessor heartbeat joined");
         let candidate = store.background_job(&id).await.expect("read").expect("job");
         let now_ms = candidate
             .token
@@ -3758,6 +3769,27 @@ pub(crate) mod tests {
             // still runs on the real clock, so dispatch must be real too.
             dispatched_at_ms: unix_ms().expect("dispatch clock"),
         };
+        assert!(matches!(
+            store
+                .claim_artifact_job(request.clone())
+                .await
+                .expect("takeover with unresolved source custody"),
+            ClaimOutcome::Contended
+        ));
+        assert_eq!(store.job_attempts(&id).await.expect("attempts").len(), 1);
+        // Lease expiry alone must not release physical Source custody. The
+        // fixture's operation has joined; persist and release that exact
+        // receipt while retaining the abandoned running job for takeover.
+        settle_joined_source_custody(
+            &store,
+            active
+                .fence
+                .0
+                .source_custody
+                .clone()
+                .expect("predecessor source custody"),
+        )
+        .await;
         let (result, dropped) = faults::dropping(
             faults::CLAIM,
             claim_with_resolution(store.as_ref(), &candidate, request.clone()),
@@ -3781,10 +3813,20 @@ pub(crate) mod tests {
                 .expect("read")
                 .expect("job")
                 .token,
-            Some(token)
+            Some(token.clone())
         );
         assert_eq!(store.job_attempts(&id).await.expect("attempts").len(), 2);
         active.finish().await;
+        assert_eq!(
+            store
+                .background_job(&id)
+                .await
+                .expect("read after predecessor retirement")
+                .expect("job")
+                .token,
+            Some(token),
+            "predecessor retirement must preserve the recovered owner"
+        );
     }
 
     #[tokio::test]
