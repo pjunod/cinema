@@ -2071,9 +2071,31 @@ mod dv_title_companion {
             &scanner,
             r#"#!/bin/sh
 set -eu
-case "$1" in http://127.0.0.1:*/*) ;; *) exit 91 ;; esac
-test "$2" = 0
-test ! -e /proc/self/fd/3
+case "$1" in
+  http://127.0.0.1:*/*) ;;
+  *) printf 'scanner refused non-loopback input URL: %s\n' "$1" >&2; exit 91 ;;
+esac
+if test "$2" != 0; then
+  printf 'scanner refused stream index: %s\n' "$2" >&2
+  exit 92
+fi
+source_identity=$(/usr/bin/stat -Lc '%d:%i' "${0%/*}/original.mkv")
+if ! test -d "/proc/$$/fd"; then
+  printf 'scanner cannot inspect inherited descriptors\n' >&2
+  exit 95
+fi
+for descriptor in /proc/$$/fd/*; do
+  if descriptor_identity=$(/usr/bin/stat -Lc '%d:%i' "$descriptor" 2>/dev/null); then
+    if test "$descriptor_identity" = "$source_identity"; then
+      printf 'scanner inherited raw media descriptor %s (device:inode %s)\n' \
+        "$descriptor" "$source_identity" >&2
+      exit 93
+    fi
+  elif test -e "$descriptor"; then
+    printf 'scanner could not identify inherited descriptor %s\n' "$descriptor" >&2
+    exit 94
+  fi
+done
 printf '%s' "$1" > "${0%/*}/scanner.input"
 printf '%s' "$$" > "${0%/*}/scanner.pid"
 exec /bin/sleep 60
@@ -2112,6 +2134,13 @@ exec /bin/sleep 60
                     // Join the completed owner and report its launch/exit
                     // result instead of hiding it behind a PID-file timeout.
                     let result = (&mut task.task).await;
+                    if let Ok(Ok(output)) = &result {
+                        panic!(
+                            "scanner exited before accepting its isolated source URL: status={}, stderr={}",
+                            output.status,
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    }
                     panic!("scanner exited before accepting its isolated source URL: {result:?}");
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
