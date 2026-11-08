@@ -250,7 +250,7 @@ async fn cancelled_copy_registration_rejection_keeps_exact_cleanup_ownership() {
 /// A process that outlives the test unless lifecycle cleanup reaps it.
 fn long_running_child() -> Child {
     let mut cmd = tokio::process::Command::new("sleep");
-    cmd.arg("60").kill_on_drop(true);
+    cmd.arg("60").process_group(0).kill_on_drop(true);
     cmd.spawn().expect("spawn sleep")
 }
 

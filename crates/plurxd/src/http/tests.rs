@@ -14935,6 +14935,7 @@ async fn the_delivery_plan_carries_a_selected_non_default_audio_track() {
     std::fs::create_dir_all(&dir).expect("media dir");
     let path = dir.join("Dual Language.mp4");
     std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("media file");
+    let metadata = std::fs::metadata(&path).expect("media metadata");
     // Both tracks decode on this client and the container is native, so
     // nothing but the selection can move the verdict off direct play.
     let file = state
@@ -14942,8 +14943,13 @@ async fn the_delivery_plan_carries_a_selected_non_default_audio_track() {
         .upsert_file(
             seeded.movie,
             &path.to_string_lossy(),
-            25,
-            1,
+            metadata.len() as i64,
+            metadata
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix mtime")
+                .as_secs() as i64,
             &ProbeResult {
                 duration_ms: Some(60_000),
                 container: Some("mp4".into()),
@@ -15429,7 +15435,12 @@ async fn android_dv_delivery_http_boundaries_bind_conversion_to_hls_and_narrow_p
             seeded.movie,
             &source.to_string_lossy(),
             metadata.len() as i64,
-            1,
+            metadata
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix mtime")
+                .as_secs() as i64,
             &ProbeResult {
                 duration_ms: Some(12_000),
                 container: Some("mkv".into()),
