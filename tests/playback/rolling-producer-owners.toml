@@ -5493,7 +5493,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and the cross-node exclusion test's one sleep. No production timer is added.
 # Main merged into the effort (2026-11-08): main's and the effort's reviewed
 # additions are both counted; the total is the merged tree's exact count.
-expected_occurrences = 2100
+# Review 3 D1 fixes: +2. http/system.rs `prepared_seam_session_processed`
+# bounds its one route read with `tokio::time::timeout` (250 ms) and starts
+# nothing; the S9 trial-failure test waits one exchange cadence (`sleep`,
+# 260 ms) before its second control exchange. No task or process is added.
+expected_occurrences = 2102
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
