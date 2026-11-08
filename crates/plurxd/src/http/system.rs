@@ -1163,6 +1163,31 @@ impl ClientPreparedSeam {
     }
 }
 
+/// Whether the session a `prepared_seam` report names is a processed Dolby
+/// Vision / HDR10-E successor, read from its durable recipe: the server's own
+/// record of what that successor delivers, so the processed upgrade's bar
+/// counts its own switches (review 3 S4) without a new beacon field and for
+/// every client version. Bounded: a read that misses its budget, or a session
+/// with no route (a refused successor that never committed), counts as an
+/// ordinary switch.
+async fn prepared_seam_session_processed(state: &AppState, session_id: &str) -> bool {
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        state.store.media_session_route(session_id),
+    )
+    .await;
+    let Ok(Ok(Some(route))) = read else {
+        return false;
+    };
+    serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(&route.recipe_json)
+        .is_ok_and(|recipe| {
+            recipe.request.dv_processing_destination.is_some()
+                || recipe
+                    .candidate_catalog
+                    .is_some_and(|catalog| catalog.candidate.processed_dv)
+        })
+}
+
 /// Sustained rate and burst allowance for `/client-log`, in reports per minute.
 ///
 /// The log ring holds 2000 lines, so a browser that hits an error in a loop can
@@ -1386,7 +1411,11 @@ pub async fn client_log(
         .as_ref()
         .and_then(ClientPreparedSeam::report)
     {
-        crate::playback_control::record_prepared_seam(platform, report);
+        let processed = match ev.session_id.as_deref() {
+            Some(session) => prepared_seam_session_processed(&state, session).await,
+            None => false,
+        };
+        crate::playback_control::record_prepared_seam(platform, processed, report);
     }
     let mut event = client_playback_event(&ev, user.id);
     // A first frame or a failure report settles the start attempt this

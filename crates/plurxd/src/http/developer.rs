@@ -1209,7 +1209,10 @@ async fn processed_dv_upgrade(state: &AppState) -> DeveloperEnableItem {
     use crate::playback_control::{prepared_seam_counts, processed_upgrade_count, ClientPlatform};
     use RequirementStatus::{Met, Unavailable, Unmet};
     let platform = |id: &'static str, title: &'static str, client: ClientPlatform, note: &str| {
-        let (qualified, reported) = prepared_seam_counts(client);
+        // The processed upgrade's own switches: prepared switches to a
+        // processed successor. Ordinary rung changes ride the same seam but
+        // say nothing about the processed output's.
+        let (qualified, reported) = prepared_seam_counts(client, true);
         DeveloperRequirement {
             id,
             title,
@@ -1219,10 +1222,10 @@ async fn processed_dv_upgrade(state: &AppState) -> DeveloperEnableItem {
                 Unmet
             },
             evidence: format!(
-                "{}: {qualified} of {PROCESSED_UPGRADE_SWITCHES} measured switches (committed, \
-                 complete ±2 s frame samples, zero dropped frames, independently observed audio \
-                 continuity, no reopen); {reported} prepared switches reported to this node since \
-                 it started.{note}",
+                "{}: {qualified} of {PROCESSED_UPGRADE_SWITCHES} measured switches to a processed \
+                 successor (committed, complete ±2 s frame samples, zero dropped frames, \
+                 independently observed audio continuity, no reopen); {reported} prepared \
+                 switches to a processed successor reported to this node since it started.{note}",
                 if qualified >= PROCESSED_UPGRADE_SWITCHES {
                     "qualified"
                 } else {
