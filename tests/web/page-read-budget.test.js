@@ -285,9 +285,13 @@ test("Activity detail request guard executes one current request and releases", 
      const DVR_PAGE={pendingId:null,selectedId:null,closedByUser:false};
      function dvrSetOverview(){} function loadDvrRecent(){} function selectDvrDetail(){}
      function refreshDurableActivity(){}
+     // Activity -> Starts (playback start G1): an admin on the Starts tab
+     // refreshes the fleet read alongside the detail.
+     const ME={is_admin:true}; const ACTIVITY_VIEW={tab:"starts"}; let STARTS_REFRESHES=0;
+     function refreshActivityStarts(){STARTS_REFRESHES++;}
      const matchMedia=()=>({matches:false});
      ${shippedSource("renderActivityBody")};
-     return {renderActivityBody,busy:()=>ACTIVITY_DETAIL_BUSY,
+     return {renderActivityBody,busy:()=>ACTIVITY_DETAIL_BUSY,startsRefreshes:()=>STARTS_REFRESHES,
        navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;},generation:()=>PAGE_RENDER_GENERATION};`,
   )(
     document, location, api, (detail) => painted.push(detail),
@@ -305,6 +309,7 @@ test("Activity detail request guard executes one current request and releases", 
   requests[0].resolve({ marker: "current" });
   await Promise.all([first, overlap]);
   assert.deepEqual(painted, [{ marker: "current" }]);
+  assert.equal(harness.startsRefreshes(), 1, "the Starts tab refreshes once per current detail");
   assert.deepEqual(phases, [
     { generation: 1, phase: "content" },
     { generation: 1, phase: "settled" },
