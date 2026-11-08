@@ -1819,7 +1819,10 @@ mod tests {
             );
         }
 
-        // Beside a running full scan it waits on the fence, then runs.
+        // Beside a running full scan it waits, says so, then runs. The running
+        // scan holds this library's source reader and the claim keeps the
+        // second reader for live demand, so the targeted job is not claimed
+        // at all while it runs (the per-library fence would refuse it next).
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let root = crate::test_tempdir().expect("root");
         media_file(root.path(), "Old Film (1999)");
@@ -1861,8 +1864,20 @@ mod tests {
             JobManager::test_new_for_node(Arc::clone(&store), root.path().join("artwork-w2"), "w2");
         let transcode = transcode_for(Arc::clone(&store), &root.path().join("transcode-w2"));
         assert!(
-            jobs.work_library_queue(&transcode, None).await,
-            "the targeted job is claimed and yields at the fence"
+            !jobs.work_library_queue(&transcode, None).await,
+            "a running full scan of the library refuses the targeted claim"
+        );
+        let full_job = request_record(store.as_ref(), "full-running").await.job_id;
+        let now_ms = crate::media_sessions::unix_ms();
+        assert!(
+            store
+                .source_io_holders(now_ms)
+                .await
+                .expect("source readers")
+                .iter()
+                .any(|holder| holder.work_id == full_job
+                    && holder.resource_key.starts_with("source_io")),
+            "the refusal is the full scan's source reader"
         );
         assert_eq!(
             request_record(store.as_ref(), "targeted-fenced")
