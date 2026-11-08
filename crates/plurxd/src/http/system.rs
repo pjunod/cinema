@@ -5702,12 +5702,21 @@ pub async fn activity_detail(
     if user.0.is_admin {
         response["processes"] = serde_json::to_value(plurx_core::process::priority::running())
             .map_err(|error| ApiError::Internal(error.to_string()))?;
-        response["workers"] = serde_json::to_value(clustered_workers(
+        let mut workers = clustered_workers(
             &state.node_id,
             super::internal_activity::local_workers(&state).await,
             &peers,
-        ))
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
+        );
+        // Operations observations include learner workers. Keep live Activity
+        // observations preferred; worker capacity never grants playback authority.
+        for (node_id, observation) in state.peer_status_cache.worker_observations().await {
+            workers.entry(node_id).or_insert(observation);
+        }
+        response["worker_observed_nodes"] =
+            serde_json::to_value(workers.keys().collect::<Vec<_>>())
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+        response["workers"] =
+            serde_json::to_value(workers).map_err(|error| ApiError::Internal(error.to_string()))?;
     }
     Ok(Json(response))
 }
