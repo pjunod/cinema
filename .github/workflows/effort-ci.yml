@@ -201,26 +201,33 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
     # Metadata compilation has a bounded pool; it does not run topology tests.
-    runs-on: [self-hosted, Linux, X64, lab, ci-effort-compile]
+    runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]
     # Explicit child limits apply even when the runner service has its own cap.
     container:
       image: ubuntu:24.04
-      options: --memory 8g --memory-swap 8g --cpus 4 --pids-limit 4096
+      options: --cpus 3 --memory 16g --memory-swap 18g --pids-limit 4096
     timeout-minutes: 30
     # Bound Cargo before parallel working sets reach the runner's memory cap.
     env:
       CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      RUNNER_NAME: "effort-rust-16g"
     steps:
       - name: Verify compile container bounds
         run: |
           set -eu
-          test "$(cat /sys/fs/cgroup/memory.max)" = 8589934592
-          test "$(cat /sys/fs/cgroup/memory.swap.max)" = 0
+          test "$(cat /sys/fs/cgroup/memory.max)" = 17179869184
+          test "$(cat /sys/fs/cgroup/memory.swap.max)" = 2147483648
           read -r quota period < /sys/fs/cgroup/cpu.max
           test "$quota" != max
-          test "$quota" -le "$((period * 4))"
+          test "$quota" -le "$((period * 3))"
           test "$(cat /sys/fs/cgroup/pids.max)" = 4096
           test "$CARGO_BUILD_JOBS" = 1
+          test "$CARGO_PROFILE_DEV_DEBUG" = 0
+          test "$CARGO_PROFILE_TEST_DEBUG" = 0
+          test "$CARGO_INCREMENTAL" = 0
       - name: Install Rust gate prerequisites
         run: |
           set -euo pipefail
@@ -251,6 +258,15 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: effort-rust
+      - name: Verify bounded local Cargo cache
+        env:
+          CACHE_LOCAL: ${{ steps.cargo-cache.outputs.local }}
+          CACHE_BUDGET: ${{ steps.cargo-cache.outputs.budget-gb }}
+        run: |
+          set -eu
+          test "$CACHE_LOCAL" = true
+          test "$CACHE_BUDGET" = 30
+          test "$RUNNER_NAME" = effort-rust-16g
       - name: Compile every Rust target without executing tests
         run: |
           make effort-rust-check

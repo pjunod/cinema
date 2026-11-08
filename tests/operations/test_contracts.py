@@ -1869,25 +1869,30 @@ assert.equal(context.ACT_TIMER, null);
     def test_effort_compile_pool_checks_real_bounds_before_compilation(self):
         job = workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"]
         header = job.split("    steps:", 1)[0]
-        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-effort-compile]", header)
+        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]", header)
         self.assertNotIn("ci-topology", header)
-        self.assertIn("options: --memory 8g --memory-swap 8g --cpus 4 --pids-limit 4096", header)
+        self.assertIn("options: --cpus 3 --memory 16g --memory-swap 18g --pids-limit 4096", header)
         self.assertRegex(header, r'(?m)^      CARGO_BUILD_JOBS: "1"$')
+        for key in ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG", "CARGO_INCREMENTAL"):
+            self.assertRegex(header, rf'(?m)^      {key}: "0"$')
         bound_check = job.split("- name: Verify compile container bounds", 1)[1].split("- name: Install Rust gate prerequisites", 1)[0]
         for fact in (
-            'test "$(cat /sys/fs/cgroup/memory.max)" = 8589934592',
-            'test "$(cat /sys/fs/cgroup/memory.swap.max)" = 0',
+            'test "$(cat /sys/fs/cgroup/memory.max)" = 17179869184',
+            'test "$(cat /sys/fs/cgroup/memory.swap.max)" = 2147483648',
             'test "$quota" != max',
-            'test "$quota" -le "$((period * 4))"',
+            'test "$quota" -le "$((period * 3))"',
             'test "$(cat /sys/fs/cgroup/pids.max)" = 4096',
             'test "$CARGO_BUILD_JOBS" = 1',
+            'test "$CARGO_PROFILE_DEV_DEBUG" = 0',
+            'test "$CARGO_PROFILE_TEST_DEBUG" = 0',
+            'test "$CARGO_INCREMENTAL" = 0',
         ):
             self.assertIn(fact, bound_check)
         self.assertLess(job.index("- name: Verify compile container bounds"), job.index("- name: Install Rust gate prerequisites"))
         self.assertIn("make effort-rust-check", job)
         self.assertIn("make hiqlite-vendor-clippy", job)
         self.assertNotIn("cargo test", job)
-        eligible = [(name, labels) for name, labels in rostered_runners() if "ci-effort-compile" in labels]
+        eligible = [(name, labels) for name, labels in rostered_runners() if "unit-memory-16g" in labels]
         self.assertEqual(len(eligible), 1)
         self.assertNotIn("ci-topology", eligible[0][1])
         self.assertNotIn("ci-store", eligible[0][1])
@@ -1902,7 +1907,24 @@ assert.equal(context.ACT_TIMER, null);
             for candidate in workflow.jobs
             if any(runner_fleet_module.eligible(eligible[0][1], frozenset(labels)) for labels in candidate.label_sets)
         }
-        self.assertEqual(matching_jobs, {(".github/workflows/effort-ci.yml", "rust_compile")})
+        self.assertEqual(matching_jobs, {
+            (".github/workflows/effort-ci.yml", "rust_compile"),
+            (".github/workflows/ci.yml", "check"),
+            (".github/workflows/coverage.yml", "coverage"),
+            (".github/workflows/release-readiness.yml", "release-check"),
+        })
+        self.assertIn('RUNNER_NAME: "effort-rust-16g"', header)
+        cache_check = job.split("- name: Verify bounded local Cargo cache", 1)[1].split("- name: Compile every Rust target", 1)[0]
+        self.assertIn('test "$CACHE_LOCAL" = true', cache_check)
+        self.assertIn('test "$CACHE_BUDGET" = 30', cache_check)
+        small_pool = [(name, labels) for name, labels in rostered_runners() if "ci-effort-compile" in labels]
+        self.assertEqual(len(small_pool), 1)
+        self.assertEqual({
+            (workflow.file, candidate.key)
+            for workflow in workflows
+            for candidate in workflow.jobs
+            if any(runner_fleet_module.eligible(small_pool[0][1], frozenset(labels)) for labels in candidate.label_sets)
+        }, set())
 
     def test_pr_ci_selects_expensive_surfaces_and_has_one_aggregate_gate(self):
         workflow = read(".github/workflows/ci.yml")

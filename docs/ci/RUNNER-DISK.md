@@ -41,22 +41,31 @@ The final repair check found a later compiler exhausting the initial 10 GiB
 combined limit; the additional swap raises that limit to 14 GiB without
 increasing host resident allocations.
 
-### Effort metadata compilation has a separate bounded slot
+### Effort metadata compilation uses the existing full-unit slot
 
-The effort Rust job uses `ci-effort-compile`, separate from `ci-topology`.
-It runs all-target checking and vendor Clippy, with no topology or Rust unit
-execution. Its Docker child has 8 GiB memory, no swap, four CPUs and at most
-4,096 PIDs; Cargo uses one build job. Before installing prerequisites, the job
-checks actual cgroup v2 memory, swap, CPU and PID limits. Runner service limits
-alone do not constrain Docker children.
+The effort Rust job selects the existing `unit-memory-16g` registration below,
+with its unchanged capacity-one profile: 16 GiB resident, 18 GiB combined,
+three CPUs and 4,096 PIDs. It checks every target and vendor Clippy without
+executing Rust units or topology tests. The workflow verifies actual cgroup
+limits before prerequisites, uses one Cargo job, omits development/test debug
+data and disables incremental compiler state. Metadata checking uses the
+development profile even for a test target. The target list and validation
+commands remain unchanged.
 
-The dedicated `gha-lab3-effort-compile-01` host registration has capacity one and only
-the dedicated compile label, not `general`, `ci-store` or `ci-topology`.
-Its persistent child options repeat the workflow caps. This bounded compile
-slot does not certify host-wide voter isolation or permit replicated tests
-on a voter. The older retired guests remain retired. Keep the existing general runners and their jobs unchanged. Create only a
-repository-scoped registration, with credentials retained on that host, and
-verify its effective server labels and actual child limits before acceptance.
+The cache action supplies a bounded job-local root when the host tool-cache
+path is not mounted. This job requires that local mode and its 30 GiB budget,
+with a stable `effort-rust-16g` identity. Existing cache preparation/finalization
+and disk-floor checks still run. Current-candidate container/cache limits and
+successful completion must be observed; configuration alone is not acceptance.
+
+The separate `ci-effort-compile` registration remains capped at 8 GiB, no swap,
+four CPUs, one Cargo job and 4,096 PIDs. Its driver remains 2 GiB/one CPU.
+The full daemon test frontend exhausted that child limit, including a forced
+source-only recompile with debug and incremental state disabled. No workflow
+selects that smaller pool for now; its original caps and host-only credentials
+remain unchanged. Reusing the existing full-unit slot changes no registration,
+service configuration or running job and grants no topology eligibility.
+The older retired guests remain retired.
 
 ### Dedicated full-unit resident capacity
 
