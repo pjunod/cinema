@@ -258,8 +258,10 @@ impl JobManager {
         }
     }
 
+    /// One request, with its contract v2 sidecar (`waiting_on`, `files`)
+    /// when it has one.
     pub async fn scan_request(&self, id: &str) -> Option<ScanRequestRecord> {
-        match self
+        let mut record = match self
             .store
             .library_work_requests(LibraryWorkQuery {
                 request_id: Some(id.into()),
@@ -268,12 +270,26 @@ impl JobManager {
             })
             .await
         {
-            Ok(records) => records.into_iter().next().map(request_record),
+            Ok(records) => records.into_iter().next().map(request_record)?,
             Err(error) => {
                 tracing::warn!(%error, "reading durable scan request");
-                None
+                return None;
             }
+        };
+        match self.store.scan_request_v2(id).await {
+            Ok(Some(row)) => {
+                record.waiting_on = Some(row.waiting_on);
+                record.files = Some(row.files);
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "reading scan request sidecar"),
         }
+        Some(record)
+    }
+
+    /// The API key that created a contract v2 request, if it is one.
+    pub async fn scan_request_creator(&self, id: &str) -> Result<Option<i64>, StoreError> {
+        Ok(self.store.scan_request_v2(id).await?.map(|row| row.key_id))
     }
 
     pub(super) async fn durable_library_statuses(&self) -> HashMap<i64, ScanStatus> {
@@ -770,6 +786,10 @@ async fn settle_library(fence: &crate::background_jobs::JobFence, settlement: Jo
     }
 }
 
+/// The `error` of a request whose job was cancelled before it finished.
+pub(crate) const SCAN_REQUEST_CANCELLED: &str =
+    "the scan request was cancelled before it finished; send a new attempt";
+
 fn request_record(record: LibraryWorkRecord) -> ScanRequestRecord {
     let (path, correlation_id, source) = match record.input {
         LibraryWorkInput::Targeted {
@@ -785,6 +805,38 @@ fn request_record(record: LibraryWorkRecord) -> ScanRequestRecord {
         Some(LibraryWorkResult::Failed { error }) => (None, None, Some(error)),
         None => (None, None, record.error_code),
     };
+    // Pending and owned by a live claim is running; pending otherwise is
+    // queued. The waiter's own state has no "running".
+    let running = record.state == "pending"
+        && matches!(record.job_state, Some(JobState::Running))
+        && record
+            .job_lease_expires_ms
+            .is_some_and(|expires| expires > clock_ms());
+    // Contract v2 has exactly four statuses (queued | running | done |
+    // failed). A request whose job was cancelled is a typed failure,
+    // `code: cancelled`, so a caller treats it like any other failed
+    // request and sends a new attempt instead of polling a fifth state.
+    let cancelled = record.state == "cancelled";
+    let status = match record.state.as_str() {
+        "succeeded" => "done",
+        "pending" | "awaiting_hydration" if running => "running",
+        "pending" | "awaiting_hydration" => "queued",
+        _ => "failed",
+    };
+    let error = if cancelled {
+        error.or_else(|| Some(SCAN_REQUEST_CANCELLED.to_owned()))
+    } else {
+        error
+    };
+    let code = if cancelled {
+        Some("cancelled")
+    } else {
+        (status == "failed"
+            && error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("path_unreadable")))
+        .then_some("path_unreadable")
+    };
     ScanRequestRecord {
         request_id: record.request_id,
         at: record.created_at_ms / 1_000,
@@ -792,15 +844,13 @@ fn request_record(record: LibraryWorkRecord) -> ScanRequestRecord {
         path,
         correlation_id,
         source,
-        status: match record.state.as_str() {
-            "succeeded" => "done",
-            "pending" => "queued",
-            other => other,
-        }
-        .into(),
+        status: status.into(),
         report,
         items,
         error,
+        code,
+        waiting_on: None,
+        files: None,
     }
 }
 

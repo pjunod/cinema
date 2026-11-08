@@ -5,6 +5,20 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## Pipeline v2 request status (T4) — scoped correspondence review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed PR #1407
+(`claude/pipeline-v2-m5-t4-status`) against its parent T3. This is an author
+review awaiting an independent check, not execution evidence.
+
+| T4 behaviour (source) | Model action or property | Still holds? | Model change |
+|---|---|---|---|
+| `scan_request` joins the request record with its v2 sidecar (`waiting_on`, `files`); `scan_request_creator` reads the creating key ([`library_work.rs`](../../crates/plurxd/src/library_work.rs)) | None; read-only observation by the HTTP caller | Yes: reads only; no queue, domain, binding or publication state changes | None |
+| The status projection reports `running` for a pending request whose job holds a live claim, and `code: path_unreadable` for a failed request whose error says so ([`state.rs`](../../crates/plurxd/src/state.rs)) | None; derived from the durable record | Yes: pure projection of existing fields | None |
+
+Whole-file pins only are refreshed; models, configurations and properties are
+unchanged.
+
 ## Pipeline v2 request handler (T3) — scoped correspondence review on 2026-11-08
 
 Claude (`claude-opus-5-5`) reviewed PR #1406

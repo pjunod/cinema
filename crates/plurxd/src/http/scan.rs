@@ -325,10 +325,18 @@ async fn answer(
             if let Some(correlation_id) = correlation_id {
                 detail.insert("correlation_id".into(), serde_json::json!(correlation_id));
             }
+            // A cancelled request is a failure with its own code, so a
+            // replayed `request_key` answers it rather than `202 queued`
+            // forever, and the caller advances to a new attempt.
+            let (code, message) = if record.code == Some("cancelled") {
+                ("cancelled", "the scan request was cancelled; see `error`")
+            } else {
+                ("scan_failed", "the scan request failed; see `error`")
+            };
             Err(ApiError::TypedDetail {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "scan_failed",
-                message: "the scan request failed; see `error`".into(),
+                code,
+                message: message.into(),
                 detail,
             })
         }
@@ -459,14 +467,29 @@ fn validate_book_hints(body: &BookMetadataBody) -> Result<BookHints, ApiError> {
     })
 }
 
-/// GET /api/v1/scan/requests/{id} (scope `status:read`)
+/// GET /api/v1/scan/requests/{id} — scope `status:read` for any request, or
+/// `scan:trigger` for a request this same key created (contract v2 §4.2): a
+/// caller can read back what it asked for without holding a wider scope.
 pub async fn request_status(
     State(state): State<AppState>,
     parts: Parts,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut parts = parts;
-    let _key = ScopedKey::require(&mut parts, &state, scopes::STATUS_READ).await?;
+    let key = ScopedKey::require_any(
+        &mut parts,
+        &state,
+        &[scopes::STATUS_READ, scopes::SCAN_TRIGGER],
+    )
+    .await?;
+    if !key.0.allows(scopes::STATUS_READ)
+        && state.jobs.scan_request_creator(&id).await? != Some(key.0.id)
+    {
+        // Another key's request, one from before keys were recorded, or no
+        // such request: all 403 for a key without `status:read`, so a scan
+        // key cannot probe which request ids exist (review #1407, 12).
+        return Err(ApiError::Forbidden);
+    }
     match state.jobs.scan_request(&id).await {
         Some(rec) => Ok(Json(serde_json::to_value(rec)?)),
         None => Err(ApiError::NotFound("scan request")),
