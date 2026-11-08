@@ -2,7 +2,7 @@
 
 **Status:** built and locally qualified — SDK-free builds, AUTH81/AUTH82 CLI
 migration, native HTTP and storage authority checks pass. Task PR #1396 passed
-its exact-head gate and merged; main delivery is tracked by the promotion PR.
+its exact-head gate and merged; main promotion PR #1397 records delivery.
 **Written:** 2026-11-04 · **Owner:** Codex · **Reviewer:** Astra.
 **Review:** [Astra findings and dispositions](../reviews/CINEMA-MODULAR-BUILD-ASTRA-REVIEW.md).
 **Source baseline:** `f30dfbbc9237046a0f6a6f20d893044593f56600`.
@@ -204,7 +204,7 @@ commit/tree/executable SHA-256, then use `migrate-private --config ...
 --expected-commit ... --expected-tree ... --expected-executable-sha256 ...`.
 That command verifies its actual self tuple and uses the same Core root-lock,
 conversion, receipt and drain checks. It does not create release trust. The
-managed and source CLI child-process acceptance tests remain pending.
+managed and source CLI acceptance tests pass on the §9 snapshots.
 
 The P4 entry design fixes a compatibility tuple, rather than matching the
 product version string alone:
@@ -537,19 +537,20 @@ Record Astra's findings and individual dispositions with the review, then
 update this ledger and the backlog row in the same task changes. Retain the
 original before measurements and failures when adding after results.
 
-## 9. Integrated delivery evidence — 2026-11-07
+## 9. Integrated delivery evidence — 2026-11-08
 
-[Task PR #1396](http://forge.lan:3000/noirr/plurx/pulls/1396), commit
-`02ea8ed11d61f737f660a1f60d2f20223d8487c0`, includes main `8c654d37b5`.
-Normal hooks, all 15 paperwork checks and all three formal mappings pass.
-The [actual SDK-cut measurements](CINEMA-BUILD-MEASUREMENTS.md#4-actual-standalone-sdk-removal--2026-11-07)
-prove zero Hiqlite/WAL/OpenRaft units, 448 → 380 total units, and 13–14% shorter
-warm changed-source rebuilds. Cold-build gains remain unproven.
+[Task #1396](http://forge.lan:3000/noirr/plurx/pulls/1396) merged after gate6532;
+Its retained nine-step qualification includes AUTH81/AUTH82 CLI conversion,
+native reopen and data/key preservation.
+[Correction task #1442](http://forge.lan:3000/noirr/plurx/pulls/1442) integrates
+current-main contracts and confines new diagnostic workers to explicit clusters.
 
-CLI run `e3c20b408c784497ba2611d5f8f2d7c5` passes actual AUTH81/AUTH82 handoff,
-native reopen, preserved settings/IDs/telemetry, safe missing-key handling and
-wrapped credential decryption; five production child-owner fixtures also pass.
-Integrated packaging: 121 tests, one environment skip; one Python-3.15-incompatible
-fixture passes on Python 3.12 retry. All nine focused qualification steps pass;
-task gate 6532 passed and PR #1396 merged as `ca6c894381`. Main promotion
-uses its exact-head receipt. Further extraction is deferred.
+The [measurement ledger §6](CINEMA-BUILD-MEASUREMENTS.md#6-integrated-standalone-build--2026-11-08)
+records source `83da88f89e`, all final warm samples and the sealed
+bundle. The actual daemon compiles 380 units with no Hiqlite/WAL/OpenRaft.
+Cold-build gains and further crate extraction remain outside this delivery.
+
+[Promotion #1397](http://forge.lan:3000/noirr/plurx/pulls/1397) owns exact-head
+full qualification, migration/graph replay, final receipt and landing. SQLite124
+remains the published dispatch migration; native identity/census is125. Models,
+quorum guards and data/credential preservation rules are unchanged.

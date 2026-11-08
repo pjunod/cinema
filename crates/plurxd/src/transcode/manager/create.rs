@@ -226,7 +226,7 @@ impl Drop for FallbackAnalysisInterestOwner {
                     .restore_playback_analysis_interest(receipt, crate::state::clock_ms())
                     .await
                 {
-                    tracing::warn!(%error,"exact fallback preparation interest cleanup remains durable");
+                    tracing::warn!(target: "plurxd::transcode", %error,"exact fallback preparation interest cleanup remains durable");
                 }
             });
         }
@@ -993,7 +993,7 @@ impl TranscodeManager {
                                     {
                                         Ok(receipt) => fallback_interest.receipt = receipt,
                                         Err(error) => {
-                                            tracing::warn!(%error,"could not demote exact fallback preparation interest; source custody arbitration remains authoritative")
+                                            tracing::warn!(target: "plurxd::transcode", %error,"could not demote exact fallback preparation interest; source custody arbitration remains authoritative")
                                         }
                                     }
                                 }
@@ -2419,18 +2419,18 @@ impl TranscodeManager {
                 },
             )
         });
-        crate::source_custody::with_request(
-            request,
-            self.prepare_vod_encoding_with_source_scoped(
-                req,
-                file,
-                source_evidence,
-                hwaccel,
-                prepared_admission,
-                _decline,
-            ),
-        )
-        .await
+        // The VOD planner holds the encode and source-probe state across
+        // awaits. Pass its pinned handle through the task-local scope to keep
+        // that state off the Tokio worker stack during a foreground create.
+        let planning = Box::pin(self.prepare_vod_encoding_with_source_scoped(
+            req,
+            file,
+            source_evidence,
+            hwaccel,
+            prepared_admission,
+            _decline,
+        ));
+        crate::source_custody::with_request(request, planning).await
     }
 
     async fn prepare_vod_encoding_with_source_scoped(

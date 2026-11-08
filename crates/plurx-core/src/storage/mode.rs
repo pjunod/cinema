@@ -432,7 +432,10 @@ mod tests {
         let root = tempfile::tempdir().expect("storage mode fixture");
         let connection =
             Connection::open(root.path().join("plurx.db")).expect("storage mode fixture");
-        connection.execute_batch("PRAGMA user_version=124; CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT); INSERT INTO settings VALUES('instance.id','server'); CREATE TABLE storage_identity(singleton INTEGER PRIMARY KEY,instance_id TEXT,node_id TEXT,generation TEXT);").expect("storage mode fixture");
+        connection.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT); INSERT INTO settings VALUES('instance.id','server'); CREATE TABLE storage_identity(singleton INTEGER PRIMARY KEY,instance_id TEXT,node_id TEXT,generation TEXT);").expect("storage mode fixture");
+        connection
+            .pragma_update(None, "user_version", crate::store::SQLITE_SCHEMA_VERSION)
+            .expect("current native fixture version");
         root
     }
 

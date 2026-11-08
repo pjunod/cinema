@@ -1,5 +1,31 @@
 use super::*;
 
+#[test]
+fn principal_rebuild_refuses_a_substituted_interest_trigger_before_detaching_it() {
+    let connection = rusqlite::Connection::open_in_memory().expect("owned fixture");
+    connection
+        .execute_batch("CREATE TABLE background_job_commands(id TEXT); CREATE TRIGGER playback_analysis_restore_effects AFTER INSERT ON background_job_commands BEGIN SELECT 1; END; BEGIN IMMEDIATE;")
+        .expect("substituted trigger");
+    let error = connection
+        .execute_batch(&crate::store::media_session_principal_rebuild_schema())
+        .expect_err("refuse substituted dependency");
+    assert!(
+        error
+            .to_string()
+            .contains("CHECK constraint failed: exact=1"),
+        "{error}"
+    );
+    let declaration: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name='playback_analysis_restore_effects'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("substituted trigger retained before rollback");
+    assert!(declaration.ends_with("BEGIN SELECT 1; END"));
+    connection.execute_batch("ROLLBACK").expect("undo guard");
+}
+
 #[tokio::test]
 async fn sharing_route_legacy_schema_refuses_a_shared_playback_pointer() {
     let store = SqliteStore::open_in_memory().expect("legacy store");
@@ -26,9 +52,18 @@ async fn sharing_route_reads_rebuilt_sqlite_rows_without_a_local_user() {
                 conn.execute_batch(include_str!(
                     "../../../../tests/fixtures/session-principal-local.sql"
                 ))?;
+                let read_interest = || {
+                    conn.query_row(
+                        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='playback_analysis_restore_effects'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                };
+                let original_interest = read_interest()?;
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
                 conn.execute_batch("COMMIT")?;
+                assert_eq!(read_interest()?, original_interest);
                 conn.execute_batch(include_str!(
                     "../../../../tests/fixtures/session-principal-sharing.sql"
                 ))?;

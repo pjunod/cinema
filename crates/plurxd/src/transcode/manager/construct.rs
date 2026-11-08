@@ -1,5 +1,13 @@
 use super::*;
 
+struct LibraryTurnWait<'a>(&'a tokio::sync::watch::Sender<usize>);
+
+impl Drop for LibraryTurnWait<'_> {
+    fn drop(&mut self) {
+        self.0.send_modify(|waiters| *waiters -= 1);
+    }
+}
+
 impl TranscodeManager {
     pub(crate) fn candidate_production_proof(&self, recipe: [u8; 32]) -> Option<u32> {
         self.candidate_production_proofs
@@ -133,6 +141,7 @@ impl TranscodeManager {
             producer: ProducerTuning::default(),
             background_producer: Mutex::new(()),
             background_heavy: Arc::new(tokio::sync::Semaphore::new(BACKGROUND_HEAVY_LIMIT)),
+            interactive_library_waiters: tokio::sync::watch::Sender::new(0),
             offline_waiting: AtomicBool::new(false),
             dv_strippable: false,
             dv_convertible: false,
@@ -1343,7 +1352,11 @@ impl TranscodeManager {
         &self,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Option<FragmentAdmission> {
-        let heavy = tokio::select! { biased; () = cancel.cancelled() => return None, permit = Arc::clone(&self.background_heavy).acquire_owned() => permit.ok()?, };
+        let heavy = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return None,
+            permit = self.queued_maintenance_turn() => permit?,
+        };
         if cancel.is_cancelled() {
             return None;
         }
@@ -1409,6 +1422,39 @@ impl TranscodeManager {
             .await
     }
 
+    /// Queue for the next safe heavy turn after the Store verifies interactive
+    /// interest. Awaiting this permit holds no CPU, GPU or source reservation.
+    pub(crate) async fn admit_interactive_library(&self) -> Option<FragmentAdmission> {
+        if self.background_yield_reason().is_some() {
+            return None;
+        }
+        self.interactive_library_waiters.send_modify(|n| *n += 1);
+        let waiting = LibraryTurnWait(&self.interactive_library_waiters);
+        let heavy = Arc::clone(&self.background_heavy)
+            .acquire_owned()
+            .await
+            .ok()?;
+        drop(waiting);
+        self.admit_source_work_with_heavy(self.software_budget().await.max(1), heavy)
+            .await
+    }
+
+    /// Ordinary FIFO waiters already in the semaphore queue can be woken
+    /// first. Pass the empty lane to a waiting manual scan before reserving CPU.
+    async fn queued_maintenance_turn(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let mut waiters = self.interactive_library_waiters.subscribe();
+        loop {
+            waiters.wait_for(|n| *n == 0).await.ok()?;
+            let heavy = Arc::clone(&self.background_heavy)
+                .acquire_owned()
+                .await
+                .ok()?;
+            if *waiters.borrow() == 0 {
+                return Some(heavy);
+            }
+        }
+    }
+
     /// The title scanner has one software decoder thread and never uses a GPU.
     #[cfg(target_os = "linux")]
     pub(crate) async fn admit_dv_title(&self) -> Option<FragmentAdmission> {
@@ -1423,10 +1469,7 @@ impl TranscodeManager {
     /// pass takes this once per pass and uses [`Self::admit_fragment`] for
     /// the rest of it. Dropping the future leaves the queue.
     pub(crate) async fn admit_fragment_queued(&self) -> Option<FragmentAdmission> {
-        let heavy = Arc::clone(&self.background_heavy)
-            .acquire_owned()
-            .await
-            .ok()?;
+        let heavy = self.queued_maintenance_turn().await?;
         self.admit_source_work_with_heavy(self.software_budget().await.max(1), heavy)
             .await
     }

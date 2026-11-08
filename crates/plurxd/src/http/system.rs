@@ -5735,12 +5735,26 @@ pub async fn activity_detail(
     if user.0.is_admin {
         response["processes"] = serde_json::to_value(plurx_core::process::priority::running())
             .map_err(|error| ApiError::Internal(error.to_string()))?;
-        response["workers"] = serde_json::to_value(clustered_workers(
+        let workers = clustered_workers(
             &state.node_id,
             super::internal_activity::local_workers(&state).await,
             &peers,
-        ))
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
+        );
+        // Operations observations include learner workers. Keep live Activity
+        // observations preferred; worker capacity never grants playback authority.
+        #[cfg(feature = "cluster")]
+        let workers = {
+            let mut workers = workers;
+            for (node_id, observation) in state.peer_status_cache.worker_observations().await {
+                workers.entry(node_id).or_insert(observation);
+            }
+            workers
+        };
+        response["worker_observed_nodes"] =
+            serde_json::to_value(workers.keys().collect::<Vec<_>>())
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+        response["workers"] =
+            serde_json::to_value(workers).map_err(|error| ApiError::Internal(error.to_string()))?;
     }
     Ok(Json(response))
 }
@@ -6249,10 +6263,13 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         "# HELP plurx_background_resource_reservations Unexpired shared admission reservations.\n\
          # TYPE plurx_background_resource_reservations gauge\n\
          plurx_background_resource_reservations{{resource_class=\"source_io\"}} {}\n\
+         # HELP plurx_background_source_recovery_pending Distinct background physical readers holding capacity after authority expired.\n\
+         # TYPE plurx_background_source_recovery_pending gauge\n\
+         plurx_background_source_recovery_pending {}\n\
          # HELP plurx_background_legacy_pending Sealed legacy interests awaiting bounded import.\n\
          # TYPE plurx_background_legacy_pending gauge\n\
          plurx_background_legacy_pending {}\n",
-        sample.background_jobs.source_io_reservations, sample.background_jobs.legacy_pending,
+        sample.background_jobs.source_io_reservations, sample.background_jobs.source_recovery_pending, sample.background_jobs.legacy_pending,
     ));
     let analysis = sample.analysis;
     out.push_str(

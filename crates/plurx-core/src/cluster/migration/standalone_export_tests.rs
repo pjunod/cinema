@@ -318,6 +318,56 @@ fn logical_conversion_preserves_all_types_row_identity_and_deleted_high_water() 
 }
 
 #[test]
+fn logical_conversion_preserves_nonempty_dispatch_demand_fairness_and_verdict() {
+    let (_directory, source, target) = fixture();
+    for path in [&source, &target] {
+        let connection = Connection::open(path).expect("dispatch conversion database");
+        connection
+            .execute_batch("CREATE TABLE background_jobs(id TEXT PRIMARY KEY);")
+            .expect("dispatch parent");
+        for sql in include_str!("../../store/background_job_turns.sql").split("-- next statement") {
+            if sql.contains("CREATE TABLE dispatch_turn_") {
+                connection
+                    .execute_batch(sql)
+                    .expect("published dispatch table");
+            }
+        }
+    }
+    let connection = Connection::open(&source).expect("retained dispatch source");
+    connection.execute_batch(r#"
+        INSERT INTO background_jobs VALUES('dispatch-job');
+        INSERT INTO dispatch_turn_ready VALUES('dispatch-job','fixture-node',7,9999,'["/library"]');
+        INSERT INTO dispatch_turn_wait VALUES('maintenance','retained','["source_io"]',1,1000,7);
+        INSERT INTO dispatch_turn_attempt VALUES(1,'analysis','attempt','["source_io"]',10,1,0,NULL,0);
+    "#).expect("nonempty dispatch state");
+    drop(connection);
+    let before = super::super::sha256_file(&source).expect("immutable source hash");
+    let report = copy_image(&source, &target).expect("preserve dispatch state");
+    let connection = Connection::open(&target).expect("native dispatch state");
+    let tables = inventory(&connection, "main").expect("native table inventory");
+    for name in [
+        "dispatch_turn_ready",
+        "dispatch_turn_wait",
+        "dispatch_turn_attempt",
+    ] {
+        let entry = report
+            .iter()
+            .find(|entry| entry.table == name)
+            .expect("dispatch receipt entry");
+        assert_eq!(entry.disposition, "copied-native-data");
+        assert_eq!(entry.source_rows, 1);
+        assert_eq!(
+            table_digest(&connection, "main", name, &tables[name]).expect("native parity"),
+            (entry.source_rows, entry.source_sha256.clone())
+        );
+    }
+    assert_eq!(
+        before,
+        super::super::sha256_file(&source).expect("unchanged source")
+    );
+}
+
+#[test]
 fn nonempty_unmapped_domain_data_refuses_before_mutating_native_target() {
     for extra in [
         "CREATE TABLE unfamiliar_domain(value TEXT); INSERT INTO unfamiliar_domain VALUES('must survive');",

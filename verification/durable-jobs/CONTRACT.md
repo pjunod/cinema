@@ -14,6 +14,45 @@ source mapping**, not an automatic refinement proof. Source hashes in
 that set complete or that the abstractions are correct.
 
 
+## Source custody fixture review on 2026-11-08
+
+Integration at `244a7d04b` duplicated source custody settlement in the
+lost claim acknowledgement test. The corrected fixture joins its predecessor
+heartbeat, attempts takeover after lease expiry, and verifies that outstanding
+custody yields contention with one attempt on record. It then settles the
+predecessor's exact receipt and recovers the successor's committed claim
+after a lost acknowledgement. The cache-part producer change from
+`d0e9349cb` adds whitespace to its existing warning.
+The mapped claim, renewal, retirement and publication operations retain
+their reviewed behavior.
+
+## Producer wait diagnostic on 2026-11-07
+
+Against `e2cdb1c4d`, the cache-part producer logs a failed child wait under
+`plurxd::transcode`. It retries the kill and wait while holding capacity, then
+releases the child job after the wait succeeds. Both mapped anchors in
+`transcode/manager/produce.rs` still identify the producer and its fenced
+publication path.
+
+## Source custody replay on 2026-11-07
+
+Against `cc2ca1338`, scheduler upkeep now rechecks settlement proof and
+the exact owner's current authority inside the cleanup transaction. This
+preserves newly registered readers through activation and lets a renewed
+background job retain its pending registration. The resource-mapping and
+selected claim, renewal, binding and fenced-publication anchors keep their
+existing transitions. Physical source activation and settlement are runtime
+obligations outside this finite model.
+
+## Queue observation source review on 2026-11-07
+
+Compared with `4ddbf1229`, the shared queue adds read-only counts of recent
+worker attempts and waiting manual requests. The SQLite and Hiqlite metrics
+queries count expired source custody, and the daemon caches that count for
+Activity and its sampler warning. These reads have no effect on claim,
+renewal, physical settlement, or any modeled transition. The focused queue
+regressions cover the observable rates and warnings.
+
 ## Native and recovery integration — scoped review on 2026-11-04
 
 Astra independently reviewed the merge of effort
@@ -932,3 +971,7 @@ finite model to caption continuity, playback deadlines or remote-worker
 liveness. Model/configuration bytes, fairness premises and historical
 receipts retain their identities. Offline mapping validation is distinct
 from runtime tests, TLC qualification and a refinement proof.
+
+## November 7 library dispatch and source release
+
+A fresh, readable manual library request now participates in the next shared resource grant. The write still uses the existing claim identity, fence and physical source limits. The source controller can inspect that immutable identity while a completion holds its publication mutex. The durable model covers the resulting claim and settlement, while the dispatch classes, timing and physical file operations are exercised in the Store and worker tests.

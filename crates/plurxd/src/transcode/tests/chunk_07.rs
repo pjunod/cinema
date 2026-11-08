@@ -250,6 +250,9 @@ async fn cancelled_copy_registration_rejection_keeps_exact_cleanup_ownership() {
 /// A process that outlives the test unless lifecycle cleanup reaps it.
 fn long_running_child() -> Child {
     let mut cmd = tokio::process::Command::new("sleep");
+    // AttemptChild applies Linux stop/resume/terminate to the producer group.
+    #[cfg(target_os = "linux")]
+    cmd.process_group(0);
     cmd.arg("60").kill_on_drop(true);
     cmd.spawn().expect("spawn sleep")
 }
@@ -539,6 +542,58 @@ async fn heavy_background_admission_is_shared_and_released_with_its_guard() {
     drop(first);
     assert_eq!(manager.admissions.software_in_use(), 0);
     assert!(manager.admit_fragment().await.is_some());
+}
+
+#[tokio::test]
+async fn manual_library_turn_precedes_waiting_maintenance_and_yields_to_playback() {
+    use std::{future::Future, task::Poll};
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let (manager, _work, _cache) = cached_manager(&store);
+    let current = manager.admit_fragment().await.expect("running worker");
+    let mut maintenance = Box::pin(manager.admit_fragment_queued());
+    let mut manual = Box::pin(manager.admit_interactive_library());
+    std::future::poll_fn(|cx| {
+        assert!(maintenance.as_mut().poll(cx).is_pending());
+        assert!(manual.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(
+        manager.fragment_worker_idle(&current),
+        "the worker retains its resources"
+    );
+    drop(current);
+    std::future::poll_fn(|cx| {
+        assert!(
+            maintenance.as_mut().poll(cx).is_pending(),
+            "older maintenance passes the turn"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    let scan = manual.await.expect("manual scan gets the released lane");
+    assert!(manager.admit_fragment().await.is_none());
+    drop(scan);
+    let next = maintenance.await.expect("maintenance resumes");
+
+    let mut manual = Box::pin(manager.admit_interactive_library());
+    std::future::poll_fn(|cx| {
+        assert!(manual.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let viewer = manager.admissions.wait_for_slot();
+    drop(next);
+    assert!(
+        manual.await.is_none(),
+        "foreground demand wins at grant time"
+    );
+    drop(viewer);
+    assert!(
+        manager.admit_fragment().await.is_some(),
+        "declined turn released the lane"
+    );
 }
 
 #[tokio::test]
@@ -2474,7 +2529,7 @@ async fn offline_preempts_speculation_and_resumes_its_published_part() {
         )
         .audio
         .expect("canonical producer audio");
-    let package_id = "offline-preemption";
+    let package_id = uuid::Uuid::new_v4().to_string();
     let requested = NewOfflinePackage {
         audio_recipe: Some(serde_json::to_string(&audio_delivery).expect("audio recipe")),
         id: package_id.to_owned(),
@@ -2496,7 +2551,7 @@ async fn offline_preempts_speculation_and_resumes_its_published_part() {
         subtitle_mode: "none".to_owned(),
         estimated_bytes: 1_000_000,
         reserved_bytes: 1_100_000,
-        expires_at: i64::MAX,
+        expires_at: crate::media_sessions::unix_ms() / 1000 + 3_600,
     };
     assert!(matches!(
         store
@@ -2903,7 +2958,7 @@ async fn seed_real_file(store: &Arc<dyn Store>, path: &std::path::Path) -> i64 {
             movie,
             &path.to_string_lossy(),
             meta.len() as i64,
-            1,
+            crate::fragment_index_cluster::source_stamp(&meta).mtime,
             &ProbeResult {
                 duration_ms: Some(6_000),
                 container: Some("mkv".into()),

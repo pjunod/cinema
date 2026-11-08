@@ -1657,12 +1657,10 @@ async fn accepted_hold_and_active_control_signal_the_real_producer_immediately()
         );
         snapshot.demand = demand;
         // The started fixture has produced 64 s and published 48 s, one
-        // whole batch staged. Held on time additionally requires the
-        // producer to have reached what the next publication will ask
-        // for: the clock's desired end (position + 48 s initial runway)
-        // plus the 10 s guard, capped at its allowed end (+64 s). From
-        // position 0 that is 58 s, which 64 s of produced media covers;
-        // from position 10 s it is 68 s, which it does not.
+        // whole batch staged. A held Source producer retains its 48 s low
+        // watermark before resuming. Position 0 leaves 64 s in that bank;
+        // position 20 s leaves 44 s, below the release watermark. This is
+        // physical production pacing, not a larger advertised playlist.
         snapshot.position_ms = position_ms;
         snapshot.buffered_from_ms = Some(position_ms);
         if demand != crate::playback_control::PlaybackDemand::Active {
@@ -1766,10 +1764,10 @@ async fn accepted_hold_and_active_control_signal_the_real_producer_immediately()
     assert_eq!(extra["production_target_seconds"], 0);
     assert_eq!(extra["producer_control"]["observation_only"], true);
 
-    // The same staged batch no longer holds a viewer ten seconds further
-    // on: the next publication needs media the producer has not made yet,
-    // so active demand resumes it instead of trapping publication at one
-    // segment per cycle.
+    // Advancing twenty seconds spends the held producer's low watermark:
+    // only 44 s of its 64 s produced inventory remain ahead of this viewer.
+    // Active demand must resume the actual producer, while the playlist's
+    // publication allowance remains independent of this physical bank.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let behind = fixture
         .state
@@ -1777,7 +1775,7 @@ async fn accepted_hold_and_active_control_signal_the_real_producer_immediately()
         .hls_session_control(request(
             3,
             crate::playback_control::PlaybackDemand::Active,
-            10_000,
+            20_000,
         ))
         .await
         .expect("local worker")
@@ -1787,7 +1785,8 @@ async fn accepted_hold_and_active_control_signal_the_real_producer_immediately()
     };
     assert!(
         !behind_status.suspended,
-        "a producer short of the next publication must resume"
+        "a producer short of the next publication must resume: hold={:?}; demand={:?}",
+        behind_status.hold_reason, behind_status.control_demand
     );
     assert_eq!(behind_status.hold_reason, None);
     assert_eq!(behind_status.control_demand, Some("active"));

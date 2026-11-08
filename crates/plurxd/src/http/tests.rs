@@ -16,6 +16,68 @@ mod playback_handoffs;
 mod public_copy_wire;
 mod subtitle_generation;
 
+#[test]
+fn optional_remote_routes_preserve_literal_plex_colon_segments() {
+    // This is the same composition boundary as the shipping root router. An
+    // ordinary internal fragment re-enables Axum checks and panics here.
+    let _: Router<AppState> = Router::new()
+        .without_v07_checks()
+        .merge(remote::router())
+        .route(
+            "/:/timeline",
+            axum::routing::get(|| async { StatusCode::NO_CONTENT }),
+        );
+}
+
+async fn route_admission_fixture_snapshot(state: &AppState) -> Value {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("fixture clock")
+        .as_millis() as i64;
+    let settings = state
+        .store
+        .settings_snapshot()
+        .await
+        .expect("fixture settings");
+    let jobs = state
+        .store
+        .list_jobs(plurx_core::store::background_jobs::JobQuery {
+            node_id: None,
+            state: None,
+            kind: None,
+            after_id: None,
+            limit: 1,
+        })
+        .await
+        .expect("fixture jobs");
+    assert!(
+        jobs.jobs.is_empty() && jobs.next_after_id.is_none(),
+        "rejected requests must allocate no job"
+    );
+    let sessions = state
+        .store
+        .owned_media_sessions(&state.node_id, now_ms)
+        .await
+        .expect("fixture media sessions");
+    let owners = state
+        .store
+        .list_foreground_source_owners(&state.node_id)
+        .await
+        .expect("fixture Source owners");
+    let holders = state
+        .store
+        .source_io_holders(now_ms)
+        .await
+        .expect("fixture Source occupancy");
+    json!({
+        "settings": settings,
+        "jobs": jobs.jobs,
+        "media_sessions": sessions.len(),
+        "source_owners": owners,
+        "source_holders": holders.len(),
+    })
+}
+
 async fn slow_test_handler() -> &'static str {
     tokio::time::sleep(Duration::from_millis(40)).await;
     "ok"
@@ -1717,7 +1779,8 @@ async fn the_capabilities_document_is_bounded_before_it_is_walked() {
 
 #[tokio::test]
 async fn playback_control_routes_reject_oversized_bodies_before_handler_work() {
-    let app = test_app();
+    let (app, state) = test_app_with_state();
+    let before = route_admission_fixture_snapshot(&state).await;
     let session = uuid::Uuid::new_v4();
     let public = Request::builder()
         .method("POST")
@@ -1749,13 +1812,23 @@ async fn playback_control_routes_reject_oversized_bodies_before_handler_work() {
         .expect("internal control request");
     assert_eq!(
         app.oneshot(internal).await.expect("response").status(),
-        StatusCode::PAYLOAD_TOO_LARGE
+        if cfg!(feature = "cluster") {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else {
+            StatusCode::NOT_FOUND
+        }
+    );
+    assert_eq!(
+        route_admission_fixture_snapshot(&state).await,
+        before,
+        "rejected bodies and absent peer routes allocate no work"
     );
 }
 
 #[tokio::test]
 async fn quality_control_routes_bound_bodies_and_require_peer_auth() {
-    let app = test_app();
+    let (app, state) = test_app_with_state();
+    let before = route_admission_fixture_snapshot(&state).await;
     for path in [
         format!("/api/v1/hls/{}/quality-control", uuid::Uuid::new_v4()),
         hls::QUALITY_CONTROL_PATH.to_owned(),
@@ -1772,7 +1845,11 @@ async fn quality_control_routes_bound_bodies_and_require_peer_auth() {
                 .await
                 .expect("quality control test request or response")
                 .status(),
-            StatusCode::PAYLOAD_TOO_LARGE
+            if path.starts_with("/api/v1/") || cfg!(feature = "cluster") {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::NOT_FOUND
+            }
         );
     }
     let unsigned = Request::builder()
@@ -1786,20 +1863,30 @@ async fn quality_control_routes_bound_bodies_and_require_peer_auth() {
             .await
             .expect("quality control test request or response")
             .status(),
-        StatusCode::UNAUTHORIZED
+        if cfg!(feature = "cluster") {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::NOT_FOUND
+        }
+    );
+    assert_eq!(
+        route_admission_fixture_snapshot(&state).await,
+        before,
+        "rejected bodies and absent peer routes allocate no work"
     );
 }
 
 #[tokio::test]
 async fn quality_schedule_routes_bound_bodies_and_require_peer_auth() {
-    let app = test_app();
+    let (app, state) = test_app_with_state();
+    let before = route_admission_fixture_snapshot(&state).await;
     for path in [
         format!("/api/v1/hls/{}/quality-schedule", uuid::Uuid::new_v4()),
         hls::QUALITY_SCHEDULE_PATH.to_owned(),
     ] {
         let request = Request::builder()
             .method("POST")
-            .uri(path)
+            .uri(&path)
             .header("content-type", "application/json")
             .body(Body::from(vec![b'x'; hls::QUALITY_SCHEDULE_MAX_BYTES + 1]))
             .expect("oversized schedule");
@@ -1809,7 +1896,11 @@ async fn quality_schedule_routes_bound_bodies_and_require_peer_auth() {
                 .await
                 .expect("response")
                 .status(),
-            StatusCode::PAYLOAD_TOO_LARGE
+            if path.starts_with("/api/v1/") || cfg!(feature = "cluster") {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::NOT_FOUND
+            }
         );
     }
     let unsigned = Request::builder()
@@ -1820,7 +1911,16 @@ async fn quality_schedule_routes_bound_bodies_and_require_peer_auth() {
         .expect("unsigned schedule");
     assert_eq!(
         app.oneshot(unsigned).await.expect("response").status(),
-        StatusCode::UNAUTHORIZED
+        if cfg!(feature = "cluster") {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::NOT_FOUND
+        }
+    );
+    assert_eq!(
+        route_admission_fixture_snapshot(&state).await,
+        before,
+        "rejected bodies and absent peer routes allocate no work"
     );
 }
 
@@ -3122,15 +3222,30 @@ async fn quorum_loss_keeps_liveness_but_fences_readiness_and_mutable_media() {
         .oneshot(post(crate::live_tv::SNAPSHOT_PATH, None, json!({})))
         .await
         .expect("fenced internal snapshot response");
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.status(),
+        if cfg!(feature = "cluster") {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::NOT_FOUND
+        }
+    );
     assert_eq!(response.headers().get(header::RETRY_AFTER), None);
-    assert!(response
+    let body = response
         .into_body()
         .collect()
         .await
         .expect("body")
-        .to_bytes()
-        .is_empty());
+        .to_bytes();
+    if cfg!(feature = "cluster") {
+        assert!(body.is_empty());
+    } else {
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("native missing route")["error"],
+            "not found"
+        );
+        assert!(state.live_tv.activities().is_empty());
+    }
 }
 
 fn post(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
@@ -6710,21 +6825,9 @@ async fn live_tv_placement_and_ingest_refuse_household_bearers_before_admission(
         "/_internal/v1/live-tv/process",
         "/_internal/v1/live-tv/ingest",
     ] {
-        let response = app
-            .clone()
-            .oneshot(post(path, Some(&admin), json!({})))
-            .await
-            .expect("response");
-        // Unknown paths intentionally return the app shell. They must not
-        // return a relay admission or a tuner stream to a household bearer.
-        assert!(
-            response
-                .headers()
-                .get(axum::http::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| value.starts_with("text/html")),
-            "{path} must remain an unrouted app-shell fallback"
-        );
+        let (status, body) = call(&app, post(path, Some(&admin), json!({}))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+        assert_eq!(body["error"], "not found", "{path}");
     }
     assert!(state.live_tv.activities().is_empty());
 }
@@ -6779,7 +6882,15 @@ async fn live_tv_quorum_loss_fences_channels_and_stops_readiness_before_device_w
         ))
         .await
         .expect("internal fenced response");
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.status(),
+        if cfg!(feature = "cluster") {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::NOT_FOUND
+        }
+    );
+    assert!(state.live_tv.activities().is_empty());
 }
 
 /// N1's two settings move as one complete replicated pair. JSON null
@@ -8084,6 +8195,7 @@ async fn a_closed_recovery_proof_refuses_by_condition_never_by_credential() {
         .cache_only_admin_proofs
         .set_cluster_revocation_capability_ready(false);
 
+    let before = route_admission_fixture_snapshot(&state).await;
     let (status, body) = call(&app, get("/api/v1/cluster/status", Some(&admin))).await;
     assert_ne!(
         status,
@@ -8096,25 +8208,38 @@ async fn a_closed_recovery_proof_refuses_by_condition_never_by_credential() {
         StatusCode::FORBIDDEN,
         "the Store still knows this admin: {body}"
     );
-    // Past the guard and inside the handler: this standalone test state has
-    // no committed roster to report, and that refusal — the handler's own,
-    // named — is the proof the request was authorized.
-    assert_eq!(
-        body["code"], "cluster_roster_unavailable",
-        "the recovery read reached its handler: {body}"
-    );
+    // The SQLite fixture has no membership manager. Its named refusal proves
+    // this authorized request reached the compiled cluster handler.
+    if cfg!(feature = "cluster") {
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(
+            body["code"], "membership_unavailable",
+            "the recovery read reached its handler: {body}"
+        );
+    } else {
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not found");
+    }
 
     let (status, _) = call(&app, get("/api/v1/cluster/status", Some(&viewer))).await;
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
+        if cfg!(feature = "cluster") {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::NOT_FOUND
+        },
         "a viewer is refused for who they are, and that is not a session-ending answer"
     );
 
     let (status, _) = call(&app, get("/api/v1/cluster/status", Some("not-a-token"))).await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
+        if cfg!(feature = "cluster") {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::NOT_FOUND
+        },
         "only a credential the Store has no row for is unauthorized"
     );
 
@@ -8123,6 +8248,14 @@ async fn a_closed_recovery_proof_refuses_by_condition_never_by_credential() {
     let (status, body) = call(&app, get("/api/v1/cluster/support-bundle", Some(&admin))).await;
     assert_ne!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+    if cfg!(feature = "cluster") {
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "membership_unavailable");
+    } else {
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not found");
+        assert_eq!(route_admission_fixture_snapshot(&state).await, before);
+    }
 }
 
 #[tokio::test]
@@ -8668,9 +8801,8 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // qualification) that never gates the switch.
             "jellyfin_compatibility",
             // The clock guard's enforcement switch. All four rows are
-            // advisory; on this standalone fixture there is no remote
-            // member to observe, so coverage and the consequence row are
-            // `met` and the offset and NTP rows `unobservable`.
+            // advisory; this SQLite fixture has no membership runtime, so
+            // all four facts are unobservable.
             "cluster_clock",
             "durable_cluster_work",
             "bounded_catalogue_reads",
@@ -8873,10 +9005,6 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // The ffmpeg row is absent here because the fixture never
             // probed a build.
             "chapter_thumbs_work",
-            // The clock guard's: no committed remote member, so nothing
-            // is uncovered and current evidence would refuse nothing.
-            "consequence",
-            "coverage",
             "durable_queue",
             "durable_role",
             "dv_target_cache",
@@ -8924,9 +9052,9 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "{id} claimed to have read something this process cannot reach: {body}"
         );
     }
-    // The clock guard has no member offset to bound here, and this process
-    // never reads a node's time-synchronisation daemon.
-    for id in ["upper_bound", "ntp"] {
+    // SQLite has no membership runtime: neither coverage nor a hypothetical
+    // enforcement consequence is an observed cluster fact.
+    for id in ["coverage", "consequence", "upper_bound", "ntp"] {
         assert_eq!(
             seen.get(id).map(String::as_str),
             Some("unobservable"),
@@ -9790,11 +9918,15 @@ async fn system_info_is_admin_only() {
 /// unknown candidate.
 #[tokio::test]
 async fn the_ingress_list_is_for_signed_in_viewers_and_nobody_else() {
-    let app = test_app();
+    let (app, state) = test_app_with_state();
     let (status, _) = call(&app, get("/api/v1/cluster/ingress", None)).await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
+        if cfg!(feature = "cluster") {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::NOT_FOUND
+        },
         "an anonymous prober may not enumerate the cluster"
     );
 
@@ -9819,16 +9951,18 @@ async fn the_ingress_list_is_for_signed_in_viewers_and_nobody_else() {
     .await;
     let viewer = login["token"].as_str().expect("token").to_owned();
 
-    let (status, body) = call(&app, get("/api/v1/cluster/ingress", Some(&viewer))).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "an ordinary viewer's player needs this list: {body}"
-    );
-    assert!(body["node_urls"].is_array(), "{body}");
-
-    let (status, _) = call(&app, get("/api/v1/cluster/ingress", Some(&admin))).await;
-    assert_eq!(status, StatusCode::OK);
+    let before = route_admission_fixture_snapshot(&state).await;
+    for token in [&viewer, &admin] {
+        let (status, body) = call(&app, get("/api/v1/cluster/ingress", Some(token))).await;
+        if cfg!(feature = "cluster") {
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["code"], "membership_unavailable");
+        } else {
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(body["error"], "not found");
+        }
+        assert!(body.get("node_urls").is_none());
+    }
 
     // And it is not smuggled back onto the public identity endpoint,
     // which both clients deliberately call without a credential.
@@ -9837,11 +9971,56 @@ async fn the_ingress_list_is_for_signed_in_viewers_and_nobody_else() {
         info.get("node_urls").is_none(),
         "the identity probe must not carry the cluster's addresses: {info}"
     );
+    if !cfg!(feature = "cluster") {
+        assert_eq!(route_admission_fixture_snapshot(&state).await, before);
+    }
 }
 
 #[tokio::test]
 async fn cluster_membership_controls_are_admin_only_and_sqlite_is_explicit() {
-    let app = test_app();
+    let (app, state) = test_app_with_state();
+    if !cfg!(feature = "cluster") {
+        let admin = setup_admin(&app).await;
+        let before = route_admission_fixture_snapshot(&state).await;
+        for token in [None, Some(admin.as_str()), Some("invalid-token")] {
+            for route in [
+                "/api/v1/cluster/nodes",
+                "/api/v1/cluster/media",
+                "/api/v1/cluster/status",
+                "/api/v1/cluster/ingress",
+            ] {
+                let (status, body) = call(&app, get(route, token)).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{route}: {body}");
+                assert_eq!(body["error"], "not found");
+            }
+            for route in [
+                "/api/v1/cluster/protocol/learner/activate",
+                "/api/v1/cluster/protocol/learner/deactivate",
+                "/api/v1/cluster/election",
+                "/api/v1/cluster/leave",
+                "/api/v1/cluster/nodes/node-b/maintenance",
+                "/api/v1/cluster/nodes/node-b/promote",
+                "/api/v1/cluster/join-tokens",
+                "/api/v1/cluster/join/redeem",
+            ] {
+                let (status, body) = call(&app, post(route, token, json!({}))).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{route}: {body}");
+                assert_eq!(body["error"], "not found");
+            }
+            assert_eq!(
+                call(
+                    &app,
+                    delete("/api/v1/cluster/nodes/node-b/maintenance", token)
+                )
+                .await
+                .0,
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert_eq!(route_admission_fixture_snapshot(&state).await, before);
+        assert!(state.live_tv.activities().is_empty());
+        return;
+    }
     let (status, _) = call(&app, get("/api/v1/cluster/nodes", None)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _) = call(&app, get("/api/v1/cluster/media", None)).await;
@@ -10214,7 +10393,7 @@ async fn tone_map_census_routes_are_admin_only_and_report_idle() {
 
 #[tokio::test]
 async fn activity_requires_auth_and_reports_idle() {
-    let app = test_app();
+    let (app, state) = test_app_with_state();
     let (status, _) = call(&app, get("/api/v1/activity", None)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
@@ -10255,6 +10434,7 @@ async fn activity_requires_auth_and_reports_idle() {
             "sessions",
             "trakt",
             // Local worker observations are useful on SQLite too.
+            "worker_observed_nodes",
             "workers",
         ]
         .into_iter()
@@ -10266,6 +10446,7 @@ async fn activity_requires_auth_and_reports_idle() {
         detail["clustered"], false,
         "SQLite reports its standalone role"
     );
+    assert_eq!(detail["worker_observed_nodes"], json!([state.node_id]));
     assert_eq!(detail["analysis"]["enabled"], false);
     assert_eq!(detail["analysis"]["total"], 0);
     assert!(
@@ -10298,7 +10479,8 @@ async fn activity_requires_auth_and_reports_idle() {
         "operator queue health stays out of ordinary household responses"
     );
     assert!(
-        viewer_detail.get("workers").is_none(),
+        viewer_detail.get("workers").is_none()
+            && viewer_detail.get("worker_observed_nodes").is_none(),
         "worker capacity and process observations remain admin-only"
     );
 }
@@ -12194,7 +12376,14 @@ async fn sharing_http_rejects_secret_bearing_unknown_fields_and_oversized_claims
 #[tokio::test]
 async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
     use plurx_core::{secrets::Secret, sharing::Invitation};
-    let (app, state) = test_app_with_state();
+    let storage = crate::test_tempdir().expect("private network storage");
+    let (_, mut state) = test_app_with_state();
+    state.sharing = Arc::new(crate::sharing::SharingManager::new(
+        state.sharing.key.clone(),
+        storage.path().join("sharing-tls"),
+        Default::default(),
+    ));
+    let app = router(state.clone());
     let admin = setup_admin(&app).await;
     let seeded = seed_content(&state).await;
     let endpoints = json!([{"ipv4":"100.101.102.103","ipv6":null,"ts_fqdn":"source.fixture.ts.net","port":32443,"spki_sha256":"a".repeat(64)}]);
@@ -12229,6 +12418,15 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1["code"], "sharing_invalid_request");
     }
+    // Production creates the node data directory before network storage.
+    std::fs::create_dir_all(
+        state
+            .sharing
+            .host_directory()
+            .parent()
+            .expect("node data directory"),
+    )
+    .expect("node data directory");
     // Combined external invitations are the production default. This owned
     // fixture has no provider authorization and must retain that refusal.
     let (status, denied) = call(
@@ -13661,11 +13859,20 @@ async fn offline_package_api_is_idempotent_owned_and_stable_before_production() 
     assert!(metrics.contains("plurx_offline_packages{state=\"queued\"} 1"));
     assert!(metrics.contains("plurx_offline_requests_total{height=\"720\"} 2"));
     assert!(metrics.contains("plurx_cache_protected_entries{reason=\"active_playback\"} 0"));
-    assert!(metrics.contains("# TYPE plurx_store_operation_seconds histogram"));
+    assert!(metrics.contains("# TYPE plurx_sqlite_connection_recoveries_total counter"));
+    assert!(metrics.contains("# TYPE plurx_sqlite_integrity_checks_total counter"));
+    if cfg!(feature = "cluster") {
+        assert!(metrics.contains("# TYPE plurx_store_operation_seconds histogram"));
+        assert!(metrics
+            .contains("plurx_store_operations_total{class=\"authority_read\",outcome=\"ok\"}"));
+    } else {
+        assert!(!metrics.contains("plurx_store_operation_seconds"));
+        assert!(!metrics.contains("plurx_store_operations_total"));
+    }
     assert!(
-        metrics.contains("plurx_store_operations_total{class=\"authority_read\",outcome=\"ok\"}")
+        !metrics.contains("plurx_raft_"),
+        "this SQLite fixture has no Raft runtime in either build profile"
     );
-    assert!(metrics.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
     assert!(!metrics.contains("plurx_raft_commit_index"));
     assert!(
         !metrics.contains("Flight"),
@@ -14026,6 +14233,23 @@ async fn pgs_overlay_contract_is_authenticated_typed_and_immutable() {
     assert_eq!(body["retry_after_ms"], 1000);
 }
 
+/// Match the scanner's size and whole-second mtime from one held fixture inode.
+fn fixture_scanner_facts(path: &std::path::Path) -> (i64, i64) {
+    let metadata = std::fs::File::open(path)
+        .expect("open fixture inode")
+        .metadata()
+        .expect("fixture inode metadata");
+    (
+        i64::try_from(metadata.len()).expect("fixture size"),
+        metadata
+            .modified()
+            .expect("fixture mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("fixture after Unix epoch")
+            .as_secs() as i64,
+    )
+}
+
 struct Seed {
     lib: i64,
     movie: i64,
@@ -14163,7 +14387,7 @@ async fn seed_content(state: &AppState) -> Seed {
     // range and Plex-part read of this fixture answered 404.
     const PLACEHOLDER: &[u8] = b"\x00\x00\x00\x18ftypmp42 tiny placeholder bytes";
     std::fs::write(&mpath, PLACEHOLDER).expect("write");
-    let placeholder_len = PLACEHOLDER.len() as i64;
+    let (placeholder_len, placeholder_mtime) = fixture_scanner_facts(&mpath);
     let probe = ProbeResult {
             duration_ms: Some(9_000_000),
             container: Some("mp4".into()),
@@ -14194,7 +14418,13 @@ async fn seed_content(state: &AppState) -> Seed {
         };
     let file = state
         .store
-        .upsert_file(movie, &mpath.to_string_lossy(), placeholder_len, 1, &probe)
+        .upsert_file(
+            movie,
+            &mpath.to_string_lossy(),
+            placeholder_len,
+            placeholder_mtime,
+            &probe,
+        )
         .await
         .expect("file");
     let show = state
@@ -14238,7 +14468,13 @@ async fn seed_content(state: &AppState) -> Seed {
         .expect("ep");
     state
         .store
-        .upsert_file(ep, &mpath.to_string_lossy(), placeholder_len, 1, &probe)
+        .upsert_file(
+            ep,
+            &mpath.to_string_lossy(),
+            placeholder_len,
+            placeholder_mtime,
+            &probe,
+        )
         .await
         .expect("epfile");
     Seed {
@@ -14303,13 +14539,14 @@ async fn seed_home(state: &AppState) -> HomeSeed {
     let vpath = dir.join("2019/Beach day.mp4");
     const HOME_PLACEHOLDER: &[u8] = b"\x00\x00\x00\x18ftypmp42 tiny placeholder";
     std::fs::write(&vpath, HOME_PLACEHOLDER).expect("write video");
+    let (video_size, video_mtime) = fixture_scanner_facts(&vpath);
     state
         .store
         .upsert_file(
             video,
             &vpath.to_string_lossy(),
-            HOME_PLACEHOLDER.len() as i64,
-            1,
+            video_size,
+            video_mtime,
             &ProbeResult {
                 duration_ms: Some(12_000),
                 container: Some("mp4".into()),
@@ -14325,13 +14562,14 @@ async fn seed_home(state: &AppState) -> HomeSeed {
     let photo_bytes = b"\xff\xd8\xff\xe0 pretend this is a jpeg \xff\xd9".to_vec();
     let ppath = dir.join("2019/IMG_4021.jpg");
     std::fs::write(&ppath, &photo_bytes).expect("write photo");
+    let (photo_size, photo_mtime) = fixture_scanner_facts(&ppath);
     state
         .store
         .upsert_file(
             photo,
             &ppath.to_string_lossy(),
-            photo_bytes.len() as i64,
-            1,
+            photo_size,
+            photo_mtime,
             &ProbeResult {
                 container: Some("jpg".into()),
                 width: Some(4032),
@@ -14937,6 +15175,7 @@ async fn the_delivery_plan_carries_a_selected_non_default_audio_track() {
     std::fs::create_dir_all(&dir).expect("media dir");
     let path = dir.join("Dual Language.mp4");
     std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("media file");
+    let (size, mtime) = fixture_scanner_facts(&path);
     // Both tracks decode on this client and the container is native, so
     // nothing but the selection can move the verdict off direct play.
     let file = state
@@ -14944,8 +15183,8 @@ async fn the_delivery_plan_carries_a_selected_non_default_audio_track() {
         .upsert_file(
             seeded.movie,
             &path.to_string_lossy(),
-            25,
-            1,
+            size,
+            mtime,
             &ProbeResult {
                 duration_ms: Some(60_000),
                 container: Some("mp4".into()),
@@ -15424,14 +15663,14 @@ async fn android_dv_delivery_http_boundaries_bind_conversion_to_hls_and_narrow_p
     let admin = setup_admin(&app).await;
     let seeded = seed_content(&state).await;
     let source = plurx_core::testfixtures::source("closed-gop");
-    let metadata = std::fs::metadata(&source).expect("DV boundary fixture metadata");
+    let (size, mtime) = fixture_scanner_facts(&source);
     let file = state
         .store
         .upsert_file(
             seeded.movie,
             &source.to_string_lossy(),
-            metadata.len() as i64,
-            1,
+            size,
+            mtime,
             &ProbeResult {
                 duration_ms: Some(12_000),
                 container: Some("mkv".into()),
@@ -17541,8 +17780,7 @@ async fn seeded_write_surface() {
 
     // Reanalyze: admin-only, 404 for an item that isn't there, and for a
     // real item it reports per-file rather than pretending to succeed. The
-    // seeded file is 35 placeholder bytes, so ffprobe refuses it — which is
-    // exactly the shape this endpoint exists to report honestly.
+    // source in this case has been replaced since the scan.
     assert_eq!(
         call(
             &app,
@@ -17581,6 +17819,17 @@ async fn seeded_write_surface() {
         .0,
         StatusCode::BAD_REQUEST
     );
+    // A changed source is re-statted and probed during the request. An
+    // unchanged source belongs to the durable probe worker.
+    let file = state
+        .store
+        .get_file(s.file)
+        .await
+        .expect("read seeded media")
+        .expect("seeded media remains catalogued");
+    let replacement = b"truncated replacement";
+    std::fs::write(&file.path, replacement).expect("replace seeded media");
+    assert_ne!(file.size, replacement.len() as i64);
     let (st, report) = call(
         &app,
         post(

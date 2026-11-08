@@ -107,14 +107,56 @@ pub struct ActivityWorkers {
     pub child_count: usize,
 }
 
+#[cfg(feature = "cluster")]
+impl ActivityWorkers {
+    /// Member-scoped operations carry capacity, never detailed process or
+    /// model/engine evidence from the voter-scoped Activity channel.
+    pub(crate) fn capacity_only(mut self) -> Self {
+        self.subtitles = None;
+        self.analysis_engine = None;
+        self.children.clear();
+        self
+    }
+
+    pub(crate) fn bounded(&self, expected_node_id: &str) -> bool {
+        self.subtitles
+            .as_ref()
+            .is_none_or(|observation| observation.bounded(expected_node_id))
+            && self.children.len() <= 32
+            && self.analysis_engine.as_ref().is_none_or(|engine| {
+                engine.len() == 64 && engine.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            && self.children.iter().all(|child| child.len() <= 256)
+            && self.child_count >= self.children.len()
+            && self.heavy_in_use <= self.heavy_limit
+            && self
+                .probe_batch_limit
+                .is_none_or(|limit| (1..=2).contains(&limit))
+            && self.heavy_available <= self.heavy_limit.saturating_sub(self.heavy_in_use)
+    }
+}
+
 pub(super) async fn local_workers(state: &AppState) -> ActivityWorkers {
+    local_workers_with_details(state, true).await
+}
+
+#[cfg(feature = "cluster")]
+pub(super) async fn local_worker_capacity(state: &AppState) -> ActivityWorkers {
+    local_workers_with_details(state, false).await
+}
+
+async fn local_workers_with_details(state: &AppState, detailed: bool) -> ActivityWorkers {
     let runtime = state.transcode.media_node_runtime().await;
     let accepting_work = state.serving.is_ready() && !state.local_maintenance_active();
     let children = plurx_core::process::priority::running();
     let heavy_in_use = usize::from(state.transcode.background_worker_in_use());
     ActivityWorkers {
-        subtitles: state.subtitle_models.local_observation().await,
-        analysis_engine: if crate::ffmpeg::fragment_index_engine_is_current().await {
+        subtitles: if detailed {
+            state.subtitle_models.local_observation().await
+        } else {
+            None
+        },
+        analysis_engine: if detailed && crate::ffmpeg::fragment_index_engine_is_current().await {
             Some(crate::ffmpeg::fragment_index_engine_digest().await)
         } else {
             None
@@ -132,11 +174,17 @@ pub(super) async fn local_workers(state: &AppState) -> ActivityWorkers {
         software_used: runtime.software_threads_used,
         software_limit: runtime.software_threads_max,
         child_count: children.len(),
-        children: children
-            .into_iter()
-            .take(32)
-            .map(|child| bounded_text(format!("{} · {}", child.class.as_str(), child.purpose), 256))
-            .collect(),
+        children: if detailed {
+            children
+                .into_iter()
+                .take(32)
+                .map(|child| {
+                    bounded_text(format!("{} · {}", child.class.as_str(), child.purpose), 256)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -600,24 +648,10 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
     snapshot.node_id == expected_node_id
         && !snapshot.node_id.is_empty()
         && snapshot.node_id.len() <= MAX_NODE_ID_BYTES
-        && snapshot.workers.as_ref().is_none_or(|workers| {
-            workers
-                .subtitles
-                .as_ref()
-                .is_none_or(|observation| observation.bounded(expected_node_id))
-                && workers.children.len() <= 32
-                && workers.analysis_engine.as_ref().is_none_or(|engine| {
-                    engine.len() == 64 && engine.bytes().all(|byte| byte.is_ascii_hexdigit())
-                })
-                && workers.children.iter().all(|child| child.len() <= 256)
-                && workers.child_count >= workers.children.len()
-                && workers.heavy_in_use <= workers.heavy_limit
-                && workers
-                    .probe_batch_limit
-                    .is_none_or(|limit| (1..=2).contains(&limit))
-                && workers.heavy_available
-                    <= workers.heavy_limit.saturating_sub(workers.heavy_in_use)
-        })
+        && snapshot
+            .workers
+            .as_ref()
+            .is_none_or(|workers| workers.bounded(expected_node_id))
         && snapshot.deliveries.len() <= MAX_DELIVERIES
         && snapshot.analysis.len() <= MAX_ANALYSIS_PROGRESS
         && snapshot.live_tv.len() <= 4

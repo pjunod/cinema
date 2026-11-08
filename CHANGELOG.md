@@ -10,6 +10,37 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Jobs includes fresh CPU, GPU and heavy-worker capacity from learner nodes.
+  Worker observations use the member-scoped operations channel and remain
+  independent of voter-only playback and recording authority.
+- Pending native HLS segments advertise their bounded Retry-After interval.
+
+- Subtitle workers preserve a completed publication when a concurrent pressure
+  check observes that its source authority has retired. Changed original files
+  retain the existing not-found response instead of returning an internal error.
+- Source-retirement and deferred-companion diagnostics remain in their parent
+  operator log channels. Verified fleet publication checks the exact reviewed
+  image configuration before advancing the main tag.
+
+- Linux Dolby Vision reconstruction avoids inherited display adjustments and
+  preserves software planar 10-bit samples. Its final Vulkan RGB cache rounds
+  to the exact nearest 16-bit value. Shared PQ mapping retains small
+  intermediates, and RGB48 export avoids double rounding while preserving the
+  caller's rounding mode.
+
+- CI retains authenticated successful Android and Node command results when
+  their consumed sources are unchanged, preserving whole-command accounting.
+- Historical queue fixtures preserve managed receipts while rewinding the
+  published source and dispatch extensions, and source audits cover nested
+  replicated-store modules and their required authority reads.
+
+- Manual library scans and explicit refreshes get the next eligible shared
+  read slot across job types. A scan finishing under a pressure check can
+  release its reader and let the next scan start.
+- Activity shows blocked shared reads above both tabs, identifies the originating
+  worker and job when available, and reports overdue manual scans alongside
+  five-minute completion and failure rates for the cluster and each worker.
+
 - Standalone build recipes omit the cluster SDK from the selected daemon,
   controller and tray graph. Explicit cluster profiles keep their own images;
   legacy data uses a separately authenticated migration helper or an explicit

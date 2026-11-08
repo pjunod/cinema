@@ -73,10 +73,10 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed SQLite-only build/helper and explicit-cluster recipes. The native
+    # Reviewed cluster-wal-check daemon commands explicitly select cluster; the native
     # desktop/Apple recipe blocks and resource closures are unchanged. Keep one
     # exact current pin: earlier Makefile receipts require fresh native evidence.
-    'Makefile': '7e12d06f8372e36a851f58ad5846f303b00cf87bca13717193dafd2a23068443',
+    'Makefile': '669a366f9082769752437d388a9a68466486a13d403a26a25633120003555a79',
     # Reviewed 0.8.0 build 289: only CURRENT_PROJECT_VERSION differs from the
     # reviewed build 288 bytes. Pin this exact spec; build-288 case receipts do
     # not transfer, and added resources or scripts still change its digest.

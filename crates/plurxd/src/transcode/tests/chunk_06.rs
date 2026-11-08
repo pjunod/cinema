@@ -2461,6 +2461,10 @@
         std::fs::create_dir(&media).expect("owned publisher directory");
         let executable = crate::ffmpeg::encoder_executable_path().expect("pinned FFmpeg");
         let mut command = tokio::process::Command::new(&executable);
+        // AttemptChild owns and signals the publisher's process group on Linux.
+        // A raw test child must establish that same ownership before adoption.
+        #[cfg(target_os = "linux")]
+        command.process_group(0);
         command.args(["-v", "error", "-nostdin", "-re", "-f", "lavfi", "-i",
             "testsrc2=size=160x120:rate=10", "-t", "30", "-an", "-c:v", "libx264",
             "-threads", "1", "-preset", "ultrafast", "-g", "10", "-bf", "0",
@@ -2469,6 +2473,7 @@
             .arg(media.join("segment%05d.ts"))
             .arg(media.join("index.m3u8"))
             .stdout(std::process::Stdio::null())
+            .process_group(0)
             .kill_on_drop(true);
         let child = command.spawn().expect("actual realtime media publisher");
         let publisher_pid = child.id().expect("live publisher pid");

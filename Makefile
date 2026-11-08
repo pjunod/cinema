@@ -774,124 +774,124 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  client::mgmt::tests::production_transport_client_rejects_oversized_unframed_response_body \
 	  --lib -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::peer_fanout_applies_the_one_second_per_peer_deadline \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::peer_fanout_never_exceeds_the_eight_peer_bound \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::production_collector_labels_directory_overflow_without_probing_it \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::peer_status_cache_is_fresh_for_five_seconds_then_expires \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_local_cache_time \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::remote_status_freshness_uses_local_monotonic_age_despite_clock_skew \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::stale_peer_sample_uses_local_elapsed_time_and_cannot_become_healthy \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::absent_and_expired_cache_are_unavailable_never_peer_limited \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::membership_status_cache_is_fresh_for_five_seconds_then_expires \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::membership_projection_refresh_is_bounded_and_preserves_last_good_sample \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::long_install_crosses_to_stalled_then_expires_after_the_post_deadline_window \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cached_fresh_active_transport_stalls_exactly_when_deadline_reaches_zero \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cached_deadline_less_active_transport_uses_the_producer_fallback_boundary \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cached_terminal_transport_observation_expires_at_five_minutes \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::transport_projection_uses_local_monotonic_age_despite_remote_clock_skew \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::peer_status_refresh_keeps_strict_cycle_overhead_margin \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::aggregate_request_reads_only_node_owned_projections \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::unclustered_membership_cache_loop_exits_without_refresh_or_retry \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::mutation_preflight_refreshes_roster_directory_and_bounded_peer_observations \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::mutation_preflight_bounds_the_current_membership_read \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::mutation_preflight_ages_local_transport_across_peer_collection \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::planned_outage_lease_blocks_membership_mutation_during_fresh_preflight \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::failed_fresh_preflight_releases_its_planned_outage_lease \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::aborted_fresh_preflight_releases_the_exact_planned_outage_claim \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cancelled_acquisition_waiter_releases_only_after_ambiguous_outcome_is_known \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::abort_during_drain_cancels_the_guard_owned_local_fence \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::unresolved_exact_release_keeps_admissions_fenced_past_the_lease_deadline \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::restart_cancellation_cannot_clear_a_maintenance_owned_fence \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::delayed_same_owner_cleanup_cannot_clear_a_successor_generation \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::overlapping_cleanup_tokens_are_resolved_independently \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::confirmed_release_resolves_latch_but_preserves_timed_fence \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::confirmed_current_restart_cancel_resolves_a_preexisting_exact_latch \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::confirmed_current_restart_cancel_resolves_an_expired_exact_latch \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::confirmed_maintenance_exit_resolves_an_expired_exact_latch \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::confirmed_maintenance_exit_preserves_a_restart_owned_latch \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::stuck_restart_admission_cannot_outlive_the_exact_fence \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::restart_preparation_claims_and_releases_the_replicated_outage_slot \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cancelled_maintenance_waiter_does_not_cancel_the_owned_commit \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cleanup_retry_backoff_is_capped_and_shutdown_interruptible \
 	  -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
@@ -954,82 +954,82 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::membership::tests::activated_guard_with_live_mutation_lease_is_not_an_activation_candidate \
 	  --lib -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_expire_without_sliding_and_refuse_non_admins \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_honor_digest_and_user_invalidation \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::active_revocation_blocks_ticket_publication_until_guard_drop \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::commit_ambiguous_local_mutation_retains_one_bounded_fail_closed_fence \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::replicated_capability_loss_clears_proofs_and_invalidates_in_flight_publication \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::cache_admin_revocation_operation_queue_is_bounded_and_raii_released \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::capability_refresh_error_and_rollback_clear_cache_only_admin_authority \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::automatic_activation_runs_outside_the_membership_projection \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::full_roster_projection_activates_without_a_credential_mutation \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::permanent_activation_stops_the_one_time_worker \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::stuck_automatic_activation_does_not_block_membership_refresh_or_shutdown \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  startup_tests::console_password_reset_fails_closed_before_any_store_mutation \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::remote_revocation_fence_expires_bounded_and_reinvalidates \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::remote_revocation_fences_have_a_hard_capacity \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::poisoned_proof_cache_fails_closed_for_authentication_and_revocation \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::digest_and_user_revocation_on_a_invalidate_primed_b_before_success \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::credential_revocation_uses_the_exact_committed_security_roster \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::credential_revocation_accepts_more_than_the_diagnostics_probe_limit \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::membership_added_between_begin_passes_is_fenced_before_store_admission \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::replicated_membership_exclusion_spans_final_roster_read_and_peer_end \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::local_apply_ack_wire_version_rejects_pre_barrier_receivers \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::begin_ack_installs_memory_fence_before_waiting_for_exact_local_apply \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::cancelled_local_apply_wait_leaves_peer_memory_fence_closed \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::origin_waits_for_exact_claim_apply_before_observing_added_member \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::automatic_activation_checks_the_permanent_marker_before_taking_the_gate \
 	  -- --exact
 	$(CARGO) test --locked -p plurx-core --lib \
@@ -1051,31 +1051,31 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --lib \
 	  store::sqlite::users::tests::concurrent_admin_demote_and_delete_preserve_one_administrator \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_have_a_hard_capacity \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::logout_revocation_generation_rejects_an_in_flight_store_result \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::user_revocation_generation_rejects_all_in_flight_store_results \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::authentication_and_revocation_callers_bracket_store_work_with_generations \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::production_collector_preserves_private_transport_when_public_listener_is_closed \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::peer_transport_age_retains_request_to_receipt_uncertainty \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::slow_public_probe_cannot_discard_completed_private_transport \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::identity_mismatch_discards_peer_local_state \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::public_transport_fallback_requires_matching_observer_identity \
 	  -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \

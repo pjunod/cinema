@@ -1320,22 +1320,9 @@ impl Encoding {
             .expect("frozen VOD execution remains valid");
         #[cfg(target_os = "linux")]
         if let Some(runtime) = &self.dv_runtime {
-            let output = self
-                .plan
-                .completed_reconstructed_output(runtime.encoder)
-                .expect("verified reconstructed output encoder")
-                .with_vaapi_hdr_policy(runtime.vaapi_hdr_policy);
-            return plurx_core::transcode::vod_completed_reconstructed_pipe_args(
-                file,
-                &output,
-                &execution,
-                self.grid,
-                duration_seconds,
-                "/proc/self/fd/3",
-                "/proc/self/fd/4",
-                self.source_clock,
-            )
-            .expect("verified reconstructed VOD recipe remains valid");
+            return runtime
+                .window_encoder_args(file, &self.plan, &execution, self.grid, duration_seconds)
+                .expect("verified reconstructed VOD recipe remains valid");
         }
         if let Some(audio) = &self.shared_audio {
             // This input is the source duration, not an already rounded plan
@@ -1546,7 +1533,8 @@ pub(crate) async fn digest_subtitle(file: &std::fs::File) -> Result<String, Stri
     let read = async {
         input.rewind().await?;
         let mut hash = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
+        // Keep the read buffer off the stack of the enclosing VOD preparation future.
+        let mut buffer = vec![0u8; 64 * 1024];
         let mut total = 0u64;
         loop {
             let count = input.read(&mut buffer).await?;

@@ -554,7 +554,9 @@ impl RetainedVodArtifact {
             return Err(io::ErrorKind::InvalidData.into());
         }
         let mut hash = Sha256::new();
-        let mut buffer = [0_u8; 65_536];
+        // This read spans an await. Keep its 64 KiB scratch off the stack of
+        // every segment handler that can enter retained-output repair.
+        let mut buffer = vec![0_u8; 65_536];
         let mut read_bytes = 0_u64;
         loop {
             let read = file.read(&mut buffer).await?;

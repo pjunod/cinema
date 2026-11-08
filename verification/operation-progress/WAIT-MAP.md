@@ -5,6 +5,15 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## Source custody replay on 2026-11-07
+
+Compared with `cc2ca1338`, scheduler upkeep preserves the interval from a
+live owner's registration to activation. An armed owner requires settlement
+evidence, including after its authority expires. The cleanup transaction
+rechecks the current owner after its initial read. The selected library
+worker's token and publication-lock waits retain their existing order.
+The focused Store regression covers the activation and renewal interleavings.
+
 ## Optional cluster composition and SQLite close — scoped review on 2026-11-04
 
 Astra independently compared the candidate with effort `6545218`. The workspace

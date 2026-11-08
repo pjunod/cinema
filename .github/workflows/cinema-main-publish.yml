@@ -1,0 +1,92 @@
+name: publish verified Cinema main recovery
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact reviewed commit in main history
+        required: true
+        type: string
+jobs:
+  publish:
+    name: publish verified Cinema main image
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    timeout-minutes: 90
+    concurrency:
+      group: publish-main-image
+      cancel-in-progress: false
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: controller
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: c470d5aa033e84b4a2de1f8d36aa4180d62cd971
+          path: landing
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Authenticate the main source and every required check
+        id: verified
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CINEMA_SOURCE_SHA: ${{ inputs.source_sha }}
+          PYTHONPATH: ${{ github.workspace }}/controller
+        run: python3 -P -m validation.publish_cinema_main
+      - uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          buildkitd-config-inline: |
+            [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
+              http = true
+      - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+      - name: Publish the exact native package image under its immutable main identity
+        working-directory: source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EXPECTED_IMAGE_ID: ${{ steps.verified.outputs.image_id }}
+          REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          image="$EXPECTED_IMAGE_ID"
+          test "$(docker image inspect --format '{{.Id}}' "$image")" = "$EXPECTED_IMAGE_ID"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$SOURCE_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$image")" = "$SOURCE_URL"
+          test "$(docker run --rm --entrypoint /usr/local/bin/plurx-cluster-check "$image" build-identity)" = "$SOURCE_SHA"
+          immutable="$REGISTRY/noirr/plurxd:sha-${SOURCE_SHA:0:12}"
+          if docker buildx imagetools inspect "$immutable" > "$RUNNER_TEMP/cinema-manifest" 2> "$RUNNER_TEMP/cinema-manifest-error"; then
+            docker pull --platform linux/amd64 "$immutable"
+            test "$(docker image inspect --format '{{.Id}}' "$immutable")" = "$EXPECTED_IMAGE_ID"
+            echo 'Preserving the matching immutable package image'
+          elif grep -Eqi 'unauthorized|denied|forbidden|timeout|connection|TLS|certificate' "$RUNNER_TEMP/cinema-manifest-error"; then
+            cat "$RUNNER_TEMP/cinema-manifest-error" >&2
+            exit 1
+          elif grep -Eqi 'manifest unknown|name unknown' "$RUNNER_TEMP/cinema-manifest-error"; then
+            docker tag "$EXPECTED_IMAGE_ID" "$immutable"
+            docker push "$immutable"
+          else
+            cat "$RUNNER_TEMP/cinema-manifest-error" >&2
+            echo 'Registry state is indeterminate; refusing publication' >&2
+            exit 1
+          fi
+      - name: Reverify the immutable image and advance the fleet main tag
+        working-directory: source
+        env:
+          PLURX_EXPECTED_IMAGE_ID: ${{ steps.verified.outputs.image_id }}
+          PLURX_BUILD_REF: ${{ inputs.source_sha }}
+          PLURX_BUILD_SHA: ${{ inputs.source_sha }}
+          PLURX_REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          PLURX_SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: "$GITHUB_WORKSPACE/controller/scripts/registry-push"

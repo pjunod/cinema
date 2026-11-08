@@ -48,10 +48,13 @@ fn fixture() -> Fixture {
         instance_id: "server".into(),
         node_id: "node".into(),
         generation: uuid::Uuid::new_v4().to_string(),
-        schema_version: 124,
+        schema_version: crate::store::SQLITE_SCHEMA_VERSION,
     };
     let native = Connection::open(root.path().join(&incoming)).expect("storage handoff fixture");
-    native.execute_batch("PRAGMA user_version=124; CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT); INSERT INTO settings VALUES('instance.id','server'); CREATE TABLE storage_identity(singleton INTEGER PRIMARY KEY,instance_id TEXT,node_id TEXT,generation TEXT); CREATE TABLE user_changes(value TEXT);").expect("storage handoff fixture");
+    native.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT); INSERT INTO settings VALUES('instance.id','server'); CREATE TABLE storage_identity(singleton INTEGER PRIMARY KEY,instance_id TEXT,node_id TEXT,generation TEXT); CREATE TABLE user_changes(value TEXT);").expect("storage handoff fixture");
+    native
+        .pragma_update(None, "user_version", crate::store::SQLITE_SCHEMA_VERSION)
+        .expect("current native fixture version");
     native
         .execute(
             "INSERT INTO storage_identity VALUES(1,?1,?2,?3)",

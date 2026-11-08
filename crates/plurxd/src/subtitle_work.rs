@@ -64,7 +64,13 @@ where
                 background_preempted() || !source_may_continue().await
             } => {
                 if preempted {
-                    cancellation.cancel(); let _ = work.await;
+                    cancellation.cancel();
+                    // A completion write can retire its own source authority
+                    // before this observation returns. Preserve that committed
+                    // success after the worker has joined; permit no new reads.
+                    if work.await.is_ok() {
+                        return Ok(());
+                    }
                     return Err(AnalysisResolutionError::Retry { code: "foreground_preempted", charge_attempt: false });
                 }
             }
@@ -73,7 +79,13 @@ where
                 !source_may_continue().await
             } => {
                 if preempted {
-                    cancellation.cancel(); let _ = work.await;
+                    cancellation.cancel();
+                    // A completion write can retire its own source authority
+                    // before this observation returns. Preserve that committed
+                    // success after the worker has joined; permit no new reads.
+                    if work.await.is_ok() {
+                        return Ok(());
+                    }
                     return Err(AnalysisResolutionError::Retry { code: "foreground_preempted", charge_attempt: false });
                 }
             }
@@ -309,12 +321,12 @@ impl JobManager {
                     fence.source_budget(),
                     plurx_core::process::bounded::cancellable(
                         cancellation.clone(),
-                        self.resolve_durable_subtitle(
+                        Box::pin(self.resolve_durable_subtitle(
                             &request,
                             runtime_cache,
                             &fence,
                             &cancellation,
-                        ),
+                        )),
                     ),
                 );
                 tokio::pin!(work);
@@ -417,6 +429,46 @@ impl JobManager {
 mod foreground_admission_tests {
     use super::admit_foreground_subtitle;
     use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
+
+    #[tokio::test(start_paused = true)]
+    async fn subtitle_pressure_preserves_committed_success_after_join() {
+        for notification in [false, true] {
+            let loss = super::CancellationToken::new();
+            let cancellation = super::CancellationToken::new();
+            let work = async {
+                cancellation.cancelled().await;
+                Ok(())
+            };
+            tokio::pin!(work);
+            let mut pressure = tokio::time::interval_at(
+                tokio::time::Instant::now()
+                    + std::time::Duration::from_secs(if notification { 3600 } else { 0 }),
+                std::time::Duration::from_secs(3600),
+            );
+            let result = super::await_subtitle_work(
+                work.as_mut(),
+                &loss,
+                &cancellation,
+                &mut pressure,
+                || async {
+                    if !notification {
+                        std::future::pending::<()>().await;
+                    }
+                },
+                || async { false },
+                || false,
+            )
+            .await;
+            assert!(
+                cancellation.is_cancelled(),
+                "pressure path must join the worker"
+            );
+            assert!(
+                result.is_ok(),
+                "committed completion was discarded: {result:?}"
+            );
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn subtitle_pressure_checks_keep_polling_the_write_that_holds_the_fence() {

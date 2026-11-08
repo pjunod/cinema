@@ -1903,6 +1903,10 @@ mod tests {
                     width: Some(3840),
                     height: Some(2160),
                     bit_depth: Some(10),
+                    dolby_vision: plurx_core::domain::DolbyVisionFacts {
+                        profile: Some(5),
+                        ..Default::default()
+                    },
                     hdr: Some("dolby_vision".into()),
                     hdr_format: Some("Dolby Vision · Profile 5".into()),
                     audio_streams: vec![AudioStream {
@@ -1921,12 +1925,72 @@ mod tests {
             .expect("profile 5 file")
     }
 
-    /// A Profile 5 pixel proof that did not finish is "try again", not the
-    /// permanent `unsupported_media` refusal: nothing was learned about the
-    /// source, nothing is remembered and no package is created, so the next
-    /// request measures again. A refuted proof stays `unsupported_media`.
+    /// Enqueue captures demand and a source-free recipe. Only the claimed
+    /// executor may spend source-reader custody on a Profile 5 proof.
     #[tokio::test]
-    async fn offline_request_with_an_unfinished_profile5_proof_is_retryable_and_creates_nothing() {
+    async fn offline_request_defers_profile5_proof_until_owned_execution() {
+        use std::sync::atomic::Ordering;
+        let fixture = fixture_with_system(crate::state::SystemInfo {
+            dovi_reshape: true,
+            ..Default::default()
+        })
+        .await;
+        let file_id = insert_profile5(&fixture).await;
+        let hooks = fixture.state.transcode.test_hooks();
+        hooks
+            .dovi_pixel_proof_script
+            .lock()
+            .expect("script")
+            .push_back(crate::ffmpeg::DoviPixelProof::Inconclusive(
+                "proof must wait for a source owner".into(),
+            ));
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (code, body) = create_response(
+            &fixture,
+            file_id,
+            CreatePackage {
+                request_id,
+                height: 720,
+                audio_index: Some(0),
+                subtitle_index: None,
+            },
+        )
+        .await;
+        assert_eq!(code, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(body["state"], "queued", "{body}");
+        assert_eq!(
+            hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+            0,
+            "HTTP enqueue must not open an original source"
+        );
+        assert_eq!(
+            hooks
+                .dovi_pixel_proof_script
+                .lock()
+                .expect("unspent script")
+                .len(),
+            1
+        );
+        let stats = fixture
+            .state
+            .store
+            .offline_package_stats("test-node", now_unix())
+            .await
+            .expect("offline package stats");
+        assert_eq!(
+            (stats.queued, stats.preparing, stats.ready, stats.failed),
+            (1, 0, 0, 0),
+            "demand is durable without claiming execution or a proved package"
+        );
+    }
+
+    /// Queueing captures metadata without reading the source. Only the claimed
+    /// durable worker proves Profile 5 pixels, before binding or rendering an
+    /// output. An inconclusive proof yields and is retried; a refuted one refuses.
+    #[tokio::test]
+    async fn offline_request_defers_profile5_proof_to_owned_worker_and_refuses_unproved_output() {
+        use crate::transcode::{OfflineProduceOutcome, OfflineSpec, OfflineSubtitle};
+        use plurx_core::transcode::EffectiveRateControl;
         use std::sync::atomic::Ordering;
 
         let fixture = fixture_with_system(crate::state::SystemInfo {
@@ -1936,71 +2000,199 @@ mod tests {
         .await;
         let file_id = insert_profile5(&fixture).await;
         let hooks = fixture.state.transcode.test_hooks();
-        let profile5 = |proof| {
-            hooks
-                .dovi_pixel_proof_script
-                .lock()
-                .expect("script")
-                .push_back(proof);
+        hooks
+            .dovi_pixel_proof_script
+            .lock()
+            .expect("proof script")
+            .extend([
+                crate::ffmpeg::DoviPixelProof::Inconclusive(
+                    "Dolby Vision pixel probe timed out".into(),
+                ),
+                crate::ffmpeg::DoviPixelProof::Refuted,
+            ]);
+        // Any attempt to reach rendering is recorded and safely refused.
+        fixture
+            .state
+            .transcode
+            .test_script_offline_production([OfflineProduceOutcome::Yielded(
+                "unexpected_unproved_render",
+            )]);
+        fn output_files(
+            root: &std::path::Path,
+        ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+            fn visit(
+                root: &std::path::Path,
+                path: &std::path::Path,
+                files: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+            ) {
+                for entry in std::fs::read_dir(path).expect("output directory") {
+                    let entry = entry.expect("output entry");
+                    let kind = entry.file_type().expect("output type");
+                    if kind.is_dir() {
+                        visit(root, &entry.path(), files);
+                    } else {
+                        assert!(kind.is_file(), "unexpected output link");
+                        files.insert(
+                            entry
+                                .path()
+                                .strip_prefix(root)
+                                .expect("owned output")
+                                .to_path_buf(),
+                            std::fs::read(entry.path()).expect("output bytes"),
+                        );
+                    }
+                }
+            }
+            let mut files = std::collections::BTreeMap::new();
+            for name in ["cache", "transcode", "renditions"] {
+                visit(root, &root.join(name), &mut files);
+            }
+            files
+        }
+        let initial_output = output_files(fixture._root.path());
+        let assert_no_output = || {
+            assert!(fixture
+                .state
+                .transcode
+                .test_offline_produced_recipes()
+                .is_empty());
+            assert_eq!(fixture.state.transcode.test_manifests_published(), 0);
+            assert_eq!(
+                output_files(fixture._root.path()),
+                initial_output,
+                "an unproved package must create no media artifacts"
+            );
+        };
+        let (code, body) = create_response(
+            &fixture,
+            file_id,
             CreatePackage {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 height: 720,
                 audio_index: Some(0),
                 subtitle_index: None,
-            }
+            },
+        )
+        .await;
+        assert_eq!(code, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(body["state"], "queued", "{body}");
+        assert_eq!(
+            hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+            0,
+            "an HTTP enqueue must not read the source for a pixel proof"
+        );
+        assert_no_output();
+        let stats = fixture
+            .state
+            .store
+            .offline_package_stats("test-node", now_unix())
+            .await
+            .expect("queued metadata");
+        assert_eq!(
+            (
+                stats.queued,
+                stats.preparing,
+                stats.ready,
+                stats.failed,
+                stats.active_leases
+            ),
+            (1, 0, 0, 0, 0)
+        );
+        let package = fixture
+            .state
+            .store
+            .claim_next_offline_package("test-node")
+            .await
+            .expect("claim owned package")
+            .expect("queued package");
+        assert_eq!(package.id, body["id"].as_str().expect("package id"));
+        assert!(package.recipe_hash.is_none());
+        let file = fixture
+            .state
+            .store
+            .get_file(file_id)
+            .await
+            .expect("source row")
+            .expect("profile5 file");
+        let spec = OfflineSpec {
+            target_height: package.target_height,
+            audio_index: package.audio_index,
+            subtitle: OfflineSubtitle::None,
+            effective_rate_control: EffectiveRateControl::parse_snapshot(
+                &package.effective_rate_control,
+            )
+            .expect("captured rate control"),
+            audio_delivery: package
+                .audio_recipe
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .expect("captured audio recipe"),
         };
-
-        let body = profile5(crate::ffmpeg::DoviPixelProof::Inconclusive(
-            "Dolby Vision pixel probe timed out".into(),
-        ));
-        let response = match create(
-            AuthUser(fixture.user.clone()),
-            State(fixture.state.clone()),
-            AxPath(file_id),
-            Json(body),
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let pending = Box::pin(
+            fixture
+                .state
+                .transcode
+                .ensure_offline(&package, &file, &spec, deadline, &cancelled),
         )
         .await
-        {
-            Ok(_) => panic!("an unfinished proof must not create a package"),
-            Err(error) => error.into_response(),
-        };
-        assert_eq!(
-            response
-                .headers()
-                .get(header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok()),
-            Some("5")
+        .expect("unfinished proof yields");
+        assert!(
+            matches!(
+                pending,
+                OfflineProduceOutcome::Yielded("source_proof_pending")
+            ),
+            "{pending:?}"
         );
-        let (code, body) = json_response(response).await;
-        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-        assert_eq!(body["code"], "startup_timeout", "{body}");
         assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            fixture
-                .state
-                .store
-                .offline_package_stats("test-node", now_unix())
-                .await
-                .expect("offline package stats"),
-            plurx_core::domain::OfflinePackageStats::default(),
-            "an unfinished proof persisted work"
-        );
+        assert_no_output();
+        let retained = fixture
+            .state
+            .store
+            .offline_package_for_user(&package.id, fixture.user.id)
+            .await
+            .expect("retained owner")
+            .expect("metadata package");
+        assert!(retained.recipe_hash.is_none());
+        assert!(retained.actual_bytes.is_none());
+        assert_eq!(retained.claim_generation, package.claim_generation);
 
-        // Nothing was remembered: the next request measures again, and a
-        // refuted proof is the permanent refusal.
-        let body = profile5(crate::ffmpeg::DoviPixelProof::Refuted);
-        let (code, body) = create_response(&fixture, file_id, body).await;
-        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-        assert_eq!(body["code"], "unsupported_media", "{body}");
-        assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 2);
-        assert_eq!(
+        // Nothing was memoized by the inconclusive proof. The same owner
+        // measures again, and a refuted proof refuses before production.
+        let refused = Box::pin(
             fixture
                 .state
-                .store
-                .offline_package_stats("test-node", now_unix())
-                .await
-                .expect("offline package stats"),
-            plurx_core::domain::OfflinePackageStats::default()
+                .transcode
+                .ensure_offline(&package, &file, &spec, deadline, &cancelled),
+        )
+        .await
+        .expect_err("refuted pixels cannot render a package");
+        assert!(
+            crate::transcode::unsupported_build_reason(&refused).is_some(),
+            "{refused}"
+        );
+        assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 2);
+        assert_no_output();
+        let retained = fixture
+            .state
+            .store
+            .offline_package_for_user(&package.id, fixture.user.id)
+            .await
+            .expect("unproduced owner")
+            .expect("metadata package");
+        assert!(retained.recipe_hash.is_none());
+        assert!(retained.actual_bytes.is_none());
+        let stats = fixture
+            .state
+            .store
+            .offline_package_stats("test-node", now_unix())
+            .await
+            .expect("unproduced statistics");
+        assert_eq!(
+            (stats.ready, stats.ready_bytes, stats.failed_bytes),
+            (0, 0, 0)
         );
     }
 

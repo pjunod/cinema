@@ -2065,24 +2065,43 @@ mod dv_title_companion {
     #[tokio::test]
     async fn budgeted_companion_inherits_no_raw_source_and_refused_pass_joins_its_input() {
         use plurx_core::transcode::dv_processing::{DvBackendIdentity, DvDigest};
-        use std::os::unix::fs::PermissionsExt;
         let directory = crate::test_tempdir().expect("companion custody fixture");
         let scanner = directory.path().join("scanner");
-        std::fs::write(
+        crate::write_test_executable(
             &scanner,
             r#"#!/bin/sh
 set -eu
-case "$1" in http://127.0.0.1:*/*) ;; *) exit 91 ;; esac
-test "$2" = 0
-test ! -e /proc/self/fd/3
+case "$1" in
+  http://127.0.0.1:*/*) ;;
+  *) printf 'scanner refused non-loopback input URL: %s\n' "$1" >&2; exit 91 ;;
+esac
+if test "$2" != 0; then
+  printf 'scanner refused stream index: %s\n' "$2" >&2
+  exit 92
+fi
+source_identity=$(/usr/bin/stat -Lc '%d:%i' "${0%/*}/original.mkv")
+if ! test -d "/proc/$$/fd"; then
+  printf 'scanner cannot inspect inherited descriptors\n' >&2
+  exit 95
+fi
+for descriptor in /proc/$$/fd/*; do
+  if descriptor_identity=$(/usr/bin/stat -Lc '%d:%i' "$descriptor" 2>/dev/null); then
+    if test "$descriptor_identity" = "$source_identity"; then
+      printf 'scanner inherited raw media descriptor %s (device:inode %s)\n' \
+        "$descriptor" "$source_identity" >&2
+      exit 93
+    fi
+  elif test -e "$descriptor"; then
+    printf 'scanner could not identify inherited descriptor %s\n' "$descriptor" >&2
+    exit 94
+  fi
+done
 printf '%s' "$1" > "${0%/*}/scanner.input"
 printf '%s' "$$" > "${0%/*}/scanner.pid"
 exec /bin/sleep 60
 "#,
-        )
-        .expect("write capability-checking scanner");
-        std::fs::set_permissions(&scanner, std::fs::Permissions::from_mode(0o700))
-            .expect("executable scanner fixture");
+            0o700,
+        );
         let digest = || DvDigest::new("a".repeat(64)).expect("fixture digest");
         let identity = DvBackendIdentity::new(digest(), digest(), digest(), digest(), 1, digest())
             .expect("fixture backend identity");
@@ -2098,7 +2117,7 @@ exec /bin/sleep 60
         std::fs::write(&source_path, b"original media capability").expect("held source fixture");
         let source = std::fs::File::open(source_path).expect("source descriptor");
         let (_store, _job, active) = crate::background_jobs::tests::active().await;
-        let task = crate::background_jobs::budgeted(active.fence().source_budget(), async {
+        let mut task = crate::background_jobs::budgeted(active.fence().source_budget(), async {
             ride.spawn(&source, Duration::from_secs(60))
                 .expect("owned companion")
         })
@@ -2110,6 +2129,19 @@ exec /bin/sleep 60
                     if let Ok(pid) = pid.parse() {
                         break pid;
                     }
+                }
+                if task.task.is_finished() {
+                    // Join the completed owner and report its launch/exit
+                    // result instead of hiding it behind a PID-file timeout.
+                    let result = (&mut task.task).await;
+                    if let Ok(Ok(output)) = &result {
+                        panic!(
+                            "scanner exited before accepting its isolated source URL: status={}, stderr={}",
+                            output.status,
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    }
+                    panic!("scanner exited before accepting its isolated source URL: {result:?}");
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }

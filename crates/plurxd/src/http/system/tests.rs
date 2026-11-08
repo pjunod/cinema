@@ -527,9 +527,15 @@ fn a_roster_read_costs_the_page_its_labels_and_never_the_page() {
     // A household member is refused before the roster is touched at all.
     let refused = reader.find("if !permitted {").expect("the admin gate");
     let read = reader
-        .find("state.membership.node_hostnames().await")
+        .find("membership.node_hostnames().await")
         .expect("the roster read");
-    assert!(refused < read);
+    let optional = reader
+        .find("if let Some(membership) = state.membership.as_ref()")
+        .expect("only a configured cluster has membership");
+    let clustered = reader
+        .find(r#"#[cfg(feature = "cluster")]"#)
+        .expect("standalone builds do not compile a roster read");
+    assert!(refused < clustered && clustered < optional && optional < read);
     // No `?`: a roster that will not answer must not turn the page into an
     // error, and must not be reported as an empty roster either.
     assert!(!reader.contains("node_hostnames().await?"));

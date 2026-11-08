@@ -1,3 +1,19 @@
+# Cluster worker-capacity observer ownership audit (2026-11-08): current
+# merge of main 78544ee against HEAD 7d4c37f8. This is source review, not
+# runtime qualification. One production tokio::spawn is added in
+# cluster_runtime/background.rs, after explicit Cluster mode and real
+# membership/replication checks. The task retains its AppState and the boot
+# BackgroundLoopGuard cancellation token. worker_status_cache_loop selects
+# shutdown while awaiting one one-second local-capacity sample, then selects
+# shutdown while awaiting its existing-cadence sleep_until. These are the
+# only two new timer sites; neither timeout nor cancellation claims a reap.
+# The sampler starts no child/session/source read and adds no detached helper.
+# New cluster cache fixtures add no task, timer-constructor or process site.
+# Per-file structural deltas: background.rs tasks 9->10; cluster_operations.rs
+# timers 12->14; the other four changed Rust files contribute zero sites.
+# Global counts: namespaced tasks 1087->1088, timers 2100->2102. Every other
+# count, root, regex, alias guard, forbidden zero and historical audit stays.
+#
 # Standalone SQLite/helper source ownership audit (2026-11-07), comparing
 # 8c654d37b to e6b7a3de9. This is a source census/review, not a substitute for
 # the runtime qualification recorded in PR #1396 and the build ledger.
@@ -742,7 +758,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # `post_media_retirement_keeps_exact_resources_after_caller_cancellation` asserts that
 # `child_transition.try_lock()` fails while retirement is held at its cleanup-handoff point. A
 # test-only probe that is expected to fail and takes nothing; no transition owner is created.
-expected_occurrences = 19
+# Incoming fixture diagnostics take one joined child-transition lock; no runtime owner added.
+expected_occurrences = 20
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -1219,7 +1236,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # fixtures under a paused clock; one in publication.rs is a source-pin
 # string (`match_indices`) proving the 100 ms init poll is the only sleep in
 # both pre-object wait branches. No shipped sleep is added.
-expected_occurrences = 88
+# Reachable retention history awaits the real 250ms control limit between observations.
+expected_occurrences = 89
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1365,7 +1383,8 @@ pattern = "child_transition"
 # 34 -> 35 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
 # test-only failing `try_lock()` probe at the retirement handoff point.
 # S10 retained attachment initializes its existing response transition mutex.
-expected_occurrences = 36
+# Incoming worker_retirement_debug names the same fixture lock twice and borrows it once.
+expected_occurrences = 38
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -2601,7 +2620,9 @@ pattern = "(?:VodPreparationGuard|preparing_sessions|begin_preparing_session|own
 # PR1369: +1 test-only registry read in settle_publication_control. It observes
 # preparing/live sessions while stopping this isolated control's survivors;
 # the ten-second settlement deadline never supplies closure evidence.
-expected_occurrences = 41
+# The encoded HTTP retry helper checks the existing live/preparing registry
+# remains exactly one; this inspection creates no owner.
+expected_occurrences = 42
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -3712,7 +3733,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # joined after an unwind-safe Release guard releases the blocked scan. The
 # actual blocking scan keeps its io_slot credit until it returns. Production
 # warm_inventory awaits the existing refresh owner and spawns no extra task.
-expected_occurrences = 1086
+# Cinema manual-scan dispatch adds the driver in the busy-worker renewal
+# regression. The test releases its BeforeScan barrier and awaits the handle.
+expected_occurrences = 1088
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5457,7 +5480,28 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # create 30s, GET 20s, body 10s, stop 5s, offline decode/probe 20s each, and
 # settlement 10s with 500-ms stop attempts and a 10-ms condition poll. Its
 # caught errors/panics still settle all isolated sessions before offline checks.
-expected_occurrences = 2090
+# PR #1390 (c2a29aac5): two timers belong to the paused-clock test
+# subtitle_pressure_checks_keep_polling_the_write_that_holds_the_fence.
+# Its local interval_at exercises the tick and notification paths. The 20ms
+# timeout bounds the borrowed driver after the write reply; success still
+# requires the work to settle, the token to stay live and the fence to unlock.
+# The production 250ms pressure interval remains owned by the subtitle job.
+# Cinema library dispatch and subtitle pressure ownership, 2026-11-07.
+# The inherited subtitle_work.rs regression (c2a29aac5) owns the paused-clock
+# interval_at and a 20 ms timeout that bounds its awaited write driver.
+# The dispatch worker bounds interactive heavy admission at one second and
+# renews ready successors every three seconds while its library scan runs.
+# Five fixture timers watch the source permission check (2 s), the write
+# commit and pressure-check event ordering (15 s), scan acknowledgement
+# (3 s), and renewal visibility (12 s with a 50 ms poll).
+# The worker's existing idle sleep changes delay in place (zero net sites).
+# Encoded Jellyfin qualification follows at most four typed pending replies
+# per phase on the original activation; the one-second awaited retry adds
+# one timer site and retains all native byte/clock/Stop assertions.
+# Incoming completion pressure test adds one interval; reachable retention
+# history adds one awaited cadence site. Neither introduces a detached owner.
+# Reachable retention history awaits the real 250ms control limit between observations.
+expected_occurrences = 2102
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6619,7 +6663,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # are unchanged; the two joined fixture tasks are classified above separately.
 # PR1369: +2 output() calls for the same bounded offline FFmpeg/FFprobe
 # controls inventoried above, not additional children or detached owners.
-expected_occurrences = 884
+# Encoded HTTP retry inspects Response::status(); it starts no OS process.
+# Final native/cluster route assertions retain the prior structural count:
+# per-file review against the integrated base found no spawn/output/status delta.
+expected_occurrences = 885
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

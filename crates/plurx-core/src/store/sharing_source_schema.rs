@@ -252,7 +252,7 @@ pub(crate) fn boot_authority_guard(parameter: usize) -> String {
 fn installed_shape_guard_at(version: i64) -> String {
     format!(
         "({}) AND ({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={version}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version={SOURCE_LAYOUT_VERSION}) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",
-        super::jellyfin_watch::session_dependency_guard(),
+        super::session_dependency_guard(),
         boot_shape_guard(),
         exact_object(INSTALLATION_SCHEMA),
         exact_object(TRANSACTION_SCHEMA),
@@ -363,7 +363,7 @@ pub(crate) fn migration_source_layout_guard(auth_version: i64) -> Option<String>
 
 pub(crate) fn native_predecessor_layout_guard() -> String {
     predecessor_layout_guard_for(
-        "EXISTS(SELECT 1 FROM pragma_user_version WHERE user_version>=124)",
+        "EXISTS(SELECT 1 FROM pragma_user_version WHERE user_version>=125)",
     )
 }
 fn predecessor_layout_guard_for(marker: &str) -> String {
@@ -421,7 +421,7 @@ fn predecessor_layout_guard_for(marker: &str) -> String {
         guards.push(format!("(SELECT count(*) FROM pragma_table_info('{table}'))={} AND NOT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE NOT ({expected})) AND EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='user_id' AND \"notnull\"=1) AND EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='main' AND name='{table}' AND strict=1)",columns.len()));
     }
     guards.push(legacy_object_guard());
-    guards.push(super::jellyfin_watch::session_dependency_guard());
+    guards.push(super::session_dependency_guard());
     format!("({})", guards.join(") AND ("))
 }
 #[cfg(feature = "hiqlite-store")]
@@ -436,8 +436,8 @@ pub(crate) fn predecessor_guard(now_parameter: usize) -> String {
 pub(crate) const NATIVE_BOOT_SCHEMA: &str = "CREATE TABLE sharing_native_source_boot (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),node_id TEXT NOT NULL,storage_generation TEXT NOT NULL,boot_id TEXT NOT NULL CHECK(length(boot_id)=36),generation INTEGER NOT NULL CHECK(generation>0),master_fingerprint TEXT NOT NULL CHECK(length(master_fingerprint)=64)) STRICT";
 
 pub(crate) fn native_layout_shape_guard() -> String {
-    format!("({}) AND ({}) AND ({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM pragma_user_version WHERE user_version>=124) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0))",
-        super::jellyfin_watch::session_dependency_guard(),
+    format!("({}) AND ({}) AND ({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM pragma_user_version WHERE user_version>=125) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0))",
+        super::session_dependency_guard(),
         exact_object(NATIVE_BOOT_SCHEMA),exact_object(INSTALLATION_SCHEMA),exact_object(TRANSACTION_SCHEMA),
         sharing_source_sessions::schema_guard_for(false),dispatch_guard_shape())
 }
@@ -451,7 +451,7 @@ pub(crate) fn native_installed_guard() -> String {
 /// Frozen statement order preserves child authority rows and then seeds the
 /// allocator before order-maintenance triggers can observe ordinary inserts.
 pub(crate) fn layout_statements() -> Vec<String> {
-    let mut statements = super::media_session_principal_rebuild_schema()
+    let mut statements = super::media_session_principal_rebuild_after_external_detach()
         .split("-- next statement\n")
         .map(|part| {
             part.lines()
