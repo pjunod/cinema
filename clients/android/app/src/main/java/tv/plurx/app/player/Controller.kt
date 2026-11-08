@@ -194,6 +194,39 @@ class Controller internal constructor(
      */
     private val preparedSwitch = PreparedSwitchRecorder()
 
+    /** True between a prepared commit and its successor's proven frame. */
+    private var mediaSessionRebindAwaitsFrame = false
+
+    /** One synchronous `DecoderCounters` read into the seam recorder. */
+    private fun sampleDecoderDropped(pipeline: ExoPlayer, force: Boolean = false) {
+        val counters = runCatching { pipeline.videoDecoderCounters }.getOrNull() ?: return
+        counters.ensureUpdated()
+        preparedSwitch.noteDecoderDropped(monotonicNowMs(), counters.droppedBufferCount.toLong(),
+            System.identityHashCode(pipeline), force)
+    }
+
+    /** One `prepared_seam` beacon. Observation only; nothing reads it back. */
+    private fun reportPreparedSeam(outcome: String, evidence: PreparedSeamEvidence?) {
+        val seam = preparedSeamReport(outcome, evidence) ?: return
+        postPlaybackClientLog(scope, PlaybackClientLog(level = "info", event = "prepared_seam",
+            message = "prepared switch: $outcome", detail = outcome, ua = "Android Media3",
+            sessionId = sessionId, preparedSeam = seam))
+    }
+
+    /**
+     * A committed switch is reported once the successor's side of the ±2 s
+     * window has elapsed, with one last forced counter read, so the report
+     * carries the same coverage the ledger row shows.
+     */
+    private fun reportPreparedSeamAfterWindow(successor: ExoPlayer) {
+        scope.launch {
+            delay(PREPARED_SWITCH_WINDOW_MS + 250L)
+            if (player !== successor) return@launch
+            sampleDecoderDropped(successor, force = true)
+            reportPreparedSeam("committed", preparedSwitch.seamEvidence(monotonicNowMs()))
+        }
+    }
+
     /**
      * The three rows the info panel shows, computed on demand. A closed panel
      * costs nothing, and the panel cannot change what it is reading.
@@ -5271,6 +5304,7 @@ class Controller internal constructor(
                     abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.RENDEZVOUS_OVERLAP)
                     return@launch
                 }
+                sampleDecoderDropped(player)
                 if (!hold.isReady) {
                     delay(RENDEZVOUS_READY_POLL_MS)
                     val target = hold.rendezvousFilmMs ?: return@launch
@@ -5333,6 +5367,7 @@ class Controller internal constructor(
                             mediaMutationEpoch,
                             "prepared successor missed the rendezvous (${step.reason})",
                         )
+                        reportPreparedSeam("refused", null)
                         abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.RENDEZVOUS_EXHAUSTED)
                         return@launch
                     }
@@ -5356,6 +5391,7 @@ class Controller internal constructor(
         val action = preparedLedger.action ?: return false
         val originMs = action.mediaOriginMs ?: return false
         if (monotonicNowMs() - preparedStartedAtMs >= PREPARED_OVERLAP_BOUND_MS) {
+            reportPreparedSeam("refused", null)
             abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.COMMIT_OVERLAP)
             return false
         }
@@ -5451,6 +5487,8 @@ class Controller internal constructor(
             predecessor = System.identityHashCode(player),
             successor = System.identityHashCode(successor),
         )
+        sampleDecoderDropped(player, force = true)
+        sampleDecoderDropped(successor, force = true)
         val previous = player
         val previousVolume = previous.volume
         // An ON_STOP owner pause survives the prepared item becoming active;
@@ -5525,7 +5563,10 @@ class Controller internal constructor(
             sessionId = successorSession
             startStatusPolling(successorSession)
         }
-        rebindMediaSessionTransport()
+        // MediaSession.setPlayer waits for the successor's own proven frame
+        // (settleCommitOnFirstFrame): until then the system transport keeps
+        // the predecessor, which stays paused and is the rollback authority.
+        mediaSessionRebindAwaitsFrame = true
         action.effectiveSelection?.let { stallReopenBudget.seed(it.height.toInt()) }
         // The badges and the info panel describe the stream on the screen, and
         // both halves of the grade move together or neither does.
@@ -5594,6 +5635,12 @@ class Controller internal constructor(
         awaitingCommitFrameSinceMs = null
         preparedCommitFrameBudget = null
         preparedSwitch.noteFirstFrame(monotonicNowMs())
+        // The decoded frame is proven: now the system transport may own it.
+        if (mediaSessionRebindAwaitsFrame) {
+            mediaSessionRebindAwaitsFrame = false
+            rebindMediaSessionTransport()
+        }
+        reportPreparedSeamAfterWindow(player)
         autoDesiredCandidate?.let { requested ->
             if (preparedLedger.action?.effectiveSelection?.candidateId == requested.id) {
                 autoActiveCandidateId = requested.id
@@ -5704,6 +5751,7 @@ class Controller internal constructor(
         retiredPlayer = failedSuccessor
         retiredParkedAtMs = monotonicNowMs()
         player = predecessor.player
+        mediaSessionRebindAwaitsFrame = false
         rebindMediaSessionTransport()
         preparedVideoSurfaces?.expose(predecessor.player) { collectRetiredPlayer() }
         return true
@@ -5719,6 +5767,11 @@ class Controller internal constructor(
         if (awaitingCommitFrameSinceMs == null) return false
         awaitingCommitFrameSinceMs = null
         preparedCommitFrameBudget = null
+        reportPreparedSeam("switched_without_a_frame", null)
+        if (mediaSessionRebindAwaitsFrame) {
+            mediaSessionRebindAwaitsFrame = false
+            rebindMediaSessionTransport()
+        }
         publishAcknowledgement(preparedLedger.failedAfterSwitch())
         return fallBackAfterPreparedFailure()
     }

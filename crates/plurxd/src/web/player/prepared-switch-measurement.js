@@ -371,6 +371,9 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
 
 function failPreparedReplacement(p,state,detail){
   if(preparedState(p)!==state) return;
+  // A commit that began and never exposed the successor is the seam's
+  // `refused`: nothing the viewer sees or hears has changed.
+  if(state.state==="committing") reportPreparedSeam(p,state,"refused",null);
   state.state="failed";
   queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
   clientLog(Object.assign({level:"warn",event:"prepared_replacement",detail:"failed",
@@ -819,4 +822,40 @@ function askPlaybackControl(renderOverride,observationOverride,deadlineMs=Infini
   // again, so nothing would ever settle this waiter but its timer.
   if(reporter.stopped) settle(null);
   return {trigger,action};
+}
+
+// ---- the seam's outcome, reported ------------------------------------------
+//
+// One `prepared_seam` beacon per prepared switch that reached its commit:
+// committed (after the ±2 s window has been sampled), refused (the commit
+// never exposed the successor), or switched without a frame. The server
+// counts these per platform (`plurx_playback_preparation_seams_*`); the
+// processed Dolby Vision upgrade leaves the Developer tab only after twenty
+// clean, fully measured committed switches. Web audio is not measured (see
+// `preparedSwitchAudioEnable`), so a web switch reports `audio_observed:false`
+// and is never one of the twenty. Reported, never acted on.
+function reportPreparedSeam(p,state,outcome,frames){
+  const control=window.PlurxPlaybackControl;
+  if(!control||typeof control.preparedSeamReport!=="function"||!state||state.seamReported) return;
+  const report=control.preparedSeamReport({platform:"web",outcome,frames,audioObserved:false,reopened:false});
+  if(!report) return;
+  state.seamReported=true;
+  clientLog(Object.assign({level:"info",event:"prepared_seam",detail:outcome,
+    message:`prepared switch to ${state.sessionId}: ${outcome}`,
+    session_id:state.sessionId,prepared_seam:report},playbackContext()));
+}
+function reportPreparedSeamAfterWindow(p,state,outcome){
+  const control=window.PlurxPlaybackControl;
+  const windowMs=control&&Number.isFinite(control.PREPARED_SWITCH_WINDOW_MS)?control.PREPARED_SWITCH_WINDOW_MS:2000;
+  // The successor's two seconds after the commit are sampled on the existing
+  // 500 ms progress tick; read the ledger once they have elapsed.
+  setTimeout(()=>{
+    const commit=p&&p.switchCommit;
+    const samples=(p&&p.switchFrames)||[];
+    const frames=control&&commit?control.preparedSwitchCounterDelta({
+      before:samples.filter(sample=>sample.element===commit.predecessor),
+      after:samples.filter(sample=>sample.element===commit.successor),
+      commitAtMs:commit.at}):null;
+    reportPreparedSeam(p,state,outcome,frames);
+  },windowMs+250);
 }

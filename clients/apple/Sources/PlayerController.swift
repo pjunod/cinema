@@ -11292,4 +11292,28 @@ extension PlayerController: PreparedSuccessorHost {
     func recordPreparedFallbackInterruption(ms: Int) {
         preparedFallbackInterruptionMs = ms
     }
+
+    /// One `prepared_seam` beacon per commit. A committed switch is reported
+    /// once the successor's side of the ±2 s window has had its 2 s status poll
+    /// (the synchronous read at the swap is the other reading), so the report
+    /// carries the same coverage the ledger row shows. Observation only.
+    func reportPreparedSeam(_ outcome: PreparedCommitOutcome) {
+        let session = sessionId
+        guard case .committed = outcome else {
+            if let seam = PreparedSeamBeacon.seam(outcome, evidence: nil) {
+                postClientLog(PreparedSeamBeacon(message: "prepared switch: \(seam.outcome)",
+                                                 detail: seam.outcome, session_id: session, prepared_seam: seam))
+            }
+            return
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(PreparedSwitchMeasurement.windowMs + 500) * 1_000_000)
+            guard let self,
+                  let seam = PreparedSeamBeacon.seam(outcome, evidence: self.preparedSwitch.seamEvidence())
+            else { return }
+            self.postClientLog(PreparedSeamBeacon(message: "prepared switch: \(seam.outcome)",
+                                                  detail: seam.outcome, session_id: self.sessionId,
+                                                  prepared_seam: seam))
+        }
+    }
 }
