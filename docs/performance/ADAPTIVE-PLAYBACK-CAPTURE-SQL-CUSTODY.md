@@ -1,6 +1,6 @@
 # Capture SQL custody — who keeps the late claim?
 
-**Status:** open · 71 scoped checks passed; task gate pending · 2026-11-08.
+**Status:** open · SQL task merged; 71 scoped checks passed · 2026-11-08.
 This follows the [native/writer task](ADAPTIVE-PLAYBACK-CAPTURE-CUSTODY.md)
 merged as #1435 after gate 6687. The [canonical ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md)
 retains the wider acceptance boundary. Full acquisition, M0 and real trials
@@ -74,8 +74,10 @@ hooks surround actual Store calls rather than replacing their effects.
 
 The branch now includes CI transport task #1439's landing `d4ecf2eca`, which
 changes no Rust/Cargo input; all four reviewed/runtime Rust files are
-byte-identical. Exact committed checks, normal hooks and the fresh manual
-effort gate remain required. Full M0 and trial eligibility are not claimed.
+byte-identical. [PR #1444](http://forge.lan:3000/noirr/plurx/pulls/1444) merged at `d6019139a`
+after all eight jobs of gate 6703 passed on `a913bfd10`. Candidate and landing
+share tree `cc485737`; all 12 regression trailers are retained. Exact committed
+checks, normal commit/push hooks and body-aware paperwork passed. Full M0 and trial eligibility are not claimed.
 
 ## Remaining ownership and inventory
 

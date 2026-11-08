@@ -28,7 +28,11 @@ gate 6591, with 14 distinct scoped passes. The
 [capture native/writer continuation](ADAPTIVE-PLAYBACK-CAPTURE-CUSTODY.md)
 merged as #1435 at `d4a517a94` after gate 6687, with 19 new and 42 existing
 scoped passes. Original [SQL claim/detach custody](ADAPTIVE-PLAYBACK-CAPTURE-SQL-CUSTODY.md)
-has 71 scoped passes; its task gate remains pending.
+has 71 scoped passes; #1444 merged after gate 6703.
+
+[Restricted native entry](ADAPTIVE-PLAYBACK-NATIVE-ENTRY.md) implements the
+atomic launcher policy and finite fd roles under qualification; production
+graph integration remains open.
 
 Complete family inventory, pre-M/SQL coordinators, finalizer output/scratch,
 production owned-worker containment, constructor/allocator/executor/kernel
