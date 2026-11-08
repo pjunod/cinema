@@ -1721,6 +1721,10 @@ async fn plan_preparation_with_candidate(
         Some(review),
         body,
         bootstrap.then_some(delivered_height),
+        predecessor
+            .candidate_catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.candidate.processed_dv),
     )
     .await?;
     if bootstrap
