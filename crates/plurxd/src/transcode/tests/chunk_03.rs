@@ -2045,7 +2045,7 @@
     /// staged is held; at 1x one that is a batch past publication but still
     /// short of `desired + guard` keeps producing.
     #[test]
-    fn rolling_flow_release_target_is_capped_by_the_publication_allowance() {
+    fn rolling_flow_release_target_keeps_the_bounded_private_source_bank() {
         let limits = AheadLimits {
             max_secs: HLS_AHEAD_MAX_SECS_DEFAULT,
             max_bytes: HLS_AHEAD_MAX_BYTES_DEFAULT,
@@ -2072,42 +2072,27 @@
             .hold
             .map(|hold| hold.reason)
         };
-        for rate in [1.0, 1.6, 2.0, 4.0] {
+        // At 1x the private bank is 80s plus the 10s exchange guard.
+        // Faster play reaches the common 124s physical reserve ceiling.
+        // Advertised publication limits are checked independently above.
+        for (rate, bank_ms) in [(1.0, 90_000), (1.6, 124_000), (2.0, 124_000), (4.0, 124_000)] {
             let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Web,
             );
             demand.playback_rate = rate;
             let age = Duration::from_secs(3);
-            let ends = rolling_explicit_publication_ends(&demand, age, 5_000);
+            let consumed = 10_000 + ((3_000.0 * rate) as i64) - 5_000;
             assert_eq!(
-                ends.consumed_end_ms,
-                10_000 + ((3_000.0 * rate) as i64) - 5_000,
-                "the flow reads the clock's projected position at {rate}x"
-            );
-            assert_eq!(
-                evaluate(&demand, age, ends.allowed_end_ms),
+                evaluate(&demand, age, consumed + bank_ms),
                 Some(AheadHoldReason::Time),
-                "held at allowed_end_ms at {rate}x"
+                "hold at the bounded private bank at {rate}x"
             );
             assert_eq!(
-                evaluate(&demand, age, ends.allowed_end_ms - 1_000),
-                (rate < 1.6).then_some(AheadHoldReason::Time),
-                "one second short of allowed_end_ms at {rate}x"
+                evaluate(&demand, age, consumed + bank_ms - 1_000),
+                None,
+                "finish the private read turn before yielding at {rate}x"
             );
         }
-        let demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
-            crate::playback_control::ClientPlatform::Web,
-        );
-        let ends = rolling_explicit_publication_ends(&demand, Duration::ZERO, 5_000);
-        assert_eq!(
-            evaluate(&demand, Duration::ZERO, ends.desired_end_ms + 9_000),
-            None,
-            "short of desired + guard at 1x the producer keeps producing"
-        );
-        assert_eq!(
-            evaluate(&demand, Duration::ZERO, ends.desired_end_ms + 10_000),
-            Some(AheadHoldReason::Time)
-        );
     }
 
     #[test]
