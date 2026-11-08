@@ -2266,12 +2266,20 @@ expected_occurrences = 2
 id = "m4-exact-session-release-admission"
 pattern = "begin_session_release"
 # J0: one public recovery fixture releases its exact native route through the existing owner.
-expected_occurrences = 3
+# R1 (playback-start): 3 -> 8. `begin_session_release_fence` is the phase-one
+# release fence that carries the requester's typed intent: its definition, the
+# client/admin DELETE caller in release.rs, the release-reconciliation retry
+# in media_sessions.rs, and two test calls. It closes the same publication
+# gate as before and owns no task or timer; only the actor mirror's typed
+# cause changes (Released/Stopped instead of AuthorityFence).
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-terminal-capability-projection"
 pattern = "begin_session_terminal"
-expected_occurrences = 15
+# R1: +1 test-only (`admin_stop_settles_stopped_not_authority_fence`) drives
+# the operator-stop phase-two projection; no new projection owner.
+expected_occurrences = 16
 
 [[module_symbols]]
 id = "m4-release-shared-settlement"
@@ -2335,18 +2343,26 @@ pattern = "terminal_reason"
 # 50 -> 52 with the VOD index recovery (PR1299), both test-only: the budget
 # test's outcome fixture initializes the field to None, and the vod test reads
 # the `attempt_limit` cause the recovery wrote. No route cause changes.
-expected_occurrences = 54
+# R1: +2 test-only reads asserting a release/stop maps to the existing
+# durable reasons (`deleted`, `admin_stop`). No new writer of a terminal cause.
+expected_occurrences = 56
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
 pattern = "retire_session_until_with_cause"
-expected_occurrences = 10
+# R1: +3 test-only calls (operator-stop join, release/fence race) that read
+# the one shared settlement's winning cause; no new retirement owner.
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-release-publication-gate"
 pattern = "begin_session_publication_fence"
 # PR1341: +1 test-only (authority_recovery.rs).
-expected_occurrences = 7
+# R1: 7 -> 9. The gate body moved into `begin_session_publication_fence_for`
+# (definition, the cause-neutral wrapper's call, the release fence's call, one
+# doc link) while release.rs and the reconciliation retry moved to
+# `begin_session_release_fence` (-2). Same gate, same linearization point.
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-release-terminal-store-deadlines"
@@ -3657,7 +3673,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # joined after an unwind-safe Release guard releases the blocked scan. The
 # actual blocking scan keeps its io_slot credit until it returns. Production
 # warm_inventory awaits the existing refresh owner and spawns no extra task.
-expected_occurrences = 1079
+# R1: +3 test-only `RollingControlHandle::spawn_for_test` actors in
+# `release_projection_is_the_first_terminal_and_keeps_its_cause`, each owned by
+# its handle and dropped at the end of the test.
+expected_occurrences = 1082
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5402,7 +5421,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # create 30s, GET 20s, body 10s, stop 5s, offline decode/probe 20s each, and
 # settlement 10s with 500-ms stop attempts and a 10-ms condition poll. Its
 # caught errors/panics still settle all isolated sessions before offline checks.
-expected_occurrences = 2071
+# R1: +1 production `timeout_at` in `Session::end_activity_until`: a released
+# or stopped generation's retirement observes the actor's committed cause
+# through a snapshot bounded by the caller's existing replacement deadline;
+# on expiry the projected release stands. It decides no recovery and spawns
+# nothing. The other +2 in this total predate R1 on main (88fa37663..ae779d141:
+# subtitle_work.rs `interval_at`, source_custody/recovery/tests.rs `timeout`);
+# they are counted here so the census is exact, not reviewed by R1.
+expected_occurrences = 2074
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

@@ -6688,6 +6688,11 @@ pub(crate) enum RollingTerminalCause {
     LeaseExpired,
     StartupExpired,
     PauseExpired,
+    /// The viewer released the capability (client DELETE). A routine
+    /// lifecycle end, never a loss of serving authority.
+    Released,
+    /// An operator stopped the session from the Activity page.
+    Stopped,
 }
 
 impl RollingTerminalCause {
@@ -6698,6 +6703,21 @@ impl RollingTerminalCause {
             Self::LeaseExpired => "expired",
             Self::StartupExpired => "startup_expired",
             Self::PauseExpired => "pause_expired",
+            Self::Released => "released",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    /// The typed actor cause a durable terminal intent retires a rolling
+    /// generation with. Only a client release and an operator stop have a
+    /// lifecycle cause of their own; every other durable terminal (takeover,
+    /// revocation, replacement, lease loss) withdraws this node's authority
+    /// to serve the generation and stays an authority fence.
+    pub(crate) fn release_for(terminal: crate::vodserve::Terminal) -> Option<Self> {
+        match terminal {
+            crate::vodserve::Terminal::Deleted => Some(Self::Released),
+            crate::vodserve::Terminal::AdminStop => Some(Self::Stopped),
+            _ => None,
         }
     }
 
@@ -6709,6 +6729,10 @@ impl RollingTerminalCause {
             Self::LeaseExpired => Terminal::ControlExpired,
             Self::StartupExpired => Terminal::StartupExpired,
             Self::PauseExpired => Terminal::PauseExpired,
+            // Existing durable reasons, so the HTTP 410 body an older client
+            // decodes keeps its vocabulary.
+            Self::Released => Terminal::Deleted,
+            Self::Stopped => Terminal::AdminStop,
         }
     }
 
@@ -6727,6 +6751,8 @@ impl RollingTerminalCause {
             Self::LeaseExpired => 2,
             Self::StartupExpired => 3,
             Self::PauseExpired => 4,
+            Self::Released => 5,
+            Self::Stopped => 6,
         }
     }
 
@@ -6737,6 +6763,8 @@ impl RollingTerminalCause {
             Self::LeaseExpired => 3,
             Self::StartupExpired => 4,
             Self::PauseExpired => 5,
+            Self::Released => 6,
+            Self::Stopped => 7,
         }
     }
 
@@ -6747,6 +6775,8 @@ impl RollingTerminalCause {
             3 => Some(Self::LeaseExpired),
             4 => Some(Self::StartupExpired),
             5 => Some(Self::PauseExpired),
+            6 => Some(Self::Released),
+            7 => Some(Self::Stopped),
             _ => None,
         }
     }
@@ -7008,6 +7038,11 @@ pub(crate) struct RollingProducerTransitionFence {
     lease_deadline: Instant,
     install_authorization: Option<ProducerInstallCoordinate>,
     producer_signal_authorized: bool,
+    /// Typed cause of a handle-side retirement that a release or operator stop
+    /// published first. Written only by the caller that moved the shared
+    /// retirement bit from false to true, so the first retirement keeps its
+    /// cause; the actor imports it in place of the default authority fence.
+    projected_release: Option<RollingTerminalCause>,
 }
 
 impl RollingProducerTransitionFence {
@@ -7016,6 +7051,7 @@ impl RollingProducerTransitionFence {
             lease_deadline,
             install_authorization: None,
             producer_signal_authorized: true,
+            projected_release: None,
         }
     }
 }
@@ -12529,7 +12565,9 @@ impl RollingControlActor {
             }
             RollingTerminalCause::End
             | RollingTerminalCause::AuthorityFence
-            | RollingTerminalCause::StartupExpired => {
+            | RollingTerminalCause::StartupExpired
+            | RollingTerminalCause::Released
+            | RollingTerminalCause::Stopped => {
                 ROLLING_LEASE_RETIREMENTS.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -12613,8 +12651,13 @@ impl RollingControlActor {
             // never revive publication or renew the actor after the timeout.
             // `was_retired` is sampled first so the normal transition wake
             // still reaches the passive executor.
+            // A release or operator stop names its cause with the bit; any
+            // other handle-side retirement is a fail-closed authority fence.
             if self.retired_fence.load(Ordering::Acquire) && !self.retired {
-                let _ = self.terminate(RollingTerminalCause::AuthorityFence);
+                let cause = transition
+                    .projected_release
+                    .unwrap_or(RollingTerminalCause::AuthorityFence);
+                let _ = self.terminate(cause);
             }
             let publication_may_win_exact_deadline = matches!(
                 &command,
@@ -14651,6 +14694,36 @@ impl RollingControlHandle {
             && now < guard.lease_deadline
     }
 
+    /// Retire this generation synchronously because its viewer released it or
+    /// an operator stopped it. The producer transition is the same as
+    /// [`Self::fence_unavailable`]; only the typed cause differs. The first
+    /// handle-side retirement wins: if the bit is already set (a serving
+    /// fence, a deadline, or the actor's own terminal), its cause stands.
+    pub(crate) fn release_unavailable(&self, cause: RollingTerminalCause) {
+        debug_assert!(matches!(
+            cause,
+            RollingTerminalCause::Released | RollingTerminalCause::Stopped
+        ));
+        let mut transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.retired.swap(true, Ordering::AcqRel) {
+            transition.projected_release = Some(cause);
+        }
+        self.producer_events.notify_flow_capacity_waiters();
+        self.flow_sync.request();
+    }
+
+    /// The release cause this handle published as its first retirement, if
+    /// a release or operator stop retired it.
+    pub(crate) fn projected_release(&self) -> Option<RollingTerminalCause> {
+        self.producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .projected_release
+    }
+
     /// A closed mailbox cannot accept another renewal. The repair loop uses
     /// this fail-closed fence before removing the orphaned session.
     pub(crate) fn fence_unavailable(&self) {
@@ -14867,10 +14940,10 @@ static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ROLLING_CONTROL_COMMANDS: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
 static ROLLING_PRODUCER_ACTION_DEADLINES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-/// End, authority-fence, lease-expiry, presentation-startup expiry, and pause
-/// grace expiry; each
-/// records won/already-terminal independently.
-static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+/// End, authority-fence, lease-expiry, presentation-startup expiry, pause
+/// grace expiry, client release and operator stop; each records
+/// won/already-terminal independently.
+static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
 
 const RELAY_VALID_RESPONSE: usize = 0;
 const RELAY_TRANSPORT_ERROR: usize = 1;
@@ -15613,6 +15686,8 @@ pub(crate) fn prometheus() -> String {
         "lease_expired",
         "startup_expired",
         "pause_expired",
+        "released",
+        "stopped",
     ]
     .iter()
     .enumerate()

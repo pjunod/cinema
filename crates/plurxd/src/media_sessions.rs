@@ -4732,7 +4732,7 @@ pub(crate) async fn lease_loop(state: AppState) {
                     // End.
                     attempt_state
                         .transcode
-                        .begin_session_publication_fence(&attempt_session)
+                        .begin_session_release_fence(&attempt_session, intent.terminal)
                         .await;
                     // This one-shot owner has no request deadline. Awaiting
                     // the mutation to a definitive result is required because

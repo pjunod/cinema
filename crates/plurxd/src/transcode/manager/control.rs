@@ -1022,7 +1022,7 @@ impl TranscodeManager {
                 "authority_fence"
             }
             SessionRegistrationRejection::SessionRelease => {
-                session.project_authority_fence();
+                session.project_release(crate::playback_control::RollingTerminalCause::Released);
                 "client_released"
             }
             SessionRegistrationRejection::Producer(_) => "failed",
@@ -1075,13 +1075,24 @@ impl TranscodeManager {
         let Some(session) = self.sessions.lock().await.get(session_id).cloned() else {
             return false;
         };
-        let event_reason = if reason.contains("released") {
-            "client_released"
+        let (event_reason, release) = if reason.contains("released") {
+            (
+                "client_released",
+                Some(crate::playback_control::RollingTerminalCause::Released),
+            )
         } else if reason.contains("admin") {
-            "killed"
+            (
+                "killed",
+                Some(crate::playback_control::RollingTerminalCause::Stopped),
+            )
         } else {
-            reason
+            (reason, None)
         };
+        // A release or operator stop retires the generation with its own
+        // cause; a serving fence that already retired it keeps its cause.
+        if let Some(release) = release {
+            session.project_release(release);
+        }
         let Ok(outcome) = self
             .retire_session_until_with_cause(session_id, &session, None, event_reason)
             .await
@@ -1361,6 +1372,28 @@ impl TranscodeManager {
     /// CAS then persists the first winning cause, and `begin_session_terminal`
     /// projects that exact winner in phase two.
     pub(crate) async fn begin_session_publication_fence(self: &Arc<Self>, session_id: &str) {
+        self.begin_session_publication_fence_for(session_id, None)
+            .await;
+    }
+
+    /// Phase one for a requested release or operator stop. Publication closes
+    /// exactly as in [`Self::begin_session_publication_fence`]; the actor
+    /// mirror carries the requester's typed cause instead of an authority
+    /// fence, so the first local terminal transition is the release itself.
+    pub(crate) async fn begin_session_release_fence(
+        self: &Arc<Self>,
+        session_id: &str,
+        intent: crate::vodserve::Terminal,
+    ) {
+        self.begin_session_publication_fence_for(session_id, Some(intent))
+            .await;
+    }
+
+    async fn begin_session_publication_fence_for(
+        self: &Arc<Self>,
+        session_id: &str,
+        intent: Option<crate::vodserve::Terminal>,
+    ) {
         let gate = self.activate_session_release_gate(session_id);
         let _transition = Arc::clone(&gate.transition).lock_owned().await;
         // This is the publication linearization point. Once set, every media
@@ -1368,7 +1401,11 @@ impl TranscodeManager {
         // optional actor mirror below from running.
         gate.released.store(true, Release);
         if let Some(session) = self.sessions.lock().await.get(session_id).cloned() {
-            session.project_authority_fence();
+            match intent {
+                Some(intent) => session.project_terminal_intent(intent),
+                // Lease loss and stale-owner settlement: authority is gone.
+                None => session.project_authority_fence(),
+            }
         }
     }
 
@@ -1458,8 +1495,10 @@ impl TranscodeManager {
         if let Some(session) = &rolling {
             // This atomic projection is the response-publication boundary.
             // Actor settlement and physical reap must not delay durable End;
-            // the detached retirement owner below retains both.
-            session.project_authority_fence();
+            // the detached retirement owner below retains both. A release or
+            // operator stop keeps its own cause; every other durable winner
+            // withdraws serving authority.
+            session.project_terminal_intent(terminal);
         }
         let manager = Arc::clone(&self);
         tokio::spawn(async move {

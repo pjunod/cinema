@@ -10,6 +10,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A client releasing a rolling stream, or an operator stopping it from
+  Activity, now retires it as `released` / `stopped` instead of an authority
+  fence. Metrics and session-end events no longer report every ordinary
+  release as failover, and a control request racing the stop is answered with
+  the existing `deleted` / `admin_stop` reason rather than `authority_fenced`,
+  which clients treat as recoverable.
+
 - macOS source installs discover full Xcode when Command Line Tools are selected,
   find renamed or relocated copies through the macOS application index,
   preserve explicit developer-directory overrides, and install missing Xcode
