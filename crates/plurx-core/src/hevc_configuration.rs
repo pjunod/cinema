@@ -20,6 +20,18 @@ const TRACE_PREFIX: &[u8] = b"[trace_headers @ ";
 /// correctable `Non-monotonic DTS` fatal. Without it a truncated or corrupt
 /// packet is dropped and the pass exits 0 with a short but well-formed
 /// index, so these are matched explicitly. None of them is a muxer message.
+///
+/// Wording by FFmpeg release (packaging's floor is 5.1; the fleet runs newer):
+/// the mov demuxer's `Packet corrupt` is in `mov.c` and does not change; the
+/// CLI's `corrupt input packet in stream N` is in every release (5.1 prefixes
+/// the input url); a bitstream-filter failure reads `Error applying bitstream
+/// filters to an output packet` (5.1/6.0) or `... to a packet` (6.1+), both
+/// matched by the shared prefix; a non-EOF demux error reads `Error during
+/// demuxing` or `Error retrieving a packet from demuxer` (7+) and, through
+/// `print_error` up to 6.x, only `<input>: <strerror>`, so the two
+/// `AVERROR_INVALIDDATA`/`EIO` strerror texts are matched as well. Checked
+/// against 6.1 on a truncated fragmented MP4; the older wording is from the
+/// release sources and is not exercised here.
 const SOURCE_FAULTS: &[&str] = &[
     // Demuxer flagged the packet (truncated fragment, "partial file").
     "corrupt input packet",
@@ -29,9 +41,15 @@ const SOURCE_FAULTS: &[&str] = &[
     // A demux error other than EOF, which ffmpeg otherwise treats as EOF.
     "Error during demuxing",
     "Error retrieving a packet from demuxer",
+    "Invalid data found when processing input",
+    "Input/output error",
 ];
-/// Only the head of a line is searched: FFmpeg prints these at the start.
-const FAULT_WINDOW: usize = 256;
+/// A line is searched whenever this many bytes are buffered, and again at its
+/// end, so a message glued onto a long unterminated trace line is still seen.
+const FAULT_CHUNK: usize = 1024;
+/// What survives a mid-line search: longer than any marker, so one split
+/// across two searches is still whole in the next.
+const FAULT_KEEP: usize = 64;
 
 /// Line-oriented, bounded scan of all stderr for [`SOURCE_FAULTS`]. It sees
 /// every byte, including after the trace has been refused.
@@ -42,20 +60,29 @@ struct FaultScan {
 }
 
 impl FaultScan {
+    fn search(&mut self) {
+        let text = String::from_utf8_lossy(&self.line);
+        self.fault = SOURCE_FAULTS.iter().copied().find(|m| text.contains(m));
+    }
+
     fn feed(&mut self, bytes: &[u8]) {
         if self.fault.is_some() {
             return;
         }
         for &byte in bytes {
             if byte == b'\n' || byte == b'\r' {
-                let line = String::from_utf8_lossy(&self.line);
-                self.fault = SOURCE_FAULTS.iter().copied().find(|m| line.contains(m));
+                self.search();
                 self.line.clear();
-                if self.fault.is_some() {
-                    return;
-                }
-            } else if self.line.len() < FAULT_WINDOW {
+            } else {
                 self.line.push(byte);
+                if self.line.len() >= FAULT_CHUNK {
+                    self.search();
+                    let keep = self.line.len() - FAULT_KEEP;
+                    self.line.drain(..keep);
+                }
+            }
+            if self.fault.is_some() {
+                return;
             }
         }
     }
@@ -538,6 +565,9 @@ mod tests {
             "[in#0/mov,mp4 @ 0x1] corrupt input packet in stream 0\n",
             "[vost#0:0/copy @ 0x1] Error applying bitstream filters to a packet\n",
             "[in#0/matroska @ 0x1] Error during demuxing: Invalid data\n",
+            "in.mkv: Invalid data found when processing input\n",
+            "in.mkv: Input/output error\n",
+            "[out#0 @ 0x1] Error applying bitstream filters to an output packet for stream #0:0\n",
         ] {
             for split in [text.len(), 7] {
                 let mut trace = Trace::default();
@@ -546,6 +576,15 @@ mod tests {
                 trace.feed(&text.as_bytes()[split.min(text.len())..]);
                 assert!(trace.source_fault().is_some(), "{text}");
             }
+        }
+        // A fault glued onto a long unterminated line is still found, even
+        // when it straddles the mid-line search boundary.
+        for pad in [FAULT_CHUNK - 5, FAULT_CHUNK + 40, 5 * FAULT_CHUNK + 3] {
+            let mut trace = Trace::default();
+            trace.feed(fixture().as_bytes());
+            trace.feed("x".repeat(pad).as_bytes());
+            trace.feed(b"Packet corrupt (stream = 0, dts = 1).\n");
+            assert!(trace.source_fault().is_some(), "pad {pad}");
         }
         let mut trace = Trace::default();
         trace.feed(fixture().as_bytes());

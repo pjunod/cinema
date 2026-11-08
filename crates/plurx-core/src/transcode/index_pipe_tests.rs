@@ -887,6 +887,12 @@ fn the_hevc_index_pass_survives_a_correctable_dts_head_and_still_proves_the_trac
     );
     let mut trace = crate::hevc_configuration::Trace::default();
     trace.feed(&out.stderr);
+    assert_eq!(
+        trace.source_fault(),
+        None,
+        "a correctable DTS head is not a damaged source: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         trace.finish("source".into(), 0).permits("source"),
         "a clean trace must still be proven"
