@@ -65,7 +65,7 @@ library.
 | Managed resource view v5 (SQLite v126, guarded Hiqlite upgrade from v4): a `library_scan` job of generation `library-targeted-v1` requires no `source_io` key; provider keys and every other kind are unchanged ([`subtitle_managed_resources_v5.sql`](../../crates/plurx-core/src/store/subtitle_managed_resources_v5.sql)) | Durable jobs `ApplyClaim` (reservation trigger), `ApplyRenew`, `LoseResource`; see the scope statement on the claim row of the operator index | Yes: a dropped requirement only removes a refusal; the targeted job's reservations still go through the same claim and renew triggers, and existing reservations stay owned until their ordinary retirement. A drifted v4 predecessor refuses without advancing the ordinal | None |
 | `claim_library` accepts the targeted generation beside `library-work-v1`, through main's dispatch-turn readiness ([`background_jobs.rs`](../../crates/plurxd/src/background_jobs.rs)) | Operation progress `ProbeReturn`, `Admission`, `ClaimSend`; worker refinement `Admission`/`ClaimSend` (eligibility over-approximated) | Yes: same `claim_with_resolution`, `ActiveBackgroundJob` and shared library driver; an unknown generation is still skipped | None |
 | Probe-only admission: no heavy permit and no CPU/GPU bundle; `fragment_worker_idle` is always true for it, so heavy-lane occupancy never raises pressure ([`construct.rs`](../../crates/plurxd/src/transcode/manager/construct.rs)) | Operation progress `Admission`, `DropAdmission`, `AdmissionUntilJoined`, `AttemptCleanup`; durable jobs `PauseSource`/`ResumeSource`; worker refinement boundary `select.admission_pressure` | Yes: the admission is still one owned object, held in the environment's `Arc` through `JoinWork` and dropped after release. Removing heavy-lane pressure only removes optional pause and pressure schedules; a subset of the modeled schedules keeps S8 and the safety results. Foreground source pressure still reaches the Linux source driver. Operation progress's `Admission` premise (try-only) describes the `library-work-v1` path; the targeted path skips `admit_fragment` and `Tick` pressure cancel and does not instantiate it | None |
-| A targeted claim the Store refuses (a lost race, or the foreground-permission gate during playback) leaves the job queued and writes nothing ([`background_jobs.rs`](../../crates/plurxd/src/background_jobs.rs) `claim_library`) | No modeled transition: operation progress `StoreApply` claims unconditionally and has no claim-refused outcome | Yes: the refused job holds no claim, domain or binding; the probe-only admission is dropped at `continue` | None. A `waiting_on` the fence wrote earlier stays until the next pass starts; see Limits |
+| A targeted candidate this node does not claim: skipped before the claim while playback protection is set (`background_yield_reason()`) or this node may not run cluster jobs (`may_run_cluster_jobs`), or refused by `CLAIM_SQL` at the two-holder provider cap or on a lost race. While the job is still queued (protection, the provider cap), `refresh_targeted_wait` rewrites `waiting_on` to `full_scan:<library>` when its own fence's lease is visibly live, otherwise to empty ([`background_jobs.rs`](../../crates/plurxd/src/background_jobs.rs) `claim_library`, `library_candidate_readiness`) | No modeled transition: operation progress `StoreApply` claims unconditionally and has no claim-refused outcome | Yes: the job holds no claim, domain or binding; the probe-only admission is dropped at `continue`. The lease read is a local hint (`lease_expiry_hint`) and the write is advisory sidecar state, holding no lock | None |
 | Fence refusal of a targeted job: advisory `waiting_on = full_scan:<library>`, yield with not-before `min(driver, now+250 ms)`; acquired fence clears `waiting_on`; a non-targeted release wakes the local library loop ([`env.rs`](../../crates/plurxd/src/library_work/env.rs)) | Durable jobs `AcquireDomain`, `RefusalRelease`, `RefusalSettle` (`notBefore = sample + YieldMs`); operation progress `PeerAcquire`, `CallerReturn` (domain refused), `Wake`; worker refinement `DomainSend`/`DomainApply`, `Wake` | Yes: the refusal still releases nothing it does not own and yields with a positive not-before. `YieldMs` (2) is an abstract positive delay; the model keeps no duration ratio (its `LeaseMs` is 1). The concrete 5 s and 250 ms both map to it. The local wake only shortens polling, a fairness premise | None; the bind-refusal row now names both delays |
 | Targeted scan with `expected_files`: forced probe of the named files and per-file placed reports written to the sidecar ([`library_work.rs`](../../crates/plurxd/src/library_work.rs), [`scan/mod.rs`](../../crates/plurx-core/src/scan/mod.rs) `scan_path_targeted`) | Durable jobs `BindAttempt` → `FacadePrecheck`/`Submit`/`ApplyPublication`; operation progress `ScanStart`…`ScanFinish`, `ItemSend`, `CompleteSend`; worker refinement `ScanStart`, `ItemSend` | Yes: it publishes through the same bound `PublicationStore` and `insert_item_fenced` after binding (bind-before-work unchanged). The report write is advisory sidecar state | None |
 | Local completion signals for `wait_ms` and the targeted scan returning placed reports ([`state.rs`](../../crates/plurxd/src/state.rs)) | None; caller-side waiting outside the worker | Yes: node-local `Notify`; the durable request record stays the authority | None |
@@ -78,9 +78,25 @@ it, and the fence refusal writes `waiting_on = full_scan:<library>`. Beside a
 running scan of another library in the same storage domain (or with an
 unmapped root, whose generic `source_io` key conflicts with every domain) it
 runs. `library_scan` also requires `provider:tmdb` and `provider:anilist`,
-each with two reservation slots (`background_job_claim_effects`), so a single
-running scan leaves one free. The regression asserts the written
-`waiting_on` and the claim beside another library's scan in one domain.
+each with two reservation slots (`background_job_claim_effects`). One running
+scan leaves one slot free; two running scans of other libraries hold both, and
+`CLAIM_SQL` refuses the targeted claim until one settles. The regressions
+assert the written `waiting_on`, the claim beside another library's scan in
+one domain, and the rewritten `waiting_on` behind the provider cap.
+
+What bounds a targeted job once it no longer reserves a reader is not the
+64-entry `expected_files` cap, which bounds only the files it force-probes:
+it walks the request path's whole subtree and probes every new or changed
+file there, and one job drains up to 256 requests. Its bounds are one serial
+walker per job, one library job per node at a time, playback protection,
+which keeps it from starting while a viewer needs the source, and the
+provider cap. Curator names one publication directory per request, so in
+practice the walk is that directory.
+
+A fence-blocked targeted job is now claimed, gets an attempt row and yields
+on every due poll, where `CLAIM_SQL` used to refuse it outright; attempt
+compaction bounds those rows, and each yield sends one idempotent
+`waiting_on` write.
 
 An earlier author revision (218fa2f93) had the reader clause refuse the
 targeted job and wrote `waiting_on` from the refusal. It said a running scan
@@ -96,10 +112,7 @@ claimed for these sources. Pins are refreshed by whole file; their
 Progress for a targeted request is not proved: operation progress has no
 claim-refused transition and its `Admission` premise describes only
 `library-work-v1`. It rests on a running scan of its own library finishing,
-the premise the models state for a domain peer. A `waiting_on` written by a
-fence refusal is not cleared when a later claim is refused for another
-reason (for example the foreground-permission gate during playback); it is
-cleared when the targeted pass starts.
+the premise the models state for a domain peer.
 
 ## Pipeline v2 targeted-scan sidecar — scoped author audit on 2026-11-08
 
