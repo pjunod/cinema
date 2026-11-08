@@ -94,7 +94,16 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         XCTAssertTrue(refusal.contains("PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand"))
         let wait = try XCTUnwrap(source.range(of: "private func awaitSharedDecodedAlignment("))
         let waitBody = source[wait.upperBound...].prefix(1_600)
-        XCTAssertTrue(waitBody.contains("PreparedReplacementBounds.alignmentMs"), "bounded at 4 s")
+        // Review 3 S5: the alignment seek and the decoded frame share one
+        // `alignmentMs` budget, so the commit lead (two bounded suspensions)
+        // still covers them: the wait is bounded by what the seek left.
+        XCTAssertTrue(waitBody.contains("< boundMs"), "bounded by the budget it is handed")
+        let budget = try XCTUnwrap(commit.range(of: "let alignmentDeadlineMs = "),
+                                   "one alignment budget, minted in the commit")
+        XCTAssertTrue(commit[budget.upperBound...].prefix(120).contains("PreparedReplacementBounds.alignmentMs"))
+        XCTAssertLessThan(budget.lowerBound, aligned.lowerBound, "minted before the alignment seek")
+        XCTAssertTrue(commit[aligned.upperBound..<exposed.lowerBound].contains("boundMs: alignmentDeadlineMs"),
+                      "the decoded-frame wait gets the remainder of that budget, not a fresh one")
         XCTAssertTrue(waitBody.contains("acceptsDecodedAlignment("), "at the aligned position")
         XCTAssertEqual(PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand, .refused)
     }
