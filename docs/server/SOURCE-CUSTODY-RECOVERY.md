@@ -1,6 +1,6 @@
 # Source custody recovery — settle abandoned readers with physical proof
 
-**Status:** open · reboot-free macOS/Linux witnesses implemented; Linux and legacy fleet acceptance pending · **Updated:** 2026-11-08
+**Status:** open · reboot-free macOS/Linux witnesses qualified; legacy fleet acceptance pending · **Updated:** 2026-11-08
 
 Executes the first independently useful recovery portion of
 [P42's RCA and proposed fix](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). That document
@@ -76,12 +76,13 @@ identity mounts. A v2 record is never retrofitted onto an already active reader.
 replay share a 4,096-owner / 16,384-file bound, reserving each pending arm marker
 before creating an anchor. Sidecars do not consume the logical owner limit.
 
-**Acceptance:** five new native macOS process tests pass, covering both custody
+**Acceptance:** seven native macOS and eleven native Linux cases pass across
+retained executions and a failed-only fixture retry, covering both custody
 families and all independent background owner types, cancellation, a surviving
 blocking reader thread, process exit, rejected activation, descriptor export,
 command reuse, foreign/corrupt anchors, and failed Store release retry. Native
-all-target Clippy passes. Linux execution and the installed legacy migration
-remain pending; these observations are not fleet acceptance.
+macOS/Linux workspace all-target Clippy passes. The installed legacy migration
+remains pending; these observations are not fleet acceptance.
 
 ### 1.2 The finite legacy DV migration uses host-admin stop proof
 
@@ -109,10 +110,9 @@ only that worker journal; host-admin proof remains read-only until its operator
 removes it. Containers need an explicit read-only bind of the host proof
 folder; ordinary v2 recovery needs no such mount.
 
-**Acceptance:** fifteen new helper controls pass on native macOS; the actual
-Linux executable-handle case remains pending. Source and strict refusal
-regressions are implemented. Linux
-execution, helper publication and fleet recovery are pending. No service has
+**Acceptance:** fifteen new helper controls pass on native macOS, and the real
+Linux executable-handle case passes. Both Linux Store refusal/release cases
+pass. Helper publication and fleet recovery are pending. No service has
 been stopped and no old reservation has been released by this continuation.
 
 ## 2. The journal never impersonates an activation or completed join
@@ -311,3 +311,5 @@ neither receives an invented successful join or retrospective witness.
 | 2026-11-08 | Five new real-process native macOS witness regressions passed once; affected all-target Clippy passed. | New v2 daemon-mediated recovery only. Linux execution, raw-reader migration and production acceptance remain open. |
 
 | 2026-11-08 | New in-place anchor restore regression passed on native macOS; the original five passes were retained. | Kernel change-time correction is independently exercised. Bounded inventory, FEL transport and finite legacy migration await Linux execution. |
+
+| 2026-11-08 | Seven macOS reader cases, eleven composed Linux recovery/FEL cases, fifteen helper controls and the Linux executable-handle case passed. Both native workspace Clippy checks pass. | The first Linux batch retained ten passes; only its failed fixture was corrected and retried. Production acceptance remains open. The gate's upstream formal JAR timeout is addressed with the existing private cache and unchanged toolchain pins. |

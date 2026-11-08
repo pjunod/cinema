@@ -19,7 +19,7 @@ A completed subtitle job retained a reader. A second failure at library completi
 Refused claims create no running attempts. The incident changes identify the blocking reader in both Activity views and monitoring, flag manual library requests after five eligible minutes, and report five-minute successful and failed attempts per minute for the cluster and each worker. Ready manual requests get the next eligible source turn across job types, subject to playback and bounded maintenance service. These incident changes are live; all four workers report capacity. [Activity API](../API.md#56-activity) · [Recovery ledger](SOURCE-CUSTODY-RECOVERY.md)
 
 November 8: same-kernel reader witnesses cover native macOS/Linux and containers.
-Five macOS process regressions pass; Linux and legacy migration are pending.
+Seven Mac and eleven Linux cases pass; legacy migration is pending.
 Cinema recovery needs no host reboot. M1 proof and acceptance remain
 in the [recovery ledger](SOURCE-CUSTODY-RECOVERY.md).
 
