@@ -62,7 +62,8 @@ def select(api, kind, descriptor, number, landing):
         attachment = receipts.positive(descriptor['attachment_id'])
         uuid, digest = descriptor['attachment_uuid'], descriptor['sha256']
         raw = retention.attachment_bytes(api, number, attachment, uuid, digest)
-        plan = retention.verify_enrollment(api, raw, digest, binding, head, attachment, uuid)
+        source = receipts.sha(receipts.bounded_json(raw)['source_commit'])
+        plan = retention.verify_enrollment(api, raw, digest, binding, source, attachment, uuid)
     if kind == 'units':
         return {'postmerge_binding': binding, 'historical_retention': plan}
     source_key = 'candidate' if kind == 'rust' else 'source_commit'

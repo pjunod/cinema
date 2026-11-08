@@ -73,6 +73,26 @@ class LandedUnitSelectionCase(unittest.TestCase):
             with self.assertRaisesRegex(receipts.ReceiptError, 'selector source'):
                 post.select(self.api, 'rust', descriptor, 7, self.landing)
 
+    def test_landing_authored_command_proof_requires_main_and_the_actual_merge(self):
+        with chdir(self.repo):
+            binding = post.landing_binding(self.api, 7, self.landing)
+            for branch, source, accepted in (('main', self.landing, True),
+                                             ('effort/jobs', self.landing, False),
+                                             ('main', self.head, False)):
+                with self.subTest(branch=branch, source=source):
+                    raw = json.dumps(dict(version=2, repository=1, pr=7, branch=branch,
+                                          source_commit=source, base_sha=self.base)).encode()
+                    digest = retention.digest(raw)
+                    claim = dict(repository=1, pr=7, sha256=digest, attachment_id=4, attachment_uuid='fixture')
+                    self.api.pages.return_value = [{'id': 9, 'user': {'login': 'writer', 'id': 3},
+                                                    'body': 'Promotion-Unit-Evidence: ' + json.dumps(claim)}]
+                    args = self.api, raw, digest, binding, self.landing, 4, 'fixture'
+                    if accepted:
+                        self.assertEqual(retention.verify_identity(*args)[3], [9])
+                    else:
+                        with self.assertRaises(receipts.ReceiptError):
+                            retention.verify_identity(*args)
+
     def test_main_may_advance_but_cannot_drop_the_tested_merge(self):
         self.git('commit', '-q', '--allow-empty', '-m', 'later main')
         later = self.git('rev-parse', 'HEAD')
