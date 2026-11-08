@@ -10,6 +10,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Linux Dolby Vision reconstruction avoids inherited display adjustments and
+  preserves software planar 10-bit samples. Its final Vulkan RGB cache rounds
+  to the exact nearest 16-bit value. Shared PQ mapping retains small
+  intermediates, and RGB48 export avoids double rounding while preserving the
+  caller's rounding mode.
+
 - macOS source installs discover full Xcode when Command Line Tools are selected,
   find renamed or relocated copies through the macOS application index,
   preserve explicit developer-directory overrides, and install missing Xcode
