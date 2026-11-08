@@ -20,7 +20,7 @@ use super::background_jobs::{decode, encode, QueueSql};
 use crate::error::StoreError;
 
 pub(crate) const SCHEMA: &str = include_str!("scan_request_v2.sql");
-pub const SQLITE_INTRODUCED_SCHEMA: i64 = 124;
+pub const SQLITE_INTRODUCED_SCHEMA: i64 = 125;
 pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name GLOB 'background_scan_request_v2*' AND sql IS NOT NULL ORDER BY name";
 pub(crate) const MARKER_SQL: &str =
     "SELECT count(*) AS count FROM background_scan_request_v2_schema WHERE singleton=1 AND version=1";

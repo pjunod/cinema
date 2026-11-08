@@ -1,0 +1,76 @@
+From: plurx contributors <noreply@plurx.invalid>
+Date: Tue, 3 Nov 2026 12:00:00 +0000
+Subject: [PATCH] vo_gpu_next: keep DV reconstruction free of inherited tone mapping
+
+DOVI decoding produces BT.2020/PQ. Reset only the local reconstruction
+color metadata before the explicit .005/10000 bounds, preserving RPU and
+closed-form display management. Retained mastering or scene metadata
+otherwise bypasses libplacebo's identity shortcut and activates its flare
+path. Refuse incomplete reconstruction rather than accepting a BL-only
+result after a reported EL sampling error.
+
+diff --git a/video/out/placebo/plurx_dv.c b/video/out/placebo/plurx_dv.c
+--- a/video/out/placebo/plurx_dv.c
++++ b/video/out/placebo/plurx_dv.c
+@@ -34,6 +34,7 @@
+ #include "plurx/dv_dm.h"
+ 
+ #include "plurx_dv.h"
++#include "dv_reconstruction.h"
+ #include "video/mp_image.h"
+ 
+ // ------------------------------------------------------------------ target
+@@ -387,8 +388,10 @@
+ 
+ // The RPU's reconstruction to BT.2020/PQ, exactly as the plurx server
+ // renders its master: libplacebo applies the reshaping and colour
+-// conversion, and identical 0.005-10000 nit source and destination volumes
+-// with clipping make its colour mapping an identity.
++// conversion. Normalize only this local frame color: retained mastering or
++// scene metadata defeats libplacebo's identity shortcut and activates its
++// black-point adaptation even with equal explicit min/max bounds. The RPU
++// representation and the separate closed-form DM preparation stay intact.
+ static bool reconstruct(struct plurx_dv *dv, const struct pl_frame *decoded,
+                         int w, int h, const char **why)
+ {
+@@ -411,8 +414,7 @@
+     image.profile = (struct pl_icc_profile){0};
+     image.lut = NULL;
+     image.film_grain = (struct pl_film_grain_data){0};
+-    image.color.hdr.max_luma = 10000;
+-    image.color.hdr.min_luma = 0.005;
++    image.color = plurx_dv_reconstruction_color();
+     struct pl_frame target = {
+         .num_planes = 1,
+         .planes = {{.texture = dv->native, .components = 3, .component_mapping = {0, 1, 2}}},
+@@ -442,6 +444,9 @@
+     pl_renderer_reset_errors(dv->recon, NULL);
+     if (!pl_render_image(dv->recon, &image, &target, &params))
+         return refuse(why, "Dolby Vision reconstruction failed");
++    struct pl_render_errors errors = pl_renderer_get_errors(dv->recon);
++    if (errors.errors || errors.num_disabled_hooks)
++        return refuse(why, "Dolby Vision reconstruction was incomplete");
+     return true;
+ }
+ 
+diff --git a/video/out/placebo/dv_reconstruction.h b/video/out/placebo/dv_reconstruction.h
+new file mode 100644
+--- /dev/null
++++ b/video/out/placebo/dv_reconstruction.h
+@@ -0,0 +1,16 @@
++/* Copyright (C) 2026 plurx contributors
++ * SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef MPV_DV_RECONSTRUCTION_H
++#define MPV_DV_RECONSTRUCTION_H
++#include <libplacebo/colorspace.h>
++
++// DOVI decoding produces BT.2020/PQ. Retained mastering/scene HDR fields
++// must not activate a second tone map in this reconstruction-only pass.
++static inline struct pl_color_space plurx_dv_reconstruction_color(void)
++{
++    struct pl_color_space color = pl_color_space_hdr10;
++    color.hdr.min_luma = 0.005;
++    color.hdr.max_luma = 10000;
++    return color;
++}
++#endif

@@ -294,3 +294,7 @@ and their resource competition are not added to the worker model.
 These refreshed whole-file hashes identify source correspondence only.
 Final adversarial review and current-source execution remain pending; no
 prior receipt is promoted into evidence for these source bytes.
+
+## November 7 library dispatch and source release
+
+The library claim path now announces eligible successors during an active scan. A complete grant still precedes source execution. The library driver can poll a pending completion through source pressure without waiting on the publisher mutex. The worker model continues to abstract candidate order and eligibility. Cross-type priority and exact custody release are exercised by the separate Store and library driver regressions.

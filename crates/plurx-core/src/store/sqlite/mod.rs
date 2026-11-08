@@ -1333,7 +1333,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA,
     // v123: prepared artifact operations do not read original media.
     super::subtitle_managed_schema::PREPARED_MIGRATION,
-    // v124: pipeline contract v2 sidecar for targeted scan requests.
+    // v124: shared dispatch turns for interactive library work.
+    super::background_job_turns::SCHEMA,
+    // v125: pipeline contract v2 sidecar for targeted scan requests.
     super::scan_request_v2::SCHEMA,
 ];
 
@@ -2271,6 +2273,7 @@ impl MetricsStore for SqliteStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)
                             + (SELECT COUNT(*) FROM analysis_source_reservations
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
+                        'source_recovery_pending', (SELECT COUNT(DISTINCT custody_id) FROM source_io_occupancy WHERE custody_id IS NOT NULL AND active_occupancy=1 AND expires_at_ms <= ?2 * 1000),
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import')))
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],

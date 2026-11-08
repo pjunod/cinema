@@ -727,14 +727,31 @@ impl JobFence {
         state.token.clone()
     }
 
+    /// The source controller can be driving the same future that holds
+    /// `state` across a publication RPC. Waiting for that lock here would
+    /// strand the publisher and its physical custody after the write commits.
+    /// Source RPCs authenticate the original claim identity and recheck the
+    /// current running state and expiry in the Store. Its renewable revision
+    /// is required by publication, but is not part of physical source ownership.
+    fn source_token(&self) -> Option<&JobToken> {
+        if self.0.lost.is_cancelled() || Instant::now() >= *self.0.deadline.borrow() {
+            return None;
+        }
+        self.0.source_budget.job_token()
+    }
+
     pub(crate) async fn source_may_continue(&self) -> Result<bool, StoreError> {
-        let Some(token) = self.snapshot().await else {
+        #[cfg(test)]
+        faults::worker::at(faults::worker::Point::SourcePermissionCheck).await;
+        let Some(token) = self.source_token() else {
             return Ok(false);
         };
         self.0
             .store
             .background_source_may_continue(
-                plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job { token },
+                plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job {
+                    token: token.clone(),
+                },
                 unix_ms()?,
             )
             .await
@@ -743,35 +760,27 @@ impl JobFence {
     /// Caller must hold a verified whole-group stop acknowledgement.
     #[cfg(target_os = "linux")]
     pub(crate) async fn pause_source(&self) -> Result<bool, StoreError> {
-        let state = self.0.state.lock().await;
-        if state.cancelling || !self.may_publish() {
-            return Ok(false);
-        }
-        let Some(token) = state.token.clone() else {
+        let Some(token) = self.source_token().filter(|_| self.may_publish()) else {
             return Ok(false);
         };
         self.0
             .store
-            .pause_background_source(token, unix_ms()?)
+            .pause_background_source(token.clone(), unix_ms()?)
             .await
     }
 
     /// Source capacity is reacquired atomically before the caller sends CONT.
     #[cfg(target_os = "linux")]
     pub(crate) async fn resume_source(&self) -> Result<bool, StoreError> {
-        let state = self.0.state.lock().await;
-        if state.cancelling
-            || !self.may_publish()
-            || !self.0.authority.may_execute_job(self.0.kind).await
-        {
+        if !self.0.authority.may_execute_job(self.0.kind).await {
             return Ok(false);
         }
-        let Some(token) = state.token.clone() else {
+        let Some(token) = self.source_token().filter(|_| self.may_publish()) else {
             return Ok(false);
         };
         self.0
             .store
-            .resume_background_source(token, unix_ms()?)
+            .resume_background_source(token.clone(), unix_ms()?)
             .await
     }
 
@@ -968,7 +977,10 @@ impl JobFence {
             .complete_library_work(token, request_id, result, unix_ms()?)
             .await;
         #[cfg(test)]
-        let completed = faults::after_commit(faults::COMPLETE, completed);
+        let completed = {
+            faults::worker::at(faults::worker::Point::CompletionCommitted).await;
+            faults::after_commit(faults::COMPLETE, completed)
+        };
         completed
     }
 
@@ -2530,17 +2542,23 @@ pub(crate) async fn fragment_siblings(
 /// Bounded, node-local eligibility observations. They never settle durable work:
 /// another member may have a readable mount while this one does not.
 #[derive(Default)]
-pub(crate) struct LibraryReadiness(
-    std::sync::Mutex<std::collections::BTreeMap<i64, LibraryReadinessProblem>>,
-);
+pub(crate) struct LibraryReadiness {
+    problems: std::sync::Mutex<std::collections::BTreeMap<i64, LibraryReadinessProblem>>,
+    advertised: std::sync::Mutex<std::collections::BTreeMap<String, LibraryTurnObservation>>,
+    interactive_waiting: AtomicBool,
+}
 
-/// How long one root-check failure stays a statement about this node. The
-/// library loop re-checks every queued library at least every ~30 s
-/// ([`IdlePoll`] tops out at 25 s plus 5 s of jitter) for as long as this node
-/// may run cluster jobs. An observation four polls old describes a node that
-/// stopped checking (a learner, maintenance, a lost membership), not one that
-/// still cannot read the roots, and Activity must not keep printing it.
+/// How long a root-check failure stays a statement about this node if its
+/// library worker loses authority or stops checking that library.
 const LIBRARY_READINESS_TTL: Duration = Duration::from_secs(120);
+const LIBRARY_TURN_REFRESH: Duration = Duration::from_secs(3);
+
+struct LibraryTurnObservation {
+    revision: i64,
+    capacity: plurx_core::store::background_jobs::LibraryTurnCapacity,
+    recorded: Instant,
+    interactive: bool,
+}
 
 #[derive(Clone)]
 struct LibraryReadinessProblem {
@@ -2549,9 +2567,68 @@ struct LibraryReadinessProblem {
     observed: std::time::Instant,
 }
 impl LibraryReadiness {
+    pub(crate) fn poll_interval(&self) -> Duration {
+        if self.interactive_waiting.load(Ordering::Relaxed) {
+            Duration::from_millis(750)
+        } else {
+            Duration::from_secs(5)
+        }
+    }
+
+    /// Cache only the permission to request a turn. The durable claim always
+    /// rechecks interest, eligibility and the complete set of shared resources.
+    async fn advertise(
+        &self,
+        store: &dyn Store,
+        candidate: &BackgroundJob,
+        node: &str,
+        roots: &[std::path::PathBuf],
+        capacity: plurx_core::store::background_jobs::LibraryTurnCapacity,
+    ) -> Result<bool, StoreError> {
+        let now = Instant::now();
+        {
+            let mut recent = self
+                .advertised
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            recent.retain(|_, row| {
+                now.saturating_duration_since(row.recorded) < LIBRARY_TURN_REFRESH
+            });
+            if let Some(row) = recent
+                .get(&candidate.id)
+                .filter(|row| row.revision == candidate.revision && row.capacity == capacity)
+            {
+                return Ok(row.interactive);
+            }
+        }
+        let interactive = store
+            .advertise_library_turn(
+                &candidate.id,
+                candidate.revision,
+                node,
+                roots,
+                capacity,
+                unix_ms()?,
+            )
+            .await?;
+        self.advertised
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                candidate.id.clone(),
+                LibraryTurnObservation {
+                    revision: candidate.revision,
+                    capacity,
+                    recorded: now,
+                    interactive,
+                },
+            );
+        Ok(interactive)
+    }
+
     fn record(&self, library_id: i64, roots: &[std::path::PathBuf], problem: Option<String>) {
         let mut rows = self
-            .0
+            .problems
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(problem) = problem {
@@ -2589,7 +2666,7 @@ impl LibraryReadiness {
         now: std::time::Instant,
     ) -> std::collections::HashMap<i64, String> {
         let observations: std::collections::BTreeMap<i64, LibraryReadinessProblem> = self
-            .0
+            .problems
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
@@ -2615,6 +2692,130 @@ impl LibraryReadiness {
     }
 }
 
+async fn library_candidate_readiness(
+    store: &dyn Store,
+    authority: &dyn ClusterJobAuthority,
+    transcode: &crate::transcode::TranscodeManager,
+    node: &str,
+    library_filter: Option<i64>,
+    readiness: &LibraryReadiness,
+    candidate: &BackgroundJob,
+) -> Result<Option<(plurx_core::store::background_jobs::JobKind, bool)>, StoreError> {
+    use plurx_core::store::background_jobs::{JobPayload, LibraryTurnCapacity};
+    let Ok(payload) = candidate.supported_payload() else {
+        return Ok(None);
+    };
+    let kind = payload.kind();
+    let library_id = match payload {
+        JobPayload::LibraryScan {
+            library_id,
+            generation,
+        }
+        | JobPayload::MetadataRefresh {
+            library_id,
+            generation,
+        } if generation == "library-work-v1" => library_id,
+        _ => return Ok(None),
+    };
+    if library_filter.is_some_and(|wanted| wanted != library_id) {
+        return Ok(None);
+    }
+    let library = store.get_library(library_id).await?;
+    // A deleted library still needs its accepted requests settled.
+    let mut problem = library
+        .as_ref()
+        .filter(|library| library.paths.is_empty())
+        .map(|_| {
+            "This node observed no library roots; waiting for a compatible worker.".to_owned()
+        });
+    for path in library.iter().flat_map(|library| &library.paths) {
+        if let Err(error) = tokio::fs::read_dir(path).await {
+            problem = Some(format!("This node could not read library root {}: {error}. Waiting for a compatible worker.", path.display()));
+            break;
+        }
+    }
+    let readable = problem.is_none();
+    readiness.record(
+        library_id,
+        library
+            .as_ref()
+            .map_or(&[], |library| library.paths.as_slice()),
+        problem,
+    );
+    if !readable {
+        return Ok(None);
+    }
+    if !authority.may_run_cluster_jobs().await {
+        return Ok(None);
+    }
+    let protected = transcode.background_yield_reason().is_some();
+    let capacity = if protected {
+        LibraryTurnCapacity::Unavailable
+    } else if transcode.fragment_worker_may_start() {
+        LibraryTurnCapacity::Available
+    } else if transcode.background_worker_in_use() {
+        LibraryTurnCapacity::HeavyOccupied
+    } else {
+        LibraryTurnCapacity::Unavailable
+    };
+    let interactive = match library.as_ref() {
+        Some(library) if candidate.priority >= 2 => {
+            readiness
+                .advertise(store, candidate, node, &library.paths, capacity)
+                .await?
+        }
+        _ => false,
+    };
+    Ok((!protected).then_some((kind, interactive)))
+}
+
+async fn library_candidates(
+    store: &dyn Store,
+    node: &str,
+    after: Option<plurx_core::store::background_jobs::CandidateCursor>,
+) -> Result<plurx_core::store::background_jobs::CandidatePage, StoreError> {
+    use plurx_core::store::background_jobs::{CandidateQuery, JobKind, MAX_PAGE_SIZE};
+    store
+        .job_candidates(CandidateQuery {
+            node_id: node.into(),
+            kinds: vec![JobKind::LibraryScan, JobKind::MetadataRefresh],
+            after,
+            now_ms: unix_ms()?,
+            limit: MAX_PAGE_SIZE,
+        })
+        .await
+}
+
+/// Keep other readable libraries in line for the next source turn while the
+/// only compatible worker is still executing its current library scan.
+pub(crate) async fn advertise_library_successors(
+    store: &dyn Store,
+    authority: &dyn ClusterJobAuthority,
+    transcode: &crate::transcode::TranscodeManager,
+    node: &str,
+    readiness: &LibraryReadiness,
+) -> Result<(), StoreError> {
+    use plurx_core::store::background_jobs::{MAX_ACTIVE_JOBS, MAX_PAGE_SIZE};
+    if !authority.may_run_cluster_jobs().await {
+        return Ok(());
+    }
+    let mut cursor = None;
+    for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
+        let page = library_candidates(store, node, cursor).await?;
+        for candidate in page.jobs.iter().filter(|candidate| candidate.priority >= 2) {
+            library_candidate_readiness(
+                store, authority, transcode, node, None, readiness, candidate,
+            )
+            .await?;
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Library coordinators share the same physical heavy-work admission as
 /// preparation/indexing. Source checks happen before claiming; domain-lease
 /// contention is resolved by the caller through an uncharged yield.
@@ -2633,71 +2834,45 @@ pub(crate) async fn claim_library(
     )>,
     StoreError,
 > {
-    use plurx_core::store::background_jobs::{
-        CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
-    };
+    use plurx_core::store::background_jobs::{MAX_ACTIVE_JOBS, MAX_PAGE_SIZE};
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    readiness
+        .interactive_waiting
+        .store(false, Ordering::Relaxed);
     if !authority.may_run_cluster_jobs().await {
         return Ok(None);
     }
     let mut cursor = None;
     for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
-        let page = store
-            .job_candidates(CandidateQuery {
-                node_id: node.into(),
-                kinds: vec![JobKind::LibraryScan, JobKind::MetadataRefresh],
-                after: cursor,
-                now_ms: unix_ms()?,
-                limit: MAX_PAGE_SIZE,
-            })
-            .await?;
+        let page = library_candidates(store.as_ref(), node, cursor).await?;
         for candidate in page.jobs {
-            let Ok(payload) = candidate.supported_payload() else {
+            let Some((kind, interactive)) = library_candidate_readiness(
+                store.as_ref(),
+                authority.as_ref(),
+                transcode,
+                node,
+                library_filter,
+                readiness,
+                &candidate,
+            )
+            .await?
+            else {
                 continue;
             };
-            let kind = payload.kind();
-            let library_id = match payload {
-                JobPayload::LibraryScan {
-                    library_id,
-                    generation,
-                }
-                | JobPayload::MetadataRefresh {
-                    library_id,
-                    generation,
-                } if generation == "library-work-v1" => library_id,
-                _ => continue,
+            let admission = if interactive {
+                readiness.interactive_waiting.store(true, Ordering::Relaxed);
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    transcode.admit_interactive_library(),
+                )
+                .await
+                .ok()
+                .flatten()
+            } else {
+                transcode.admit_fragment().await
             };
-            if library_filter.is_some_and(|wanted| wanted != library_id) {
-                continue;
-            }
-            let library = store.get_library(library_id).await?;
-            // A deleted library still needs its accepted requests settled.
-            let mut problem = library
-                .as_ref()
-                .filter(|library| library.paths.is_empty())
-                .map(|_| {
-                    "This node observed no library roots; waiting for a compatible worker."
-                        .to_owned()
-                });
-            for path in library.iter().flat_map(|library| &library.paths) {
-                if let Err(error) = tokio::fs::read_dir(path).await {
-                    problem = Some(format!("This node could not read library root {}: {error}. Waiting for a compatible worker.", path.display()));
-                    break;
-                }
-            }
-            let readable = problem.is_none();
-            readiness.record(
-                library_id,
-                library
-                    .as_ref()
-                    .map_or(&[], |library| library.paths.as_slice()),
-                problem,
-            );
-            if !readable {
-                continue;
-            }
-            let Some(admission) = transcode.admit_fragment().await else {
+            let Some(admission) = admission else {
                 return Ok(None);
             };
             if !authority.may_run_cluster_jobs().await {
@@ -3808,6 +3983,41 @@ pub(crate) mod tests {
                 .token,
             Some(after)
         );
+        active.finish().await;
+    }
+
+    #[tokio::test]
+    async fn source_pressure_can_progress_while_the_publisher_holds_the_job_fence() {
+        let (store, id, active) = active().await;
+        let fence = active.fence();
+        // This is the exact guard held across complete_library_work. The
+        // source supervisor cannot poll that publisher while awaiting a check.
+        let publishing = fence.0.state.lock().await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            assert!(fence.source_may_continue().await.expect("live reader"));
+            #[cfg(target_os = "linux")]
+            {
+                assert!(fence.pause_source().await.expect("verified pause"));
+                assert!(fence.resume_source().await.expect("reacquire slot"));
+            }
+            store
+                .cancel_job(plurx_core::store::background_jobs::CancelJob {
+                    job_id: id,
+                    now_ms: unix_ms().expect("clock"),
+                })
+                .await
+                .expect("cancel reader")
+                .expect("owned job");
+            assert!(!fence.source_may_continue().await.expect("revoked reader"));
+            #[cfg(target_os = "linux")]
+            {
+                assert!(!fence.pause_source().await.expect("revoked pause"));
+                assert!(!fence.resume_source().await.expect("revoked resume"));
+            }
+        })
+        .await
+        .expect("source checks must finish before polling the publisher again");
+        drop(publishing);
         active.finish().await;
     }
 
