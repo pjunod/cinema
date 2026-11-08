@@ -6325,9 +6325,9 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
              # TYPE plurx_analysis_queue_running_past_lease gauge\n\
              # HELP plurx_analysis_queue_eligible Due fragment-index work some live engine can claim now (queued jobs plus compatible pre-worker requests).\n\
              # TYPE plurx_analysis_queue_eligible gauge\n\
-             # HELP plurx_analysis_queue_waiting Pre-worker fragment-index requests still inside their retry wait.\n\
+             # HELP plurx_analysis_queue_waiting Fragment-index work inside a retry wait: pre-worker requests and queued worker jobs.\n\
              # TYPE plurx_analysis_queue_waiting gauge\n\
-             # HELP plurx_analysis_queue_incompatible Due pre-worker fragment-index requests under an engine digest no live worker runs.\n\
+             # HELP plurx_analysis_queue_incompatible Due pre-worker fragment-index requests nobody can claim: no live worker runs their engine digest, or their target was removed.\n\
              # TYPE plurx_analysis_queue_incompatible gauge\n\
              # HELP plurx_analysis_queue_claims_since_start Claims this process has watched, since it started. Shared with skip-marker work.\n\
              # TYPE plurx_analysis_queue_claims_since_start gauge\n\

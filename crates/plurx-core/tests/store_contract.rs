@@ -26287,6 +26287,10 @@ async fn pre_worker_requests_are_split_by_live_engine_and_counted_once() {
         const NOW_SECS: i64 = NOW_MS / 1_000;
         let live = "a".repeat(64);
         let retired = "b".repeat(64);
+        let live_set = plurx_core::store::LiveAnalysisEngines {
+            engines: [("split-node".to_owned(), live.clone())].into(),
+            members: None,
+        };
         let mut seeded = Vec::new();
         for (name, engine, not_before_ms) in [
             ("due-live", &live, NOW_MS - 60_000),
@@ -26310,19 +26314,17 @@ async fn pre_worker_requests_are_split_by_live_engine_and_counted_once() {
                 not_before_ms,
                 created_at_ms: NOW_MS - 120_000,
             };
+            // Through the runnable-work cap with a known live set, so both
+            // backends execute that statement and not only its source text.
             store
-                .enqueue_analysis_request(&request)
+                .enqueue_analysis_request_with(&request, Some(&live_set))
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: enqueue {name}: {error}"));
             seeded.push(request);
         }
 
         let split = store
-            .prometheus_store_snapshot_with(
-                "split-node",
-                NOW_SECS,
-                Some(std::slice::from_ref(&live)),
-            )
+            .prometheus_store_snapshot_with("split-node", NOW_SECS, Some(&live_set))
             .await
             .unwrap_or_else(|error| panic!("{backend}: split snapshot: {error}"))
             .analysis;
@@ -26383,6 +26385,209 @@ async fn pre_worker_requests_are_split_by_live_engine_and_counted_once() {
             (unknown.eligible, unknown.incompatible),
             (2, 0),
             "{backend}"
+        );
+    })
+    .await;
+}
+
+/// One stranded rule for the health, the enqueue caps and the reconciler
+/// (review S7/S8). Due pre-worker requests split into `eligible` and
+/// `incompatible` exactly as `LiveAnalysisEngines::is_stranded` calls them —
+/// a row another live worker can claim (the claim's cross-node arm) is not
+/// stranded whatever its own target runs — and a removed target's row is
+/// stranded in the Store and never reconciled. Both enqueues run their
+/// live-set cap on both backends, and two reconcilers racing on one row
+/// commit exactly one successor.
+#[tokio::test]
+async fn one_stranded_rule_splits_the_health_and_refuses_racing_reconcilers() {
+    for_each_backend(|store, backend| async move {
+        const NOW_MS: i64 = 1_700_000_000_000;
+        const NOW_SECS: i64 = NOW_MS / 1_000;
+        let (live, busy, retired) = ("a".repeat(64), "c".repeat(64), "b".repeat(64));
+        let inventory = plurx_core::store::LiveAnalysisEngines {
+            engines: [
+                ("rule-live".to_owned(), live.clone()),
+                ("rule-busy".to_owned(), busy.clone()),
+            ]
+            .into(),
+            members: Some(
+                ["rule-live", "rule-busy", "rule-silent"]
+                    .map(str::to_owned)
+                    .into(),
+            ),
+        };
+        let mut rows = Vec::new();
+        for (name, engine, target) in [
+            ("runnable", &live, "rule-live"),
+            ("cross-node", &live, "rule-busy"),
+            ("engine-changed", &retired, "rule-live"),
+            ("absent", &retired, "rule-gone"),
+            ("silent", &retired, "rule-silent"),
+        ] {
+            let (_, file_id) = seed_file(&store, &format!("rule-{name}")).await;
+            let request = NewAnalysisRequest {
+                request_id: format!("rule-{name}"),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: engine.clone(),
+                video_identity: String::new(),
+                requested_generation: format!("rule-{name}-generation"),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: target.to_owned(),
+                not_before_ms: NOW_MS - 60_000,
+                created_at_ms: NOW_MS - 120_000,
+            };
+            rows.push(
+                store
+                    .enqueue_analysis_request_with(&request, Some(&inventory))
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: enqueue {name}: {error}")),
+            );
+        }
+        let stranded = rows.iter().filter(|row| inventory.is_stranded(row)).count() as i64;
+        assert_eq!(stranded, 3, "{backend}: engine-changed, absent and silent");
+        let remedies = rows
+            .iter()
+            .map(|row| inventory.remedy(row))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remedies,
+            vec![
+                None,
+                None,
+                Some(plurx_core::store::StrandedRemedy::TargetEngine(
+                    live.clone()
+                )),
+                Some(plurx_core::store::StrandedRemedy::TargetAbsent),
+                Some(plurx_core::store::StrandedRemedy::TargetSilent),
+            ],
+            "{backend}"
+        );
+        let health = |at| {
+            let store = Arc::clone(&store);
+            let inventory = inventory.clone();
+            async move {
+                store
+                    .prometheus_store_snapshot_with("rule-live", at, Some(&inventory))
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: snapshot: {error}"))
+                    .analysis
+                    .health
+            }
+        };
+        let split = health(NOW_SECS).await;
+        assert_eq!(
+            (split.eligible, split.incompatible),
+            (5 - stranded, stranded),
+            "{backend}: the metric's incompatible is the reconciler's stranded"
+        );
+
+        // A subtitle source runs the same live-set cap.
+        let (_, subtitle_file) = seed_file(&store, "rule-subtitle").await;
+        let subtitle = store
+            .enqueue_or_promote_subtitle_source_with(
+                &subtitle_source_stamp(subtitle_file),
+                "normal",
+                NOW_MS,
+                Some(&inventory),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: subtitle enqueue: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: inside the repair budget"));
+        assert_eq!(subtitle.state, "queued", "{backend}");
+
+        // Two voters re-home the absent target's row, each onto itself, at
+        // once: exactly one successor commits.
+        let absent = rows[3].clone();
+        let replacement = |voter: &str| NewAnalysisRequest {
+            request_id: format!("rule-absent-{voter}"),
+            file_id: absent.file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: live.clone(),
+            video_identity: String::new(),
+            requested_generation: format!("rule-absent-{voter}-generation"),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            target_node_id: voter.to_owned(),
+            not_before_ms: 0,
+            created_at_ms: 0,
+        };
+        let (left, right) = (replacement("rule-live"), replacement("rule-busy"));
+        let (a, b) = tokio::join!(
+            store.reconcile_analysis_request(&absent, &left, NOW_MS),
+            store.reconcile_analysis_request(&absent, &right, NOW_MS),
+        );
+        let (a, b) = (
+            a.unwrap_or_else(|error| panic!("{backend}: reconcile a: {error}")),
+            b.unwrap_or_else(|error| panic!("{backend}: reconcile b: {error}")),
+        );
+        assert!(
+            a ^ b,
+            "{backend}: exactly one reconciler commits ({a}, {b})"
+        );
+        let read = |id: String| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .analysis_request(&id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read {id}: {error}"))
+            }
+        };
+        assert_eq!(
+            read(absent.request_id.clone()).await.map(|row| row.state),
+            Some("cancelled".to_owned()),
+            "{backend}: the predecessor is retired once"
+        );
+        let successors = [left.request_id.clone(), right.request_id.clone()];
+        let mut live_successors = 0;
+        for id in successors {
+            if read(id).await.is_some_and(|row| row.state == "queued") {
+                live_successors += 1;
+            }
+        }
+        assert_eq!(live_successors, 1, "{backend}: one successor, not two");
+
+        // A removed target's row is stranded in the Store, and never
+        // reconciled: removal retires it.
+        store
+            .put_setting("internal.cluster_job_owner_removed.rule-live", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: removal fence: {error}"));
+        let fenced = health(NOW_SECS).await;
+        assert_eq!(
+            fenced.incompatible,
+            // engine-changed and silent as before; runnable now targets a
+            // removed node; absent is cancelled; the winner of the race
+            // targets rule-live (removed) or rule-busy (a live digest).
+            2 + 1 + i64::from(a),
+            "{backend}: a removed target's row is not claimable"
+        );
+        let engine_changed = rows[2].clone();
+        assert!(
+            !store
+                .reconcile_analysis_request(
+                    &engine_changed,
+                    &NewAnalysisRequest {
+                        request_id: "rule-engine-changed-successor".to_owned(),
+                        file_id: engine_changed.file_id,
+                        target_node_id: "rule-live".to_owned(),
+                        pipeline_version: live.clone(),
+                        requested_generation: "rule-engine-changed-successor".to_owned(),
+                        ..replacement("rule-live")
+                    },
+                    NOW_MS,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reconcile fenced: {error}")),
+            "{backend}: a removed target's row is never reconciled"
         );
     })
     .await;
@@ -26450,6 +26655,17 @@ async fn the_prometheus_snapshot_answers_what_the_queue_verdict_asks() {
         assert_eq!(
             too_early.claimable, 0,
             "{backend}: a job inside its retry wait is not work the queue is refusing"
+        );
+        // ...but it is work: a queue whose whole backlog is backing off is
+        // not idle (review S9 — job-level waits were missing from `waiting`).
+        assert_eq!(
+            too_early.waiting, 1,
+            "{backend}: a job inside its retry wait is waiting"
+        );
+        assert_ne!(
+            plurx_core::store::analysis_queue_verdict(too_early, 0, 0, 0),
+            plurx_core::store::AnalysisQueueVerdict::Idle,
+            "{backend}: a backing-off backlog does not read idle"
         );
 
         let claim = store

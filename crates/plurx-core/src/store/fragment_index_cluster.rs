@@ -1880,6 +1880,116 @@ pub const MAX_ACTIVE_ANALYSIS_REQUESTS: i64 = 4_096;
 /// grow the table without limit while it waits to be reconciled.
 pub const ANALYSIS_BACKLOG_BOUND_FACTOR: i64 = 4;
 
+/// The prefix of the durable fence membership writes for a removed (or
+/// removal-pending) node. A request targeted at a fenced node is never worked
+/// for: the claim's cross-node arm skips it, removal retires it
+/// (`retire_analysis_requests_for_node`) and the settle pass catches any it
+/// missed.
+pub(crate) const REMOVED_TARGET_FENCE_PREFIX: &str = "internal.cluster_job_owner_removed.";
+
+/// What the last worker inventory read knows about who can run a
+/// fragment-index request: the fresh engine digest each reporting node runs,
+/// and the committed members (this node included) when membership could be
+/// read.
+///
+/// It carries the one rule for *stranded* work, shared by the enqueue cap,
+/// the queue health (`incompatible` against `eligible`) and the background
+/// reconciler. A pre-worker fragment-index request (`queued`, no worker cache
+/// key) is claimable by its own target when that target runs its digest, and
+/// by any other idle member that does (the claim's cross-node arm) unless the
+/// target is fenced as removed. So it is **stranded** exactly when no live
+/// worker runs its digest, or its target is removed
+/// ([`analysis_request_stranded_sql`] in SQL, [`Self::is_stranded`] for a row
+/// in hand). Which of the two remedies applies depends on the target
+/// ([`Self::remedy`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveAnalysisEngines {
+    /// Node id to the engine digest it reported inside the freshness window.
+    pub engines: std::collections::BTreeMap<String, String>,
+    /// Committed members, this node included; `None` when membership could
+    /// not be read, which disables the absent-target remedy.
+    pub members: Option<std::collections::BTreeSet<String>>,
+}
+
+/// What the background reconciler does with a stranded request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StrandedRemedy {
+    /// The target reports, fresh, this engine: replace the request onto it
+    /// under the same target (`engine_changed`).
+    TargetEngine(String),
+    /// The target is not a committed member and reports nothing: re-home the
+    /// request through the reconcile candidate's reassign path
+    /// (`target_changed`), source checked on the new node. A removed
+    /// target's request is never re-homed — the Store refuses it and removal
+    /// retires it.
+    TargetAbsent,
+    /// The target is a member that has not reported inside the window:
+    /// absence of evidence retires nothing. It stays counted `incompatible`
+    /// until the target reports again or membership removes it.
+    TargetSilent,
+}
+
+impl LiveAnalysisEngines {
+    /// The distinct digests some live worker runs, the JSON array the SQL
+    /// half binds.
+    #[must_use]
+    pub fn digests(&self) -> Vec<String> {
+        self.engines
+            .values()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// The row-in-hand half of [`analysis_request_stranded_sql`], short of
+    /// the removed-target fence (a Store fact; the reconcile statements
+    /// refuse a fenced target themselves).
+    #[must_use]
+    pub fn is_stranded(&self, request: &AnalysisRequest) -> bool {
+        request.component == "fragment_index"
+            && request.state == "queued"
+            && request.result_cache_key.is_empty()
+            && !self
+                .engines
+                .values()
+                .any(|engine| engine == &request.pipeline_version)
+    }
+
+    /// The remedy for a stranded request, `None` when it is not stranded.
+    #[must_use]
+    pub fn remedy(&self, request: &AnalysisRequest) -> Option<StrandedRemedy> {
+        if !self.is_stranded(request) {
+            return None;
+        }
+        Some(match self.engines.get(&request.target_node_id) {
+            Some(engine) => StrandedRemedy::TargetEngine(engine.clone()),
+            None if self
+                .members
+                .as_ref()
+                .is_some_and(|members| !members.contains(&request.target_node_id)) =>
+            {
+                StrandedRemedy::TargetAbsent
+            }
+            None => StrandedRemedy::TargetSilent,
+        })
+    }
+}
+
+/// [`LiveAnalysisEngines`]'s stranded rule over an unqualified
+/// `analysis_requests` row. `live` is the placeholder bound to the JSON array
+/// of [`LiveAnalysisEngines::digests`], or NULL when the inventory is
+/// unknown — then nothing is stranded, every row counts as before.
+pub(crate) fn analysis_request_stranded_sql(live: &str) -> String {
+    format!(
+        "({live} IS NOT NULL AND component = 'fragment_index' AND state = 'queued' \
+          AND COALESCE(result_cache_key, '') = '' \
+          AND (pipeline_version NOT IN (SELECT value FROM json_each({live})) \
+            OR EXISTS (SELECT 1 FROM settings \
+              WHERE key = '{REMOVED_TARGET_FENCE_PREFIX}' || target_node_id)))"
+    )
+}
+
 /// Room above [`MAX_ACTIVE_ANALYSIS_REQUESTS`] that only a viewer's own
 /// request may use: copy preparation (`priority = foreground`,
 /// `trigger = playback`) and a viewer's subtitle source (`foreground`). Background discovery that filled the queue to the ceiling refused
@@ -2024,6 +2134,20 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         stamp: &SubtitleSourceStamp,
         priority: &str,
         now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.enqueue_or_promote_subtitle_source_with(stamp, priority, now_ms, None)
+            .await
+    }
+
+    /// [`Self::enqueue_or_promote_subtitle_source`] with the same cap as
+    /// [`Self::enqueue_analysis_request_with`]: runnable work holds the
+    /// ceiling, stranded fragment-index backlog only the hard bound.
+    async fn enqueue_or_promote_subtitle_source_with(
+        &self,
+        stamp: &SubtitleSourceStamp,
+        priority: &str,
+        now_ms: i64,
+        live_engines: Option<&LiveAnalysisEngines>,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     async fn retire_subtitle_source_ready(
@@ -2082,9 +2206,9 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     }
 
     /// [`Self::enqueue_analysis_request`] with the cap measured against
-    /// *runnable* work. `live_engines` is the set of fragment-index engine
-    /// digests some live worker runs; an active `fragment_index` row under
-    /// any other digest is backlog nobody can claim and does not hold the
+    /// *runnable* work. `live_engines` is the last worker inventory; an
+    /// active pre-worker `fragment_index` row it calls stranded
+    /// ([`LiveAnalysisEngines`]) is backlog nobody can claim and does not hold the
     /// [`MAX_ACTIVE_ANALYSIS_REQUESTS`] ceiling against new runnable work —
     /// on 2026-11-07 3,878 such rows held it at 4,097/4,096 and refused every
     /// background enqueue. All active rows stay bounded by
@@ -2093,7 +2217,7 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     async fn enqueue_analysis_request_with(
         &self,
         request: &NewAnalysisRequest,
-        live_engines: Option<&[String]>,
+        live_engines: Option<&LiveAnalysisEngines>,
     ) -> Result<AnalysisRequest, StoreError>;
 
     async fn claim_analysis_request(

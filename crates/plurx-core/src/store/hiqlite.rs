@@ -5931,7 +5931,7 @@ impl MetricsStore for HiqliteAuthStore {
         &self,
         node_id: &str,
         now: i64,
-        live_fragment_engines: Option<&[String]>,
+        live_fragment_engines: Option<&super::LiveAnalysisEngines>,
     ) -> Result<PrometheusStoreSnapshot, StoreError> {
         let live = super::live_engines_param(live_fragment_engines);
         let request_health = super::analysis_request_health_sql("$2", "$3");

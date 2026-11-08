@@ -6,7 +6,9 @@
 use std::collections::BTreeMap;
 
 use plurx_core::cluster::membership::MembershipManager;
-use plurx_core::store::{AnalysisRequest, NewAnalysisRequest, Store};
+use plurx_core::store::{
+    AnalysisRequest, LiveAnalysisEngines, NewAnalysisRequest, Store, StrandedRemedy,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -37,10 +39,13 @@ impl<'a> ReconcileContext<'a> {
     }
 }
 
-/// The candidate reason the background reconciler acts on: the request's
-/// target node reports, fresh, a different engine digest than the one the
-/// request names. Source and target changes stay with the operator's page.
+/// The candidate reasons the background reconciler acts on, one per
+/// [`StrandedRemedy`] it can apply: the request's target reports, fresh, a
+/// different engine digest (`engine_changed`), or the target is not a
+/// committed member and the row is re-homed here (`target_changed`). Source
+/// changes stay with the operator's page.
 pub(crate) const RETIRED_ENGINE_REASON: &str = "engine_changed";
+pub(crate) const ABSENT_TARGET_REASON: &str = "target_changed";
 
 #[derive(Serialize)]
 pub(crate) struct Candidate {
@@ -68,29 +73,29 @@ pub(crate) async fn engines(state: &AppState) -> Result<BTreeMap<String, String>
 /// peer fan-out (an enqueue on the playback path). Every successful
 /// inventory read refreshes it; older than [`LIVE_ENGINES_TTL`] it is
 /// unknown.
-static LIVE_ENGINES: std::sync::RwLock<Option<(std::time::Instant, Vec<String>)>> =
-    std::sync::RwLock::new(None);
+static LIVE_ENGINES: std::sync::RwLock<
+    Option<(std::time::Instant, std::sync::Arc<LiveAnalysisEngines>)>,
+> = std::sync::RwLock::new(None);
 const LIVE_ENGINES_TTL: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// The distinct engine digests some live worker ran at the last inventory
-/// read, or `None` when there has been none recently. Feeds the enqueue cap
-/// (`enqueue_analysis_request_with`), which treats `None` as "count every
-/// active row".
-pub(crate) fn live_engines_snapshot() -> Option<Vec<String>> {
+/// The engines live workers ran at the last inventory read, or `None` when
+/// there has been none recently. Feeds the enqueue caps
+/// (`enqueue_analysis_request_with`, `enqueue_or_promote_subtitle_source_with`),
+/// which treat `None` as "count every active row". Carries no membership:
+/// the caps' stranded rule needs only the digests.
+pub(crate) fn live_engines_snapshot() -> Option<std::sync::Arc<LiveAnalysisEngines>> {
     let guard = LIVE_ENGINES.read().ok()?;
-    let (at, digests) = guard.as_ref()?;
-    (at.elapsed() <= LIVE_ENGINES_TTL && !digests.is_empty()).then(|| digests.clone())
+    let (at, live) = guard.as_ref()?;
+    (at.elapsed() <= LIVE_ENGINES_TTL && !live.engines.is_empty()).then(|| live.clone())
 }
 
 fn publish_live_engines(engines: &BTreeMap<String, String>) {
-    let digests = engines
-        .values()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let live = std::sync::Arc::new(LiveAnalysisEngines {
+        engines: engines.clone(),
+        members: None,
+    });
     if let Ok(mut guard) = LIVE_ENGINES.write() {
-        *guard = Some((std::time::Instant::now(), digests));
+        *guard = Some((std::time::Instant::now(), live));
     }
 }
 
@@ -100,6 +105,25 @@ pub(crate) async fn engines_in(
     let engines = read_engines(ctx).await?;
     publish_live_engines(&engines);
     Ok(engines)
+}
+
+/// The committed members, this node included, for the absent-target remedy:
+/// `{this node}` on a single node, `None` when replicated membership could
+/// not be read (which disables that remedy rather than guessing).
+async fn read_members(ctx: ReconcileContext<'_>) -> Option<std::collections::BTreeSet<String>> {
+    let membership = ctx.membership?;
+    let mut members = std::collections::BTreeSet::from([ctx.node_id.to_owned()]);
+    if membership.is_replicated() {
+        members.extend(
+            membership
+                .operations_peers()
+                .await
+                .ok()?
+                .into_iter()
+                .map(|peer| peer.node_id),
+        );
+    }
+    Some(members)
 }
 
 async fn read_engines(ctx: ReconcileContext<'_>) -> Result<BTreeMap<String, String>, ApiError> {
@@ -292,13 +316,17 @@ const RECONCILE_PAGE: i64 = 100;
 /// Requests the background reconciler replaced, by candidate reason.
 static RECONCILED_ENGINE_CHANGED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+static RECONCILED_TARGET_CHANGED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn prometheus() -> String {
     format!(
         "# HELP plurx_analysis_reconciled_total Pre-worker analysis requests the fragment-index worker replaced onto a live engine, by reason.\n\
          # TYPE plurx_analysis_reconciled_total counter\n\
-         plurx_analysis_reconciled_total{{reason=\"{RETIRED_ENGINE_REASON}\"}} {}\n",
-        RECONCILED_ENGINE_CHANGED.load(std::sync::atomic::Ordering::Relaxed)
+         plurx_analysis_reconciled_total{{reason=\"{RETIRED_ENGINE_REASON}\"}} {}\n\
+         plurx_analysis_reconciled_total{{reason=\"{ABSENT_TARGET_REASON}\"}} {}\n",
+        RECONCILED_ENGINE_CHANGED.load(std::sync::atomic::Ordering::Relaxed),
+        RECONCILED_TARGET_CHANGED.load(std::sync::atomic::Ordering::Relaxed)
     )
 }
 
@@ -307,29 +335,45 @@ pub(crate) fn prometheus() -> String {
 pub(crate) struct ReconcileReport {
     /// Active rows read this pass (bounded by the pass limit).
     pub(crate) scanned: usize,
-    /// Queued pre-worker rows whose target reports a different engine.
+    /// Stranded rows (no live worker runs their engine) the pass acted on:
+    /// the target reports a different engine, or the target is not a
+    /// committed member and the row was re-homed here.
     pub(crate) retired: usize,
     /// Of those, the ones whose successor this pass committed. A retired row
     /// not replaced lost a race to another reconciler, or is held by a live
     /// playback waiter until that waiter's deadline.
     pub(crate) replaced: usize,
-    /// Rows whose target has no fresh engine report: nothing is retired on
-    /// the absence of evidence.
+    /// Of `retired`, the rows whose target is absent from committed
+    /// membership (re-homed through the reassign path).
+    pub(crate) absent_target: usize,
+    /// Stranded rows whose target is a member with no fresh engine report:
+    /// nothing is retired on the absence of evidence.
     pub(crate) skipped_unfresh: usize,
     /// The cursor reached the end of the table and starts over next pass.
     pub(crate) wrapped: bool,
 }
 
-/// One bounded pass of the retired-engine half of reconciliation.
+/// One bounded pass of the stranded-request half of reconciliation.
 ///
 /// The root cause it removes: a request names the engine digest of the node
 /// that asked, and the claim filters on an exact digest, so after a deploy
 /// changes the engine every queued request under the old digest is
 /// unclaimable by anyone, forever — it is never charged an attempt, so the
 /// attempt sweep never retires it, and it counts against the active cap.
+///
+/// Which rows: exactly the ones [`LiveAnalysisEngines`] calls stranded, the
+/// rule the queue health's `incompatible` and the enqueue caps also use, so
+/// the pass and the metric agree. A row some live worker can still claim
+/// (its own target, or another idle member through the claim's cross-node
+/// arm) is left alone. Of the stranded rows: a target that reports, fresh, a
+/// different engine gets the row replaced onto that engine; a target absent
+/// from committed membership gets it re-homed here through the reassign
+/// path (source checked on this node); a removed target's row is never
+/// touched — removal retires it and the reconcile statements refuse it; a
+/// silent member's row stays (absence of evidence) and stays counted.
 /// Replacement goes through the same `candidate` decision and the same
-/// atomic insert-then-cancel the operator's page uses, so a row is retired
-/// only when its own target says, freshly, that it runs something else.
+/// atomic insert-then-cancel the operator's page uses, so two voters racing
+/// on one row commit exactly one successor.
 ///
 /// `cursor` persists across passes so a large table is walked, not re-read
 /// from its first page; `own_targets_only` keeps a learner to the rows that
@@ -340,20 +384,23 @@ pub(crate) async fn reconcile_retired(
     limit: usize,
     own_targets_only: bool,
 ) -> Result<ReconcileReport, ApiError> {
-    let engines = engines_in(ctx).await?;
-    reconcile_retired_against(ctx, &engines, cursor, limit, own_targets_only).await
+    let live = LiveAnalysisEngines {
+        engines: engines_in(ctx).await?,
+        members: read_members(ctx).await,
+    };
+    reconcile_retired_against(ctx, &live, cursor, limit, own_targets_only).await
 }
 
 /// [`reconcile_retired`] against an inventory already read.
 pub(crate) async fn reconcile_retired_against(
     ctx: ReconcileContext<'_>,
-    engines: &BTreeMap<String, String>,
+    live: &LiveAnalysisEngines,
     cursor: &mut String,
     limit: usize,
     own_targets_only: bool,
 ) -> Result<ReconcileReport, ApiError> {
     let mut report = ReconcileReport::default();
-    if engines.is_empty() {
+    if live.engines.is_empty() {
         return Ok(report);
     }
     while report.scanned < limit {
@@ -369,8 +416,8 @@ pub(crate) async fn reconcile_retired_against(
         for old in &page {
             report.scanned += 1;
             // Cheap filters first: only queued, unowned fragment-index rows
-            // can be candidates, and a row whose target runs its digest is
-            // current. Neither needs a Store read.
+            // can be candidates, and a row some live worker can claim is not
+            // stranded. Neither needs a Store read.
             if (own_targets_only && old.target_node_id != ctx.node_id)
                 || old.state != "queued"
                 || old.component != "fragment_index"
@@ -379,19 +426,25 @@ pub(crate) async fn reconcile_retired_against(
             {
                 continue;
             }
-            match engines.get(&old.target_node_id) {
-                None => {
+            let (reassign, reason, counter) = match live.remedy(old) {
+                None => continue,
+                Some(StrandedRemedy::TargetSilent) => {
                     report.skipped_unfresh += 1;
                     continue;
                 }
-                Some(engine) if engine == &old.pipeline_version => continue,
-                Some(_) => {}
-            }
-            let candidate = candidate_in(ctx, old, engines, false).await?;
-            if candidate.reason != RETIRED_ENGINE_REASON || !candidate.eligible {
+                Some(StrandedRemedy::TargetEngine(_)) => {
+                    (false, RETIRED_ENGINE_REASON, &RECONCILED_ENGINE_CHANGED)
+                }
+                Some(StrandedRemedy::TargetAbsent) => {
+                    (true, ABSENT_TARGET_REASON, &RECONCILED_TARGET_CHANGED)
+                }
+            };
+            let candidate = candidate_in(ctx, old, &live.engines, reassign).await?;
+            if candidate.reason != reason || !candidate.eligible {
                 continue;
             }
             report.retired += 1;
+            report.absent_target += usize::from(reassign);
             if let Some(replacement) = candidate.replacement {
                 if ctx
                     .store
@@ -399,7 +452,7 @@ pub(crate) async fn reconcile_retired_against(
                     .await?
                 {
                     report.replaced += 1;
-                    RECONCILED_ENGINE_CHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
