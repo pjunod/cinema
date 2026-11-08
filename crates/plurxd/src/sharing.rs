@@ -201,34 +201,9 @@ impl SharingManager {
             clock.filter(|_| identity.supports(crate::sharing_client::START_BUDGET_FEATURE));
         // The handshake can park. Reobserve the original login and committed
         // blocked owner immediately before the first non-idempotent send.
-        self.ensure_current(state, summary).await?;
-        let authority = state
-            .store
-            .prepare_receiver_session_authority(intent.clone())
-            .await
-            .map_err(|_| PeerError::Unavailable)?
-            .ok_or(PeerError::Authentication)?;
-        let mut fresh_owner = owner.clone();
-        fresh_owner.now_ms = clock_ms();
-        fresh_owner.lease_expires_at_ms = fresh_owner.now_ms.saturating_add(30_000);
-        if !state
-            .store
-            .renew_pending_receiver_session(&authority, &fresh_owner)
-            .await
-            .map_err(|_| PeerError::Unavailable)?
-        {
-            return Err(PeerError::Authentication);
-        }
-        let viewer = state
-            .store
-            .authorize_share_viewer(
-                summary.id,
-                intent.recipe.reference.library_id.clone(),
-                intent.user_id,
-            )
-            .await
-            .map_err(|_| PeerError::Unavailable)?
-            .ok_or(PeerError::Authentication)?;
+        let viewer = self
+            .receiver_presend_authority(state, intent, owner, summary, None)
+            .await?;
         // Retain cleanup authentication before the first send, including when
         // no Start response returns. The callback performs no await.
         let endpoint = peer
@@ -254,14 +229,16 @@ impl SharingManager {
             .await
             .map_err(|_| PeerError::Unavailable)?
             .ok_or(PeerError::Authentication)?;
+        let mut fresh_owner = owner.clone();
         fresh_owner.now_ms = clock_ms();
+        fresh_owner.lease_expires_at_ms = fresh_owner.now_ms.saturating_add(30_000);
         match state
             .store
             .record_receiver_dispatch(
                 &authority,
                 &plurx_core::sharing_receiver_sessions::ReceiverDispatchRecord {
                     owner: fresh_owner,
-                    envelope,
+                    envelope: envelope.clone(),
                 },
             )
             .await
@@ -302,6 +279,20 @@ impl SharingManager {
                         return Err(error);
                     }
                     tokio::time::sleep(wait).await;
+                    // A re-post is a new non-idempotent send (after `Busy`
+                    // the Source made no entry): every check the first send
+                    // passed is made again, and any failure ends the Start.
+                    self.receiver_presend_authority(
+                        state,
+                        intent,
+                        owner,
+                        summary,
+                        Some((&viewer, &envelope)),
+                    )
+                    .await?;
+                    if !retrying(retry) {
+                        return Err(error);
+                    }
                 }
                 result => break result?,
             }
@@ -315,6 +306,93 @@ impl SharingManager {
             endpoint,
             source: reply,
         })
+    }
+
+    /// Every check B makes before a non-idempotent Start send to the Source:
+    /// sharing is on and the import is still this attempt's, the original
+    /// login and the committed blocked owner are current (and renewed), and
+    /// the viewer is still assigned to the library. Answers the viewer
+    /// pseudonym. With `dispatched`, a re-post after a typed retry: the
+    /// viewer must be the one the dispatch capsule sealed, and that dispatch
+    /// record must still stand. Any failure refuses the send.
+    async fn receiver_presend_authority(
+        &self,
+        state: &AppState,
+        intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
+        owner: &plurx_core::sharing_receiver_sessions::ReceiverPendingRenewal,
+        summary: &plurx_core::sharing::ImportSummary,
+        dispatched: Option<(&str, &plurx_core::secrets::SealedSecret)>,
+    ) -> Result<String, crate::sharing_client::PeerError> {
+        use crate::sharing_client::PeerError;
+        if dispatched.is_some() {
+            let current = state
+                .store
+                .sharing_import(intent.scope.import_id)
+                .await
+                .map_err(|_| PeerError::Unavailable)?
+                .ok_or(PeerError::Unavailable)?;
+            if current.summary.state != "active"
+                || current.summary.source_server_id != summary.source_server_id
+                || current.summary.catalogue_epoch != summary.catalogue_epoch
+                || current.summary.lifecycle_generation != summary.lifecycle_generation
+                || current.summary.claim_id != summary.claim_id
+                || current.summary.remote_grant_id != summary.remote_grant_id
+            {
+                return Err(PeerError::Authentication);
+            }
+        }
+        self.ensure_current(state, summary).await?;
+        let authority = state
+            .store
+            .prepare_receiver_session_authority(intent.clone())
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+            .ok_or(PeerError::Authentication)?;
+        let mut fresh_owner = owner.clone();
+        fresh_owner.now_ms = clock_ms();
+        fresh_owner.lease_expires_at_ms = fresh_owner.now_ms.saturating_add(30_000);
+        if !state
+            .store
+            .renew_pending_receiver_session(&authority, &fresh_owner)
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+        {
+            return Err(PeerError::Authentication);
+        }
+        let viewer = state
+            .store
+            .authorize_share_viewer(
+                summary.id,
+                intent.recipe.reference.library_id.clone(),
+                intent.user_id,
+            )
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+            .ok_or(PeerError::Authentication)?;
+        if let Some((sealed_viewer, envelope)) = dispatched {
+            if viewer != sealed_viewer {
+                return Err(PeerError::Authentication);
+            }
+            match state
+                .store
+                .record_receiver_dispatch(
+                    &authority,
+                    &plurx_core::sharing_receiver_sessions::ReceiverDispatchRecord {
+                        owner: fresh_owner,
+                        envelope: envelope.clone(),
+                    },
+                )
+                .await
+                .map_err(|_| PeerError::Unavailable)?
+            {
+                plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Applied
+                | plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Replay => {}
+                plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Refused => {
+                    return Err(PeerError::Authentication);
+                }
+            }
+        }
+        Ok(viewer)
     }
 
     pub fn new(

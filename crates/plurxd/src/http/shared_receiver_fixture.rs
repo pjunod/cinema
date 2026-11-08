@@ -2463,7 +2463,7 @@ async fn sharing_receiver_real_pinned_source_not_yet_rejoins_the_same_source_sta
         .parse()
         .expect("fixture IP");
     assert!(plurx_core::sharing::is_tailnet_address(address));
-    for older_source in [false, true] {
+    for (older_source, unassigned) in [(false, false), (true, false), (false, true)] {
         let fixture_body_budget =
             crate::transcode::TranscodeManager::source_fixture_body_budget().await;
         tokio::time::timeout(
@@ -2471,6 +2471,7 @@ async fn sharing_receiver_real_pinned_source_not_yet_rejoins_the_same_source_sta
             Box::pin(actual_pinned_not_yet(
                 address,
                 older_source,
+                unassigned,
                 fixture_body_budget,
             )),
         )
@@ -2479,9 +2480,14 @@ async fn sharing_receiver_real_pinned_source_not_yet_rejoins_the_same_source_sta
     }
 }
 
+/// With `unassigned`, the viewer loses the library between the Source's
+/// "not yet" and B's re-post: B's pre-send authority check refuses the
+/// re-post, so the Source sees only the first Start and the viewer's retry
+/// is not published.
 async fn actual_pinned_not_yet(
     address: IpAddr,
     older_source: bool,
+    unassigned: bool,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) {
     use axum::http::StatusCode;
@@ -2676,6 +2682,42 @@ async fn actual_pinned_not_yet(
         pause.was_reached(),
         "the Source Start is parked at its index"
     );
+    if unassigned {
+        // Before B's re-post (one `Retry-After` after the Source's answer).
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .assign_share_viewers(fixture.import_id, 2, Vec::new(), crate::state::clock_ms())
+                .await
+                .expect("actual viewer unassignment"),
+            MutationOutcome::Applied
+        );
+        pause.release();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let (status, _, bytes) = start(5_000).await;
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "an unassigned viewer's Start is never published: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let arrivals = arrivals.lock().expect("arrivals").clone();
+        assert_eq!(
+            arrivals.len(),
+            1,
+            "B never re-posts for a viewer it no longer authorizes: {arrivals:?}"
+        );
+        let _ = b_stop.send(());
+        b_task.await.expect("B joined").expect("B result");
+        let _ = source_stop.send(());
+        source_task
+            .await
+            .expect("Source joined")
+            .expect("Source result");
+        fixture.shutdown().await;
+        return;
+    }
     // The client's ladder: release the Source, re-post the same request.
     pause.release();
     tokio::time::sleep(Duration::from_secs(1)).await;
