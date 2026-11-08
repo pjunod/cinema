@@ -3614,12 +3614,13 @@ pub(crate) struct LiveTvManager {
     caption_proofs: StdMutex<Vec<caption_probe::CaptionProof>>,
     source_formats: StdMutex<HashMap<SourceFormatKey, CachedSourceFormat>>,
     source_facts: StdMutex<HashMap<SourceFormatKey, CachedSourceFacts>>,
+    pub(crate) capture_owners: Arc<dvr::capture_owner::CaptureOwners>,
     registry: Arc<StdMutex<LiveTvRegistry>>,
     /// Owner-sampled during the DVR loop. Public overview reads this atomic;
     /// they never stat the recording filesystem themselves.
     dvr_storage_free_bytes: AtomicU64,
     scratch_claims: StdMutex<HashSet<PathBuf>>,
-    scratch_sweep_gate: tokio::sync::Mutex<()>,
+    scratch_sweep_gate: Arc<tokio::sync::Mutex<()>>,
     /// The one settings observation every live session on this node validates
     /// against, refreshed by `settings_observer_loop`.
     fence: FenceObserver,
@@ -3707,10 +3708,11 @@ impl LiveTvManager {
             caption_proofs: StdMutex::new(Vec::new()),
             source_formats: StdMutex::new(HashMap::new()),
             source_facts: StdMutex::new(HashMap::new()),
+            capture_owners: dvr::capture_owner::CaptureOwners::new(),
             registry: Arc::clone(&metrics.registry),
             dvr_storage_free_bytes: AtomicU64::new(u64::MAX),
             scratch_claims: StdMutex::new(HashSet::new()),
-            scratch_sweep_gate: tokio::sync::Mutex::new(()),
+            scratch_sweep_gate: Arc::new(tokio::sync::Mutex::new(())),
             fence: FenceObserver::new(Arc::clone(&metrics)),
             observer_wake: tokio::sync::Notify::new(),
             settings_changes: StdMutex::new(Some(SettingsChangeSource::LocalOnly)),
@@ -4759,6 +4761,8 @@ impl LiveTvManager {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<usize, LiveTvError> {
+        let deadline = tokio::time::Instant::now() + SESSION_DRAIN_TIMEOUT;
+        self.capture_owners.seal(deadline);
         self.close_all_transports().await;
         let sessions = {
             let mut registry = self
@@ -4769,10 +4773,16 @@ impl LiveTvManager {
             registry.sessions.values().cloned().collect::<Vec<_>>()
         };
         let drained = self.cancel_and_wait(sessions, OrphanScope::All).await;
+        // One stuck original capture must not skip the existing session/
+        // orphan drain or leave the admission registry open during shutdown.
+        let captures = self.capture_owners.shutdown(deadline).await;
         // A clean stop is the last moment this process is seen. A capability
         // presented to the next process soon after is explained as a restart.
         self.incarnation.write();
-        drained
+        match drained {
+            Err(error) => Err(error),
+            Ok(count) => captures.map(|()| count),
+        }
     }
 
     async fn cancel_and_wait(

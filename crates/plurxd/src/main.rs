@@ -2515,6 +2515,8 @@ async fn boot_observing(
         state.clone(),
         background_loops.token(),
     ));
+    // Independent of every captured manager/sink/transport graph.
+    let capture_owners = Arc::clone(&state.live_tv.capture_owners);
     spawn_background_loops(&state, background_loops.token());
 
     let progress = Arc::clone(&state.progress);
@@ -2639,6 +2641,12 @@ async fn boot_observing(
         )
         .await
     };
+    let capture_result = capture_owners
+        .shutdown(tokio::time::Instant::now() + Duration::from_secs(30))
+        .await;
+    if let Err(error) = &capture_result {
+        tracing::warn!(%error, "capture originals retain native custody");
+    }
     // The last census write. It is marked clean only when the HTTP server
     // drained and the original finite collector released its ownership.
     // Once every connection drained, no façade request can still
@@ -2682,7 +2690,9 @@ async fn boot_observing(
         }
         tracing::warn!(%error, "ordinary finalizer shutdown retains unresolved ownership");
     }
-    let clean = matches!(served, Ok(HttpDrain::Complete)) && ordinary_finalizer_result.is_ok();
+    let clean = matches!(served, Ok(HttpDrain::Complete))
+        && ordinary_finalizer_result.is_ok()
+        && capture_result.is_ok();
     #[cfg(target_os = "linux")]
     let clean = clean && attempt_root_result.is_ok();
     #[cfg(any(target_os = "linux", target_os = "macos"))]

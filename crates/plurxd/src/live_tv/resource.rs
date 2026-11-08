@@ -271,6 +271,23 @@ impl LiveTvManager {
         Ok(())
     }
 
+    pub(super) fn transport_authority(&self) -> TransportAuthority {
+        TransportAuthority {
+            store: Arc::clone(&self.store),
+            worker: self.resource_worker(),
+            serving: self.serving.clone(),
+        }
+    }
+}
+
+/// Only these authority objects are needed by a tuner worker. In particular,
+/// retaining them never retains LiveTvManager or its original capture root.
+pub(super) struct TransportAuthority {
+    store: Arc<dyn Store>,
+    worker: Worker,
+    serving: LiveTvAuthority,
+}
+impl TransportAuthority {
     pub(super) async fn resource_transport_release(
         &self,
         ingest: &ledger::Ingest,
@@ -280,7 +297,7 @@ impl LiveTvManager {
                 Command::Release {
                     ingest_id: ingest.id.clone(),
                     epoch: ingest.epoch,
-                    worker: self.resource_worker(),
+                    worker: self.worker.clone(),
                 },
                 now_ms(),
             )
@@ -294,9 +311,13 @@ impl LiveTvManager {
         transport: &dvr::DvrTransport,
     ) -> Result<(tokio::time::Instant, ledger::Ingest), LiveTvError> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(ledger::LEASE_MS as u64);
-        let snapshot = tokio::time::timeout_at(deadline, self.resource_snapshot(0, ""))
-            .await
-            .map_err(|_| fenced())??;
+        let snapshot = tokio::time::timeout_at(
+            deadline,
+            self.store.live_tv_resource_snapshot(0, "", now_ms()),
+        )
+        .await
+        .map_err(|_| fenced())?
+        .map_err(store_error)?;
         let ingest = snapshot
             .records
             .into_iter()
@@ -305,7 +326,7 @@ impl LiveTvManager {
                     if i.device_id == transport.device_id
                         && i.channel_id == transport.channel.id
                         && i.generation == transport.generation
-                        && i.worker == self.resource_worker() =>
+                        && i.worker == self.worker.clone() =>
                 {
                     Some(i)
                 }
@@ -319,7 +340,7 @@ impl LiveTvManager {
                     ingest_id: ingest.id,
                     epoch: ingest.epoch,
                     revision: ingest.revision,
-                    worker: self.resource_worker(),
+                    worker: self.worker.clone(),
                 },
                 now_ms(),
             ),
@@ -346,7 +367,7 @@ impl LiveTvManager {
         mut valid_until: tokio::time::Instant,
         mut ingest: ledger::Ingest,
     ) -> Result<(), LiveTvError> {
-        let worker = self.resource_worker();
+        let worker = self.worker.clone();
         loop {
             let began = tokio::time::Instant::now();
             let deadline = valid_until.min(began + Duration::from_millis(ledger::LEASE_MS as u64));
@@ -383,48 +404,6 @@ impl LiveTvManager {
     }
 }
 
-/// The marker names a filesystem namespace, not a pathname that happens to
-/// look identical on two nodes. Creation is exclusive; a concurrent creator
-/// reads the winner's stable identity.
-pub(super) async fn storage_identity(root: &str) -> Result<String, LiveTvError> {
-    use tokio::io::AsyncWriteExt;
-    tokio::fs::create_dir_all(root)
-        .await
-        .map_err(|e| LiveTvError::InvalidConfig(e.to_string()))?;
-    let marker = Path::new(root).join(".plurx-storage-id");
-    let id = uuid::Uuid::new_v4().simple().to_string();
-    match tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&marker)
-        .await
-    {
-        Ok(mut file) => {
-            file.write_all(id.as_bytes())
-                .await
-                .map_err(|e| LiveTvError::InvalidConfig(e.to_string()))?;
-            file.sync_all()
-                .await
-                .map_err(|e| LiveTvError::InvalidConfig(e.to_string()))?;
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => {
-            return Err(LiveTvError::InvalidConfig(format!(
-                "DVR storage identity: {e}"
-            )))
-        }
-    }
-    let value = tokio::fs::read_to_string(&marker)
-        .await
-        .map_err(|e| LiveTvError::InvalidConfig(e.to_string()))?;
-    if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(LiveTvError::InvalidConfig(
-            "DVR storage identity is incomplete or invalid".into(),
-        ));
-    }
-    Ok(value)
-}
-
 impl LiveTvManager {
     pub(super) async fn resource_capture(
         &self,
@@ -449,6 +428,7 @@ impl LiveTvManager {
         row: &plurx_core::dvr::DvrRecording,
         device: &str,
         base: &Path,
+        storage_id: String,
     ) -> Result<ledger::Capture, LiveTvError> {
         let capture = ledger::Capture {
             recording_id: row.id.clone(),
@@ -456,7 +436,7 @@ impl LiveTvManager {
             worker: self.resource_worker(),
             ingest_id: String::new(),
             ingest_epoch: 0,
-            storage_id: storage_identity(&dvr.root).await?,
+            storage_id,
             base_path: base.to_string_lossy().into_owned(),
             generation: live.generation,
             expires_at_ms: 0,
@@ -510,9 +490,8 @@ impl LiveTvManager {
     pub(super) async fn resource_finalize(
         &self,
         id: &str,
-        root: &str,
+        storage_id: String,
     ) -> Result<ledger::Capture, LiveTvError> {
-        let storage_id = storage_identity(root).await?;
         let legacy = self
             .store
             .get_dvr_recording(id)

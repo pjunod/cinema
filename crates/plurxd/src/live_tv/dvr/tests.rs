@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::atomic::AtomicBool;
 
-async fn oversized_scheduler_fixture() -> (
+pub(super) async fn oversized_scheduler_fixture() -> (
     Arc<LiveTvManager>,
     LiveTvConfig,
     DvrConfig,
@@ -244,7 +244,7 @@ async fn a_late_reminder_is_not_moved_when_only_the_full_guide_contains_it() {
 }
 
 #[derive(Clone, Default)]
-struct MemoryWriter {
+pub(super) struct MemoryWriter {
     bytes: Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
@@ -343,7 +343,7 @@ fn test_sink_at(
     test_sink_attempt_at(id, 1, base, writer, delivered, metrics)
 }
 
-fn test_sink_attempt_at(
+pub(super) fn test_sink_attempt_at(
     id: &str,
     attempt: i64,
     base: PathBuf,
@@ -353,7 +353,7 @@ fn test_sink_attempt_at(
 ) -> Arc<DvrSink> {
     let now = unix_seconds();
     let sink = Arc::new(DvrSink {
-        _restart_admission: None,
+        capture: None,
         recording_id: id.to_owned(),
         channel_id: "7.1".to_owned(),
         airing_start: now,
@@ -362,18 +362,18 @@ fn test_sink_attempt_at(
         window: (now - 60, now + 60),
         base,
         writer: std::sync::Mutex::new(None),
-        writer_task: std::sync::Mutex::new(None),
+        writer_task: OriginalTask::default(),
         bytes: AtomicU64::new(0),
         prior_attempt_bytes: None,
         observation: std::sync::Mutex::new(DvrSinkObservation::new(attempt)),
-        metrics,
+        metrics: Arc::downgrade(&metrics),
         cancel: CancellationToken::new(),
     });
     start_sink_writer(&sink, writer, delivered);
     sink
 }
 
-fn test_transport(
+pub(super) fn test_transport(
     sinks: Vec<Arc<DvrSink>>,
     _delivered: Arc<AtomicU64>,
     serving_generation: u64,
@@ -1227,7 +1227,12 @@ async fn closing_a_shared_transport_ends_every_viewer_and_joins_its_reader() {
         Arc::clone(&transport),
         None,
     ));
-    *transport.worker.lock().expect("worker slot") = Some(worker);
+    let cell = manager
+        .capture_owners
+        .reserve_transport(&transport, &manager.registry)
+        .expect("original tuner slot");
+    *transport.worker.lock().expect("worker slot") = Some(Arc::downgrade(&cell));
+    cell.install(worker);
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     manager.close_all_transports().await;
@@ -2215,4 +2220,138 @@ fn a_full_webhook_queue_drops_the_oldest_event() {
         Some("rec-3"),
         "the three oldest went, not the three newest"
     );
+}
+
+#[derive(Default)]
+struct FlushGate {
+    entered: AtomicBool,
+    released: AtomicBool,
+    waker: futures_util::task::AtomicWaker,
+}
+struct GateWriter(Arc<FlushGate>);
+impl tokio::io::AsyncWrite for GateWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Ready(Ok(bytes.len()))
+    }
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.0.waker.register(cx.waker());
+        self.0.entered.store(true, Ordering::Release);
+        if self.0.released.load(Ordering::Acquire) {
+            std::task::Poll::Ready(Ok(()))
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.poll_flush(cx)
+    }
+}
+impl SinkWriter for GateWriter {
+    fn sync_all<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+#[tokio::test]
+async fn cancelled_and_concurrent_settle_observers_keep_the_original_writer() {
+    use futures_util::FutureExt;
+    let gate = Arc::new(FlushGate::default());
+    let sink = test_sink(
+        "cancelled-observer",
+        Box::new(GateWriter(Arc::clone(&gate))),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(LiveTvMetrics::default()),
+    );
+    let original = sink.writer_task.identity();
+    let observed = Arc::clone(&sink);
+    let first = tokio::spawn(async move { settle_sink(&observed).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !gate.entered.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("original writer reached flush");
+    first.abort();
+    assert!(first
+        .await
+        .expect_err(
+            "expected refusal: cancelled and concurrent settle observers keep the original writer"
+        )
+        .is_cancelled());
+    assert_eq!(sink.writer_task.identity(), original);
+    let second = settle_sink(&sink);
+    tokio::pin!(second);
+    assert!(
+        second.as_mut().now_or_never().is_none(),
+        "cancelled first observer cannot make a live original appear Settled"
+    );
+    let third = settle_sink(&sink);
+    tokio::pin!(third);
+    assert!(
+        third.as_mut().now_or_never().is_none(),
+        "concurrent observation cannot steal original custody"
+    );
+    assert_eq!(sink.writer_task.identity(), original);
+    gate.released.store(true, Ordering::Release);
+    gate.waker.wake();
+    assert_eq!(second.await, SinkStopResult::Settled);
+    assert_eq!(third.await, SinkStopResult::Settled);
+    assert!(
+        sink.writer_task.identity().is_none(),
+        "positive original join and header drop"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_transport_close_keeps_original_worker_and_closed_false() {
+    use futures_util::FutureExt;
+    let dir = tempfile::tempdir().expect("fixture operation succeeds: cancelled transport close keeps original worker and closed false");
+    let manager = transport_test_manager(dir.path());
+    let transport = test_transport(vec![], Arc::new(AtomicU64::new(0)), 0);
+    register(&manager, "7.1", &transport);
+    let cell = manager
+        .capture_owners
+        .reserve_transport(&transport, &manager.registry)
+        .expect("fixture operation succeeds: cancelled transport close keeps original worker and closed false");
+    *transport.worker.lock().expect("fixture operation succeeds: cancelled transport close keeps original worker and closed false") = Some(Arc::downgrade(&cell));
+    let (release, blocked) = tokio::sync::oneshot::channel();
+    cell.install(tokio::spawn(async move {
+        let _ = blocked.await;
+        Ok(())
+    }));
+    let original = cell.identity();
+    {
+        let close = manager.close_transport_arc(Arc::clone(&transport));
+        tokio::pin!(close);
+        assert!(close.as_mut().now_or_never().is_none());
+    }
+    assert_eq!(cell.identity(), original);
+    assert!(!transport.is_closed());
+    assert!(manager
+        .registry
+        .lock()
+        .expect("fixture operation succeeds: cancelled transport close keeps original worker and closed false")
+        .transports
+        .get("7.1")
+        .is_some_and(|t| Arc::ptr_eq(t, &transport)));
+    release.send(()).expect("fixture operation succeeds: cancelled transport close keeps original worker and closed false");
+    manager.close_transport_arc(Arc::clone(&transport)).await;
+    assert!(transport.is_closed());
+    manager
+        .capture_owners
+        .shutdown(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+        .await
+        .expect("fixture operation succeeds: cancelled transport close keeps original worker and closed false");
 }
