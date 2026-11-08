@@ -1139,7 +1139,10 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
         (123, 4),
         (124, 4),
         (125, 4),
+        (126, 5),
         (122, 4),
+        (125, 5),
+        (126, 4),
         (123, 3),
         (124, 3),
         (125, 3),
@@ -1154,6 +1157,9 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
         let path = directory.path().join("current.db");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
         let connection = rusqlite::Connection::open(path).expect("owned fixture");
+        if schema_version < 126 {
+            source_extensions_fixture::rewind_empty_targeted_managed_to_v125(&connection);
+        }
         if schema_version < 125 {
             source_extensions_fixture::rewind_empty_scan_request_to_v124(&connection);
         }
@@ -1214,7 +1220,7 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
         };
         if !matches!(
             (schema_version, managed_version),
-            (119, 1) | (120, 2) | (121..=122, 3) | (123..=125, 4)
+            (119, 1) | (120, 2) | (121..=122, 3) | (123..=125, 4) | (126, 5)
         ) {
             let before = snapshot();
             assert!(
@@ -1511,6 +1517,7 @@ fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, 
         120 => 2,
         121 | 122 => 3,
         123..=125 => 4,
+        126 => 5,
         _ => panic!("only exact published fixture tails may be rewound"),
     };
     // Validate DDL before using any table identity in the read-only inventory.
@@ -1620,7 +1627,7 @@ fn validated_empty_managed_subtitle_rewind(connection: &rusqlite::Connection) ->
     assert!(
         matches!(
             (schema_version, marker),
-            (111..=119, 1) | (120, 2) | (121..=122, 3) | (123..=125, 4)
+            (111..=119, 1) | (120, 2) | (121..=122, 3) | (123..=125, 4) | (126, 5)
         ),
         "managed marker must match its published SQLite schema version"
     );
@@ -1688,11 +1695,14 @@ fn complete_fixture_snapshot(connection: &rusqlite::Connection) -> String {
 
 #[test]
 fn current_fixture_rewind_accepts_exact_empty_v120_with_foreign_keys() {
-    for version in [120, 121, 122, 123, 124, 125] {
+    for version in [120, 121, 122, 123, 124, 125, 126] {
         let dir = tempfile::tempdir().expect("current fixture");
         let path = dir.path().join("store.sqlite");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture schema"));
         let connection = rusqlite::Connection::open(path).expect("fixture connection");
+        if version < 126 {
+            source_extensions_fixture::rewind_empty_targeted_managed_to_v125(&connection);
+        }
         if version < 125 {
             source_extensions_fixture::rewind_empty_scan_request_to_v124(&connection);
         }

@@ -185,7 +185,12 @@ permanent 422.
   the full scan's final known-minus-seen reconciliation (`scan/mod.rs:887-932`)
   cannot prune an item a concurrent targeted scan just inserted; the targeted
   request waits with `waiting_on: full_scan:<library>` and runs the moment
-  the fence is released. No preemption in this round; a safe yield point
+  the fence is released. *Built note (decision on #1405, 2026-11-08):* a
+  probe of at most 64 named files takes **no background source reader**, so
+  the per-library fence is the targeted job's only wait. `full_scan:<library>`
+  names only that library's own running scan; a full scan of another library
+  on the same volume does not hold it, and `heavy_lane:<holder>` is never
+  written for a targeted job. No preemption in this round; a safe yield point
   (between directories) is a later improvement if full scans prove long
   enough to matter. Fragment index, DV title scan and cache work for the new
   item stay on the heavy lane, as today. This is a store change (`key_id`,

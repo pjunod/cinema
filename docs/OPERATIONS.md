@@ -4700,7 +4700,10 @@ transcode copies share this permit. A media-probe batch may execute up to two
 one-thread probes within that admission when its reserved CPU budget permits.
 Each probe claims its own shared storage reader. Only one background reader
 per domain is allowed; the second reader is reserved for playback. Scans
-probe inline under their own reservation. Repair batches can run two probes
+probe inline under their own reservation. A targeted scan request (a probe of
+the named files from `POST /api/v1/scan`) takes no background reader: it waits
+only for a running scan of its own library, so a full scan of another library
+on the same storage does not hold it. Repair batches can run two probes
 only across separate available domains. The node detail panel reports the
 batch ceiling. Other worker loops, playback and transfers
 have their own admission limits. An available heavy slot still needs eligible
