@@ -939,11 +939,11 @@
 
         // Physical-iPad regression: AVPlayer fetched through 300s while its
         // playhead was around 180s, despite a 60s preferred forward buffer.
-        // The retained window must still leave 60s behind that playhead for
-        // back-buffering and a retry.
+        // The final published window must preserve the configured back buffer
+        // plus the control exchange guard behind that playhead.
         let observed_playhead_ms = 180_000;
         let observed_fetched_end_ms = 300_000;
-        let required_reload_margin_ms = 60_000;
+        let required_reload_margin_ms = CLIENT_BACK_BUFFER_SECS * 1_000 + ROLLING_PUBLICATION_GUARD_MS;
         session
             .fetched_end_ms
             .store(observed_fetched_end_ms, Relaxed);
@@ -977,23 +977,19 @@
             .await
             .expect("retention boundary reaches the served snapshot");
 
-        // The retained/pruned segment boundary is the behavior under test.
-        // Segment 30 begins at 120s, leaving 60s behind the observed 180s
-        // playhead even though the download frontier had reached 300s.
+        // Publication may advance the window beyond the download-retention
+        // request. Its combined boundary must still protect C - G - B.
         let (first_retained, retained_start_ms) = {
             let index = session.segments.lock().await;
             let first = index.first_retained_index().expect("retained segment");
             let (start, _) = index.window_ms_of(first).expect("retained window");
             (first, start)
         };
-        assert_eq!(first_retained, 30);
-        assert_eq!(
-            observed_playhead_ms - retained_start_ms,
-            required_reload_margin_ms,
-            "the actual retained set leaves the required reload margin"
-        );
+        assert!(first_retained >= 30, "the expired prefix cannot reappear");
+        assert!(observed_playhead_ms - retained_start_ms >= required_reload_margin_ms,
+            "the actual retained set must preserve the configured back buffer and guard");
         assert!(!p.join("seg00029.ts").exists(), "just before the boundary");
-        assert!(p.join("seg00030.ts").exists(), "retention boundary");
+        assert!(p.join(format!("seg{first_retained:05}.ts")).exists(), "retention boundary");
         assert!(p.join("seg00074.ts").exists(), "just inside the window");
         // …and only what is older goes.
         assert!(!p.join("seg00000.ts").exists());
@@ -1026,10 +1022,11 @@
             .map_err(|error| error.error)
             .expect("served playlist");
         let served = String::from_utf8(served).expect("playlist utf8");
-        assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:30"), "{served}");
+        assert!(served.contains(&format!("#EXT-X-MEDIA-SEQUENCE:{first_retained}")), "{served}");
         assert!(!served.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{served}");
         assert!(!served.contains("seg00029.ts"), "{served}");
-        assert!(served.contains("seg00030.ts"), "{served}");
+        assert!(served.contains(&format!("seg{first_retained:05}.ts")), "{served}");
+        assert!(!served.contains(&format!("seg{:05}.ts", first_retained - 1)), "{served}");
         for name in served.lines().filter(|line| line.ends_with(".ts")) {
             assert!(p.join(name).exists(), "served segment must exist: {name}");
         }
