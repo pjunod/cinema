@@ -953,7 +953,7 @@ mod tests {
                     .find("peer_directory(state, &operation_id, deadline).await")
                     .expect("committed roster read")
         );
-        assert!(begin.contains("membership_exclusion,"));
+        assert!(begin.contains("membership_exclusion: Some(membership_exclusion),"));
 
         let digest_entry = source
             .split_once("pub(crate) async fn begin_digest")
@@ -978,7 +978,9 @@ mod tests {
             .1
             .split_once("fn request(&self")
             .expect("cluster revocation finish end")
-            .0;
+            .0
+            .split_whitespace()
+            .collect::<String>();
         assert!(
             finish.find("self.request(Phase::End)").expect("peer end")
                 < finish

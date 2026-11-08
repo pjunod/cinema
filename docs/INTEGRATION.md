@@ -1,5 +1,13 @@
 # Integration — plurx's seams with Curator, and how to prove they work
 
+> **Being replaced by** [PIPELINE-CONTRACT.md](features/PIPELINE-CONTRACT.md)
+> (pipeline contract v2, §4–§6). The scan seam described in §1 below changes
+> on `effort/pipeline-v2`: idempotent `request_key`, `wait_ms`,
+> `expected_files` with a per-file report, typed `422 path_outside_roots` /
+> `503 path_unreadable`, a status read for the creating key, and
+> `probe_paths`. Until that effort lands on `main`, this page describes the
+> code as it is; afterwards it is rewritten from the contract.
+
 Companion to [INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md) (the master plan and
 why each seam exists) and [OPERATIONS.md](OPERATIONS.md) (running it day to
 day) — this is *what each seam does, where you look at it, and the exact
@@ -197,8 +205,12 @@ Two success shapes, and the difference matters:
 
 | Code | Body | Means |
 |---|---|---|
-| `200` | `{"status":"scanned","library_id":…,"request_id":…,"report":…,"items":…,"correlation_id":…}` | scanned inline; the result is in the body |
-| `202` | `{"status":"queued","request_id":…,"correlation_id":…}` | plurx was busy — queued, not dropped |
+| `202` | `{"status":"queued","request_id":…,"correlation_id":…}` | the usual answer: the request is queued as library work and a worker scans it — queued, not dropped |
+| `200` | `{"status":"scanned","library_id":…,"request_id":…,"report":…,"items":…,"correlation_id":…}` | the replay case: the request had already finished by the time the handler re-read it, so the result is in the body |
+
+The handler does not wait for the scan: it enqueues, re-reads the request once,
+and answers `200` only when a worker happened to finish it in between. Expect
+`202` and poll.
 
 Poll `GET /api/v1/scan/requests/{id}` (scope `status:read`) for
 `queued | running | done | failed`. Silently losing a request would leave a
@@ -232,8 +244,9 @@ curl -sS -X POST "$PLURX/api/v1/scan" \
 **How to read it.** A rejection naming *"under any library root"* proves the
 key, the scope and the route all work — it is the wrong path and nothing else.
 A 401 means the key is wrong or revoked; a 403 means the key is real but
-lacks `scan:trigger`. `"status":"accepted"` with a request id means plurx took
-it; whether the file was *usable* is the scan's business, not the seam's.
+lacks `scan:trigger`. `202` with `"status":"queued"` and a request id means
+plurx took it (there is no `accepted` status); whether the file was *usable*
+is the scan's business, not the seam's.
 
 ---
 
