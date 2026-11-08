@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
 env:
   CARGO_TERM_COLOR: always
-  CINEMA_MAIN_COMMIT: 'd0e9349cb190438c18723e65903fe3a3f1450b04'
+  CINEMA_MAIN_COMMIT: '8f2585e6b2003e16d40a672aedde002795faaacf'
 concurrency:
-  group: cinema-main-package-d0e9349cb190
+  group: cinema-main-package-8f2585e6b200-arm
   cancel-in-progress: false
 jobs:
   package_smoke:
@@ -19,11 +19,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
-            target: x86_64-unknown-linux-gnu
-            kernel_machine: x86_64
-            docker_machine: x86_64
-            runs_on: '["self-hosted","Linux","X64","lab","ci-topology"]'
           - arch: arm64
             target: aarch64-unknown-linux-gnu
             kernel_machine: aarch64
@@ -32,13 +27,13 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: d0e9349cb190438c18723e65903fe3a3f1450b04
+          ref: 8f2585e6b2003e16d40a672aedde002795faaacf
           persist-credentials: false
           fetch-depth: 0
       - name: Verify actual merged main source
         run: |
           test "$(git rev-parse HEAD)" = "$CINEMA_MAIN_COMMIT"
-          test "$(git rev-parse 'HEAD^{tree}')" = 86a5086324e83d14584bca30aa004985c3f21661
+          test "$(git rev-parse 'HEAD^{tree}')" = 60610d4fa21207fa4fbe4be2a0403bdf2f09c843
 
       - name: Prove the package runner and Docker engine are native
         env:
@@ -68,8 +63,8 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           outputs: type=local,dest=binary-export
           build-args: |
-            PLURX_BUILD_REF=d0e9349cb190438c18723e65903fe3a3f1450b04
-            PLURX_BUILD_SHA=d0e9349cb190438c18723e65903fe3a3f1450b04
+            PLURX_BUILD_REF=8f2585e6b2003e16d40a672aedde002795faaacf
+            PLURX_BUILD_SHA=8f2585e6b2003e16d40a672aedde002795faaacf
             SOURCE_DATE_EPOCH=${{ steps.binary-build.outputs.source_date_epoch }}
           cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-compile-{0}', matrix.arch) || '' }}
           cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=max,scope=package-compile-{0}', matrix.arch) || '' }}
@@ -114,8 +109,8 @@ jobs:
           tags: plurx/plurxd:ci-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=d0e9349cb190438c18723e65903fe3a3f1450b04
-            tv.plurx.build-ref=d0e9349cb190438c18723e65903fe3a3f1450b04
+            org.opencontainers.image.revision=8f2585e6b2003e16d40a672aedde002795faaacf
+            tv.plurx.build-ref=8f2585e6b2003e16d40a672aedde002795faaacf
           cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-runtime-{0}', matrix.arch) || '' }}
           cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=min,scope=package-runtime-{0}', matrix.arch) || '' }}
       - name: Verify architecture, identity, and stop/start runtime
