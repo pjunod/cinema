@@ -641,6 +641,18 @@ impl SourceStartEntry {
         owner
     }
 }
+#[cfg(test)]
+impl SourceStartRegistry {
+    /// Entries still holding one of the registry's slots.
+    pub(crate) fn live_entries(&self) -> usize {
+        self.entries
+            .lock()
+            .expect("Source HTTP starts")
+            .iter()
+            .filter(|entry| !entry.actual_finished())
+            .count()
+    }
+}
 impl SourceStartRegistry {
     fn current_entry(
         &self,

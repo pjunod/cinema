@@ -262,11 +262,12 @@ async fn start(
         .prepare_receiver_session_authority(intent.clone())
         .await?
         .ok_or_else(unavailable)?;
+    let shared_state = Arc::new(state.clone());
     let actor = state
         .sharing
         .receiver_starts
         .begin(
-            Arc::new(state.clone()),
+            Arc::clone(&shared_state),
             intent,
             request.request_id,
             request.playback_id,
@@ -274,7 +275,7 @@ async fn start(
         )
         .map_err(actor_error)?;
     let response = actor
-        .wait_ready(Instant::now() + Duration::from_secs(305))
+        .wait_published(&shared_state, Instant::now() + Duration::from_secs(305))
         .await
         .map_err(actor_error)?;
     let connection = connection.ok_or_else(unavailable)?;

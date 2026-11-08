@@ -377,6 +377,22 @@ impl SourceResponseGuard {
         }
     }
 }
+#[cfg(test)]
+impl TranscodeManager {
+    /// Hold the Source's cold-index scan after its child spawns, so a test can
+    /// act while a start is mid-preparation.
+    pub(crate) fn pause_source_index_after_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.source_workers.index_hooks.pause_after_spawn()
+    }
+    /// Source owners still holding a worker registry slot.
+    pub(crate) fn source_worker_count(&self) -> usize {
+        self.source_workers
+            .entries
+            .lock()
+            .expect("Source workers")
+            .len()
+    }
+}
 impl SourceViewerActor {
     /// Transport bookkeeping only. This observes the real physical/body/SQL
     /// result; a missing actor, lease expiry or acknowledgement cannot mint it.
@@ -1349,6 +1365,7 @@ impl TranscodeManager {
             Some(request) => match request.register("source-preparation").await {
                 Ok(custody) => Some(custody),
                 Err(_) => {
+                    tracing::warn!(target: "plurxd::transcode", stage = "preparation_custody", error_class = ?SourceWorkerError::Unavailable, "Source producer startup failed");
                     let mut current = owner.state.lock().expect("Source worker state");
                     current.start = Some(Err(SourceWorkerError::Unavailable));
                     current.settled = Some(Err(SourceWorkerError::Unavailable));
@@ -1365,7 +1382,28 @@ impl TranscodeManager {
         let mut probe_work = None;
         let mut unowned_existing = true;
         let mut startup_stage = "deadline";
-        let start = tokio::time::timeout_at(
+        // Retirement (a Source End, a drain, a revocation) ends a start that
+        // has not published as the deadline does: the startup future is
+        // dropped, and the preparation owners held outside it are cancelled
+        // and settled below, releasing the registry slot and copy permit.
+        let retirement = async {
+            loop {
+                let notification = owner.changed.notified();
+                tokio::pin!(notification);
+                notification.as_mut().enable();
+                if owner
+                    .state
+                    .lock()
+                    .expect("Source worker state")
+                    .retirement_requested
+                {
+                    return Err(SourceWorkerError::Unavailable);
+                }
+                notification.await;
+            }
+        };
+        let start = tokio::select! { biased;
+            start = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             Box::pin(async {
                 if Instant::now() >= deadline {
@@ -1605,11 +1643,12 @@ impl TranscodeManager {
                 }
                 Ok(response)
             }),
-        )
-        .await
-        .unwrap_or(Err(SourceWorkerError::Deadline));
+        ) => start.unwrap_or(Err(SourceWorkerError::Deadline)),
+            retired = retirement => retired,
+        };
+        // Every start that does not publish ends here with its stage, once.
         if let Err(error) = &start {
-            tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, "Source producer startup failed");
+            tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, retirement_requested = owner.state.lock().expect("Source worker state").retirement_requested, "Source producer startup failed");
         }
         if start.is_ok() {
             // Readiness helpers have returned; join their independent owners

@@ -141,6 +141,9 @@ struct ReceiverStartState {
     owner: Option<ReceiverSourceOwner>,
     planned_activation: Option<MediaSessionActivation>,
     retirement_started: bool,
+    /// HTTP waiters currently awaiting this Start's outcome
+    /// (`ReceiverWaiter`). Only the abandonment decision reads it.
+    waiters: usize,
     ingress_owner_identity: Option<String>,
     /// Why retirement began; read by the connection monitors when it stops.
     retirement_reason: Option<plurx_core::sharing_receiver_retirement::ReceiverRetirementReason>,
@@ -1381,6 +1384,37 @@ impl ReceiverStartActor {
         let mut owner = self.0.state.lock().expect("receiver owner");
         Ok(owner.confirmed_source_end.get_or_insert(receipt).clone())
     }
+    /// Whether this attempt has been genuinely abandoned: it has no waiter,
+    /// it never published, and its retirement has not already begun. This is
+    /// the one place that decides abandonment; the End it triggers is the
+    /// ordinary retirement owner's, so no timer or watchdog is involved.
+    ///
+    /// A retry that may rejoin the same attempt within a bounded window must
+    /// add its "inside the grace window" condition HERE, so that an End fires
+    /// only after the attempt is abandoned for good.
+    fn abandoned_before_publication(owned: &ReceiverStartState) -> bool {
+        owned.waiters == 0 && owned.start.is_none() && !owned.retirement_started
+    }
+    /// Register an HTTP waiter. When the last waiter of an unpublished Start
+    /// goes away (client disconnect, handler deadline), the guard hands the
+    /// attempt to its single retirement owner, which sends the Source its End
+    /// and frees the Source's registry slot and source-copy permit.
+    pub(crate) fn join_waiter(&self, state: Arc<AppState>) -> ReceiverWaiter {
+        self.0.state.lock().expect("receiver owner").waiters += 1;
+        ReceiverWaiter {
+            actor: self.clone(),
+            state,
+        }
+    }
+    /// `wait_ready` as an abandonable waiter.
+    pub(crate) async fn wait_published(
+        &self,
+        state: &Arc<AppState>,
+        deadline: Instant,
+    ) -> Result<ReceiverPublished, ReceiverStartError> {
+        let _waiter = self.join_waiter(Arc::clone(state));
+        self.wait_ready(deadline).await
+    }
     pub(crate) async fn wait_ready(
         &self,
         deadline: Instant,
@@ -1398,6 +1432,27 @@ impl ReceiverStartActor {
             tokio::time::timeout_at(deadline.into(), changed)
                 .await
                 .map_err(|_| ReceiverStartError::Deadline)?;
+        }
+    }
+}
+/// An HTTP waiter for a shared Start. Dropping it is the only signal that a
+/// viewer left; see `ReceiverStartActor::abandoned_before_publication`.
+pub(crate) struct ReceiverWaiter {
+    actor: ReceiverStartActor,
+    state: Arc<AppState>,
+}
+impl Drop for ReceiverWaiter {
+    fn drop(&mut self) {
+        let abandoned = {
+            let mut owned = self.actor.0.state.lock().expect("receiver owner");
+            owned.waiters = owned.waiters.saturating_sub(1);
+            ReceiverStartActor::abandoned_before_publication(&owned)
+        };
+        if abandoned {
+            self.actor.begin_retirement(
+                self.state.clone(),
+                plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked,
+            );
         }
     }
 }

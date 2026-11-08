@@ -1168,6 +1168,164 @@ async fn actual_pinned_playback(
     fixture.shutdown().await;
 }
 
+/// S10: a viewer who leaves a shared start before it publishes gives the
+/// Source its slot back, and the Source logs the stage that start ended in,
+/// once. The Source start is held mid-preparation (its cold-index scan has
+/// spawned); the client then disconnects from B. B's last waiter leaving sends
+/// the Source an End, the Source retires the unpublished start, and the entry
+/// is finished with no further viewer action.
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_and_logs_one_stage()
+{
+    use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
+    use tokio::io::AsyncWriteExt as _;
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    let logs = Arc::new(crate::logbuf::LogBuffer::new(4096));
+    let _capture = crate::logbuf::capture_for_test(&logs);
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+    let fixture =
+        build_receiver_fixture(address, SourceFixtureMode::Copy, None, fixture_body_budget).await;
+    let tls = Arc::new(
+        LiveNodeTls::open(
+            &fixture.directory().join("source-runtime-tls"),
+            crate::state::clock_ms() / 1000,
+        )
+        .expect("actual Source runtime TLS"),
+    );
+    let (pin, _) = tls.status().expect("actual Source runtime SPKI");
+    let source_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual Source CGNAT listener");
+    let endpoint = Endpoint {
+        ipv4: match address {
+            IpAddr::V4(ip) => ip,
+            _ => panic!("IPv4 CGNAT fixture"),
+        },
+        ipv6: None,
+        ts_fqdn: "source.fixture.ts.net".into(),
+        port: source_listener.local_addr().expect("Source bind").port(),
+        spki_sha256: pin,
+    };
+    let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
+    let source_task = tokio::spawn(crate::serve_http(
+        SharingTlsListener::new(source_listener, tls.clone()),
+        super::sharing::peer_router((*fixture.source.state).clone()),
+        async move {
+            let _ = source_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    fixture.pair(endpoint).await;
+    let b_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual B CGNAT listener");
+    let b_address = b_listener.local_addr().expect("B bind");
+    let (b_stop, b_stopped) = tokio::sync::oneshot::channel();
+    let b_task = tokio::spawn(crate::serve_http(
+        b_listener,
+        fixture_router(fixture.state.clone()),
+        async move {
+            let _ = b_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let (status, _, bytes) = b_request(
+        b_address,
+        false,
+        "GET",
+        &format!(
+            "/api/v1/shared/imports/{}/items/{}",
+            fixture.import_id,
+            fixture.source.reference.item_id.as_str(),
+        ),
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "actual details");
+    let details: Value = serde_json::from_slice(&bytes).expect("detail JSON");
+    let base = details["files"][0]["file_base"]
+        .as_str()
+        .expect("signed file alias");
+    let original: Value = serde_json::from_slice(&fixture.source.request).expect("Source recipe");
+    let session = serde_json::to_vec(&original["session"]).expect("CreateSession body");
+
+    let transcode = Arc::clone(&fixture.source.state.transcode);
+    let pause = transcode.pause_source_index_after_spawn();
+    // The client: a raw socket, so closing it is the whole of a disconnect.
+    let mut client = tokio::net::TcpStream::connect(b_address)
+        .await
+        .expect("client socket");
+    let mut request = format!(
+        "POST {base}/hls/sessions HTTP/1.1\r\nhost: {b_address}\r\nauthorization: Bearer {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        fixture.original_login,
+        session.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&session);
+    client.write_all(&request).await.expect("client Start");
+    let held = pause.reached().await;
+    assert_eq!(
+        transcode.source_http_starts.live_entries(),
+        1,
+        "the Source start holds a registry slot while it prepares"
+    );
+    assert_eq!(transcode.source_worker_count(), 1);
+    drop(client);
+
+    // The Source ends the start it never published, logging its stage, while
+    // its scan is still held: retirement is what ended it, not the scan.
+    let terminal = || {
+        logs.tail("trace", 4096)
+            .into_iter()
+            .filter(|entry| entry.message.contains("Source producer startup failed"))
+            .collect::<Vec<_>>()
+    };
+    let bound = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while terminal().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < bound,
+            "the abandoned Source start was never ended"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    held.release();
+    while transcode.source_http_starts.live_entries() != 0 || transcode.source_worker_count() != 0 {
+        assert!(
+            tokio::time::Instant::now() < bound,
+            "the abandoned start still holds its Source slot: entries={} workers={}",
+            transcode.source_http_starts.live_entries(),
+            transcode.source_worker_count()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let ended = terminal();
+    assert_eq!(ended.len(), 1, "exactly one terminal stage: {ended:?}");
+    assert!(
+        ended[0].message.contains("stage=\"recipe_preparation\"")
+            && ended[0].message.contains("retirement_requested=true"),
+        "{ended:?}"
+    );
+    assert_eq!(fixture.source.active_source_sessions().await, 0);
+
+    let _ = b_stop.send(());
+    b_task
+        .await
+        .expect("actual B server joined")
+        .expect("B server result");
+    let _ = source_stop.send(());
+    source_task
+        .await
+        .expect("actual Source server joined")
+        .expect("Source server result");
+    fixture.shutdown().await;
+}
+
 #[tokio::test]
 #[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
 async fn sharing_receiver_real_pinned_quality_reopen_preserves_position_and_releases_slot() {
