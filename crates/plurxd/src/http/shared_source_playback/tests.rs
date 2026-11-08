@@ -2948,7 +2948,7 @@ async fn sharing_source_http_budgeted_start_answers_not_yet_and_rejoins_the_same
 }
 async fn actual_source_budgeted_start() {
     use std::time::{Duration, Instant};
-    let fixture = real_source_start_fixture().await;
+    let fixture = real_source_start_fixture_with(SourceFixtureMode::ColdCopy, None).await;
     // Occupied software capacity: the Source cannot publish until released.
     let hold = fixture
         .state
@@ -3066,7 +3066,10 @@ async fn actual_source_budgeted_start() {
     let (status, _, bytes) = post(body(abandoned), Some(300)).await;
     assert_eq!(
         (status, typed(&bytes[..])),
-        (StatusCode::SERVICE_UNAVAILABLE, "startup_timeout".to_owned()),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "startup_timeout".to_owned()
+        ),
         "the viewer's window does not end owned preparation: {}",
         String::from_utf8_lossy(&bytes)
     );

@@ -1170,10 +1170,12 @@ async fn actual_pinned_playback(
 
 /// S10: a viewer who leaves a shared start before it publishes gives the
 /// Source its slot back, and the Source logs the stage that start ended in,
-/// once. The Source start is held mid-preparation (its cold-index scan has
-/// spawned); the client then disconnects from B. B's last waiter leaving sends
-/// the Source an End, the Source retires the unpublished start, and the entry
-/// is finished with no further viewer action.
+/// once. The client sends its start clock and is answered a typed not-yet;
+/// it never retries. When the attempt's rejoin window ends B's owner sends
+/// the Source an End. The Source start is held mid-preparation (its cold
+/// index scan has spawned) when the End arrives: the scan is not cancelled,
+/// it completes and persists for the next play, and only then does the
+/// start end at its stage boundary and free its slot.
 #[tokio::test]
 #[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
 async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_and_logs_one_stage()
@@ -1188,8 +1190,13 @@ async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_a
     let _capture = crate::logbuf::capture_for_test(&logs);
     let fixture_body_budget =
         crate::transcode::TranscodeManager::source_fixture_body_budget().await;
-    let fixture =
-        build_receiver_fixture(address, SourceFixtureMode::Copy, None, fixture_body_budget).await;
+    let fixture = build_receiver_fixture(
+        address,
+        SourceFixtureMode::ColdCopy,
+        None,
+        fixture_body_budget,
+    )
+    .await;
     let tls = Arc::new(
         LiveNodeTls::open(
             &fixture.directory().join("source-runtime-tls"),
@@ -1211,10 +1218,26 @@ async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_a
         port: source_listener.local_addr().expect("Source bind").port(),
         spki_sha256: pin,
     };
+    // Counts the Ends B sends the Source.
+    let ends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_ends = ends.clone();
+    let source_app = super::sharing::peer_router((*fixture.source.state).clone()).layer(
+        axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let ends = observed_ends.clone();
+                async move {
+                    if request.uri().path().ends_with("/end") {
+                        ends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    next.run(request).await
+                }
+            },
+        ),
+    );
     let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
     let source_task = tokio::spawn(crate::serve_http(
         SharingTlsListener::new(source_listener, tls.clone()),
-        super::sharing::peer_router((*fixture.source.state).clone()),
+        source_app,
         async move {
             let _ = source_stopped.await;
         },
@@ -1256,13 +1279,33 @@ async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_a
     let session = serde_json::to_vec(&original["session"]).expect("CreateSession body");
 
     let transcode = Arc::clone(&fixture.source.state.transcode);
+    let file = fixture
+        .source
+        .state
+        .store
+        .get_file(1)
+        .await
+        .expect("Source file read")
+        .expect("Source file");
+    let indexed = || {
+        let store = Arc::clone(&fixture.source.state.store);
+        let (id, size, mtime) = (file.id, file.size, file.mtime);
+        async move {
+            store
+                .holds_fragment_index_for_source(id, size, mtime)
+                .await
+                .expect("Source node-local index read")
+        }
+    };
+    assert!(!indexed().await, "the fixture title starts cold");
     let pause = transcode.pause_source_index_after_spawn();
-    // The client: a raw socket, so closing it is the whole of a disconnect.
+    // The client: a raw socket with a 1 s start clock. Its rejoin window is
+    // that second plus one re-post's grace.
     let mut client = tokio::net::TcpStream::connect(b_address)
         .await
         .expect("client socket");
     let mut request = format!(
-        "POST {base}/hls/sessions HTTP/1.1\r\nhost: {b_address}\r\nauthorization: Bearer {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "POST {base}/hls/sessions HTTP/1.1\r\nhost: {b_address}\r\nauthorization: Bearer {}\r\ncontent-type: application/json\r\nx-plurx-startup-remaining-ms: 1000\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         fixture.original_login,
         session.len()
     )
@@ -1276,10 +1319,9 @@ async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_a
         "the Source start holds a registry slot while it prepares"
     );
     assert_eq!(transcode.source_worker_count(), 1);
+    // The typed not-yet came; the viewer leaves without retrying.
     drop(client);
 
-    // The Source ends the start it never published, logging its stage, while
-    // its scan is still held: retirement is what ended it, not the scan.
     let terminal = || {
         logs.tail("trace", 4096)
             .into_iter()
@@ -1287,13 +1329,21 @@ async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_a
             .collect::<Vec<_>>()
     };
     let bound = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-    while terminal().is_empty() {
+    // B's owner ends the attempt when the window ends, and the End reaches
+    // the Source while its scan is still held.
+    while ends.load(std::sync::atomic::Ordering::SeqCst) == 0 {
         assert!(
             tokio::time::Instant::now() < bound,
-            "the abandoned Source start was never ended"
+            "B never ended the abandoned attempt"
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        terminal().is_empty(),
+        "the End does not cancel a running index scan"
+    );
+    assert_eq!(transcode.source_http_starts.live_entries(), 1);
     held.release();
     while transcode.source_http_starts.live_entries() != 0 || transcode.source_worker_count() != 0 {
         assert!(
@@ -1310,6 +1360,10 @@ async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_a
         ended[0].message.contains("stage=\"recipe_preparation\"")
             && ended[0].message.contains("retirement_requested=true"),
         "{ended:?}"
+    );
+    assert!(
+        indexed().await,
+        "the abandoned start's cold index persisted for the next play"
     );
     assert_eq!(fixture.source.active_source_sessions().await, 0);
 
@@ -2493,8 +2547,13 @@ async fn actual_pinned_not_yet(
     use axum::http::StatusCode;
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
     use std::time::{Duration, Instant};
-    let fixture =
-        build_receiver_fixture(address, SourceFixtureMode::Copy, None, fixture_body_budget).await;
+    let fixture = build_receiver_fixture(
+        address,
+        SourceFixtureMode::ColdCopy,
+        None,
+        fixture_body_budget,
+    )
+    .await;
     let tls = Arc::new(
         LiveNodeTls::open(
             &fixture.directory().join("source-runtime-tls"),

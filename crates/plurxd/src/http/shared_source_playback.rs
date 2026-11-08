@@ -2462,6 +2462,10 @@ pub(crate) fn real_source_start_fixture(
 #[derive(Clone, Copy)]
 pub(crate) enum SourceFixtureMode {
     Copy,
+    /// The Copy fixture with no pre-built fragment index (its scan facts and
+    /// stored probe evidence are kept), so a Start runs the Source's cold
+    /// index scan, where a test can park it.
+    ColdCopy,
     Encoded,
     NativeCopy,
     NativeEncoded,
@@ -2935,7 +2939,7 @@ async fn build_real_source_start_fixture(
         file_id: SourceId::parse("1").expect("file"),
         revision: key.file_revision(&witness).expect("actual revision"),
     };
-    if !native && !encoded {
+    if !native && !encoded && !matches!(mode, SourceFixtureMode::ColdCopy) {
         let media = store.get_file(1).await.expect("file read").expect("file");
         let crate::fragindex::IndexOutcome::Built(index) = Box::pin(crate::fragindex::build(
             &media,
