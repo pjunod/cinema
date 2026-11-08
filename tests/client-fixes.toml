@@ -8340,3 +8340,29 @@ source = "crates/plurxd/src/web/player/player.js"
 source_anchor = "function concludeNativeHlsObservation(player,episode){"
 test = "tests/playback/native-hls-startup.test.js"
 test_anchor = "native observer conclusion preserves later physical-freeze recovery and real element rejection"
+
+[[fixes]]
+id = "linux-player.dolby-final-unorm16-rounding"
+commits = ["28f2cb9a968f16425a42dc4201e9c3165192d31e"]
+source = "clients/linux-player/packaging/patches/mpv/0008-vo_gpu_next-round-the-final-DV-UNORM16-cache-exactly.patch"
+source_anchor = "+static const char dv_unorm16_glsl[] ="
+test = "clients/linux-player/tests/test_dv_unorm16.py"
+test_anchor = "def test_exact_terminal_shader_against_rational_reference(self):"
+
+[[fixes]]
+id = "linux-player.dolby-reconstruction-color-metadata"
+commits = []
+supplements = "linux-player.dolby-final-unorm16-rounding"
+source = "clients/linux-player/packaging/patches/mpv/0006-vo_gpu_next-normalize-DV-reconstruction-metadata.patch"
+source_anchor = "+    image.color = plurx_dv_reconstruction_color();"
+test = "clients/linux-player/tests/dv_render_controls.c"
+test_anchor = "struct pl_color_space got=plurx_dv_reconstruction_color();"
+
+[[fixes]]
+id = "linux-player.dolby-hdr10-planar-10bit-upload"
+commits = []
+supplements = "linux-player.dolby-final-unorm16-rounding"
+source = "clients/linux-player/packaging/patches/mpv/0007-vo_gpu_next-preserve-DV-software-sampling-precision.patch"
+source_anchor = "+static bool frame_needs_precise_sw10(const struct pl_frame *frame)"
+test = "clients/linux-player/tests/dv_render_controls.c"
+test_anchor = "assert(upload_planes_sw(&vo,&gpu,&mpi,&hdr10,tex,frame_needs_precise_sw10(&hdr10)));"

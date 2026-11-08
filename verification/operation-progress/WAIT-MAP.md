@@ -5,6 +5,32 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## Pipeline v2 targeted-scan sidecar — scoped author audit on 2026-11-08
+
+Claude (`claude-opus-5-5`, the pipeline-v2 builder) compared PR #1404 (task T1
+of `effort/pipeline-v2`) with main `1d11f0cdf`. This is authored
+correspondence, not independent review or an execution receipt.
+
+| Reviewed changed dependency | Correspondence and limit |
+|---|---|
+| `background_jobs.rs` | Six new trait methods delegate to the [sidecar module](../../crates/plurx-core/src/store/scan_request_v2.rs); no existing method body changes |
+| `background_jobs_library.rs` | `enqueue` routes through `enqueue_with`, which validates an optional contract-v2 seed, refuses it for anything but `Targeted` input and adds it to the enqueue command body. `ENQUEUE_SQL` and the selected claim, binding, renewal, cancellation, settlement and `insert_item_fenced` paths are unchanged |
+| `hiqlite.rs`, `sqlite/mod.rs` and [the v125 SQL](../../crates/plurx-core/src/store/scan_request_v2.sql) | The sidecar installs as an independent extension (SQLite v125; Hiqlite after dispatch turns). Its admission trigger writes only when the enqueue command carries a `scan_request_v2` object, so full scans and metadata refresh are unaffected; a `(key_id, request_key)` collision aborts only that targeted admission. The census pins its two committed-authority reads; the unannotated ceiling is unchanged |
+| `store_contract.rs` | A test module, the six methods in its inventory, a replicated sidecar check and the sidecar import-plan name. The [shared fixtures](../../crates/plurx-core/tests/support/source_extensions_fixture.rs) validate and remove the exact empty v125 sidecar before main's v122–v124 source rewind, and refuse drift or retained rows before mutation |
+
+Only whole-file pins change. Anchors, models, configurations, properties and
+qualification identities keep their bytes; fresh mapping and smoke results are
+separate execution evidence.
+
+## Source custody replay on 2026-11-07
+
+Compared with `cc2ca1338`, scheduler upkeep preserves the interval from a
+live owner's registration to activation. An armed owner requires settlement
+evidence, including after its authority expires. The cleanup transaction
+rechecks the current owner after its initial read. The selected library
+worker's token and publication-lock waits retain their existing order.
+The focused Store regression covers the activation and renewal interleavings.
+
 ## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
 
 Codex agent `/root/recovery_design_audit` compared the frozen corrections with
