@@ -3,7 +3,7 @@
 
 use super::*;
 
-fn ordinary_request(playback_id: &str) -> crate::transcode::SessionRequest {
+pub(in crate::http) fn ordinary_request(playback_id: &str) -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
         source_telemetry: None,
         continuous_media: None,

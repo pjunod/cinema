@@ -632,4 +632,4 @@ async fn admit_processed_candidate(
 
 #[cfg(test)]
 #[path = "processed_upgrade_tests.rs"]
-mod tests;
+pub(in crate::http) mod tests;
