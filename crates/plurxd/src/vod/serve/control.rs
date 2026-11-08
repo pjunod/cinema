@@ -685,7 +685,7 @@ impl VodServe {
                     )
                     .await
                 {
-                    tracing::debug!(session_id = control.session_id, rendition = %rendition_id,
+                    tracing::debug!(target: "plurxd::vodserve", session_id = control.session_id, rendition = %rendition_id,
                         %error, "accepted pending companion could not acquire its original source credit");
                 }
             }
