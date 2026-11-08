@@ -21564,6 +21564,75 @@ async fn the_creating_scan_key_reads_its_own_request_and_another_scan_key_gets_4
 }
 
 /// Review #1406 (finding 8): a replayed `request_key` whose request has
+/// A targeted request whose job is cancelled is a typed failure, never a
+/// fifth status: the record reads `status: failed, code: cancelled`, and a
+/// replay of its `request_key` answers that failed request instead of
+/// `202 queued` forever, so the caller advances to a new attempt.
+#[tokio::test]
+async fn a_cancelled_request_reads_failed_cancelled_and_its_replay_answers_it() {
+    use plurx_core::store::background_jobs_library::LibraryWorkQuery;
+
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let movie = dir.path().join("Ronin (1998)");
+    std::fs::create_dir_all(&movie).expect("mkdir");
+    std::fs::write(movie.join("Ronin (1998).mkv"), b"x").expect("write");
+    v2_library(&app, &admin, dir.path()).await;
+    let body = json!({ "path": movie, "request_key": "t-9-eee/1/d0/1" });
+    let (status, queued) = call(&app, post("/api/v1/scan", Some(&key), body.clone())).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+    let id = queued["request_id"]
+        .as_str()
+        .expect("request id")
+        .to_owned();
+
+    // No worker runs: cancel the queued targeted job as Activity's Cancel does.
+    let job_id = state
+        .store
+        .library_work_requests(LibraryWorkQuery {
+            request_id: Some(id.clone()),
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+        .expect("request")
+        .remove(0)
+        .job_id;
+    let (status, cancelled) = call(
+        &app,
+        post(
+            &format!("/api/v1/cluster/jobs/{job_id}/cancel"),
+            Some(&admin),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cancelled}");
+
+    let (status, record) = call(
+        &app,
+        get(&format!("/api/v1/scan/requests/{id}"), Some(&key)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{record}");
+    assert_eq!(record["status"], "failed", "{record}");
+    assert_eq!(record["code"], "cancelled", "{record}");
+    assert!(
+        record["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
+        "{record}"
+    );
+
+    let (status, replay) = call(&app, post("/api/v1/scan", Some(&key), body)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{replay}");
+    assert_eq!(replay["code"], "cancelled", "{replay}");
+    assert_eq!(replay["status"], "failed");
+    assert_eq!(replay["request_id"], id.as_str(), "the same request");
+}
+
 /// failed answers with that request — its `request_id`, `status: failed` and
 /// `error`, under a typed code — not a bare 500.
 #[tokio::test]

@@ -2857,7 +2857,8 @@ pub struct ScanRequestRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// A machine-readable failure: `path_unreadable` when the library root
-    /// could not be read at scan time, so the caller retries.
+    /// could not be read at scan time, so the caller retries; `cancelled`
+    /// when the request's job was cancelled before it finished.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<&'static str>,
     /// Contract v2: what a queued request is waiting on (`full_scan:<lib>`,
