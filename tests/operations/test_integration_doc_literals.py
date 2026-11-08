@@ -78,6 +78,21 @@ class IntegrationDocLiterals(unittest.TestCase):
         self.assertIsNotNone(bound, "the per-library pending bound moved out of ENQUEUE_SQL")
         self.assertEqual(self.limit("ENQUEUE_SQL"), int(bound.group(1)))
 
+    def test_expected_file_bounds_and_the_recent_list_match_the_code(self) -> None:
+        sidecar = SIDECAR.read_text()
+        total = re.search(r"encode\(&self\.expected_files\)\?\.len\(\) > (\d+) \* 1024", sidecar)
+        path = re.search(r"file\.path\.len\(\) > (\d+)", sidecar)
+        self.assertIsNotNone(total, "the expected_files total bound moved")
+        self.assertIsNotNone(path, "the expected_files path bound moved")
+        row = self.limits["MAX_EXPECTED_FILES"]
+        self.assertIn(f"{total.group(1)} KiB of JSON", row)
+        self.assertIn(f"each path at most {path.group(1)} bytes", row)
+        recent = rust_const(
+            ROOT / "crates" / "plurx-core" / "src" / "store" / "background_jobs_library.rs",
+            "MAX_LIBRARY_REQUESTS",
+        )
+        self.assertIn(f"The recent list is\nbounded to {recent} records", self.doc)
+
     def test_retry_after_is_stated_with_its_value(self) -> None:
         seconds = rust_const(SCAN, "PATH_UNREADABLE_RETRY_S")
         self.assertIn(f"`Retry-After: {seconds}`", self.doc)

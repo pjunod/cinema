@@ -1,7 +1,8 @@
 # Pipeline contract v2 (cinema slice) — status ledger
 
-**Status:** done — archived on 2026-11-08 by M6 (task T7, the last cinema task
-of `effort/pipeline-v2`). This is the effort's status ledger as it stood in
+**Status:** built — the effort is not yet promoted to `main`. Archived on
+2026-11-08 by M6 (task T7, the last cinema task of `effort/pipeline-v2`). This
+is the effort's status ledger as it stood in
 [STATUS.md](../../STATUS.md), moved here verbatim. The seam itself is
 documented in [INTEGRATION.md](../INTEGRATION.md) §1–§2, written from
 [the contract](../features/PIPELINE-CONTRACT.md); promotion to `main` is

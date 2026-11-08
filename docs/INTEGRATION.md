@@ -400,12 +400,8 @@ curl -sS -X POST "$PLURX/api/v1/scan" \
 curl -sS -H "Authorization: Bearer $PLXKEY" "$PLURX/api/v1/scan/requests/<request_id>"
 ```
 
-**How to read it.** `422 path_outside_roots` proves the key, the scope and the
-route all work — it is the wrong path and nothing else. `503 path_unreadable`
-means the path maps to a root plurx cannot read now: check the mount on the
-plurx side. `401` means the key is wrong or revoked; `403` means it lacks
-`scan:trigger`. `202` with `"status":"queued"` means plurx took it (there is
-no `accepted` status). Whether a file was *usable* is what `files` answers.
+Read the answer against §1.2: a `422 path_outside_roots` proves the key, the
+scope and the route all work, and `files` says whether each file is usable.
 
 ---
 
