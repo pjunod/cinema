@@ -1015,7 +1015,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # awaits its JoinHandle before asserting.
 # PR1341: +1 test-only spawn in chunk_06.rs (M5 init-wait driver); the
 # test joins it under its deadline.
-expected_occurrences = 121
+# Playback start Phase 1: the create-time processed credit D1 left unreachable is
+# removed (PreparedCandidateOnce, session_request.rs). -1: its expiry task, which
+# dropped an unconsumed credit at its deadline.
+expected_occurrences = 120
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -3707,7 +3710,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # additions are both counted; the total is the merged tree's exact count.
 # Main (8f2585e6b..c32bf261c, jellyfin/activity fixture fixes) landed these
 # without a recount; counted at the 2026-11-08 main→effort merge so the census is exact.
-expected_occurrences = 1091
+# Playback start Phase 1: the create-time processed credit D1 left unreachable is
+# removed (PreparedCandidateOnce, session_request.rs). -2: that expiry task and a
+# test-only thread spawn in its removed consume-once test.
+expected_occurrences = 1089
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5501,7 +5507,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 260 ms) before its second control exchange. No task or process is added.
 # Main (8f2585e6b..c32bf261c, jellyfin/activity fixture fixes) landed these
 # without a recount; counted at the 2026-11-08 main→effort merge so the census is exact.
-expected_occurrences = 2105
+# Playback start Phase 1: the create-time processed credit D1 left unreachable is
+# removed (PreparedCandidateOnce, session_request.rs). -2: the expiry `sleep_until`
+# and `Instant::from_std`.
+expected_occurrences = 2103
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6970,7 +6979,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Subtitle completion adds two installer qualification child lifecycle calls;
 # the child remains owned through wait or kill-and-wait on its 60s bound.
 # Main retains the HTTPS transport listener's awaited task/connection boundary.
-expected_occurrences = 378
+# Playback start Phase 1: the create-time processed credit D1 left unreachable is
+# removed (PreparedCandidateOnce, session_request.rs). -2: barrier waits and the
+# thread join in its removed consume-once test.
+expected_occurrences = 376
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
