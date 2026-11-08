@@ -3692,12 +3692,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # `a_create_cancelled_at_its_claim_await_leaves_the_claim_retryable`; the
 # test drops it before the create owns its claim, which aborts it.
 # D1 processed DV upgrade: +1 production `tokio::spawn` in
-# http/hls/processed_upgrade.rs `note_first_frame`. It runs one upgrade for one
-# session after that session's first frame: it owns the `UpgradeRun` claim
-# (dropped, and its registry entry removed, when the task ends however it
-# ends), races the run against that claim's cancellation (release, a newer
-# session for the playback) and the playback's pending-candidate slot (a
-# viewer's own change). It holds the trial's prepared root only through a
+# http/hls/processed_upgrade.rs `start_upgrade` (called by `note_first_frame`
+# and `note_presented`). It runs one upgrade for one session after that
+# session's first frame: it owns the `UpgradeRun` claim (dropped, and its
+# registry entry removed, when the task ends however it ends). It is awaited
+# to completion, never raced against the claim's cancellation (review 3 S1):
+# release and a newer session reach the trial and the staged successor
+# through the playback slot's token, a child of the run's, so a cancelled
+# successor is settled by staging's own cleanup instead of stranded by a
+# dropped future. It holds the trial's prepared root only through a
 # `ProcessedUpgradeRootLease` that frees it on drop, and starts no process of
 # its own: the trial and the successor's prime use the existing owners.
 # Main merged into the effort (2026-11-08): main's and the effort's reviewed

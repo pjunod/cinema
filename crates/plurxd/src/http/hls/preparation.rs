@@ -261,7 +261,17 @@ pub(super) const PROCESSED_UPGRADE_ASK: &str = "processed-upgrade";
 /// the one lock, so an upgrade never cancels a viewer's ask; a viewer's ask
 /// arriving later overwrites (and so cancels) the upgrade's claim, exactly as
 /// it would an older ask of its own.
-pub(super) fn begin_processed_upgrade(playback_id: &str) -> Option<PendingCandidateGuard> {
+///
+/// The claim's token is a child of `run`, the upgrade's own cancellation: a
+/// release or a newer session for the playback cancels the run, and with it
+/// this claim, which is the token the trial races and the staged successor
+/// registers under. Cancellation therefore reaches every phase through the
+/// phase's own exit path, and the upgrade's future is never dropped while
+/// staging holds a half-registered successor.
+pub(super) fn begin_processed_upgrade(
+    playback_id: &str,
+    run: &tokio_util::sync::CancellationToken,
+) -> Option<PendingCandidateGuard> {
     let successor_registered = active_prepared_successors()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -271,15 +281,16 @@ pub(super) fn begin_processed_upgrade(playback_id: &str) -> Option<PendingCandid
         return None;
     }
     let claim = NEXT_PENDING_CANDIDATE_CLAIM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let cancelled = tokio_util::sync::CancellationToken::new();
+    let cancelled = run.child_token();
     let registered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let mut pending = pending_preparation_candidates()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if pending
-            .get(playback_id)
-            .is_some_and(|entry| !entry.cancelled.is_cancelled())
+        if run.is_cancelled()
+            || pending
+                .get(playback_id)
+                .is_some_and(|entry| !entry.cancelled.is_cancelled())
         {
             return None;
         }

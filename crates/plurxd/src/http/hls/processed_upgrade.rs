@@ -224,13 +224,23 @@ pub(in crate::http) fn note_first_frame(state: &AppState, user_id: i64, session_
     let Some((intent, run)) = take_on_first_frame(user_id, session_id) else {
         return;
     };
+    start_upgrade(state, intent, run);
+}
+
+/// Run one taken upgrade to its outcome on a task of its own.
+///
+/// The run is awaited to completion, never raced against its cancellation: a
+/// future dropped between the successor's registration and its deadline arm
+/// would strand that successor. Cancellation instead reaches every phase
+/// through the playback slot's token, a child of the run's
+/// ([`super::preparation::begin_processed_upgrade`]): the trial races it, and
+/// the staged successor registers under it and exits on it by the same
+/// cleanup an ordinary preparation's cancellation takes.
+fn start_upgrade(state: &AppState, intent: Box<UpgradeIntent>, run: UpgradeRun) {
     crate::playback_control::record_processed_upgrade("scheduled");
     let state = state.clone();
     tokio::spawn(async move {
-        let outcome = tokio::select! {
-            () = run.cancelled().cancelled() => "cancelled",
-            outcome = run_upgrade(&state, &intent, &run) => outcome,
-        };
+        let outcome = run_upgrade(&state, &intent, &run).await;
         crate::playback_control::record_processed_upgrade(outcome);
         drop(run);
     });
@@ -241,7 +251,12 @@ async fn run_upgrade(state: &AppState, intent: &UpgradeIntent, run: &UpgradeRun)
     let session = crate::transcode::session_log_id(&intent.session_id);
     // One preparation slot per playback: a viewer's own change in flight wins,
     // and a viewer's change arriving during the trial cancels this one.
-    let Some(pending) = super::preparation::begin_processed_upgrade(&intent.playback_id) else {
+    let Some(pending) =
+        super::preparation::begin_processed_upgrade(&intent.playback_id, run.cancelled())
+    else {
+        if run.cancelled().is_cancelled() {
+            return "cancelled";
+        }
         tracing::info!(target: "plurxd::http::hls", session = %session,
             "processed upgrade skipped: a viewer-directed preparation holds the playback's slot");
         return "not_applicable";
@@ -296,7 +311,7 @@ async fn run_upgrade(state: &AppState, intent: &UpgradeIntent, run: &UpgradeRun)
             return "declined";
         }
     };
-    if pending.cancelled() || run.cancelled().is_cancelled() {
+    if pending.cancelled() {
         return "cancelled";
     }
     // The trial spent up to its budget; the session it upgrades may have
