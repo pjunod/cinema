@@ -3761,8 +3761,7 @@ async fn create_with_purpose_inner(
                 return Err(ApiError::TypedRetry {
                     status: StatusCode::SERVICE_UNAVAILABLE,
                     code: "media_session_overloaded",
-                    message: "too many session starts are already active for this user"
-                        .to_owned(),
+                    message: "too many session starts are already active for this user".to_owned(),
                     retry_after_seconds: MEDIA_SESSION_OVERLOADED_RETRY_AFTER_SECS,
                 });
             }
@@ -4384,26 +4383,21 @@ async fn create_with_purpose_inner(
                 .retained_output_receiver(&candidate)
                 .await
                 .then_some(1);
-            let mut remote_start = state
-                .media_sessions
-                .start_remote(&candidate, &remote_request, placement_deadline)
-                .await;
             // A reply lost in transit leaves the worker holding a session keyed
             // by this create's incarnation (the worker request's id). Asking the
             // same worker again recovers that session (`Recovered`) instead of
             // placing a second producer elsewhere, so the claim keeps one owner.
-            if matches!(
-                remote_start,
-                Err(crate::media_sessions::RemoteStartFailure::Transport(
-                    PeerTransportError::Unreachable | PeerTransportError::TimedOut
-                ))
-            ) && tokio::time::Instant::now() < placement_deadline
-            {
-                remote_start = state
-                    .media_sessions
-                    .start_remote(&candidate, &remote_request, placement_deadline)
-                    .await;
-            }
+            let remote_start = crate::media_sessions::start_remote_recovering_lost_reply(
+                placement_deadline,
+                || {
+                    state.media_sessions.start_remote(
+                        &candidate,
+                        &remote_request,
+                        placement_deadline,
+                    )
+                },
+            )
+            .await;
             match remote_start {
                 Ok(started) => {
                     let target_generation = started.info.activation_generation;

@@ -1658,6 +1658,38 @@ pub(crate) enum RemoteStartFailure {
     Transport(PeerTransportError),
 }
 
+/// Ask one worker to start, and when no usable answer arrived ask that same
+/// worker once more inside `deadline`.
+///
+/// A reply lost in transit leaves the worker holding a session keyed by the
+/// request's incarnation; the second ask finds it and answers `Recovered`, so
+/// the start keeps one producer. A definitive answer (a start, a refusal) is
+/// never asked twice. A loss that persists through the re-ask is returned as
+/// it is, and the caller moves on to its next candidate: whatever the first
+/// worker may hold then retires on its own confirmation watcher as soon as
+/// another owner's activation of the incarnation is visible, or at its
+/// confirmation window when none comes (PLAYBACK-START-PLAN §8).
+pub(crate) async fn start_remote_recovering_lost_reply<F, Fut>(
+    deadline: tokio::time::Instant,
+    mut ask: F,
+) -> Result<RemoteSessionStart, RemoteStartFailure>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<RemoteSessionStart, RemoteStartFailure>>,
+{
+    let first = ask().await;
+    if matches!(
+        first,
+        Err(RemoteStartFailure::Transport(
+            PeerTransportError::Unreachable | PeerTransportError::TimedOut
+        ))
+    ) && tokio::time::Instant::now() < deadline
+    {
+        return ask().await;
+    }
+    first
+}
+
 impl From<PeerTransportError> for RemoteStartFailure {
     fn from(error: PeerTransportError) -> Self {
         Self::Transport(error)
