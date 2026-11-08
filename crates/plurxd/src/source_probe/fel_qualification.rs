@@ -1037,8 +1037,8 @@ mod tests {
             "the audited outputs do not clear or require a raw-source exemption"
         );
         // This isolated self-exec needs the fixture values and loader paths
-        // above. The service environment API clears the fixture values, so the child
-        // return without exercising its descriptor checks. Preserve this
+        // above. The service API clears them, making the child return before
+        // exercising its descriptor checks. Preserve this
         // explicitly cleared configuration through the same bounded owner.
         let output = plurx_core::process::source_lifetime::mediated(
             plurx_core::process::bounded::output_command_inherited_env(

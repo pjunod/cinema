@@ -65,7 +65,7 @@ impl Witness {
         if mediated {
             return Ok(());
         }
-        let mut disqualified = self
+        let disqualified = self
             .disqualified
             .lock()
             .map_err(|_| std::io::Error::other("reader witness poisoned"))?;
@@ -74,6 +74,7 @@ impl Witness {
         }
         #[cfg(unix)]
         {
+            let mut disqualified = disqualified;
             use std::os::unix::fs::FileExt;
             // Invalidate the existing locked inode itself. This remains durable
             // even if a receipt path is removed/restored, and never unlocks it.
@@ -95,14 +96,16 @@ impl Witness {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
+            *disqualified = true;
+            Ok(())
         }
         #[cfg(not(unix))]
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "reader lifetime anchors need Unix file locks",
-        ));
-        *disqualified = true;
-        Ok(())
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "reader lifetime anchors need Unix file locks",
+            ))
+        }
     }
 }
 
