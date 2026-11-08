@@ -145,3 +145,46 @@ test("prepared SDR clock alignment retries when the first seek still trails by m
   assert.equal(proof.length,1);assert.equal(proof[0],seeks[1]);
   assert.equal(h.failed.length,0);assert.equal(h.incumbent.muted,false);
 });
+
+// D1 seam fix (plan ruling 3): an engine without frame callbacks never
+// exposes on `readyState`. A seek into a buffer hole leaves HAVE_FUTURE_DATA
+// about a range the playhead is not in; the successor takes the picture only
+// after its decoder counts new frames while its clock advances on the
+// incumbent's second, under the same bound as the callback proof.
+function withoutFrameCallbacks(counter){
+  const h=harness({voluntary:false});
+  delete h.target.requestVideoFrameCallback;
+  h.target.requestVideoFrameCallback=undefined;
+  if(counter) h.target.getVideoPlaybackQuality=()=>({totalVideoFrames:h.decoded});
+  h.decoded=100;
+  h.step=(ms,frames=0,advance=0)=>{
+    h.advance(ms);h.decoded+=frames;h.target.currentTime+=advance;h.incumbent.currentTime+=advance;
+    for(const [id,t] of [...h.timers])if(t.at<=h.now()){h.timers.delete(id);t.fn();}
+  };
+  return h;
+}
+test("a successor without frame callbacks is not exposed on readyState alone",()=>{
+  const h=withoutFrameCallbacks(true);
+  h.now=()=>h.ctx.performance.now();
+  h.start();
+  assert.equal(h.exposed.length,0,"readyState 4 and a landed seek are not a picture");
+  for(let i=0;i<25;i++) h.step(40);
+  assert.equal(h.exposed.length,0);
+  assert.equal(h.failed.length,1);assert.match(h.failed[0],/decoded-frame deadline/);
+  assert.equal(h.incumbent.muted,false,"the incumbent stays the one heard");
+});
+test("decoded frames at the aligned position expose the successor",()=>{
+  const h=withoutFrameCallbacks(true);
+  h.now=()=>h.ctx.performance.now();
+  h.start();
+  h.step(40,1,0.04);h.step(40,1,0.04);
+  assert.equal(h.exposed.length,0,"two frames are not yet the monotonic proof");
+  h.step(40,1,0.04);
+  assert.equal(h.exposed.length,1);assert.equal(h.failed.length,0);
+});
+test("an engine with no decoded-frame counter refuses the exposure",()=>{
+  const h=withoutFrameCallbacks(false);
+  h.start();
+  assert.equal(h.exposed.length,0);
+  assert.equal(h.failed.length,1);assert.match(h.failed[0],/no decoded-frame observation/);
+});

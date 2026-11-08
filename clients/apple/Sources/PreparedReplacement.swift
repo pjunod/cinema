@@ -944,6 +944,15 @@ protocol PreparedSuccessorHost: AnyObject {
     /// preparation and never exercised it; this is the instrument that closes
     /// that residual.
     func recordPreparedFallbackInterruption(ms: Int)
+
+    /// How the commit ended at its seam, for the `prepared_seam` report. Only
+    /// an observation: nothing reads it back.
+    func reportPreparedSeam(_ outcome: PreparedCommitOutcome)
+}
+
+extension PreparedSuccessorHost {
+    /// A host without seam instruments reports nothing.
+    func reportPreparedSeam(_ outcome: PreparedCommitOutcome) {}
 }
 
 extension PreparedSuccessorHost {
@@ -1136,6 +1145,7 @@ final class PreparedReplacementCoordinator {
         let startedAt = now()
         let outcome = await host?.commitPreparedSuccessor(action) ?? .refused
         openedAtMs = nil
+        host?.reportPreparedSeam(outcome)
         switch outcome {
         case .committed(let firstFrameUnixMs):
             ledger.noteCommitted(action, firstFrameUnixMs: firstFrameUnixMs)

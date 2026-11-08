@@ -15086,6 +15086,93 @@ pub(crate) fn record_preparation_staged(staged: bool) {
     PREPARATIONS_STAGED[usize::from(staged)].fetch_add(1, Ordering::Relaxed);
 }
 
+/// What one processed Dolby Vision / HDR10-E upgrade came to (plan ruling 3:
+/// an upgrade after the first frame). Index order is
+/// [`PROCESSED_UPGRADE_OUTCOMES`]; `other` keeps the sum equal to the number of
+/// first frames that scheduled one.
+pub(crate) const PROCESSED_UPGRADE_OUTCOMES: [&str; 7] = [
+    "scheduled",
+    "not_applicable",
+    "declined",
+    "admission_refused",
+    "staged",
+    "not_staged",
+    "cancelled",
+];
+static PROCESSED_UPGRADES: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+pub(crate) fn record_processed_upgrade(outcome: &'static str) {
+    let index = PROCESSED_UPGRADE_OUTCOMES
+        .iter()
+        .position(|known| *known == outcome)
+        .unwrap_or(PROCESSED_UPGRADE_OUTCOMES.len() - 1);
+    PROCESSED_UPGRADES[index].fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn processed_upgrade_count(outcome: &str) -> u64 {
+    PROCESSED_UPGRADE_OUTCOMES
+        .iter()
+        .position(|known| *known == outcome)
+        .map_or(0, |index| PROCESSED_UPGRADES[index].load(Ordering::Relaxed))
+}
+
+/// How a client's prepared switch ended at the seam, as that client reported
+/// it (`prepared_seam` beacons). Index order is [`PREPARED_SEAM_OUTCOMES`].
+pub(crate) const PREPARED_SEAM_OUTCOMES: [&str; 3] =
+    ["committed", "refused", "switched_without_a_frame"];
+
+/// One reported seam: the outcome, whether the ±2 s frame window was fully
+/// sampled, whether audio continuity was independently observed, and whether
+/// the change also reopened. Only a committed switch with complete frames,
+/// observed audio and no reopen counts toward the twenty the Developer tab
+/// asks for before the processed upgrade graduates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedSeamReport {
+    pub(crate) outcome: usize,
+    pub(crate) frames_complete: bool,
+    pub(crate) dropped_frames: Option<u64>,
+    pub(crate) audio_observed: bool,
+    pub(crate) reopened: bool,
+}
+
+impl PreparedSeamReport {
+    pub(crate) fn qualifies(&self) -> bool {
+        self.outcome == 0
+            && self.frames_complete
+            && self.dropped_frames == Some(0)
+            && self.audio_observed
+            && !self.reopened
+    }
+}
+
+/// [platform][outcome] reports, and [platform] qualifying switches.
+static PREPARED_SEAMS: [[AtomicU64; 3]; CLIENT_PLATFORMS] =
+    [const { [const { AtomicU64::new(0) }; 3] }; CLIENT_PLATFORMS];
+static PREPARED_SEAMS_QUALIFIED: [AtomicU64; CLIENT_PLATFORMS] =
+    [const { AtomicU64::new(0) }; CLIENT_PLATFORMS];
+
+pub(crate) fn record_prepared_seam(platform: ClientPlatform, report: PreparedSeamReport) {
+    let platform = platform_index(platform);
+    if let Some(counter) = PREPARED_SEAMS[platform].get(report.outcome) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+    if report.qualifies() {
+        PREPARED_SEAMS_QUALIFIED[platform].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// (qualifying switches, all reported seams) for one platform on this node.
+pub(crate) fn prepared_seam_counts(platform: ClientPlatform) -> (u64, u64) {
+    let platform = platform_index(platform);
+    (
+        PREPARED_SEAMS_QUALIFIED[platform].load(Ordering::Relaxed),
+        PREPARED_SEAMS[platform]
+            .iter()
+            .map(|counter| counter.load(Ordering::Relaxed))
+            .sum(),
+    )
+}
+
 /// Why a reserved successor was settled without ever being watched.
 ///
 /// A speculative successor is a real encoder on real hardware. The standing
@@ -15544,6 +15631,38 @@ pub(crate) fn prometheus() -> String {
         output.push_str(&format!(
             "plurx_playback_preparation_cancelled_total{{reason=\"{reason}\"}} {}\n",
             PREPARATIONS_CANCELLED[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_processed_upgrades_total Processed Dolby Vision upgrades after a first frame, by outcome.\n\
+         # TYPE plurx_playback_preparation_processed_upgrades_total counter\n",
+    );
+    for (index, outcome) in PROCESSED_UPGRADE_OUTCOMES.iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_preparation_processed_upgrades_total{{outcome=\"{outcome}\"}} {}\n",
+            PROCESSED_UPGRADES[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_seams_total Prepared switches as the client reported their seam, by platform and outcome.\n\
+         # TYPE plurx_playback_preparation_seams_total counter\n",
+    );
+    for (platform_index, platform) in CLIENT_PLATFORM_LABELS.iter().enumerate() {
+        for (index, outcome) in PREPARED_SEAM_OUTCOMES.iter().enumerate() {
+            output.push_str(&format!(
+                "plurx_playback_preparation_seams_total{{platform=\"{platform}\",outcome=\"{outcome}\"}} {}\n",
+                PREPARED_SEAMS[platform_index][index].load(Ordering::Relaxed)
+            ));
+        }
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_seams_qualified_total Committed prepared switches with complete +-2 s frame samples, zero dropped frames, observed audio continuity and no reopen.\n\
+         # TYPE plurx_playback_preparation_seams_qualified_total counter\n",
+    );
+    for (platform_index, platform) in CLIENT_PLATFORM_LABELS.iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_preparation_seams_qualified_total{{platform=\"{platform}\"}} {}\n",
+            PREPARED_SEAMS_QUALIFIED[platform_index].load(Ordering::Relaxed)
         ));
     }
     output.push_str(

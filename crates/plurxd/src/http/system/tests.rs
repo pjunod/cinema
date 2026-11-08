@@ -918,6 +918,7 @@ fn raft_exposition_is_fixed_and_privacy_safe() {
 
 fn beacon(event: &str, ms: i64) -> ClientLog {
     ClientLog {
+        prepared_seam: None,
         transport: None,
         frame_drop: None,
         level: "warn".into(),
@@ -1805,4 +1806,71 @@ fn failed_by_code_is_one_bounded_series_per_code_the_page_explains() {
         explained, bounded,
         "analysis.js and ANALYSIS_FAILURE_CODES must agree"
     );
+}
+
+/// A `prepared_seam` beacon is counted for its platform and outcome; only a
+/// committed switch with its ±2 s frame window fully sampled, zero dropped
+/// frames, independently observed audio and no reopen counts toward the
+/// twenty the processed upgrade waits on. A word outside the vocabulary is
+/// dropped rather than guessed at.
+#[test]
+fn a_prepared_seam_counts_toward_graduation_only_when_clean_and_fully_measured() {
+    use crate::playback_control::{prepared_seam_counts, record_prepared_seam, ClientPlatform};
+    let parse = |json: serde_json::Value| -> ClientPreparedSeam {
+        serde_json::from_value(json).expect("seam beacon")
+    };
+    let clean = parse(
+        serde_json::json!({"platform":"android","outcome":"committed",
+        "frames_complete":true,"dropped_frames":0,"audio_observed":true,"reopened":false}),
+    );
+    let (platform, report) = clean.report().expect("in vocabulary");
+    assert_eq!(platform, ClientPlatform::Android);
+    assert!(report.qualifies());
+    for unclean in [
+        serde_json::json!({"platform":"android","outcome":"committed","frames_complete":false,
+            "dropped_frames":0,"audio_observed":true}),
+        serde_json::json!({"platform":"android","outcome":"committed","frames_complete":true,
+            "dropped_frames":1,"audio_observed":true}),
+        serde_json::json!({"platform":"android","outcome":"committed","frames_complete":true,
+            "dropped_frames":0,"audio_observed":false}),
+        serde_json::json!({"platform":"android","outcome":"committed","frames_complete":true,
+            "dropped_frames":0,"audio_observed":true,"reopened":true}),
+        serde_json::json!({"platform":"android","outcome":"refused"}),
+        serde_json::json!({"platform":"android","outcome":"switched_without_a_frame"}),
+    ] {
+        let (_, report) = parse(unclean.clone()).report().expect("in vocabulary");
+        assert!(!report.qualifies(), "{unclean}");
+    }
+    assert!(
+        parse(serde_json::json!({"platform":"roku","outcome":"committed"}))
+            .report()
+            .is_none()
+    );
+    assert!(
+        parse(serde_json::json!({"platform":"web","outcome":"teleported"}))
+            .report()
+            .is_none()
+    );
+    let (qualified, total) = prepared_seam_counts(ClientPlatform::Linux);
+    let (_, refused) = parse(serde_json::json!({"platform":"linux","outcome":"refused"}))
+        .report()
+        .expect("in vocabulary");
+    record_prepared_seam(ClientPlatform::Linux, refused);
+    let (_, linux_clean) = parse(serde_json::json!({"platform":"linux","outcome":"committed",
+        "frames_complete":true,"dropped_frames":0,"audio_observed":true}))
+    .report()
+    .expect("in vocabulary");
+    record_prepared_seam(ClientPlatform::Linux, linux_clean);
+    let (after_qualified, after_total) = prepared_seam_counts(ClientPlatform::Linux);
+    assert_eq!(after_total - total, 2);
+    assert_eq!(after_qualified - qualified, 1);
+    let metrics = crate::playback_control::prometheus();
+    assert!(metrics.contains(
+        "plurx_playback_preparation_seams_total{platform=\"linux\",outcome=\"refused\"}"
+    ));
+    assert!(
+        metrics.contains("plurx_playback_preparation_seams_qualified_total{platform=\"linux\"}")
+    );
+    assert!(metrics
+        .contains("plurx_playback_preparation_processed_upgrades_total{outcome=\"scheduled\"}"));
 }

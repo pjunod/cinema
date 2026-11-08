@@ -1106,6 +1106,61 @@ pub struct ClientLog {
     /// document is built from (`"5,8"`). Split here rather than on the wire so
     /// a client that grows a profile does not need a new field.
     pub declared_dv_profiles: Option<String>,
+    /// How a prepared switch ended at its seam, with the evidence the client
+    /// measured (plan ruling 3: the processed upgrade leaves the Developer
+    /// tab only after twenty clean, fully measured switches per platform).
+    pub(crate) prepared_seam: Option<ClientPreparedSeam>,
+}
+
+/// One `prepared_seam` report. Every field is the client's observation; the
+/// server counts them (`plurx_playback_preparation_seams_*`) and decides
+/// nothing from them.
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(default)]
+pub(crate) struct ClientPreparedSeam {
+    platform: String,
+    outcome: String,
+    /// The ±2 s window around the commit was sampled end to end.
+    frames_complete: bool,
+    dropped_frames: Option<u64>,
+    /// Audio continuity was measured by an instrument of its own, not
+    /// inferred from the picture.
+    audio_observed: bool,
+    /// The change also took an ordinary reopen.
+    reopened: bool,
+}
+
+impl ClientPreparedSeam {
+    /// The counted report, or `None` for a platform or outcome outside the
+    /// vocabulary (a newer client's word is dropped, not guessed at).
+    pub(crate) fn report(
+        &self,
+    ) -> Option<(
+        crate::playback_control::ClientPlatform,
+        crate::playback_control::PreparedSeamReport,
+    )> {
+        use crate::playback_control::ClientPlatform;
+        let platform = match self.platform.as_str() {
+            "web" => ClientPlatform::Web,
+            "apple" => ClientPlatform::Apple,
+            "android" => ClientPlatform::Android,
+            "linux" => ClientPlatform::Linux,
+            _ => return None,
+        };
+        let outcome = crate::playback_control::PREPARED_SEAM_OUTCOMES
+            .iter()
+            .position(|known| *known == self.outcome)?;
+        Some((
+            platform,
+            crate::playback_control::PreparedSeamReport {
+                outcome,
+                frames_complete: self.frames_complete,
+                dropped_frames: self.dropped_frames,
+                audio_observed: self.audio_observed,
+                reopened: self.reopened,
+            },
+        ))
+    }
 }
 
 /// Sustained rate and burst allowance for `/client-log`, in reports per minute.
@@ -1326,6 +1381,13 @@ pub async fn client_log(
         tracing::warn!(target: "plurxd::client", "{line}");
     }
 
+    if let Some((platform, report)) = ev
+        .prepared_seam
+        .as_ref()
+        .and_then(ClientPreparedSeam::report)
+    {
+        crate::playback_control::record_prepared_seam(platform, report);
+    }
     let mut event = client_playback_event(&ev, user.id);
     // A first frame or a failure report settles the start attempt this
     // node opened for the viewer and file (C-08 M5 row 4); any other beacon
@@ -1340,6 +1402,14 @@ pub async fn client_log(
             event.reason.as_deref(),
             std::time::Instant::now(),
         );
+        // Plan ruling 3: processed Dolby Vision is an upgrade after the
+        // first frame. The viewer's first picture for a session this node
+        // owns starts its upgrade, if the create left one waiting.
+        if event.event == "ttff" {
+            if let Some(session) = event.session_id.as_deref() {
+                super::hls::processed_upgrade::note_first_frame(&state, user.id, session);
+            }
+        }
         // The same report also settles the create it answers (G1): carry that
         // create's attempt id on the beacon, and record the first frame as a
         // row of its own. Matched by the session the report names, so two

@@ -1921,23 +1921,25 @@ impl TranscodeManager {
         )
     }
 
-    /// Called only after ingress has acquired its durable create and checked
-    /// predecessor admission. Catalog/restore paths never call this producer.
-    pub(crate) async fn prepare_processed_hdr10(
-        &self,
+    /// Every decision [`Self::prepare_processed_upgrade`] makes from the
+    /// request and its planning inputs alone, before any slot or render.
+    ///
+    /// `Ok(None)` is silent: no processed destination is what this play is (a
+    /// native Dolby Vision copy, an SDR output, the setting off, a source with
+    /// no supported Dolby Vision metadata). `Err` names why an applicable
+    /// upgrade is declined, for the enhancement details of the ordinary start.
+    /// The create calls this with the planning snapshot it already holds, so
+    /// a declined upgrade is reported on the start it answers without any
+    /// processed work before the first frame; the upgrade calls it again on
+    /// freshly revalidated inputs.
+    pub(crate) fn processed_upgrade_gates(
         request: &SessionRequest,
-        recovery: &SessionRecoveryIdentity,
+        planning: &plurx_core::store::PlaybackPlanningSnapshot,
         hdr10_intent: bool,
-    ) -> Result<
-        Option<(
-            SessionRequest,
-            plurx_core::playback::candidate::QualityCandidate,
-        )>,
-        String,
-    > {
+    ) -> Result<Option<plurx_core::transcode::dv_processing::DvDestination>, String> {
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (request, recovery, hdr10_intent);
+            let _ = (request, planning, hdr10_intent);
             Ok(None)
         }
         #[cfg(target_os = "linux")]
@@ -1987,13 +1989,7 @@ impl TranscodeManager {
             {
                 return Ok(None);
             }
-            let Some(planning) = self
-                .validate_candidate_planning_binding(request, None)
-                .await?
-            else {
-                return Ok(None);
-            };
-            let preferences = Self::vod_dv_preferences_from_snapshot(&planning);
+            let preferences = Self::vod_dv_preferences_from_snapshot(planning);
             let enabled = if profile81 {
                 preferences.fel_reencode
             } else {
@@ -2035,11 +2031,6 @@ impl TranscodeManager {
             if request.subtitle_burn.is_some() {
                 return Err("burned-in subtitles are not drawn into processed HDR10 yet".into());
             }
-            // Reconstruction is the better picture only for a title whose EL
-            // adds more than the re-encode loses: its measured verdict decides.
-            if profile81 {
-                self.reconstruction_qualified(&planning).await?;
-            }
             let Some(caps) = original.canonical_caps.as_ref() else {
                 return Err("the client did not report its playback capabilities".into());
             };
@@ -2058,19 +2049,69 @@ impl TranscodeManager {
                         .into(),
                 );
             }
+            Ok(Some(destination))
+        }
+    }
+
+    /// Processed Dolby Vision / HDR10-E for a session that is already playing
+    /// (plan ruling 3: an upgrade after the first frame, never work before
+    /// it). Called on the session's owner once the viewer's first frame is
+    /// observed; `recovery` is the identity of the prepared successor the
+    /// result will be staged as, so the trial's request already carries the
+    /// successor's incarnation. The result's root is handed to the successor's
+    /// first preparation through [`Self::hold_processed_upgrade_root`]; a
+    /// failed or declined trial leaves `session_id` untouched. `session_id`
+    /// names the session being upgraded in what the trial reports; whether it
+    /// is still live is its caller's to check, before and after.
+    pub(crate) async fn prepare_processed_upgrade(
+        &self,
+        session_id: &str,
+        request: &SessionRequest,
+        recovery: &SessionRecoveryIdentity,
+        hdr10_intent: bool,
+    ) -> Result<Option<ProcessedUpgradeTrial>, String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (session_id, request, recovery, hdr10_intent);
+            Ok(None)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use plurx_core::transcode::dv_processing::DvDestination;
+            let Some(planning) = self
+                .validate_candidate_planning_binding(request, None)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let Some(destination) =
+                Self::processed_upgrade_gates(request, &planning, hdr10_intent)?
+            else {
+                return Ok(None);
+            };
+            let profile81 = destination == DvDestination::Profile81;
+            let original = request
+                .candidate_context
+                .as_ref()
+                .ok_or("processed destination requires fresh admitted owner qualification")?;
+            let caps = original
+                .canonical_caps
+                .as_ref()
+                .ok_or("the client did not report its playback capabilities")?;
+            // Reconstruction is the better picture only for a title whose EL
+            // adds more than the re-encode loses: its measured verdict decides.
+            if profile81 {
+                self.reconstruction_qualified(&planning).await?;
+            }
             let Ok(_preparation_slot) =
                 Arc::clone(&self.processed_preparation_slot).try_acquire_owned()
             else {
                 return Err("another processed preparation already holds this node's slot".into());
             };
-            // Qualification is an optional enhancement of a start that is
-            // already resolved. It spends at most half of the create budget
-            // left now, so admissibility, catalog, placement, the durable
-            // writes and the dispatch that consumes its result keep theirs.
-            let deadline = crate::media_pool::create_enhancement_deadline(Duration::from_secs(8));
-            if tokio::time::Instant::now() >= deadline {
-                return Err("no startup budget remains for processed qualification".into());
-            }
+            // The upgrade runs after the viewer's first frame, outside any
+            // create budget: one bounded trial, the same 8 s the in-create
+            // qualification was allowed at most.
+            let deadline = tokio::time::Instant::now() + PROCESSED_UPGRADE_TRIAL_BUDGET;
             let mut file = planning.file.clone();
             file.audio_offset_ms = if file.audio_streams.is_empty() {
                 0
@@ -2275,29 +2316,125 @@ impl TranscodeManager {
             context.planning_binding = Some(binding);
             context.planning_snapshot = Some(Arc::new(planning));
             context.owner_node_id = self.cache_location().map(|(_, node)| node.to_owned());
-            // The processed candidate enhances a start that was already
-            // resolved. Dispatch falls back to that start, with the reason,
-            // if the prepared graph cannot be consumed; a client that named
-            // the processed candidate itself has no such fallback.
+            // The processed candidate enhances the ordinary session that is
+            // already playing. A dispatch that cannot consume the prepared
+            // graph falls back to that request, with the reason; a client that
+            // named the processed candidate itself has no such fallback.
             context.ordinary_request =
                 (!original.selected_candidate.processed_dv).then(|| Box::new(request.clone()));
             trial.candidate_context = Some(Box::new(context));
             trial.hdr10 = destination != DvDestination::Sdr;
-            let lease_binding = trial.processed_preparation_binding(recovery)?;
-            trial
-                .candidate_context
-                .as_mut()
-                .ok_or("processed candidate context missing")?
-                .prepared_processing = Some(PreparedCandidateOnce::new(
-                lease_binding,
-                // Consumable for as long as this create may still dispatch:
-                // the same stage deadline that bounds its worker placement.
-                crate::media_pool::create_stage_deadline(crate::media_sessions::START_DEADLINE)
-                    .into_std(),
+            tracing::info!(target: "plurxd::transcode",
+                session = %crate::transcode::session_log_id(session_id),
+                ?destination, height,
+                "processed upgrade verified its first window");
+            Ok(Some(ProcessedUpgradeTrial {
+                request: trial,
+                candidate,
                 root,
-            ));
-            Ok(Some((trial, candidate)))
+            }))
         }
+    }
+
+    /// Hand a verified upgrade root to the prepared successor `incarnation_id`
+    /// will prime. Process-private and one-shot: only that successor's first
+    /// preparation on this node can take it, and dropping the returned lease
+    /// (the staging ended, however it ended) frees whatever was not taken.
+    /// Whether this node's one processed-preparation slot is free now;
+    /// `None` where processed output is not rendered.
+    pub(crate) fn processed_preparation_slot_free(&self) -> Option<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            Some(self.processed_preparation_slot.available_permits() > 0)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    pub(crate) fn hold_processed_upgrade_root(
+        &self,
+        incarnation_id: &str,
+        context: CandidateExecutionContext,
+        root: crate::vodserve::PreparedRootAdmission,
+    ) -> ProcessedUpgradeRootLease {
+        let mut held = self
+            .processed_upgrade_roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.insert(
+            incarnation_id.to_owned(),
+            HeldProcessedUpgradeRoot {
+                context: Box::new(context),
+                root,
+                deadline: Instant::now() + crate::media_sessions::START_DEADLINE,
+            },
+        );
+        ProcessedUpgradeRootLease {
+            roots: Arc::clone(&self.processed_upgrade_roots),
+            incarnation_id: incarnation_id.to_owned(),
+        }
+    }
+
+    pub(crate) fn take_processed_upgrade_root(
+        &self,
+        incarnation_id: &str,
+    ) -> Option<HeldProcessedUpgradeRoot> {
+        self.processed_upgrade_roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(incarnation_id)
+            .filter(|held| Instant::now() < held.deadline)
+    }
+
+    /// The successor half of a processed upgrade: the exact root its trial
+    /// verified, validated against the staged recipe the same way a staged
+    /// processed predecessor's root is ([`Self::validate_processed_root`]).
+    async fn restore_processed_upgrade_root(
+        &self,
+        remote: &mut crate::media_sessions::RemoteStartRequest,
+        held: HeldProcessedUpgradeRoot,
+    ) -> Result<crate::vodserve::PreparedRootAdmission, String> {
+        let HeldProcessedUpgradeRoot { context, root, .. } = held;
+        let req = &remote.request;
+        let catalog = remote
+            .candidate_catalog
+            .as_ref()
+            .ok_or("processed upgrade catalog missing")?;
+        let selected = &context.selected_candidate;
+        if req.request_id.as_deref() != Some(remote.incarnation_id.as_str())
+            || req.presentation != Presentation::Vod
+            || req.continuous_media.is_some()
+            || req.subtitle_burn.is_some()
+            || req.dv_processing_destination.is_none()
+            || remote.candidate_id != Some(context.candidate_id)
+            || catalog.candidate.id != selected.id
+            || catalog.candidate.recipe_digest != selected.recipe_digest
+            || context.planning_binding.as_ref() != Some(&catalog.binding)
+        {
+            return Err("processed upgrade identity changed".into());
+        }
+        let mut file = context
+            .planning_snapshot
+            .as_ref()
+            .ok_or("processed upgrade planning missing")?
+            .file
+            .clone();
+        if file.size != remote.source_size || file.mtime != remote.source_mtime {
+            return Err("processed upgrade source changed".into());
+        }
+        file.audio_offset_ms = if file.audio_streams.is_empty() {
+            0
+        } else {
+            req.audio_offset_ms.clamp(-15_000, 15_000)
+        };
+        self.validate_processed_root(req, &context, &file, &root)
+            .await?;
+        let mut context = context;
+        context.prepared_processing = None;
+        remote.request.candidate_context = Some(context);
+        Ok(root)
     }
 
     /// [`Self::prepare_vod_encoding`] with the HWACCEL preference already in
@@ -3727,23 +3864,6 @@ impl TranscodeManager {
         Ok(prepared)
     }
 
-    /// Physical window controls consume the same one-shot owner lease and
-    /// source/recipe validation as dispatch, without starting a registry driver.
-    #[cfg(all(test, target_os = "linux"))]
-    pub(super) async fn admit_processed_window_control(
-        &self,
-        request: &SessionRequest,
-        recovery: &SessionRecoveryIdentity,
-        file: &plurx_core::domain::MediaFile,
-    ) -> Result<crate::vodserve::PreparedRootAdmission, String> {
-        let context = request
-            .candidate_context
-            .as_ref()
-            .ok_or("processed context missing")?;
-        self.admit_prepared_processing(request, context, Some(recovery), file)
-            .await
-    }
-
     /// Rebuild descriptive inputs only under a verified first-preparation
     /// expectation, borrowing custody from its exact process-local predecessor.
     /// This does not relax generic serialized catalog restoration.
@@ -5165,7 +5285,27 @@ impl TranscodeManager {
                 .candidate_catalog
                 .as_ref()
                 .is_some_and(|catalog| catalog.candidate.processed_dv);
-            let root_admission = if processed {
+            // A processed successor's root is either the exact root its trial
+            // verified after the ordinary predecessor's first frame (the
+            // processed upgrade), or its processed predecessor's own.
+            let upgrade = if processed && first_capture {
+                self.take_processed_upgrade_root(&remote.incarnation_id)
+            } else {
+                None
+            };
+            let root_admission = if let Some(upgrade) = upgrade {
+                match self
+                    .restore_processed_upgrade_root(&mut remote, upgrade)
+                    .await
+                {
+                    Ok(root) => Some(root),
+                    Err(error) => {
+                        tracing::warn!(target: "plurxd::transcode", %error,
+                            "processed upgrade root refused by its successor");
+                        return false;
+                    }
+                }
+            } else if processed {
                 let Some(predecessor) = processed_predecessor.as_ref() else {
                     return false;
                 };

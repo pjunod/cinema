@@ -3685,7 +3685,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Review 1 B1: +1 test-only `OwnedCreate::spawn` in
 # `a_create_cancelled_at_its_claim_await_leaves_the_claim_retryable`; the
 # test drops it before the create owns its claim, which aborts it.
-expected_occurrences = 1088
+# D1 processed DV upgrade: +1 production `tokio::spawn` in
+# http/hls/processed_upgrade.rs `note_first_frame`. It runs one upgrade for one
+# session after that session's first frame: it owns the `UpgradeRun` claim
+# (dropped, and its registry entry removed, when the task ends however it
+# ends), races the run against that claim's cancellation (release, a newer
+# session for the playback) and the playback's pending-candidate slot (a
+# viewer's own change). It holds the trial's prepared root only through a
+# `ProcessedUpgradeRootLease` that frees it on drop, and starts no process of
+# its own: the trial and the successor's prime use the existing owners.
+expected_occurrences = 1089
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes

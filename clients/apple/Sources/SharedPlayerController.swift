@@ -1011,6 +1011,17 @@ extension SharedPlayerController: PreparedSuccessorHost {
             discardPreparedSuccessor()
             return PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
         }
+        // A landed seek says where the item's clock is, not that a picture
+        // exists there: a seek into a buffer hole lands and decodes nothing.
+        // The parked successor shows a decoded frame at the aligned position
+        // before it is exposed, inside the same alignment bound, or the
+        // incumbent stays and the change takes its ordinary reopen.
+        guard await awaitSharedDecodedAlignment(item, output: output, rendezvous: rendezvous,
+                                                frameDurationSeconds: frameDurationSeconds),
+              !closing, preparedItem === item, preparedPlayer === successor else {
+            discardPreparedSuccessor()
+            return PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
+        }
         // The parked successor waits at the switch point for the incumbent,
         // so the swap neither skips nor repeats film.
         guard await awaitSharedRendezvous(rendezvous, frameDurationSeconds: frameDurationSeconds,
@@ -1031,6 +1042,33 @@ extension SharedPlayerController: PreparedSuccessorHost {
             return .switchedWithoutAFrame
         }
         return .committed(firstFrameUnixMs: frame)
+    }
+
+    /// The aligned successor's own decoded frame, at the item position the
+    /// rendezvous froze, read off the output the commit already installed.
+    /// Bounded by `alignmentMs`, as Local's decoded alignment is.
+    private func awaitSharedDecodedAlignment(_ item: AVPlayerItem, output: AVPlayerItemVideoOutput,
+                                             rendezvous: PreparedCommitRendezvous,
+                                             frameDurationSeconds: Double) async -> Bool {
+        let began = Int(ProcessInfo.processInfo.systemUptime * 1_000)
+        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - began < PreparedReplacementBounds.alignmentMs {
+            guard !Task.isCancelled, !closing, playing, preparedItem === item, preparedOutput === output,
+                  item.status == .readyToPlay else { return false }
+            let itemTime = item.currentTime()
+            var displayTime = CMTime.invalid
+            if itemTime.isValid, itemTime.seconds.isFinite,
+               output.hasNewPixelBuffer(forItemTime: itemTime),
+               let pixels = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &displayTime),
+               displayTime.isValid,
+               rendezvous.acceptsDecodedAlignment(
+                   displaySeconds: displayTime.seconds,
+                   width: CVPixelBufferGetWidth(pixels), height: CVPixelBufferGetHeight(pixels),
+                   frameDurationSeconds: frameDurationSeconds) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: UInt64(PreparedReplacementBounds.pollMs) * 1_000_000)
+        }
+        return false
     }
 
     /// Wait for the incumbent to reach the planned switch point. Arriving

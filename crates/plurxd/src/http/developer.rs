@@ -572,6 +572,7 @@ pub(crate) async fn readiness(
             clock_measurement(&state, clock_guard_enforced),
             durable_cluster_work(&state).await,
             indexing_while_serving(&state).await,
+            processed_dv_upgrade(&state).await,
             bounded_catalogue_reads(
                 &state,
                 plurx_core::store::stored_switch(
@@ -1192,6 +1193,135 @@ fn domain_readers(
             (domain, readers)
         })
         .collect()
+}
+
+/// How many measured switches each platform needs before the processed
+/// Dolby Vision upgrade leaves the Developer tab (Paul, 2026-11-07).
+const PROCESSED_UPGRADE_SWITCHES: u64 = 20;
+
+/// Processed Dolby Vision / HDR10-E is an upgrade after the first frame,
+/// switched in through the M6 prepared replacement (plan ruling 3). It always
+/// runs when the processing settings are on; these rows say whether the
+/// switch it rides on is qualified on each platform, from the `prepared_seam`
+/// reports this node has counted since it started, and whether this node can
+/// run an upgrade now. Advisory: nothing here gates anything.
+async fn processed_dv_upgrade(state: &AppState) -> DeveloperEnableItem {
+    use crate::playback_control::{prepared_seam_counts, processed_upgrade_count, ClientPlatform};
+    use RequirementStatus::{Met, Unavailable, Unmet};
+    let platform = |id: &'static str, title: &'static str, client: ClientPlatform, note: &str| {
+        let (qualified, reported) = prepared_seam_counts(client);
+        DeveloperRequirement {
+            id,
+            title,
+            status: if qualified >= PROCESSED_UPGRADE_SWITCHES {
+                Met
+            } else {
+                Unmet
+            },
+            evidence: format!(
+                "{}: {qualified} of {PROCESSED_UPGRADE_SWITCHES} measured switches (committed, \
+                 complete ±2 s frame samples, zero dropped frames, independently observed audio \
+                 continuity, no reopen); {reported} prepared switches reported to this node since \
+                 it started.{note}",
+                if qualified >= PROCESSED_UPGRADE_SWITCHES {
+                    "qualified"
+                } else {
+                    "unqualified"
+                }
+            ),
+        }
+    };
+    #[cfg(target_os = "linux")]
+    let renderer = match crate::vodencode::dv_runtime::ToolSet::capture().await {
+        Ok(Some(_)) => (
+            Met,
+            "The processing helper is installed on this node.".to_owned(),
+        ),
+        Ok(None) => (
+            Unmet,
+            "No processing helper on this node: its sessions start ordinary and stay so."
+                .to_owned(),
+        ),
+        Err(error) => (
+            Unavailable,
+            format!("The processing helper could not be read: {error}"),
+        ),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let renderer = (
+        Unmet,
+        "Processed output is rendered only on Linux workers.".to_owned(),
+    );
+    let slot = match state.transcode.processed_preparation_slot_free() {
+        Some(true) => (
+            Met,
+            "This node's one processed-preparation slot is free.".to_owned(),
+        ),
+        Some(false) => (
+            Unmet,
+            "This node's processed-preparation slot is in use: an upgrade that finds it busy \
+             declines and its session keeps playing ordinary."
+                .to_owned(),
+        ),
+        None => (
+            Unmet,
+            "This node has no processed-preparation slot.".to_owned(),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "processed_dv_upgrade",
+        title: "Processed DV upgrade",
+        enabled: None,
+        setting: None,
+        requirements: vec![
+            platform(
+                "processed_upgrade_web",
+                "Web switches measured",
+                ClientPlatform::Web,
+                " The web client does not measure audio at the seam (an analyser would capture \
+                 the element's audio for its lifetime), so its switches report audio unobserved.",
+            ),
+            platform(
+                "processed_upgrade_apple",
+                "Apple switches measured",
+                ClientPlatform::Apple,
+                "",
+            ),
+            platform(
+                "processed_upgrade_android",
+                "Android switches measured",
+                ClientPlatform::Android,
+                "",
+            ),
+            DeveloperRequirement {
+                id: "processed_upgrade_renderer",
+                title: "Renderer present",
+                status: renderer.0,
+                evidence: renderer.1,
+            },
+            DeveloperRequirement {
+                id: "processed_upgrade_slot",
+                title: "Slot free",
+                status: slot.0,
+                evidence: slot.1,
+            },
+            DeveloperRequirement {
+                id: "processed_upgrade_activity",
+                title: "Upgrades on this node",
+                status: Met,
+                evidence: format!(
+                    "Since start: {} scheduled by a first frame, {} staged as a prepared \
+                     successor, {} declined, {} not admitted, {} cancelled. A declined or \
+                     cancelled upgrade leaves its session playing ordinary.",
+                    processed_upgrade_count("scheduled"),
+                    processed_upgrade_count("staged"),
+                    processed_upgrade_count("declined"),
+                    processed_upgrade_count("admission_refused"),
+                    processed_upgrade_count("cancelled"),
+                ),
+            },
+        ],
+    }
 }
 
 /// Content analysis no longer waits for an idle node (C1): a serving node

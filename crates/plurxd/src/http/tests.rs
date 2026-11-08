@@ -8643,6 +8643,9 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // C1: what this node's indexer may do while it serves. All four
             // rows describe an idle standalone node here.
             "indexing_while_serving",
+            // D1: the processed DV upgrade's per-platform switch
+            // qualification and this node's renderer and slot.
+            "processed_dv_upgrade",
             "bounded_catalogue_reads",
             "cluster_backup",
             "windows_server",
@@ -8743,6 +8746,11 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
                     | "output_node_idle"
                     | "output_storage_ownership"
                     | "retention_same_filesystem"
+                    // D1: the helper is the host's, and the activity row is
+                    // a count rather than a requirement.
+                    | "processed_upgrade_renderer"
+                    | "processed_upgrade_slot"
+                    | "processed_upgrade_activity"
             )
         })
         .collect::<Vec<_>>();

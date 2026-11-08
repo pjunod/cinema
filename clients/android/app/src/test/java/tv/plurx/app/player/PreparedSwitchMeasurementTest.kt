@@ -189,4 +189,74 @@ class PreparedSwitchMeasurementTest {
             preparedSwitchAudioUnderrunRow(preparedSwitchEventCount(emptyList(), 0)),
         )
     }
+
+    // D1: the seam report. Only a committed switch whose window was sampled
+    // end to end, with no drop and no audio underrun, is one of the twenty.
+
+    @Test
+    fun seamEvidenceIsCompleteOnlyForADecoderSampledWindow() {
+        val recorder = PreparedSwitchRecorder()
+        recorder.noteDecoderDropped(8_000, 3, pipeline = 1)
+        recorder.noteDecoderDropped(10_000, 3, pipeline = 1, force = true)
+        recorder.noteCommit(10_000, tappedAtMs = null, predecessor = 1, successor = 2)
+        recorder.noteDecoderDropped(10_000, 0, pipeline = 2, force = true)
+        assertFalse("the successor side is unsampled", recorder.seamEvidence(10_500).framesComplete)
+        recorder.noteDecoderDropped(12_000, 0, pipeline = 2, force = true)
+        val evidence = recorder.seamEvidence(12_250)
+        assertTrue(evidence.framesComplete)
+        assertEquals(0L, evidence.droppedFrames)
+        assertTrue(evidence.audioObserved)
+        recorder.noteAudioUnderrun(11_000, pipeline = 2)
+        assertFalse("an underrun at the seam is not continuity", recorder.seamEvidence(12_250).audioObserved)
+        assertFalse(PreparedSwitchRecorder().seamEvidence(0).framesComplete)
+    }
+
+    @Test
+    fun unforcedDecoderReadingsAreSpacedSoTheBoundedListSpansTheWindow() {
+        // The rendezvous polls far faster than the window needs. Unspaced, the
+        // 32-sample bound would keep only the last 1.6 s of the predecessor.
+        val recorder = PreparedSwitchRecorder()
+        for (at in 0L until 4_000L step 50L) recorder.noteDecoderDropped(at, 0, pipeline = 1)
+        recorder.noteDecoderDropped(4_000, 0, pipeline = 1, force = true)
+        recorder.noteCommit(4_000, tappedAtMs = null, predecessor = 1, successor = 2)
+        recorder.noteDecoderDropped(4_000, 0, pipeline = 2, force = true)
+        recorder.noteDecoderDropped(6_000, 0, pipeline = 2, force = true)
+        val evidence = recorder.seamEvidence(6_500)
+        assertTrue("both sides span their two seconds", evidence.framesComplete)
+        assertEquals(0L, evidence.droppedFrames)
+    }
+
+    @Test
+    fun theSeamReportNamesEachOutcomeAndOnlyACommitCanCount() {
+        val clean = PreparedSeamEvidence(framesComplete = true, droppedFrames = 0, audioObserved = true)
+        val committed = preparedSeamReport("committed", clean)!!
+        assertEquals("android", committed.platform)
+        assertTrue(committed.framesComplete && committed.audioObserved && !committed.reopened)
+        val refused = preparedSeamReport("refused", clean)!!
+        assertTrue(refused.reopened && !refused.framesComplete && !refused.audioObserved)
+        assertNull(refused.droppedFrames)
+        assertEquals("switched_without_a_frame", preparedSeamReport("switched_without_a_frame", null)!!.outcome)
+        assertNull(preparedSeamReport("teleported", clean))
+    }
+
+    /**
+     * MediaSession.setPlayer follows the successor's proven frame, never the
+     * commit itself: the system transport is rebound in the first-frame
+     * settle, and a rollback rebinds the predecessor.
+     */
+    @Test
+    fun mediaSessionMovesToTheSuccessorOnlyAfterItsFrame() {
+        val module = generateSequence(java.io.File("").absoluteFile) { it.parentFile }
+            .first { java.io.File(it, "src/main/java/tv/plurx/app/player/Controller.kt").isFile }
+        val source = java.io.File(module, "src/main/java/tv/plurx/app/player/Controller.kt").readText()
+        val commit = source.substringAfter("private fun commitPreparedReplacement(")
+            .substringBefore("private fun settleCommitOnFirstFrame(")
+        assertFalse("the commit does not hand MediaSession the successor", commit.contains("rebindMediaSessionTransport()"))
+        assertTrue(commit.contains("mediaSessionRebindAwaitsFrame = true"))
+        val settle = source.substringAfter("private fun settleCommitOnFirstFrame(")
+            .substringBefore("private fun drainSeekDeferredBehindSwitch(")
+        val proof = settle.indexOf("preparedSwitch.noteFirstFrame(")
+        val rebind = settle.indexOf("rebindMediaSessionTransport()")
+        assertTrue("rebound only after the frame", proof in 0 until rebind)
+    }
 }

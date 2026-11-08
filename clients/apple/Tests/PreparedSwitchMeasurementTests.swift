@@ -179,4 +179,46 @@ final class PreparedSwitchMeasurementTests: XCTestCase {
             "0 access-log stalls · ±2.0 s · 0.0 s of 4.0 s sampled"
         )
     }
+
+    // MARK: the seam report (D1)
+
+    func testSeamEvidenceIsCompleteOnlyForAFullySampledWindow() {
+        var recorder = M.Recorder()
+        recorder.note(atMs: 0, droppedFrames: 4, stalls: 1)
+        recorder.note(atMs: 2_000, droppedFrames: 4, stalls: 1)
+        recorder.note(commitAtMs: 2_000)
+        recorder.note(atMs: 2_000, droppedFrames: 0, stalls: 0)
+        XCTAssertFalse(recorder.seamEvidence().framesComplete, "the successor side is not sampled yet")
+        recorder.note(atMs: 4_000, droppedFrames: 0, stalls: 0)
+        let evidence = recorder.seamEvidence()
+        XCTAssertTrue(evidence.framesComplete)
+        XCTAssertEqual(evidence.droppedFrames, 0)
+        XCTAssertTrue(evidence.audioObserved, "the stall counter was sampled across the window and did not move")
+        var stalled = M.Recorder()
+        stalled.note(atMs: 0, droppedFrames: 0, stalls: 0)
+        stalled.note(atMs: 2_000, droppedFrames: 0, stalls: 1)
+        stalled.note(commitAtMs: 2_000)
+        stalled.note(atMs: 2_000, droppedFrames: 0, stalls: 0)
+        stalled.note(atMs: 4_000, droppedFrames: 0, stalls: 0)
+        XCTAssertFalse(stalled.seamEvidence().audioObserved, "a stall at the seam is not continuity")
+        XCTAssertFalse(M.Recorder().seamEvidence().framesComplete)
+    }
+
+    func testSeamBeaconNamesEachOutcomeAndCountsOnlyACommit() throws {
+        let clean = PreparedSeamEvidence(framesComplete: true, droppedFrames: 0, audioObserved: true)
+        let committed = try XCTUnwrap(PreparedSeamBeacon.seam(.committed(firstFrameUnixMs: 1), evidence: clean))
+        XCTAssertEqual(committed.platform, "apple")
+        XCTAssertEqual(committed.outcome, "committed")
+        XCTAssertTrue(committed.frames_complete && committed.audio_observed && !committed.reopened)
+        let refused = try XCTUnwrap(PreparedSeamBeacon.seam(.refused, evidence: clean))
+        XCTAssertEqual(refused.outcome, "refused")
+        XCTAssertTrue(refused.reopened && !refused.frames_complete && !refused.audio_observed)
+        let blank = try XCTUnwrap(PreparedSeamBeacon.seam(.switchedWithoutAFrame, evidence: clean))
+        XCTAssertEqual(blank.outcome, "switched_without_a_frame")
+        XCTAssertNil(PreparedSeamBeacon.seam(.failedWithoutReopen, evidence: clean))
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PreparedSeamBeacon(
+            message: "m", detail: "committed", session_id: "s", prepared_seam: committed))) as? [String: Any]
+        XCTAssertEqual(json?["event"] as? String, "prepared_seam")
+        XCTAssertEqual((json?["prepared_seam"] as? [String: Any])?["outcome"] as? String, "committed")
+    }
 }
