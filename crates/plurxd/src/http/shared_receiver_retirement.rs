@@ -54,6 +54,7 @@ impl RetirementStep {
             | PeerError::InvalidResponse
             // A Start refusal is never evidence about this End operation.
             | PeerError::DolbyVisionUnsupported
+            | PeerError::StartRetry(_)
             | PeerError::Rejected(_) => Self::Retry,
         }
     }

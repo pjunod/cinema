@@ -377,6 +377,7 @@ fn clone_error(error: &PeerError) -> PeerError {
         PeerError::InvalidResponse => PeerError::InvalidResponse,
         PeerError::Rejected(status) => PeerError::Rejected(*status),
         PeerError::DolbyVisionUnsupported => PeerError::DolbyVisionUnsupported,
+        PeerError::StartRetry(retry) => PeerError::StartRetry(*retry),
     }
 }
 

@@ -1711,7 +1711,8 @@ async fn start(
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: axum::body::Body,
 ) -> Result<axum::response::Response, ApiError> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(305);
+    let clock = SourceStartClock::new(&headers);
+    let deadline = clock.work_deadline();
     let bytes = axum::body::to_bytes(body, 128 * 1024)
         .await
         .map_err(|_| invalid())?;
@@ -1723,24 +1724,33 @@ async fn start(
         .transcode
         .source_http_starts
         .register(grant, &viewer, &input, &authenticated_hash)
-        .map_err(SourceStartFailure::response)?;
+        .map_err(|failure| clock.refusal(failure))?;
     if new {
         // No await separates insertion and spawning the owned task. Disconnect
         // drops only a waiter; durable/physical work stays owned by this entry.
         let state = std::sync::Arc::new(state.clone());
         entry.start_owned_task(state, headers.clone(), input, deadline);
     }
-    let assignment = ingress::assigned(&state, &entry, deadline).await?;
+    let assignment = clock
+        .answer(ingress::assigned(&state, &entry, deadline))
+        .await??;
     let connection = connection.ok_or_else(unavailable)?;
     ingress::register_local(&state, &connection.0, &entry, &assignment, deadline).await?;
-    let owned = entry
-        .wait(deadline)
-        .await
+    let owned = clock
+        .answer(entry.wait(deadline))
+        .await?
         .map_err(SourceStartFailure::response)?;
     if owned.actor.is_direct() {
         return direct::published_reply(&state, &headers, &entry, &owned, &target, grant, deadline)
             .await;
     }
+    // Wait for the first publication on the viewer's clock alone, then open
+    // the response under the owner's: opening reserves a body and is not
+    // abandoned midway.
+    clock
+        .answer(owned.actor.wait_ready(deadline))
+        .await?
+        .map_err(|e| SourceStartFailure::from(e).response())?;
     let (response, guard) = owned
         .actor
         .open_start_response(deadline)
@@ -1760,6 +1770,60 @@ async fn start(
         serde_json::json!({"reference":target,"incarnation_id":owned.assignment.binding().incarnation_id(),"response":response}),
     )?;
     Ok(hold_start_body(response, guard))
+}
+/// A peer Start's clock. A receiver that sends the viewer's remaining start
+/// (only to a Source advertising `START_BUDGET_FEATURE`) gets the local
+/// create's rule: an answer by `CreateStartupBudget::deadline`, a typed
+/// `startup_timeout` if the entry is still working then, and owned work
+/// bounded by the same owner window, which the worker further caps with its
+/// configured materialize allowance (`source_start_budget_for_request`) the
+/// way a local claim window caps a local owner. A Start without the header
+/// (an older receiver) keeps today's fixed 305 s bound and today's refusals.
+struct SourceStartClock {
+    budget: Option<crate::media_pool::CreateStartupBudget>,
+    fixed: std::time::Instant,
+}
+impl SourceStartClock {
+    fn new(headers: &HeaderMap) -> Self {
+        Self {
+            budget: super::hls::startup_allowance(headers)
+                .map(crate::media_pool::CreateStartupBudget::new),
+            fixed: std::time::Instant::now() + std::time::Duration::from_secs(305),
+        }
+    }
+    fn work_deadline(&self) -> std::time::Instant {
+        self.budget.as_ref().map_or(self.fixed, |budget| {
+            budget
+                .owner_window(self.fixed.into(), super::hls::OWNED_CREATE_REPOST_GRACE)
+                .into_std()
+        })
+    }
+    /// Run a pure wait to the viewer's answer deadline; past it, the typed
+    /// "not yet" (the owned work is untouched). Without a clock, the wait
+    /// runs exactly as it always has.
+    async fn answer<T>(&self, wait: impl std::future::Future<Output = T>) -> Result<T, ApiError> {
+        let Some(budget) = &self.budget else {
+            return Ok(wait.await);
+        };
+        tokio::time::timeout_at(budget.deadline, wait)
+            .await
+            .map_err(|_| {
+                super::hls::create_still_starting("The Source is still preparing this stream")
+            })
+    }
+    /// Registration capacity is a full registry: no entry was made, so a
+    /// retry later is a fresh, bounded attempt, answered as a local create's
+    /// `media_session_overloaded` to a receiver that reads typed retries.
+    fn refusal(&self, failure: SourceStartFailure) -> ApiError {
+        if self.budget.is_some() && failure == SourceStartFailure::Capacity {
+            return crate::sharing_client::StartRetry {
+                code: crate::sharing_client::StartRetryCode::Overloaded,
+                retry_after_secs: super::hls::MEDIA_SESSION_OVERLOADED_RETRY_AFTER_SECS,
+            }
+            .response("The Source has no free start slot right now");
+        }
+        failure.response()
+    }
 }
 fn hold_start_body(
     response: axum::response::Response,

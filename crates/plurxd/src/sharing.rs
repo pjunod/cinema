@@ -147,6 +147,8 @@ impl SharingManager {
                 &plurx_core::sharing::Endpoint,
             ) -> Result<(), crate::sharing_client::PeerError>
             + Send,
+        clock: Option<&crate::media_pool::CreateStartupBudget>,
+        mut retrying: impl FnMut(crate::sharing_client::StartRetry) -> bool + Send,
     ) -> Result<ReceiverSourceStartResult, crate::sharing_client::PeerError> {
         use crate::sharing_client::{PeerConnection, PeerError};
         let expected = receiver_source_request(intent, request_json)?;
@@ -186,13 +188,17 @@ impl SharingManager {
             catalogue_epoch: expected.catalogue_epoch,
             created_at_ms: 0,
         };
-        let (mut peer, _) = PeerConnection::verified_with_lifetime(
+        let (mut peer, identity) = PeerConnection::verified_with_lifetime(
             self,
             &summary.endpoints,
             &source,
             connection_lifetime,
         )
         .await?;
+        // The viewer's clock crosses only to a Source that reads it (H2): an
+        // older Source gets exactly today's Start.
+        let clock =
+            clock.filter(|_| identity.supports(crate::sharing_client::START_BUDGET_FEATURE));
         // The handshake can park. Reobserve the original login and committed
         // blocked owner immediately before the first non-idempotent send.
         self.ensure_current(state, summary).await?;
@@ -267,9 +273,38 @@ impl SharingManager {
                 return Err(PeerError::Authentication);
             }
         }
-        let reply = peer
-            .file_start(&credential.credential, &expected, &viewer, request_json)
-            .await?;
+        // One Start, re-posted with the same bytes on the same pinned
+        // connection after each typed "not yet": the Source's retained entry
+        // for this request is rejoined, never a second producer. The viewer's
+        // clock bounds the re-posts by the local create's owner window.
+        let window = clock.map(|clock| {
+            clock.owner_window(
+                tokio::time::Instant::now() + Duration::from_secs(305),
+                crate::http::hls::OWNED_CREATE_REPOST_GRACE,
+            )
+        });
+        let reply = loop {
+            match peer
+                .file_start(
+                    &credential.credential,
+                    &expected,
+                    &viewer,
+                    request_json,
+                    clock.map(crate::media_pool::CreateStartupBudget::viewer_remaining),
+                )
+                .await
+            {
+                Err(PeerError::StartRetry(retry)) => {
+                    let wait = Duration::from_secs(retry.retry_after_secs);
+                    let window = window.ok_or(PeerError::Unavailable)?;
+                    if !retrying(retry) || tokio::time::Instant::now() + wait >= window {
+                        return Err(PeerError::StartRetry(retry));
+                    }
+                    tokio::time::sleep(wait).await;
+                }
+                result => break result?,
+            }
+        };
         // Do not discard a known Source result after an await. Publication
         // repeats B authority; cleanup retains this handle independently.
         Ok(ReceiverSourceStartResult {

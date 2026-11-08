@@ -79,6 +79,56 @@ pub(crate) enum PeerError {
     Rejected(StatusCode),
     /// An authenticated Start refusal, never a physical cleanup receipt.
     DolbyVisionUnsupported,
+    /// A Source's typed "not yet" to a Start that carried the viewer's start
+    /// clock: its owned work goes on, and the same request rejoins it.
+    StartRetry(StartRetry),
+}
+
+/// The Start capability a Source advertises in its identity handshake: it
+/// reads the viewer's remaining start (`x-plurx-startup-remaining-ms`) on a
+/// peer Start and may answer it with a typed retryable refusal. A receiver
+/// sends that header only to a Source that advertises this, and a Source
+/// answers typed retries only to a Start that carried it, so an older peer on
+/// either side sees exactly the shapes it always has.
+pub(crate) const START_BUDGET_FEATURE: &str = "start_budget_v1";
+
+/// A retryable Start refusal, with the same codes and `Retry-After` a local
+/// create answers with (`create_503_not_yet` in the playback contract).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StartRetry {
+    pub code: StartRetryCode,
+    pub retry_after_secs: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartRetryCode {
+    /// The owner is still working: `startup_timeout`.
+    StartupTimeout,
+    /// No start slot is free right now: `media_session_overloaded`.
+    Overloaded,
+}
+impl StartRetryCode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::StartupTimeout => "startup_timeout",
+            Self::Overloaded => "media_session_overloaded",
+        }
+    }
+    fn parse(code: &str) -> Option<Self> {
+        [Self::StartupTimeout, Self::Overloaded]
+            .into_iter()
+            .find(|known| known.as_str() == code)
+    }
+}
+impl StartRetry {
+    /// The typed answer to the viewer, the way a local create gives it.
+    pub(crate) fn response(self, message: &str) -> crate::http::error::ApiError {
+        crate::http::error::ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: self.code.as_str(),
+            message: message.to_owned(),
+            retry_after_seconds: self.retry_after_secs,
+        }
+    }
 }
 #[derive(Deserialize)]
 pub(crate) struct Identity {
@@ -89,6 +139,15 @@ pub(crate) struct Identity {
     pub name: String,
     pub protocol_min: u8,
     pub protocol_max: u8,
+    /// Additive capabilities. A Source that predates them sends none, and a
+    /// receiver that predates them ignores the field.
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+impl Identity {
+    pub(crate) fn supports(&self, feature: &str) -> bool {
+        self.features.iter().any(|known| known == feature)
+    }
 }
 pub(crate) struct PeerArtwork {
     pub bytes: axum::body::Bytes,
@@ -334,6 +393,9 @@ impl PeerConnection {
         if identity.name.len() > 128 || identity.name.chars().any(char::is_control) {
             return Err(PeerError::InvalidResponse);
         }
+        if identity.features.len() > 32 || identity.features.iter().any(|f| f.len() > 64) {
+            return Err(PeerError::InvalidResponse);
+        }
         Ok(identity)
     }
     async fn request<T: DeserializeOwned>(
@@ -555,6 +617,7 @@ impl PeerConnection {
         expected: &crate::http::hls::SourcePlaybackTarget,
         viewer_hash: &str,
         request_json: &str,
+        startup_remaining: Option<Duration>,
     ) -> Result<crate::http::sharing_direct_wire::DecodedSourceStart, PeerError> {
         crate::http::validate_source_start_request(request_json.as_bytes(), expected)
             .map_err(|_| PeerError::InvalidResponse)?;
@@ -580,7 +643,7 @@ impl PeerConnection {
             let mut viewer =
                 HeaderValue::from_str(viewer_hash).map_err(|_| PeerError::InvalidResponse)?;
             viewer.set_sensitive(true);
-            let request = Request::builder()
+            let mut request = Request::builder()
                 .method(Method::POST)
                 .uri(format!(
                     "/sharing/v1/items/{}/files/{}/sessions",
@@ -591,7 +654,17 @@ impl PeerConnection {
                 .header(header::ACCEPT, "application/json")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::AUTHORIZATION, authorization)
-                .header("cinemashare-viewer", viewer)
+                .header("cinemashare-viewer", viewer);
+            // Outside the canonical body: the Source's Start identity is the
+            // digest of those bytes, so a re-post with less time left is
+            // still the same Start.
+            if let Some(remaining) = startup_remaining {
+                request = request.header(
+                    crate::http::hls::STARTUP_REMAINING_HEADER,
+                    remaining.as_millis().to_string(),
+                );
+            }
+            let request = request
                 .body(Body::from(request_json.to_owned()))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender
@@ -604,6 +677,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             let bytes = axum::body::to_bytes(
                 Body::new(
                     response
@@ -625,7 +699,11 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if !status.is_success() {
-                return Err(source_start_refusal(status, &bytes));
+                return Err(source_start_refusal(
+                    status,
+                    &bytes,
+                    startup_remaining.map(|_| retry_after.as_ref()),
+                ));
             }
             crate::http::sharing_direct_wire::decode_source_start(&bytes, expected, direct)
                 .map_err(|_| PeerError::InvalidResponse)
@@ -1387,12 +1465,38 @@ mod driver_lifetime_tests {
 
 /// Preserve only the closed typed Start code; peer prose never reaches B's UI.
 /// This answer says nothing about whether an older invocation owns resources.
-fn source_start_refusal(status: StatusCode, bytes: &[u8]) -> PeerError {
+///
+/// `budgeted` is `Some(Retry-After)` only for a Start that carried the
+/// viewer's clock to a Source that advertised [`START_BUDGET_FEATURE`]: only
+/// then is a typed retry decoded, so every other Start keeps today's mapping.
+fn source_start_refusal(
+    status: StatusCode,
+    bytes: &[u8],
+    budgeted: Option<Option<&HeaderValue>>,
+) -> PeerError {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Refusal {
         code: String,
         message: String,
+    }
+    if let (Some(retry_after), StatusCode::SERVICE_UNAVAILABLE) = (budgeted, status) {
+        let retry_after_secs = retry_after
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|secs| (1..=30).contains(secs));
+        if let (Ok(refusal), Some(retry_after_secs)) =
+            (serde_json::from_slice::<Refusal>(bytes), retry_after_secs)
+        {
+            if let Some(code) =
+                StartRetryCode::parse(&refusal.code).filter(|_| refusal.message.len() <= 4096)
+            {
+                return PeerError::StartRetry(StartRetry {
+                    code,
+                    retry_after_secs,
+                });
+            }
+        }
     }
     if status == StatusCode::UNPROCESSABLE_ENTITY {
         if let Ok(refusal) = serde_json::from_slice::<Refusal>(bytes) {
@@ -1415,23 +1519,120 @@ mod source_start_refusal_tests {
         let body =
             br#"{"code":"sharing_start_dolby_vision_unsupported","message":"source detail"}"#;
         assert!(matches!(
-            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, body),
+            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, body, None),
             PeerError::DolbyVisionUnsupported
         ));
         assert!(matches!(
-            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body),
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body, None),
             PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
         ));
         assert!(matches!(
             source_start_refusal(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                br#"{"code":"something_else","message":"detail"}"#
+                br#"{"code":"something_else","message":"detail"}"#,
+                None
             ),
             PeerError::Rejected(StatusCode::UNPROCESSABLE_ENTITY)
         ));
         assert!(matches!(
-            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, b"not json"),
+            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, b"not json", None),
             PeerError::Rejected(StatusCode::UNPROCESSABLE_ENTITY)
         ));
+    }
+
+    /// S11, both directions of the Start wire. A typed retry is decoded only
+    /// for a Start that carried the viewer's clock; every other Start keeps
+    /// today's mapping, whatever the Source answered.
+    #[test]
+    fn sharing_source_start_typed_retry_is_decoded_only_for_a_budgeted_start() {
+        let not_yet = br#"{"code":"startup_timeout","message":"still preparing"}"#;
+        let busy = br#"{"code":"media_session_overloaded","message":"busy"}"#;
+        let one = HeaderValue::from_static("1");
+        let two = HeaderValue::from_static("2");
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, not_yet, Some(Some(&one))),
+            PeerError::StartRetry(StartRetry {
+                code: StartRetryCode::StartupTimeout,
+                retry_after_secs: 1
+            })
+        ));
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, busy, Some(Some(&two))),
+            PeerError::StartRetry(StartRetry {
+                code: StartRetryCode::Overloaded,
+                retry_after_secs: 2
+            })
+        ));
+        // An unbudgeted Start (old receiver behaviour) is exactly today's.
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, not_yet, None),
+            PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+        // Not retryable: no or absurd Retry-After, another status, an unknown
+        // or a Sharing code, or prose that is not the closed shape.
+        for (status, body, retry_after) in [
+            (StatusCode::SERVICE_UNAVAILABLE, &not_yet[..], None),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                &not_yet[..],
+                Some(HeaderValue::from_static("0")),
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                &not_yet[..],
+                Some(HeaderValue::from_static("3600")),
+            ),
+            (StatusCode::TOO_MANY_REQUESTS, &busy[..], Some(two.clone())),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                &br#"{"code":"sharing_start_deadline","message":"x"}"#[..],
+                Some(one.clone()),
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                &br#"{"code":"startup_timeout","message":"x","extra":1}"#[..],
+                Some(one.clone()),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    source_start_refusal(status, body, Some(retry_after.as_ref())),
+                    PeerError::Rejected(rejected) if rejected == status
+                ),
+                "{status} {}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    /// S11 handshake: an older Source's identity (no `features`) decodes and
+    /// is not budget-capable; a newer one's decodes and is. The newer field is
+    /// additive, so an older receiver's decoder (no `deny_unknown_fields`)
+    /// reads the newer identity unchanged.
+    #[test]
+    fn sharing_identity_start_budget_feature_decodes_in_both_directions() {
+        let server = uuid::Uuid::new_v4();
+        let epoch = uuid::Uuid::new_v4();
+        let old = serde_json::json!({"server_id":server,"catalogue_epoch":epoch,"name":"Old","protocol_min":1,"protocol_max":1});
+        let mut new = old.clone();
+        new["features"] = serde_json::json!([START_BUDGET_FEATURE]);
+        let old: Identity = serde_json::from_value(old).expect("older Source identity");
+        assert!(!old.supports(START_BUDGET_FEATURE));
+        let decoded: Identity = serde_json::from_value(new.clone()).expect("newer identity");
+        assert!(decoded.supports(START_BUDGET_FEATURE));
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OlderReceiverIdentity {
+            #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+            server_id: uuid::Uuid,
+            #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+            catalogue_epoch: uuid::Uuid,
+            name: String,
+            protocol_min: u8,
+            protocol_max: u8,
+        }
+        let older: OlderReceiverIdentity =
+            serde_json::from_value(new).expect("an older receiver reads the newer identity");
+        assert_eq!(older.server_id, server);
     }
 }
