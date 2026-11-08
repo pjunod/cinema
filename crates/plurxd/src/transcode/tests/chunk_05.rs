@@ -953,26 +953,55 @@
                 .end_ms,
             48_000,
         );
-        session.control.mark_startup_presented_for_test().await;
-        // A stable observation at 252 s earns the next 48 s, ending exactly
-        // at 300 s. Waiting avoids extrapolating this deterministic position
-        // while the actor and publication task exchange their messages.
-        accept_rolling_publication_demand(
-            &session,
-            1,
-            252_000,
-            1.0,
-            crate::playback_control::PlaybackDemand::Active,
-            crate::playback_control::RenderState::Waiting,
-        )
-        .await;
-        session
-            .publication_cycle_at(
-                "retained-window",
-                published_at + ROLLING_PUBLICATION_TARGET,
+        // Advance through reachable cuts. Before each observation, commit
+        // media from the currently served window. Its position and five-second
+        // buffer stay within that window and below the fetched frontier. No
+        // forced presentation verdict or prepublication telemetry earns credit.
+        for (sequence, position_ms, expected_end_ms) in [
+            (1, 40_000, 88_000),
+            (2, 80_000, 128_000),
+            (3, 120_000, 168_000),
+            (4, 160_000, 208_000),
+            (5, 200_000, 248_000),
+            (6, 240_000, 288_000),
+            (7, 252_000, 300_000),
+        ] {
+            let (last_segment, end_ms) = {
+                let clock = session.publication.lock().await;
+                let served = clock.served.as_ref().expect("current served cut");
+                assert!(position_ms >= served.first_segment * 4_000);
+                assert!(position_ms + 5_000 <= served.end_ms);
+                (served.last_segment, served.end_ms)
+            };
+            assert!(commit_rolling_publication_media(&session, last_segment, end_ms).await);
+            accept_rolling_publication_demand(
+                &session,
+                sequence,
+                position_ms,
+                1.0,
+                crate::playback_control::PlaybackDemand::Active,
+                crate::playback_control::RenderState::Waiting,
             )
-            .await
-            .expect("earned publication");
+            .await;
+            session
+                .publication_cycle_at(
+                    "retained-window",
+                    Instant::now() + ROLLING_PUBLICATION_TARGET,
+                )
+                .await
+                .expect("earned publication");
+            assert_eq!(
+                session
+                    .publication
+                    .lock()
+                    .await
+                    .served
+                    .as_ref()
+                    .expect("next served cut")
+                    .end_ms,
+                expected_end_ms,
+            );
+        }
         {
             let clock = session.publication.lock().await;
             let served = clock.served.as_ref().expect("earned snapshot");
@@ -999,7 +1028,7 @@
             .store(observed_fetched_end_ms, Relaxed);
         accept_rolling_publication_demand(
             &session,
-            2,
+            8,
             observed_playhead_ms,
             1.0,
             crate::playback_control::PlaybackDemand::Active,
