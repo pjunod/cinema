@@ -3620,6 +3620,10 @@ fn spawn_background_loops(
         state.clone(),
         background_shutdown.clone(),
     ));
+    tokio::spawn(crate::http::cluster_operations::worker_status_cache_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     let replication = state.replication.clone();
     tokio::spawn(replication.passive_metrics_loop(background_shutdown.clone().cancelled_owned()));
     tokio::spawn(
