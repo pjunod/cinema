@@ -16,6 +16,19 @@ bump may break compatibility and a **patch** bump never does.
   intermediates, and RGB48 export avoids double rounding while preserving the
   caller's rounding mode.
 
+- CI retains authenticated successful Android and Node command results when
+  their consumed sources are unchanged, preserving whole-command accounting.
+- Historical queue fixtures preserve managed receipts while rewinding the
+  published source and dispatch extensions, and source audits cover nested
+  replicated-store modules and their required authority reads.
+
+- Manual library scans and explicit refreshes get the next eligible shared
+  read slot across job types. A scan finishing under a pressure check can
+  release its reader and let the next scan start.
+- Activity shows blocked shared reads above both tabs, identifies the originating
+  worker and job when available, and reports overdue manual scans alongside
+  five-minute completion and failure rates for the cluster and each worker.
+
 - macOS source installs discover full Xcode when Command Line Tools are selected,
   find renamed or relocated copies through the macOS application index,
   preserve explicit developer-directory overrides, and install missing Xcode
