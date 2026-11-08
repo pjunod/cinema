@@ -198,7 +198,7 @@ use subtitle_names::*;
 mod playlist_text;
 use playlist_text::*;
 pub(crate) use playlist_text::{
-    source_native_master, source_native_playlist, source_native_segment_window, source_native_slice,
+    source_native_master, source_native_playlist, source_native_segment,
 };
 // split: end hls-playlist-text
 

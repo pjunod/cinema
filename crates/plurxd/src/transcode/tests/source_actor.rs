@@ -1117,7 +1117,7 @@ async fn source_actual_actor(
         source_actual_unknown_register_reconciliation(state, manager, assignment).await;
         return;
     }
-    if matches!(mode, 3 | 19) {
+    if matches!(mode, 3 | 19 | 28) {
         state
             .store
             .put_setting(keys::SW_POOL_THREADS, "3")
@@ -1267,16 +1267,16 @@ async fn source_actual_actor(
                 .pause_after_wait_failure(),
         ),
         20 => Some(manager.source_workers.probe_hooks.pause_after_evidence()),
+        22 => Some(manager.source_workers.native_hooks.pause_after_spawn()),
+        23 | 25 | 26 | 27 => Some(manager.source_workers.native_hooks.pause_before_spawn()),
+        24 => Some(
+            manager
+                .source_workers
+                .native_hooks
+                .pause_after_wait_failure(),
+        ),
         _ => None,
     };
-    // Subtitles never gate a Source start: with every native extraction hook
-    // parked, a start with a native text track must still publish.
-    let native_parked = (mode == 22).then(|| {
-        (
-            manager.source_workers.native_hooks.pause_before_spawn(),
-            manager.source_workers.native_hooks.pause_after_spawn(),
-        )
-    });
     let actor = Box::pin(manager.start_source_worker(
         Arc::clone(&state),
         assignment.clone(),
@@ -1361,12 +1361,14 @@ async fn source_actual_actor(
             .await
             .expect("no preactivation media route")
             .is_none());
-        let pid = if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
+        let pid = if mode >= 21 {
+            manager.source_workers.native_hooks.spawned_pid()
+        } else if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
             manager.source_workers.probe_hooks.spawned_pid()
         } else {
             manager.source_workers.index_hooks.spawned_pid()
         };
-        if matches!(mode, 6 | 8 | 13 | 15 | 20) {
+        if matches!(mode, 6 | 8 | 13 | 15 | 20 | 22 | 24) {
             assert!(pid > 0, "actual Source index child started");
         } else {
             assert_eq!(pid, 0, "refusal point precedes any actual child");
@@ -1376,7 +1378,7 @@ async fn source_actual_actor(
             Err(SourceWorkerError::Deadline)
         ));
         drop(joined); // A disconnected waiter cannot abandon the scan owner.
-        if matches!(mode, 6 | 7 | 13 | 14) {
+        if matches!(mode, 6 | 7 | 13 | 14 | 22 | 23) {
             state
                 .store
                 .put_setting(keys::SHARING_ENABLED, "false")
@@ -1390,7 +1392,7 @@ async fn source_actual_actor(
                 .await
                 .expect("actual encoder capacity removed after confirmed probe settlement");
         }
-        if matches!(mode, 10 | 17) {
+        if matches!(mode, 10 | 17 | 26) {
             let file = state
                 .store
                 .get_file(1)
@@ -1400,7 +1402,7 @@ async fn source_actual_actor(
             std::fs::write(&file.path, b"changed physical Source before scan")
                 .expect("actual held Source object drift");
         }
-        if matches!(mode, 11 | 18) {
+        if matches!(mode, 11 | 18 | 27) {
             client
                 .execute(
                     "DELETE FROM cluster_node_capabilities WHERE capability=$1",
@@ -1411,7 +1413,7 @@ async fn source_actual_actor(
                 .await
                 .expect("actual purpose capability disappearance after observation");
         }
-        if matches!(mode, 9 | 16) {
+        if matches!(mode, 9 | 16 | 25) {
             tokio::time::sleep(Duration::from_millis(5100)).await;
         }
         assert_eq!(
@@ -1460,7 +1462,7 @@ async fn source_actual_actor(
         ingress_monitor.join().await;
         return;
     }
-    if matches!(mode, 3 | 19) {
+    if matches!(mode, 3 | 19 | 28) {
         assert!(actor
             .wait_ready(Instant::now() + Duration::from_secs(10))
             .await
@@ -1499,13 +1501,6 @@ async fn source_actual_actor(
         .await
         .expect("actual published actor");
     assert!(response.control.is_some());
-    if native_parked.is_some() {
-        assert_eq!(
-            manager.source_workers.native_hooks.spawned_pid(),
-            0,
-            "no native extraction child exists before or after a start"
-        );
-    }
     if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
         let value = serde_json::to_value(&response).expect("complete encoded response");
         assert_eq!(value["height"], 72);
@@ -1538,6 +1533,10 @@ async fn source_actual_actor(
         12 => manager
             .source_workers
             .probe_hooks
+            .assert_closed_parent_settlements(),
+        21 => manager
+            .source_workers
+            .native_hooks
             .assert_closed_parent_settlements(),
         _ => {}
     }
@@ -2113,55 +2112,33 @@ async fn source_actual_actor(
             "capabilities":{"platform":"web","max_height":2160,"codecs":["h264"],"dynamic_ranges":["sdr"],"dual_player_preparation":false},
             "supported_actions":[],"intent":null
         })).expect("cached caption fixture");
-        // The cache is cold at publication: the Source reports `warming`, not
-        // a revision it extracted before start. Its readiness poll warms the
-        // whole track in the background (a segment ask kicks the warm), and
-        // the revision it then reports is local playback's versioned grammar.
-        let mut reported = None;
-        for attempt in 0..200 {
-            let opened = actor
-                .control(request.clone(), Instant::now() + Duration::from_secs(10))
-                .await
-                .expect("cached caption fixture");
-            let (control, guard) = opened.into_response(&request);
-            let control = control.expect("cached caption fixture");
-            drop(guard);
-            if attempt == 0 {
-                assert_eq!(
-                    control.delivery.subtitle_readiness.as_deref(),
-                    Some("warming")
-                );
-                assert_eq!(control.delivery.subtitle_revision, None);
-                let cold = actor
-                    .open_resource(
-                        &SharingHlsResource::parse("subs/0/seg00000.vtt")
-                            .expect("cached caption fixture"),
-                        Instant::now() + Duration::from_secs(5),
-                    )
-                    .await
-                    .expect("a cold segment answers without extraction");
-                drop(cold.into_parts().1);
-            }
-            if control.delivery.subtitle_readiness.as_deref() == Some("ready") {
-                reported = control.delivery.subtitle_revision;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let reported = reported.expect("the background warm made the track ready");
-        let (incarnation, generation) = {
-            let binding = assignment.binding();
-            (
-                binding.incarnation_id().to_string(),
-                assignment.dispatch_generation(),
-            )
-        };
-        let retired = format!("source-{incarnation}-{generation}-0.vtt");
-        for (requested, present) in [
-            (reported.clone(), true),
-            ("source-stale.vtt".to_owned(), false),
-            (retired, false),
-        ] {
+        let opened = actor
+            .control(request.clone(), Instant::now() + Duration::from_secs(10))
+            .await
+            .expect("cached caption fixture");
+        let (control, guard) = opened.into_response(&request);
+        let control = control.expect("cached caption fixture");
+        assert_eq!(
+            control.delivery.subtitle_readiness.as_deref(),
+            Some("ready")
+        );
+        let reported = control
+            .delivery
+            .subtitle_revision
+            .expect("cached caption fixture");
+        drop(guard);
+        let revision = actor
+            .0
+            .state
+            .lock()
+            .expect("cached caption fixture")
+            .native
+            .as_ref()
+            .expect("cached caption fixture")
+            .revision(0)
+            .expect("cached caption fixture");
+        assert_eq!(reported, revision);
+        for (requested, present) in [(revision, true), ("source-stale.vtt".to_owned(), false)] {
             let opened = actor
                 .open_resource(
                     &SharingHlsResource::parse(&format!("subs/0/cached-{requested}"))
@@ -2250,31 +2227,21 @@ async fn source_actual_actor(
                 .await,
             Err(SourceWorkerError::Unsupported)
         ));
-        // A cold window answers an empty document at once and warms in the
-        // background; a player's retry then gets the cues.
-        let mut served = None;
-        for _ in 0..200 {
-            let opened = actor
-                .open_resource(
-                    &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("typed actual VTT"),
-                    Instant::now() + Duration::from_secs(5),
-                )
-                .await
-                .expect("actual native VTT");
-            let (payload, guard) = opened.into_parts();
-            let SourceResourcePayload::SubtitleText(bytes) = payload else {
-                panic!("VTT")
-            };
-            let text = String::from_utf8(bytes).expect("actual bounded UTF8");
-            if text.contains("Actual Source caption") {
-                assert!(text.contains("X-TIMESTAMP-MAP"));
-                served = Some(guard);
-                break;
-            }
-            drop(guard);
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        served
+        let opened = actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("typed actual VTT"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("actual native VTT");
+        let (payload, guard) = opened.into_parts();
+        let SourceResourcePayload::SubtitleText(bytes) = payload else {
+            panic!("VTT")
+        };
+        let text = String::from_utf8(bytes).expect("actual bounded UTF8");
+        assert!(text.contains("Actual Source caption"));
+        assert!(text.contains("X-TIMESTAMP-MAP"));
+        Some(guard)
     } else {
         None
     };
@@ -2534,8 +2501,38 @@ async fn source_native_embedded_text_media_and_counted_vtt_retirement() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn source_native_start_is_not_gated_by_parked_extraction_hooks() {
+async fn source_native_child_survives_waiter_cancel_and_revoke() {
     Box::pin(source_copy_preadmission_fixture(22)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_refuses_disabled_before_child() {
+    Box::pin(source_copy_preadmission_fixture(23)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_retains_permit_through_actual_reap_retry() {
+    Box::pin(source_copy_preadmission_fixture(24)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_refuses_expired_original_observation() {
+    Box::pin(source_copy_preadmission_fixture(25)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_refuses_changed_physical_source() {
+    Box::pin(source_copy_preadmission_fixture(26)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_refuses_lost_purpose_floor() {
+    Box::pin(source_copy_preadmission_fixture(27)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_requires_actual_cpu_admission() {
+    Box::pin(source_copy_preadmission_fixture(28)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2547,6 +2544,7 @@ async fn source_native_encoded_embedded_text_actual_media_and_body_retirement() 
 async fn source_preparation_closes_actual_parent_descriptors_before_settlement() {
     Box::pin(source_copy_preadmission_fixture(5)).await;
     Box::pin(source_copy_preadmission_fixture(12)).await;
+    Box::pin(source_copy_preadmission_fixture(21)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
