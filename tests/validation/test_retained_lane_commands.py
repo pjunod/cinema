@@ -199,6 +199,22 @@ class NativeCommandCase(unittest.TestCase):
                 native.record_contract(lane, suite, record, CANDIDATE, raw, source)
 
 
+class NativeJvmResourceCommentCase(unittest.TestCase):
+    def test_only_reviewed_playback_trees_with_identical_catalog_data_are_equivalent(self):
+        old, new = native.JVM_PLAYBACK_COMMENT_TREES
+        for current_tree, path, data, accepted in (
+            (new, 'tests/playback', b'# attribution\ncount=2080', True),
+            (new, 'tests/playback', b'count=2081', False),
+            ('another-tree', 'tests/playback', b'count=2080', False),
+            (new, 'tests/contracts', b'count=2080', False),
+        ):
+            with self.subTest(tree=current_tree, path=path, data=data):
+                with patch.object(native, 'tree_id', side_effect=[old, current_tree]):
+                    self.assertEqual(native.same_jvm_fixture_tree(
+                        PRIOR, CANDIDATE, path, lambda ref, _: b'count=2080' if ref == PRIOR else data),
+                        accepted)
+
+
 class NativeWorkflowScopeCase(unittest.TestCase):
     def test_unrelated_rust_job_and_exact_descriptor_preserve_native_scopes(self):
         changed = WORKFLOW.replace('      promotion_pr:', native.RUST_DESCRIPTOR_INPUT + '      promotion_pr:')
