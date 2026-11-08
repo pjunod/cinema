@@ -371,11 +371,10 @@ jobs:
     # The full unit and SQLite suite continues below; contributors may merge
     # after this compile gate and policy pass, then watch that suite on main.
     if: needs.scope.outputs.rust == 'true'
-    # General executors also reclaim above 4 GiB during the large Rust check.
-    # Share the existing larger-memory topology queue; keep its host bounds.
-    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
+    # Use the same compiler pool and cold-build budget as main-fast-lane.
+    runs-on: [self-hosted, Linux, lab, high-cpu]
     container: ubuntu:24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "1"
     steps:
@@ -388,12 +387,23 @@ jobs:
             build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
             libgtk-4-dev libdbus-1-dev make nasm ninja-build xz-utils pkg-config python3
           # Forgejo needs Node before checkout; use the patched upstream build.
+          case "$(dpkg --print-architecture)" in
+            amd64)
+              node_arch=x64
+              node_sha=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
+              ;;
+            arm64)
+              node_arch=arm64
+              node_sha=6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b
+              ;;
+            *) echo "Unsupported Node architecture" >&2; exit 1 ;;
+          esac
           node_tmp="$(mktemp -d)"
           trap 'rm -rf "$node_tmp"' EXIT
           curl --fail --silent --show-error --location --retry 3 \
-            https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz \
+            "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-${node_arch}.tar.xz" \
             -o "$node_tmp/node.tar.xz"
-          echo "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce  $node_tmp/node.tar.xz" | sha256sum --check --strict
+          echo "$node_sha  $node_tmp/node.tar.xz" | sha256sum --check --strict
           tar -xJf "$node_tmp/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
           node --version | grep -Fx 'v22.23.4'
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

@@ -1894,20 +1894,20 @@ assert.equal(context.ACT_TIMER, null);
             "\n  cluster_store_legacy:", 1
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
-        # Full run 5274 exhausted twenty minutes during all-target checking;
-        # the compiler lanes share the effort's bounded thirty-minute allowance.
-        self.assertIn("timeout-minutes: 30", fast_rust)
-        metadata_jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        self.assertIn("timeout-minutes: 60", fast_rust)
+        compiler_pool = "runs-on: [self-hosted, Linux, lab, high-cpu]"
         for compiler_job in (
             metadata_jobs["rust_compile"],
+            workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
+        ):
+            compiler_header = compiler_job.split("    steps:", 1)[0]
+            self.assertIn(compiler_pool, compiler_header)
+        for compiler_job in (
+            fast_rust,
             metadata_jobs["cluster_wal"],
             workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
         ):
             compiler_header = compiler_job.split("    steps:", 1)[0]
-            self.assertIn(
-                "runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]",
-                compiler_header,
-            )
             self.assertRegex(
                 compiler_header,
                 r'(?m)^      CARGO_BUILD_JOBS: "1"$',
@@ -2604,8 +2604,8 @@ assert.equal(context.ACT_TIMER, null);
         # unchanged all-target compile and vendored denied-warning Clippy.
         full_jobs = workflow_job_blocks(".github/workflows/ci.yml")
         for lane, rust_job, minutes in (
-            ("effort", effort_jobs["rust_compile"], 30),
-            ("full compiler", full_jobs["rust_compile"], 30),
+            ("effort", effort_jobs["rust_compile"], 60),
+            ("full compiler", full_jobs["rust_compile"], 60),
         ):
             with self.subTest(lane=lane):
                 self.assertRegex(rust_job, rf"(?m)^    timeout-minutes: {minutes}$")
@@ -2626,7 +2626,7 @@ assert.equal(context.ACT_TIMER, null);
         # cannot authenticate; effort retains its separate finite budget.
         self.assertIn("timeout-minutes: 30", fast_jobs["preflight"])
         self.assertIn("timeout-minutes: 15", effort_jobs["preflight"])
-        self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 60", effort_jobs["rust_compile"])
         effort_rust_header = effort_jobs["rust_compile"].split("\n    steps:", 1)[0]
         self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"', effort_rust_header)
         self.assertEqual(
@@ -4572,7 +4572,7 @@ assert.equal(context.ACT_TIMER, null);
                     }
                     and name == "rust_compile"
                 ):
-                    expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
+                    expected = local("Linux", "lab", "high-cpu")
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
                     "android_device",
@@ -4636,6 +4636,27 @@ assert.equal(context.ACT_TIMER, null);
                 block,
                 f"rust-audit:{name} does not provision the pinned Cargo toolchain",
             )
+
+    def test_linux_rust_compilers_use_native_bootstrap_on_the_shared_pool(self):
+        checksums = {
+            "amd64": ("x64", "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce"),
+            "arm64": ("arm64", "6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b"),
+        }
+        for workflow in ("ci", "effort-ci", "main-fast-lane"):
+            job = workflow_job_blocks(f".github/workflows/{workflow}.yml")["rust_compile"]
+            self.assertEqual(self_hosted_label_sets(job), [("self-hosted", "Linux", "lab", "high-cpu")])
+            bootstrap = workflow_step_blocks(job)["Install Rust gate prerequisites"]
+            selector = re.search(r'(?ms)^          case "\$\(dpkg --print-architecture\)" in.*?^          esac$', bootstrap)
+            self.assertIsNotNone(selector)
+            for arch, (node_arch, digest) in checksums.items():
+                with self.subTest(workflow=workflow, architecture=arch):
+                    command = ('dpkg() { echo "$DEB_ARCH"; }\n' + selector.group(0)
+                               + '\nprintf "%s %s" "$node_arch" "$node_sha"')
+                    selected = subprocess.check_output(["bash", "-ec", command], text=True,
+                                                       env={**os.environ, "DEB_ARCH": arch})
+                    self.assertEqual(selected, f"{node_arch} {digest}")
+            self.assertIn('node-v22.23.4-linux-${node_arch}.tar.xz', bootstrap)
+            self.assertIn('echo "$node_sha  $node_tmp/node.tar.xz" | sha256sum --check --strict', bootstrap)
 
     def test_native_arm_release_and_ci_have_separate_rostered_eligibility(self):
         # Recovering the release VM must not silently admit it to CI packaging.
