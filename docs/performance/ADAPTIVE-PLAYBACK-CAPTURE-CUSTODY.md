@@ -1,6 +1,6 @@
 # Capture native custody — which originals survive a cancelled observer?
 
-**Status:** open · native/writer implementation under qualification · 2026-11-07.
+**Status:** open · native/writer task merged · 2026-11-08.
 Companion to the [canonical ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) and
 [owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md). This continuation
 covers original local recording files, their native operations and writer
@@ -81,16 +81,22 @@ fixture expectations in place of unwraps; the catalog
 needed both new source paths. Strict Clippy and full formatting pass on exact successor `7ed0b926`.
 Reversing only the transparent alias and fixture panic diagnostics, then using
 the pinned formatter, reproduces all four runtime-source hashes exactly.
-Normal hooks, exact committed checks, paperwork and the manual effort gate
-remain required.
+Normal hooks, exact committed checks and paperwork passed. [PR #1435](http://forge.lan:3000/noirr/plurx/pulls/1435)
+merged at `d4a517a94` after all eight jobs in gate 6687 passed on `7c73c986`.
+The candidate and landing share tree `816244d7`; all 19 regression trailers
+are retained. Existing runner 8 completed its original 16/18 GiB profile;
+actual limits, source, compiler flags and bounded local cache were observed.
+The driver PID change was recorded; this task did not restart or reconfigure
+its service. Full native/allocator/executor peaks remain unqualified.
 
 ## Remaining inventory boundaries are explicit
 
 SQL Claim remains inline in the attach caller. A dropped observer can leave a
 late Store commit and temporary durable capacity hold after native-root cleanup;
 it cannot launch the later capture-file/tuner work from that dropped caller.
-Owning that original coordinator/result and completing its restart SQL drain
-remain pre-M/application work.
+The [SQL continuation](ADAPTIVE-PLAYBACK-CAPTURE-SQL-CUSTODY.md) owns that
+original coordinator/result and its exact detach under local qualification.
+This checkpoint records the boundary before that separate task.
 
 Finalizer assembly/output, unlink work, inherited scratch publication, the
 whole transport graph and other-node/shared-storage expiry are not certified

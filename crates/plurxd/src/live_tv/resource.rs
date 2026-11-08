@@ -421,7 +421,7 @@ impl LiveTvManager {
             },
         )
     }
-    pub(super) async fn resource_capture_claim(
+    pub(super) fn prepare_capture_claim(
         &self,
         live: &LiveTvConfig,
         dvr: &DvrConfig,
@@ -429,7 +429,7 @@ impl LiveTvManager {
         device: &str,
         base: &Path,
         storage_id: String,
-    ) -> Result<ledger::Capture, LiveTvError> {
+    ) -> (CaptureAuthority, Command) {
         let capture = ledger::Capture {
             recording_id: row.id.clone(),
             epoch: 0,
@@ -446,45 +446,30 @@ impl LiveTvManager {
             finalizer_epoch: 0,
             published_path: None,
         };
-        match self
-            .store
-            .live_tv_resource_command(
-                Command::ClaimCapture {
-                    capture,
-                    ingest_id: uuid::Uuid::new_v4().simple().to_string(),
-                    limit: live.max_sessions,
-                    reserve: dvr.tuner_reserve,
-                    device_id: device.into(),
-                    channel_id: row.channel_id.clone(),
-                },
-                now_ms(),
-            )
-            .await
-            .map_err(store_error)?
-        {
-            Outcome::Record(Record::Capture(c)) if c.worker == self.resource_worker() => Ok(c),
-            Outcome::Capacity => Err(LiveTvError::Capacity(
-                "the cluster's recording capacity is occupied".into(),
-            )),
-            _ => Err(fenced()),
-        }
+        (
+            CaptureAuthority {
+                store: Arc::clone(&self.store),
+                worker: capture.worker.clone(),
+                #[cfg(test)]
+                at_ms: None,
+            },
+            Command::ClaimCapture {
+                capture,
+                ingest_id: uuid::Uuid::new_v4().simple().to_string(),
+                limit: live.max_sessions,
+                reserve: dvr.tuner_reserve,
+                device_id: device.into(),
+                channel_id: row.channel_id.clone(),
+            },
+        )
     }
-    pub(super) async fn resource_capture_detach(
+    pub(super) fn validate_capture_claim(
         &self,
-        id: &str,
-        epoch: i64,
+        claim: &ledger::Capture,
     ) -> Result<(), LiveTvError> {
-        self.store
-            .live_tv_resource_command(
-                Command::DetachCapture {
-                    recording_id: id.into(),
-                    epoch,
-                    worker: self.resource_worker(),
-                },
-                now_ms(),
-            )
-            .await
-            .map_err(store_error)?;
+        if claim.worker != self.resource_worker() {
+            return Err(fenced());
+        }
         Ok(())
     }
     pub(super) async fn resource_finalize(
@@ -593,5 +578,26 @@ impl LiveTvManager {
             Outcome::Applied => Ok(()),
             _ => Err(fenced()),
         }
+    }
+}
+
+// Original SQL work holds only Store and its exact worker incarnation; it
+// cannot retain LiveTvManager -> CaptureOwners -> original task backedges.
+#[derive(Clone)]
+pub(super) struct CaptureAuthority {
+    store: Arc<dyn Store>,
+    pub(super) worker: Worker,
+    #[cfg(test)]
+    pub(super) at_ms: Option<i64>,
+}
+impl CaptureAuthority {
+    pub(super) async fn execute(
+        &self,
+        command: Command,
+    ) -> Result<Outcome, plurx_core::error::StoreError> {
+        let at_ms = now_ms();
+        #[cfg(test)]
+        let at_ms = self.at_ms.unwrap_or(at_ms);
+        self.store.live_tv_resource_command(command, at_ms).await
     }
 }

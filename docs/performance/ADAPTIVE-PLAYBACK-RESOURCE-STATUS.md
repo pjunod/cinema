@@ -1,6 +1,6 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation active · updated 2026-11-07.
+**Status:** open · implementation active · updated 2026-11-08.
 Draft effort #1248; release qualification and deployment remain open.
 
 [Plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) ·
@@ -26,8 +26,9 @@ unqualified for the daemon test frontend.
 [Retained S exit](ADAPTIVE-PLAYBACK-RETAINED-EXIT.md) merged as #1419 after
 gate 6591, with 14 distinct scoped passes. The
 [capture native/writer continuation](ADAPTIVE-PLAYBACK-CAPTURE-CUSTODY.md)
-has 19 new and 42 existing scoped passes; final lint, hooks and its task gate
-remain open.
+merged as #1435 at `d4a517a94` after gate 6687, with 19 new and 42 existing
+scoped passes. Original [SQL claim/detach custody](ADAPTIVE-PLAYBACK-CAPTURE-SQL-CUSTODY.md)
+has 71 scoped passes; its task gate remains pending.
 
 Complete family inventory, pre-M/SQL coordinators, finalizer output/scratch,
 production owned-worker containment, constructor/allocator/executor/kernel

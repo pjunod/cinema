@@ -2602,9 +2602,12 @@ impl LiveTvManager {
         let storage_id = capture.storage_identity(&dvr.root).await.map_err(|error| {
             LiveTvError::InvalidConfig(format!("DVR storage identity: {error}"))
         })?;
-        let claim = self
-            .resource_capture_claim(&effective, dvr, row, &device_id, &base, storage_id)
-            .await?;
+        let (authority, command) =
+            self.prepare_capture_claim(&effective, dvr, row, &device_id, &base, storage_id);
+        let claim = capture.claim(authority, command).await?;
+        // Preserve the original post-await current-incarnation fence. Cleanup
+        // still retains the old claim's actual worker, not this fresh value.
+        self.validate_capture_claim(&claim)?;
         if !capture.demand_alive() {
             return Err(LiveTvError::OwnerUnavailable(
                 "original capture was stopped during admission".into(),
@@ -2919,10 +2922,9 @@ impl LiveTvManager {
         if settling || self.capture_owners.unsettled(recording_id) {
             SinkStopResult::Settling
         } else {
-            if let Err(error) = self.resource_capture_detach(recording_id, attempt).await {
-                tracing::warn!(%error, "recording writer closed but durable detach is pending");
-                return SinkStopResult::Settling;
-            }
+            // Each production sink's resident original owner positively joins
+            // its exact SQL detach before publishing settled. No caller-owned
+            // replacement mutation crosses this cancellation boundary.
             for transport in &transports {
                 transport
                     .sinks

@@ -636,6 +636,179 @@ impl SinkWriter for NativeWriter {
     }
 }
 
+type SqlResult = Result<plurx_core::live_tv_resource::Outcome, plurx_core::error::StoreError>;
+
+// Original Store futures run only after their handles and result cells have
+// resident custody. Neither task captures this Entry, the root or the manager.
+// A Store error or failed join is ambiguous, even if a later lookup says None.
+#[derive(Default)]
+struct CaptureSql {
+    authority: Option<super::super::resource::CaptureAuthority>,
+    claim: OriginalTask<()>,
+    claim_result: Arc<Mutex<Option<SqlResult>>>,
+    claim_resolved: bool,
+    claimed_epoch: Option<i64>,
+    detach: OriginalTask<()>,
+    detach_result: Arc<Mutex<Option<SqlResult>>>,
+    detach_started: bool,
+    failed: bool,
+    #[cfg(test)]
+    hooks: Arc<SqlHooks>,
+}
+impl CaptureSql {
+    fn start(
+        &mut self,
+        authority: super::super::resource::CaptureAuthority,
+        command: plurx_core::live_tv_resource::Command,
+    ) -> Result<(), super::LiveTvError> {
+        if self.authority.is_some() {
+            return Err(super::LiveTvError::Conflict(
+                "original capture claim already registered".into(),
+            ));
+        }
+        self.authority = Some(authority.clone());
+        let output = Arc::clone(&self.claim_result);
+        #[cfg(test)]
+        let hooks = Arc::clone(&self.hooks);
+        let (enter, registered) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            if registered.await.is_err() {
+                return;
+            }
+            #[cfg(test)]
+            hooks.before_claim.pause().await;
+            let result = authority.execute(command).await;
+            #[cfg(test)]
+            hooks.after_claim.pause().await;
+            #[cfg(test)]
+            let result = hooks.finish_claim(result);
+            *output
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+        });
+        self.claim.install(task);
+        let _ = enter.send(());
+        Ok(())
+    }
+    fn take_claim(
+        &mut self,
+    ) -> Poll<Result<plurx_core::live_tv_resource::Capture, super::LiveTvError>> {
+        use plurx_core::live_tv_resource::{Outcome, Record};
+        match self.claim.observe() {
+            JoinState::Pending => return Poll::Pending,
+            JoinState::Unknown => self.failed = true,
+            JoinState::Joined => {}
+        }
+        let mut output = self
+            .claim_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.failed || matches!(&*output, Some(Err(_))) || output.is_none() {
+            self.failed = true;
+            return Poll::Ready(Err(super::LiveTvError::OwnerUnavailable(
+                "original capture SQL result is unresolved".into(),
+            )));
+        }
+        let Some(Ok(outcome)) = output.take() else {
+            unreachable!()
+        };
+        self.claim_resolved = true;
+        match outcome {
+            Outcome::Record(Record::Capture(c))
+                if self
+                    .authority
+                    .as_ref()
+                    .is_some_and(|a| a.worker == c.worker) =>
+            {
+                self.claimed_epoch = Some(c.epoch);
+                Poll::Ready(Ok(c))
+            }
+            Outcome::Capacity => Poll::Ready(Err(super::LiveTvError::Capacity(
+                "the cluster's recording capacity is occupied".into(),
+            ))),
+            Outcome::Record(Record::Capture(_))
+            | Outcome::Fenced
+            | Outcome::Absent
+            | Outcome::Retired
+            | Outcome::Expired
+            | Outcome::Conflict => Poll::Ready(Err(super::LiveTvError::CapabilityExpired(
+                "the cluster no longer authorizes this Live TV attempt".into(),
+            ))),
+            _ => {
+                self.failed = true;
+                Poll::Ready(Err(super::LiveTvError::OwnerUnavailable(
+                    "unexpected original capture SQL result".into(),
+                )))
+            }
+        }
+    }
+    fn settle(&mut self, recording: &str) -> bool {
+        use plurx_core::live_tv_resource::{Command, Outcome};
+        if self.authority.is_none() {
+            return true;
+        }
+        if !self.claim_resolved {
+            // Only called after actual acquisition completion; this is the
+            // original unobserved result, never a fresh read or replacement.
+            if self.take_claim().is_pending() {
+                return false;
+            }
+        }
+        if self.failed {
+            return false;
+        }
+        let Some(epoch) = self.claimed_epoch else {
+            return true;
+        };
+        if !self.detach_started {
+            let authority = self
+                .authority
+                .as_ref()
+                .expect("registered original SQL authority")
+                .clone();
+            let command = Command::DetachCapture {
+                recording_id: recording.to_owned(),
+                epoch,
+                worker: authority.worker.clone(),
+            };
+            let output = Arc::clone(&self.detach_result);
+            #[cfg(test)]
+            let hooks = Arc::clone(&self.hooks);
+            let (enter, registered) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                if registered.await.is_err() {
+                    return;
+                }
+                #[cfg(test)]
+                hooks.before_detach.pause().await;
+                let result = authority.execute(command).await;
+                #[cfg(test)]
+                hooks.after_detach.pause().await;
+                #[cfg(test)]
+                let result = hooks.finish_detach(result);
+                *output
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+            });
+            self.detach.install(task);
+            self.detach_started = true;
+            let _ = enter.send(());
+        }
+        if self.detach.observe() != JoinState::Joined {
+            return false;
+        }
+        // Fenced/Absent is a positive transactional result for this exact old
+        // worker/epoch. A failed Store call is not replaced or retried here.
+        matches!(
+            &*self
+                .detach_result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Some(Ok(Outcome::Applied | Outcome::Absent | Outcome::Fenced))
+        )
+    }
+}
+
 pub(super) struct CaptureEntry {
     recording: String,
     attempt: i64,
@@ -643,6 +816,7 @@ pub(super) struct CaptureEntry {
     // every actual child and this Arc/header die before the token releases.
     native: Arc<NativeFile>,
     identity: Arc<NativeFile>,
+    sql: Mutex<CaptureSql>,
     pub(super) writer: Arc<OriginalTask<SinkWriterOutcome>>,
     abandoned: AtomicBool,
     stopped: AtomicBool,
@@ -655,6 +829,37 @@ pub(super) struct CaptureLease {
     entry: Arc<CaptureEntry>,
 }
 impl CaptureLease {
+    pub(super) async fn claim(
+        &self,
+        authority: super::super::resource::CaptureAuthority,
+        command: plurx_core::live_tv_resource::Command,
+    ) -> Result<plurx_core::live_tv_resource::Capture, super::LiveTvError> {
+        if !self.demand_alive()
+            || self.entry.acquisition_done.load(Ordering::Acquire)
+            || self.entry.closed.load(Ordering::Acquire)
+        {
+            return Err(super::LiveTvError::OwnerUnavailable(
+                "original capture admission is already sealed".into(),
+            ));
+        }
+        self.entry
+            .sql
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .start(authority, command)?;
+        loop {
+            let result = self
+                .entry
+                .sql
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take_claim();
+            if let Poll::Ready(result) = result {
+                return result;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
     pub(super) async fn storage_identity(&self, root: &str) -> io::Result<String> {
         self.entry
             .identity
@@ -801,6 +1006,7 @@ impl CaptureOwners {
             attempt,
             native: Arc::new(NativeFile::new()),
             identity: Arc::new(NativeFile::new()),
+            sql: Mutex::new(CaptureSql::default()),
             writer: Arc::new(OriginalTask::default()),
             abandoned: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
@@ -964,7 +1170,14 @@ impl CaptureOwners {
             if writer == JoinState::Joined {
                 let identity = std::future::poll_fn(|cx| e.identity.poll_close(cx)).now_or_never();
                 let native = std::future::poll_fn(|cx| e.native.poll_close(cx)).now_or_never();
-                if identity == Some(true) && native == Some(true) {
+                if identity == Some(true)
+                    && native == Some(true)
+                    && acquisition_done
+                    && e.sql
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .settle(&e.recording)
+                {
                     e.closed.store(true, Ordering::Release);
                 }
             }
@@ -1257,3 +1470,70 @@ impl BlockingGate {
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[derive(Default)]
+struct SqlPause {
+    enabled: AtomicBool,
+    entered: AtomicBool,
+    release: tokio::sync::Notify,
+}
+#[cfg(test)]
+impl SqlPause {
+    async fn pause(&self) {
+        if self.enabled.load(Ordering::Acquire) {
+            self.entered.store(true, Ordering::Release);
+            self.release.notified().await;
+        }
+    }
+    async fn entered(&self) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !self.entered.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("original SQL operation entered");
+    }
+}
+#[cfg(test)]
+#[derive(Default)]
+struct SqlHooks {
+    before_claim: SqlPause,
+    after_claim: SqlPause,
+    before_detach: SqlPause,
+    after_detach: SqlPause,
+    panic_claim: AtomicBool,
+    fail_claim: AtomicBool,
+    panic_detach: AtomicBool,
+    fail_detach: AtomicBool,
+}
+#[cfg(test)]
+impl SqlHooks {
+    fn finish_claim(&self, result: SqlResult) -> SqlResult {
+        assert!(
+            !self.panic_claim.load(Ordering::Acquire),
+            "fixture original claim panic after real Store commit"
+        );
+        if self.fail_claim.load(Ordering::Acquire) {
+            Err(plurx_core::error::StoreError::Task(
+                "fixture ambiguous original claim result after real commit".into(),
+            ))
+        } else {
+            result
+        }
+    }
+    fn finish_detach(&self, result: SqlResult) -> SqlResult {
+        assert!(
+            !self.panic_detach.load(Ordering::Acquire),
+            "fixture original detach panic after real Store commit"
+        );
+        if self.fail_detach.load(Ordering::Acquire) {
+            Err(plurx_core::error::StoreError::Task(
+                "fixture ambiguous original detach result after real commit".into(),
+            ))
+        } else {
+            result
+        }
+    }
+}
