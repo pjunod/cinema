@@ -894,9 +894,10 @@ pub(crate) fn peer_error_code(error: &crate::sharing_client::PeerError) -> &'sta
         PeerError::ProtocolUnsupported => "sharing_protocol_unsupported",
         PeerError::Authentication => "sharing_peer_auth_failed",
         PeerError::InvalidResponse => "sharing_invalid_peer_response",
-        PeerError::Unavailable | PeerError::Rejected(_) | PeerError::DolbyVisionUnsupported => {
-            "sharing_peer_unavailable"
-        }
+        PeerError::Unavailable
+        | PeerError::Rejected(_)
+        | PeerError::Busy { .. }
+        | PeerError::DolbyVisionUnsupported => "sharing_peer_unavailable",
     }
 }
 fn peer_error(error: crate::sharing_client::PeerError) -> ApiError {

@@ -66,6 +66,7 @@ fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_cli
         PeerError::Authentication => ("authentication", None),
         PeerError::InvalidResponse => ("invalid_response", None),
         PeerError::Rejected(status) => ("rejected", Some(status.as_u16())),
+        PeerError::Busy { .. } => ("busy", Some(429)),
         PeerError::DolbyVisionUnsupported => ("dolby_vision_unsupported", None),
     };
     tracing::warn!(target: "plurx::sharing", stage, error_class, http_status, "receiver Source status refused");

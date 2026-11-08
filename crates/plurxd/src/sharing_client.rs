@@ -69,6 +69,20 @@ fn query_component(value: &str) -> String {
     result
 }
 
+/// A peer 429 that names no wait (an older Source, or a capacity refusal that
+/// never carried one) is asked again after this long.
+const PEER_BUSY_DEFAULT_RETRY_AFTER_SECS: u64 = 1;
+/// A peer's `Retry-After` is untrusted input relayed to our own client, so it
+/// is bounded: a hostile or broken Source cannot park a browser for minutes.
+const PEER_BUSY_MAX_RETRY_AFTER_SECS: u64 = 10;
+fn peer_retry_after_secs(value: Option<&HeaderValue>) -> u64 {
+    value
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(PEER_BUSY_DEFAULT_RETRY_AFTER_SECS)
+        .min(PEER_BUSY_MAX_RETRY_AFTER_SECS)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PeerError {
     Unavailable,
@@ -77,6 +91,12 @@ pub(crate) enum PeerError {
     Authentication,
     InvalidResponse,
     Rejected(StatusCode),
+    /// The peer answered 429: it is working on the request, or is at capacity,
+    /// and says when to ask again. Distinct from `Rejected` so the wait
+    /// survives to the client instead of being flattened into "unavailable".
+    Busy {
+        retry_after_secs: u64,
+    },
     /// An authenticated Start refusal, never a physical cleanup receipt.
     DolbyVisionUnsupported,
 }
@@ -465,11 +485,16 @@ impl PeerConnection {
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
             if status != StatusCode::OK {
+                let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
                 axum::body::to_bytes(Body::new(response.into_body()), MANAGEMENT_RESPONSE_BYTES)
                     .await
                     .map_err(|_| PeerError::InvalidResponse)?;
                 return Err(if status == StatusCode::UNAUTHORIZED {
                     PeerError::Authentication
+                } else if status == StatusCode::TOO_MANY_REQUESTS {
+                    PeerError::Busy {
+                        retry_after_secs: peer_retry_after_secs(retry_after.as_ref()),
+                    }
                 } else {
                     PeerError::Rejected(status)
                 });
@@ -887,6 +912,7 @@ mod tests {
                                     header::LOCATION,
                                     "https://outside.example.invalid/credential-sink",
                                 )
+                                .header(header::RETRY_AFTER, "3")
                                 .body(Full::new(Bytes::from(
                                     serde_json::to_vec(&payload).expect("fixture response"),
                                 )))
@@ -967,6 +993,74 @@ mod tests {
             drop(peer);
             server.abort();
             let _ = server.await;
+        }
+    }
+    /// A Source 429 is a typed wait, not an opaque failure: the client keeps
+    /// the Source's `Retry-After` so the receiver can hand it to the browser.
+    #[tokio::test]
+    async fn sharing_art_client_keeps_source_429_and_its_retry_after() {
+        use plurx_core::{
+            secrets::CredentialKey,
+            sharing_artwork::{artwork_expiry, ArtKind, ArtVariant, SourceArtReference},
+            sharing_catalogue_details::CatalogueRevisionKey,
+        };
+        let identity = SharingIdentity {
+            server_id: Uuid::new_v4(),
+            catalogue_epoch: Uuid::new_v4(),
+            created_at_ms: 1,
+        };
+        let key = CredentialKey::from_bytes([1; 32]);
+        let envelope =
+            CatalogueRevisionKey::generate_sealed(&key, identity.clone()).expect("fixture key");
+        let key = CatalogueRevisionKey::open(&key, identity.clone(), &envelope).expect("open");
+        let now = crate::state::clock_ms();
+        let resource = key
+            .issue_art(
+                &SourceArtReference {
+                    server_id: identity.server_id,
+                    catalogue_epoch: identity.catalogue_epoch,
+                    grant_id: Uuid::new_v4(),
+                    library_id: SourceId::parse("1").expect("lib"),
+                    item_id: SourceId::parse("1").expect("item"),
+                    kind: ArtKind::Poster,
+                    variant: ArtVariant::W300,
+                    expires_at_ms: artwork_expiry(now).expect("expiry"),
+                },
+                now,
+            )
+            .expect("resource");
+        let credential = plurx_core::sharing::new_secret().expect("credential");
+        let (mut peer, requests, server) = fixture(
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({"code":"sharing_art_variant_busy"}),
+        )
+        .await;
+        for _ in 0..2 {
+            assert!(matches!(
+                peer.artwork(&credential, &resource).await,
+                Err(PeerError::Busy {
+                    retry_after_secs: 3
+                })
+            ));
+        }
+        assert_eq!(requests.lock().expect("requests").len(), 2);
+        drop(peer);
+        server.abort();
+        let _ = server.await;
+        // The wait is untrusted input bound for a browser: missing or garbled
+        // falls back to the default, and a long one is capped.
+        for (value, expected) in [
+            (None, PEER_BUSY_DEFAULT_RETRY_AFTER_SECS),
+            (Some("soon"), PEER_BUSY_DEFAULT_RETRY_AFTER_SECS),
+            (Some("4"), 4),
+            (Some("99999"), PEER_BUSY_MAX_RETRY_AFTER_SECS),
+        ] {
+            let header = value.map(|v| HeaderValue::from_str(v).expect("value"));
+            assert_eq!(
+                peer_retry_after_secs(header.as_ref()),
+                expected,
+                "{value:?}"
+            );
         }
     }
     #[tokio::test]

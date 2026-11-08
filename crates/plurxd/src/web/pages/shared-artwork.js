@@ -108,11 +108,22 @@ const SHARED_ARTWORK=(()=>{
       }if(frames!==1)throw new Error("Invalid WebP artwork");
     }else throw new Error("Invalid Shared artwork MIME");if(!width)throw new Error("Shared artwork dimensions unavailable");return {width,height};
   }
+  // Retry-After is whole seconds from B; bounded so a bad header cannot park a poster.
+  function retryAfterMs(value){const n=/^\d{1,3}$/.test(value??"")?Number(value):1;return Math.min(n,10)*1000;}
   async function load(job){
     let credit=null;
     try{
       if(!live(job.ctx)||typeof createImageBitmap!=="function")throw new Error("Shared artwork decoder unavailable");credit=compressed.take(ASSET*2);job.canvas.dataset.sharedArtAttempted="true";
-      const response=await fetch(origin(job.ctx.capture)+job.ctx.row.url,{headers:{authorization:"Bearer "+job.ctx.capture.token},signal:job.controller.signal,credentials:"omit",redirect:"error",cache:"no-store"});job.response=response;
+      const target=origin(job.ctx.capture)+job.ctx.row.url,init={headers:{authorization:"Bearer "+job.ctx.capture.token},signal:job.controller.signal,credentials:"omit",redirect:"error",cache:"no-store"};
+      let response=await fetch(target,init);job.response=response;
+      // A 429 is the Source saying "rendering, ask again", not a failure: wait as told, once.
+      if(response.status===429&&live(job.ctx)){
+        await response.body?.cancel();
+        const wait=retryAfterMs(response.headers.get("retry-after"));
+        await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,wait);job.controller.signal.addEventListener("abort",()=>{clearTimeout(timer);reject(new Error("Shared artwork retry cancelled"));},{once:true});});
+        if(!live(job.ctx))throw new Error("stale Shared artwork");
+        response=await fetch(target,init);job.response=response;
+      }
       if(!live(job.ctx)||response.redirected||response.url!==origin(job.ctx.capture)+job.ctx.row.url)throw new Error("stale Shared artwork");
       if(response.status===401||response.status===403){await response.body?.cancel();if(live(job.ctx)){if(response.status===401)clearLocalSession(job.ctx.capture.auth,"Your session ended on the server.");else retire(job.ctx.reference.import_id);}throw new Error("Shared artwork authorization refused");}
       const mime=(response.headers.get("content-type")||"").split(";")[0].trim().toLowerCase(),declared=response.headers.get("content-length");

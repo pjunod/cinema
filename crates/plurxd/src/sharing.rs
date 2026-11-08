@@ -1815,7 +1815,21 @@ impl SharingManager {
         ),
         crate::sharing_client::PeerError,
     > {
-        use crate::sharing_client::{PeerConnection, PeerError};
+        let import = self.artwork_authority(state, reference).await?;
+        let asset = self.fetch_artwork(state, reference, &import).await?;
+        Ok((import.summary, asset))
+    }
+
+    /// Every local authority check an artwork read needs, with no peer call:
+    /// the import is active for this lifecycle, names this Source, grant and
+    /// catalogue epoch, is current, and the user is assigned the item's
+    /// library. A receiver-held snapshot may be served only after this passes.
+    pub async fn artwork_authority(
+        &self,
+        state: &AppState,
+        reference: &plurx_core::sharing_artwork::ReceiverArtReference,
+    ) -> Result<plurx_core::sharing::StoredImport, crate::sharing_client::PeerError> {
+        use crate::sharing_client::PeerError;
         tokio::time::timeout(Duration::from_secs(5), async {
             let import = state
                 .store
@@ -1850,12 +1864,29 @@ impl SharingManager {
             if !assigned.contains(&reference.item.library_id) {
                 return Err(PeerError::Authentication);
             }
+            Ok(import)
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+    }
+
+    /// The peer dial for an artwork read already authorized by
+    /// [`Self::artwork_authority`].
+    pub async fn fetch_artwork(
+        &self,
+        state: &AppState,
+        reference: &plurx_core::sharing_artwork::ReceiverArtReference,
+        import: &plurx_core::sharing::StoredImport,
+    ) -> Result<crate::sharing_client::PeerArtwork, crate::sharing_client::PeerError> {
+        use crate::sharing_client::{PeerConnection, PeerError};
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let summary = &import.summary;
             let local = state
                 .store
                 .sharing_identity(clock_ms())
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
-            let credentials = ImportCredential::open(self, local.server_id, &import)
+            let credentials = ImportCredential::open(self, local.server_id, import)
                 .map_err(|_| PeerError::Unavailable)?;
             let expected = plurx_core::sharing::SharingIdentity {
                 server_id: summary.source_server_id,
@@ -1865,10 +1896,8 @@ impl SharingManager {
             let (mut peer, _) =
                 PeerConnection::verified(self, &summary.endpoints, &expected).await?;
             self.ensure_current(state, summary).await?;
-            let asset = peer
-                .artwork(&credentials.credential, &reference.source)
-                .await?;
-            Ok((summary.clone(), asset))
+            peer.artwork(&credentials.credential, &reference.source)
+                .await
         })
         .await
         .map_err(|_| PeerError::Unavailable)?
