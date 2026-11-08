@@ -3,8 +3,11 @@
 //! Plan ruling 3 (Paul, 2026-11-07): processed output is never work before the
 //! viewer's first frame. A create resolves the ordinary plan only; when that
 //! plan could be processed it leaves an [`UpgradeIntent`] here, on the node
-//! that owns the session. The first `ttff` beacon naming the session takes the
-//! intent and runs one bounded trial
+//! that owns the session, and so does the activation of a locally owned
+//! ordinary prepared successor. The first `ttff` beacon naming the session
+//! (or, for a prepared successor, its commit, which the client sends only
+//! after showing the successor's frame) takes the intent and runs one bounded
+//! trial
 //! ([`crate::transcode::TranscodeManager::prepare_processed_upgrade`]). A
 //! verified first window is staged as an M6 prepared successor
 //! ([`super::preparation::stage_prepared_successor_as`]) and the control
@@ -230,6 +233,16 @@ pub(in crate::http) fn note_first_frame(state: &AppState, user_id: i64, session_
         return;
     };
     start_upgrade(state, intent, run);
+}
+
+/// A prepared successor this node owns was committed for `user_id`: the
+/// client commits only after it has shown the successor's own frame, so the
+/// commit is that session's first presented frame, and the upgrade the
+/// successor's activation left waiting starts here
+/// ([`super::preparation::stage_prepared_successor_as`]). VOD sessions keep no
+/// presentation phase of their own; the commit is their presented proof.
+pub(in crate::http) fn note_presented(state: &AppState, user_id: i64, session_id: &str) {
+    note_first_frame(state, user_id, session_id);
 }
 
 /// Run one taken upgrade to its outcome on a task of its own.

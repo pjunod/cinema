@@ -634,6 +634,8 @@ pub(super) async fn settle_cancelled_preparation(
 
 fn spawn_cancelled_preparation(active: ActivePreparedSuccessor, reason: &'static str) {
     active.cancelled.cancel();
+    // A successor that will never present has no upgrade to wait for.
+    super::processed_upgrade::cancel_for_session(&active.preparation.session_id);
     tokio::spawn(settle_cancelled_preparation(active, reason));
 }
 
@@ -2976,6 +2978,38 @@ pub(super) async fn stage_prepared_successor_as(
                     )
                     .await;
                 }
+            }
+            // A locally owned ordinary successor gets the processed upgrade a
+            // create would have left it (review 3 S3): it waits for the
+            // successor's own first presented frame, which its commit proves
+            // ([`super::processed_upgrade::note_presented`]). The processed
+            // upgrade's own successor, and any processed successor, is already
+            // the upgrade.
+            let processed = staged_request.dv_processing_destination.is_some()
+                || staged_request
+                    .candidate_context
+                    .as_ref()
+                    .is_some_and(|context| context.selected_candidate.processed_dv);
+            if successor_owner == state.node_id
+                && !processed
+                && staged_request.presentation == crate::transcode::Presentation::Vod
+            {
+                super::processed_upgrade::register(super::processed_upgrade::UpgradeIntent {
+                    user_id: local_user_id,
+                    playback_id: active.preparation.playback_id.clone(),
+                    session_id: active.preparation.session_id.clone(),
+                    incarnation_id: active.preparation.incarnation_id.clone(),
+                    request: staged_request.clone(),
+                    hdr10_intent: staged_request.hdr10,
+                    auto_policy: staged_request.automatic,
+                    // The control exchange that asked for this successor
+                    // carries no network identity or link receipt; recovery
+                    // and link admission read none, as for a start without
+                    // them.
+                    network: None,
+                    network_prior: None,
+                    incumbent_receipt: None,
+                });
             }
             trace_auto_preparation_stage(candidate, "activated");
             crate::playback_control::record_preparation_staged(true);
