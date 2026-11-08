@@ -1396,6 +1396,9 @@ impl NetworkConnectionStreaming {
         // that drop also tears down a half-open WebSocket and lets the next
         // snapshot/append attempt establish a clean stream.
         let mut reset = ConnectionResetGuard::new(Arc::clone(&self.reset));
+        let request_kind = req.kind();
+        let chunk_bytes = req.snapshot_chunk_bytes();
+        let started = time::Instant::now();
         let result = tokio::time::timeout(soft_ttl, async {
             self.sender.send_async(req).await.map_err(|err| {
                 error!(
@@ -1416,7 +1419,22 @@ impl NetworkConnectionStreaming {
                 reset.disarm();
                 result
             }
-            Err(error) => Err(RPCError::Unreachable(Unreachable::new(&error))),
+            Err(_elapsed) => {
+                // The bare `Elapsed` says only "deadline has elapsed"; name
+                // what timed out so the openraft log line is attributable.
+                let error = std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "rpc to node {} timed out: request_kind={} snapshot_chunk_bytes={} elapsed_ms={} soft_ttl_ms={}",
+                        self.node.id,
+                        request_kind,
+                        chunk_bytes.map_or_else(|| "none".to_owned(), |n| n.to_string()),
+                        started.elapsed().as_millis(),
+                        soft_ttl.as_millis(),
+                    ),
+                );
+                Err(RPCError::Unreachable(Unreachable::new(&error)))
+            }
         }
     }
 }
