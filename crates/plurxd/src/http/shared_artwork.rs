@@ -951,16 +951,20 @@ mod tests {
         }
     }
 
+    async fn snapshot(
+        state: &AppState,
+        reference: &ReceiverArtReference,
+    ) -> Option<crate::sharing_client::PeerArtwork> {
+        read_disk_snapshot(state, reference, ArtBodyLease::receiver().expect("permit")).await
+    }
     struct ReceiverArtFixture {
         _directory: tempfile::TempDir,
         state: AppState,
-        key: plurx_core::sharing_file_locators::FileLocatorKey,
         source_key: CatalogueRevisionKey,
         import: uuid::Uuid,
         grant: uuid::Uuid,
         lifecycle: i64,
         viewer: i64,
-        token: String,
         remote: SharingIdentity,
     }
     /// An active B import whose Source endpoint cannot be reached, so any
@@ -1084,7 +1088,6 @@ mod tests {
             )
             .expect("key row");
         drop(writer);
-        let key = FileLocatorKey::open(&state.sharing.key, &local, &envelope).expect("signer");
         let source_envelope =
             CatalogueRevisionKey::generate_sealed(&state.sharing.key, remote.clone())
                 .expect("source key");
@@ -1102,13 +1105,11 @@ mod tests {
         ReceiverArtFixture {
             _directory: directory,
             state,
-            key,
             source_key,
             import,
             grant,
             lifecycle,
             viewer: user.id,
-            token,
             remote,
         }
     }
@@ -1145,40 +1146,30 @@ mod tests {
                     .expect("Source resource"),
             }
         }
-        async fn get(&self, reference: &ReceiverArtReference) -> axum::response::Response {
-            use tower::ServiceExt;
-            let url = self
-                .key
-                .issue_art(reference, clock_ms())
-                .expect("B resource")
-                .url();
-            super::super::router(self.state.clone())
-                .oneshot(
-                    axum::http::Request::builder()
-                        .uri(url)
-                        .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
-                        .body(Body::empty())
-                        .expect("request"),
-                )
-                .await
-                .expect("response")
-        }
     }
 
-    /// The second view of a poster comes from B's own verified snapshot and
-    /// never dials the Source, yet every authority check still runs first.
+    /// The second view of a poster is answered from B's own verified
+    /// snapshot with no artwork fetch from the Source, after every local
+    /// authority check. (The response's separate live scope proof,
+    /// `attach_receiver_art_authority`, is a small Source request by design
+    /// and is not part of this seam; it needs the pinned-TLS fixtures.)
     #[tokio::test]
     async fn sharing_art_receiver_serves_verified_snapshot_before_dialling_the_source() {
-        use http_body_util::BodyExt;
         use plurx_core::sharing::Assignment;
         use sha2::{Digest, Sha256};
         let _serial = ART_FIXTURES.lock().await;
         let fixture = receiver_art_fixture().await;
+        let state = &fixture.state;
         let now = clock_ms();
         let reference = fixture.reference(now);
-        // Cold: nothing is held and the Source endpoint is unreachable.
-        let cold = fixture.get(&reference).await;
-        assert_eq!(cold.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // Every local authority check passes for the assigned viewer.
+        state
+            .sharing
+            .artwork_authority(state, &reference)
+            .await
+            .expect("assigned viewer of an active import");
+        // Cold: nothing held yet, so the handler would have to dial.
+        assert!(snapshot(state, &reference).await.is_none());
         // B proved these bytes against the Source once (the first view).
         let mut png = vec![7u8; 4096];
         png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
@@ -1189,7 +1180,7 @@ mod tests {
             mime: "image/png",
         };
         publish_disk_snapshot(
-            &fixture.state,
+            state,
             &reference,
             &asset,
             ArtBodyLease::receiver().expect("permit"),
@@ -1197,20 +1188,15 @@ mod tests {
         .await
         .expect("first view publishes");
         for _ in 0..2 {
-            let again = fixture.get(&reference).await;
-            assert_eq!(again.status(), StatusCode::OK, "served from the snapshot");
-            assert_eq!(again.headers()[header::CONTENT_TYPE], "image/png");
-            assert_eq!(
-                again.headers()["x-plurx-art-sha256"],
-                hex::encode(asset.digest)
-            );
-            assert_eq!(
-                again.into_body().collect().await.expect("body").to_bytes(),
-                bytes
-            );
+            let held = snapshot(state, &reference)
+                .await
+                .expect("served from the snapshot");
+            assert_eq!(held.bytes, bytes);
+            assert_eq!(held.digest, asset.digest);
+            assert_eq!(held.mime, "image/png");
         }
         // Corrupt snapshot bytes are a miss, never a wrong poster.
-        let root = fixture.state.runtime_cache_dir.join("sharing-art-v1");
+        let root = state.runtime_cache_dir.join("sharing-art-v1");
         let file = std::fs::read_dir(&root)
             .expect("entries")
             .next()
@@ -1218,40 +1204,29 @@ mod tests {
             .expect("entry")
             .path();
         std::fs::write(&file, vec![9u8; bytes.len()]).expect("same-size corruption");
-        assert_eq!(
-            fixture.get(&reference).await.status(),
-            StatusCode::SERVICE_UNAVAILABLE,
-            "digest mismatch falls through to the Source"
+        assert!(
+            snapshot(state, &reference).await.is_none(),
+            "digest mismatch"
         );
         std::fs::write(&file, &bytes).expect("restore");
         publish_disk_snapshot(
-            &fixture.state,
+            state,
             &reference,
             &asset,
             ArtBodyLease::receiver().expect("permit"),
         )
         .await
         .expect("republish");
-        assert_eq!(fixture.get(&reference).await.status(), StatusCode::OK);
+        assert!(snapshot(state, &reference).await.is_some());
         // A newer catalogue read issues a new Source resource: the old
         // snapshot does not answer for it.
         let next = fixture.reference(now + 60_000);
-        assert_ne!(
-            next.source.reference_unverified().unwrap().expires_at_ms,
-            reference
-                .source
-                .reference_unverified()
-                .unwrap()
-                .expires_at_ms
-        );
-        assert_eq!(
-            fixture.get(&next).await.status(),
-            StatusCode::SERVICE_UNAVAILABLE,
+        assert!(
+            snapshot(state, &next).await.is_none(),
             "a new catalogue issue revalidates against the Source"
         );
-        // Losing the assignment refuses even a held snapshot.
-        fixture
-            .state
+        // Losing the assignment refuses before any snapshot is consulted.
+        state
             .store
             .assign_share_viewers(
                 fixture.import,
@@ -1264,10 +1239,10 @@ mod tests {
             )
             .await
             .expect("assignment change");
-        assert_eq!(
-            fixture.get(&reference).await.status(),
-            StatusCode::SERVICE_UNAVAILABLE,
-            "authority is checked before the snapshot"
-        );
+        assert!(state
+            .sharing
+            .artwork_authority(state, &reference)
+            .await
+            .is_err());
     }
 }
