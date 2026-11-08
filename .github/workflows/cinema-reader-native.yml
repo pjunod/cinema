@@ -54,8 +54,13 @@ jobs:
           tool="$RUNNER_TEMP/reader-registry"
           (umask 077; mkdir -p "$tool/debs" "$tool/root")
           cd "$tool/debs"
-          apt-get download 'skopeo=1.13.3+ds1-2ubuntu0.24.04.3' libgpgme11t64
+          apt-get download 'skopeo=1.13.3+ds1-2ubuntu0.24.04.3' libgpgme11t64 'docker-buildx=0.30.1-0ubuntu1~24.04.1'
           for package in ./*.deb; do dpkg-deb -x "$package" "$tool/root"; done
+          export DOCKER_CONFIG="$tool/docker-config"
+          mkdir -p "$DOCKER_CONFIG/cli-plugins"
+          ln -s "$tool/root/usr/libexec/docker/cli-plugins/docker-buildx" "$DOCKER_CONFIG/cli-plugins/docker-buildx"
+          docker buildx version | grep -F '0.30.1'
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
           export LD_LIBRARY_PATH="$tool/root/usr/lib/x86_64-linux-gnu"
           cli="$tool/root/usr/bin/skopeo"
           "$cli" --version
@@ -237,6 +242,8 @@ jobs:
           "$cli" --policy "$tool/policy.json" copy --src-tls-verify=false --src-authfile "$tool/auth.json" "docker://$exact" "docker-daemon:$local_proof"
           test "$(docker image inspect --format '{{.Id}}' "$local_proof")" = "$id"
           test "$(docker run --rm --entrypoint /usr/local/bin/plurx-cluster-check "$local_proof" build-identity)" = "$CINEMA_MAIN_COMMIT"
+          reported=$(docker run --rm "$local_proof" --version)
+          test "$reported" = "$(python3 -c 'import json;print(json.load(open("release-bin/smoked-image.json"))["plurxd_version"])')"
           echo "CINEMA_IMMUTABLE_IMAGE source=$CINEMA_MAIN_COMMIT arch=amd64 id=$id reference=$ref manifest=$exact"
       - name: Remove the job-local registry login
         if: always()
