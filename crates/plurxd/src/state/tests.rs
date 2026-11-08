@@ -2241,6 +2241,10 @@ async fn full_subtitle_coverage_settles_ready_without_spawning_a_pass() {
 
 #[tokio::test]
 async fn remove_original_complete_publisher_and_request_third_ordinal_recovers_through_repair() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
     use crate::subtitle_ride_along::testing::{fixture, Sub};
     use plurx_core::store::BackgroundJobStore as _;
 

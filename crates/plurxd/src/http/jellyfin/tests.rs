@@ -192,6 +192,10 @@ async fn jellyfin_native_hls_duplicate_entries_share_one_activation_and_preserve
 }
 #[tokio::test]
 async fn jellyfin_native_hls_encoded_without_copy_index_preserves_ranges_clock_and_stop() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
     Box::pin(native_hls_copy_flow(false, true)).await;
 }
 async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
