@@ -1883,12 +1883,13 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
 | 422 | `hdr_subtitle_burn_refused` | the resolved plan delivers HDR without the burn, so burning would discard that grade. Judged after `resolve_plan`, against the no-burn delivered range — not against the source `hdr` column, and not exempted by a transcode verdict. The M6 preparation candidate is refused the same way |
 | 503 | `startup_timeout` + `Retry-After` | the create's owner is still working, or an identical request (same `request_id`) is: re-post the same body; the retry joins that owner |
 | 503 | `transcode_capacity_pending` + `Retry-After` | a hardware slot, CPU share or queue position is taken; a retry of the same request can succeed |
-| 503 | `transcode_height_unavailable` | this worker cannot encode the requested height now; ask for a smaller one rather than re-posting |
+| 503 | `transcode_height_unavailable` | this worker cannot encode the requested height now; ask for a smaller one rather than re-posting (no shipped client re-asks yet: each ends the start on the `create_capacity_terminal` surface row) |
 | 503 | `transcode_scratch_exhausted` | this start's scratch grant is larger than the configured ceiling; no retry can succeed |
 | 503 | `replacement_expired` | the replacement start spent its own deadline before provisional work finished |
 | 503 | `media_session_handoff_pending` | the predecessor owner has not finished handoff |
 | 503 | `media_session_superseded` / `playback_target_superseded` | the client has since settled on a later destination |
-| 503 | — | too many session starts already active for this user |
+| 503 | `media_session_overloaded` + `Retry-After` | too many session starts already active for this user; the caps free as this user's other starts activate or end |
+| 503 | `media_owner_transition` + `Retry-After` | the ingress or the chosen worker lost serving authority, a worker did not answer, or the session's durable owner could not be committed in time; re-post the same body. Every create 503 carries a code; one with no more specific cause carries this one |
 
 **Start budget.** A client sends `X-Plurx-Startup-Remaining-Ms`: what its
 own start sequence has left, in milliseconds, on every attempt. The server
@@ -1897,8 +1898,9 @@ create longer than 10 s, whatever the header says — and a create without the
 header gets the 10 s. `0` is answered `startup_timeout` at once. When the
 allowance ends first, the answer is `startup_timeout` with `Retry-After`, but
 the start itself is not abandoned: once the create holds its durable
-`request_id` claim it runs on to activation (bounded by the claim's 60 s
-window), and a re-post of the same body with the same `request_id` — on any
+`request_id` claim it runs on to activation for as long as the viewer can
+still take the answer — the header's whole remaining time (unclamped) plus one
+re-post, inside the claim's 60 s window — and a re-post of the same body with the same `request_id` — on any
 node — waits for that owner's activation (bounded by the new attempt's own
 allowance) and answers with it, rather than starting a second encoder. A
 client with more time left than 10 s therefore re-posts on `startup_timeout`;
