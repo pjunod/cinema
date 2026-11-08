@@ -1157,6 +1157,43 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
     }
 }
 
+/// Two source-I/O resource keys contend when they are the same domain or
+/// either is the whole-source wildcard `source_io` -- the overlap rule of the
+/// claim's `domain_readers_full` term.
+fn source_domains_overlap(a: &str, b: &str) -> bool {
+    a == b
+        || (a.starts_with("source_io")
+            && b.starts_with("source_io")
+            && (a == "source_io" || b == "source_io"))
+}
+
+/// Readers per storage domain as the claim counts them: every distinct
+/// active reader (kind and work id, however many rows it holds) whose key
+/// overlaps the domain, a wildcard reader counting against every domain.
+fn domain_readers(
+    holders: &[plurx_core::store::background_jobs::SourceIoHolder],
+) -> std::collections::BTreeMap<String, usize> {
+    let active = holders
+        .iter()
+        .filter(|holder| holder.active_occupancy)
+        .collect::<Vec<_>>();
+    active
+        .iter()
+        .map(|holder| holder.resource_key.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|domain| {
+            let readers = active
+                .iter()
+                .filter(|holder| source_domains_overlap(&holder.resource_key, &domain))
+                .map(|holder| (holder.kind.as_str(), holder.work_id.as_str()))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            (domain, readers)
+        })
+        .collect()
+}
+
 /// Content analysis no longer waits for an idle node (C1): a serving node
 /// keeps indexing its own requests, an idle one takes other nodes'. Nothing
 /// to switch; these rows say what this node's indexer may do right now.
@@ -1176,10 +1213,7 @@ async fn indexing_while_serving(state: &AppState) -> DeveloperEnableItem {
     .await
     {
         Ok(Ok(holders)) => {
-            let mut domains = std::collections::BTreeMap::<String, usize>::new();
-            for holder in holders.iter().filter(|holder| holder.active_occupancy) {
-                *domains.entry(holder.resource_key.clone()).or_default() += 1;
-            }
+            let domains = domain_readers(&holders);
             let full = domains.values().any(|readers| *readers >= 2);
             let listed = if domains.is_empty() {
                 "No storage domain has an active source reader".to_owned()
@@ -3342,6 +3376,39 @@ async fn display_target_hdr10(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review 2 of C1 (S9): the row counts readers the way the claim does --
+    /// a whole-source (`source_io`) reader contends with every domain, and a
+    /// reader holding several rows is one reader.
+    #[test]
+    fn domain_readers_follow_the_claims_overlap_and_distinct_reader_rules() {
+        use plurx_core::store::background_jobs::SourceIoHolder;
+        let holder = |key: &str, work: &str, active: bool| SourceIoHolder {
+            active_occupancy: active,
+            resource_key: key.to_owned(),
+            work_id: work.to_owned(),
+            kind: "analysis_source".to_owned(),
+            priority: "maintenance".to_owned(),
+            started_at_ms: 0,
+            lease_expires_at_ms: 0,
+            phase: None,
+            last_phase_at_ms: None,
+        };
+        let readers = domain_readers(&[
+            holder("source_io:nas-a", "one", true),
+            holder("source_io:nas-a", "one", true),
+            holder("source_io", "everything", true),
+            holder("source_io:nas-b", "two", true),
+            holder("source_io:nas-b", "paused", false),
+        ]);
+        assert_eq!(readers.get("source_io:nas-a"), Some(&2), "{readers:?}");
+        assert_eq!(readers.get("source_io:nas-b"), Some(&2), "{readers:?}");
+        assert_eq!(readers.get("source_io"), Some(&3), "{readers:?}");
+        assert!(!source_domains_overlap(
+            "source_io:nas-a",
+            "source_io:nas-b"
+        ));
+    }
 
     #[test]
     fn sharing_endpoint_readiness_distinguishes_missing_configured_and_unreadable() {

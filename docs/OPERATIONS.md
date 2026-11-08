@@ -6009,15 +6009,21 @@ A node no longer stops indexing because one of its encoders is in use. The
 analysis worker claims requests one after another for as long as the claim's
 source-capacity rule admits one (two readers per storage domain; without a live
 viewer, a background read takes only a domain no other reader holds), and the
-rule is asked again before the read starts, while it reads and before the
-result is submitted — a foreground stream that takes the source in between makes
+rule is asked again before the read starts, while it reads (every 2 s; the
+node-local "viewer queuing" check every 0.5 s) and before the result is
+submitted — a foreground stream that takes the source in between makes
 the request yield, back to the queue uncharged, as `foreground_preempted`. A
 viewer queuing for this node's encoder limits claims to requests a playback is
 waiting on.
 
 An idle node (no encoder in use, nobody queuing) also claims other nodes'
-fragment-index requests that asked for exactly its engine, after its own. The
-request keeps its target: the executor builds the index and publishes its own
+fragment-index requests that asked for exactly its engine. Work a viewer is
+waiting on comes first wherever it is targeted, then the node's own requests,
+then other nodes'. A request naming a copy-video pipeline the executor cannot
+produce (Dolby Vision tooling it lacks, a Profile 7 conversion it has turned
+off) goes back uncharged once, and that executor then leaves requests naming
+that pipeline to other nodes for 15 minutes rather than taking them back on
+every pass. The request keeps its target: the executor builds the index and publishes its own
 copy, delivery hydrates the node that asked, and the request is `ready` only
 once that node holds it. A target membership has removed is never worked for.
 `plurx_analysis_completed_total{node}` counts, per executing node, the

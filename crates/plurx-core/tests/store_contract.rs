@@ -24727,7 +24727,8 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     1011,
                     true,
                     false,
-                    false
+                    false,
+                    &[]
                 )
                 .await
                 .expect("busy claim")
@@ -24776,7 +24777,8 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     1013,
                     true,
                     false,
-                    false
+                    false,
+                    &[]
                 )
                 .await
                 .expect("wrong engine")
@@ -24792,6 +24794,7 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                 true,
                 false,
                 false,
+                &[],
             )
             .await
             .expect("viewer claim")
@@ -24819,7 +24822,8 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     121013,
                     true,
                     false,
-                    false
+                    false,
+                    &[]
                 )
                 .await
                 .expect("expired viewer claim")
@@ -24835,7 +24839,8 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     121014,
                     false,
                     false,
-                    false
+                    false,
+                    &[]
                 )
                 .await
                 .expect("idle maintenance claim")
@@ -24898,6 +24903,7 @@ async fn an_idle_node_claims_another_nodes_fragment_request_for_its_engine() {
                         false,
                         false,
                         cross_node,
+                        &[],
                     )
                     .await
                     .unwrap_or_else(|error| panic!("{backend}: claim at {at}: {error}"))
@@ -25081,6 +25087,259 @@ async fn an_idle_node_claims_another_nodes_fragment_request_for_its_engine() {
     .await;
 }
 
+/// Review 2 of C1 (S1, B1): a foreign row a viewer is waiting on outranks
+/// this node's own background rows, and a foreign row naming a copy-video
+/// identity this executor cannot emit is never claimed by it -- it stays
+/// queued for its own target, which still claims it.
+#[tokio::test]
+async fn a_waited_foreign_row_comes_first_and_an_unemittable_identity_stays_queued() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, own_file) = seed_file(&store, "ranked-own").await;
+        let (_, waited_file) = seed_file(&store, "ranked-waited").await;
+        let (_, excluded_file) = seed_file(&store, "ranked-excluded").await;
+        let request = |id: &str, file_id: i64, target: &str, identity: &str, created: i64| {
+            NewAnalysisRequest {
+                request_id: id.into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "ranked-engine".into(),
+                video_identity: identity.into(),
+                requested_generation: format!("{id}-generation"),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: target.into(),
+                not_before_ms: created,
+                created_at_ms: created,
+            }
+        };
+        let mut waited = None;
+        for row in [
+            request("own-background", own_file, "idle-node", "own-identity", 10),
+            request(
+                "foreign-waited",
+                waited_file,
+                "serving-node",
+                "waited-identity",
+                20,
+            ),
+            request(
+                "foreign-excluded",
+                excluded_file,
+                "serving-node",
+                "no-dovi-here",
+                5,
+            ),
+        ] {
+            let enqueued = store
+                .enqueue_analysis_request(&row)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {}: {error}", row.request_id));
+            if enqueued.request_id == "foreign-waited" {
+                waited = Some(enqueued);
+            }
+        }
+        let waited = waited.expect("the waited row");
+        assert!(
+            store
+                .join_analysis_viewer(AnalysisViewerInterest {
+                    analysis_request_id: waited.request_id.clone(),
+                    requested_generation: waited.requested_generation.clone(),
+                    pipeline_version: waited.pipeline_version.clone(),
+                    video_identity: waited.video_identity.clone(),
+                    target_node_id: waited.target_node_id.clone(),
+                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id,
+                    },
+                    playback_id: "ranked-viewer".into(),
+                    now_ms: 25,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: join viewer: {error}")),
+            "{backend}"
+        );
+        let excluded = vec!["no-dovi-here".to_owned()];
+        let claim = |node: &'static str, at: i64, cross_node: bool, excluded: Vec<String>| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .claim_analysis_request_for_capacity(
+                        node,
+                        Some("ranked-engine"),
+                        at,
+                        at + 1_000,
+                        false,
+                        false,
+                        cross_node,
+                        &excluded,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: claim at {at}: {error}"))
+            }
+        };
+        let settle = |claimed: plurx_core::store::AnalysisRequest, node: &'static str, at: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                assert!(store
+                    .fail_analysis_request(
+                        &claimed.request_id,
+                        node,
+                        claimed.fence,
+                        "admin_cancelled",
+                        at
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: settle: {error}")));
+            }
+        };
+
+        // The viewer's row first, though it is another node's and younger
+        // than this node's own background row.
+        let first = claim("idle-node", 30, true, excluded.clone())
+            .await
+            .unwrap_or_else(|| panic!("{backend}: a claimable row"));
+        assert_eq!(
+            first.request_id, "foreign-waited",
+            "{backend}: a waiting viewer outranks own background work"
+        );
+        settle(first, "idle-node", 31).await;
+        // Then its own row (after the first claim's reservation lapses).
+        let second = claim("idle-node", 2_000, true, excluded.clone())
+            .await
+            .unwrap_or_else(|| panic!("{backend}: its own row"));
+        assert_eq!(second.request_id, "own-background", "{backend}");
+        settle(second, "idle-node", 2_001).await;
+        // The oldest foreign row names an identity this executor cannot
+        // emit: not this node's to take, however often it asks.
+        for at in [4_000, 4_001] {
+            assert!(
+                claim("idle-node", at, true, excluded.clone())
+                    .await
+                    .is_none(),
+                "{backend}: an excluded identity is not re-claimed at {at}"
+            );
+        }
+        let row = store
+            .analysis_request("foreign-excluded")
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            (row.state.as_str(), row.fence, row.attempts),
+            ("queued", 0, 0),
+            "{backend}: untouched"
+        );
+        // Its target is not excluded from its own row.
+        let own = claim("serving-node", 4_002, false, excluded.clone())
+            .await
+            .unwrap_or_else(|| panic!("{backend}: the target claims its own row"));
+        assert_eq!(own.request_id, "foreign-excluded", "{backend}");
+
+        let too_many = (0..=plurx_core::store::MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES)
+            .map(|n| format!("identity-{n}"))
+            .collect::<Vec<_>>();
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "idle-node",
+                    Some("ranked-engine"),
+                    6_000,
+                    7_000,
+                    false,
+                    false,
+                    true,
+                    &too_many,
+                )
+                .await
+                .is_err(),
+            "{backend}: the exclusion list is bounded"
+        );
+    })
+    .await;
+}
+
+/// Review 2 of G1 (S2): what "index now" says about a file comes from that
+/// file's own requests -- an active one when there is any, else the newest --
+/// however deep the queue is.
+#[tokio::test]
+async fn fragment_index_requests_for_files_answers_per_file() {
+    for_each_backend(|store, backend| async move {
+        let (_, active_file) = seed_file(&store, "lookup-active").await;
+        let (_, failed_file) = seed_file(&store, "lookup-failed").await;
+        let (_, empty_file) = seed_file(&store, "lookup-empty").await;
+        let request = |id: &str, file_id: i64, generation: &str, created: i64| NewAnalysisRequest {
+            request_id: id.into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: "lookup-engine".into(),
+            video_identity: String::new(),
+            requested_generation: generation.into(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: "lookup-node".into(),
+            not_before_ms: created,
+            created_at_ms: created,
+        };
+        store
+            .enqueue_analysis_request(&request("failed-old", failed_file, "lookup-g1", 10))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let claimed = store
+            .claim_analysis_request("lookup-node", 11, 1_011)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: claimable"));
+        assert!(store
+            .fail_analysis_request(
+                &claimed.request_id,
+                "lookup-node",
+                claimed.fence,
+                "attempt_limit",
+                12
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail: {error}")));
+        store
+            .enqueue_analysis_request(&request("active", active_file, "lookup-g2", 20))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let rows = store
+            .fragment_index_requests_for_files(&[active_file, failed_file, empty_file])
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: lookup: {error}"));
+        let by_file = rows
+            .iter()
+            .map(|row| (row.file_id, (row.request_id.as_str(), row.state.as_str())))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            by_file.get(&active_file),
+            Some(&("active", "queued")),
+            "{backend}"
+        );
+        assert_eq!(
+            by_file.get(&failed_file),
+            Some(&("failed-old", "failed")),
+            "{backend}"
+        );
+        assert!(
+            !by_file.contains_key(&empty_file),
+            "{backend}: no request, no row"
+        );
+        assert!(store
+            .fragment_index_requests_for_files(&[])
+            .await
+            .expect("empty")
+            .is_empty());
+        assert!(store.fragment_index_requests_for_files(&[0]).await.is_err());
+    })
+    .await;
+}
+
 /// C1: the claim's source-capacity rule, asked again of the claimed request,
 /// leaves out what the request itself holds, and yields to a foreground
 /// stream that arrived after the claim; the yield goes back uncharged.
@@ -25120,6 +25379,7 @@ async fn analysis_source_admission_carries_the_claim_decision_through_the_read()
                 false,
                 false,
                 false,
+                &[],
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
@@ -25228,6 +25488,7 @@ async fn removing_a_node_retires_only_its_active_analysis_requests() {
                 false,
                 true,
                 false,
+                &[],
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
@@ -25304,7 +25565,8 @@ async fn removing_a_node_retires_only_its_active_analysis_requests() {
                     3_000,
                     false,
                     true,
-                    false
+                    false,
+                    &[]
                 )
                 .await
                 .expect("targeted-only claim")
@@ -25320,7 +25582,8 @@ async fn removing_a_node_retires_only_its_active_analysis_requests() {
                     3_001,
                     false,
                     false,
-                    false
+                    false,
+                    &[]
                 )
                 .await
                 .expect("claim")
