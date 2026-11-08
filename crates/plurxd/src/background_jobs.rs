@@ -2546,9 +2546,6 @@ pub(crate) struct LibraryReadiness {
     problems: std::sync::Mutex<std::collections::BTreeMap<i64, LibraryReadinessProblem>>,
     advertised: std::sync::Mutex<std::collections::BTreeMap<String, LibraryTurnObservation>>,
     interactive_waiting: AtomicBool,
-    /// The `waiting_on` last written per targeted job, so an unchanged
-    /// reason is not rewritten on every claim pass.
-    targeted_waits: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 /// How long a root-check failure stays a statement about this node if its
@@ -2570,32 +2567,6 @@ struct LibraryReadinessProblem {
     observed: std::time::Instant,
 }
 impl LibraryReadiness {
-    /// Write a targeted job's `waiting_on` when it changes. The cache is
-    /// node-local and bounded; losing it only costs one repeated write.
-    async fn note_targeted_wait(&self, store: &dyn Store, job_id: &str, waiting_on: &str) {
-        {
-            let mut waits = self
-                .targeted_waits
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if waits.get(job_id).is_some_and(|last| last == waiting_on) {
-                return;
-            }
-            if waits.len() >= 1024 {
-                waits.clear();
-            }
-            waits.insert(job_id.to_owned(), waiting_on.to_owned());
-        }
-        note_targeted_wait(store, job_id, waiting_on).await;
-    }
-
-    fn forget_targeted_wait(&self, job_id: &str) {
-        self.targeted_waits
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(job_id);
-    }
-
     pub(crate) fn poll_interval(&self) -> Duration {
         if self.interactive_waiting.load(Ordering::Relaxed) {
             Duration::from_millis(750)
@@ -2782,13 +2753,12 @@ async fn library_candidate_readiness(
     );
     if !readable {
         if let Some(root) = unreadable.filter(|_| targeted) {
-            readiness
-                .note_targeted_wait(
-                    store,
-                    &candidate.id,
-                    &format!("root_unreadable:{}", root.display()),
-                )
-                .await;
+            note_targeted_wait(
+                store,
+                &candidate.id,
+                &format!("root_unreadable:{}", root.display()),
+            )
+            .await;
         }
         return Ok(None);
     }
@@ -2817,7 +2787,6 @@ async fn library_candidate_readiness(
         kind,
         interactive,
         targeted,
-        roots: library.map(|library| library.paths).unwrap_or_default(),
     }))
 }
 
@@ -2828,7 +2797,6 @@ struct LibraryCandidateReadiness {
     kind: plurx_core::store::background_jobs::JobKind,
     interactive: bool,
     targeted: bool,
-    roots: Vec<std::path::PathBuf>,
 }
 
 async fn library_candidates(
@@ -2913,7 +2881,6 @@ pub(crate) async fn claim_library(
                 kind,
                 interactive,
                 targeted,
-                roots,
             }) = library_candidate_readiness(
                 store.as_ref(),
                 authority.as_ref(),
@@ -2967,21 +2934,8 @@ pub(crate) async fn claim_library(
             )
             .await?
             else {
-                if targeted {
-                    // The claim refused it. Name what it waits on, so the
-                    // request record says it while the queue holds it.
-                    if let Some(waiting_on) =
-                        targeted_claim_blocker(store.as_ref(), &candidate.id, &roots, now_ms)
-                            .await?
-                    {
-                        readiness
-                            .note_targeted_wait(store.as_ref(), &candidate.id, &waiting_on)
-                            .await;
-                    }
-                }
                 continue;
             };
-            readiness.forget_targeted_wait(&candidate.id);
             let active = ActiveBackgroundJob::start(
                 Arc::clone(&store),
                 Arc::clone(&authority),
@@ -3000,71 +2954,6 @@ pub(crate) async fn claim_library(
         }
     }
     Ok(None)
-}
-
-/// Why the claim refused a targeted library job, in contract v2 `waiting_on`
-/// terms. A library scan or metadata refresh that holds a source reader the
-/// job needs is `full_scan:<its library>`: the claim keeps the second reader
-/// of a source for live demand (`CLAIM_SQL`), and a running scan of the same
-/// library always holds that library's reader, so the targeted request waits
-/// for it — the per-library mutation fence would refuse it next. Any other
-/// background reader is `heavy_lane:<its kind>`. Live-demand readers never
-/// refuse this claim, and a lost race names nothing.
-async fn targeted_claim_blocker(
-    store: &dyn Store,
-    job_id: &str,
-    roots: &[std::path::PathBuf],
-    now_ms: i64,
-) -> Result<Option<String>, StoreError> {
-    use plurx_core::store::background_jobs::JobPayload;
-    let domains = store.storage_domains().await?;
-    let needed = roots
-        .iter()
-        .map(|root| {
-            let root = root.to_string_lossy();
-            domains
-                .iter()
-                .find(|mapping| mapping.root_path == root)
-                .map_or_else(
-                    || "source_io".to_owned(),
-                    |mapping| format!("source_io:{}", mapping.domain_id),
-                )
-        })
-        .collect::<Vec<_>>();
-    let conflicts = |held: &str| {
-        needed
-            .iter()
-            .any(|key| key == held || key == "source_io" || held == "source_io")
-    };
-    let mut heavy = None;
-    for holder in store.source_io_holders(now_ms).await? {
-        if holder.work_id == job_id
-            || holder.priority == "viewer"
-            || !conflicts(&holder.resource_key)
-        {
-            continue;
-        }
-        if matches!(holder.kind.as_str(), "library_scan" | "metadata_refresh") {
-            let library_id = match store.background_job(&holder.work_id).await? {
-                Some(job) => match job.supported_payload() {
-                    Ok(
-                        JobPayload::LibraryScan { library_id, .. }
-                        | JobPayload::MetadataRefresh { library_id, .. },
-                    ) => Some(library_id),
-                    _ => None,
-                },
-                None => None,
-            };
-            if let Some(library) = match library_id {
-                Some(id) => store.get_library(id).await?,
-                None => None,
-            } {
-                return Ok(Some(format!("full_scan:{}", library.name)));
-            }
-        }
-        heavy.get_or_insert_with(|| format!("heavy_lane:{}", holder.kind));
-    }
-    Ok(heavy)
 }
 
 /// Record, on every pending request of a targeted library job, what it is
