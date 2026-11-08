@@ -35,6 +35,9 @@ use plurx_core::dvr::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub(crate) mod capture_owner;
+use capture_owner::{CaptureLease, JoinState, OriginalTask};
+
 use super::schedule;
 use super::{
     collect_live_prefix, open_tuner_stream, pinned_url, probe_live_source, unix_seconds, DvrConfig,
@@ -136,6 +139,8 @@ pub(crate) enum TransportOrigin {
     Recording,
 }
 
+type TransportWorkerTask = OriginalTask<Result<(), LiveTvError>>;
+
 /// One tuner GET on one channel of one device, feeding every recording sink
 /// and every live viewer on it (plan L-03 §3.1).
 ///
@@ -169,7 +174,7 @@ pub(crate) struct DvrTransport {
     /// a recording opening its file), plus `SEATS_RETIRED` once retired.
     seats: AtomicUsize,
     consumers_changed: tokio::sync::Notify,
-    pub(crate) worker: std::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), LiveTvError>>>>,
+    worker: std::sync::Mutex<Option<std::sync::Weak<TransportWorkerTask>>>,
     /// What the prefix probe saw, for every sidecar this transport writes.
     pub(crate) source: std::sync::Mutex<Option<LiveSourceFacts>>,
     probe: tokio::sync::watch::Sender<ProbePublication>,
@@ -192,7 +197,7 @@ pub(crate) struct DvrTransport {
     closed: CancellationToken,
     /// Where the prefix probe writes its sample.
     pub(crate) scratch: PathBuf,
-    metrics: Arc<LiveTvMetrics>,
+    metrics: std::sync::Weak<LiveTvMetrics>,
     /// A warm opening (plan L-02 §3.3): the opener already planned from
     /// cached facts, so the fan-out feeds it from the first byte instead of
     /// holding a prefix, and probes the opening sample beside the feed as
@@ -208,6 +213,29 @@ pub(crate) struct DvrTransport {
     /// publication so a warm opener reads the verdict on *this tune's first
     /// bytes* even if a later re-probe has already replaced it.
     opening: std::sync::Mutex<Option<Result<LiveSourceFacts, LiveTvError>>>,
+}
+
+struct CaptureSeat<'a> {
+    manager: &'a LiveTvManager,
+    transport: Arc<DvrTransport>,
+    opened: bool,
+    armed: bool,
+}
+impl CaptureSeat<'_> {
+    fn commit(mut self) {
+        self.transport.release_seat();
+        self.armed = false;
+    }
+}
+impl Drop for CaptureSeat<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.transport.release_seat();
+            if self.opened {
+                self.manager.abandon_unstarted_transport(&self.transport);
+            }
+        }
+    }
 }
 
 pub(crate) struct TransportInit {
@@ -252,7 +280,7 @@ impl DvrTransport {
             terminal: std::sync::Mutex::new(None),
             closed: CancellationToken::new(),
             scratch: init.scratch,
-            metrics: init.metrics,
+            metrics: Arc::downgrade(&init.metrics),
             warm_opening: AtomicBool::new(false),
             warm_opener: std::sync::Mutex::new(None),
             opening: std::sync::Mutex::new(None),
@@ -459,7 +487,7 @@ impl DvrTransport {
             .sinks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.cancel.is_cancelled() {
+        if self.cancel.is_cancelled() || sink.capture.as_ref().is_some_and(|c| !c.demand_alive()) {
             return false;
         }
         sinks.push(sink);
@@ -672,7 +700,6 @@ impl DvrTransport {
         self.closed.cancelled().await;
     }
 
-    #[cfg(test)]
     pub(crate) fn is_closed(&self) -> bool {
         self.closed.is_cancelled()
     }
@@ -802,7 +829,7 @@ impl ViewerConsumer {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn evict(&self, reason: &'static str, metrics: &LiveTvMetrics) {
+    fn evict(&self, reason: &'static str, metrics: Option<&LiveTvMetrics>) {
         let first = {
             let mut evicted = self
                 .evicted
@@ -813,7 +840,9 @@ impl ViewerConsumer {
             first
         };
         if first {
-            metrics.observe_consumer_eviction("viewer", reason);
+            if let Some(metrics) = metrics {
+                metrics.observe_consumer_eviction("viewer", reason);
+            }
         }
         self.close_feed();
     }
@@ -828,9 +857,9 @@ impl ViewerConsumer {
 
 /// One recording's file within a transport.
 pub(crate) struct DvrSink {
-    // Remains owned by the sink/writer/transport through fsync and worker exit,
-    // including after the activity row has disappeared from the registry.
-    _restart_admission: Option<crate::serving_fence::RestartAdmission>,
+    // Client reference only. The independent root owns the same original
+    // acquisition/native jobs/File/admission even after every sink disappears.
+    capture: Option<CaptureLease>,
     pub(crate) recording_id: String,
     pub(crate) channel_id: String,
     pub(crate) airing_start: i64,
@@ -843,13 +872,13 @@ pub(crate) struct DvrSink {
     /// The fan-out owns only this bounded queue. The writer task is the sole
     /// owner of the file, so a slow filesystem can never stall the tuner read.
     writer: std::sync::Mutex<Option<SinkQueue>>,
-    /// Kept until it settles. A timed-out stop puts the handle back so the
-    /// next DVR tick can join it before reading the attempt file.
-    writer_task: std::sync::Mutex<Option<tokio::task::JoinHandle<SinkWriterOutcome>>>,
+    /// Test-only writer seams retain their original task in place. Production
+    /// original writer custody is in capture, outside this sink graph.
+    writer_task: OriginalTask<SinkWriterOutcome>,
     pub(crate) bytes: AtomicU64,
     pub(crate) prior_attempt_bytes: Option<u64>,
     observation: std::sync::Mutex<DvrSinkObservation>,
-    metrics: Arc<LiveTvMetrics>,
+    metrics: std::sync::Weak<LiveTvMetrics>,
     pub(crate) cancel: CancellationToken,
 }
 
@@ -880,6 +909,7 @@ trait SinkWriter: tokio::io::AsyncWrite + Send + Unpin {
         -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>>;
 }
 
+#[cfg(test)]
 impl SinkWriter for tokio::fs::File {
     fn sync_all<'a>(
         &'a mut self,
@@ -1060,7 +1090,9 @@ fn interrupt_sink(sink: &Arc<DvrSink>, reason: &'static str) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .interrupted(reason);
     if first {
-        sink.metrics.observe_dvr_sink_failure(reason);
+        if let Some(metrics) = sink.metrics.upgrade() {
+            metrics.observe_dvr_sink_failure(reason);
+        }
     }
     sink.cancel.cancel();
     sink.writer
@@ -1080,14 +1112,25 @@ fn start_sink_writer(sink: &Arc<DvrSink>, writer: Box<dyn SinkWriter>, delivered
         queued_bytes: Arc::clone(&queued_bytes),
     });
     let weak = Arc::downgrade(sink);
-    let task =
-        tokio::spawn(
-            async move { sink_writer_loop(weak, writer, rx, queued_bytes, delivered).await },
-        );
-    *sink
-        .writer_task
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+    let cancel = sink.cancel.clone();
+    let (enter, registered) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        if registered.await.is_err() {
+            return SinkWriterOutcome::Failed {
+                reason: "writer_not_registered",
+            };
+        }
+        sink_writer_loop(weak, writer, rx, queued_bytes, delivered, cancel).await
+    });
+    let start = if let Some(capture) = &sink.capture {
+        capture.install_writer(task)
+    } else {
+        sink.writer_task.install(task);
+        true
+    };
+    if start {
+        let _ = enter.send(());
+    }
 }
 
 async fn sink_writer_loop(
@@ -1096,10 +1139,16 @@ async fn sink_writer_loop(
     mut rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
     queued_bytes: Arc<AtomicU64>,
     delivered: Arc<AtomicU64>,
+    cancel: CancellationToken,
 ) -> SinkWriterOutcome {
     use tokio::io::AsyncWriteExt as _;
 
-    while let Some(bytes) = rx.recv().await {
+    loop {
+        let bytes = tokio::select! {
+            biased;
+            bytes = rx.recv() => match bytes { Some(bytes) => bytes, None => break },
+            _ = cancel.cancelled() => break,
+        };
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         match tokio::time::timeout(TUNER_READ_TIMEOUT, writer.write_all(&bytes)).await {
             Ok(Ok(())) => {
@@ -1182,31 +1231,105 @@ async fn settle_sink(sink: &Arc<DvrSink>) -> SinkStopResult {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
-    let task = sink
-        .writer_task
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    let Some(mut task) = task else {
-        return SinkStopResult::Settled;
-    };
-    match tokio::time::timeout(super::SESSION_DRAIN_TIMEOUT, &mut task).await {
-        Ok(Ok(_)) => SinkStopResult::Settled,
-        Ok(Err(error)) => {
-            tracing::warn!(%error, recording = %sink.recording_id, "capture writer stopped unexpectedly");
-            SinkStopResult::Settled
+    let deadline = tokio::time::Instant::now() + super::SESSION_DRAIN_TIMEOUT;
+    loop {
+        let joined = if let Some(capture) = &sink.capture {
+            capture.settled()
+        } else {
+            sink.writer_task.observe() == JoinState::Joined
+        };
+        if joined {
+            return SinkStopResult::Settled;
         }
-        Err(_) => {
+        if tokio::time::Instant::now() >= deadline {
             sink.observation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .settling();
-            *sink
-                .writer_task
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
-            SinkStopResult::Settling
+            return SinkStopResult::Settling;
         }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// The actual cleanup F retains only its original transport/cell and a weak
+/// registry reference. It never owns a manager or the capture root.
+async fn close_transport_original(
+    registry: std::sync::Weak<std::sync::Mutex<super::LiveTvRegistry>>,
+    transport: Arc<DvrTransport>,
+) {
+    transport.cancel.cancel();
+    let sinks = transport
+        .sinks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let mut settling = false;
+    for sink in sinks {
+        settling |= settle_sink(&sink).await == SinkStopResult::Settling;
+    }
+    transport.close_viewer_feeds();
+    if settling {
+        return;
+    }
+    // All these exact original files are positively closed. Release the
+    // legitimate sink clients so root-owned Entry destruction can finish.
+    transport
+        .sinks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    let original = transport
+        .worker
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(original) = original {
+        let Some(cell) = original.upgrade() else {
+            return;
+        };
+        let deadline = tokio::time::Instant::now() + super::SESSION_DRAIN_TIMEOUT;
+        loop {
+            match cell.observe() {
+                JoinState::Joined => break,
+                JoinState::Unknown => return,
+                JoinState::Pending if tokio::time::Instant::now() >= deadline => return,
+                JoinState::Pending => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await
+                }
+            }
+        }
+    }
+    {
+        if let Some(registry) = registry.upgrade() {
+            let mut registry = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let key = transport.channel.id.clone();
+            if registry
+                .transports
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &transport))
+            {
+                registry.transports.remove(&key);
+            }
+        }
+    }
+    // Absent is common (the probe never wrote); anything left behind is
+    // the orphan sweeper's once this transport is out of the registry.
+    // This inherited scratch attempt is not an original native identity
+    // close receipt. `closed` certifies the original tuner-worker join;
+    // complete LiveTransport/scratch containment remains a separate scope.
+    let _ = tokio::fs::remove_dir_all(&transport.scratch).await;
+    transport.closed.cancel();
+    if let Some(cell) = transport
+        .worker
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(std::sync::Weak::upgrade)
+    {
+        cell.retire();
     }
 }
 
@@ -1594,25 +1717,7 @@ impl LiveTvManager {
                 // Disabling capture must still preserve useful partial work.
                 if self.serving.admit().is_some() {
                     if !live_tv.enabled || !dvr.enabled {
-                        if let Ok(rows) = self.dvr_rows(&[DvrState::Recording]).await {
-                            for row in rows {
-                                let _ = self.stop_sink(&row.id, row.attempt).await;
-                                if let Err(error) = self
-                                    .finish_row(
-                                        &row,
-                                        &events,
-                                        unix_seconds(),
-                                        (row.capture_end - unix_seconds()).max(0),
-                                        None,
-                                        "recording disabled",
-                                        live_tv.generation,
-                                    )
-                                    .await
-                                {
-                                    tracing::debug!(recording = %row.id, %error, "finalization will retry");
-                                }
-                            }
-                        }
+                        self.finish_disabled_recordings(&live_tv, &events).await;
                     }
                     if let Err(error) = self.dvr_purge_deleted().await {
                         tracing::debug!(%error, "recording deletion will retry");
@@ -1625,6 +1730,34 @@ impl LiveTvManager {
                     return;
                 }
                 _ = tokio::time::sleep(DVR_TICK) => {}
+            }
+        }
+    }
+
+    async fn finish_disabled_recordings(
+        &self,
+        live_tv: &LiveTvConfig,
+        events: &super::webhook::DvrEventSink,
+    ) {
+        if let Ok(rows) = self.dvr_rows(&[DvrState::Recording]).await {
+            for row in rows {
+                if self.stop_sink(&row.id, row.attempt).await == SinkStopResult::Settling {
+                    continue;
+                }
+                if let Err(error) = self
+                    .finish_row(
+                        &row,
+                        events,
+                        unix_seconds(),
+                        (row.capture_end - unix_seconds()).max(0),
+                        None,
+                        "recording disabled",
+                        live_tv.generation,
+                    )
+                    .await
+                {
+                    tracing::debug!(recording = %row.id, %error, "finalization will retry");
+                }
             }
         }
     }
@@ -1703,6 +1836,9 @@ impl LiveTvManager {
         let live = self.live_recording_ids();
         let rows = self.dvr_rows(&[DvrState::Recording]).await?;
         for row in rows {
+            if self.capture_owners.unsettled(&row.id) {
+                continue;
+            }
             if self
                 .resource_capture(&row.id)
                 .await?
@@ -2417,6 +2553,7 @@ impl LiveTvManager {
             .ok_or_else(|| {
                 LiveTvError::OwnerUnavailable("this node is preparing for restart".to_owned())
             })?;
+        let capture = self.capture_owners.reserve(&row.id, attempt, admission)?;
         if dvr.root.trim().is_empty() {
             return Err(LiveTvError::InvalidConfig(
                 "no DVR root is configured, so a recording has nowhere to go".to_owned(),
@@ -2462,9 +2599,17 @@ impl LiveTvManager {
             LiveTvError::OwnerUnavailable(crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned())
         })?;
 
+        let storage_id = capture.storage_identity(&dvr.root).await.map_err(|error| {
+            LiveTvError::InvalidConfig(format!("DVR storage identity: {error}"))
+        })?;
         let claim = self
-            .resource_capture_claim(&effective, dvr, row, &device_id, &base)
+            .resource_capture_claim(&effective, dvr, row, &device_id, &base, storage_id)
             .await?;
+        if !capture.demand_alive() {
+            return Err(LiveTvError::OwnerUnavailable(
+                "original capture was stopped during admission".into(),
+            ));
+        }
         let base = PathBuf::from(&claim.base_path);
         if claim.epoch != attempt {
             return Err(LiveTvError::Conflict(
@@ -2573,40 +2718,25 @@ impl LiveTvManager {
             }
         };
 
-        let opened_file = async {
-            if let Some(parent) = base.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                    LiveTvError::StreamFailed(format!("creating the recording folder: {error}"))
-                })?;
-            }
-            // `create_new` is the whole guarantee against a fenced predecessor:
-            // an attempt file that already exists means another process owns
-            // it, and this attempt takes the next number rather than
-            // truncating it.
-            tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(attempt_path(&base, attempt))
-                .await
-                .map_err(|error| {
-                    LiveTvError::StreamFailed(format!(
-                        "opening attempt {attempt} of this recording: {error}"
-                    ))
-                })
-        }
-        .await;
-        let file = match opened_file {
+        let seat = CaptureSeat {
+            manager: self,
+            transport: Arc::clone(&transport),
+            opened,
+            armed: true,
+        };
+        // No open file crosses this metadata await.
+        let prior_attempt_bytes = prior_attempt_bytes(&base, attempt).await;
+        let file = match capture.open(attempt_path(&base, attempt)).await {
             Ok(file) => file,
             Err(error) => {
-                transport.release_seat();
-                if opened {
-                    self.abandon_unstarted_transport(&transport);
-                }
-                return Err(error);
+                return Err(LiveTvError::StreamFailed(format!(
+                    "opening attempt {attempt}: {error}"
+                )));
             }
         };
+        let cancel = capture.cancellation();
         let sink = Arc::new(DvrSink {
-            _restart_admission: Some(admission),
+            capture: Some(capture),
             recording_id: row.id.clone(),
             channel_id: row.channel_id.clone(),
             airing_start: row.airing_start,
@@ -2615,12 +2745,12 @@ impl LiveTvManager {
             window: (row.capture_start, row.capture_end),
             base: base.clone(),
             writer: std::sync::Mutex::new(None),
-            writer_task: std::sync::Mutex::new(None),
+            writer_task: OriginalTask::default(),
             bytes: AtomicU64::new(0),
-            prior_attempt_bytes: prior_attempt_bytes(&base, attempt).await,
+            prior_attempt_bytes,
             observation: std::sync::Mutex::new(DvrSinkObservation::new(attempt)),
-            metrics: Arc::clone(&self.metrics),
-            cancel: CancellationToken::new(),
+            metrics: Arc::downgrade(&self.metrics),
+            cancel,
         });
         start_sink_writer(&sink, Box::new(file), Arc::clone(&transport.delivered));
 
@@ -2628,17 +2758,14 @@ impl LiveTvManager {
         // sees a sink it cannot write to; then give back the seat that kept
         // the transport from retiring while the file was opened.
         let attached = transport.attach_sink(Arc::clone(&sink));
-        transport.release_seat();
         if !attached {
             let _ = settle_sink(&sink).await;
-            if opened {
-                self.abandon_unstarted_transport(&transport);
-            }
             return Err(LiveTvError::StreamFailed(
                 "this channel's tuner connection closed while the recording file was opened"
                     .to_owned(),
             ));
         }
+        seat.commit();
         if opened {
             self.spawn_transport_worker(&transport, client);
         }
@@ -2676,17 +2803,41 @@ impl LiveTvManager {
         transport: &Arc<DvrTransport>,
         client: reqwest::Client,
     ) {
-        let manager = Arc::downgrade(self);
+        let cell = match self
+            .capture_owners
+            .reserve_transport(transport, &self.registry)
+        {
+            Ok(cell) => cell,
+            Err(error) => {
+                transport.cancel.cancel();
+                transport.finish(&Err(error));
+                return;
+            }
+        };
+        *transport
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(&cell));
+        let authority = self.transport_authority();
+        let system = Arc::clone(&self.system);
+        let scratch_gate = Arc::clone(&self.scratch_sweep_gate);
         let worker_transport = Arc::clone(transport);
         let serving = self.serving.clone();
+        let (enter, registered) = tokio::sync::oneshot::channel();
         let worker = tokio::spawn(async move {
+            if registered.await.is_err() {
+                return Err(LiveTvError::OwnerUnavailable(
+                    "tuner task was not registered".into(),
+                ));
+            }
             let stream = run_transport(
                 client,
-                manager.clone(),
+                system,
+                scratch_gate,
                 serving,
                 Arc::clone(&worker_transport),
             );
-            let result = if let Some(authority) = manager.upgrade() {
+            let result = {
                 match authority.resource_transport_admit(&worker_transport).await {
                     Ok((valid_until, ingest)) => {
                         let result = tokio::select! {
@@ -2709,30 +2860,13 @@ impl LiveTvManager {
                     }
                     Err(error) => Err(error),
                 }
-            } else {
-                Err(LiveTvError::OwnerUnavailable(
-                    "Live TV worker stopped".into(),
-                ))
             };
             worker_transport.cancel.cancel();
             worker_transport.finish(&result);
-            if let Some(manager) = manager.upgrade() {
-                // Cleanup must not await the JoinHandle of the task that is
-                // currently executing this block. Hand it to a sibling task
-                // so the worker can become joinable before close_transport_arc
-                // settles writers and collects it. The exact transport, not
-                // whatever the channel's entry is by then.
-                let transport = Arc::clone(&worker_transport);
-                tokio::spawn(async move {
-                    manager.close_transport_arc(transport).await;
-                });
-            }
             result
         });
-        *transport
-            .worker
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+        cell.install(worker);
+        let _ = enter.send(());
     }
 
     /// Cancel every writer for one recording through the row's exact attempt.
@@ -2740,6 +2874,10 @@ impl LiveTvManager {
     /// stopping one of two recordings on a channel frees no tuner, and
     /// pretending otherwise is what would make the capacity dialog lie.
     async fn stop_sink(&self, recording_id: &str, attempt: i64) -> SinkStopResult {
+        let _stop = match self.capture_owners.begin_stop(recording_id, attempt) {
+            Ok(stop) => stop,
+            Err(_) => return SinkStopResult::Settling,
+        };
         let transports = {
             let registry = self
                 .registry
@@ -2766,7 +2904,11 @@ impl LiveTvManager {
             return SinkStopResult::Settling;
         }
         if sinks.is_empty() {
-            return SinkStopResult::NotFound;
+            return if self.capture_owners.unsettled(recording_id) {
+                SinkStopResult::Settling
+            } else {
+                SinkStopResult::NotFound
+            };
         }
         let mut settling = false;
         for sink in sinks {
@@ -2774,12 +2916,23 @@ impl LiveTvManager {
             // every matching writer through that attempt must be joined first.
             settling |= settle_sink(&sink).await == SinkStopResult::Settling;
         }
-        if settling {
+        if settling || self.capture_owners.unsettled(recording_id) {
             SinkStopResult::Settling
         } else {
             if let Err(error) = self.resource_capture_detach(recording_id, attempt).await {
                 tracing::warn!(%error, "recording writer closed but durable detach is pending");
                 return SinkStopResult::Settling;
+            }
+            for transport in &transports {
+                transport
+                    .sinks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .retain(|sink| {
+                        !(sink.recording_id == recording_id
+                            && sink.attempt <= attempt
+                            && sink.cancel.is_cancelled())
+                    });
             }
             SinkStopResult::Settled
         }
@@ -2917,46 +3070,7 @@ impl LiveTvManager {
     /// up to `SESSION_DRAIN_TIMEOUT` later (§2.4 D4). A start that needs this
     /// transport gone waits on `closed()`, which fires after the join.
     pub(crate) async fn close_transport_arc(&self, transport: Arc<DvrTransport>) {
-        transport.cancel.cancel();
-        let sinks = transport
-            .sinks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let mut settling = false;
-        for sink in sinks {
-            settling |= settle_sink(&sink).await == SinkStopResult::Settling;
-        }
-        transport.close_viewer_feeds();
-        if settling {
-            return;
-        }
-        {
-            let mut registry = self
-                .registry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let key = transport.channel.id.clone();
-            if registry
-                .transports
-                .get(&key)
-                .is_some_and(|current| Arc::ptr_eq(current, &transport))
-            {
-                registry.transports.remove(&key);
-            }
-        }
-        let worker = transport
-            .worker
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(worker) = worker {
-            let _ = tokio::time::timeout(super::SESSION_DRAIN_TIMEOUT, worker).await;
-        }
-        // Absent is common (the probe never wrote); anything left behind is
-        // the orphan sweeper's once this transport is out of the registry.
-        let _ = tokio::fs::remove_dir_all(&transport.scratch).await;
-        transport.closed.cancel();
+        close_transport_original(Arc::downgrade(&self.registry), transport).await;
     }
 
     pub(crate) async fn close_all_transports(&self) {
@@ -3102,7 +3216,7 @@ impl LiveTvManager {
         reason: &str,
         _generation: i64,
     ) -> Result<(), LiveTvError> {
-        let _admission = self
+        let admission = self
             .serving
             .serving
             .try_restart_admission()
@@ -3110,12 +3224,24 @@ impl LiveTvManager {
             .ok_or_else(|| {
                 LiveTvError::OwnerUnavailable("this node is preparing for restart".to_owned())
             })?;
+        let _capture_finalization =
+            self.capture_owners
+                .begin_finalization(&row.id, row.attempt, admission)?;
         let (_, dvr) = self.dvr_configs().await?;
         let finalizer_deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(plurx_core::live_tv_resource::LEASE_MS as u64);
+        let storage_id = tokio::time::timeout_at(
+            finalizer_deadline,
+            _capture_finalization.storage_identity(&dvr.root),
+        )
+        .await
+        .map_err(|_| {
+            LiveTvError::OwnerUnavailable("recording finalization authority timed out".into())
+        })?
+        .map_err(|error| LiveTvError::InvalidConfig(format!("DVR storage identity: {error}")))?;
         let claim = tokio::time::timeout_at(
             finalizer_deadline,
-            self.resource_finalize(&row.id, &dvr.root),
+            self.resource_finalize(&row.id, storage_id),
         )
         .await
         .map_err(|_| {
@@ -3142,6 +3268,14 @@ impl LiveTvManager {
                 / 1000)
                 .max(0)
         };
+        if !self
+            .capture_owners
+            .permits_finalization(&current.id, claim.epoch)
+        {
+            return Err(LiveTvError::OwnerUnavailable(
+                "original capture file is still settling".into(),
+            ));
+        }
         let row = &current;
         let input_base = PathBuf::from(&claim.base_path);
         let base = sibling(&input_base, &format!(".f{}", claim.finalizer_epoch));
@@ -3251,13 +3385,26 @@ impl LiveTvManager {
     }
 
     async fn delete_recording_files(&self, row: &DvrRecording) -> bool {
+        if self.stop_sink(&row.id, row.attempt).await == SinkStopResult::Settling {
+            return false;
+        }
+        let Some(admission) = self.serving.serving.try_restart_admission().await else {
+            return false;
+        };
+        let Ok(identity_owner) =
+            self.capture_owners
+                .begin_finalization(&row.id, row.attempt, admission)
+        else {
+            return false;
+        };
         let mut artifacts = Vec::new();
         match self.resource_capture(&row.id).await {
             Ok(Some(claim)) => {
                 let Ok((_, dvr)) = self.dvr_configs().await else {
                     return false;
                 };
-                if super::resource::storage_identity(&dvr.root)
+                if identity_owner
+                    .storage_identity(&dvr.root)
                     .await
                     .ok()
                     .as_deref()
@@ -3332,7 +3479,8 @@ fn store_error(error: plurx_core::error::StoreError) -> LiveTvError {
 /// then write every chunk to every sink whose window contains this moment.
 async fn run_transport(
     client: reqwest::Client,
-    manager: std::sync::Weak<LiveTvManager>,
+    system: Arc<super::SystemInfo>,
+    scratch_gate: Arc<tokio::sync::Mutex<()>>,
     serving: super::LiveTvAuthority,
     transport: Arc<DvrTransport>,
 ) -> Result<(), LiveTvError> {
@@ -3367,37 +3515,23 @@ async fn run_transport(
     // describes them. Before this the transport never probed, so `source`
     // was always empty. Later viewers may ask the fan-out to re-probe the
     // live edge (`source_for_viewer`).
-    let (system, source) = match manager.upgrade() {
-        Some(manager) => {
-            {
-                // The orphan sweeper takes this gate across its snapshot of
-                // owned directories and its walk; creating the directory
-                // under it means the sweeper either sees this transport as
-                // the owner or finishes before the directory exists.
-                let _gate = manager.scratch_sweep_gate.lock().await;
-                if let Err(error) = tokio::fs::create_dir_all(&transport.scratch).await {
-                    tracing::warn!(%error, "could not create the transport's probe folder");
-                }
-            }
-            let system = Arc::clone(&manager.system);
-            drop(manager);
-            if warm {
-                return pump_tuner_fanout(input, serving, transport, Some(system)).await;
-            }
-            let source = probe_live_source(
-                &system,
-                &transport.scratch,
-                &input.prefix,
-                super::SourceProbeWork::VIEWER,
-            )
-            .await;
-            (Some(system), source)
+    {
+        let _gate = scratch_gate.lock().await;
+        if let Err(error) = tokio::fs::create_dir_all(&transport.scratch).await {
+            tracing::warn!(%error, "could not create the transport's probe folder");
         }
-        None => (
-            None,
-            Err(LiveTvError::StreamFailed("live-TV manager stopped".into())),
-        ),
-    };
+    }
+    if warm {
+        return pump_tuner_fanout(input, serving, transport, Some(system)).await;
+    }
+    let source = probe_live_source(
+        &system,
+        &transport.scratch,
+        &input.prefix,
+        super::SourceProbeWork::VIEWER,
+    )
+    .await;
+    let system = Some(system);
     if let Err(error) = &source {
         if !transport.is_recording() {
             // Nothing but viewers wants these bytes: the transport ends with
@@ -3525,13 +3659,13 @@ async fn pump_tuner_fanout(
         // processes never write one recording.
         if !serving.running(transport.owner_serving_generation) {
             for sink in transport.live_sinks() {
-                transport
-                    .metrics
-                    .observe_consumer_eviction("recording", "fenced");
+                if let Some(metrics) = transport.metrics.upgrade() {
+                    metrics.observe_consumer_eviction("recording", "fenced");
+                }
                 sink.cancel.cancel();
             }
             for viewer in transport.live_viewers() {
-                viewer.evict("fenced", &transport.metrics);
+                viewer.evict("fenced", transport.metrics.upgrade().as_deref());
             }
             return Err(LiveTvError::OwnerUnavailable(
                 crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
@@ -3620,9 +3754,9 @@ async fn pump_tuner_fanout(
                     queued_bytes = queue.queued_bytes.load(Ordering::Acquire),
                     "a recording's disk queue filled; that capture is stopping"
                 );
-                transport
-                    .metrics
-                    .observe_consumer_eviction("recording", "backlog");
+                if let Some(metrics) = transport.metrics.upgrade() {
+                    metrics.observe_consumer_eviction("recording", "backlog");
+                }
                 interrupt_sink(&sink, "disk_write_backlog");
                 continue;
             }
@@ -3631,9 +3765,9 @@ async fn pump_tuner_fanout(
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     queue.queued_bytes.fetch_sub(len, Ordering::AcqRel);
-                    transport
-                        .metrics
-                        .observe_consumer_eviction("recording", "backlog");
+                    if let Some(metrics) = transport.metrics.upgrade() {
+                        metrics.observe_consumer_eviction("recording", "backlog");
+                    }
                     interrupt_sink(&sink, "disk_write_backlog");
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -3659,7 +3793,7 @@ async fn pump_tuner_fanout(
                     queued_bytes = queue.queued_bytes.load(Ordering::Acquire),
                     "a live viewer's FFmpeg stopped reading; evicting that viewer only"
                 );
-                viewer.evict("backlog", &transport.metrics);
+                viewer.evict("backlog", transport.metrics.upgrade().as_deref());
                 continue;
             }
             let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -3667,7 +3801,7 @@ async fn pump_tuner_fanout(
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     queue.queued_bytes.fetch_sub(len, Ordering::AcqRel);
-                    viewer.evict("backlog", &transport.metrics);
+                    viewer.evict("backlog", transport.metrics.upgrade().as_deref());
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     // Its pump is gone; the session is ending on its own.

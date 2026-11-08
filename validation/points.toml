@@ -1324,6 +1324,8 @@ title = "Recording from the tuner, and reminders"
 contract = "Recording rules and one-off requests materialise one row per airing, identified by channel and start for that airing's whole life, so a cancelled recording is never resurrected by a rule that still matches it. The owner node alone opens tuner transports and writes the live and terminal states, recording back-to-back airings on one channel through a single tuner GET; a viewer is never refused a tuner by a recording without being told which recording holds it and offered a way to stop it. Every capture is an Activity row with a reason and a stop, recordings scan into a library from their own sidecars with no provider lookups, and reminders fire from a loop that needs neither the tuner nor the recording switch. Readiness facts in Developer settings are advisory and never gate enablement."
 paths = [
   "crates/plurxd/src/live_tv/dvr/tests.rs",
+  "crates/plurxd/src/live_tv/dvr/capture_owner.rs",
+  "crates/plurxd/src/live_tv/dvr/capture_owner/tests.rs",
   "crates/plurxd/src/live_tv/dvr/lifecycle_tests.rs",
   "crates/plurx-core/src/dvr.rs",
   "crates/plurx-core/src/store/hiqlite_dvr.rs",

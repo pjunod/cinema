@@ -273,7 +273,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "3bdc88cf1fd98584a90f7576cc6b376291f8c167ec5bcff99a5da681946a098f"
+        "sha256": "40951179eecf9b252464ec6dd075e9bbf92a7512fba5ee53e96fe65315371373"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",

@@ -1,6 +1,6 @@
 # Attempt root — who owns pre-Winner storage through final destruction?
 
-**Status:** open · production wiring under qualification · 2026-11-07.
+**Status:** open · scoped task merged; broader inventory open · 2026-11-07.
 Companion to the [canonical ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) and
 [owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md). The
 [ordinary collector](ADAPTIVE-PLAYBACK-ORDINARY-COLLECTOR.md) owns native finite
@@ -109,7 +109,11 @@ have passed across recorded source scopes: 20 core/original-task cases at
 and two RPC cases rerun at `fc8bd0d5`. Reruns add no distinct credit. The final source corrections
 have independent review. Strict Clippy, workspace/all-targets compilation,
 the affected RPC rerun and full formatting pass at `fc8bd0d5`; normal hooks
-and the manual effort gate remain pending.
+and the manual effort gate passed before task [#1429](http://forge.lan:3000/noirr/plurx/pulls/1429)
+merged at `4dabcb100`. Gate 6675 passed all eight jobs on `340b73b8`;
+candidate/landing tree `b8dd2379` and all 32 regression trailers match.
+The exact committed checks and normal hooks passed. Full qualification scope
+and the compile-profile boundary remain recorded in the task PR.
 
 The native fixtures initialize the same ordinary collector before attempt
 support as production startup. They exercise stored-snapshot P/M work before

@@ -1,7 +1,7 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation active · updated 2026-11-07.
-Effort #1248 remains draft; release qualification and deployment are open.
+Draft effort #1248; release qualification and deployment remain open.
 
 [Plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) ·
 [finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) ·
@@ -9,49 +9,32 @@ Effort #1248 remains draft; release qualification and deployment are open.
 [support ADR](ADAPTIVE-PLAYBACK-FINALIZATION-SUPPORT.md) ·
 [collector](ADAPTIVE-PLAYBACK-ORDINARY-COLLECTOR.md) ·
 [attempt root](ADAPTIVE-PLAYBACK-ATTEMPT-ROOT.md) ·
-[retained exit](ADAPTIVE-PLAYBACK-RETAINED-EXIT.md).
+[retained exit](ADAPTIVE-PLAYBACK-RETAINED-EXIT.md) ·
+[capture](ADAPTIVE-PLAYBACK-CAPTURE-CUSTODY.md).
 
 ## Current continuation — source-bound task qualification
 
-Draft effort #1248 includes merged task PRs #1293, #1338, #1360–#1365, #1368,
-#1371 and #1375. The latter landed at `edb5b79f` after eight green jobs in gate
-6437; #1368/#1371 passed gates 6411/6422. [Owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md)
-keeps the earlier 44 cases separate from 51 selected-bridge core passes on
-production-identical `6ee93330`/`ca85f07f` and three daemon passes on `ca85f07f`.
-Seven unchanged overlap failures remain reproduced baseline exceptions.
+Pre-Winner ownership [PR #1429](http://forge.lan:3000/noirr/plurx/pulls/1429)
+merged at `4dabcb100` after all eight jobs in gate 6675 passed on `340b73b8`.
+Candidate and landing share tree `b8dd2379`; all 32 regression trailers are
+retained. Its [31 scoped passes](ADAPTIVE-PLAYBACK-ATTEMPT-ROOT.md) preserve
+original Entry/P-M/task custody and response backing through actual aliases.
+Normal hooks, exact committed checks and paperwork passed. The compile uses
+the existing 16/18 GiB profile; the new 8 GiB worker remains unchanged and
+unqualified for the daemon test frontend.
 
-[PR #1377](http://forge.lan:3000/noirr/plurx/pulls/1377) records the exact-candidate
-gate and landing for the built direct-retirement amendment. Exact `7658db4c` execution
-reproduced three core and two daemon ticket-retention failures. The
-[original-selector follow-up](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#direct-retirement-follow-up--original-selectors-replace-permanent-aliases)
-records the bounded repair and two new actual-read cases at source tree
-`4cb874ba`: 21 focused core and three affected daemon cases pass. Distinct source-scoped total: 66.
-Exact-candidate checks are recorded in that task PR.
-The earlier 51-case qualification retains its original source boundary.
-The [direct application continuation](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#direct-applications-retain-original-workers-and-whole-payloads)
-records 17 scoped passes for original-worker and rich-payload reference custody; full M0 stays open.
+[Retained S exit](ADAPTIVE-PLAYBACK-RETAINED-EXIT.md) merged as #1419 after
+gate 6591, with 14 distinct scoped passes. The
+[capture native/writer continuation](ADAPTIVE-PLAYBACK-CAPTURE-CUSTODY.md)
+has 19 new and 42 existing scoped passes; final lint, hooks and its task gate
+remain open.
 
-The [static P/M continuation](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#static-pm-counts-actual-controllers-entries-and-inline-futures)
-now counts the actual original controller, inline encoded pass and escaped
-entry aliases, with core custody of the same heartbeat and compact independent
-cleanup. Its 63 distinct source-scoped passes are recorded there. The pre-M
-census span and all family coverage remain unbridged.
-
-[Finite driver custody](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#finite-vod-keeps-the-original-driver-through-every-join)
-records 13 scoped daemon passes, zero ignored. Opaque build gates preserve
-original mutexes; rich R/S and pre-Winner whole-F closure remain open.
-
-The [finite ledger](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
-and [policy ledger](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) retain their earlier
-reader/lifecycle/restart and fourteen refusal/service results. #1365's
-controlled two-node and exact-owner publication evidence remains in the
-[delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md). None establishes naturally
-selected performance or M0–M7 acceptance.
-
-Still open: full inventory/M0, M3a/C2 native and allocator bounds, production
-trials, V1–V5, broader adapters/platforms, current-main integration and Main
-promotion. The actor-application lease regression and selected-static FFmpeg
-`-display_rotation` decision remain separate open items. No deployment.
+Complete family inventory, pre-M/SQL coordinators, finalizer output/scratch,
+production owned-worker containment, constructor/allocator/executor/kernel
+peaks, full R/S/F closure and real trials remain open. V1–V5, current-main
+integration and Main promotion remain open; no deployment. Earlier selected
+bridge, static, driver and collector evidence is preserved in the
+[earlier checkpoint](ADAPTIVE-PLAYBACK-CAPTURE-CUSTODY.md#earlier-canonical-checkpoint).
 
 ## 2026-10-29 checkpoint — historical source-bound evidence
 
