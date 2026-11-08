@@ -2,6 +2,7 @@
 import json
 import re
 import subprocess
+import tomllib
 from validation import python_unit_receipts as receipts
 
 DEVICE_FORMAT = 'instrumentation-command'
@@ -194,6 +195,23 @@ def android_source(read_source):
     return normalized
 
 
+# The two exact playback resource trees differ only by six comments in the
+# rolling ownership catalog. The bound JVM tests load named JSON fixtures.
+JVM_PLAYBACK_COMMENT_TREES = ('ad8414cfe9700cfadb8a42ab2a84ede121baa336',
+                              '11407824d6dbbb6bcad85ca59f863bfd776dca9d')
+
+
+def same_jvm_fixture_tree(prior, candidate, path, read_source):
+    trees = tree_id(prior, path), tree_id(candidate, path)
+    if trees[0] == trees[1]:
+        return True
+    if path != 'tests/playback' or trees != JVM_PLAYBACK_COMMENT_TREES:
+        return False
+    ledger = path + '/rolling-producer-owners.toml'
+    before, after = read_source(prior, ledger), read_source(candidate, ledger)
+    return before is not None and after is not None and tomllib.loads(before.decode()) == tomllib.loads(after.decode())
+
+
 def record_contract(lane, suite, record, candidate, raw, read_source):
     from validation import promotion_unit_retention as retention
     device = record['format'] == DEVICE_FORMAT
@@ -216,7 +234,7 @@ def record_contract(lane, suite, record, candidate, raw, read_source):
         if jvm:
             for path in ('tests/contracts', 'tests/playback', 'tests/sharing',
                          'crates/plurx-core/tests/fixtures'):
-                receipts.require(tree_id(prior, path) == tree_id(candidate, path),
+                receipts.require(same_jvm_fixture_tree(prior, candidate, path, read_source),
                                  'Native Gradle consumed fixture tree changed: ' + path)
         workflow_raw = read_source(prior, '.github/workflows/ci.yml')
         job = 'android_jvm' if jvm else 'android_device'
