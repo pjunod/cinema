@@ -561,7 +561,8 @@ test("durable owners, attempts and repair destinations use roster names", () => 
 test("a waiting targeted library request names what it waits on", () => {
   const reason = new Function(
     `let ACTIVITY_SNAPSHOT={}; const ME={is_admin:true}; function activitySourceRecovery(){ return []; }
-     ${shippedSource("durableJobReason")} return durableJobReason;`,
+     ${shippedSource("durableJobReason")}
+     return durableJobReason;`,
   )();
   const job = (waiting_on) => ({ kind: "library_scan", targeted: true, state: "queued", library_id: 3, waiting_on });
   assert.equal(reason(job("full_scan:Movies")), "Waiting on: full scan of Movies");
