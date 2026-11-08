@@ -12,12 +12,15 @@ from pathlib import Path
 import subprocess
 
 from validation import postmerge_unit_retention as retention
+from validation.landed_python_completion import verify_python_completion
 from validation import python_unit_receipts as receipts
 from validation import qualification
 
 LANDING = 'c470d5aa033e84b4a2de1f8d36aa4180d62cd971'
 UNITS = {'sha256': '8d53a0fec705f9e060e5a32c65a833a5c9bd4a02af1eb0a790491732b0b4c466',
          'attachment_id': 149, 'attachment_uuid': '31fc459d-0c43-484b-8696-6a61ae0ece4e'}
+PYTHON = {'sha256': 'e75639ed83941e3be2aeca57c6a6c7e5c919ea5d91533445e149a11a8df887db',
+          'attachment_id': 148, 'attachment_uuid': '23f429f1-f204-449e-b96d-5217ee48ebfd'}
 # Filled only after reviewing the final package fix and terminal lane records.
 REVIEWED_BUILD_TREE = None
 CONTROL_PATHS = frozenset({
@@ -93,14 +96,14 @@ def verify(api, env, source, landing):
     try:
         os.chdir(landing)
         retained = retention.select(api, 'units', UNITS, 1399, LANDING)
+        python = verify_python_completion(api, LANDING,
+            retention.select(api, 'python', PYTHON, 1399, LANDING))
     finally:
         os.chdir(previous)
     outcomes = [successful_job(api, repo_id, expected) for expected in JOBS]
-    # Python disposition and native nonunit receipts are added here only after
-    # their authenticated terminal records have been reviewed.
-    require(False, 'Python and nonunit terminal evidence not installed')
+    require(False, 'Nonunit terminal evidence not installed')
     return {'source': source_sha, 'tree': git(source, 'rev-parse', 'HEAD^{tree}'),
-            'retained_units': retained, 'jobs': outcomes}
+            'retained_units': retained, 'python': python, 'jobs': outcomes}
 
 
 def main():

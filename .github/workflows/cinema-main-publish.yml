@@ -84,8 +84,9 @@ jobs:
       - name: Reverify the immutable image and advance the fleet main tag
         working-directory: source
         env:
+          PLURX_EXPECTED_IMAGE_ID: ${{ steps.verified.outputs.image_id }}
           PLURX_BUILD_REF: ${{ inputs.source_sha }}
           PLURX_BUILD_SHA: ${{ inputs.source_sha }}
           PLURX_REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
           PLURX_SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
-        run: scripts/registry-push
+        run: "$GITHUB_WORKSPACE/controller/scripts/registry-push"
