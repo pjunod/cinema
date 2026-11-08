@@ -88,9 +88,23 @@ class IntegrationDocLiterals(unittest.TestCase):
         codes = set(re.findall(r'code: "([a-z_]+)"', source))
         codes |= set(re.findall(r'"code": "([a-z_]+)"', source))
         codes |= set(re.findall(r'const PATH_UNREADABLE: &str = "([a-z_]+)"', source))
+        codes |= set(re.findall(r'\(\s*"([a-z_]+)",\s*"the scan request', source))
+        # The record's own failure codes, which the GET read carries.
+        record = re.search(
+            r"fn request_record\(.*?\n\}\n", LIBRARY_WORK.read_text(), re.S
+        )
+        self.assertIsNotNone(record, "request_record moved")
+        codes |= set(re.findall(r'(?:Some|then_some)\("([a-z_]+)"\)', record.group(0)))
         self.assertGreaterEqual(
             codes,
-            {"path_required", "probe_paths_with_path", "scan_failed", "path_outside_roots", "path_unreadable"},
+            {
+                "path_required",
+                "probe_paths_with_path",
+                "scan_failed",
+                "cancelled",
+                "path_outside_roots",
+                "path_unreadable",
+            },
         )
         for code in sorted(codes):
             with self.subTest(code=code):
@@ -99,7 +113,7 @@ class IntegrationDocLiterals(unittest.TestCase):
     def test_the_four_statuses_are_the_ones_the_record_reports(self) -> None:
         mapping = re.search(r'let status = match record\.state\.as_str\(\) \{(.*?)\};', LIBRARY_WORK.read_text(), re.S)
         self.assertIsNotNone(mapping, "the request status mapping moved")
-        statuses = set(re.findall(r'=> "([a-z]+)"', mapping.group(1))) | {"failed"}
+        statuses = set(re.findall(r'=> "([a-z]+)"', mapping.group(1)))
         self.assertEqual(statuses, {"done", "running", "queued", "failed"})
         self.assertIn("`status` is `queued` · `running` · `done` · `failed`", self.doc)
 

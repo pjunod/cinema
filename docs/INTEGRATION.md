@@ -243,6 +243,7 @@ fails if one drifts:
 | `422` | `{"code":"path_outside_roots","error":"path is not under any library root","path","roots":[…]}` | Under no library root — **permanent**. `roots` is there because "wrong path" is only actionable if you can see the right ones |
 | `422` | plain text, no `code` | The JSON extractor refused the body: a missing required field or a field of the wrong type. Curator tells this from `path_outside_roots` by the body. Malformed JSON is a plain-text `400`, a missing JSON `Content-Type` a `415` |
 | `500` | `{"code":"scan_failed","message","status":"failed","request_id","error","correlation_id"}` | The request, or the finished request a replayed `request_key` names, failed for a reason other than an unreadable root |
+| `500` | `{"code":"cancelled","message","status":"failed","request_id","error","correlation_id"}` | The same failed shape for a request whose job was cancelled (Activity's Cancel). Send a new attempt |
 | `503` | `{"code":"path_unreadable","error":"library root could not be read: …","path","root","retry_after_s":60}` + `Retry-After: 60` | Under a root plurx cannot read right now — **transient**; the same request succeeds once the share is back. When a waited-for or replayed request failed because its root dropped mid-scan, the body also carries `request_id` and `"status":"failed"` and has no `root` |
 | `503` | `{"error":"library work was not accepted: …"}` | The durable queue refused it: the library already has 256 pending requests, another queue bound is reached, or the same request is being cancelled. Nothing is lost; retry later |
 
@@ -299,8 +300,11 @@ key created. Curator needs only `scan:trigger` (§2).
 ```
 
 `status` is `queued` · `running` · `done` · `failed`. `report` and `items`
-appear at `done` and `error` at `failed`, with `code: "path_unreadable"` when
-the root dropped mid-scan; Curator treats that as retryable. Requests made
+appear at `done` and `error` at `failed`. A failure may carry a `code`:
+`"code":"path_unreadable"` when the root dropped mid-scan, or
+`"code":"cancelled"` when the request's job was cancelled before it finished.
+Both are retryable with a new attempt, and a cancelled request is a failure,
+never a status of its own. Requests made
 through `POST /scan` also carry `waiting_on` and `files`; their absence means a
 request from before contract v2 (or a full scan's own request). `waiting_on`
 is empty once the request's turn starts, and while it is queued is one of:
@@ -728,10 +732,6 @@ work around it and a reader who doesn't will misread the UI:
   way whether you clicked it or Curator asked for it, even though the request
   record carries `source` and `correlation_id`.
 - **No keys UI** (§2). Minting is a curl.
-- **A cancelled request reads `cancelled`.** Cancelling a targeted job in
-  Activity cancels its requests. Their record then reads `"status":"cancelled"`,
-  a value outside the contract's four, and replaying the request's
-  `request_key` answers `202 queued`. Curator should send a new attempt.
 - **A stale `waiting_on` can outlive its reason.** After a fence refusal wrote
   `full_scan:<library>`, a later claim refused for another reason (playback's
   foreground gate) writes nothing. The old value stays until the targeted pass
