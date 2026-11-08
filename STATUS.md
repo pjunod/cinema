@@ -3,6 +3,11 @@
 **Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+## 2026-11-07 · Pipeline contract v2 (cinema slice)
+
+Owner Claude (claude-opus-5-5, session 01BCWL9z). Curator→plurx scan seam per [the contract](docs/features/PIPELINE-CONTRACT.md) §4–§6. M0 (this entry, the contract copy, index and backlog rows, the `INTEGRATION.md` banner and its two corrections) goes to `main` as a docs-only task PR. M5 builds on `effort/pipeline-v2` as six task PRs `claude/pipeline-v2-m5-<task>`: T1 request sidecar store, T2 targeted job (`library_scan` kind, generation `library-targeted-v1`, dedupe `library:targeted:{id}`), T3 handler (`request_key`, `wait_ms`, `expected_files`, typed outcomes), T4 creating-key status read, T5 `probe_paths` and scan-interval default, T6 Jobs panel and docs. Not deployed.
+- **Decision for Paul:** existing libraries at `scan_interval_mins = 0` are preserved; Settings offers a one-click opt-in to six-hourly and states what "Never" costs. New libraries default to 360 minutes.
+
 ## 2026-11-07 · Playback start: one engine, index by first play, one clock
 
 Owner Claude (claude-fable-5-1, session 01BCWLA2SJPLAmibeaz9L5xb). [End-to-end review](docs/reviews/CINEMA-END-TO-END-REVIEW-2026-11-07.md) merged as #1400; [plan and lane status](docs/streaming/PLAYBACK-START-PLAN.md). On the fleet most starts fall to the rolling engine for `vod_index_pending` (18 of 29 since the last deploy) because the fragment-index queue is starved (13.6k published, 7.7k failed, 3.9k retry-wait, 16 claims in 2.7 days) and engine-keyed; the 16 s first-publication gate is the slow start. Paul ruled 2026-11-07: one copy engine with the first play building the index; source-keyed index; processed DV as an upgrade after the first frame; learners and idle voters index. Plan revision 3 (Fable adversarial review and Astra independent review applied) is the first revision build agents may claim; Phase 1 order H2 → C2 → C3 → C1 → D2 → G1 → R1/H1 → D1 on `effort/playback-start`; the processed-DV switch mechanism is the M6 prepared replacement (Paul, 2026-11-07). Phase 1 build contract: [PLAYBACK-START-BUILD.md](docs/streaming/PLAYBACK-START-BUILD.md). Nothing deployed.
@@ -76,33 +81,13 @@ rev 6.
   - the two-build B-M4 measurement (§9.1).
 - **Waiting on those:** Part A's A-M1/A-M2 waits on B, and C-M2/C-M3 wait on R2.
 
-## HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity
-
-**Branch `effort/macos-gpu-tonemap-parity`.** An Apple M4 node's Transcoding
-backend row read "CPU tone-map — fell back" over a Vulkan `Cannot allocate
-memory` and an OpenCL graph 59 levels from the CPU picture. Causes, each
-reproduced on that node's Jellyfin FFmpeg 8.1.3: the macOS build has no
-Vulkan compiled in, and the probe ran the graph anyway; the OpenCL graph
-named `hable` but left Jellyfin's `tonemap_mode=auto` and desaturation on;
-and the probe never tried the native Metal graph, whose BT.2390/ITP spelling
-the Mac processing context used without any CPU comparison (29.5 levels
-away). Now: the probe reads the build's device types and filters and reports
-what it cannot express as not available; CUDA, OpenCL and Metal-on-PQ take
-the CPU chain's operator from one source that also keys plan identity; the
-Metal graph is the first VideoToolbox candidate (≈2.2× the CPU chain within
-10.3 levels), and a pass ends the race with node routing left on the CPU
-chain; and the Mac context offers its HDR10 Metal graphs only when that
-parity passed. GPU graphs now get the CPU chain's peak. HLG through Metal is
-unchanged. Use still goes through Mac video processing in Developer. Plan
-identity gains the curve terms, so CUDA HDR and Mac Metal renditions (HLG
-included) are made once more under new keys.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19 and 2026-10-26 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19, 2026-10-26 and 2026-11-07 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-10-10 | HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-04 | Live TV station logos on Apple TV, iOS and Android | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
 | 2026-10-17 | Agent efficiency: smaller searches, a docs router, paperwork first | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-10-04 | A leader restart no longer ends progressive or Live TV playback | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |

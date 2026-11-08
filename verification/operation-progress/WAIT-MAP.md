@@ -5,6 +5,21 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## Main direct-push source drift — scoped review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed the authority-source drift that direct
+pushes left on main `ce11e8fd2`, against the last reviewed bytes. This is an
+author review awaiting an independent check, not execution evidence.
+
+| Changed source (commit) | Change | Model action or property | Still holds? |
+|---|---|---|---|
+| `plurxd/background_jobs.rs` (4f417e852) | Test-only: inside `#[cfg(test)] mod tests`, the fixture `lost_claim_acknowledgement_resolves_the_original_attempt` stops the heartbeat and settles joined source custody before reading the candidate | None; no production code changes. `ReplayClaim`/`ResolveClaim` correspondence and every claim/settlement body are unchanged | Yes |
+| `plurxd/main.rs` (d9a0ebc76) | `spawn_background_loops` also starts `worker_status_cache_loop`, a read-only, cancellable once-per-interval refresh of local worker capacity for Activity | None; the selected worker spawn, its wait/lock order and the queue/domain authority paths are unchanged | Yes |
+| `plurxd/transcode/manager/produce.rs` (0a33ddc02) | One `tracing::warn!` gains `target: "plurxd::transcode"` | None; no control flow change | Yes |
+
+No model, configuration or property changes; only whole-file pins are
+refreshed.
+
 ## Source custody replay on 2026-11-07
 
 Compared with `cc2ca1338`, scheduler upkeep preserves the interval from a
@@ -524,3 +539,22 @@ Faithfully model one request's queue claim, domain lease, exact binding, finite 
 For useful completion, require readable roots, available physical admission, authority, finite filesystem/provider calls, and an eventual Store/Raft reply or explicit timeout outcome. Model queue-token and publication-lock grants as atomic FIFO transitions with the actual holder and the dependency whose return releases it; do not assume that a lock holder or the cleanup it performs eventually finishes. Derive cleanup/join progress from those held resources and their external-return edges, rather than assuming unconditional eventual cleanup. A blocked filesystem syscall can outlive cancellation, and a lease heartbeat's expiry path still drains its renewal future. These remain explicit liveness premises.
 
 No concrete lock cycle was found within this inspected application path. This is not a transitive deadlock proof: lower Raft/network/leader recovery, remote authority construction, kernel filesystem waits and process-runtime shutdown remain outside scope. Ripwire refused because `target` was inaccessible; claims were checked directly. The JSON file is a drift receipt, not a liveness proof.
+
+## November 8 reader recovery wait
+
+A live lock holder keeps its source slot. On the same kernel, replay must
+acquire the original armed anchor and verify its inode, change time and
+nonce. A raw descriptor handoff disqualifies that witness, including when
+a bounded command clears its environment. For one audited legacy DV
+activation, the Linux host helper instead requires two complete matching
+reader censuses under the launch fence. An unknown reader keeps the slot.
+[Witness replay](../../crates/plurxd/src/source_custody/recovery/reader.rs) ·
+[Child launch](../../crates/plurx-core/src/process/bounded.rs) ·
+[Host census](../../scripts/source-custody-reader-stop)
+
+Each recovery path still waits for the exact Store settlement and release.
+A lost acknowledgement leaves evidence for retry. These kernel and host
+checks are covered by focused implementation tests. Their success and the
+time until a slot reopens lie outside the modeled request's progress guarantee.
+[Native witness tests](../../crates/plurxd/src/source_custody/recovery/reader/tests.rs) ·
+[Legacy custody tests](../../crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs)

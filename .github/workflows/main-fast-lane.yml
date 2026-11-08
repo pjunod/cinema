@@ -271,7 +271,22 @@ jobs:
           python3 -c 'import json, os; from pathlib import Path; base=Path("target/verification"); durable=json.loads((base/"durable-jobs/ci-inputs.json").read_text()); progress=json.loads((base/"operation-progress/ci-inputs.json").read_text()); worker=json.loads((base/"worker-refinement/ci-inputs.json").read_text()); assert all(type(item["affected"]) is bool for item in (durable, progress, worker)); out=open(os.environ["GITHUB_OUTPUT"], "a"); print("affected_durable=" + str(durable["affected"]).lower(), file=out); print("affected_progress=" + str(progress["affected"]).lower(), file=out); print("affected_worker_refinement=" + str(worker["affected"]).lower(), file=out); print("affected=" + str(durable["affected"] or progress["affected"] or worker["affected"]).lower(), file=out)'
       - name: Provision the pinned formal toolchain
         if: steps.formal-inputs.outputs.affected == 'true'
-        run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
+        env:
+          PLURX_FORMAL_CACHE_BASE: ${{ github.server_url }}/api/packages/noirr/generic/plurx-formal-toolchain
+          PLURX_FORMAL_CACHE_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+        run: |
+          set -eu
+          # Cache the verified upstream bytes by the unchanged manifest hash.
+          # No redirects: credentials stay on this Forgejo instance. Bootstrap
+          # still verifies the original artifact pins before installing either.
+          test -n "$PLURX_FORMAL_CACHE_TOKEN"
+          cache_version="$(sha256sum verification/durable-jobs/toolchain.json | cut -d' ' -f1)"
+          cache_base="$PLURX_FORMAL_CACHE_BASE/$cache_version"
+          mkdir -p target/formal-toolchain-seed
+          curl -q --fail --silent --show-error --proto '=http,https' --retry 2 --connect-timeout 15 --max-time 240 --max-filesize 536870912 --user "noirr:$PLURX_FORMAL_CACHE_TOKEN" "$cache_base/temurin-21.0.12+8-linux-x64.tar.gz" -o target/formal-toolchain-seed/temurin-21.0.12+8-linux-x64.tar.gz
+          curl -q --fail --silent --show-error --proto '=http,https' --retry 2 --connect-timeout 15 --max-time 240 --max-filesize 16777216 --user "noirr:$PLURX_FORMAL_CACHE_TOKEN" "$cache_base/tla2tools-1.7.4.jar" -o target/formal-toolchain-seed/tla2tools-1.7.4.jar
+          unset PLURX_FORMAL_CACHE_TOKEN
+          python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain --seed-dir target/formal-toolchain-seed
       - name: Complete the bounded formal smoke configuration
         id: formal-smoke
         if: steps.formal-inputs.outputs.affected_durable == 'true'
