@@ -1320,9 +1320,9 @@ impl TranscodeManager {
                         Priority::Live,
                     ) {
                         let admission = FragmentAdmission {
-                            _heavy: heavy,
+                            _heavy: Some(heavy),
                             threads: 2,
-                            _permit: permit,
+                            _permit: Some(permit),
                             extension: std::sync::Mutex::new(None),
                         };
                         // Our registration may not reject its own reservation.
@@ -1389,9 +1389,9 @@ impl TranscodeManager {
                 Priority::Speculative,
             )
             .map(|permit| FragmentAdmission {
-                _heavy: heavy,
+                _heavy: Some(heavy),
                 threads,
-                _permit: permit,
+                _permit: Some(permit),
                 extension: std::sync::Mutex::new(None),
             })
     }
@@ -1503,10 +1503,10 @@ impl TranscodeManager {
                 Priority::Background,
             )
             .map(|permit| FragmentAdmission {
-                _heavy: heavy,
+                _heavy: Some(heavy),
                 threads,
                 extension: std::sync::Mutex::new(None),
-                _permit: permit,
+                _permit: Some(permit),
             })
     }
 
@@ -1558,6 +1558,13 @@ impl TranscodeManager {
     }
 
     pub(crate) fn fragment_worker_idle(&self, admission: &FragmentAdmission) -> bool {
+        if admission.is_probe_only() {
+            // A probe admission holds no heavy-lane permit and no CPU or GPU
+            // reservation, so there is nothing for foreground demand to
+            // reclaim by stopping it: a targeted scan's `stat` + `ffprobe`
+            // keeps going while a viewer plays (contract v2 §5.1).
+            return true;
+        }
         let (hardware, threads) = admission.claimed();
         !self.admissions.live_is_waiting()
             && self.admissions.in_use() <= hardware

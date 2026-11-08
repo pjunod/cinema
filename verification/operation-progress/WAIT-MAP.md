@@ -5,6 +5,74 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## Pipeline v2 targeted job (T2) — scoped correspondence review on 2026-11-08
+
+Claude (`claude-opus-5-5`, the pipeline-v2 builder) reviewed PR #1405
+(`claude/pipeline-v2-m5-t2-targeted-job`, T2 of `effort/pipeline-v2`) against
+its parent T1 `dd22ccd21` and main `1d11f0cdf`. This is an author review
+checked independently in #15422 and revised for the decision in #15516; it
+is not execution evidence or a refinement theorem. Contract v2 §5.1 adds a
+targeted library request as its own job: kind `library_scan`, generation
+`library-targeted-v1`, dedupe `library:targeted:{id}`, priority 3. It claims
+with a probe-only admission and no background source reader, and the
+per-library fence serialises it against a running full scan of its own
+library.
+
+| T2 behaviour (source) | Model action or property | Still holds? | Model change |
+|---|---|---|---|
+| Targeted enqueue: new generation, priority 3, own dedupe key, optional sidecar in the command body ([`background_jobs_library.rs`](../../crates/plurx-core/src/store/background_jobs_library.rs)) | Durable jobs `SendClaim`…`DeliverClaim`, S1–S8; `ENQUEUE_SQL` and `CLAIM_SQL` unchanged. The model does not represent kind, generation or priority | Yes: claim CAS, attempt and reservation triggers, binding, renewal and settlement are the existing ones for `library_scan` | None |
+| Managed resource view v5 (SQLite v126, guarded Hiqlite upgrade from v4): a `library_scan` job of generation `library-targeted-v1` requires no `source_io` key; provider keys and every other kind are unchanged ([`subtitle_managed_resources_v5.sql`](../../crates/plurx-core/src/store/subtitle_managed_resources_v5.sql)) | Durable jobs `ApplyClaim` (reservation trigger), `ApplyRenew`, `LoseResource`; durable jobs states the claim-rule scope on its `ApplyClaim` operator row | Yes: a dropped requirement only removes a refusal; the targeted job's reservations still go through the same claim and renew triggers, and existing reservations stay owned until their ordinary retirement. A drifted v4 predecessor refuses without advancing the ordinal | None |
+| `claim_library` accepts the targeted generation beside `library-work-v1`, through main's dispatch-turn readiness ([`background_jobs.rs`](../../crates/plurxd/src/background_jobs.rs)) | Operation progress `ProbeReturn`, `Admission`, `ClaimSend`; worker refinement `Admission`/`ClaimSend` (eligibility over-approximated) | Yes: same `claim_with_resolution`, `ActiveBackgroundJob` and shared library driver; an unknown generation is still skipped | None |
+| Probe-only admission: no heavy permit and no CPU/GPU bundle; `fragment_worker_idle` is always true for it, so heavy-lane occupancy never raises pressure ([`construct.rs`](../../crates/plurxd/src/transcode/manager/construct.rs)) | Operation progress `Admission`, `DropAdmission`, `AdmissionUntilJoined`, `AttemptCleanup`; durable jobs `PauseSource`/`ResumeSource`; worker refinement boundary `select.admission_pressure` | Yes: the admission is still one owned object, held in the environment's `Arc` through `JoinWork` and dropped after release. Removing heavy-lane pressure only removes optional pause and pressure schedules; a subset of the modeled schedules keeps S8 and the safety results. Foreground source pressure still reaches the Linux source driver. Operation progress's `Admission` premise (try-only) describes the `library-work-v1` path; the targeted path skips `admit_fragment` and `Tick` pressure cancel and does not instantiate it | None |
+| A targeted candidate this node does not claim: skipped before the claim while playback protection is set (`background_yield_reason()`) or this node may not run cluster jobs (`may_run_cluster_jobs`), or refused by `CLAIM_SQL` at the two-holder provider cap or on a lost race. While the job is still queued (protection, the provider cap), `refresh_targeted_wait` rewrites `waiting_on` to `full_scan:<library>` when its own fence's lease is visibly live, otherwise to empty ([`background_jobs.rs`](../../crates/plurxd/src/background_jobs.rs) `claim_library`, `library_candidate_readiness`) | No modeled transition: operation progress `StoreApply` claims unconditionally and has no claim-refused outcome | Yes: the job holds no claim, domain or binding; the probe-only admission is dropped at `continue`. The lease read is a local hint (`lease_expiry_hint`) and the write is advisory sidecar state, holding no lock | None |
+| Fence refusal of a targeted job: advisory `waiting_on = full_scan:<library>`, yield with not-before `min(driver, now+250 ms)`; acquired fence clears `waiting_on`; a non-targeted release wakes the local library loop ([`env.rs`](../../crates/plurxd/src/library_work/env.rs)) | Durable jobs `AcquireDomain`, `RefusalRelease`, `RefusalSettle` (`notBefore = sample + YieldMs`); operation progress `PeerAcquire`, `CallerReturn` (domain refused), `Wake`; worker refinement `DomainSend`/`DomainApply`, `Wake` | Yes: the refusal still releases nothing it does not own and yields with a positive not-before. `YieldMs` (2) is an abstract positive delay; the model keeps no duration ratio (its `LeaseMs` is 1). The concrete 5 s and 250 ms both map to it. The local wake only shortens polling, a fairness premise | None; the bind-refusal row now names both delays |
+| Targeted scan with `expected_files`: forced probe of the named files and per-file placed reports written to the sidecar ([`library_work.rs`](../../crates/plurxd/src/library_work.rs), [`scan/mod.rs`](../../crates/plurx-core/src/scan/mod.rs) `scan_path_targeted`) | Durable jobs `BindAttempt` → `FacadePrecheck`/`Submit`/`ApplyPublication`; operation progress `ScanStart`…`ScanFinish`, `ItemSend`, `CompleteSend`; worker refinement `ScanStart`, `ItemSend` | Yes: it publishes through the same bound `PublicationStore` and `insert_item_fenced` after binding (bind-before-work unchanged). The report write is advisory sidecar state | None |
+| Local completion signals for `wait_ms` and the targeted scan returning placed reports ([`state.rs`](../../crates/plurxd/src/state.rs)) | None; caller-side waiting outside the worker | Yes: node-local `Notify`; the durable request record stays the authority | None |
+| At the start of a targeted pass, `process_library_requests` clears the requests' `waiting_on` ([`library_work.rs`](../../crates/plurxd/src/library_work.rs)) | None; inside `ScanStart`'s bound work, before any publication | Yes: a plain sidecar write through the Store, not the publisher; it holds no queue-token or publication lock across the await and changes no authority state | None |
+
+**Isolation from a running scan.** The targeted job requires no source
+reader, so `CLAIM_SQL`'s second-reader clause never refuses it. Beside a
+running scan of its own library it is claimed, the per-library fence refuses
+it, and the fence refusal writes `waiting_on = full_scan:<library>`. Beside a
+running scan of another library in the same storage domain (or with an
+unmapped root, whose generic `source_io` key conflicts with every domain) it
+runs. `library_scan` also requires `provider:tmdb` and `provider:anilist`,
+each with two reservation slots (`background_job_claim_effects`). One running
+scan leaves one slot free; two running scans of other libraries hold both, and
+`CLAIM_SQL` refuses the targeted claim until one settles. The regressions
+assert the written `waiting_on`, the claim beside another library's scan in
+one domain, and the rewritten `waiting_on` behind the provider cap.
+
+What bounds a targeted job once it no longer reserves a reader is not the
+64-entry `expected_files` cap, which bounds only the files it force-probes:
+it walks the request path's whole subtree and probes every new or changed
+file there, and one job drains up to 256 requests. Its bounds are one serial
+walker per job, one library job per node at a time, playback protection,
+which keeps it from starting while a viewer needs the source, and the
+provider cap. Curator names one publication directory per request, so in
+practice the walk is that directory.
+
+A fence-blocked targeted job is now claimed, gets an attempt row and yields
+on every due poll, where `CLAIM_SQL` used to refuse it outright; attempt
+compaction bounds those rows, and each yield sends one idempotent
+`waiting_on` write.
+
+An earlier author revision (218fa2f93) had the reader clause refuse the
+targeted job and wrote `waiting_on` from the refusal. It said a running scan
+always holds its library's reader; #15422 corrected that the reader is the
+storage domain's, or the generic `source_io` key for an unmapped root. The
+reader reservation does not protect a running scan's reconciliation:
+known-minus-seen pruning is per library, and the per-library fence already
+serialises a targeted job against its own library's scan.
+
+**Limits.** No model or configuration byte changes, and no TLC run is
+claimed for these sources. Pins are refreshed by whole file; their
+`review_basis` notes name the behaviour each changed anchor gained.
+Progress for a targeted request is not proved: operation progress has no
+claim-refused transition and its `Admission` premise describes only
+`library-work-v1`. It rests on a running scan of its own library finishing,
+the premise the models state for a domain peer.
+
 ## Pipeline v2 targeted-scan sidecar — scoped author audit on 2026-11-08
 
 Claude (`claude-opus-5-5`, the pipeline-v2 builder) compared PR #1404 (task T1
@@ -528,7 +596,7 @@ Useful completion is the durable state change: the request has a non-null result
 
 | Edge and source | Resource held while awaiting | What completes the wait; reverse dependency seen | Bound and model treatment |
 |---|---|---|---|
-| Candidate scan and claim: [`claim_library`](../../crates/plurxd/src/background_jobs.rs#L2271) | No claim or domain lease yet; checks each candidate's library and root readability. | Store candidate/read calls; async `read_dir` completes per root. `admit_fragment` is try-only; no permit returns without claiming. Authority is checked again before the durable queue claim. No reverse edge found. | Hiqlite Store calls have per-call timeout; root filesystem readiness has no source deadline. Model readable root/available admission as premises, or refusal as idle. |
+| Candidate scan and claim: [`claim_library`](../../crates/plurxd/src/background_jobs.rs#L2271) | No claim or domain lease yet; checks each candidate's library and root readability. | Store candidate/read calls; async `read_dir` completes per root. `admit_fragment` is try-only; no permit returns without claiming. Authority is checked again before the durable queue claim. No reverse edge found. Scope: this row describes `library-work-v1`. A targeted job (`library-targeted-v1`) takes a probe-only admission without `admit_fragment`, is not cancelled by `Tick` pressure, and requires no source reader; a refused claim leaves it queued for the next poll or `library_wake`, a transition `StoreApply` does not have, so its progress is not covered. | Hiqlite Store calls have per-call timeout; root filesystem readiness has no source deadline. Model readable root/available admission as premises, or refusal as idle. |
 | Queue claim / ambiguity: [`claim_with_resolution_inner`](../../crates/plurxd/src/background_jobs.rs#L303) | No domain lease yet. | `claim_job` reply completes directly. On error, `resolve_claim` and possibly `background_job` repeat until a fixed claim deadline, with 250 ms sleeps. No reverse callback found. | Model claimed, refused, settled, and deadline outcomes; do not assume a claim succeeds. |
 | Queue token heartbeat: [`JobFence::renew`](../../crates/plurxd/src/background_jobs.rs#L517) | Holds queue-token `Mutex` across authority, `renew_jobs`, and possible `resolve_claim` awaits. | Authority/Store replies. `bind_library`, `complete_library`, `settle`, and retirement also need this mutex. No backend callback taking it was found. | Store calls are bounded at the hiqlite boundary; this job kind uses the voter check below. Contention can delay renewal; fair lock acquisition must be an explicit premise. |
 | Domain lease acquire / heartbeat: [`acquire_cluster_job_with_policy`](../../crates/plurxd/src/job_lease.rs#L281), [`start_with_policy`](../../crates/plurxd/src/job_lease.rs#L51) | Acquire holds no app lock. Renewal holds publication fence RwLock write guard over coordinator renewal. | Coordinator responds; fenced writes share that RwLock, so renewal and publication can delay each other. No reverse callback into the app was found. TTL 90 s, heartbeat 30 s. | On expiry the fence is revoked and loss notified, **then the already-dispatched renewal is still awaited before invalidation and heartbeat exit**. Expiry fences publication; it does not bound cleanup. Model eventual renewal-future return as a premise for joined cleanup. |

@@ -864,9 +864,10 @@ async fn v6_rebuild_preserves_everything() {
     // v121 appends the managed v3 view for verified text-artifact inference.
     // v122 adds source custody; v123 gives prepared artifacts the v4 view;
     // v124 appends shared dispatch turns; v125 the pipeline contract v2 scan
-    // request sidecar.
+    // request sidecar; v126 the managed v5 view, where a targeted library
+    // probe takes no background source reader.
     assert_eq!(
-        version, 125,
+        version, 126,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );

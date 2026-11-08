@@ -12875,7 +12875,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,4)".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,5)".to_owned()),
             "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
             "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
             "caption-marker" => ("DELETE FROM shared_caption_schema".to_owned(), "INSERT INTO shared_caption_schema VALUES(1,1)".to_owned()),
@@ -12936,6 +12936,80 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .expect("fixture restored");
+    }
+}
+
+/// Review #1405 (4): a replicated cluster at managed v4 (the v125 release)
+/// upgrades to v5 on bootstrap — the exact v5 view and marker, with its
+/// managed receipts kept — and a later bootstrap is a no-op.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("managed upgrade client");
+    let telemetry = cluster._root.path().join("managed-v5-upgrade.db");
+    drop(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("bootstrap current"),
+    );
+    // Return exactly the managed view and marker to published v4.
+    let statements = include_str!("../src/store/subtitle_managed_resources_v4.sql")
+        .split("-- next statement")
+        .map(str::trim)
+        .filter(|sql| !sql.is_empty())
+        .map(|sql| (sql.to_owned(), hiqlite::params!()))
+        .collect::<Vec<_>>();
+    for result in client.txn(statements).await.expect("rewind to managed v4") {
+        result.expect("published v4 statement");
+    }
+    for result in client
+        .txn([(
+            "INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')",
+            hiqlite::params!(),
+        )])
+        .await
+        .expect("retained managed receipt")
+    {
+        result.expect("receipt insert");
+    }
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
+    assert_eq!(
+        replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
+        queue_fixture::managed_fixture_shape(4),
+        "exact published managed v4"
+    );
+    for round in ["upgrade", "restart"] {
+        drop(
+            HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+                .await
+                .unwrap_or_else(|error| panic!("{round} bootstrap: {error}")),
+        );
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
+        assert_eq!(
+            replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
+            queue_fixture::managed_fixture_shape(5),
+            "{round}: exact managed v5 view, marker and guards"
+        );
+        let receipts: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT count(*) AS value FROM subtitle_model_receipts",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("managed receipts");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].value, 1, "{round}: managed receipts kept");
     }
 }
 
@@ -13008,7 +13082,7 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
             "bootstrap exact published shape"
         );
     }
-    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
     require_replicated_fixture_marker(&client, "subtitle_translation_schema", 1).await;
     for marker in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
         require_replicated_fixture_marker(&client, marker, 1).await;
@@ -13211,7 +13285,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     require_replicated_fixture_marker(client, "dv_title_jobs_schema", 1).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
-    require_replicated_fixture_marker(client, "subtitle_managed_schema", 4).await;
+    require_replicated_fixture_marker(client, "subtitle_managed_schema", 5).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
@@ -13247,7 +13321,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     let annotations_drops =
         queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=4) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=5) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -13279,7 +13353,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     );
     let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
     let managed_drops =
-        queue_fixture::validated_empty_managed_rewind(&managed_shape, 4, managed_data_count);
+        queue_fixture::validated_empty_managed_rewind(&managed_shape, 5, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -13886,13 +13960,14 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 4",
+             WHERE singleton = 1 AND version = 5",
             1,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'view' \
              AND name = 'background_job_required_resources' \
-             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%'",
+             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%' \
+             AND sql LIKE '%library-targeted-v1%'",
             1,
         ),
     ];
@@ -13912,11 +13987,11 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(4),
-            "{round}: exact current managed v4 view, marker and guards",
+            queue_fixture::managed_fixture_shape(5),
+            "{round}: exact current managed v5 view, marker and guards",
         );
         let views: Vec<SchemaText> = client
             .query_consistent_map(
@@ -17390,7 +17465,7 @@ mod managed_bootstrap_regressions {
             ),
             (
                 "DELETE FROM subtitle_managed_schema",
-                "INSERT INTO subtitle_managed_schema VALUES(1,4)".into(),
+                "INSERT INTO subtitle_managed_schema VALUES(1,5)".into(),
                 "marker missing",
             ),
         ]
