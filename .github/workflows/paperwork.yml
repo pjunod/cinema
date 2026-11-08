@@ -31,7 +31,7 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BODY_FROM_EVENT: "1"
           PR_TITLE: ${{ github.event.pull_request.title }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |

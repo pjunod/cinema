@@ -31,6 +31,7 @@ checked-out head, and it says so.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -198,6 +199,27 @@ def corrective_subjects(root: Path, base: str, head: str) -> tuple[str, ...]:
     )
 
 
+def description_from_environment() -> str:
+    """Read full PR data without putting a large description in execve's env."""
+    if "PR_BODY" in os.environ:
+        return os.environ["PR_BODY"]
+    if os.environ.get("PR_BODY_FROM_EVENT") != "1":
+        return ""
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if not event_path:
+        raise ValueError("PR_BODY_FROM_EVENT requires GITHUB_EVENT_PATH")
+    event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+    request = event.get("pull_request") if isinstance(event, dict) else None
+    if not isinstance(request, dict) or "body" not in request:
+        raise ValueError("PR event must contain pull_request.body")
+    body = request["body"]
+    if body is None:
+        return ""
+    if not isinstance(body, str):
+        raise ValueError("pull_request.body must be a string or null")
+    return body
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Check a pull request's Regression-Test fields against the tree it merges to."
@@ -227,7 +249,10 @@ def main(argv: list[str] | None = None) -> int:
     elif args.body is not None:
         body = args.body
     else:
-        body = os.environ.get("PR_BODY", "")
+        try:
+            body = description_from_environment()
+        except (OSError, ValueError) as error:
+            parser.error(f"cannot read PR description: {error}")
     title = args.title if args.title is not None else os.environ.get("PR_TITLE", "")
     base = args.base or os.environ.get("PR_BASE_SHA", "")
     head = args.head or os.environ.get("PR_HEAD_SHA", "")

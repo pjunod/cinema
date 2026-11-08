@@ -39,7 +39,7 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BODY_FROM_EVENT: "1"
           PR_TITLE: ${{ github.event.pull_request.title }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -237,9 +237,9 @@ jobs:
         run: make history-check
       # docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.1: the pull
       # request's `Regression-Test:` lines, judged in the tree the merge will
-      # produce. The body and title are payload data on the `pull_request`
-      # event, read from the environment: no API call, no credential, and
-      # nothing interpolated into the script. This checkout is the branch
+      # produce. The body comes from the runner-owned pull_request event
+      # file; the short title stays in the environment. No API call,
+      # credential or payload interpolation into the script is needed. This checkout is the branch
       # head, not a merge candidate (the step prints both to keep that
       # visible), so the module builds the candidate with `git merge-tree`.
       # Advisory while validation/merge-errata.toml sets no boundary (phase
@@ -248,7 +248,7 @@ jobs:
       # one without the other.
       - name: Check validation catalog and static contracts
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BODY_FROM_EVENT: "1"
           KNOWLEDGE_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           make validation-lint
