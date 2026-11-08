@@ -273,7 +273,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "80022135847b7f1ee24b1db2a742951688ff94dc0d1300f706873b9fd7a6ea6c"
+        "sha256": "3bdc88cf1fd98584a90f7576cc6b376291f8c167ec5bcff99a5da681946a098f"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -285,7 +285,7 @@
         "table": "FIFO lock contract pinned Tokio dependency",
         "source": "Cargo.lock",
         "anchor": "name = \"tokio\"\nversion = \"1.53.1\"",
-        "sha256": "296c22df8116174e61cb72aee0a05e4da60311f815eb946f51376c907aa6280f"
+        "sha256": "b1de37d93ec5aaced022ad8ea3e248c197ade965fd284417e4bdb8875b1431fd"
       },
       {
         "table": "production-consumed post-claim lifecycle controller; local safety only",

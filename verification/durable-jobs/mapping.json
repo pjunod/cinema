@@ -7,7 +7,7 @@
     "tables": [
       {
         "anchor": "name = \"hiqlite\"\nversion = \"0.14.0\"",
-        "sha256": "296c22df8116174e61cb72aee0a05e4da60311f815eb946f51376c907aa6280f",
+        "sha256": "b1de37d93ec5aaced022ad8ea3e248c197ade965fd284417e4bdb8875b1431fd",
         "source": "Cargo.lock",
         "table": "proposal \u00a74.2 lockfile runtime dependency pin"
       },
