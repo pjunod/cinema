@@ -13891,13 +13891,14 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 4",
+             WHERE singleton = 1 AND version = 5",
             1,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'view' \
              AND name = 'background_job_required_resources' \
-             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%'",
+             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%' \
+             AND sql LIKE '%library-targeted-v1%'",
             1,
         ),
     ];

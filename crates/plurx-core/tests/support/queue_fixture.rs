@@ -1803,6 +1803,7 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
         "scan-request-marker",
         "scan-request-trigger",
         "v124-with-scan-request",
+        "v125-with-managed-v5",
     ] {
         let dir = tempfile::tempdir().expect("refusal fixture");
         let path = dir.path().join("store.sqlite");
@@ -1812,7 +1813,7 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
             .execute_batch("PRAGMA foreign_keys=OFF;")
             .expect("prepare hostile retained fixture rows");
         let sql = match damage {
-            "future-version" => "PRAGMA user_version=126;",
+            "future-version" => "PRAGMA user_version=127;",
             "v120-managed-v3" => "PRAGMA user_version=120;",
             "v121-managed-v2" => include_str!("../../src/store/subtitle_managed_resources_v2.sql"),
             "unsupported-tail-version" => "PRAGMA user_version=119;",
@@ -1854,7 +1855,13 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
             "retained-scan-request" => "INSERT INTO background_scan_request_v2(request_id,key_id,created_at_ms,updated_at_ms) VALUES('retained',1,0,0);",
             "scan-request-marker" => "DELETE FROM background_scan_request_v2_schema;",
             "scan-request-trigger" => "DROP TRIGGER background_scan_request_v2_retired;",
-            "v124-with-scan-request" => "PRAGMA user_version=124;",
+            // Published managed v4 beside the sidecar, so only the sidecar is
+            // out of place at v124.
+            "v124-with-scan-request" => concat!(
+                include_str!("../../src/store/subtitle_managed_resources_v4.sql"),
+                "\nPRAGMA user_version=124;"
+            ),
+            "v125-with-managed-v5" => "PRAGMA user_version=125;",
             _ => unreachable!(),
         };
         connection.execute_batch(sql).expect("damage owned fixture");
