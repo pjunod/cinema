@@ -16,8 +16,12 @@ reachable paired production schedule.
 
 Production admission has two earlier gates. Each node's background-heavy
 physical semaphore has capacity one. Even with separate node-local pools,
-the durable `CLAIM_SQL` source-reader gate rejects a second same-root
-non-live background job while the first holds its reservation. The supported
+the durable `CLAIM_SQL` source-reader gate rejects a second non-live
+background job on the same storage domain (or with an unmapped root, whose
+generic `source_io` key conflicts with every domain) while the first holds its
+reservation. A targeted library job (generation `library-targeted-v1`)
+requires no source reader and is outside this gate; its only serialiser
+against a running scan of its own library is the `scan:library:<id>` fence. The supported
 `enqueue_library_work` API supplies a `library_work` waiter and does not
 attach the qualifying live-demand waiter that would permit that second
 reader. Different dedupe keys and a generic resource capacity of two do not

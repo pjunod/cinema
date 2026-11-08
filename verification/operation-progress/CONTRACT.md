@@ -149,7 +149,7 @@ mutation adds the missing reverse wait, and fairness cannot rescue it.
 | Boundary | Classification and premise |
 |---|---|
 | `ProbeReturn`, `WalkReturn` | **PRM-fs:** each selected filesystem step eventually returns; blocking filesystem syscalls have no local finite bound |
-| `Admission` | **PRM-admission:** the selected capable worker has suitable physical capacity; production admission is try-only, not a waiting reservation |
+| `Admission` | **PRM-admission:** the selected capable worker has suitable physical capacity; production admission is try-only, not a waiting reservation. Scope: the `library-work-v1` path. A targeted library job's probe-only admission does not instantiate this premise, and `StoreApply` has no claim-refused outcome, so the model says nothing about the progress of a targeted request; it is not proved |
 | `AuthorityReturn`, `QueueAuthorityReturn` | **PRM-authority:** selected authority checks return; local metrics are examined, remote client construction is an external boundary |
 | `StoreApply`, `StoreReply`, domain/queue backend steps | **PRM-backend:** after finite modeled faults, quorum, transport, rate limiting, forwarding and store scheduling permit normal calls to apply and return |
 | Caller timeout | **Code fact for selected Hiqlite caller:** TimedClient wraps the whole transaction future with a 3-second deadline; acquiring the publication lock can precede that window |
