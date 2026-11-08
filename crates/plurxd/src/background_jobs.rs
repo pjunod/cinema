@@ -3912,7 +3912,20 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn lost_claim_acknowledgement_resolves_the_original_attempt() {
-        let (store, id, active) = active().await;
+        let (store, id, mut active) = active().await;
+        // Model an abandoned claim after its physical producer has joined.
+        // Lease expiry alone cannot reclaim the source from a live owner.
+        active.stop.cancel();
+        if let Some(heartbeat) = active.heartbeat.take() {
+            heartbeat.await.expect("join fixture heartbeat");
+        }
+        let custody = active
+            .fence
+            .0
+            .source_custody
+            .clone()
+            .expect("source custody");
+        settle_joined_source_custody(&store, custody).await;
         let candidate = store.background_job(&id).await.expect("read").expect("job");
         let now_ms = candidate
             .token

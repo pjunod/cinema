@@ -1391,15 +1391,19 @@ async fn supervisor_stop_bounds_persistent_steady_response_interrupts() {
     // Long enough that a loaded runner's launch cannot reach it: whether
     // the stop signal or the deadline released the loop is read from the
     // loop's own exit counters below, not from how long the call took.
-    probe_version_with_deadline_on(
+    let result = probe_version_with_deadline_on(
         &identity.executable_snapshot,
         identity.executable(),
         ProbeLaunchMode::ProductionSteadyResponseInterruptedUntilStop,
         Duration::from_secs(20),
         Arc::clone(&ownership),
     )
-    .await
-    .expect("the supervisor stop signal releases the response loop before deadline");
+    .await;
+    assert!(
+        matches!(result, Err(DecodeFactError::ProbeIdentity(ref message))
+            if message == "bounded version probe failed"),
+        "the injected stop denies the child's second exec without reaching the deadline"
+    );
     assert!(
         STEADY_RESPONSE_STOP_INTERRUPT_HITS.load(Ordering::Acquire) >= 1,
         "the stop-path proof must first consume a steady response interruption"
@@ -1680,18 +1684,20 @@ async fn pidfd_read_failure_retains_source_ownership_until_reap() {
         .await
         .expect("detached pidfd-read cleanup finishes")
         .expect("source ownership returns after reap");
+    // The caller times out while reap is held, but the collection itself
+    // records the injected pidfd read error after its owner finishes cleanup.
     tokio::time::timeout(Duration::from_millis(250), async {
-            loop {
-                if cache.metrics().prometheus().contains(
-                    "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"deadline\"} 1"
-                ) {
-                    break;
-                }
-                tokio::task::yield_now().await;
+        loop {
+            if cache.metrics().prometheus().contains(
+                "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"error\"} 1",
+            ) {
+                break;
             }
-        })
-        .await
-        .expect("the collection sample appears after the detached owner finishes cleanup");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the collection sample appears after the detached owner finishes cleanup");
     assert_eq!(PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
     assert_eq!(
         source

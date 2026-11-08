@@ -55,7 +55,7 @@ test('progressive translation retains the shipped video, literal cues, original 
   return json({});
  });
  try{
-  await page.goto('https://translation.test/#/settings/developer/enable-subtitle-translation');await page.getByRole('button',{name:'Configure English translation',exact:true}).click();
+  await page.goto('https://translation.test/#/settings/developer/enable-subtitle-translation');await page.getByRole('button',{name:'Set up speech captions',exact:true}).click();
   assert.equal(await page.locator('[data-translation-setting-profile]').inputValue(),P,'first use suggests the sole active profile');
   await page.locator('[data-translation-setting-profile]').selectOption('');
   await page.locator('[data-translation-setting-enabled]').check();await page.locator('[data-translation-settings]').getByRole('button',{name:'Save',exact:true}).click();await page.getByText(/Saved\. Current unsaved controls/).waitFor();assert.equal(saved.enabled,true);assert.equal(saved.profile_id,null,'enabled unconfigured remains saveable');
