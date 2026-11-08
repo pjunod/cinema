@@ -1785,35 +1785,36 @@ async fn start(
 }
 /// A peer Start's clock. A receiver that sends the viewer's remaining start
 /// (only to a Source advertising `START_BUDGET_FEATURE`) gets the local
-/// create's rule: an answer by `CreateStartupBudget::deadline`, a typed
-/// `startup_timeout` if the entry is still working then, and owned work
-/// bounded by the same owner window, which the worker further caps with its
-/// configured materialize allowance (`source_start_budget_for_request`) the
-/// way a local claim window caps a local owner. A Start without the header
-/// (an older receiver) keeps today's fixed 305 s bound and today's refusals.
-struct SourceStartClock {
+/// create's answer rule: an answer by `CreateStartupBudget::deadline`, and a
+/// typed `startup_timeout` if the entry is still working then. The clock
+/// bounds answers only. The entry's owned work keeps the fixed bound below,
+/// which the worker caps with its own `source_start_budget_for_request`, so
+/// a cold index outlives the viewer that asked for it and persists for the
+/// next play. A Start without the header (an older receiver) keeps today's
+/// refusals as well.
+pub(super) struct SourceStartClock {
     budget: Option<crate::media_pool::CreateStartupBudget>,
     fixed: std::time::Instant,
 }
 impl SourceStartClock {
-    fn new(headers: &HeaderMap) -> Self {
+    pub(super) fn new(headers: &HeaderMap) -> Self {
         Self {
             budget: super::hls::startup_allowance(headers)
                 .map(crate::media_pool::CreateStartupBudget::new),
             fixed: std::time::Instant::now() + std::time::Duration::from_secs(305),
         }
     }
+    /// The bound of the entry's owned work, whatever the viewer sent.
     fn work_deadline(&self) -> std::time::Instant {
-        self.budget.as_ref().map_or(self.fixed, |budget| {
-            budget
-                .owner_window(self.fixed.into(), super::hls::OWNED_CREATE_REPOST_GRACE)
-                .into_std()
-        })
+        self.fixed
     }
     /// Run a pure wait to the viewer's answer deadline; past it, the typed
     /// "not yet" (the owned work is untouched). Without a clock, the wait
     /// runs exactly as it always has.
-    async fn answer<T>(&self, wait: impl std::future::Future<Output = T>) -> Result<T, ApiError> {
+    pub(super) async fn answer<T>(
+        &self,
+        wait: impl std::future::Future<Output = T>,
+    ) -> Result<T, ApiError> {
         let Some(budget) = &self.budget else {
             return Ok(wait.await);
         };

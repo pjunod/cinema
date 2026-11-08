@@ -1391,38 +1391,22 @@ impl TranscodeManager {
         let mut unowned_existing = true;
         let mut startup_stage = "deadline";
         // Retirement (a Source End, a drain, a revocation) ends a start that
-        // has not published as the deadline does: the startup future is
-        // dropped, and the preparation owners held outside it are cancelled
-        // and settled below, releasing the registry slot and copy permit.
-        //
-        // Only while the future is in that preparation, though. Before the
-        // route-absence proof, `unowned_existing` still says "not ours", and
-        // dropping there would make settlement refuse a route this owner
-        // never touched. From VOD admission on, the admission and the
-        // reservation are held inside the future, and only the reservation's
-        // own retirement proves "admitted, never spawned"; dropping mid-way
-        // would leave settlement nothing to prove it with. That section ends
-        // in the explicit retirement check after reservation, as before.
-        let abandonable = std::sync::atomic::AtomicBool::new(false);
-        let retirement = async {
-            loop {
-                let notification = owner.changed.notified();
-                tokio::pin!(notification);
-                notification.as_mut().enable();
-                if abandonable.load(std::sync::atomic::Ordering::Acquire)
-                    && owner
-                        .state
-                        .lock()
-                        .expect("Source worker state")
-                        .retirement_requested
-                {
-                    return Err(SourceWorkerError::Unavailable);
-                }
-                notification.await;
-            }
+        // has not published at its next stage boundary: after the route
+        // proof, after native tracks, after recipe preparation, and after
+        // reservation. Each stage runs to its own end under the start's
+        // bounded budget, so a cold index the viewer left still completes
+        // and persists for the next play, and nothing is dropped mid-await:
+        // no custody registration, index write or file fence is abandoned
+        // half-done. The registry slot and copy permit are freed when the
+        // boundary is reached, by the ordinary settlement below.
+        let retirement_requested = || {
+            owner
+                .state
+                .lock()
+                .expect("Source worker state")
+                .retirement_requested
         };
-        let start = tokio::select! { biased;
-            start = tokio::time::timeout_at(
+        let start = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             Box::pin(async {
                 if Instant::now() >= deadline {
@@ -1442,10 +1426,9 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unresolved);
                 }
                 unowned_existing = false;
-                // Preparation from here is owned outside this future. A
-                // retirement requested earlier is acted on now.
-                abandonable.store(true, std::sync::atomic::Ordering::Release);
-                owner.changed.notify_waiters();
+                if retirement_requested() {
+                    return Err(SourceWorkerError::Unavailable);
+                }
                 // This actual worker owns the configured queue/materialization
                 // allowance. Its inherited deadline can only become shorter.
                 startup_stage = "startup_budget";
@@ -1487,6 +1470,9 @@ impl TranscodeManager {
                     .await?;
                     owner.state.lock().expect("Source native actor").native = Some(tracks);
                 }
+                if retirement_requested() {
+                    return Err(SourceWorkerError::Unavailable);
+                }
                 startup_stage = "recipe_preparation";
                 let encoding = if source_recipe_is_encoded(prepared.request()) {
                     Some(
@@ -1509,8 +1495,12 @@ impl TranscodeManager {
                     .await?;
                     None
                 };
+                // The prepared recipe (and a cold index, persisted) is done;
+                // a viewer who left during it is acted on before admission.
+                if retirement_requested() {
+                    return Err(SourceWorkerError::Unavailable);
+                }
                 startup_stage = "vod_admission";
-                abandonable.store(false, std::sync::atomic::Ordering::Release);
                 let admitted = Box::pin(self.vod.prepare_admitted_source_vod(
                     &prepared,
                     &owner.assignment,
@@ -1671,9 +1661,9 @@ impl TranscodeManager {
                 }
                 Ok(response)
             }),
-        ) => start.unwrap_or(Err(SourceWorkerError::Deadline)),
-            retired = retirement => retired,
-        };
+        )
+        .await
+        .unwrap_or(Err(SourceWorkerError::Deadline));
         // Every start that does not publish ends here with its stage, once.
         if let Err(error) = &start {
             tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, retirement_requested = owner.state.lock().expect("Source worker state").retirement_requested, "Source producer startup failed");
