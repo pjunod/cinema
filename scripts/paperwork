@@ -91,9 +91,11 @@ TEST_RULES: tuple[tuple[str, str, str], ...] = (
     (
         "test_media_pool_wire",
         "the media-pool wire changes only with a protocol bump and a rollout note",
-        "a strict (deny_unknown_fields) envelope change, or a removed/retyped lenient field, needs "
-        "a PROTOCOL_VERSION bump in crates/plurxd/src/media_pool.rs and a dated `protocol <N>` line "
-        "under \"Rolling upgrades\" in docs/OPERATIONS.md; a new lenient field needs #[serde(default)]",
+        "a strict (deny_unknown_fields) envelope change, an enum variant added/removed (no "
+        "#[serde(other)]), a changed tag/rename_all, or a removed/retyped lenient field — on an "
+        "envelope or any in-repo type its fields name — needs a PROTOCOL_VERSION bump in "
+        "crates/plurxd/src/media_pool.rs and a dated `protocol <N>` line under \"Rolling upgrades\" "
+        "in docs/OPERATIONS.md; a new lenient field needs #[serde(default)]",
     ),
     (
         "test_doc_size_budget",
