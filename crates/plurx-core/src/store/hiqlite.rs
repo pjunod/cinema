@@ -4054,7 +4054,7 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.subtitle_managed_schema_version().await?;
-        if version == Some(4) {
+        if version == Some(5) {
             return Ok(());
         }
         if version.is_none() {
@@ -4129,6 +4129,25 @@ impl HiqliteAuthStore {
             }
         }
         if self.subtitle_managed_schema_version().await? == Some(4) {
+            let mut statements = vec![(
+                super::subtitle_managed_schema::TARGETED_GUARD.to_owned(),
+                params!(super::subtitle_managed_schema::targeted_predecessor_view()),
+            )];
+            statements.extend(
+                super::subtitle_managed_schema::targeted_statements()
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await? != Some(5) {
+                result?;
+                return Err(StoreError::Migration(
+                    "managed targeted-probe schema upgrade did not settle".into(),
+                ));
+            }
+        }
+        if self.subtitle_managed_schema_version().await? == Some(5) {
             return Ok(());
         }
         Err(StoreError::Migration(
