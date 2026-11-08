@@ -2567,6 +2567,7 @@ async fn learner_workers_reach_activity_without_voter_activity() {
 #[tokio::test(start_paused = true)]
 async fn local_operations_reads_cached_worker_capacity_and_never_refreshes_it() {
     let (_, state) = crate::http::tests::test_app_with_state();
+    let replication = plurx_core::cluster::migration::status::ReplicationMonitor::sqlite();
     let mut sample = learner_worker_sample();
     sample.children = vec!["private process purpose".into()];
     sample.child_count = 1;
@@ -2577,7 +2578,7 @@ async fn local_operations_reads_cached_worker_capacity_and_never_refreshes_it() 
         .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "1")
         .await
         .expect("setting");
-    let status = local_snapshot(&state).await;
+    let status = local_snapshot(&state, &replication).await;
     let workers = status.workers.expect("cached sample");
     assert_eq!(
         workers.software_limit, 8,
@@ -2588,7 +2589,7 @@ async fn local_operations_reads_cached_worker_capacity_and_never_refreshes_it() 
     assert_eq!(workers.child_count, 1);
     tokio::time::advance(PEER_STATUS_CACHE_TTL).await;
     assert!(
-        local_snapshot(&state).await.workers.is_none(),
+        local_snapshot(&state, &replication).await.workers.is_none(),
         "stale sample is absent, not idle"
     );
 }
