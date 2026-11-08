@@ -8777,6 +8777,14 @@ async fn content_analysis_switch_reads_the_same_in_settings_and_developer() {
 #[tokio::test]
 async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
     let (app, state) = test_app_with_state();
+    // Keep the exact readiness set independent of the runner's visible CPUs.
+    // This pool cannot fit a live FEL graph, even when the host's auto-sized
+    // pool could; readiness must report the actual saved budget.
+    state
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "4")
+        .await
+        .expect("fixed fixture software pool");
     let (status, _) = call(&app, get("/api/v1/developer/readiness", None)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 

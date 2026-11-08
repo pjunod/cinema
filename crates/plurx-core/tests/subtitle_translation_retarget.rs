@@ -1,8 +1,6 @@
 //! Producer reassignment uses the real writer, preserving root Stop and cached read authority.
 #[path = "support/historical_sqlite.rs"]
 mod historical_sqlite;
-#[path = "support/source_extensions_fixture.rs"]
-mod source_extensions_fixture;
 
 use plurx_core::store::{
     background_jobs::BackgroundJobStore,
@@ -207,7 +205,6 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
                 .starts_with("CREATE TRIGGER subtitle_translation_mutate ")
         })
         .expect("known legacy trigger");
-    source_extensions_fixture::rewind_empty_source_extensions_to_v121(&conn);
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .expect("current fixture checkpoint"),
@@ -332,12 +329,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
     assert_eq!(store_epoch(&reopened, &id).await, "1");
     let current =
         rusqlite::Connection::open(dir.path().join("store.db")).expect("upgraded fixture");
-    assert_eq!(
-        fixture_schema_rows(&current, MANAGED_SHAPE),
-        source_extensions_fixture::managed_fixture_rows(
-            &source_extensions_fixture::managed_fixture_connection(4)
-        )
-    );
+    assert_eq!(fixture_schema_rows(&current, MANAGED_SHAPE), expected_v4);
     assert_eq!(
         current
             .query_row(
