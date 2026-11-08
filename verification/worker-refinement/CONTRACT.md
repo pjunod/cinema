@@ -178,7 +178,7 @@ cancellation and detached lower application are not forced to occur.
 | Boundary | Premise and scope |
 |---|---|
 | `ProbeReturn`, `WalkReturn` | PRM-fs: selected filesystem operations eventually return; no local finite bound |
-| `Admission`, successful modeled claim | PRM-admission/model abstraction: two independently admitted capable workers may hold claims; production node-local capacity and durable same-root eligibility are omitted, not established by this premise |
+| `Admission`, successful modeled claim | PRM-admission/model abstraction: two independently admitted capable workers may hold claims; production node-local capacity and durable same-storage-domain eligibility (or an unmapped root) are omitted, not established by this premise |
 | Authority actions | PRM-authority: selected local/remote authority checks return |
 | Store and heartbeat apply/reply actions | PRM-backend: stable quorum/transport permits remaining normal calls to apply and return |
 | Individual lock, dispatch, poll, join, retire and drop actions | PRM-runtime: continuously enabled selected task steps eventually run |
