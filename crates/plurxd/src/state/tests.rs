@@ -1144,9 +1144,10 @@ async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() 
     .await
     .expect("join requesting viewer");
     assert!(
-        jobs.analysis_source_may_continue(&transcode, Some(&request))
+        !jobs
+            .analysis_source_may_continue(&transcode, Some(&request))
             .await,
-        "any live request waiter permits the source read on a busy node"
+        "a queued request cannot authorize source input before the worker claims it"
     );
     assert!(
         !jobs.analysis_source_may_continue(&transcode, None).await,
@@ -1173,6 +1174,7 @@ async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() 
         "a busy worker must admit a source read with any live request waiter: {:?}",
         store.analysis_request(&request.request_id).await
     );
+    let admitted = admitted.expect("observed the actual foreground claim");
     let interest = plurx_core::store::AnalysisViewerInterest {
         analysis_request_id: request.request_id.clone(),
         requested_generation: request.requested_generation.clone(),
@@ -1198,7 +1200,7 @@ async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() 
         Duration::from_secs(1),
         jobs.wait_for_cluster_fragment_index_stop(
             &transcode,
-            Some(&request),
+            Some(&admitted),
             &lost,
             &AnalysisAttestationBudget::default(),
         ),

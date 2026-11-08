@@ -388,26 +388,56 @@ pub(crate) async fn open_source_playback_fence(
     file: &MediaFile,
     expected_object_version: Option<&str>,
 ) -> Result<SourceFence, String> {
+    open_source_playback_fence_io(file, expected_object_version)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// `NotFound` means the catalogued object cannot be served under its recorded identity.
+pub(crate) async fn open_source_playback_fence_io(
+    file: &MediaFile,
+    expected_object_version: Option<&str>,
+) -> std::io::Result<SourceFence> {
+    use std::io::{Error, ErrorKind};
+
     let path = file.path.clone();
     let source = tokio::task::spawn_blocking(move || {
         plurx_core::fs_secure::open_read_nofollow_blocking(&path)
     })
     .await
-    .map_err(|_| "Source file open task failed".to_owned())?
-    .map_err(|_| "Source file cannot be opened without following links".to_owned())?;
+    .map_err(|_| Error::other("Source file open task failed"))?
+    .map_err(|error| {
+        let kind = match error.kind() {
+            ErrorKind::NotFound
+            | ErrorKind::NotADirectory
+            | ErrorKind::PermissionDenied
+            | ErrorKind::InvalidInput => ErrorKind::NotFound,
+            #[cfg(unix)]
+            _ if error.raw_os_error() == Some(libc::ELOOP) => ErrorKind::NotFound,
+            kind => kind,
+        };
+        Error::new(kind, "Source file cannot be opened without following links")
+    })?;
     let metadata = source
         .metadata()
-        .map_err(|_| "Source file cannot be stated".to_owned())?;
+        .map_err(|_| Error::other("Source file cannot be stated"))?;
     if !metadata.is_file() || file.size < 0 {
-        return Err("Source file is not a bounded regular media object".to_owned());
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            "Source file is not a bounded regular media object",
+        ));
     }
-    scanner_identity_matches(&metadata, file)?;
+    scanner_identity_matches(&metadata, file)
+        .map_err(|reason| Error::new(ErrorKind::NotFound, reason))?;
     #[cfg(unix)]
-    let object_version = object_version(&metadata)?;
+    let object_version = object_version(&metadata).map_err(Error::other)?;
     #[cfg(windows)]
-    let object_version = windows_object_version(&source)?;
+    let object_version = windows_object_version(&source).map_err(Error::other)?;
     if expected_object_version.is_some_and(|expected| expected != object_version) {
-        return Err("Source file changed after its owned observation".to_owned());
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            "Source file changed after its owned observation",
+        ));
     }
     Ok(SourceFence {
         handle: source,

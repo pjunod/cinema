@@ -6642,7 +6642,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # PR1369: +2 output() calls for the same bounded offline FFmpeg/FFprobe
 # controls inventoried above, not additional children or detached owners.
 # Encoded HTTP retry inspects Response::status(); it starts no OS process.
-expected_occurrences = 885
+# Native missing-route qualification adds one net HTTP Response::status()
+# inspection across its profile assertions; no spawn/output site is added.
+expected_occurrences = 886
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

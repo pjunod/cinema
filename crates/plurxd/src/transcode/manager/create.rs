@@ -226,7 +226,7 @@ impl Drop for FallbackAnalysisInterestOwner {
                     .restore_playback_analysis_interest(receipt, crate::state::clock_ms())
                     .await
                 {
-                    tracing::warn!(%error,"exact fallback preparation interest cleanup remains durable");
+                    tracing::warn!(target: "plurxd::transcode", %error,"exact fallback preparation interest cleanup remains durable");
                 }
             });
         }
@@ -993,7 +993,7 @@ impl TranscodeManager {
                                     {
                                         Ok(receipt) => fallback_interest.receipt = receipt,
                                         Err(error) => {
-                                            tracing::warn!(%error,"could not demote exact fallback preparation interest; source custody arbitration remains authoritative")
+                                            tracing::warn!(target: "plurxd::transcode", %error,"could not demote exact fallback preparation interest; source custody arbitration remains authoritative")
                                         }
                                     }
                                 }

@@ -980,6 +980,9 @@ mod tests {
     fn sleeper() -> Child {
         let mut command = tokio::process::Command::new("sleep");
         command.arg("300").kill_on_drop(true);
+        // Match the group identity used by production producer spawning.
+        #[cfg(target_os = "linux")]
+        command.process_group(0);
         command.spawn().expect("spawn sleep")
     }
 

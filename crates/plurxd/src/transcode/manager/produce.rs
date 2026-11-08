@@ -3228,7 +3228,7 @@ impl TranscodeManager {
                 let _=child.start_kill();
             }
             loop {match child.wait().await {Ok(_)=>break,Err(error)=>{
-                tracing::warn!(%error,"source-owned cache part wait failed; retaining capacity");
+                tracing::warn!(target: "plurxd::transcode",%error,"source-owned cache part wait failed; retaining capacity");
                 let _=child.start_kill();tokio::time::sleep(Duration::from_millis(100)).await;
             }}}
             drop(child_job);

@@ -2257,7 +2257,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
         .expect("offline user");
     let package = NewOfflinePackage {
         audio_recipe: None,
-        id: "owned-background-pixel-proof".into(),
+        id: uuid::Uuid::new_v4().to_string(),
         request_id: "owned-background-pixel-proof-request".into(),
         user_id: user.id,
         file_id,
@@ -2276,7 +2276,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
         subtitle_mode: "none".into(),
         estimated_bytes: 1_000_000,
         reserved_bytes: 1_100_000,
-        expires_at: i64::MAX,
+        expires_at: crate::media_sessions::unix_ms() / 1000 + 3_600,
     };
     assert!(matches!(
         store

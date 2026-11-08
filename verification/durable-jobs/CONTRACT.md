@@ -14,6 +14,14 @@ source mapping**, not an automatic refinement proof. Source hashes in
 that set complete or that the abstractions are correct.
 
 
+## Producer wait diagnostic on 2026-11-07
+
+Against `e2cdb1c4d`, the cache-part producer logs a failed child wait under
+`plurxd::transcode`. It retries the kill and wait while holding capacity, then
+releases the child job after the wait succeeds. Both mapped anchors in
+`transcode/manager/produce.rs` still identify the producer and its fenced
+publication path.
+
 ## Source custody replay on 2026-11-07
 
 Against `cc2ca1338`, scheduler upkeep now rechecks settlement proof and

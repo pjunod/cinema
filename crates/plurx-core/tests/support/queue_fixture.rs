@@ -1713,7 +1713,7 @@ fn current_fixture_rewind_accepts_exact_empty_v120_with_foreign_keys() {
                     "../../src/store/subtitle_managed_resources_v3.sql"
                 ))
                 .expect("published v121/v122 managed v3 fixture");
-        } else if version == 123 {
+        } else if matches!(version, 123 | 124) {
             connection
                 .execute_batch(include_str!(
                     "../../src/store/subtitle_managed_resources_v4.sql"

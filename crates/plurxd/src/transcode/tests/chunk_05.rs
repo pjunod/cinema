@@ -934,6 +934,59 @@
             Some(400_000)
         );
 
+        // Establish real served history before recording any media fetch.
+        // The first publication cannot spend telemetry from an attachment
+        // that has not presented: it earns only the initial 48 s runway.
+        let published_at = Instant::now();
+        session
+            .publication_cycle_at("retained-window", published_at)
+            .await
+            .expect("initial publication");
+        assert_eq!(
+            session
+                .publication
+                .lock()
+                .await
+                .served
+                .as_ref()
+                .expect("initial snapshot")
+                .end_ms,
+            48_000,
+        );
+        session.control.mark_startup_presented_for_test().await;
+        // A stable observation at 252 s earns the next 48 s, ending exactly
+        // at 300 s. Waiting avoids extrapolating this deterministic position
+        // while the actor and publication task exchange their messages.
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            252_000,
+            1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Waiting,
+        )
+        .await;
+        session
+            .publication_cycle_at(
+                "retained-window",
+                published_at + ROLLING_PUBLICATION_TARGET,
+            )
+            .await
+            .expect("earned publication");
+        {
+            let clock = session.publication.lock().await;
+            let served = clock.served.as_ref().expect("earned snapshot");
+            assert_eq!(served.first_segment, 30);
+            assert_eq!(served.last_segment, 74);
+            assert_eq!(served.end_ms, 300_000);
+        }
+        let accepted = session
+            .control
+            .snapshot()
+            .await
+            .expect("publication accepted by actor");
+        assert_eq!(accepted.delivery.published_end_ms, Some(300_000));
+
         // Physical-iPad regression: AVPlayer fetched through 300s while its
         // playhead was around 180s, despite a 60s preferred forward buffer.
         // The retained window must still leave 60s behind that playhead for
@@ -946,7 +999,7 @@
             .store(observed_fetched_end_ms, Relaxed);
         accept_rolling_publication_demand(
             &session,
-            1,
+            2,
             observed_playhead_ms,
             1.0,
             crate::playback_control::PlaybackDemand::Active,
@@ -959,10 +1012,8 @@
         );
         expire_seeded_prefix(&session, 30).await;
         gc_expired_segments(&session).await;
-        // This fixture expires files directly instead of advancing them
-        // through the publication transition, so mirror the logical retention
-        // boundary that production installs before selecting a new snapshot.
-        session.publication.lock().await.retention_first_segment = Some(30);
+        // The already-served publication, not the raw writer history, owns
+        // the prefix boundary while these expired files are collected.
         session
             .publication_cycle_at(
                 "retained-window",
