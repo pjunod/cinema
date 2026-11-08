@@ -2601,7 +2601,9 @@ pattern = "(?:VodPreparationGuard|preparing_sessions|begin_preparing_session|own
 # PR1369: +1 test-only registry read in settle_publication_control. It observes
 # preparing/live sessions while stopping this isolated control's survivors;
 # the ten-second settlement deadline never supplies closure evidence.
-expected_occurrences = 41
+# The encoded HTTP retry helper checks the existing live/preparing registry
+# remains exactly one; this inspection creates no owner.
+expected_occurrences = 42
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -6639,7 +6641,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # are unchanged; the two joined fixture tasks are classified above separately.
 # PR1369: +2 output() calls for the same bounded offline FFmpeg/FFprobe
 # controls inventoried above, not additional children or detached owners.
-expected_occurrences = 884
+# Encoded HTTP retry inspects Response::status(); it starts no OS process.
+expected_occurrences = 885
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

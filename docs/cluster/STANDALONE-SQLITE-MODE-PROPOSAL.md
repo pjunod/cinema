@@ -426,9 +426,9 @@ the finite worker models' claims to those mechanisms.
 
 These are focused source checks, not full release qualification. The recorded
 snapshots distinguish runtime changes from later documentation; the normal
-commit hook recompiles/lints the exact staged tree. The effort/main promotion gates,
-broader feature and multi-node acceptance, old-binary execution drills, affected
-Mac playback/suspend, and durable SQLite performance acceptance remain pending.
+commit hook recompiles/lints the exact staged tree. [Main delivery](http://forge.lan:3000/noirr/plurx/pulls/1397)
+owns the current promotion receipt. Broader multi-node, old-binary, Mac
+playback/suspend and SQLite durability/performance acceptance are separate.
 FFmpeg on this compiler VM is 8.0.1; a passing
 software check there does not claim standard-runner FFmpeg 6 or physical Mac
 acceptance. Power-loss/OS-crash durability and Windows execution remain pending;
