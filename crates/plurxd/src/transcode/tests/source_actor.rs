@@ -2144,6 +2144,25 @@ async fn source_actual_actor(
                     .await
                     .expect("a cold segment answers without extraction");
                 drop(cold.into_parts().1);
+                // Finish the whole-track warm the cold ask started (the same
+                // production extraction, joined by single-flight) so readiness
+                // does not depend on how long a detached warmer takes: the
+                // fixture's membership observation is fresh for seconds only.
+                let local = state
+                    .store
+                    .get_file(1)
+                    .await
+                    .expect("cached caption fixture")
+                    .expect("cached caption fixture");
+                crate::subtitles::ensure_vtt_bytes_with_store(
+                    &state.subs_dir,
+                    &local,
+                    0,
+                    &state.subtitle_source_access(),
+                    crate::http::stream::SUBTITLE_TRACK_FOR_A_VIEWER,
+                )
+                .await
+                .expect("cached caption fixture whole-track sidecar");
             }
             if control.delivery.subtitle_readiness.as_deref() == Some("ready") {
                 reported = control.delivery.subtitle_revision;

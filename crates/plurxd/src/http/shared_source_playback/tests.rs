@@ -918,6 +918,30 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
             );
         }
         if native {
+            // The whole-track sidecar is what the background `subtitle_source`
+            // warm publishes. Run that same production extraction to
+            // completion here: the fixture's membership observation is only
+            // fresh for a few seconds, so the test must not wait on a detached
+            // warmer to find out when the cues land. The cold, non-blocking
+            // answer is proven separately.
+            let local = fixture
+                .state
+                .store
+                .get_file(1)
+                .await
+                .expect("local file read")
+                .expect("local fixture file");
+            for index in [0, 1] {
+                crate::subtitles::ensure_vtt_bytes_with_store(
+                    &fixture.state.subs_dir,
+                    &local,
+                    index,
+                    &fixture.state.subtitle_source_access(),
+                    crate::http::stream::SUBTITLE_TRACK_FOR_A_VIEWER,
+                )
+                .await
+                .expect("whole-track sidecar for the fixture");
+            }
             for resource in [
                 "master.m3u8?subtitle=0",
                 "subs/0/index.m3u8",
