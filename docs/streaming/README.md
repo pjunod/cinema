@@ -4,6 +4,8 @@ Delivery, Dolby Vision, capabilities and playback reliability. The
 [docs index](../README.md) defines status words and documentation rules.
 Add each document's row here in the same commit.
 
+Start-path owner: the lane owner recorded in PLAYBACK-START-PLAN.md §6 until the effort closes.
+
 | File | Answers | |
 |---|---|---|
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract for Opus: all nine lanes. | open |
