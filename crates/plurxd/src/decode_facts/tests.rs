@@ -1684,12 +1684,12 @@ async fn pidfd_read_failure_retains_source_ownership_until_reap() {
         .await
         .expect("detached pidfd-read cleanup finishes")
         .expect("source ownership returns after reap");
-    // The caller times out while reap is held, but the collection itself
-    // records the injected pidfd read error after its owner finishes cleanup.
+    // The caller's deadline cancels its detached collection. That collection
+    // reports cancellation only after its physical owner finishes cleanup.
     tokio::time::timeout(Duration::from_millis(250), async {
         loop {
             if cache.metrics().prometheus().contains(
-                "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"error\"} 1",
+                "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"cancelled\"} 1",
             ) {
                 break;
             }
@@ -1697,7 +1697,12 @@ async fn pidfd_read_failure_retains_source_ownership_until_reap() {
         }
     })
     .await
-    .expect("the collection sample appears after the detached owner finishes cleanup");
+    .unwrap_or_else(|_| {
+        panic!(
+            "the collection sample appears after the detached owner finishes cleanup: {}",
+            cache.metrics().prometheus()
+        )
+    });
     assert_eq!(PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
     assert_eq!(
         source
