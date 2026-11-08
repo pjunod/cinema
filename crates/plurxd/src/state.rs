@@ -234,6 +234,7 @@ struct StoreMetricsAtomics {
     background_job_counts: [AtomicI64; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
     background_job_oldest_age: [AtomicI64; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
     background_source_io: AtomicI64,
+    background_source_recovery: AtomicI64,
     background_legacy_pending: AtomicI64,
     analysis_queue_depth: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
     analysis_queue_oldest_age_seconds: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
@@ -282,6 +283,7 @@ impl Default for StoreMetricsAtomics {
             background_job_counts: std::array::from_fn(|_| AtomicI64::new(0)),
             background_job_oldest_age: std::array::from_fn(|_| AtomicI64::new(0)),
             background_source_io: AtomicI64::new(0),
+            background_source_recovery: AtomicI64::new(0),
             background_legacy_pending: AtomicI64::new(0),
             analysis_queue_depth: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_queue_oldest_age_seconds: std::array::from_fn(|_| AtomicI64::new(0)),
@@ -438,6 +440,10 @@ impl StoreMetricsCache {
                         self.inner.background_job_oldest_age[slot].load(Ordering::Relaxed)
                     }),
                     source_io_reservations: self.inner.background_source_io.load(Ordering::Relaxed),
+                    source_recovery_pending: self
+                        .inner
+                        .background_source_recovery
+                        .load(Ordering::Relaxed),
                     legacy_pending: self.inner.background_legacy_pending.load(Ordering::Relaxed),
                 },
                 analysis: plurx_core::store::AnalysisStoreMetrics {
@@ -630,6 +636,10 @@ impl StoreMetricsCache {
         {
             target.store(value, Ordering::Relaxed);
         }
+        self.inner.background_source_recovery.store(
+            sample.background_jobs.source_recovery_pending,
+            Ordering::Relaxed,
+        );
         self.inner.background_source_io.store(
             sample.background_jobs.source_io_reservations,
             Ordering::Relaxed,
@@ -1457,6 +1467,7 @@ impl AppState {
         let base_interval = Duration::from_secs(30 + stagger);
         let mut consecutive_errors = 0_u32;
         let mut warn_state = QueueWarnState::default();
+        let mut custody_warning = QueueWarnState::default();
         loop {
             if let Err(error) = self.refresh_store_metrics().await {
                 consecutive_errors = consecutive_errors.saturating_add(1);
@@ -1464,6 +1475,14 @@ impl AppState {
             } else {
                 consecutive_errors = 0;
                 self.warn_if_the_queue_is_not_producing(&mut warn_state);
+                if let Some(sample) = self.store_metrics.snapshot().sample {
+                    let pending = sample.background_jobs.source_recovery_pending;
+                    if pending == 0 {
+                        custody_warning.record_good_sample();
+                    } else if custody_warning.should_warn(clock_ms()) {
+                        tracing::warn!(pending, "Shared source reads need recovery; affected media jobs cannot start. Inspect the source readers on Activity.");
+                    }
+                }
             }
             let backoff = 1_u32 << consecutive_errors.min(3);
             let interval = base_interval.saturating_mul(backoff);
@@ -6445,12 +6464,14 @@ impl JobManager {
             }
         };
         let libraries = async {
-            let mut pacing = crate::background_jobs::IdlePoll::new();
             loop {
-                let progressed = self.work_library_queue(&transcode, None).await;
+                let progressed = self.drive_library_queue(&transcode).await;
+                if progressed {
+                    continue;
+                }
                 tokio::select! {
                     () = self.library_wake.notified() => {},
-                    () = tokio::time::sleep(pacing.delay(progressed)) => {},
+                    () = tokio::time::sleep(self.library_readiness.poll_interval()) => {},
                 }
             }
         };
@@ -6474,33 +6495,8 @@ impl JobManager {
         if let Err(error) = crate::source_custody::replay_local_settlements(&self.store).await {
             tracing::warn!(%error,"replaying local source settlement journal");
         }
-        match self.store.settled_background_source_custody().await {
-            Ok(receipts) => {
-                for receipt in receipts {
-                    if let Err(error) = self
-                        .store
-                        .release_background_source_custody(receipt, clock_ms())
-                        .await
-                    {
-                        tracing::warn!(%error,"replaying settled background source custody");
-                    }
-                }
-            }
-            Err(error) => tracing::warn!(%error,"reading settled background source custody"),
-        }
-        match self.store.settled_foreground_source_custody().await {
-            Ok(receipts) => {
-                for receipt in receipts {
-                    if let Err(error) = self
-                        .store
-                        .release_foreground_source(receipt, clock_ms())
-                        .await
-                    {
-                        tracing::warn!(%error,"replaying settled foreground source custody");
-                    }
-                }
-            }
-            Err(error) => tracing::warn!(%error,"reading settled foreground source custody"),
+        if let Err(error) = self.store.reap_settled_source_custody(clock_ms()).await {
+            tracing::warn!(%error, "replaying settled source custody");
         }
         crate::source_custody::source_pressure_changed().notify_waiters();
     }
