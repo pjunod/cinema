@@ -1,11 +1,96 @@
 use super::*;
 
+/// A capacity refusal a retry of the same request can outlive: a hardware
+/// slot, a CPU share, a queue position or a gate that frees on its own.
 pub(super) fn capacity_error(message: impl AsRef<str>) -> String {
     format!("{RETRYABLE_CAPACITY_PREFIX}{}", message.as_ref())
 }
 
-pub(super) fn replacement_deadline_error() -> String {
-    capacity_error("the replacement start expired before it could finish provisional work")
+/// A capacity refusal no retry of the same request can outlive. It stays in
+/// the capacity class, so every server-side consumer of that class (yield,
+/// placement, peer status) is unchanged; only the viewer's answer differs.
+pub(super) fn terminal_capacity_error(code: &'static str, message: impl AsRef<str>) -> String {
+    debug_assert!(
+        TERMINAL_CAPACITY_CODES.contains(&code),
+        "a terminal capacity code must be one the start contract names: {code}"
+    );
+    format!("{RETRYABLE_CAPACITY_PREFIX}[{code}] {}", message.as_ref())
+}
+
+/// [`terminal_capacity_error`] for the HTTP mapping's tests.
+#[cfg(test)]
+pub(crate) fn terminal_capacity_error_for_test(code: &'static str, message: &str) -> String {
+    terminal_capacity_error(code, message)
+}
+
+pub(crate) fn replacement_deadline_error() -> String {
+    terminal_capacity_error(
+        REPLACEMENT_EXPIRED,
+        "the replacement start expired before it could finish provisional work",
+    )
+}
+
+/// The start asked for a height this worker cannot encode right now; the
+/// request has to change (a smaller height), so re-posting it cannot help.
+pub(crate) const TRANSCODE_HEIGHT_UNAVAILABLE: &str = "transcode_height_unavailable";
+/// The start's own scratch grant is larger than the configured ceiling: no
+/// amount of other sessions ending makes room for it.
+pub(crate) const TRANSCODE_SCRATCH_EXHAUSTED: &str = "transcode_scratch_exhausted";
+/// The replacement start spent its own deadline before provisional work
+/// finished.
+pub(crate) const REPLACEMENT_EXPIRED: &str = "replacement_expired";
+const TERMINAL_CAPACITY_CODES: [&str; 3] = [
+    TRANSCODE_HEIGHT_UNAVAILABLE,
+    TRANSCODE_SCRATCH_EXHAUSTED,
+    REPLACEMENT_EXPIRED,
+];
+/// What a waitable refusal tells a client to wait before re-posting the same
+/// request. Admission keeps no estimate of when a slot frees; this is eight
+/// admission polls, long enough for a just-ended session to hand its slot back.
+pub(crate) const CAPACITY_RETRY_AFTER_MS: u64 = 2_000;
+
+/// The terminal capacity code `code` names, if it names one. A worker's
+/// refusal crosses to the ingress as this code alone.
+pub(crate) fn terminal_capacity_code(code: &str) -> Option<&'static str> {
+    TERMINAL_CAPACITY_CODES
+        .iter()
+        .copied()
+        .find(|known| *known == code)
+}
+
+/// What a capacity refusal tells the viewer's client to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapacityRefusal {
+    /// Re-posting the same request after `retry_after_ms` can succeed.
+    Waitable { retry_after_ms: u64 },
+    /// No retry of the same request can succeed; the code says why.
+    Terminal(&'static str),
+}
+
+/// Classify a refusal of the capacity class, with the sentence the viewer
+/// should read. `None` for every other error.
+pub(crate) fn capacity_refusal(error: &str) -> Option<(CapacityRefusal, &str)> {
+    if is_replacement_wait_error(error) {
+        return Some((
+            CapacityRefusal::Waitable {
+                retry_after_ms: REPLACEMENT_WAIT_RETRY_AFTER_SECS * 1_000,
+            },
+            error,
+        ));
+    }
+    let rest = error.strip_prefix(RETRYABLE_CAPACITY_PREFIX)?;
+    let terminal = rest
+        .strip_prefix('[')
+        .and_then(|tagged| tagged.split_once("] "))
+        .and_then(|(code, message)| {
+            terminal_capacity_code(code).map(|code| (CapacityRefusal::Terminal(code), message))
+        });
+    Some(terminal.unwrap_or((
+        CapacityRefusal::Waitable {
+            retry_after_ms: CAPACITY_RETRY_AFTER_MS,
+        },
+        error,
+    )))
 }
 
 pub(crate) fn is_retryable_capacity_error(error: &str) -> bool {

@@ -1015,7 +1015,8 @@ impl TranscodeManager {
             && target_height == HDR10_4K_HEIGHT
             && encoder != Encoder::Qsv
         {
-            return Err(capacity_error(
+            return Err(terminal_capacity_error(
+                TRANSCODE_HEIGHT_UNAVAILABLE,
                 "the proved 4K HDR10 QuickSync slot is busy; retry at 1080p",
             ));
         }

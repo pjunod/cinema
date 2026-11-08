@@ -54,14 +54,10 @@ const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
 /// The HTTP layer maps only this class to 503; source, filesystem, and ffmpeg
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
-/// The one capacity refusal a client may safely wait out by re-posting the
-/// same request: this player's previous start has not let go of it yet.
-///
-/// A strict subset of the capacity class, and deliberately narrow. The other
-/// producers of `capacity_error` are not all waits — one instructs the client
-/// to ask for a smaller height, and one reports a scratch ceiling above the
-/// configured budget, which no amount of retrying can satisfy. Those keep the
-/// codeless 503 that no client retries.
+/// One waitable capacity refusal with its own wait: this player's previous
+/// start has not let go of it yet. Every other refusal of the class is
+/// classified by [`capacity_refusal`]: waitable by default, terminal when its
+/// producer names a code ([`terminal_capacity_error`]).
 const REPLACEMENT_WAIT_PREFIX: &str =
     "transcode capacity is temporarily unavailable: waiting for this player's previous start: ";
 /// What a client should wait before re-posting. One cooperative window: by

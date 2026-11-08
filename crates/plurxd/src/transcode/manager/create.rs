@@ -457,9 +457,7 @@ impl TranscodeManager {
             )
             .await?;
         if tokio::time::Instant::now() >= deadline {
-            return Err(capacity_error(
-                "the replacement start expired before it could finish provisional work",
-            ));
+            return Err(replacement_deadline_error());
         }
         self.require_cluster_serving_authority(serving_admission)?;
         let creation = self
@@ -487,9 +485,7 @@ impl TranscodeManager {
         admission: ClusterServingAdmission,
     ) -> Result<(), String> {
         if tokio::time::Instant::now() >= admission.deadline {
-            return Err(capacity_error(
-                "the replacement start expired before it could finish provisional work",
-            ));
+            return Err(replacement_deadline_error());
         }
         self.serving_authority
             .is_current(admission.generation)
@@ -536,7 +532,8 @@ impl TranscodeManager {
         // start with no budget left cannot finish, and spawning ffmpeg only to
         // abandon it costs an admission slot for nothing.
         if tokio::time::Instant::now() >= deadline {
-            return Err(capacity_error(
+            return Err(terminal_capacity_error(
+                REPLACEMENT_EXPIRED,
                 "the takeover start expired while waiting for this player's gate",
             ));
         }

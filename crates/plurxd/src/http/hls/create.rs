@@ -4222,9 +4222,30 @@ async fn create_with_purpose_inner(
                     };
                     Ok((started.info, guard, Some(target_generation), (None, None)))
                 }
-                Err(error) => Err(ApiError::ServiceUnavailable(format!(
-                    "media worker {candidate} could not start the session: {error:?}"
-                ))),
+                // The worker cannot take this start now. Every 503 its start
+                // route answers is one a retry can outlive, so it is the
+                // waitable answer here too rather than a codeless one.
+                Err(crate::media_sessions::RemoteStartFailure::Unavailable) => {
+                    Err(ApiError::TypedRetry {
+                        status: StatusCode::SERVICE_UNAVAILABLE,
+                        code: "transcode_capacity_pending",
+                        message: format!("media worker {candidate} cannot take this start now"),
+                        retry_after_seconds: crate::transcode::CAPACITY_RETRY_AFTER_MS
+                            .div_ceil(1_000),
+                    })
+                }
+                Err(crate::media_sessions::RemoteStartFailure::Terminal(code)) => {
+                    Err(ApiError::typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        code,
+                        format!("media worker {candidate} cannot take this start"),
+                    ))
+                }
+                Err(crate::media_sessions::RemoteStartFailure::Transport(error)) => {
+                    Err(ApiError::ServiceUnavailable(format!(
+                        "media worker {candidate} could not start the session: {error:?}"
+                    )))
+                }
             }
         };
         match result {
@@ -5937,18 +5958,6 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
             retry_after_seconds: SIDECAR_PENDING_RETRY_AFTER_SECS,
         };
     }
-    // This player's previous start has not let go yet — a wait, and a bounded
-    // one, so name it. Left as a bare `{error}` sentence this was a codeless
-    // 503, which every client correctly refuses to retry because a 503 nobody
-    // explained is not a "still building" answer. The viewer got a terminal
-    // overlay quoting an internal sentence, over a Retry button that re-posted
-    // into the same contention with no backoff. With a code it joins
-    // `create_503_not_yet` and the existing 1s/2s/4s ladder waits it out.
-    //
-    // Deliberately narrower than the whole capacity class. Sibling refusals in
-    // that class are not all waits: one tells the client to ask for a smaller
-    // height, and one reports a scratch ceiling above the configured budget
-    // that no retry can satisfy. Those keep the codeless 503 nothing retries.
     // This source's Dolby Vision pixel proof did not finish — a probe timed
     // out, failed to start or exited non-zero. Nothing was learned about the
     // source and nothing was remembered, so the next start measures again:
@@ -5963,17 +5972,33 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
             retry_after_seconds: SOURCE_PROOF_PENDING_RETRY_AFTER_SECS,
         };
     }
-    if crate::transcode::is_replacement_wait_error(&error) {
-        return ApiError::TypedRetry {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "transcode_capacity_pending",
-            message: error,
-            retry_after_seconds: crate::transcode::REPLACEMENT_WAIT_RETRY_AFTER_SECS,
+    // Every capacity refusal carries a code. Left as a bare `{error}` sentence
+    // a refusal was a codeless 503, which every client correctly refuses to
+    // retry because a 503 nobody explained is not a "still building" answer —
+    // so the one failure a retry would cure was the one never retried. A
+    // waitable one (a slot, a CPU
+    // share, a queue position or this player's previous start letting go) is
+    // the `create_503_not_yet` answer every client's ladder already retries,
+    // with the wait its class names. A terminal one (a height this worker
+    // cannot encode, a scratch grant above the ceiling, a replacement that
+    // spent its deadline) names itself so no client re-posts it unchanged.
+    if let Some((refusal, message)) = crate::transcode::capacity_refusal(&error) {
+        return match refusal {
+            crate::transcode::CapacityRefusal::Waitable { retry_after_ms } => {
+                ApiError::TypedRetry {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "transcode_capacity_pending",
+                    message: message.to_owned(),
+                    retry_after_seconds: retry_after_ms.div_ceil(1_000).max(1),
+                }
+            }
+            crate::transcode::CapacityRefusal::Terminal(code) => {
+                ApiError::typed(StatusCode::SERVICE_UNAVAILABLE, code, message)
+            }
         };
     }
     if crate::transcode::is_serving_fence_error(&error)
         || crate::transcode::is_start_infrastructure_error(&error)
-        || crate::transcode::is_retryable_capacity_error(&error)
     {
         return ApiError::ServiceUnavailable(error);
     }

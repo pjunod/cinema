@@ -4290,3 +4290,37 @@ async fn processing_owner_header_preserves_old_control_body_and_refuses_wrong_in
         assert_eq!(parsed, expected);
     }
 }
+
+/// D2 item 2, remote arm: a worker's terminal capacity refusal reaches the
+/// ingress as its code, so the viewer is not told to wait for a start that no
+/// retry can make; every other 503 — an older worker's bodiless one, a fence,
+/// a waitable refusal — stays the waitable answer.
+#[tokio::test]
+async fn a_worker_terminal_capacity_refusal_crosses_to_the_ingress_by_code() {
+    use axum::response::IntoResponse;
+    let worker = crate::http::internal_media_sessions::RemoteStartError::TerminalCapacity(
+        crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE,
+    )
+    .into_response();
+    assert_eq!(worker.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(worker.into_body(), 4096)
+        .await
+        .expect("worker body");
+    assert_eq!(
+        remote_start_refusal(&body),
+        RemoteStartFailure::Terminal(crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE)
+    );
+    for waitable in [
+        &b""[..],
+        crate::serving_fence::SERVING_FENCED_JSON.as_bytes(),
+        br#"{"code":"transcode_capacity_pending"}"#,
+        br#"{"code":"not_a_contract_code"}"#,
+    ] {
+        assert_eq!(
+            remote_start_refusal(waitable),
+            RemoteStartFailure::Unavailable,
+            "{}",
+            String::from_utf8_lossy(waitable)
+        );
+    }
+}
