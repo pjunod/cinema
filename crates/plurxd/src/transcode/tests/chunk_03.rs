@@ -910,7 +910,7 @@
         session.progress.recent_milli.store(900, Relaxed);
         tokio::fs::write(
             directory.path().join("index.m3u8"),
-            rolling_playlist(&[8.0; 4], false),
+            rolling_playlist(&[8.0; 6], false),
         )
         .await
         .expect("writer inventory");
@@ -2400,6 +2400,8 @@
     ) {
         let directory = crate::test_tempdir().expect("publication deadline");
         let session = test_session(directory.path().to_path_buf());
+        session.publication.lock().await
+            .bind_startup_candidate_for_test(RollingStartupPolicy::Conservative);
         let started = Instant::now();
         // Even a slow producer is not judged below the fixed initial runway.
         session.progress.recent_milli.store(500, Relaxed);
@@ -3705,7 +3707,10 @@
                     seconds: 60,
                     bytes: 1_000,
                 }),
-                produced_end_ms: Some(80_000),
+                produced_end_ms: Some(
+                    20_000 + rolling_source_bank_target_ms(1.0, false)
+                        + ROLLING_PUBLICATION_GUARD_MS,
+                ),
                 staged_publication_seconds: Some(16),
                 // Pre-existing coverage: the startup grant is already spent, so
                 // these assertions are about steady-state flow control.

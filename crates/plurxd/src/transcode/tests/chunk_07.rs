@@ -2526,7 +2526,7 @@ async fn offline_preempts_speculation_and_resumes_its_published_part() {
         )
         .audio
         .expect("canonical producer audio");
-    let package_id = "offline-preemption";
+    let package_id = "0f362c6d-9f82-49c1-bce4-0f2f62f32308";
     let requested = NewOfflinePackage {
         audio_recipe: Some(serde_json::to_string(&audio_delivery).expect("audio recipe")),
         id: package_id.to_owned(),
@@ -2955,7 +2955,7 @@ async fn seed_real_file(store: &Arc<dyn Store>, path: &std::path::Path) -> i64 {
             movie,
             &path.to_string_lossy(),
             meta.len() as i64,
-            1,
+            crate::fragment_index_cluster::source_stamp(&meta).mtime,
             &ProbeResult {
                 duration_ms: Some(6_000),
                 container: Some("mkv".into()),

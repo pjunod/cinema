@@ -2184,7 +2184,9 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
         .expect("attested");
     file.hdr = Some("dolby_vision".into());
     file.hdr_format = Some("Dolby Vision · Profile 5".into());
-    file.dolby_vision = Default::default();
+    file.dolby_vision = plurx_core::domain::DolbyVisionFacts {
+        profile: Some(5), ..Default::default()
+    };
 
     let realtime = ChildWork::realtime("Dolby Vision pixel probe");
     let background = ChildWork::background("Dolby Vision pixel probe");
@@ -2257,7 +2259,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
         .expect("offline user");
     let package = NewOfflinePackage {
         audio_recipe: None,
-        id: "owned-background-pixel-proof".into(),
+        id: "2079fce0-e3b6-4ed1-a2cd-aa2b7f1025af".into(),
         request_id: "owned-background-pixel-proof-request".into(),
         user_id: user.id,
         file_id,
