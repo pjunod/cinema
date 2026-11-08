@@ -8,6 +8,8 @@ use plurx_core::store::background_jobs_resources::{
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 
+#[cfg(target_os = "linux")]
+mod physical_stop;
 mod reader;
 pub(super) use reader::Witness;
 
@@ -254,6 +256,10 @@ fn verify_directory(dir: &Path) -> Result<(), String> {
 }
 
 fn read(path: &Path) -> Result<Envelope, String> {
+    serde_json::from_slice(&read_bytes(path)?).map_err(|error| error.to_string())
+}
+
+fn read_bytes(path: &Path) -> Result<Vec<u8>, String> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -280,7 +286,7 @@ fn read(path: &Path) -> Result<Envelope, String> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err("source recovery record grew past its bound".into());
     }
-    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+    Ok(bytes)
 }
 
 fn write_active_at(dir: &Path, record: Record, identity: Option<Identity>) -> Result<(), String> {
@@ -486,6 +492,8 @@ pub(super) async fn replay(store: &Arc<dyn Store>, node: &str) -> Result<(), Str
     } else {
         Ok(())
     };
+    #[cfg(target_os = "linux")]
+    let legacy_result = legacy_result.and(physical_stop::replay(store, &context.dir, node).await);
     reader_result.and(legacy_result)
 }
 

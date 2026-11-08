@@ -21,6 +21,9 @@ struct Evidence {
     anchor_nonce: String,
     anchor_device: u64,
     anchor_inode: u64,
+    // Older evidence can still be removed following an acknowledged join.
+    #[serde(default)]
+    anchor_ctime: Option<(i64, i64)>,
     record: Record,
 }
 
@@ -31,6 +34,8 @@ pub(crate) struct Witness {
     record: Record,
     // Never explicitly unlock, clone or export this descriptor to children.
     _anchor: std::fs::File,
+    #[cfg(unix)]
+    anchor_ctime: (i64, i64),
     disqualified: Mutex<bool>,
 }
 
@@ -72,8 +77,24 @@ impl Witness {
             use std::os::unix::fs::FileExt;
             // Invalidate the existing locked inode itself. This remains durable
             // even if a receipt path is removed/restored, and never unlocks it.
-            self._anchor.write_all_at(b"!", 0)?;
-            self._anchor.sync_all()?;
+            // Rewriting saved bytes in place preserves both device and inode.
+            // Require a later kernel-assigned change time before allowing exec,
+            // including on filesystems whose ctime resolution is one second.
+            let started = std::time::Instant::now();
+            loop {
+                self._anchor.write_all_at(b"!", 0)?;
+                self._anchor.sync_all()?;
+                if anchor_ctime(&self._anchor.metadata()?) > self.anchor_ctime {
+                    break;
+                }
+                if started.elapsed() >= std::time::Duration::from_secs(2) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "reader invalidation could not advance the anchor change time",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
         #[cfg(not(unix))]
         return Err(std::io::Error::new(
@@ -86,7 +107,13 @@ impl Witness {
 }
 
 #[cfg(unix)]
-fn local_filesystem(file: &std::fs::File) -> bool {
+fn anchor_ctime(metadata: &std::fs::Metadata) -> (i64, i64) {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.ctime(), metadata.ctime_nsec())
+}
+
+#[cfg(unix)]
+pub(super) fn local_filesystem(file: &std::fs::File) -> bool {
     use std::os::fd::AsRawFd;
     let mut information = std::mem::MaybeUninit::<libc::statfs>::uninit();
     // SAFETY: fstatfs initializes the complete struct on success.
@@ -172,6 +199,11 @@ pub(super) fn prepare_at(
         if path.try_exists().map_err(|error| error.to_string())? {
             return Err("old reader evidence cannot be rewritten as a new activation".into());
         }
+        // A second daemon sharing this directory cannot simultaneously reserve
+        // the last slots. Retain the directory lock through evidence creation.
+        directory_file.lock().map_err(|error| error.to_string())?;
+        let entries = std::fs::read_dir(directory).map_err(|error| error.to_string())?;
+        inventory(entries, true)?;
         let nonce = uuid::Uuid::new_v4().to_string();
         let anchor_path = directory.join(format!("{name}.anchor"));
         let mut anchor = std::fs::OpenOptions::new()
@@ -197,6 +229,7 @@ pub(super) fn prepare_at(
             anchor_nonce: nonce,
             anchor_device: metadata.dev(),
             anchor_inode: metadata.ino(),
+            anchor_ctime: Some(anchor_ctime(&metadata)),
             record: record.clone(),
         };
         let bytes = serde_json::to_vec(&evidence).map_err(|error| error.to_string())?;
@@ -222,6 +255,7 @@ pub(super) fn prepare_at(
             activation_id: activation_id.to_owned(),
             record,
             _anchor: anchor,
+            anchor_ctime: anchor_ctime(&metadata),
             disqualified: Mutex::new(false),
         });
         owned.insert(path, Arc::clone(&witness));
@@ -321,6 +355,47 @@ pub(super) fn observe_children(mediated: bool) -> std::io::Result<()> {
     Ok(())
 }
 
+// Each owner has evidence, an anchor, an arm marker and, for older
+// witnesses, an optional unmediated marker. Bound physical entries as well
+// as owners so unrelated files cannot create unbounded directory scans.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn inventory(entries: std::fs::ReadDir, reserving_owner: bool) -> Result<Vec<PathBuf>, String> {
+    const MAX_ENTRIES: usize = 4 * MAX_FILES;
+    let mut paths = Vec::new();
+    let mut arms = std::collections::HashSet::new();
+    let mut count = 0;
+    for entry in entries.take(MAX_ENTRIES + 1) {
+        count += 1;
+        if count > MAX_ENTRIES {
+            return Err("reader witness inventory exceeds its entry bound".into());
+        }
+        let path = entry.map_err(|error| error.to_string())?.path();
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("json") => {
+                paths.push(path);
+                if paths.len() > MAX_FILES {
+                    return Err("reader witness inventory exceeds its owner bound".into());
+                }
+            }
+            Some("armed") if reserving_owner => {
+                arms.insert(path);
+            }
+            _ => {}
+        }
+    }
+    if reserving_owner {
+        // A concurrent activation can still add its pending arm marker.
+        let pending = paths
+            .iter()
+            .filter(|path| !arms.contains(&path.with_extension("armed")))
+            .count();
+        if paths.len() == MAX_FILES || count + pending + 3 > MAX_ENTRIES {
+            return Err("reader witness inventory has no capacity for a new owner".into());
+        }
+    }
+    Ok(paths)
+}
+
 pub(super) async fn replay_at(
     store: &Arc<dyn Store>,
     directory: &Path,
@@ -344,18 +419,7 @@ pub(super) async fn replay_at(
             Err(error) => return Err(error.to_string()),
         };
         verify_directory(directory)?;
-        let mut paths = entries
-            .take(MAX_FILES + 1)
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        if paths.len() > MAX_FILES {
-            return Err("reader witness inventory exceeds its bound".into());
-        }
-        paths.retain(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-        });
+        let mut paths = inventory(entries, false)?;
         paths.sort();
         static CURSOR: Mutex<Option<PathBuf>> = Mutex::new(None);
         let after = CURSOR.lock().map_err(|_| "reader cursor poisoned")?.clone();
@@ -439,11 +503,22 @@ pub(super) async fn replay_at(
                     continue;
                 }
             }
+            let Some(original_ctime) = evidence.anchor_ctime else {
+                continue;
+            };
+            if anchor_ctime(&anchor.metadata().map_err(|error| error.to_string())?)
+                != original_ctime
+            {
+                continue;
+            }
             let mut nonce = String::new();
             anchor
                 .read_to_string(&mut nonce)
                 .map_err(|error| error.to_string())?;
-            if nonce != evidence.anchor_nonce {
+            if nonce != evidence.anchor_nonce
+                || anchor_ctime(&anchor.metadata().map_err(|error| error.to_string())?)
+                    != original_ctime
+            {
                 continue;
             }
             // The existing inode stays locked through exact-owner settlement,
@@ -496,7 +571,7 @@ fn read_private_text(path: &Path, limit: u64) -> Result<String, String> {
 /// Positive equality of the actual locking kernel prevents a cloned volume
 /// from impersonating the old lock. A changed boot is NOT used as same-boot
 /// proof, and no image/container marker is treated as host identity.
-fn kernel_instance() -> Option<String> {
+pub(super) fn kernel_instance() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
         use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};

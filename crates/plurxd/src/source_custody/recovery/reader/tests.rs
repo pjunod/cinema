@@ -273,6 +273,98 @@ async fn reader_recovery_refuses_unarmed_unmediated_foreign_kernel_and_replaced_
 }
 
 #[tokio::test]
+async fn reader_recovery_refuses_original_bytes_restored_in_place_after_raw_launch() {
+    let fixture = Fixture::new();
+    let record = fixture.background("job");
+    preread(&fixture, &record);
+    let (path, config) = configuration(&fixture, &record, "unmediated");
+    let mut child = OwnedChild::start(&path);
+    child.wait_for("READER_PREPARED");
+    let proof = config.directory.join(record.name().expect("name"));
+    let anchor = proof.with_extension("anchor");
+    let original = std::fs::read(&anchor).expect("backup before raw launch");
+    let original_stat = anchor.metadata().expect("original anchor identity");
+    assert!(activate(&fixture, &record, &config.activation_id).await);
+    child.send("arm");
+    child.wait_for("READER_ARMED");
+    assert_ne!(
+        std::fs::read(&anchor).expect("invalidated anchor"),
+        original
+    );
+    child.exit();
+
+    let mut restore = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&anchor)
+        .expect("existing anchor");
+    restore
+        .write_all(&original)
+        .expect("restore original bytes in place");
+    restore.sync_all().expect("durable restore");
+    let restored = restore.metadata().expect("restored anchor identity");
+    assert_eq!(
+        (restored.dev(), restored.ino()),
+        (original_stat.dev(), original_stat.ino())
+    );
+    assert_eq!(std::fs::read(&anchor).expect("restored bytes"), original);
+    replay_at(&fixture.store, &config.directory, &fixture.dir, NODE)
+        .await
+        .expect("replay observations");
+    assert_eq!(
+        count(&fixture, &record),
+        1,
+        "restored raw-owner proof cannot release custody"
+    );
+    assert!(proof.exists());
+}
+
+#[tokio::test]
+async fn reader_inventory_admits_and_replays_by_owner_count_among_sidecars() {
+    let fixture = Fixture::new();
+    let record = fixture.background("job");
+    preread(&fixture, &record);
+    let (path, config) = configuration(&fixture, &record, "mediated");
+    std::fs::create_dir_all(&config.directory).expect("fixture inventory");
+    for n in 0..MAX_FILES {
+        std::fs::File::create(config.directory.join(format!("orphan-{n}.anchor")))
+            .expect("retained sidecar");
+    }
+    let mut child = OwnedChild::start(&path);
+    child.wait_for("READER_PREPARED");
+    assert!(activate(&fixture, &record, &config.activation_id).await);
+    child.send("arm");
+    child.wait_for("READER_ARMED");
+    child.exit();
+    replay_at(&fixture.store, &config.directory, &fixture.dir, NODE)
+        .await
+        .expect("replay beyond a single sidecar per owner");
+    assert_eq!(
+        count(&fixture, &record),
+        0,
+        "release the proven exact owner"
+    );
+    assert!(!config.directory.join(record.name().expect("name")).exists());
+
+    // Fill all logical slots without changing the total number of entries.
+    for n in 0..MAX_FILES {
+        let old = config.directory.join(format!("orphan-{n}.anchor"));
+        std::fs::rename(&old, old.with_extension("json")).expect("occupied owner slot");
+    }
+    let other = fixture.background("analysis");
+    preread(&fixture, &other);
+    let candidate = config.directory.join(other.name().expect("other name"));
+    let result = prepare_at(
+        &config.directory,
+        other.clone(),
+        &uuid::Uuid::new_v4().to_string(),
+    );
+    assert!(matches!(result, Err(error) if error.contains("no capacity")));
+    assert!(!candidate.exists());
+    assert!(!candidate.with_extension("anchor").exists());
+    assert_eq!(count(&fixture, &other), 1);
+}
+
+#[tokio::test]
 async fn reader_release_failure_keeps_exact_proof_for_retry() {
     let fixture = Fixture::new();
     let record = fixture.background("analysis");

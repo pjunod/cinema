@@ -42,7 +42,7 @@ preserve directly awaited cancellation/join ownership and identity checks.
 use the separate `source-custody-recovery/v2/` directory. Before activation,
 the daemon creates and exclusively locks a private local file. Its evidence
 binds the immutable custody token, node, activation nonce, kernel instance,
-and the anchor's device, inode and nonce. The authoritative activation must
+and the anchor's device, inode, change time and nonce. The authoritative activation must
 acknowledge the exact new nonce before a separate durable marker arms it.
 Rejected activation cannot arm a legacy owner's witness.
 
@@ -52,7 +52,9 @@ lock after process exit, verifies the same kernel and untouched anchor, and
 holds the lock through the existing typed Store settlement and release.
 Cancellation, PID reuse, a copied receipt, replaced anchor, missing marker,
 foreign kernel or a failed release cannot authorize another owner's release.
-Store errors retain the evidence for retry.
+Store errors retain the evidence for retry. Original change-time equality also
+rejects old bytes restored in place. Raw launch is refused unless durable
+invalidation advances that kernel timestamp, including coarse filesystems.
 
 Every production child launch is observed before exec. Only narrowly audited
 children that receive broker URLs and no original media descriptor or pathname
@@ -70,7 +72,9 @@ child ran concurrently; it must never assume a raw reader stopped.
 
 Unknown or remote filesystem lock semantics remain held. The v2 path runs
 before the legacy Linux identity lookup, so native macOS needs no Linux host
-identity mounts. A v2 record is never retrofitted onto an already active reader.
+identity mounts. A v2 record is never retrofitted onto an already active reader. Admission and
+replay share a 4,096-owner / 16,384-file bound, reserving each pending arm marker
+before creating an anchor. Sidecars do not consume the logical owner limit.
 
 **Acceptance:** five new native macOS process tests pass, covering both custody
 families and all independent background owner types, cancellation, a surviving
@@ -78,6 +82,38 @@ blocking reader thread, process exit, rejected activation, descriptor export,
 command reuse, foreign/corrupt anchors, and failed Store release retry. Native
 all-target Clippy passes. Linux execution and the installed legacy migration
 remain pending; these observations are not fleet acceptance.
+
+### 1.2 The finite legacy DV migration uses host-admin stop proof
+
+The Linux-only compatibility consumer reads the fixed, root-controlled
+`/run/plurx-physical-stop/legacy-dv-title-v1.json` path. The worker cannot create,
+modify or remove it. The proof covers one audited historical v1 activation by
+its exact file digest, immutable claim and custody identity, expired authority,
+and the authoritative DV title job's scanner digest. It does not add general
+permission to release old records or infer an old PID from a newer container.
+
+The daemon and both native reader classes were verified in the old artifact
+closure. A complete initial-host PID namespace census must open and inspect
+actual executable descriptors, including each live thread, in two matching
+passes. It retains those descriptors, rejects unreadable/zombie/unknown/changing
+inventories, and requires zero matching readers. Cinema's data-directory lock
+fences new startup during the census; the lock alone is not stop evidence.
+The [host helper](../../scripts/source-custody-reader-stop) performs no service
+stops, signals, reboots or database writes. Its default `--check` mode publishes
+nothing; `--publish` performs its own fresh census under the startup fence.
+
+The authoritative consumer checks the exact legacy activation and current job
+again, rejects any v2 witness, and uses the existing typed Store settlement and
+release. Failure keeps the journal. After acknowledged exact absence it removes
+only that worker journal; host-admin proof remains read-only until its operator
+removes it. Containers need an explicit read-only bind of the host proof
+folder; ordinary v2 recovery needs no such mount.
+
+**Acceptance:** fifteen new helper controls pass on native macOS; the actual
+Linux executable-handle case remains pending. Source and strict refusal
+regressions are implemented. Linux
+execution, helper publication and fleet recovery are pending. No service has
+been stopped and no old reservation has been released by this continuation.
 
 ## 2. The journal never impersonates an activation or completed join
 
@@ -273,3 +309,5 @@ neither receives an invented successful join or retrospective witness.
 | 2026-11-04 | Debian snapshot download failures blocked the full unit job before its tests and both package jobs. The exact pinned package subsequently returned HTTP 200 over both transports. | No snapshot date, package version or integrity check was changed. Retry the required CI; the earlier failures do not supply qualification credit. |
 
 | 2026-11-08 | Five new real-process native macOS witness regressions passed once; affected all-target Clippy passed. | New v2 daemon-mediated recovery only. Linux execution, raw-reader migration and production acceptance remain open. |
+
+| 2026-11-08 | New in-place anchor restore regression passed on native macOS; the original five passes were retained. | Kernel change-time correction is independently exercised. Bounded inventory, FEL transport and finite legacy migration await Linux execution. |
