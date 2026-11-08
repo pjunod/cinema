@@ -2947,9 +2947,12 @@ pub(crate) async fn claim_library(
                     // claim this pass raced — rather than lost to another
                     // worker: say what it waits on now, not what an earlier
                     // pass saw.
-                    let queued = store.background_job(&candidate.id).await?.is_some_and(|job| {
-                        job.state == plurx_core::store::background_jobs::JobState::Queued
-                    });
+                    let queued = store
+                        .background_job(&candidate.id)
+                        .await?
+                        .is_some_and(|job| {
+                            job.state == plurx_core::store::background_jobs::JobState::Queued
+                        });
                     if queued {
                         let library = store.get_library(library_id).await?;
                         refresh_targeted_wait(

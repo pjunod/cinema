@@ -1684,7 +1684,9 @@ mod tests {
             &[&new],
         )
         .await;
-        let alpha_job = request_record(store.as_ref(), "alpha-targeted").await.job_id;
+        let alpha_job = request_record(store.as_ref(), "alpha-targeted")
+            .await
+            .job_id;
         // What an earlier fence refusal wrote, before Alpha's fence was released.
         crate::background_jobs::note_targeted_wait(store.as_ref(), &alpha_job, "full_scan:Alpha")
             .await;
@@ -1710,7 +1712,11 @@ mod tests {
             request_record(store.as_ref(), "alpha-targeted").await.state,
             "pending"
         );
-        assert_eq!(waiting_on().await, "", "Alpha's fence is free: no named wait");
+        assert_eq!(
+            waiting_on().await,
+            "",
+            "Alpha's fence is free: no named wait"
+        );
 
         let fence = jobs
             .acquire_job(format!("scan:library:{}", libraries[0].id))
