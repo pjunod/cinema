@@ -183,7 +183,7 @@ calls `ScopedKey::require`:
 | Route | Scope |
 |---|---|
 | `POST /api/v1/scan` | `scan:trigger` |
-| `GET /api/v1/scan/requests/{id}` | `status:read` |
+| `GET /api/v1/scan/requests/{id}` | `status:read`, or `scan:trigger` for a request that key created |
 
 `POST /api/v1/keys` rejects an unknown scope at creation rather than storing
 it, because a typo'd scope would otherwise produce a key that looks correct in
@@ -979,8 +979,8 @@ node does not hold, `409` while a session is reading the published artifact.
 | POST | `/api/v1/libraries/{id}/refresh` | admin | Scans **and** forces metadata re-fetch |
 | POST | `/api/v1/libraries/{id}/root-identity/reset` | admin | Forgets the root fingerprint so replaced storage can re-establish |
 | GET | `/api/v1/libraries/{id}/items` | bearer | Paged, sorted, optionally genre-filtered grid |
-| POST | `/api/v1/scan` | scoped key: `scan:trigger` | "Index exactly this path", for another application |
-| GET | `/api/v1/scan/requests/{id}` | scoped key: `status:read` | Polls one targeted-scan request |
+| POST | `/api/v1/scan` | scoped key: `scan:trigger` | "Index exactly this path", for another application; also the `probe_paths` connection test |
+| GET | `/api/v1/scan/requests/{id}` | scoped key: `status:read`, or the creating `scan:trigger` key | Polls one targeted-scan request |
 | GET | `/api/v1/items/{id}` | bearer | Item detail: item, ancestors, children, files, editions, reading |
 | PATCH | `/api/v1/items/{id}` | admin | Hand-edits metadata — **home libraries only** |
 | POST | `/api/v1/items/{id}/reanalyze` | admin | Re-runs ffprobe over every file on the item |
@@ -1113,16 +1113,23 @@ clients must tolerate both absent-optional and unknown-extra keys.
 `POST /api/v1/scan` is how Curator says "index exactly this path". It is
 deliberately **not** under `/libraries/{id}`: the caller knows a filesystem
 path, not a plurx library id, and plurx resolving it is one less thing for two
-applications to keep in sync.
+applications to keep in sync. The seam's contract is
+[PIPELINE-CONTRACT.md](features/PIPELINE-CONTRACT.md) §4–§5; this section is
+the wire as built.
 
 ```jsonc
-{ "path": "/media/tv/Show/Season 01",   // required, must be ABSOLUTE
+{ "path": "/media/tv/Show/Season 01",   // must be ABSOLUTE; absent only with probe_paths
   "ids":  { "tmdb": 1234, "imdb": "tt0001234" },
   "hint": "movie" | "episode" | "season" | "book",
   "series": { "tmdb": 5678 },           // the SHOW's id, for episodes
   "book": { "title", "author", "medium", "work_id", "edition_id",
             "cover_url" },              // Books libraries only
-  "correlation_id": "…", "source": "…" }
+  "correlation_id": "…", "source": "…",
+  "request_key": "t-42-a3f9/1/9c2e/1",  // idempotency key, attempt suffix last
+  "wait_ms": 10000,                     // hold the answer up to this long; cap 15000
+  "expected_files": [{ "path": "…/Show.S01E01.mkv", "bytes": 8123456789,
+                       "mtime_ns": 1794076138123456789 }],   // at most 64
+  "probe_paths": ["/media/tv", "/media/movies"] }           // connection test, no path
 ```
 
 `path` must be absolute, because the caller and plurx may not share a working
@@ -1137,22 +1144,66 @@ used as a fallback show ID for an episode or season request.
 `correlation_id` is echoed and logged, so one grep reconstructs a transfer
 across every application it passed through.
 
-Library resolution canonicalizes the path and matches component-wise against
-every root, **longest root wins** — so `/media` and `/media/kids` resolve to
-the more specific library, and `/data` never matches `/database`. Nothing
-matching is the one 422 in the API, and its body names every configured root:
+**Idempotency.** A `request_key` the same API key already used returns *that*
+request — the same `request_id`, and its result once it has one — so a lost
+response never becomes a second scan. A key with a new attempt suffix is a new
+request. Keys belong to the API key that created them: another key's identical
+`request_key` is its own request. A concurrent identical POST loses inside the
+admission transaction and is answered with the winner.
+
+**Expected files.** Each `expected_files` path is probed whatever its size and
+whole-second mtime say — the catalogue's cache cannot tell a same-path
+replacement with equal size from the file it replaced — and reported once the
+scan finishes, in `files`, as `placed {item_id, file_id, bytes, mtime_ns}`
+(from a fresh `stat`, mtime in nanoseconds), `skipped {reason}` or `missing`.
+Other files under `path` are scanned as before.
+
+**Containment is lexical first.** The request path, with `.` and `..` resolved
+and no symlink followed, is matched component-wise against every configured
+root, **longest root wins** — so `/media` and `/media/kids` resolve to the more
+specific library, and `/data` never matches `/database`. Under no root (or a
+symlink that resolves out of its root) is a permanent 422 that names every
+root; under a root that cannot be read right now — an unmounted share, an empty
+mount point, `ENOTCONN`, `EIO`, or the path missing beneath it — is a transient
+503 with `Retry-After: 60`:
 
 ```json
-{ "error": "path is not under any library root",
+{ "code": "path_outside_roots", "error": "path is not under any library root",
   "path": "/downloads/x", "roots": ["/media/movies", "/media/tv"] }
+{ "code": "path_unreadable", "error": "library root could not be read: …",
+  "path": "/media/tv/Show", "root": "/media/tv", "retry_after_s": 60 }
 ```
 
 | Status | Meaning |
 |---|---|
-| 200 `{"status":"scanned", …, "report", "items"}` | A durable result was already ready when the request was acknowledged |
+| 200 `{"status":"scanned", "request_id", "report", "items", "files", …}` | The request finished — within `wait_ms`, or before the handler re-read it, or it is a replay of a finished `request_key` |
 | 202 `{"status":"queued", "request_id", …}` | Durably accepted for an eligible cluster worker. Requests survive process restart; same-path requests share a scan while retaining each caller’s hints and result |
-| 400 | Relative path, nonpositive `series.tmdb`, or invalid `book` fields |
-| 422 | Path under no library root |
+| 200 `{"roots", "visible", "missing", "outside_roots"}` | `probe_paths` with no `path`: which roots plurx can see. Only a configured root or a path under one is looked at; a symlink beneath the root is found with `lstat` and listed as `outside_roots` without being followed; anything else is `outside_roots`. Nothing is scanned or queued |
+| 400 | Relative path, nonpositive `series.tmdb`, invalid `book` fields, a malformed `request_key` or `expected_files`, `{"code":"path_required"}` (neither `path` nor `probe_paths`), or `{"code":"probe_paths_with_path"}` (both) |
+| 500 `{"code":"scan_failed", "status":"failed", "request_id", "error"}` | The request (or the finished request a replayed `request_key` names) failed for a reason other than an unreadable root; the same `request_id` the record carries |
+| 500 `{"code":"cancelled", "status":"failed", "request_id", "error"}` | The same failed shape for a request whose job was cancelled (Activity's Cancel); send a new attempt |
+| 422 `path_outside_roots` | Path under no library root — permanent |
+| 503 `path_unreadable` | Path under a root that cannot be read now — retry after 60 s. Also the answer when a waited-for or replayed request failed because its root dropped mid-scan; then it also carries `request_id` and `status: failed` |
+| 503 (`error` only) | The durable queue refused the request (full, or the same request is cancelling) |
+
+**The targeted job.** Targeted requests run as their own job, dedupe key
+`library:targeted:{library_id}`, separate from the library's full scan. It is
+claimed first among library work and with a probe admission — no heavy-lane
+permit, so a busy GPU or a running title scan never delays it, and playback
+does not preempt it. It takes the same per-library mutation fence
+(`scan:library:{id}`) as a full scan, so the two never run at once: beside a
+running full scan (or metadata refresh) the request waits with `waiting_on:
+full_scan:<library>`; its retry is due a quarter second after the refusal, and
+the holder's release wakes the releasing node's library loop, which claims it
+at once — any other node within its next idle poll (no preemption). Fragment
+index, Dolby Vision title scan and cache work for what it places still queue on
+the heavy lane. The job keeps the `library_scan` kind with its own payload
+generation (`library-targeted-v1`; whole-library work is `library-work-v1`),
+so older nodes in a rolling upgrade decode it and leave it alone — and any
+logic keyed on the `library_scan` kind must check the generation too. One
+consequence of its priority: on a node that keeps receiving imports, a
+scheduled full scan of the same library can stay queued behind them; the
+contract allows it.
 
 The id hints ride *on* the queued request so the drained job applies them
 later; an endpoint that applied them itself would drop them for every request
@@ -1161,14 +1212,28 @@ series hint once per resolved show. A series-ID conflict does not fail or roll
 back playable placement; it is a bounded diagnostic and never overwrites the
 known provider ID. Every call increments the integration
 notification counter *before* path resolution, so a request rejected for a
-path-mapping mistake still proves the caller reached plurx with a working key.
+path-mapping mistake still proves the caller reached plurx with a working key;
+a `probe_paths` test counts there too and never as a scan.
 
-`GET /api/v1/scan/requests/{id}` returns the record verbatim. `status` is
-`queued` · `done` · `failed` · `cancelled`; `report` and `items` appear only at
-a terminal state, `error` only on failure. Request receipts and results persist
-for seven days. The recent list is bounded to 256 records; an older record can
-still be read by ID until its receipt expires. A library admits at most 256
-pending requests; overload is an explicit rejection before acceptance.
+`GET /api/v1/scan/requests/{id}` returns the record. A `status:read` key reads
+any request; a `scan:trigger` key reads the requests it created and gets 403
+for any other id — including one that does not exist, so a scan key cannot
+probe which requests exist. `status` is `queued` · `running` · `done` · `failed`; `report` and
+`items` appear at `done`, `error` on failure, with `code: "path_unreadable"`
+when the root dropped mid-scan or `code: "cancelled"` when the request's job
+was cancelled (a cancelled request is `failed`, never a status of its own). A request made through this route also carries
+`waiting_on` — `full_scan:<library>` while a full scan or a metadata refresh of
+the request's own library holds that library's fence, `root_unreadable:<path>`
+while the claiming node cannot read a root, `queue_position:<n>` when it joined
+a targeted pass already running with `n` requests ahead of it, empty once its
+turn starts — and `files`, the per-file report above; their absence means a
+request from before contract v2. A targeted request takes no background source
+reader, so a scan of another library on the same storage does not hold it, and
+the contract's `heavy_lane:<holder>` is never produced for it.
+Request receipts and results persist for seven days. The recent list is bounded
+to 256 records; an older record can still be read by ID until its receipt
+expires. A library admits at most 256 pending requests; overload is an explicit
+rejection before acceptance.
 
 ### 6.4 Root identity, and why a scan refuses to prune
 

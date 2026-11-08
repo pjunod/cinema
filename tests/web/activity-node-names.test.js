@@ -78,6 +78,7 @@ const BORROWED = [
   "durableQueueHtml",
   "clusterWorkersHtml",
   "activityIsClustered",
+  "durableKindLabel",
   "durableJobReason",
   "activityBlockedScans",
   "activityBlockedScansHtml",
@@ -557,6 +558,34 @@ test("durable owners, attempts and repair destinations use roster names", () => 
   Object.assign(painter.durable,{rows:[],repairs:[],detail:null});
 });
 
+test("a waiting targeted library request names what it waits on", () => {
+  const reason = new Function(
+    `let ACTIVITY_SNAPSHOT={}; const ME={is_admin:true}; function activitySourceRecovery(){ return []; }
+     ${shippedSource("durableJobReason")}
+     return durableJobReason;`,
+  )();
+  const job = (waiting_on) => ({ kind: "library_scan", targeted: true, state: "queued", library_id: 3, waiting_on });
+  assert.equal(reason(job("full_scan:Movies")), "Waiting on: full scan of Movies");
+  // Decision (a) on #1405: a targeted job takes no background reader, so
+  // nothing writes `heavy_lane:`; an unknown value is not labelled.
+  assert.equal(reason(job("heavy_lane:title scan")), "");
+  assert.equal(reason(job("root_unreadable:/20t/tv")), "Waiting on: root unreadable: /20t/tv");
+  assert.equal(reason(job("queue_position:2")), "Waiting on: queue position 2");
+  assert.equal(reason(job("")), "", "nothing in the way, nothing said");
+  assert.equal(reason({ ...job("full_scan:Movies"), targeted: false }), "", "a full scan has no waiting_on");
+  // The row prints it through esc(), like every other reason.
+  assert.match(shippedSource("durableQueueHtml"), /esc\(durableJobReason\(job\)/);
+});
+
+test("a targeted library job is labelled as one, not as a library scan", () => {
+  const label = new Function(`${shippedSource("durableKindLabel")} return durableKindLabel;`)();
+  assert.equal(label({ kind: "library_scan", targeted: true }), "targeted scan");
+  assert.equal(label({ kind: "library_scan", targeted: false }), "library scan");
+  assert.equal(label({ kind: "dv_title_scan" }), "dv title scan");
+  for (const fn of ["durableQueueHtml", "activityInspectorHtml"])
+    assert.match(shippedSource(fn), /durableKindLabel\(job\)/, `${fn} labels through durableKindLabel`);
+});
+
 test("expired durable leases do not masquerade as live executions", () => {
   const now=Date.now();
   const job={id:"expired",kind:"subtitle_extract",state:"running",owner_node_id:"owner-id",
@@ -582,7 +611,7 @@ function refreshingQueue(q,api){
     const ACTIVITY_VIEW={inspector:{kind:"job",id:"job"},detailTab:"history"};
     const ACTIVITY_SNAPSHOT={node_hostnames:{node:"lab6"}};
     function paintDurableActivity(){}
-    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","activityIsClustered","durableJobReason","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
+    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","activityIsClustered","durableKindLabel","durableJobReason","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
     return {page:pageDurableJobs,previous:previousDurableJobs,resize:resizeDurableJobs,filter:filterDurableJobs,refresh:refreshDurableActivity,reset:()=>{resetActivityWork();PAGE_RENDER_GENERATION++;},html:()=>activityInspectorHtml()};
   `)(q,api);
 }
