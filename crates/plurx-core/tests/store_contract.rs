@@ -24726,6 +24726,7 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     11,
                     1011,
                     true,
+                    false,
                     false
                 )
                 .await
@@ -24774,6 +24775,7 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     13,
                     1013,
                     true,
+                    false,
                     false
                 )
                 .await
@@ -24788,6 +24790,7 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                 14,
                 1014,
                 true,
+                false,
                 false,
             )
             .await
@@ -24815,6 +24818,7 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     120013,
                     121013,
                     true,
+                    false,
                     false
                 )
                 .await
@@ -24830,6 +24834,7 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     120014,
                     121014,
                     false,
+                    false,
                     false
                 )
                 .await
@@ -24837,6 +24842,345 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                 .is_some(),
             "{backend}: idle maintenance still runs"
         );
+    })
+    .await;
+}
+
+/// C1: an idle node takes another node's fragment-index request for its own
+/// engine -- after its own rows, never for a different engine, never for a
+/// target membership removed -- and the work keeps the requester's target:
+/// the executor builds, delivery hydrates the requester, and settlement
+/// counts the target-verified completion against the executor.
+#[tokio::test]
+async fn an_idle_node_claims_another_nodes_fragment_request_for_its_engine() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "cross-node-analysis").await;
+        let request = |id: &str, target: &str, engine: &str, created: i64| NewAnalysisRequest {
+            request_id: id.into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: engine.into(),
+            video_identity: String::new(),
+            requested_generation: format!("{id}-generation"),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: target.into(),
+            not_before_ms: created,
+            created_at_ms: created,
+        };
+        for row in [
+            request("serving-row", "serving-node", "shared-engine", 10),
+            request("own-row", "idle-node", "shared-engine", 20),
+            request("gone-row", "gone-node", "shared-engine", 5),
+            request("other-engine-row", "serving-node", "other-engine", 6),
+        ] {
+            store
+                .enqueue_analysis_request(&row)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {}: {error}", row.request_id));
+        }
+        store
+            .put_setting("internal.cluster_job_owner_removed.gone-node", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: mark removed: {error}"));
+        let claim = |node: &'static str, engine: &'static str, at: i64, cross_node: bool| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .claim_analysis_request_for_capacity(
+                        node,
+                        Some(engine),
+                        at,
+                        at + 1_000,
+                        false,
+                        false,
+                        cross_node,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: claim at {at}: {error}"))
+            }
+        };
+
+        // Its own row first, though the other node's is older.
+        let own = claim("idle-node", "shared-engine", 30, true)
+            .await
+            .unwrap_or_else(|| panic!("{backend}: the idle node's own row"));
+        assert_eq!(own.request_id, "own-row", "{backend}: own rows first");
+        assert!(store
+            .fail_analysis_request(
+                &own.request_id,
+                "idle-node",
+                own.fence,
+                "admin_cancelled",
+                31
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle own row: {error}")));
+
+        // After its lease (the reservation outlives the failure), a node
+        // that is not idle takes nothing it was not asked to do...
+        assert!(
+            claim("idle-node", "shared-engine", 2_000, false)
+                .await
+                .is_none(),
+            "{backend}: a serving node claims only its own rows"
+        );
+        // ...an idle one takes nothing for another engine...
+        assert!(
+            claim("idle-node", "unknown-engine", 2_001, true)
+                .await
+                .is_none(),
+            "{backend}: never another engine's request"
+        );
+        // ...and the other live node's row for its own engine.
+        let taken = claim("idle-node", "shared-engine", 2_002, true)
+            .await
+            .unwrap_or_else(|| panic!("{backend}: the serving node's row"));
+        assert_eq!(
+            taken.request_id, "serving-row",
+            "{backend}: not the removed target's"
+        );
+        assert_eq!(taken.owner_node_id, "idle-node", "{backend}");
+        assert_eq!(
+            taken.target_node_id, "serving-node",
+            "{backend}: the requester keeps it"
+        );
+
+        // Submission accepts an executor that is not the target.
+        let source_sha256 = "c1".repeat(32);
+        let pipeline_sha256 = "d1".repeat(32);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("cross-node cache key");
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            target_node_id: "serving-node".into(),
+            not_before_ms: 2_003,
+            created_at_ms: 2_003,
+        };
+        assert!(
+            store
+                .submit_fragment_index_analysis(&taken, &job, 2_003)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: submit: {error}")),
+            "{backend}: the executor submits the requester's job"
+        );
+        assert!(
+            claim("idle-node", "shared-engine", 2_004, true)
+                .await
+                .is_none(),
+            "{backend}: nothing left that this engine may do"
+        );
+
+        // The executor builds it; delivery hydrates the requester.
+        let built = store
+            .fixture_claim_cluster_fragment_index("idle-node", &[], 2_010, 3_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: build claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the executor may build the job"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            blob_sha256: "e1".repeat(32),
+            bytes: 4_096,
+            built_by_node_id: "idle-node".into(),
+            built_at_ms: 2_020,
+        };
+        let location = |node: &str, at: i64| ClusterFragmentIndexLocation {
+            cache_key: cache_key.clone(),
+            node_id: node.into(),
+            bytes: 4_096,
+            verified_at_ms: at,
+            last_seen_at_ms: at,
+        };
+        assert!(store
+            .fixture_complete_cluster_fragment_index(
+                &built,
+                &artifact,
+                &location("idle-node", 2_020),
+                2_020
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish: {error}")));
+        store
+            .settle_analysis_requests(2_025)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: early settle: {error}"));
+        assert_ne!(
+            store
+                .analysis_request("serving-row")
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "ready",
+            "{backend}: not ready until the target holds it"
+        );
+        let hydrating = store
+            .fixture_claim_cluster_fragment_index("serving-node", &[], 2_030, 3_030)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: hydration claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: delivery to the requester"));
+        assert_eq!(hydrating.target_node_id, "serving-node", "{backend}");
+        assert!(store
+            .fixture_complete_cluster_fragment_index_by_hydration(
+                &hydrating,
+                &artifact,
+                &location("serving-node", 2_040),
+                2_040,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: hydrate: {error}")));
+        store
+            .settle_analysis_requests(2_050)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle: {error}"));
+        assert_eq!(
+            store
+                .analysis_request("serving-row")
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "ready",
+            "{backend}: target-verified"
+        );
+        for (node, completed) in [("idle-node", 1), ("serving-node", 0)] {
+            assert_eq!(
+                store
+                    .analysis_completions_executed_by(node, 0)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: completions: {error}")),
+                completed,
+                "{backend}: {node} executed {completed}"
+            );
+        }
+        assert_eq!(
+            store
+                .analysis_completions_executed_by("idle-node", 2_051)
+                .await
+                .expect("since"),
+            0,
+            "{backend}: only completions settled since the given time"
+        );
+    })
+    .await;
+}
+
+/// C1: the claim's source-capacity rule, asked again of the claimed request,
+/// leaves out what the request itself holds, and yields to a foreground
+/// stream that arrived after the claim; the yield goes back uncharged.
+#[tokio::test]
+async fn analysis_source_admission_carries_the_claim_decision_through_the_read() {
+    use plurx_core::store::background_jobs::AnalysisSourceAdmission;
+    use plurx_core::store::background_jobs_resources::{
+        ForegroundSourceOwner, ForegroundSourcePolicy,
+    };
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-admission").await;
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "admission-row".into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "admission-engine".into(),
+                video_identity: String::new(),
+                requested_generation: "admission-generation".into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: "node-a".into(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let claimed = store
+            .claim_analysis_request_for_capacity(
+                "node-a",
+                Some("admission-engine"),
+                10,
+                60_010,
+                false,
+                false,
+                false,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: an idle domain admits the claim"));
+        let admission = |fence: i64, at: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .analysis_source_admission("admission-row", "node-a", fence, at)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: admission at {at}: {error}"))
+            }
+        };
+        assert_eq!(
+            admission(claimed.fence, 11).await,
+            AnalysisSourceAdmission::Admit,
+            "{backend}: its own reservation is not a competing reader"
+        );
+        assert_eq!(
+            admission(claimed.fence + 1, 11).await,
+            AnalysisSourceAdmission::NotOwned,
+            "{backend}: another fence is not this claim"
+        );
+        let foreground = store
+            .register_foreground_source(
+                ForegroundSourceOwner {
+                    owner_id: uuid::Uuid::new_v4().to_string(),
+                    lifetime_id: "admission-gesture".into(),
+                    session_incarnation: uuid::Uuid::new_v4().to_string(),
+                    producer_attempt: "producer-1".into(),
+                    node_id: "node-a".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    source_generation: "admission-source".into(),
+                    policy: ForegroundSourcePolicy::Rolling,
+                },
+                12,
+                20_012,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: foreground: {error}"));
+        assert!(foreground.is_some(), "{backend}: playback takes the source");
+        assert_eq!(
+            admission(claimed.fence, 13).await,
+            AnalysisSourceAdmission::Yield("foreground_source"),
+            "{backend}: a foreground permission after the claim stops the read"
+        );
+        assert!(store
+            .retry_analysis_request(&claimed, "foreground_preempted", 14, 15, false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: yield: {error}")));
+        let row = store
+            .analysis_request("admission-row")
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(row.state, "queued", "{backend}");
+        assert_eq!(row.attempts, 0, "{backend}: the yield is uncharged");
+        assert_eq!(row.last_error_code, "foreground_preempted", "{backend}");
     })
     .await;
 }
@@ -24883,6 +25227,7 @@ async fn removing_a_node_retires_only_its_active_analysis_requests() {
                 1011,
                 false,
                 true,
+                false,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
@@ -24952,7 +25297,15 @@ async fn removing_a_node_retires_only_its_active_analysis_requests() {
             .unwrap_or_else(|error| panic!("{backend}: untargeted: {error}"));
         assert!(
             store
-                .claim_analysis_request_for_capacity("lonely-node", None, 2_000, 3_000, false, true)
+                .claim_analysis_request_for_capacity(
+                    "lonely-node",
+                    None,
+                    2_000,
+                    3_000,
+                    false,
+                    true,
+                    false
+                )
                 .await
                 .expect("targeted-only claim")
                 .is_none(),
@@ -24965,6 +25318,7 @@ async fn removing_a_node_retires_only_its_active_analysis_requests() {
                     None,
                     2_001,
                     3_001,
+                    false,
                     false,
                     false
                 )

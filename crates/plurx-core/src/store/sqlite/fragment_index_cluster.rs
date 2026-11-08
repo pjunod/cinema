@@ -832,6 +832,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn claim_analysis_request_for_capacity(
         &self,
         node_id: &str,
@@ -840,6 +841,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         lease_expires_ms: i64,
         viewer_only: bool,
         targeted_only: bool,
+        cross_node: bool,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if node_id.is_empty()
             || node_id.len() > 128
@@ -859,6 +861,12 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 "0"
             } else {
                 "(component IN ('skip_markers','subtitle_source') AND target_node_id = '')"
+            };
+            // Another node's fragment-index row, for this exact engine.
+            let cross = if cross_node && pipeline_version.is_some() {
+                super::super::fragment_index_cluster::analysis_cross_node_clause("?1")
+            } else {
+                "0".to_owned()
             };
             let max_attempts = configured_max_attempts(conn)?;
             let backoff_base_ms = configured_backoff_base_ms(conn)?;
@@ -911,12 +919,13 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 .query_row(
                     &format!(
                         "SELECT {REQUEST_COLS} FROM analysis_requests
-                          WHERE (target_node_id = ?1 OR {untargeted})
+                          WHERE (target_node_id = ?1 OR {untargeted} OR {cross})
                             AND component <> 'subtitle_source' AND attempts < ?2
                             AND state = 'queued' AND not_before_ms <= ?3
                             AND (?5 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?5)
                             AND {capacity} AND {viewer}
-                          ORDER BY CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
+                          ORDER BY CASE WHEN target_node_id IN (?1, '') THEN 0 ELSE 1 END,
+                                   CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
                             OR (component = 'fragment_index' AND EXISTS (
                                 SELECT 1 FROM background_job_waiters waiter
                                 WHERE waiter.request_scope = 'playback-analysis'
