@@ -737,12 +737,42 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         .lines()
         .rfind(|line| !line.is_empty() && !line.starts_with("#"))
         .expect("last segment");
-    let resumed = f
+    let resume_started = std::time::Instant::now();
+    let mut resumed = f
         .app
         .clone()
         .oneshot(request("GET", resume_url, Some(&f.token), Value::Null))
         .await
         .expect("resume after idle reap");
+    while encoded && resumed.status() == StatusCode::SERVICE_UNAVAILABLE {
+        assert_eq!(
+            resumed
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        let pending = resumed
+            .into_body()
+            .collect()
+            .await
+            .expect("pending resumed segment body")
+            .to_bytes();
+        let pending: Value =
+            serde_json::from_slice(&pending).expect("typed pending resumed segment");
+        assert_eq!(pending["code"], "segment_pending", "{pending}");
+        assert!(
+            resume_started.elapsed() < std::time::Duration::from_secs(60),
+            "native encoded resume never completed: {pending}"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        resumed = f
+            .app
+            .clone()
+            .oneshot(request("GET", resume_url, Some(&f.token), Value::Null))
+            .await
+            .expect("resume after idle reap retry");
+    }
     let resumed_status = resumed.status();
     let resumed_bytes = resumed
         .into_body()
