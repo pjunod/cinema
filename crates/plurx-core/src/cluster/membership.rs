@@ -8888,17 +8888,35 @@ impl MembershipManager {
     /// from this directory before owned work is settled, and the progress row
     /// keeps a lagged learner out even while its heartbeat is fresh.
     pub async fn media_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        Ok(self
+            .media_peers_with_roles()
+            .await?
+            .into_iter()
+            .map(|(peer, _)| peer)
+            .collect())
+    }
+
+    /// [`Self::media_peers`] with each peer's committed serving role, read from
+    /// the same membership snapshot (no extra replicated read). A peer in the
+    /// committed voter set is [`LocalServingRole::Voter`]; any other member is
+    /// a [`LocalServingRole::Learner`].
+    pub async fn media_peers_with_roles(
+        &self,
+    ) -> Result<Vec<(ActivityPeer, LocalServingRole)>, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(Vec::new());
         };
         let now = unix_ms()?;
-        let members = inner
-            .client
-            .metrics_db()
-            .await?
+        let metrics = inner.client.metrics_db().await?;
+        let members = metrics
             .membership_config
             .nodes()
             .map(|(raft_id, _)| *raft_id)
+            .take(MAX_ACTIVITY_PEERS.saturating_add(1))
+            .collect::<BTreeSet<_>>();
+        let voters = metrics
+            .membership_config
+            .voter_ids()
             .take(MAX_ACTIVITY_PEERS.saturating_add(1))
             .collect::<BTreeSet<_>>();
         let rows = inner
@@ -8926,11 +8944,21 @@ impl MembershipManager {
                     && node_is_reachable(now, row.observed_at.unwrap_or_default())
             })
             .take(MAX_ACTIVITY_PEERS)
-            .map(|row| ActivityPeer {
-                http_base: row.http_base,
-                node_id: row.node_id,
-                raft_id: row.raft_id,
-                reachable: node_is_reachable(now, row.last_seen_at),
+            .map(|row| {
+                let role = if voters.contains(&row.raft_id) {
+                    LocalServingRole::Voter
+                } else {
+                    LocalServingRole::Learner
+                };
+                (
+                    ActivityPeer {
+                        http_base: row.http_base,
+                        node_id: row.node_id,
+                        raft_id: row.raft_id,
+                        reachable: node_is_reachable(now, row.last_seen_at),
+                    },
+                    role,
+                )
             })
             .collect())
     }

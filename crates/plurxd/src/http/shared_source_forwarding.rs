@@ -15,7 +15,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{FutureExt, StreamExt};
-use plurx_core::playback_principal::PlaybackPrincipal;
+use plurx_core::{
+    cluster::membership::{ActivityPeer, LocalServingRole},
+    playback_principal::PlaybackPrincipal,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
@@ -65,7 +68,18 @@ fn credit_from(
     };
     Arc::clone(credits)
         .try_acquire_owned()
-        .map_err(|_| unavailable())
+        .map_err(|_| saturated())
+}
+
+/// A full credit pool is load, not an outage: typed 429 with `Retry-After`,
+/// which the client-facing retry path carries through.
+pub(super) fn saturated() -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "sharing_capacity_busy",
+        message: "Shared playback capacity is busy; retry shortly".to_owned(),
+        retry_after_seconds: 1,
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1876,6 +1890,41 @@ mod tests {
         let _ack = credit_from(Operation::End, &media, &control, &cleanup).expect("Ack cleanup");
         assert!(credit_from(Operation::End, &media, &control, &cleanup).is_err());
     }
+    #[test]
+    fn locate_asks_only_peers_whose_role_admits_it() {
+        let peer = |id: &str, raft_id| ActivityPeer {
+            node_id: id.to_owned(),
+            raft_id,
+            http_base: Some(format!("http://{id}")),
+            reachable: true,
+        };
+        let targets = locate_targets(
+            vec![
+                (peer("lab3", 7), LocalServingRole::Learner),
+                (peer("lab6", 6), LocalServingRole::Voter),
+            ],
+            "self",
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .map(|p| p.node_id.as_str())
+                .collect::<Vec<_>>(),
+            ["lab6"]
+        );
+    }
+    #[tokio::test]
+    async fn full_credit_pool_answers_429_with_retry_after() {
+        let media = Arc::new(tokio::sync::Semaphore::new(1));
+        let control = Arc::new(tokio::sync::Semaphore::new(1));
+        let cleanup = Arc::new(tokio::sync::Semaphore::new(1));
+        let _held = credit_from(Operation::Direct, &media, &control, &cleanup).expect("held");
+        let response = credit_from(Operation::Direct, &media, &control, &cleanup)
+            .expect_err("pool is full")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+    }
     #[tokio::test]
     async fn bounded_control_response_refuses_oversize_and_expired_deadline() {
         let response = Response::new(Body::from(vec![0u8; 24 * 1024 + 1]));
@@ -1942,6 +1991,25 @@ impl LocationReply {
     }
 }
 
+/// Peers worth asking to locate: reachable, addressable, and whose committed
+/// role admits the locate route (the receiving gate's own predicate), so a
+/// learner is never sent a request it is certain to refuse.
+fn locate_targets(
+    peers: Vec<(ActivityPeer, LocalServingRole)>,
+    own_node_id: &str,
+) -> Vec<ActivityPeer> {
+    peers
+        .into_iter()
+        .filter(|(peer, role)| {
+            peer.node_id != own_node_id
+                && peer.reachable
+                && peer.http_base.is_some()
+                && crate::http::serving_role_admits(*role, &axum::http::Method::POST, LOCATE_PATH)
+        })
+        .map(|(peer, _)| peer)
+        .collect()
+}
+
 /// Cold routing hints only. A timeout may try another read-only peer before
 /// any claim exists; once FreshPrepare is sent, its original candidate remains
 /// pinned and this collector must never be used to reconstruct its owner.
@@ -1954,15 +2022,14 @@ pub(super) async fn collect_fresh_location(
     deadline: Instant,
 ) -> Result<Option<(String, Uuid)>, ApiError> {
     let deadline = deadline.min(Instant::now() + Duration::from_secs(9));
-    let mut peers = tokio::time::timeout_at(
+    let peers = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        state.membership.media_peers(),
+        state.membership.media_peers_with_roles(),
     )
     .await
     .map_err(|_| unavailable())?
     .map_err(|_| unavailable())?;
-    peers
-        .retain(|peer| peer.node_id != state.node_id && peer.reachable && peer.http_base.is_some());
+    let mut peers = locate_targets(peers, &state.node_id);
     peers.sort_by(|a, b| a.node_id.cmp(&b.node_id));
     peers.dedup_by(|a, b| a.node_id == b.node_id);
     if peers.len() > 64 {

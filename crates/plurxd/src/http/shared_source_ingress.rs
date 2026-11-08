@@ -973,6 +973,13 @@ pub(super) async fn publication_allowed(
     Ok(())
 }
 
+fn placement_credit(
+    pool: &Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    Arc::clone(pool)
+        .try_acquire_owned()
+        .map_err(|_| super::forwarding::saturated())
+}
 static PLACEMENT_IO: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(32)));
 /// Read-only locality observation. The actual accepted driver owns the existing
@@ -1039,9 +1046,7 @@ pub(super) async fn source_forward_locality(
     let file = snapshot.file;
     let size = file.size;
     let mtime = file.mtime;
-    let permit = Arc::clone(&PLACEMENT_IO)
-        .try_acquire_owned()
-        .map_err(|_| unavailable())?;
+    let permit = placement_credit(&PLACEMENT_IO)?;
     let (result, reply) = tokio::sync::oneshot::channel();
     connection
         .monitor(async move {
@@ -1145,5 +1150,21 @@ mod registration_coordination_tests {
         // Only explicit reconciliation of the exact pending reservation can
         // release it. No physical-close ACK is manufactured by this test.
         assert!(registry.reconcile_guard(&unknown).await.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod placement_credit_tests {
+    use super::*;
+
+    #[test]
+    fn full_placement_pool_answers_429_with_retry_after() {
+        let pool = Arc::new(tokio::sync::Semaphore::new(1));
+        let _held = placement_credit(&pool).expect("first credit");
+        let response = placement_credit(&pool)
+            .expect_err("pool is full")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
     }
 }
