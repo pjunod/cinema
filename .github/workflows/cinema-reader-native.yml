@@ -44,6 +44,27 @@ jobs:
           set -euo pipefail
           test "$(uname -s)/$(uname -m)" = "Linux/$KERNEL_ARCH"
           test "$(docker info --format '{{.OSType}}/{{.Architecture}}')" = "linux/$DOCKER_ARCH"
+      - name: Prepare the signed nonvoter registry client before the build
+        shell: bash
+        env:
+          REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          tool="$RUNNER_TEMP/reader-registry"
+          (umask 077; mkdir -p "$tool/debs" "$tool/root")
+          cd "$tool/debs"
+          apt-get download 'skopeo=1.13.3+ds1-2ubuntu0.24.04.3' libgpgme11t64
+          for package in ./*.deb; do dpkg-deb -x "$package" "$tool/root"; done
+          export LD_LIBRARY_PATH="$tool/root/usr/lib/x86_64-linux-gnu"
+          cli="$tool/root/usr/bin/skopeo"
+          "$cli" --version
+          printf '%s' "$REGISTRY_TOKEN" | "$cli" login --tls-verify=false --authfile "$tool/auth.json" --username fleet --password-stdin "$REGISTRY"
+          chmod 600 "$tool/auth.json"
+          printf '%s\n' '{"default":[{"type":"reject"}],"transports":{"docker-daemon":{"":[{"type":"insecureAcceptAnything"}]},"docker":{"":[{"type":"insecureAcceptAnything"}]}}}' > "$tool/policy.json"
+          # This preflight also proves the guest can read an actual previous immutable release.
+          "$cli" inspect --tls-verify=false --authfile "$tool/auth.json" --raw "docker://$REGISTRY/noirr/plurxd:sha-8f2585e6b200" > "$tool/previous.json"
+          python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["schemaVersion"] == 2' "$tool/previous.json"
       - id: buildx-cache
         uses: ./.github/actions/buildx-cache
         with:
@@ -177,46 +198,50 @@ jobs:
           pathlib.Path("release-bin/smoked-image.json").write_text(raw + "\n")
           print("CINEMA_SMOKED_IMAGE=" + raw, flush=True)
           PYTHON
-      - name: Authenticate to the existing fleet registry
-        uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
-          username: fleet
-          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
-      - name: Publish this verified architecture by immutable main identity
+      - name: Publish only the image that passed native runtime and restore smoke
         shell: bash
         env:
-          ARCH: ${{ matrix.arch }}
           REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
         run: |
           set -euo pipefail
+          tool="$RUNNER_TEMP/reader-registry"
+          export LD_LIBRARY_PATH="$tool/root/usr/lib/x86_64-linux-gnu"
+          cli="$tool/root/usr/bin/skopeo"
+          image="$REGISTRY/noirr/plurxd"
+          tag="sha-${CINEMA_MAIN_COMMIT:0:12}-amd64"
+          ref="$image:$tag"
           id=$(python3 -c 'import json;print(json.load(open("release-bin/smoked-image.json"))["image_id"])')
           [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]]
-          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$id")" = "linux/$ARCH"
-          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$id")" = "$CINEMA_MAIN_COMMIT"
-          image="$REGISTRY/noirr/plurxd"
-          ref="$image:sha-${CINEMA_MAIN_COMMIT:0:12}-$ARCH"
-          if docker buildx imagetools inspect "$ref" >"$RUNNER_TEMP/cinema-manifest" 2>"$RUNNER_TEMP/cinema-manifest-error"; then
-            docker pull --platform "linux/$ARCH" "$ref"
-            test "$(docker image inspect --format '{{.Id}}' "$ref")" = "$id"
-          elif grep -Eqi 'unauthorized|denied|forbidden|timeout|connection|TLS|certificate' "$RUNNER_TEMP/cinema-manifest-error"; then
-            cat "$RUNNER_TEMP/cinema-manifest-error" >&2
-            exit 1
-          elif grep -Fq 'manifest unknown' "$RUNNER_TEMP/cinema-manifest-error" || grep -Fxq "ERROR: $ref: not found" "$RUNNER_TEMP/cinema-manifest-error"; then
-            docker tag "$id" "$ref"
-            docker push "$ref"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$id")" = linux/amd64
+          test "$(docker run --rm --entrypoint /usr/local/bin/plurx-cluster-check "$id" build-identity)" = "$CINEMA_MAIN_COMMIT"
+          read_manifest() {
+            "$cli" inspect --tls-verify=false --authfile "$tool/auth.json" --raw "docker://$1"
+          }
+          if read_manifest "$ref" > "$tool/manifest" 2> "$tool/error"; then
+            python3 -c 'import json,sys;assert json.load(open(sys.argv[1]))["config"]["digest"]==sys.argv[2]' "$tool/manifest" "$id"
+          elif grep -Eqi 'unauthorized|denied|forbidden|timeout|connection|TLS|certificate' "$tool/error"; then
+            cat "$tool/error" >&2; exit 1
+          elif grep -Eqi 'manifest unknown|name unknown' "$tool/error"; then
+            local_tag="plurx/plurxd:reader-publish-$GITHUB_RUN_ID"
+            docker tag "$id" "$local_tag"
+            "$cli" --policy "$tool/policy.json" copy --format v2s2 --dest-tls-verify=false --dest-authfile "$tool/auth.json" "docker-daemon:$local_tag" "docker://$ref"
           else
-            cat "$RUNNER_TEMP/cinema-manifest-error" >&2
-            exit 1
+            cat "$tool/error" >&2; exit 1
           fi
-          docker pull --platform "linux/$ARCH" "$ref"
-          test "$(docker image inspect --format '{{.Id}}' "$ref")" = "$id"
-          digest=$(docker buildx imagetools inspect "$ref" | python3 -c 'import re,sys; value,=re.findall(r"(?m)^Digest:\s*(sha256:[0-9a-f]{64})$",sys.stdin.read());print(value)')
-          digest_ref="$image@$digest"
-          docker pull --platform "linux/$ARCH" "$digest_ref"
-          test "$(docker image inspect --format '{{.Id}}' "$digest_ref")" = "$id"
-          test "$(docker run --rm --entrypoint /usr/local/bin/plurx-cluster-check "$digest_ref" build-identity)" = "$CINEMA_MAIN_COMMIT"
-          echo "CINEMA_IMMUTABLE_IMAGE source=$CINEMA_MAIN_COMMIT arch=$ARCH id=$id reference=$ref manifest=$digest_ref"
+          read_manifest "$ref" > "$tool/manifest"
+          python3 -c 'import json,sys;assert json.load(open(sys.argv[1]))["config"]["digest"]==sys.argv[2]' "$tool/manifest" "$id"
+          digest=$("$cli" manifest-digest "$tool/manifest")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          exact="$image@$digest"
+          local_proof="plurx/plurxd:reader-pulled-$GITHUB_RUN_ID"
+          "$cli" --policy "$tool/policy.json" copy --src-tls-verify=false --src-authfile "$tool/auth.json" "docker://$exact" "docker-daemon:$local_proof"
+          test "$(docker image inspect --format '{{.Id}}' "$local_proof")" = "$id"
+          test "$(docker run --rm --entrypoint /usr/local/bin/plurx-cluster-check "$local_proof" build-identity)" = "$CINEMA_MAIN_COMMIT"
+          echo "CINEMA_IMMUTABLE_IMAGE source=$CINEMA_MAIN_COMMIT arch=amd64 id=$id reference=$ref manifest=$exact"
+      - name: Remove the job-local registry login
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/reader-registry/auth.json"
       - name: Retain the exact package receipt
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
