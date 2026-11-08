@@ -147,6 +147,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m validation.worker_control_resume
+      - name: Cache the pinned worker controller toolchain
+        if: steps.worker-control-inputs.outputs.affected == 'true'
+        env:
+          PLURX_WORKER_CACHE_BASE: ${{ github.server_url }}/api/packages/noirr/generic/plurx-worker-control-toolchain
+          PLURX_WORKER_CACHE_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PLURX_WORKER_CACHE_TOKEN"
+          cache_version="$(sha256sum verification/worker-control/toolchain.json | cut -d' ' -f1)"
+          cache_base="$PLURX_WORKER_CACHE_BASE/$cache_version"
+          mkdir -p target/worker-control-tools/archives
+          curl -q --fail --silent --show-error --proto '=http,https' \
+            --retry 2 --connect-timeout 15 --max-time 240 --max-filesize 268435456 \
+            --user "noirr:$PLURX_WORKER_CACHE_TOKEN" \
+            "$cache_base/kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz" \
+            --output target/worker-control-tools/archives/kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz
+          unset PLURX_WORKER_CACHE_TOKEN
       - name: Run the pinned production worker controller proof
         if: steps.worker-control-inputs.outputs.affected == 'true'
         run: >-
