@@ -273,7 +273,15 @@ fn automatic_activation_runs_outside_the_membership_projection() {
         .0;
     assert!(source.contains("cache_admin_revocation_ready()"));
     assert!(!source.contains("activate_if_ready"));
-    assert!(include_str!("../../main.rs")
+    let loops = include_str!("../../cluster_runtime/background.rs");
+    let activation = loops
+        .find("internal_auth_revocation::cache_admin_revocation_activation_loop")
+        .expect("activation has its own cluster worker");
+    let cluster_mode = loops
+        .find("state.storage_mode != StorageMode::Cluster")
+        .expect("explicit cluster mode guard");
+    assert!(cluster_mode < activation);
+    assert!(!include_str!("../../main.rs")
         .contains("internal_auth_revocation::cache_admin_revocation_activation_loop"));
 }
 
