@@ -1267,7 +1267,6 @@ impl SessionRequest {
         };
         hex::encode(Sha256::digest(durable.to_string().as_bytes()))
     }
-
 }
 
 pub struct StartInfo {
@@ -1524,5 +1523,4 @@ mod prepared_candidate_tests {
         );
         assert!(manager.active_session_ids().await.is_empty());
     }
-
 }
