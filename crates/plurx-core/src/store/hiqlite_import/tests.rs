@@ -455,9 +455,22 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // Playback handoff codes and tokens are durable account state.
     assert!(names.contains(&"playback_handoffs"));
     assert!(names.contains(&"playback_handoffs_tokens"));
-    // 95 with the three item-annotation tables (SQLite v113), 97 with the
-    // two playback handoff tables (SQLite v115).
-    assert_eq!(names.len(), 97, "review every imported durable table");
+    // SQLite v122 preserves source reservations, suspended work and its service credits.
+    for name in [
+        "foreground_source_owners",
+        "background_source_pauses",
+        "background_source_custody",
+        "background_source_service_epochs",
+        "background_source_service_grants",
+        "analysis_source_checkpoints",
+        "playback_analysis_suspensions",
+    ] {
+        assert!(
+            names.contains(&name),
+            "durable source arbitration table: {name}"
+        );
+    }
+    assert_eq!(names.len(), 104, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its
@@ -1041,6 +1054,10 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 "background_predictions" => 79,
                 "background_embeddings" => 80,
                 "background_artifact_repairs" => 82,
+                "background_source_pauses"
+                | "background_source_custody"
+                | "background_source_service_epochs"
+                | "background_source_service_grants" => 122,
                 _ => 71,
             };
             assert_eq!(table.minimum_schema, introduced, "{}", table.name);

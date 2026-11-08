@@ -424,6 +424,50 @@ pub(super) async fn mark_foreground_settled<T: QueueSql>(
     Ok(!rows.is_empty())
 }
 
+/// A no-reader registration can still arm while its exact owner is live.
+/// Joined and aborted owners have already settled. Recheck both the proof
+/// and current authority in the writer because a sweep can race a renewal,
+/// activation, or a new registration.
+pub(super) async fn reap_settled_source_custody<T: QueueSql>(
+    store: &T,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let foreground = "SELECT owner_id FROM foreground_source_owners
+        WHERE settlement_proof IN ('joined','aborted')
+           OR (settlement_proof='no_reader' AND lease_expires_at_ms<=json_extract($1,'$.now_ms'))
+        ORDER BY started_at_ms,owner_id LIMIT 128";
+    let background = "SELECT custody_id FROM background_source_current_owners
+        WHERE settlement_proof IN ('joined','aborted')
+           OR (settlement_proof='no_reader' AND authority_expires_at_ms<=json_extract($1,'$.now_ms'))
+        ORDER BY started_at_ms,custody_id LIMIT 128";
+    let body = encode(&serde_json::json!({"now_ms": now_ms}))?;
+    let pending = store
+        .queue_sql(
+            format!(
+                "SELECT 'true' AS result_json WHERE EXISTS ({foreground}) OR EXISTS ({background})"
+            ),
+            body.clone(),
+            false,
+            true,
+        )
+        .await?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    store
+        .queue_transaction(vec![
+            (
+                format!("DELETE FROM foreground_source_owners WHERE owner_id IN ({foreground})"),
+                body.clone(),
+            ),
+            (
+                format!("DELETE FROM background_source_custody WHERE custody_id IN ({background})"),
+                body,
+            ),
+        ])
+        .await
+}
+
 pub(super) async fn settled_foreground_custody<T: QueueSql>(
     store: &T,
 ) -> Result<Vec<ForegroundSourceToken>, StoreError> {
@@ -914,6 +958,98 @@ mod source_tests {
         assert!(release_background_custody(&store, receipt, 1002)
             .await
             .expect("exact receipt"));
+    }
+
+    #[tokio::test]
+    async fn settlement_replay_preserves_new_registrations_until_activation() {
+        let store = fixture();
+        let foreground =
+            register_foreground(&store, owner(ForegroundSourcePolicy::Rolling), 1000, 2000)
+                .await
+                .expect("register foreground")
+                .expect("foreground receipt");
+        let job = seed_job(&store);
+        let background = register_background_custody(
+            &store,
+            BackgroundSourceOwner::Job { token: job.clone() },
+            1000,
+        )
+        .await
+        .expect("register background")
+        .expect("background receipt");
+        let abandoned =
+            register_foreground(&store, owner(ForegroundSourcePolicy::Rolling), 1000, 1500)
+                .await
+                .expect("register abandoned owner")
+                .expect("abandoned receipt");
+
+        // Force a real sweep in the registration/activation interval.
+        reap_settled_source_custody(&store, 1500)
+            .await
+            .expect("sweep");
+        assert!(resolve_foreground(&store, abandoned)
+            .await
+            .expect("lookup expired unarmed")
+            .is_none());
+        assert!(activate_foreground_custody(
+            &store,
+            foreground.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("live foreground can still activate"));
+
+        // The physical registration retains the original lease snapshot. A
+        // job heartbeat extends its exact authority while activation is pending.
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute(
+                "UPDATE background_jobs SET lease_expires_ms=120000 WHERE id=?1",
+                [&job.job_id],
+            )
+            .expect("renew job");
+        reap_settled_source_custody(&store, 60000)
+            .await
+            .expect("sweep after renewal");
+        assert!(activate_background_custody(
+            &store,
+            background.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("renewed background can still activate"));
+
+        // Losing authority after arming does not prove the input has stopped.
+        reap_settled_source_custody(&store, 120000)
+            .await
+            .expect("sweep expired active owners");
+        assert!(resolve_foreground(&store, foreground.clone())
+            .await
+            .expect("lookup armed foreground")
+            .is_some());
+        assert!(resolve_background_custody(&store, background.clone())
+            .await
+            .expect("lookup armed background")
+            .is_some());
+        assert!(mark_foreground_settled(&store, foreground.clone())
+            .await
+            .expect("foreground joined"));
+        assert!(mark_background_settled(&store, background.clone())
+            .await
+            .expect("background joined"));
+        reap_settled_source_custody(&store, 120000)
+            .await
+            .expect("sweep joined owners");
+        assert!(resolve_foreground(&store, foreground)
+            .await
+            .expect("lookup retired foreground")
+            .is_none());
+        assert!(resolve_background_custody(&store, background)
+            .await
+            .expect("lookup retired background")
+            .is_none());
     }
 
     #[tokio::test]

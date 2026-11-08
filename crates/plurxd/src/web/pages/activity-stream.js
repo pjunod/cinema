@@ -322,9 +322,9 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     <h2 class="section">Happening now · Watching</h2>
     ${missing.length?`<div class="clrefusal" role="status" aria-live="polite"><b>Activity is incomplete</b> ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Streams on those nodes may be missing.</div>`:""}
     ${activityWatchingHtml(dels,d.live_tv,nodeNames,sessionsById,open)}
+    ${activitySourceRecoveryHtml(d)}
     ${activityTabsHtml()}
     <section id="activity-status" ${ME?.is_admin?'role="tabpanel" aria-labelledby="activity-tab-status"':'aria-label="Activity status"'}${ACTIVITY_VIEW.tab!=="status"?" hidden":""}>
-    ${activitySourceRecoveryHtml(d)}
     ${activityBlockedScansHtml(d)}
     <div id="cluster-workers">${clusterWorkersHtml(d)}</div>
     ${section("recordings",`Recording activity · ${recording.length} active`,dvrActivityRows(recording,nodeNames,dvrState),!!DVR_PAGE.selectedId)}

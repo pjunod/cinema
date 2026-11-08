@@ -6197,10 +6197,13 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         "# HELP plurx_background_resource_reservations Unexpired shared admission reservations.\n\
          # TYPE plurx_background_resource_reservations gauge\n\
          plurx_background_resource_reservations{{resource_class=\"source_io\"}} {}\n\
+         # HELP plurx_background_source_recovery_pending Distinct background physical readers holding capacity after authority expired.\n\
+         # TYPE plurx_background_source_recovery_pending gauge\n\
+         plurx_background_source_recovery_pending {}\n\
          # HELP plurx_background_legacy_pending Sealed legacy interests awaiting bounded import.\n\
          # TYPE plurx_background_legacy_pending gauge\n\
          plurx_background_legacy_pending {}\n",
-        sample.background_jobs.source_io_reservations, sample.background_jobs.legacy_pending,
+        sample.background_jobs.source_io_reservations, sample.background_jobs.source_recovery_pending, sample.background_jobs.legacy_pending,
     ));
     let analysis = sample.analysis;
     out.push_str(

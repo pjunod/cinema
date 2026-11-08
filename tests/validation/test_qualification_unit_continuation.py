@@ -812,7 +812,55 @@ class CompleteCommandUnitCase(unittest.TestCase):
                 argv=json.loads(raw.splitlines()[0].removeprefix('COMMAND '));record['origin']['command']=shlex.join(argv)
             with self.assertRaises(receipts.ReceiptError):self.validate(proof)
 
+    def test_original_conditional_rust_jobs_require_the_unretained_dispatch(self):
+        source = q.ORIGINAL_RUST_6713_SOURCE
+        inputs = {'promotion_pr': '1399', 'promotion_head_sha': source,
+                  'promotion_base_sha': '8c654d37b5ee3f1418fa3393662c671a6555455e'}
+        for kind, (job_id, task_id, status) in q.ORIGINAL_RUST_6713_JOBS.items():
+            job = {'id': job_id, 'task_id': task_id, 'status': status}
+            q.require_original_conditional_rust_dispatch(source, inputs, 6713, job, kind)
+            with self.subTest(kind=kind), self.assertRaises(receipts.ReceiptError):
+                q.require_original_conditional_rust_dispatch(
+                    source, {**inputs, 'retained_units_sha256': 'a' * 64}, 6713, job, kind)
+            with self.assertRaises(receipts.ReceiptError):
+                q.require_original_conditional_rust_dispatch(
+                    source, inputs, 6713, {**job, 'task_id': 1}, kind)
+
+    def test_archived_store_requires_the_reviewed_source_and_exact_executor_manifest(self):
+        from validation import store_native_capture as captures
+        record = fixture()['commands'][0]['records'][0]
+        item = {'name': 'store_contract:1'}
+        source = captures.FIRST_SOURCE
+        record['source_commit'] = source
+        record['origin']['execution'] = {
+            'mode': 'archived-store-native', 'first_line': 1, 'capture': captures.CAPTURES[source],
+        }
+        replacement = log('{"different":"executor"}')
+        with self.assertRaisesRegex(receipts.ReceiptError, 'manifest changed'):
+            q.bound_execution(record, item, 'COMMAND []', proof={'logs': {
+                captures.CAPTURES[source]: replacement,
+            }})
+        record['source_commit'] = CANDIDATE
+        with self.assertRaisesRegex(receipts.ReceiptError, 'Unknown archived Store'):
+            q.bound_execution(record, item, 'COMMAND []', proof={'logs': {}})
+
     def test_native_argv_must_be_the_preserved_fingerprint_binary(self):
         for key,value in [('binary_path','/different/store_contract-deadbeef'),('fingerprint_path','/owned/.fingerprint/plurx-core-ffffffff/test-integration-test-store_contract.json')]:
             proof=fixture();proof['commands'][0]['records'][0]['origin']['execution'][key]=value
             with self.assertRaises(receipts.ReceiptError):self.validate(proof)
+
+
+class NativeTopologyWorkflowTailCase(unittest.TestCase):
+    def test_native_topology_tail_requires_reviewed_workflow_and_stays_outside_unit_coverage(self):
+        record = {'source_commit': 'a' * 40, 'origin': {'kind': 'authenticated-ci'}}
+        recipe = ['$(CARGO) test --locked -p plurx-cluster-check final --lib -- --exact']
+        with patch.object(q.retention, 'git_bytes', return_value=b'cluster-harness-unit-check: ## reviewed\n'), patch.object(q, 'make_commands', side_effect=lambda text, target: list(recipe) if target == 'cluster-harness-unit-check' else ['$(CARGO) run --locked -p plurx-cluster-check -- check']), patch.object(q, 'historical_command', return_value=True):
+            actual = q.historical_recipe(record, 'topology')
+            self.assertEqual(actual[:-1], recipe)
+            self.assertEqual(actual[-1], '$(CARGO) run --locked -p plurx-cluster-check -- check')
+        with patch.object(q.retention, 'git_bytes', return_value=b'cluster-harness-unit-check: ## unknown\n'), patch.object(q, 'make_commands', return_value=list(recipe)), patch.object(q, 'historical_command', return_value=False):
+            with self.assertRaises(receipts.ReceiptError):
+                q.historical_recipe(record, 'topology')
+        record['origin']['kind'] = 'attested-local'
+        with patch.object(q.retention, 'git_bytes', return_value=b'cluster-harness-unit-check: ## local\n'), patch.object(q, 'make_commands', return_value=list(recipe)), patch.object(q, 'historical_command', side_effect=AssertionError('local invocation has no workflow tail')):
+            self.assertEqual(q.historical_recipe(record, 'topology'), recipe)
