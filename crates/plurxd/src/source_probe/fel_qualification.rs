@@ -1017,8 +1017,16 @@ mod tests {
                 "source_probe::fel_qualification::tests::fel_output_handoff_fixture",
                 "--nocapture",
             ])
+            .env_clear()
             .env("PLURX_FEL_OUTPUT_SOURCE_DEVICE", identity.dev().to_string())
             .env("PLURX_FEL_OUTPUT_SOURCE_INODE", identity.ino().to_string());
+        // The source-only compiler's verified SDK supplies shared libraries.
+        // Preserve only loader paths needed by this same test executable.
+        for name in ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
         assert!(
             inherit_renderer_outputs(&mut command, &directory, &source).is_err(),
             "a regular source file must never qualify as an output pipe"
@@ -1028,8 +1036,12 @@ mod tests {
             !plurx_core::process::source_lifetime::has_descriptor_handoff(command.as_std()),
             "the audited outputs do not clear or require a raw-source exemption"
         );
+        // This isolated self-exec needs the fixture values and loader paths
+        // above. The service environment API clears the fixture values, so the child
+        // return without exercising its descriptor checks. Preserve this
+        // explicitly cleared configuration through the same bounded owner.
         let output = plurx_core::process::source_lifetime::mediated(
-            plurx_core::process::bounded::output_command(
+            plurx_core::process::bounded::output_command_inherited_env(
                 &mut command,
                 Duration::from_secs(10),
                 32 * 1024,
