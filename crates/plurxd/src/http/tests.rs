@@ -21563,6 +21563,183 @@ async fn the_creating_scan_key_reads_its_own_request_and_another_scan_key_gets_4
     );
 }
 
+/// Contract v2 §5.3: the connection test names the library roots Curator
+/// expects and hears which plurx can see. Only a configured root or a path
+/// under one is looked at; anything else is `outside_roots`, never `stat`ed —
+/// and nothing is scanned or queued.
+#[tokio::test]
+async fn probe_paths_report_visible_missing_and_outside_without_scanning() {
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let movies = dir.path().join("movies");
+    let tv = dir.path().join("tv");
+    std::fs::create_dir_all(movies.join("Heat (1995)")).expect("movies");
+    std::fs::create_dir_all(&tv).expect("tv");
+    v2_library(&app, &admin, &movies).await;
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/libraries",
+            Some(&admin),
+            json!({ "name": "TV", "kind": "shows", "paths": [tv] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    std::fs::remove_dir(&tv).expect("unmount the tv share");
+    let before = state.jobs.scan_requests().await.len();
+
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({ "probe_paths": [movies, movies.join("Heat (1995)"), tv, "/etc", "relative/path"] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let strings = |value: &Value| -> Vec<String> {
+        value
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|entry| entry.as_str().expect("string").to_owned())
+            .collect()
+    };
+    assert_eq!(
+        strings(&body["visible"]),
+        vec![
+            movies.display().to_string(),
+            movies.join("Heat (1995)").display().to_string()
+        ]
+    );
+    assert_eq!(strings(&body["missing"]), vec![tv.display().to_string()]);
+    assert_eq!(
+        strings(&body["outside_roots"]),
+        vec!["/etc".to_owned(), "relative/path".to_owned()]
+    );
+    let roots = strings(&body["roots"]);
+    assert!(
+        roots.contains(&movies.display().to_string()) && roots.contains(&tv.display().to_string())
+    );
+    assert_eq!(
+        state.jobs.scan_requests().await.len(),
+        before,
+        "a connection test is not a scan"
+    );
+
+    // It needs scan:trigger, like the scan it stands in for.
+    let reader = scan_key(&app, &admin, json!(["status:read"])).await;
+    let (status, _) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&reader),
+            json!({ "probe_paths": [movies] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // Neither a path nor a probe: the handler's 400, not the extractor's 422.
+    let (status, body) = call(&app, post("/api/v1/scan", Some(&key), json!({}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "path_required");
+}
+
+/// Contract v2 §5.2: a library created now reconciles every six hours unless
+/// the caller says otherwise; a library that already exists at `0` keeps `0`
+/// through edits until someone opts in.
+#[tokio::test]
+async fn new_libraries_default_to_six_hourly_scans_and_existing_zero_is_preserved() {
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    for name in ["new", "explicit", "existing"] {
+        std::fs::create_dir_all(dir.path().join(name)).expect("root");
+    }
+    let (status, created) = call(
+        &app,
+        post(
+            "/api/v1/libraries",
+            Some(&admin),
+            json!({ "name": "New", "kind": "movies", "paths": [dir.path().join("new")] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["scan_interval_mins"], 360);
+    let (status, explicit) = call(
+        &app,
+        post(
+            "/api/v1/libraries",
+            Some(&admin),
+            json!({ "name": "Explicit", "kind": "movies", "paths": [dir.path().join("explicit")],
+                    "scan_interval_mins": 0 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{explicit}");
+    assert_eq!(
+        explicit["scan_interval_mins"], 0,
+        "an explicit Never is honoured"
+    );
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/libraries",
+            Some(&admin),
+            json!({ "name": "Bad", "kind": "movies", "paths": [dir.path().join("new")],
+                    "scan_interval_mins": 5 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // A library from before this release: the column default, untouched.
+    let existing = state
+        .store
+        .create_library(&plurx_core::domain::NewLibrary {
+            name: "Existing".into(),
+            kind: plurx_core::domain::LibraryKind::Movies,
+            paths: vec![dir.path().join("existing")],
+            anime: false,
+        })
+        .await
+        .expect("existing library");
+    assert_eq!(existing.scan_interval_mins, 0);
+    let (status, edited) = call(
+        &app,
+        put(
+            &format!("/api/v1/libraries/{}", existing.id),
+            Some(&admin),
+            json!({ "name": "Existing (renamed)", "kind": "movies",
+                    "paths": [dir.path().join("existing")] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(
+        edited["scan_interval_mins"], 0,
+        "an edit never opts a library in"
+    );
+    let (_, listed) = call(&app, get("/api/v1/libraries", Some(&admin))).await;
+    let by_name = |name: &str| {
+        listed
+            .as_array()
+            .expect("libraries")
+            .iter()
+            .find(|library| library["name"] == name)
+            .expect("listed")["scan_interval_mins"]
+            .clone()
+    };
+    assert_eq!(by_name("New"), 360);
+    assert_eq!(by_name("Explicit"), 0);
+    assert_eq!(by_name("Existing (renamed)"), 0);
+}
+
 /// Review #1406 (finding 8): a replayed `request_key` whose request has
 /// A targeted request whose job is cancelled is a typed failure, never a
 /// fifth status: the record reads `status: failed, code: cancelled`, and a
@@ -21685,4 +21862,49 @@ async fn a_replayed_failed_request_answers_with_its_request() {
             .is_some_and(|error| !error.is_empty()),
         "{replay}"
     );
+}
+
+/// Review #1408 (finding 14) and #1406 (finding 9): a symlink beneath a root
+/// is `outside_roots` without ever being followed, and `probe_paths` with a
+/// `path` is refused rather than silently answered as one or the other.
+#[cfg(unix)]
+#[tokio::test]
+async fn probe_paths_never_follow_a_symlink_and_refuse_a_path_beside_them() {
+    let (app, _state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let movies = dir.path().join("movies");
+    let secret = dir.path().join("secret");
+    std::fs::create_dir_all(&movies).expect("movies");
+    std::fs::create_dir_all(&secret).expect("secret");
+    std::os::unix::fs::symlink(&secret, movies.join("escape")).expect("symlink");
+    v2_library(&app, &admin, &movies).await;
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({ "probe_paths": [movies.join("escape"), movies.join("escape").join("inner")] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["visible"], json!([]), "{body}");
+    assert_eq!(
+        body["outside_roots"].as_array().map(Vec::len),
+        Some(2),
+        "{body}"
+    );
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({ "path": movies, "probe_paths": [movies] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "probe_paths_with_path");
 }

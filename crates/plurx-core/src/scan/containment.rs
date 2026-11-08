@@ -71,6 +71,26 @@ pub fn lexical_root<'a>(libraries: &'a [Library], path: &Path) -> Option<(&'a Li
         .max_by_key(|(_, root)| root.components().count())
 }
 
+/// Whether any component of `path` strictly below the configured `root` is a
+/// symlink, found with `lstat` alone so no link is ever followed. The root
+/// itself may be a link; it is configuration. An error means a component
+/// cannot be read right now (or is missing). Blocking.
+pub fn symlink_below_root(root: &Path, path: &Path) -> std::io::Result<bool> {
+    let root = lexical(root);
+    let path = lexical(path);
+    let Ok(below) = path.strip_prefix(&root) else {
+        return Ok(false);
+    };
+    let mut at = root;
+    for component in below.components() {
+        at.push(component);
+        if std::fs::symlink_metadata(&at)?.file_type().is_symlink() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Classify `path` against `libraries`. Blocking: it may `stat` the root and
 /// the path, so async callers run it on a blocking thread.
 pub fn classify_path<'a>(libraries: &'a [Library], path: &Path) -> PathClass<'a> {
@@ -184,6 +204,21 @@ mod tests {
             classify_path(&unmounted, &share.join("Show/Season 1")),
             PathClass::Unreadable { .. }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_below_a_root_is_found_without_following_it() {
+        let dir = tempfile::tempdir().expect("dir");
+        let movies = dir.path().join("movies");
+        std::fs::create_dir_all(movies.join("Film (2001)")).expect("movies");
+        std::os::unix::fs::symlink("/nonexistent/target", movies.join("link")).expect("symlink");
+        assert!(!symlink_below_root(&movies, &movies.join("Film (2001)")).expect("plain"));
+        assert!(
+            symlink_below_root(&movies, &movies.join("link/deeper")).expect("dangling link"),
+            "found by lstat, never resolved"
+        );
+        assert!(symlink_below_root(&movies, &movies.join("gone")).is_err());
     }
 
     #[cfg(unix)]

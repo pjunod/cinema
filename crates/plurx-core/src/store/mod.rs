@@ -2459,6 +2459,15 @@ pub trait UserStore: Send + Sync + 'static {
 #[async_trait]
 pub trait LibraryStore: Send + Sync + 'static {
     async fn create_library(&self, library: &NewLibrary) -> Result<Library, StoreError>;
+    /// Create a library with its automatic scan interval (minutes; `0` = off)
+    /// in the same write, so a new library can never be left at the column
+    /// default by a failure between two writes. [`Self::create_library`]
+    /// keeps the column default, `0`.
+    async fn create_library_with_scan_interval(
+        &self,
+        library: &NewLibrary,
+        scan_interval_mins: i64,
+    ) -> Result<Library, StoreError>;
     async fn update_library(
         &self,
         id: i64,

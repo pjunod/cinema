@@ -631,6 +631,7 @@ paths = [
   "crates/plurx-core/src/store/playback_handoffs.sql",
   "crates/plurx-core/src/store/hiqlite_playback_handoffs.rs",
   "crates/plurx-core/src/store/sqlite/playback_handoffs.rs",
+  "crates/plurx-core/tests/store_contract/library_schedule.rs",
   "crates/plurx-core/tests/store_contract/playback_handoffs.rs",
   "crates/plurx-core/tests/store_contract/scan_request_v2.rs",
   "crates/plurx-core/src/store/hiqlite_catalog.rs",

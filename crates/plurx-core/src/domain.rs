@@ -83,6 +83,12 @@ pub struct Library {
     pub last_refresh_at: Option<i64>,
 }
 
+/// The automatic scan interval a library created through the API starts
+/// with: six hours, so a Curator notification that never arrived is found by
+/// the next sweep (pipeline contract v2 §5.2). Existing libraries keep what
+/// they have; the column default stays `0`.
+pub const DEFAULT_SCAN_INTERVAL_MINS: i64 = 360;
+
 #[derive(Debug, Clone)]
 pub struct NewLibrary {
     pub name: String,

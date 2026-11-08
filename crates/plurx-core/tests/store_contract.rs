@@ -35,6 +35,8 @@ mod jellyfin_identity;
 mod jellyfin_login;
 #[path = "store_contract/jellyfin_play.rs"]
 mod jellyfin_play;
+#[path = "store_contract/library_schedule.rs"]
+mod library_schedule;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
@@ -354,6 +356,9 @@ const USER_METHODS: &[&str] = &[
 ];
 const LIBRARY_METHODS: &[&str] = &[
     "create_library",
+    // Contract v2 §6: a library created with an explicit scan interval;
+    // store_contract/library_schedule.rs runs it on every backend.
+    "create_library_with_scan_interval",
     "update_library",
     "delete_library",
     "set_library_schedule",
@@ -21265,7 +21270,8 @@ fn contract_inventory_matches_every_store_method() {
     // The recovery sweep checks current authority and settlement in the writer.
     // +6: the contract v2 scan request sidecar methods in
     // BACKGROUND_JOB_METHODS (pipeline v2 T1).
-    assert_eq!(declared.len(), 553, "review the Store method count");
+    // +1: `create_library_with_scan_interval` in LIBRARY_METHODS (T5).
+    assert_eq!(declared.len(), 554, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
