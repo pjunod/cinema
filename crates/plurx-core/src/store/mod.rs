@@ -271,6 +271,7 @@ mod library_annotations_schema;
 pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
+pub mod scan_request_v2;
 mod subtitle_managed_schema;
 pub mod subtitle_text_translation;
 mod subtitle_text_translation_schema;

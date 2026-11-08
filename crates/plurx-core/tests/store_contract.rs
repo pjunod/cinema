@@ -39,6 +39,8 @@ mod jellyfin_play;
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
 mod remote;
+#[path = "store_contract/scan_request_v2.rs"]
+mod scan_request_v2;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/session_principals.rs"]
 mod session_principals;
@@ -608,6 +610,15 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
     "probe_can_preempt_title",
+    // Contract v2 targeted-scan sidecar: admission with its sidecar, reads by
+    // request and by creating key, and the later report/waiting writes. All
+    // six run on every backend in store_contract/scan_request_v2.rs.
+    "enqueue_library_work_v2",
+    "scan_request_v2",
+    "scan_request_by_key",
+    "set_scan_request_waiting_on",
+    "set_library_job_waiting_on",
+    "set_scan_request_files",
     // Progressive translation's actual source-bind/publication/Stop/read-lease
     // contract below exercises these on every backend, including three voters.
     "maintain_translation_cache",
@@ -13085,6 +13096,48 @@ async fn replicated_source_tail_drops(
     validated_source_tail_drops(&source_shape, &source_counts, true, remove)
 }
 
+/// The v125 scan request sidecar, validated like the source tail: exact
+/// published DDL, its one marker and no request facts. Ordinary open
+/// reinstalls it whole.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_scan_request_drops(client: &Client) -> Vec<String> {
+    use queue_fixture::source_extensions_fixture::{
+        validated_scan_request_drops, SCAN_REQUEST_FIXTURE_SHAPE_SQL,
+    };
+    let shape: Vec<_> = client
+        .query_consistent(
+            SCAN_REQUEST_FIXTURE_SHAPE_SQL.to_owned(),
+            hiqlite::params!(),
+        )
+        .await
+        .expect("replicated scan request sidecar inventory")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        queue_fixture::source_extensions_fixture::scan_request_fixture_shape(),
+        "exact published scan request sidecar required before inventory"
+    );
+    let marker =
+        require_replicated_fixture_marker(client, "background_scan_request_v2_schema", 1).await;
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM background_scan_request_v2",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("replicated scan request data inventory");
+    assert_eq!(rows.len(), 1);
+    validated_scan_request_drops(&shape, (marker, marker), rows[0].value)
+}
+
 /// A historical queue fixture cannot retain half of the independent managed
 /// extension after removing its background objects. Rewind only an empty,
 /// unactivated current extension, then let ordinary open reinstall it.
@@ -13102,6 +13155,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
             .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
             .collect()
     }
+    let scan_request_drops = replicated_scan_request_drops(client).await;
     let source_drops = replicated_source_tail_drops(client, |_| true).await;
     let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
     assert_eq!(
@@ -13265,8 +13319,9 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(jobs.len(), 1);
     let translation_drops =
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
-    let mut statements: Vec<_> = source_drops
+    let mut statements: Vec<_> = scan_request_drops
         .into_iter()
+        .chain(source_drops)
         .chain(tail_drops)
         .chain(handoff_drops)
         .chain(title_drops)
@@ -19038,6 +19093,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "background_library_requests",
             "background_predictions",
             "background_provider_budgets",
+            "background_scan_request_v2",
             "background_source_custody",
             "background_source_pauses",
             "background_source_service_epochs",
@@ -21132,7 +21188,9 @@ fn contract_inventory_matches_every_store_method() {
     // 27 foreground/background source custody, service, and checkpoint methods,
     // plus library turn readiness and recent job completions.
     // The recovery sweep checks current authority and settlement in the writer.
-    assert_eq!(declared.len(), 547, "review the Store method count");
+    // +6: the contract v2 scan request sidecar methods in
+    // BACKGROUND_JOB_METHODS (pipeline v2 T1).
+    assert_eq!(declared.len(), 553, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
