@@ -980,3 +980,20 @@ from runtime tests, TLC qualification and a refinement proof.
 ## November 7 library dispatch and source release
 
 A fresh, readable manual library request now participates in the next shared resource grant. The write still uses the existing claim identity, fence and physical source limits. The source controller can inspect that immutable identity while a completion holds its publication mutex. The durable model covers the resulting claim and settlement, while the dispatch classes, timing and physical file operations are exercised in the Store and worker tests.
+
+## November 8 physical reader recovery
+
+Before exposing input, the worker persists an activation intent and requires
+the Store to acknowledge its exact token and activation nonce. A mediated
+reader witness is armed only after that acknowledgement. Recovery uses the
+same typed settlement and release selectors as normal cleanup. A lost Store
+reply leaves evidence for retry. Physical-stop evidence cannot grant a new
+activation or stand in for a worker join.
+[Activation](../../crates/plurxd/src/source_custody.rs) ·
+[Settlement](../../crates/plurxd/src/source_custody/recovery.rs)
+
+The model takes reader termination as a premise. Separate runtime tests cover
+the native same-kernel witness and the Linux host census for one audited
+legacy DV activation. An unknown reader or inconclusive witness keeps custody
+held. [Native witness tests](../../crates/plurxd/src/source_custody/recovery/reader/tests.rs) ·
+[Legacy custody tests](../../crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs)
