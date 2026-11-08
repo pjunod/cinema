@@ -73,7 +73,8 @@ jobs:
           elif grep -Eqi 'unauthorized|denied|forbidden|timeout|connection|TLS|certificate' "$RUNNER_TEMP/cinema-manifest-error"; then
             cat "$RUNNER_TEMP/cinema-manifest-error" >&2
             exit 1
-          elif grep -Eqi 'manifest unknown|name unknown' "$RUNNER_TEMP/cinema-manifest-error"; then
+          elif grep -Eqi 'manifest unknown|name unknown' "$RUNNER_TEMP/cinema-manifest-error" ||
+               [ "$(cat "$RUNNER_TEMP/cinema-manifest-error")" = "ERROR: $immutable: not found" ]; then
             docker tag "$EXPECTED_IMAGE_ID" "$immutable"
             docker push "$immutable"
           else
