@@ -114,7 +114,7 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 | G1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1433, review 2 fixes #1438) | — |
 | R1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1428, review 1 fix #1440) | authority_fence won 16/18 → by cause |
 | H1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1427) | — |
-| A1 | — | 3 | unclaimed (design review first); shared S1–S7: [RCA](SHARED-LIBRARY-PLAYBACK-RCA.md) | vod_index_pending fallbacks 18/29; remux ≤5 s share; p90 → |
+| A1 | — | 3 | unclaimed (design review first); shared S1–S12: [RCA](SHARED-LIBRARY-PLAYBACK-RCA.md) | vod_index_pending fallbacks 18/29; remux ≤5 s share; p90 → |
 | A2 | — | 3 | unclaimed | HW/SW transcode TTFF → |
 | A3 | — | 3 | unclaimed | — |
 | B1 | — | 3 | unclaimed (design with A1) | artifacts matched across a deploy → |

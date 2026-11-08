@@ -3,21 +3,22 @@
 **Status:** open · **Proposes:** shared playback joins
 [A1](PLAYBACK-START-PLAN.md#phase-2--the-fix-12-weeks) plus five
 independent repairs · **Written:** 2026-11-08 · **Evidence build:**
-`09097650f` on the receiver and `b08b5b8ec` on the source cluster
+`09097650f` on the receiver and `b08b5b8ec` on the source cluster ·
+**Review:** adversarial (Opus 5.5), 24 findings, all applied (§13)
 
 Companion to [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md), which covers
 how playback starts on your own server. This document covers playback from
 *another* server's library: why it never starts, and how it joins the same
 start design. Sections 4–9 cover five unrelated errors found in the same
-logs, each with its own fix. Owner's ruling (2026-11-08): "it needs to fit
-in with the overall design and architecture for sure so make shared libs
-work with the a1 design", and the other errors must be fixed too.
+logs, each with its own fix. Owner's ruling (2026-11-08): shared libraries
+must "fit in with the overall design and architecture … work with the a1
+design", and the other errors must be fixed too.
 
 Names follow the public-mirror rules: media1 · lab3 · lab4 · lab6 are the
-source cluster; the receiver is a separate one-node install on maca, on a
-different tailnet. The titles were real library titles. Here they are
-**title A** (1.9 GB, H.264 1080p Matroska) and **title B** (12.8 GB, HEVC
-2160p Matroska with embedded text subtitles).
+source cluster; the receiver is a one-node install on maca, on a different
+tailnet. Here the titles are **title A** (1.9 GB, H.264 1080p Matroska) and
+**title B** (12.8 GB, HEVC 2160p Matroska with embedded text subtitles).
+Paths are relative to `crates/plurxd/src` unless marked otherwise.
 
 ## 1. What the owner saw
 
@@ -28,73 +29,98 @@ both servers' logs and Stores:
 
 | UTC | Where | Event |
 |---|---|---|
-| 17:22:44 | maca | Play title B; the client asks lab6 (ingress) for its decision: remux, HEVC |
+| 17:22:44 | maca | Play title B; lab6 (ingress) decides remux, HEVC |
 | 17:22:46 | media1 | Source start assigned to media1; native text subtitles requested |
 | 17:23:04 | maca | Client preparation deadline (20 s) → `owner_stopped` |
 | 17:23:22 | media1 | `Source producer startup failed stage="native_tracks" error_class=Unavailable` (36 s) |
 | 17:23:23 | maca | Play title A; decision remux, H.264 |
 | 17:23:42 | maca | Client preparation deadline → `owner_stopped` |
-| 17:23:52 | media1 | Title A's VOD session attaches, **28 s** after the start, with no viewer left |
-| 17:28:45 | maca | Retirement of the abandoned start: `receiver Source status refused … http_status=429` |
+| 17:23:52 | media1 | Title A's VOD session attaches 28 s after the start; a producer spawns |
+| 17:28:45 | maca | Retirement: `receiver Source status refused … http_status=429` |
 
-All three receiver media sessions ended `revoked`, and none was ever
-published. On the source, the only Source session ended `deleted`. Its
-`publication_ready_at_ms` was `i64::MAX`, so it never became ready.
+All three receiver media sessions ended `revoked`, and none was published.
+The one Source session ended `deleted` with `publication_ready_at_ms =
+i64::MAX` (`MEDIA_SESSION_PUBLICATION_BLOCKED`). Title A logged no failure
+line. It attached with about 7 s left of its 35 s budget (§2.4) and did not
+reach publication. That a Source start can end with no logged stage is a gap
+in itself, which S10 closes.
 
 ## 2. Root cause — a shared start reads the whole file before its first frame
 
 On your own server, a copy start of a title with no index plays straight
 away: today through rolling or progressive remux, and after A1 through the
-one engine whose first play builds the index. A shared start has neither
-path. The Source actor finishes whole-file work *before* VOD admission, and
-nothing on the receiver or client side allows for that wait.
+one engine whose first play builds the index. A shared start has neither.
+Its Source actor does whole-file work *before* VOD admission, inside a
+hidden 35 s budget, and nothing on the receiver or client side allows for
+it.
 
 ```
-receiver (maca)                 source ingress (lab6)          owner (media1)
-POST …/hls/sessions  ──────────▶ start (305 s deadline) ──────▶ source actor
-  client clock: 20 s                                            ├ native_tracks: one full
-                                                                │  demux per text track
-                                                                ├ cold index: whole-file
-                                                                │  remux scan (~70 MB/s)
-                                                                └ VOD admission → publish
-          ◀── nothing within 20 s; client stops and the receiver revokes ───┘
+receiver (maca)               ingress (lab6)          owner (media1)
+POST …/hls/sessions ────────▶ start ────────────────▶ source actor, 35 s budget
+  client clock: 20 s           HTTP waiter: 305 s     ├ native_tracks: one full
+                                                      │  demux per text track
+                                                      ├ cold index: whole-file
+                                                      │  scan, node-local result
+                                                      └ VOD admission → publish
+    ◀── nothing within 20 s; nothing retryable; the attempt is revoked ──┘
 ```
 
-### 2.1 The Source refuses an unindexed copy by building the index first
+### 2.1 The Source has its own copy of create, and its own index
 
+`prepare_source_rendition` (`vod/serve/create.rs:2568-2927`) is a full
+second copy of the local `prepare_recipe` (`:620-920`), not a caller of
+it. It makes its own choices on probe source, DoVi capability, the cluster
+index (skipped for Source, `:2668-2669`), the HEVC gate (`:2715-2786`) and
+the key namespace (`source_rendition_key`, `vod/plan.rs:55-77`). It also
+keeps the `vod_index_pending` refusal (`:2841`). Locally that refusal falls
+back to rolling. The Source instead satisfies it ahead of time:
 [`prepare_source_cold_index`](../../crates/plurxd/src/transcode/source_actor.rs)
-(`source_actor.rs:1088`) runs at `startup_stage = "recipe_preparation"`.
-When `cluster_fragment_index_artifacts` has no row for the file, it calls
-`fragindex::start_source_index` and waits for the complete outcome. The
-scan reads the whole file. Title A is 1.9 GB and took 28 s. A 2160p remux
-of 50 GB would take ten minutes or more. The scan exists only because
-`prepare_source_rendition` (`vod/serve/create.rs:2568`, refusal at `:2841`)
-keeps the same `vod_index_pending` refusal as the local VOD create
-(`:862`). Locally that refusal falls back to rolling. On the Source it
-became a blocking pre-step.
+(`source_actor.rs:1088`, called at `:1438`) checks the **owner node's own
+index** (`store.fragment_index`, which on hiqlite is the node-local sidecar,
+`plurx-core/src/store/hiqlite.rs:5681-5700`). When it finds nothing, it
+scans the whole file and waits for the result.
 
-On the source cluster, 3,237 of 6,374 files had no fragment index on
-2026-11-08. A shared play of any of them cannot start inside a 20 s client
-budget.
+The consequences:
+
+- **Any title not indexed on that particular owner node cold-scans.** That
+  includes titles that have a cluster-wide artifact: 3,224 files have one,
+  and the Source never reads it.
+- **A scan that does not fit 35 s never completes.** Title A (1.9 GB) took
+  28 s. A 50 GB remux is cut off at 35 s, nothing persists, and every retry
+  repeats a full-speed read.
+- **DV-tagged and non-H.264/HEVC titles skip the scan** (`:1097-1102`) and
+  always hit `vod_index_pending`.
 
 ### 2.2 Native subtitles are extracted whole, one demux per track, before start
 
-When the client asks for native subtitles (any title with an embedded text
-track), [`prepare_source_native_tracks`](../../crates/plurxd/src/transcode/source_actor.rs)
-(`:1224`) runs [`extract_native`](../../crates/plurxd/src/transcode/source_subtitles.rs)
-(`source_subtitles.rs:185`). That runs a full-file FFmpeg demux for
-**each** supported track, one after another, before any video work. It
-uses neither the Matroska cue-index reader
+When the client asks for native subtitles,
+`prepare_source_native_tracks` (`source_actor.rs:1224`) runs
+[`extract_native`](../../crates/plurxd/src/transcode/source_subtitles.rs)
+(`source_subtitles.rs:185`). That is one sequential full-file
+`-map 0:s:N` demux per supported track (`ffmpeg.rs:1241-1268`), before any
+video work. It uses neither the Matroska cue-index reader
 ([SUBTITLE-CUE-INDEX-RCA.md](../clients/SUBTITLE-CUE-INDEX-RCA.md)) nor the
-windowed bridge that local playback uses. On title B the extraction failed
-after 36 s, with `Unavailable` at the start budget.
+windowed shared caption route that already exists
+(`captions/{asset}/segments`, `http/shared_receiver_assets.rs:56-58`). On
+title B it ran out of the 35 s budget.
 
-### 2.3 Some titles can never be indexed, and the Source has no other path
+### 2.3 Unindexable titles: the HEVC index pass aborts on a correctable DTS head
 
 Title B's index jobs failed on three nodes between 2026-10-07 and
-2026-10-22, each with the same diagnostic:
-`Non-monotonic DTS; previous: 2000, current: 672` at the first packets,
-`covered_ms=166`, FFmpeg exit 234. That class is not rare:
+2026-10-22, all the same way: `Non-monotonic DTS; previous: 2000, current:
+672`, `covered_ms=166`, FFmpeg exit 234. The cause was measured on lab6
+with the same FFmpeg and the index's copy options, over 20 s of title B:
+
+| Run | Result |
+|---|---|
+| index options **with** `-xerror` | `Non-monotonous DTS … aborting`, exit 1 |
+| index options **without** `-xerror` | exit 0 (the muxer corrects the head) |
+
+The HEVC index argv adds `-xerror`
+(`plurx-core/src/transcode/mod.rs:2692-2694`). Rolling copy does not: it
+adds `-xerror` only for strict Dolby Vision (`:1711-1713`). A reordered DTS
+head that the muxer corrects therefore makes the index fatal, while rolling
+plays the same title. That class is not rare:
 
 | Fleet Store, 2026-11-08 | Count |
 |---|---|
@@ -102,163 +128,209 @@ Title B's index jobs failed on three nodes between 2026-10-07 and
 | …of which the stderr tail shows non-monotonic DTS at the head | 262 |
 | Files whose only index jobs failed, with no artifact | 987 |
 
-Locally such a title falls back to rolling or progressive remux, which
-answers the "any title plays through either path" ruling. Per design this
-was not replayed for title B today. The Source has only the indexed-VOD
-path, so these titles can never play shared. **This matters to A1 as a
-whole, not only to sharing:** once rolling copy and indexed copy are one
-engine, the cutter must handle what rolling handles today, or A1 removes
-local playback for these 262 titles as well.
+**This matters to A1 as a whole:** once rolling copy and indexed copy are
+one engine, keeping `-xerror` on the cutter takes playback away from these
+262 titles locally as well as shared.
 
-### 2.4 The client's clock, the Source's clock and the codes do not meet
+### 2.4 Three clocks that do not meet, and no retry across the relay
 
-- The web start runs inside a 20 s preparation owner
-  ([`openSessionRetryingNotYet`](../../crates/plurxd/src/web/player/directed-change.js),
-  `directed-change.js:1070`). Shared starts go through
-  [`shared-decision.js` `read()`](../../crates/plurxd/src/web/core/shared-decision.js)
-  (`:41`, 310 s fetch timeout). It sends no `x-plurx-startup-remaining-ms`,
-  the budget header D2 relies on (`http/hls/create.rs`).
-- The receiver waits up to 305 s
-  ([`shared_receiver_ingress.rs` `start`](../../crates/plurxd/src/http/shared_receiver_ingress.rs)),
-  and so does the Source (`shared_source_playback.rs:1714`). Neither knows
-  the client's remaining budget. Neither answers with the typed retryable
-  "not yet" codes the web ladder understands (`create_503_not_yet` in
-  [`playback-policy.js`](../../crates/plurxd/src/web/playback-policy.js)).
-- When the client stops, the receiver revokes the start. If the Source
-  finished anything, such as title A's index, that work is still subject to
-  the abandoned start's cleanup.
+- **Client:** 20 s preparation owner
+  (`web/player/measurements.js:96`), with the not-yet ladder
+  `openSessionRetryingNotYet` (`web/player/directed-change.js:1070`) inside
+  it. Shared starts go through `SHARED_DECISION.read`
+  (`web/core/shared-decision.js:41`). That builds its own fetch headers
+  (`:44`) and so bypasses `web/core/api.js:59`, which sends
+  `x-plurx-startup-remaining-ms`.
+- **Source:** `source_start_budget_for_request` = `QUEUE_WAIT` 5 s +
+  `materialize_budget` 30 s (`source_actor.rs:113-124`,
+  `admission.rs:47`, `vod/serve/construct.rs:248`), applied with
+  `deadline.min(…)` (`:1387-1392`). The 305 s values
+  (`http/shared_receiver_ingress.rs:277`,
+  `http/shared_source_playback.rs:1714`) bound only HTTP waiters.
+- **No retry:** the receiver maps every Source `PeerError` except DV to
+  `Unresolved` (`http/shared_receiver_playback.rs:1554-1557`). Any start
+  error retires the attempt as `Revoked` (`:538-549`). The client's retry
+  reuses its `request_id` (`directed-change.js:1081`) and so hits the
+  settled tombstone (`:621-631`). `SHARED_DECISION.refusal()`
+  (`shared-decision.js:14-29`) throws with no `streamFailure`, so the ladder
+  never retries a shared create in the first place.
+- **Abandonment:** dropping the HTTP waiter cancels nothing
+  (`shared_receiver_playback.rs:528-529`,
+  `shared_source_playback.rs:1728-1731`). An abandoned Source start holds
+  one of 8 registry slots (`shared_source_playback.rs:339`) and its source
+  copy permit until its budget ends.
 
 ## 3. Fix — shared playback becomes an A1 consumer, not a second start path
 
-A1 already changes the shared VOD create code that both paths call: a copy
-start with no index attaches a growing rendition whose producer is the
-remux, and the first play builds the index. The Source must take that same
-path, with no Source-only pre-work. A1 gains these items. The design review
-of A1 + B1 covers them, and §3.3 holds their acceptance.
+The Source must go through the same recipe preparation, engine, index and
+clock as a local start. It keeps only what is genuinely Source-specific:
+grant authority, custody, the source namespace and the relay. A1 gains
+these items. The A1 + B1 design review covers them, and §3.3 holds their
+tests.
 
 ### 3.1 Items added to A1
 
-| # | Change | Where | Why this shape |
-|---|---|---|---|
-| S1 | Delete the Source cold-index pre-step. `prepare_source_rendition` takes A1's growing-rendition branch exactly as the local create does; remove the duplicated refusal at `vod/serve/create.rs:2841` so there is one copy decision. | `transcode/source_actor.rs:1088-1221` (called at `:1438`); `vod/serve/create.rs:2568` | One engine means one admission rule. A Source that keeps its own pre-step is the second start path the ruling forbids. |
-| S2 | The growing rendition's index completes under the Source's existing fenced claim. Partial ranges stay rendition-local (A1 iv). The complete index publishes through `put_fragment_index` as today, and A1 (v)'s HEVC attestation gates only that publication. | `source_actor.rs` (HEVC proof block `:1186-1211` moves to publication) | A cold HEVC shared start then plays inside budget, as A1 (v) already requires locally. |
-| S3 | Native text subtitles no longer gate start. The Source publishes the subtitle group from track facts it already holds and serves each WebVTT segment through the windowed reader (cue-index fast path, demux fallback). Whole-track extraction becomes the existing background `subtitle_source` job. `extract_native` and the `native_tracks` stage are removed. | `transcode/source_subtitles.rs`, `source_actor.rs:1415-1425`; Source resources in `plurx-core/src/sharing_resources.rs` | This matches local delivery and the cue-index fix. One demux per track over a 12.8 GB file cannot fit any start budget. |
-| S4 | The cutter tolerates a non-monotonic DTS head the same way rolling does today. Before the first cut, record which rolling argv property makes it tolerant (input/output timestamp flags) and add a corpus fixture with a reordered head. A title that still fails gets a defined per-title fallback (ruling 2), served by the same producer through its existing degradation, never a refusal. | `plurx-core/src/transcode/mod.rs` (`copy_index_shared_args_with_input`), `fragindex.rs:1666` | Prevents A1 from turning 262 title failures into playback refusals, shared or local. |
-| S5 | The receiver forwards the client's start budget. `shared-decision.js` sends `x-plurx-startup-remaining-ms`. The receiver carries the remaining budget on the wire to the Source, and the Source applies D2's create-budget rule. A Source "not yet" (`vod_index_pending` retires with A1; capacity, owner transition) reaches the client with the same typed code and `Retry-After` as a local create. | `web/core/shared-decision.js:41`, `http/shared_receiver_ingress.rs:208`, `http/shared_source_playback.rs:1707` | One clock per client (F1) has to cross the relay. Otherwise shared starts keep a 305 s server wait under a 20 s client. |
-| S6 | The receiver relay accepts a growing playlist. `EVENT` with `ENDLIST` appended later passes through the projection, and the receiver does not cache a playlist as immutable until the Source marks it VOD. | `http/shared_receiver_assets.rs` (`project_manifest`, `serve`), `plurx-core/src/sharing_resources.rs:513` | The rewriter already admits `EVENT`. The receiver's caching rules must follow A1 (i). |
-| S7 | Locate asks only the nodes that may own a Source start (§8). | `http/shared_source_forwarding.rs:1948` | A refused RPC per start, on every start, is noise that hides real refusals. |
+| # | Change | Anchors |
+|---|---|---|
+| S1 | **One recipe preparation.** Fold `prepare_source_rendition` into `prepare_recipe`, with a Source binding as a parameter that carries the namespace, the attesting node and the probe source. Delete `prepare_source_cold_index` and its call. A1's growing-rendition branch then serves both, including non-preserved DV copy. A start with no stored probe evidence gets a bounded header probe in the same step local create uses. | `vod/serve/create.rs:620`, `:2568`; `source_actor.rs:1088-1221`, `:1438`, `:1115-1125` |
+| S2 | **One index.** The Source reads the cluster v2 index exactly as local create does. The growing rendition's complete index publishes through the cluster artifact path in B1's format, under the cluster `fragment_index` claim and its fence, so A1 (ii)'s background builder has one claim to join or yield to. HEVC attestation moves to that publication, both the actor block and the admission gate (A1 v). | `source_actor.rs:1135-1216`; `create.rs:2668`, `:2715-2786` |
+| S3 | **Producers share by file, not by namespace.** `source_rendition_key` stays for custody isolation. Partial ranges stay per namespace, and there is one index claim per file identity, so a concurrent local and shared cold play build one index, not two racing ones. | `vod/plan.rs:55-77` |
+| S4 | **The cutter does not abort on a correctable DTS head.** Drop `-xerror` from the copy cutter's argv. The HEVC header proof's strictness moves to what it must actually refuse: a trace-parse failure or a parameter-set change, already detected by `segplan`/`fragindex`. The rows recorded are the muxer-corrected ones, which are the bytes served. | `plurx-core/src/transcode/mod.rs:2692-2694` |
+| S5 | **Subtitles never gate start.** Delete `extract_native` and the `native_tracks` stage. The Source publishes the subtitle group from held track facts and serves cues through the existing windowed caption route (cue-index fast path, demux fallback). It keeps `validate_text`'s bounds per window, and carries a versioned revision identity in place of `source-{inc}-{gen}-{idx}.vtt`. | `source_subtitles.rs:17-20`, `:42-50`, `:185`; `source_actor.rs:1415-1425`; `http/shared_captions.rs` |
+| S6 | **One clock across the relay.** Every client sends the start budget on shared creates: web (fix `shared-decision.js:44` to use `api.js`'s header), Apple and Android (D2 (a), with their build bumps). The receiver forwards it as a header, **outside** the canonical request body, because the Source identity is the SHA-256 of the body (`shared_source_playback.rs:2109`). `source_start_budget_for_request` folds into D2's single create budget. | `shared_receiver_ingress.rs:208`; `source_actor.rs:113` |
+| S7 | **A typed not-yet survives both hops.** The Source's typed refusal and `Retry-After` pass through `run_owner`, `actor_error` and the client unchanged. The receiver claim and the Source `SourceStartEntry` stay alive across a retryable answer for a bounded window, so the same `request_id` rejoins its work (D2 (c)'s durable identity on both hops). `shared-decision.js` returns the `streamFailure` shape the ladder reads. | `shared_receiver_playback.rs:538-549`, `:621-631`, `:1554-1557`; `shared-decision.js:14-29` |
+| S8 | **The relay admits a growing rendition.** The receiver media actor stops retiring the whole session on a retryable Source resource answer (segment not yet, busy), and returns it to the client typed (`:2102-2111`, `:1236`). Start acceptance takes A1's first-publication contract instead of `vod && media_origin_ms == 0` (`:1602-1613`). `SharingHlsResource::parse` and `validate_sharing_playlist` admit A1 (i)'s separate immutable VOD playlist URI and any tag A1 adds (`plurx-core/src/sharing_resources.rs:191-215`, `:521-523`). | `shared_receiver_playback.rs:1963-2140` |
+| S9 | **Cold resume through the relay.** The receiver carries a start position (`source_position_ms` is forced to 0 today, `shared_receiver_ingress.rs:202`). A range producer declares its origin, and the receiver checks that origin instead of zero. A1's "cold resume at 90 min within budget" test runs through the relay. | `shared_receiver_playback.rs:588`, `:1604` |
+| S10 | **Abandonment is owned.** When the last receiver waiter leaves before publication, the receiver sends a bounded End and the Source settles the entry, freeing the registry slot and copy permit. A growing producer whose only viewer left finishes its index under the background budget, and Activity attributes it: what it is, why, and Stop, under the hardware-attribution rule. Every Source start ends with a logged terminal stage. | `shared_source_playback.rs:339`; `source_actor.rs:1613` |
+| S11 | **Version skew is negotiated.** Source and receiver are independent installs (here `b08b5b8ec` against `09097650f`), and the peer start wire is closed (`closed_provided_fields`, `:2115-2134`). Apply the plan's H2 rule across the peer boundary: a sharing capability advertised in the handshake, so an old peer gets today's shapes, with old/new decode tests in both directions. | `plurx-core/src/sharing_receiver_sessions.rs:182-193` |
+| S12 | **Locate asks only start-eligible peers** (§8). | `http/shared_source_forwarding.rs:1948` |
 
 ### 3.2 Non-goals
 
 - **No longer client timeout for shared titles.** A 300 s spinner on a 4K
-  title is the same failure with more waiting, and it would mask any later
+  title is the same failure with more waiting, and it would hide any later
   regression of the cause.
 - **No shared-only rolling path.** A rolling Source producer next to A1 is
   the two-engine design A1 retires.
 - **No pre-start subtitle work of any kind.** Not even "only the selected
-  track": a single 50 GB demux still misses every budget.
-- **No change to pairing, grants, pinned TLS or ingress custody.** They
-  worked end to end in this incident.
+  track": one 50 GB demux still misses every budget.
+- **No change to pairing, grants or pinned TLS.** They worked end to end in
+  this incident. Wire changes go through S11.
 
 ### 3.3 Tests and acceptance
 
 **Tests (in A1's corpus):**
 
-- A real B-to-Source fixture (`shared_receiver_fixture.rs`) starts an
-  unindexed copy and gets its first playlist after the third segment.
-- The same fixture with a text track: start does not wait for extraction,
-  and the cue segment for t=0 is served.
-- A reordered-DTS-head fixture plays through the one engine.
-- The budget header crosses the relay: a fake-clock test where the Source
-  answers typed "not yet" inside the client's remaining time.
-- A receiver that abandons a start leaves a partial range that a later
-  viewer reuses or that cleanly settles, never a half-published index.
-- **Counterfactual** (house rule): restore `prepare_source_cold_index` as a
-  blocking pre-step, and the first-playlist test must fail.
+- **Start with a parked scan.** A real B-to-Source fixture
+  (`shared_receiver_fixture.rs`) starts an unindexed copy. With the scan
+  parked on `source_workers.index_hooks` (`source_actor.rs:1168`), the first
+  playlist still publishes after the third segment. **Counterfactual:**
+  restore the blocking pre-step and it never publishes. A fixture-sized
+  file scans too fast to tell the two apart, so the hook is what makes this
+  test meaningful.
+- **Start with a parked subtitle extraction.** The same, with a text track
+  and `native_hooks` (`:1247`) parked. The cue for t=0 is served from the
+  windowed route.
+- **DTS head.** A reordered-DTS-head HEVC fixture is indexed and played
+  through the one engine. With `-xerror` restored, the index fails.
+- **One recipe.** Local and Source entry points resolve the same `Recipe`
+  and `SourceIdentity` for one file.
+- **One clock.** A fake-clock test: the budget header crosses the relay, a
+  Source "not yet" reaches the client typed, and the retry rejoins the same
+  Source incarnation.
+- **Relay.** A growing rendition with a segment-not-yet survives at the
+  receiver. A cold resume at 90 min works through the relay.
+- **Abandonment.** The last waiter leaving before publication frees the
+  Source slot, and the background finish is listed in Activity.
+- **Skew.** An old receiver against a new Source, and the reverse, both
+  either play or get today's typed refusal.
 
 **Acceptance (fleet, after the owner deploys):** on the two-account setup,
-title A, title B and one reordered-DTS-head title each reach first frame
+title A, title B and a second reordered-DTS-head title each reach first frame
 within the A1 remux bound (≤ 5 s share of eligible attempts) from cold. A
-second shared viewer reuses title A's first-play index. The receiver logs
-no `revoked` start for a viewer who is still waiting.
+second shared viewer on a different owner uses the first play's cluster
+index. The receiver logs no `revoked` start for a viewer who is still
+waiting.
 
 ## 4. Predictive preparation fails while any shared session is active
 
 **Symptom:** every minute, lab6 logs `predictive preparation deferred
 error=database error: invalid background job row: invalid type: null,
-expected i64`. It started at 17:24:34, as soon as the Source session
-existed, and stopped when its lease expired. No predictions are made for
-anyone during that time.
+expected i64`. It started at 17:24:34 with the Source session and stopped
+when that session's lease expired. No predictions are made for anyone in
+that time.
 
 **Root cause:** the `viewers` CTE in
-[`background_jobs_preparation.rs` `demands`](../../crates/plurx-core/src/store/background_jobs_preparation.rs)
-(`:55-60`) reads every active `media_sessions` row. A Source session has
-`principal_kind = 'sharing'` and `user_id = NULL`: the Store shows one such
-row, against 19 `local` integer rows. That row becomes
-`{"kind":"viewer","user_id":null}`, and `PreparationDemand::Viewer {
-user_id: i64 }` fails to decode. Because `rows.iter().map(decode).collect()`
-fails as a whole, the entire tick is lost. The same CTE also reads
-`$.request.file_id`, a path the Source recipe does not have.
+[`demands`](../../crates/plurx-core/src/store/background_jobs_preparation.rs)
+(`plurx-core/src/store/background_jobs_preparation.rs:55-60`) reads every
+active `media_sessions` row. A Source session has `principal_kind =
+'sharing'` and `user_id = NULL`; the Store held one, against 19 `local`
+rows. That row decodes as `PreparationDemand::Viewer { user_id: i64 }` and
+fails, and `rows.iter().map(decode).collect()` loses the whole tick. The CTE
+also reads `$.request.file_id`, a path the Source recipe does not have.
 
-**Fix:** filter the CTE to `principal_kind = 'local'`. Viewer demand means
-"this account's next episode", and a sharing principal is not an account on
-this server. Shared viewers' predictions are a feature with their own
-design, not a side effect of this query. Audit every other Store query that
-reads `media_sessions.user_id` or `recipe_json` paths without a principal
-filter (`rg "FROM media_sessions" crates/plurx-core/src/store`), and fix
-the same defect wherever it appears.
+**Sibling defect, the same cause:** the replica-equality dump decodes
+`user_id: i64` for `MediaSessionDumpRow`, `MediaSessionRequestDumpRow`,
+`MediaPlaybackPointerDumpRow` and `MediaSessionPreparationDumpRow`
+(`plurx-core/src/store/hiqlite.rs:7714-7760`). Their SELECTs have no state
+or principal filter (`:5344-5350`, `:5442-5452`). Replica validation
+therefore fails whenever any sharing row exists, in any state.
 
-**Test:** a store contract test (both backends) with one active sharing
-session and one local session. It returns exactly the local viewer's demand.
-Counterfactual: without the filter, the same test fails with today's error.
+**Fix:**
 
-## 5. One background source reader on lab3 can never be recovered
+- Filter `viewers` to `principal_kind = 'local'`. Viewer demand means "this
+  account's next episode", and a sharing principal is not an account here.
+- Make the four dump rows `user_id: Option<i64>`: those rows are
+  legitimately principal-less.
+- Audit every principal-keyed table read (`media_sessions`,
+  `media_session_requests`, `media_playback_pointers`,
+  `media_session_preparations`) for non-null decoding. Equality joins on
+  `user_id` are already NULL-safe (`background_jobs.rs:2054`,
+  `background_jobs_viewer_analysis.sql:232`).
+
+**Tests:**
+
+- A store contract test (both backends) with one active sharing session and
+  one local one returns exactly the local viewer's demand.
+- A replica-dump test with a sharing row passes.
+- **Counterfactual:** both tests fail on today's code with today's error.
+
+## 5. One background source reader on lab3 can never be recovered automatically
 
 **Symptom:** all four nodes log `Shared source reads need recovery; affected
-media jobs cannot start`, and `plurx_background_source_recovery_pending` is
-1. The sample is cluster-wide, so every node reports the one record.
+media jobs cannot start`. `plurx_background_source_recovery_pending` is 1,
+and since the sample is cluster-wide, every node reports the one record.
 
 **Evidence:**
 
-- `background_source_custody` holds custody `16da3798…`, phase `active`.
-- It belongs to a `dv_title_scan` job (`a68e6605…`, file 6323, 68 GB) owned
-  by lab3's previous process boot. The job is still `running`, with its
-  lease expired at 04:35 UTC.
-- `source_io_occupancy` still charges the slot, 13 h after expiry.
-- lab3's recovery journal holds the activation at
-  `source-custody-recovery/v1/background-16da3798….json`, written with
+- `background_source_custody` holds custody `16da3798…`, phase `active`. It
+  belongs to a `dv_title_scan` job (`a68e6605…`, file 6323, 68 GB) owned by
+  lab3's previous process boot.
+- The job is still `running`, with its lease expired at 04:35 UTC.
+  `source_io_occupancy` still charges the slot, 13 h later.
+- lab3's journal holds the activation at
+  `source-custody-recovery/v1/background-16da3798….json`, with
   `"machine_id":"","boot_id":""`.
 
-**Root cause:** the activation was written by a pre-witness build while the
-container had no host-identity bind. Recovery replay
-([`recovery.rs` `verified`](../../crates/plurxd/src/source_custody/recovery.rs),
-`:462`) needs a valid prior machine and boot identity and a *different*
-current boot. An empty identity can never satisfy it, and lab3's host has
-not rebooted since 2026-10-12, so no v1 reboot proof can exist. There is no
-v2 witness either. That is exactly the case
+**Root cause:** `write_active_at` deliberately writes an empty identity
+when `Identity::current()` is `None` (`source_custody/recovery.rs:315-318`).
+That happens in a container without the identity binds, and it is
+expected, because the v2 reader witness is the designed recovery path.
+This activation came from a build that wrote neither: no v1 identity and no
+v2 witness. `verified` (`:462`) needs a valid prior identity and a
+different current boot, so it can never pass, and lab3's host has not
+rebooted since 2026-10-12. This is the finite legacy case that
 [SOURCE-CUSTODY-RECOVERY.md §1.2](../server/SOURCE-CUSTODY-RECOVERY.md)
-covers with the host-admin physical-stop proof, and that proof was never
-run on lab3. `/run/plurx-physical-stop` does not exist there, and the
-container has no bind for it.
+handles with host-admin physical-stop proof, and that proof was never run
+on lab3: `/run/plurx-physical-stop` does not exist there, and the container
+has no bind for it.
 
-**Fix:** no code change. The documented remedy is the root fix: it proves
-the old reader is gone instead of releasing on a guess. In order:
+**The remedy's preconditions were checked on lab3 (2026-11-08):**
 
-- on lab3, run `scripts/source-custody-reader-stop --check`, then
-  `--publish`, as root;
+| Check | Result |
+|---|---|
+| Journal file SHA-256 vs `ACTIVATION` (`physical_stop.rs:28`) | `50f069fb…` — matches |
+| Job payload scanner digest vs `TITLE_SCANNER` (`:38`) | `12315d1f…` — matches |
+| Daemon euid / capabilities (`:204-213`) | uid 1000; `CapEff` / `CapPrm` 0 — accepted |
+
+**Fix:** no code change. This is the designed proof of a physical stop, not
+a release on a guess. Run the helper on lab3 as root, following §1.2's
+procedure:
+
+- `scripts/source-custody-reader-stop --check` with its required
+  `--host-enrollment` and `--reference-manifest`, then `--publish`;
 - add the read-only `/run/plurx-physical-stop` bind to lab3's Compose
   override in the deployment playbooks;
 - redeploy lab3.
 
 The daemon then settles the custody, clears its journal and frees the slot.
-This is the owner's step (deploys). The deployment-playbook change is in
-§10.
+This is the owner's step (deploys).
 
-**Prevention check:** confirm that no current build can write a v1
-activation without identity. Grep for writers of the
-`source-custody-recovery/v1/` envelope, and add a test that refuses an
-empty identity at write time. A future container without the binds must
-fail loudly at write time, not strand capacity months later.
+**Prevention:** the right invariant is "an activation has a v2 witness *or*
+a valid v1 identity". Refusing an empty identity outright would break native
+macOS and unbound containers, where empty is normal. Add a test that the
+activation writer refuses only when `prepare_at` returns `Ok(None)` *and*
+the identity is empty.
 
 ## 6. Every node warns about two removed Raft members, every minute
 
@@ -268,165 +340,202 @@ membership config … [1, 5, 6, 7]` for nodes 3 and 4, six lines a minute
 
 **Root cause:**
 
-- Each node's `membership.json` keeps the `bootstrap` peer list from the
-  moment it joined: lab6 `[1, 3, 4]`, lab4 `[1, 4, 5]`, lab3 `[1, 5, 6]`,
-  media1 `[1]`.
+- Each node's `membership.json` keeps the `bootstrap` list from the moment
+  it joined: lab6 `[1, 3, 4]`, lab4 `[1, 4, 5]`, lab3 `[1, 5, 6]`, media1
+  `[1]`.
 - Raft ids 3 and 4 were the earlier lab4 and lab3 identities, removed on
-  2026-08-25 and 2026-09-02. Today ids 6 and 7 hold those same addresses.
+  2026-08-25 and 2026-09-02. Ids 6 and 7 now hold those same addresses.
 - [`migration.rs`](../../crates/plurx-core/src/cluster/migration.rs)
-  (`:3757-3764`) passes that list to hiqlite as its static `nodes`, and the
-  file is never refreshed. The code says so itself at `:1634`: "records the
-  bootstrap list once and is never refreshed".
-- hiqlite's `split_brain_check` compares the static list with live
-  membership every 60 s and warns about each absent id.
+  (`:3757-3764`) passes that list to hiqlite as its static `nodes`. The code
+  says itself that the file "records the bootstrap list once and is never
+  refreshed" (`:1634`).
+- hiqlite copies `nodes` into `split_brain_check` at start
+  (`vendor/hiqlite/src/start.rs:260-265`) and compares them with live
+  membership every 60 s.
 
-The static list is also what a restarting node dials first, and two of its
-entries are removed ids that now share an address with live voters.
+An initialized node does not dial this list to rejoin
+(`vendor/hiqlite/src/init.rs:244-273`). Only the check uses it, plus an
+uninitialized node that has lost its volume. The defect is therefore a
+false alarm every minute plus a wrong lost-volume bootstrap, not a
+replication risk.
 
-**Fix:** after the Store opens, the node rewrites its `membership.json`
-`bootstrap` from committed membership: `cluster_nodes` with
-`removed_at IS NULL`, through the existing `write_local_membership`. Every
-node also does this when it applies a join or removal. Startup keeps using
-the file as written, so a node that cannot reach the Store still starts as
-it does today. Filter removed raft ids from the hiqlite `nodes` at
-construction, too, so a stale file cannot reintroduce them.
+**Fix:** derive hiqlite's `nodes` before start from the committed
+membership in the closed state machine: `cluster_nodes` with `removed_at IS
+NULL`, read the way `admitted_peer_count` already reads it (`:1636`). Then
+rewrite `membership.json`'s `bootstrap` from the same set, so a lost-volume
+start also sees current peers. Rewriting the file only after the Store opens
+would leave the warnings running for the rest of that boot.
 
-**Test:** a migration test that removes a peer and restarts. The rewritten
-file and the hiqlite `nodes` must both omit the removed id. A second test
-starts with a stale file and an unreachable Store, and startup must be
-unchanged.
+**Test:** a migration test that removes a peer and restarts: hiqlite's
+`nodes` and the file both omit the removed id. A second test starts with a
+stale file and must behave as today. **Acceptance:** zero split-brain
+warnings after one restart per node.
 
 ## 7. The leader intermittently cannot confirm leadership for reads
 
-**Symptom:**
+**Symptom:** media1, the Raft leader, logs `timeout while confirming
+leadership for read request target=5 … target=6` at the same millisecond
+for both followers, about 28 times in the 40 minutes after the 17:00
+deploy. Followers then log `transient replicated authority read failed;
+retrying retry=QuorumUnavailable`, and one such retry was a user-facing
+`/api/v1/dvr/overview`.
 
-- media1, the Raft leader, logs `timeout while confirming leadership for
-  read request target=5 … target=6` at the same millisecond for both
-  followers, about 28 times in 40 minutes after the 17:00 deploy.
-- The followers then log `transient replicated authority read failed;
-  retrying retry=QuorumUnavailable`. One of those retries was a user-facing
-  `/api/v1/dvr/overview`.
+**What was measured, and what it rules out:**
 
-**What is established:**
+| Hypothesis | Measurement (2026-11-08) | Verdict |
+|---|---|---|
+| Network path | RTT media1→lab6 0.64 ms avg, 3.8 ms max over 300 pings, 0 % loss; same L2 segment | ruled out |
+| RX overruns on media1's NIC (`igc`, RX ring 256 of 4,096) | 0.5 s counter sampler, 17:47:48–18:27:48 UTC, 4,662 samples. Bursts of ≥ 20 overruns per 0.5 s occur in 8.9 % of samples. In the 2 s before each read-confirm event: 18:23:53 → 166 overruns, 18:25:25 → 330, 18:25:56 → 258. The fourth event, a lone `Elapsed` at 18:12:32 with no read-confirm pair, saw 0. | **cause of the read-confirm timeouts** — 3 of 3 coincide with bursts (≈ 0.07 % by chance) |
+| Follower durable writes | 20 s fsync probe on `/srv/plurx`: lab6 p50 2.9 / p99 5.2 ms · lab4 p50 8.9 / p99 80 ms (disk 92 % full) · media1 p50 1.3 / p99 2.6 ms | not the cause: well inside 800 ms, and lab6 is fast |
 
-- Both voters time out in the same instant, and neither logs a stall or a
-  slow apply then. A follower-side cause would not hit both at once.
-- RTT from media1 to lab6 is 0.64 ms average and 3.8 ms maximum over 300
-  pings, with no loss. The two machines share one L2 segment.
-- media1's `igc` NIC runs an RX ring of 256, against a maximum of 4,096.
-  Its lifetime counters show `missed` = 1,533,976 (FIFO overruns) and
-  `dropped` = 510,276. In a quiet 60 s sample `missed` rose by 14 and TCP
-  retransmits by 4.
+**Root cause:** media1 serves media and reads its library over NFS through
+one 2.5 GbE `igc` port whose RX ring is 256 descriptors. Inbound bursts
+overflow the ring, and the NIC drops whatever arrives during the overflow,
+including the followers' Raft replies. The followers then retransmit after
+an RTO of at least 200 ms. Those retransmits are counted on the followers,
+which is why media1's own `TcpRetransSegs` stays flat. Two losses on one
+flow are enough to push a read confirmation past the 800 ms window
+(`HIQLITE_HEARTBEAT_INTERVAL_MS`, `plurx-core/src/cluster/migration.rs:151-160`).
+It hits both followers at once because both replies arrive inside the same
+overflow. An early draft read the flat retransmit counter as ruling the NIC
+out. That was wrong: the drops are inbound, so the retransmits happen on the
+other side.
 
-**Leading cause, pending the decisive sample:** under media streaming load,
-RX overruns on media1 drop Raft segments. The retransmit (RTO ≥ 200 ms)
-then pushes leadership confirmation past its heartbeat window
-(`HIQLITE_HEARTBEAT_INTERVAL_MS = 800`). A 0.5 s counter sampler has been
-running on media1 since 17:47:48 UTC
-(`~/work/rca-nic/nic.log`, 40 minutes, removed afterwards). The result is
-recorded in §12.
+**Fix:**
 
-**Fix if confirmed:** raise media1's RX ring with `ethtool -G enp86s0 rx
-4096`, persisted in the host role of the deployment playbooks, and check the
-`igc` interrupt coalescing. Acceptance: no read-confirm timeouts over 24 h
-of normal playback.
-
-**If not confirmed:** time a read-confirm round trip on the leader. That
-means a debug span around openraft's linearizable read, plus a tokio
-runtime stall probe. Do not raise the heartbeat or election windows: that
-hides the stall instead of removing it.
+1. **Size the ring for the load (owner, host role in the deployment
+   playbooks):** `ethtool -G enp86s0 rx 4096` on media1, persisted. Check the
+   other nodes' rings the same way. Then confirm adaptive interrupt moderation
+   and RSS spreading with `ethtool -c` and `-l`. Acceptance: `missed` stops
+   rising during playback, and no read-confirm timeouts over 24 h of normal
+   load.
+2. **Make the next one attributable (code, small):** the vendored
+   `raft_client` timeout path (`vendor/hiqlite/src/network/raft_client.rs:1399`)
+   warns with the target, request kind, entry count and payload bytes. The
+   lone 18:12:32 `Elapsed` cannot be attributed today. If it recurs with a
+   large payload, the next step is to give heartbeats their own lane rather
+   than queue them behind bulk appends.
+3. **Do not raise the heartbeat or election windows.** That hides packet
+   loss instead of removing it, and 800 ms already carries the
+   rolling-update safety argument at `:151-158`.
 
 ## 8. Source locate is refused by the learner on every start
 
 **Symptom:** lab3 logs `http request failed status=503 latency_ms=0
 path=/internal/cluster/sharing/source/locate` for every shared start.
 
-**Root cause:** lab3 is a learner, raft id 7. `capacity_role_refusal`
-([`http/mod.rs`](../../crates/plurxd/src/http/mod.rs), `:2850`) answers
-every route outside `learner_route_eligible` (`:2665`) with
-`learner_route_ineligible`. `collect_fresh_location` (`:1948`) fans out to
-every reachable `media_peers()` member, without checking whether its role
-may own a Source start.
+**Root cause:** lab3 is a learner (raft id 7). `capacity_role_refusal`
+(`http/mod.rs:2850`) answers every route outside `learner_route_eligible`
+(`:2665`) with `learner_route_ineligible`. `collect_fresh_location`
+(`http/shared_source_forwarding.rs:1948`) fans out to every reachable
+`media_peers()` member and never checks whether that member's role admits
+the route.
 
-**Fix:** use the same role predicate in both places. Locate asks only peers
-whose committed role admits Source start ownership. Membership already
-carries the role (`cluster_nodes.role`). Today that means voters only. If
-learners should serve Source media, the same way they serve node-local media
-routes, that is a deliberate extension of `learner_route_eligible`, recorded
-in A1's design review. A side effect of fan-out is not the place for it.
-Decision for the owner, recommended no for now: learners would also need
-Source claim-write forwarding, which this incident does not need.
+**Fix:** filter locate's peers with the same predicate:
+`learner_route_eligible(POST, LOCATE_PATH)` applied to each peer's committed
+role. `ActivityPeer` carries no role (`plurx-core/src/cluster/membership.rs:2316-2321`),
+so take the role from `cluster_nodes`. Using the one predicate means the
+two checks cannot drift apart.
 
-**Test:** a forwarding unit test with one learner and one voter peer. Only
-the voter receives locate. Counterfactual: the current code sends both.
+Locality was checked: lab3 mounts the same five library paths as lab6, so
+no file is present only on lab3, and excluding the learner loses no title.
+Whether learners should *serve* Source media, the way they serve node-local
+media routes, would be a deliberate widening of `learner_route_eligible`
+for A1's design review. It is not something to add through this fan-out.
 
-## 9. Shared posters fail in bursts with 503
+**Sibling erasures, fixed in the same PR:** `credit()`
+(`http/shared_source_forwarding.rs:45-68`) and `PLACEMENT_IO`
+(`http/shared_source_ingress.rs:1042-1044`) turn a full semaphore into
+503. They should answer typed 429 with `Retry-After`, which S7 then carries
+to the client.
 
-**Symptom:** maca logged 18 failed `/api/v1/shared/imports/…/art/…` requests.
-Each was a distinct image, failing once, in two bursts: six within 12 s at
-17:07, and twelve within 29 s at 17:29–17:30. Latency was 290–630 ms, so each
-reached the Source and came back refused.
+**Test:** a forwarding unit test with one learner and one voter peer: only
+the voter receives locate. **Counterfactual:** today's code sends both.
 
-**Root cause:**
+## 9. Shared posters fail on first view
 
-- Source art admission is a non-waiting
-  `try_acquire_owned` on `SOURCE_OPERATIONS = 4`
-  ([`shared_artwork.rs`](../../crates/plurxd/src/http/shared_artwork.rs),
-  `:20`, `:74`). The receiver's side is the same, `RECEIVER_OPERATIONS = 4`.
-- A library grid asks for dozens of posters at once. The Source answers
-  everything past four in flight with `429 sharing_art_capacity` or
-  `sharing_art_variant_busy`.
-- The receiver then turns every peer error into 503: `read_artwork(…)
-  .map_err(|_| unavailable())` (`:240`).
-- The page gets a broken image and no retry signal.
+**Symptom:** maca logged 18 failed `/api/v1/shared/imports/…/art/…`
+requests. Each was a different image that failed exactly once, in two
+browse bursts (six in 12 s at 17:07; twelve in 29 s at 17:29–17:30). Each
+took 290–630 ms, so every one reached the Source and came back refused.
+
+**Most likely cause:** a size the Source has not rendered yet. The Source
+answers `429 sharing_art_variant_busy` whenever the W300/W500/W780
+derivative a page asks for does not exist yet. It enqueues the render and
+refuses without `Retry-After` (`http/images.rs:319-341`,
+`http/shared_artwork.rs:185`). "Each image failed once" is what that cause
+looks like.
+
+Contention is less likely. The receiver caps itself at 4 operations
+(`RECEIVER_OPERATIONS`, `:23-24`), so the Source never sees more than 4
+concurrent requests from it, the same as `SOURCE_OPERATIONS`. The receiver
+erases the code: `read_artwork(…).map_err(|_| unavailable())` (`:240-242`)
+turns every peer refusal into 503. That is why the cause cannot be read
+from maca's log, and it has to be fixed whichever cause it was.
+
+The receiver also never reads its own snapshot. `publish_disk_snapshot`
+(`:381`) writes one, but `receiver` always calls the peer
+(`sharing.rs:1807-1866`). Responses are `private, no-store` (`:159-162`),
+so every grid render refetches every poster across the tailnet.
 
 **Fix:**
 
-- Make both admissions bounded waits rather than instant refusals: wait for
-  a slot within a short deadline (1–2 s, set from the byte budget), keeping
-  the same operation and byte limits.
-- Carry the Source's typed refusal through the receiver as 429 with
-  `Retry-After`, never 503.
-- The shared artwork loader retries a 429 once after `Retry-After`. Once one
-  fetch succeeds, the receiver's disk snapshot serves the image after that.
+- **Carry the code.** The receiver passes the Source's typed refusal through
+  as 429 with `Retry-After`, never 503, and logs it.
+- **Answer variant-busy as a scheduled not-yet.** `Retry-After` comes from
+  the queued render job, and the shared artwork loader retries once after
+  it.
+- **Serve the snapshot first.** The receiver serves its verified snapshot
+  before dialling the peer, revalidating against the catalogue revision it
+  already carries.
 
-**Test:**
+**Tests:**
 
-- 24 concurrent art requests against one Source fixture all succeed within
-  the deadline.
+- First request for an unrendered variant returns 429 with `Retry-After`,
+  and the retry succeeds once the render lands.
 - A forced Source 429 reaches the client as 429.
-- Counterfactual: `try_acquire` refuses 20 of the 24.
+- A second view of an image is served from the snapshot, with zero peer
+  calls.
+- **Counterfactual:** each test fails on today's code.
 
 ## 10. Order of work and owners
 
 | Item | Lane | Size | Blocked on |
 |---|---|---|---|
-| §3 S1–S7 | A1 (design review with B1, Fable; then Opus build) | adds ~M to A1's XL | A1 design review |
-| §4 predictive preparation | standalone PR to main | S | — |
-| §6 membership bootstrap | standalone PR to main | S–M | — |
-| §8 locate role filter | standalone PR to main (S7 reuses it) | S | — |
-| §9 shared art admission | standalone PR to main | S | — |
-| §5 lab3 custody | owner: host helper + playbook bind + lab3 redeploy | ops | — |
-| §7 media1 NIC | owner: playbook host change, after §12 confirms | ops | sampler result |
-| §5 prevention test | with §4's PR | S | — |
+| §3 S1–S12 | A1 (design review with B1; then Opus build) | adds ~L to A1's XL | A1 design review |
+| §4 NULL principal (both sites) | standalone PR | S | — |
+| §6 membership from committed state | standalone PR | M | — |
+| §7 step 1, media1 RX ring | owner: host role in the deployment playbooks | ops | — |
+| §7 step 2, RPC attribution | standalone PR | S | — |
+| §8 locate filter and typed 429s | standalone PR (S12 reuses it) | S | — |
+| §9 shared art | standalone PR | S–M | — |
+| §5 lab3 custody | owner: helper, playbook bind, lab3 redeploy | ops | — |
 
-The four standalone PRs touch disjoint files, so they can stack into one
-fast-lane run. The PLAYBACK-START-PLAN A1 row gains "S1–S7, see
-SHARED-LIBRARY-PLAYBACK-RCA.md §3" in the same commit as this document.
+The standalone PRs touch disjoint files, so they can stack into one
+fast-lane run. The PLAYBACK-START-PLAN A1 row links §3.
 
-## 11. Decisions for the owner to look over
+## 11. Decisions for the owner
 
-1. **Learners stay out of Source start (§8).** Recommended now. Revisit in
+1. **Fallback for a title that still cannot be cut after S4.** A transcode
+   uses hardware, so it is your call. Recommended: none until one exists.
+   S4 removes the whole measured class.
+2. **Serve the original poster while a smaller size renders (§9)?** It
+   shows the image sooner but sends more bytes over the tailnet.
+   Recommended: no, keep the typed retry.
+3. **Learners as Source owners (§8).** Recommended: not now. Raise it in
    A1's design review if learner media serving widens.
-2. **The lab3 custody is released only through physical-stop proof (§5),
-   never by a manual Store edit.** That is the custody doc's rule, applied
-   here as written.
-3. **Shared viewers get no next-episode predictions (§4) until that is a
-   designed feature.**
 
 ## 12. Evidence ledger
 
 | Date | Evidence | Scope |
 |---|---|---|
-| 2026-11-08 | Receiver and source logs, both Stores (read-only snapshot copies, since removed), the media1 / lab3 / lab4 / lab6 membership files, lab3's recovery journal, ping and NIC counters. No setting, file or service was changed on any node. | §1–§9 |
-| 2026-11-08 | NIC overrun sampler on media1, 17:47:48–18:27:48 UTC | §7, result below |
+| 2026-11-08 | Receiver and source logs; both Stores (read-only snapshot copies, removed afterwards); the four membership files; lab3's recovery journal and digests; container uid and capabilities | §1–§9 |
+| 2026-11-08 | Title B, 20 s copy with and without `-xerror` (read-only, output to `/dev/null`) | §2.3 |
+| 2026-11-08 | Ping, NIC counter sampler (media1, 17:47:48–18:27:48 UTC), fsync probes on three nodes | §7 |
+| 2026-11-08 | The sampler log and probe files were the only things written on any node, and all were removed. No setting or service was changed. | — |
+
+## 13. Review ledger
+
+| Date | Reviewer | Result |
+|---|---|---|
+| 2026-11-08 | Opus 5.5, adversarial, at `3d3d7b62a` (Fable 5.1 was out of usage credits; the owner chose Opus) | 7 P1 · 15 P2 · 2 P3. All applied: one recipe and one index (S1–S3); the 35 s clock; retry across the relay (S7); the relay hazards (S8); version skew (S11); resume (S9); abandonment (S10); §9 cause re-attributed; §5 preconditions checked; §6 fix moved before start; §7 alternatives measured, and the cause found by correlation; S4 re-grounded on the measured `-xerror` cause; citations corrected |
