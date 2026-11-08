@@ -4304,7 +4304,10 @@ async function main() {
         shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
         shippedSource("preparedAlignedBuffered"), shippedSource("preparedFrameCadence"),
         shippedSource("preparedFramesMeet"), shippedSource("exposePreparedReplacementAtFrame"),
+        shippedSource("preparedDecodedFrameCount"), shippedSource("exposePreparedReplacementAfterDecodedFrames"),
         shippedSource("exposePreparedReplacement"),
+        // D1: the seam's outcome, reported (beacon only).
+        shippedSource("reportPreparedSeam"), shippedSource("reportPreparedSeamAfterWindow"),
         // M3's instruments. Sliced rather than stubbed, so a commit in this
         // harness exercises the real recording and the assertions below can
         // read what it recorded.
