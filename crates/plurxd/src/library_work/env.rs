@@ -253,11 +253,14 @@ impl Environment for TokioEnvironment<'_> {
                         true
                     }
                     result => {
+                        let fence_held = result.is_ok();
                         if let Err(error) = result {
                             tracing::warn!(library_id = self.library_id, %error, "library domain lease unavailable");
                         }
                         self.domain_refused = true;
-                        if is_targeted(&self.job) {
+                        // Only a lease another worker holds is `full_scan:`;
+                        // an unreachable coordinator names no wait.
+                        if fence_held && is_targeted(&self.job) {
                             // Another worker holds the library's mutation
                             // fence — a full scan or a metadata refresh, both
                             // reported as `full_scan:<library>`. A targeted job
