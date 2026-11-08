@@ -68,6 +68,9 @@ pub(crate) struct ClusterNodeOperationsStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<SnapshotTransportStatus>,
     pub media: MediaDrainStatus,
+    /// Node-owned background observation; available for voter and learner workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<Box<super::internal_activity::ActivityWorkers>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1214,6 +1217,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
         snapshot,
         transport: state.replication.transport_status_snapshot(),
         media: media_drain_status(active_sessions, drain),
+        workers: state.peer_status_cache.cached_local_workers().map(Box::new),
     }
 }
 
@@ -1397,6 +1401,13 @@ impl MembershipStatusCache {
 #[derive(Clone, Default)]
 pub(crate) struct PeerStatusCache {
     inner: std::sync::Arc<tokio::sync::Mutex<Option<CachedPeerStatuses>>>,
+    local_workers: std::sync::Arc<std::sync::RwLock<Option<CachedLocalWorkers>>>,
+}
+
+#[derive(Clone)]
+struct CachedLocalWorkers {
+    stored_at: tokio::time::Instant,
+    workers: super::internal_activity::ActivityWorkers,
 }
 
 #[derive(Clone)]
@@ -1421,6 +1432,49 @@ impl From<BTreeMap<String, PeerStatusOutcome>> for PeerStatusCacheRead {
 }
 
 impl PeerStatusCache {
+    fn cached_local_workers(&self) -> Option<super::internal_activity::ActivityWorkers> {
+        self.local_workers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|cached| cached.stored_at.elapsed() < PEER_STATUS_CACHE_TTL)
+            .map(|cached| cached.workers.clone())
+    }
+
+    fn store_local_workers(&self, workers: super::internal_activity::ActivityWorkers) {
+        *self
+            .local_workers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(CachedLocalWorkers {
+            stored_at: tokio::time::Instant::now(),
+            workers: workers.capacity_only(),
+        });
+    }
+
+    pub(super) async fn worker_observations(
+        &self,
+    ) -> BTreeMap<String, super::internal_activity::ActivityWorkers> {
+        let PeerStatusCacheRead::Fresh(statuses, _) = self.fresh().await else {
+            return BTreeMap::new();
+        };
+        statuses
+            .into_iter()
+            .filter_map(|(id, outcome)| {
+                if outcome.state != ObservationState::Answered || outcome.node_id != id {
+                    return None;
+                }
+                let status = outcome.status?;
+                if status.node_id != id {
+                    return None;
+                }
+                let workers = status.workers?;
+                workers
+                    .bounded(&id)
+                    .then_some((id, workers.capacity_only()))
+            })
+            .collect()
+    }
+
     async fn fresh(&self) -> PeerStatusCacheRead {
         let cache = self.inner.lock().await;
         let Some(cached) = cache.as_ref() else {
@@ -1636,6 +1690,27 @@ pub(crate) async fn membership_status_cache_loop(
 
 /// Refresh authenticated peer observations away from page renders and
 /// Prometheus scrapes. The request path reads the five-second cache only.
+/// Sampling may read settings, so it runs independently of the Store-free
+/// operations handlers and the peer refresh's fixed timing budget.
+pub(crate) async fn worker_status_cache_loop(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    loop {
+        let started = tokio::time::Instant::now();
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            result = tokio::time::timeout(Duration::from_secs(1), super::internal_activity::local_worker_capacity(&state)) => {
+                if let Ok(workers) = result { state.peer_status_cache.store_local_workers(workers); }
+            }
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            () = tokio::time::sleep_until(started + PEER_STATUS_REFRESH_INTERVAL) => {}
+        }
+    }
+}
+
 pub(crate) async fn peer_status_cache_loop(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
@@ -1852,7 +1927,12 @@ async fn fetch_peer_status(
     let (state, status) = match response {
         Ok(response) if response.status.is_success() => {
             match serde_json::from_slice::<ClusterNodeOperationsStatus>(&response.body) {
-                Ok(status) if status.node_id == expected_node_id => {
+                Ok(mut status) if status.node_id == expected_node_id => {
+                    status.workers = status.workers.take().and_then(|workers| {
+                        workers
+                            .bounded(expected_node_id)
+                            .then(|| Box::new(workers.capacity_only()))
+                    });
                     (ObservationState::Answered, Some(status))
                 }
                 Ok(_) => (ObservationState::IdentityMismatch, None),
