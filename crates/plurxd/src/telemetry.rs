@@ -2128,8 +2128,11 @@ fn classify(event: &PlaybackEvent) -> EventClass {
         | "control_retry_resource"
         | "control_hold_withheld"
         | "control_action_suppressed" => EventClass::Terminal,
+        // `start_attempt` / `start_presented` are the server's own record of
+        // one start (G1). They are rare, one per create, and consecutive ones
+        // from one session would otherwise be coalesced as samples.
         "ttff" | "session_start" | "stall" | "stall_end" | "stall_recovery" | "suspend"
-        | "resume" => EventClass::Lifecycle,
+        | "resume" | "start_attempt" | "start_presented" => EventClass::Lifecycle,
         _ => EventClass::Sample,
     }
 }

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::delivery::{Key, Method};
@@ -233,6 +233,43 @@ struct StartEntry {
     method: &'static str,
     phase: StartPhase,
     last_seen: Instant,
+    /// The create (`request_claim_id`) that most recently opened or joined
+    /// this entry. The entry is keyed by (viewer, file), so two devices of one
+    /// viewer on one title share it and this names only the newer; the
+    /// per-create record is [`StartAttempts::settle`]'s session index.
+    attempt: Option<String>,
+}
+
+/// One create that is waiting for its client's first-frame or failure report.
+#[derive(Debug)]
+struct PendingStart {
+    user_id: i64,
+    file_id: i64,
+    attempt: String,
+    at: Instant,
+}
+
+/// The create's identity as the ledger learns it: the attempt id (the
+/// create's `request_claim_id`) and the session the create answered with,
+/// which is the one thing the client's beacons name that tells two devices of
+/// one viewer on one title apart.
+#[derive(Clone, Debug)]
+pub struct AttemptTag {
+    pub attempt: String,
+    pub session_id: String,
+}
+
+/// How a client's beacon settled a create.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettledOutcome {
+    Presented,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettledStart {
+    pub attempt: String,
+    pub outcome: SettledOutcome,
 }
 
 /// C-08 M5 row 4, failed starts per attempt: one entry per (viewer, file)
@@ -270,6 +307,11 @@ struct StartEntry {
 /// on the same page as the number it distorts.
 pub struct StartAttempts {
     entries: Mutex<HashMap<(i64, i64), StartEntry>>,
+    /// Creates awaiting a client report, by the session each answered with.
+    /// Independent of `entries`' phase machine on purpose: that machine
+    /// counts one outcome per (viewer, file) and so cannot say which of two
+    /// devices a first frame belongs to; this index can.
+    sessions: Mutex<HashMap<String, PendingStart>>,
     /// This ledger's own resolutions, for tests that must not read the
     /// process-wide counters every other test is also moving.
     #[cfg(test)]
@@ -295,6 +337,7 @@ impl StartAttempts {
     pub fn new() -> StartAttempts {
         StartAttempts {
             entries: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
             #[cfg(test)]
             local: Mutex::new(HashMap::new()),
         }
@@ -358,6 +401,7 @@ impl StartAttempts {
     /// Media was requested for `file_id`: open an attempt, or join the one in
     /// flight, or refresh the play it belongs to, or (for a play quiet for
     /// [`PLAY_QUIET`]) hold a possible resume of it.
+    #[cfg(test)]
     pub fn opened(
         &self,
         user_id: i64,
@@ -366,6 +410,24 @@ impl StartAttempts {
         method: &str,
         now: Instant,
     ) {
+        self.opened_tagged(user_id, file_id, item_id, method, None, now);
+    }
+
+    /// [`Self::opened`] for a request that is a create with an identity of
+    /// its own: the attempt is remembered on the entry. Matching the client's
+    /// report back to the create is [`Self::tag_session`]'s, taken at the
+    /// create itself rather than in the detached task that opens the entry,
+    /// so no report can beat it.
+    pub fn opened_tagged(
+        &self,
+        user_id: i64,
+        file_id: i64,
+        item_id: Option<i64>,
+        method: &str,
+        tag: Option<&AttemptTag>,
+        now: Instant,
+    ) {
+        let attempt = tag.map(|tag| tag.attempt.clone());
         let Ok(mut entries) = self.entries.lock() else {
             return;
         };
@@ -382,6 +444,7 @@ impl StartAttempts {
                     entry.method = method;
                     entry.last_seen = now;
                     entry.item_id = item_id.or(entry.item_id);
+                    entry.attempt = attempt.or(entry.attempt.take());
                     return;
                 }
                 StartPhase::Playing
@@ -399,6 +462,7 @@ impl StartAttempts {
                     entry.method = method;
                     entry.last_seen = now;
                     entry.item_id = item_id.or(entry.item_id);
+                    entry.attempt = attempt.or(entry.attempt.take());
                     return;
                 }
                 StartPhase::Closed { .. } => {}
@@ -417,8 +481,90 @@ impl StartAttempts {
                     after_play: false,
                 },
                 last_seen: now,
+                attempt,
             },
         );
+    }
+
+    /// A create answered with `tag.session_id`: remember which attempt that
+    /// session belongs to until its client reports.
+    pub fn tag_session(&self, user_id: i64, file_id: i64, tag: &AttemptTag, now: Instant) {
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return;
+        };
+        sessions.retain(|_, pending| now.saturating_duration_since(pending.at) < START_DEADLINE);
+        if sessions.len() < START_LEDGER_CAP || sessions.contains_key(&tag.session_id) {
+            sessions.insert(
+                tag.session_id.clone(),
+                PendingStart {
+                    user_id,
+                    file_id,
+                    attempt: tag.attempt.clone(),
+                    at: now,
+                },
+            );
+        }
+    }
+
+    /// A client report that settles a create: the first frame (`ttff`, for
+    /// any reason — a seek's or a quality change's new session is a create
+    /// too) or one of [`START_FAILURE_EVENTS`]. Returns the attempt it
+    /// belongs to, once: the create is no longer waiting afterwards.
+    ///
+    /// The report is matched by the session it names, so two devices of one
+    /// viewer on one title settle their own creates. A report that names no
+    /// session (an older client) falls back to the newest create for the
+    /// (viewer, file), which is the old ledger key's answer and is the only
+    /// one such a report can have. `None` when nothing waits for it: the
+    /// create was handled by another node, or has already been settled.
+    pub fn settle(
+        &self,
+        user_id: i64,
+        file_id: i64,
+        session_id: Option<&str>,
+        event: &str,
+        now: Instant,
+    ) -> Option<SettledStart> {
+        let outcome = if event == "ttff" {
+            SettledOutcome::Presented
+        } else if START_FAILURE_EVENTS.contains(&event) {
+            SettledOutcome::Failed
+        } else {
+            return None;
+        };
+        // The entry's newest attempt, read before the session index is taken
+        // so the two locks are never held together.
+        let newest = match session_id {
+            Some(_) => None,
+            None => self
+                .entries
+                .lock()
+                .ok()?
+                .get(&(user_id, file_id))
+                .and_then(|entry| entry.attempt.clone()),
+        };
+        let mut sessions = self.sessions.lock().ok()?;
+        sessions.retain(|_, pending| now.saturating_duration_since(pending.at) < START_DEADLINE);
+        let key = match (session_id, newest) {
+            (Some(session), _) => sessions
+                .get(session)
+                .filter(|pending| pending.user_id == user_id && pending.file_id == file_id)
+                .map(|_| session.to_owned())?,
+            (None, Some(attempt)) => sessions
+                .iter()
+                .find(|(_, pending)| {
+                    pending.attempt == attempt
+                        && pending.user_id == user_id
+                        && pending.file_id == file_id
+                })
+                .map(|(session, _)| session.clone())?,
+            (None, None) => return None,
+        };
+        let pending = sessions.remove(&key)?;
+        Some(SettledStart {
+            attempt: pending.attempt,
+            outcome,
+        })
     }
 
     /// A client beacon about `file_id`. Only `ttff` and
@@ -535,6 +681,7 @@ impl StartAttempts {
                             method: start_method(method),
                             phase: waiting,
                             last_seen: now,
+                            attempt: None,
                         },
                     );
                 }
@@ -568,6 +715,7 @@ impl StartAttempts {
                             method: start_method(method),
                             phase: StartPhase::Closed { at: now },
                             last_seen: now,
+                            attempt: None,
                         },
                     );
                 }
@@ -623,6 +771,177 @@ impl StartAttempts {
     }
 }
 
+/// What a create reports about itself to the handler boundary that persists
+/// it: the attempt id and the owner are only known deep inside the create, and
+/// the boundary that logs the create's read budget is two calls up. A
+/// task-local carries them out without widening the create's signature.
+#[derive(Debug, Default)]
+pub(crate) struct CreateNote {
+    attempt: Option<String>,
+    owner_node: Option<String>,
+}
+
+impl CreateNote {
+    /// The note a create fills and the boundary that spawned it reads; shared
+    /// because the create runs as its own task that outlives a viewer.
+    pub(crate) fn shared() -> Arc<Mutex<CreateNote>> {
+        Arc::default()
+    }
+    /// What the create has said so far.
+    pub(crate) fn take(note: &Arc<Mutex<CreateNote>>) -> CreateNote {
+        std::mem::take(&mut *note.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+    pub(crate) fn attempt(&self) -> Option<&str> {
+        self.attempt.as_deref()
+    }
+    pub(crate) fn owner_node(&self) -> Option<&str> {
+        self.owner_node.as_deref()
+    }
+}
+
+tokio::task_local! {
+    static CREATE_NOTE: Arc<Mutex<CreateNote>>;
+}
+
+/// Run one create with the [`CreateNote`] it can fill. The caller keeps the
+/// handle, so a create that times out, or whose viewer goes away, still
+/// reports the attempt it had reached.
+pub(crate) async fn scope_create_note<F: std::future::Future>(
+    note: Arc<Mutex<CreateNote>>,
+    create: F,
+) -> F::Output {
+    CREATE_NOTE.scope(note, create).await
+}
+
+/// [`scope_create_note`] with a fresh note, returned with the output.
+#[cfg(test)]
+pub(crate) async fn with_create_note<F: std::future::Future>(create: F) -> (F::Output, CreateNote) {
+    let note = CreateNote::shared();
+    let output = scope_create_note(Arc::clone(&note), create).await;
+    (output, CreateNote::take(&note))
+}
+
+/// The create claimed its durable admission row under `attempt`.
+pub(crate) fn note_create_attempt(attempt: &str) {
+    let _ = CREATE_NOTE.try_with(|note| {
+        note.lock().unwrap_or_else(|e| e.into_inner()).attempt = Some(attempt.to_owned());
+    });
+}
+
+/// The node that owns the session this create published.
+pub(crate) fn note_create_owner(owner_node: &str) {
+    let _ = CREATE_NOTE.try_with(|note| {
+        note.lock().unwrap_or_else(|e| e.into_inner()).owner_node = Some(owner_node.to_owned());
+    });
+}
+
+/// One create, as the node-local telemetry sidecar keeps it (G1).
+pub(crate) struct StartAttemptRecord {
+    pub at_unix_ms: i64,
+    pub user_id: i64,
+    pub file_id: i64,
+    pub attempt: String,
+    /// The session the create answered with, when it answered.
+    pub session_id: Option<String>,
+    /// `vod` or `rolling` once the create got far enough to know.
+    pub route: Option<&'static str>,
+    /// The refusal's `code`, or `http_<status>` for a refusal that carries
+    /// none, which is itself the finding.
+    pub refusal: Option<String>,
+    pub refusal_message: Option<String>,
+    pub client_build: String,
+    pub owner_node: Option<String>,
+    pub phases: String,
+    pub authority_reads: u64,
+    pub local_reads: u64,
+    pub mutations: u64,
+    pub store_ms: u64,
+    pub elapsed_ms: u64,
+}
+
+/// `name:12ms/1a/2l/0w,…` (the create's read-budget phases) as rows.
+pub(crate) fn parse_phases(rendered: &str) -> Vec<serde_json::Value> {
+    rendered
+        .split(',')
+        .filter_map(|phase| {
+            let (name, counts) = phase.split_once(':')?;
+            let mut parts = counts.split('/');
+            let mut number = |suffix: &str| parts.next()?.strip_suffix(suffix)?.parse::<u64>().ok();
+            Some(serde_json::json!({
+                "name": name,
+                "ms": number("ms")?,
+                "authority_reads": number("a")?,
+                "local_reads": number("l")?,
+                "mutations": number("w")?,
+            }))
+        })
+        .collect()
+}
+
+fn clip_text(value: &str, max: usize) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(max)
+        .collect()
+}
+
+impl StartAttemptRecord {
+    pub(crate) fn into_event(self) -> plurx_core::domain::PlaybackEvent {
+        let extra = serde_json::json!({
+            "phases": parse_phases(&self.phases),
+            "authority_reads": self.authority_reads,
+            "local_reads": self.local_reads,
+            "mutations": self.mutations,
+            "store_ms": self.store_ms,
+            "elapsed_ms": self.elapsed_ms,
+            "owner_node": self.owner_node,
+            "client_build": clip_text(&self.client_build, 48),
+        });
+        plurx_core::domain::PlaybackEvent {
+            at_unix_ms: self.at_unix_ms,
+            user_id: Some(self.user_id),
+            session_id: self
+                .session_id
+                .as_deref()
+                .map(crate::transcode::session_log_id),
+            file_id: Some(self.file_id),
+            event: "start_attempt".to_owned(),
+            method: self.route.map(str::to_owned),
+            detail: self.refusal_message.as_deref().map(|m| clip_text(m, 200)),
+            attempt: Some(clip_text(&self.attempt, 64)),
+            reason: self.refusal.as_deref().map(|r| clip_text(r, 48)),
+            extra: Some(extra.to_string()),
+            ..plurx_core::domain::PlaybackEvent::default()
+        }
+    }
+}
+
+/// The first-frame row for a create the client's `ttff` report settled; `ms`
+/// is the report's own time to first frame.
+pub(crate) fn presented_event(
+    attempt: &str,
+    (user_id, file_id): (i64, i64),
+    raw_session_id: Option<&str>,
+    method: Option<&str>,
+    ttff_ms: Option<i64>,
+    reason: Option<&str>,
+    now_unix_ms: i64,
+) -> plurx_core::domain::PlaybackEvent {
+    plurx_core::domain::PlaybackEvent {
+        at_unix_ms: now_unix_ms,
+        user_id: Some(user_id),
+        session_id: raw_session_id.map(crate::transcode::session_log_id),
+        file_id: Some(file_id),
+        event: "start_presented".to_owned(),
+        method: method.map(|m| clip_text(m, 16)),
+        ms: ttff_ms.filter(|ms| *ms >= 0),
+        attempt: Some(clip_text(attempt, 64)),
+        reason: reason.map(|r| clip_text(r, 24)),
+        ..plurx_core::domain::PlaybackEvent::default()
+    }
+}
+
 /// Note that a viewer has actually started receiving media for `file_id`.
 ///
 /// Fire-and-forget: the work (resolving the item, reading resume position,
@@ -643,6 +962,7 @@ pub fn note_playback_started(
     file_id: i64,
     method: Method,
     playback_id: Option<&str>,
+    tag: Option<AttemptTag>,
 ) {
     let registry_key = method
         .needs_registry()
@@ -666,11 +986,12 @@ pub fn note_playback_started(
         }
         // Every media request, like the registry above: the first opens a
         // start attempt (C-08 M5 row 4) and the rest join or refresh it.
-        state.start_attempts.opened(
+        state.start_attempts.opened_tagged(
             user_id,
             file_id,
             Some(file.item_id),
             start_method,
+            tag.as_ref(),
             Instant::now(),
         );
         if !state.starts.claim(user_id, file.item_id) {
@@ -1132,5 +1453,179 @@ mod tests {
             "a different item is a different play"
         );
         assert!(notifier.claim(2, 10), "so is a different viewer");
+    }
+}
+
+/// G1: the per-create identity and record.
+#[cfg(test)]
+mod start_record_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tag(attempt: &str, session: &str) -> AttemptTag {
+        AttemptTag {
+            attempt: attempt.to_owned(),
+            session_id: session.to_owned(),
+        }
+    }
+
+    /// Two devices of one viewer on one title are two creates. The ledger is
+    /// keyed by (viewer, file) and so holds one entry for both; the reports
+    /// are matched by the session each names, and each settles its own.
+    #[test]
+    fn two_devices_on_one_title_settle_their_own_creates() {
+        let ledger = StartAttempts::new();
+        let t0 = Instant::now();
+        for create in [tag("claim-a", "sess-a"), tag("claim-b", "sess-b")] {
+            ledger.tag_session(1, 10, &create, t0);
+            ledger.opened_tagged(1, 10, Some(100), "transcode", Some(&create), t0);
+        }
+        let later = t0 + Duration::from_secs(2);
+        assert_eq!(
+            ledger.settle(1, 10, Some("sess-b"), "ttff", later),
+            Some(SettledStart {
+                attempt: "claim-b".to_owned(),
+                outcome: SettledOutcome::Presented
+            }),
+            "the second device's picture settles the second device's create"
+        );
+        assert_eq!(
+            ledger.settle(1, 10, Some("sess-a"), "hls_fatal", later),
+            Some(SettledStart {
+                attempt: "claim-a".to_owned(),
+                outcome: SettledOutcome::Failed
+            }),
+            "and the first device's failure settles the first"
+        );
+        assert_eq!(
+            ledger.settle(1, 10, Some("sess-a"), "ttff", later),
+            None,
+            "a create is settled once"
+        );
+        // Not a first frame or a start failure: nothing to settle.
+        ledger.tag_session(1, 10, &tag("claim-c", "sess-c"), t0);
+        assert_eq!(ledger.settle(1, 10, Some("sess-c"), "stall", later), None);
+        // Another viewer or title cannot settle it by naming its session.
+        assert_eq!(ledger.settle(2, 10, Some("sess-c"), "ttff", later), None);
+        assert_eq!(ledger.settle(1, 11, Some("sess-c"), "ttff", later), None);
+        assert!(ledger
+            .settle(1, 10, Some("sess-c"), "ttff", later)
+            .is_some());
+    }
+
+    /// The counterfactual, as the code answers it: a report that names no
+    /// session can only be given the (viewer, file) entry's newest attempt,
+    /// so with the old key two devices merge into one and the older create
+    /// is never attributed. Naming the session is what separates them.
+    #[test]
+    fn a_report_that_names_no_session_gets_the_newest_create_only() {
+        let ledger = StartAttempts::new();
+        let t0 = Instant::now();
+        for create in [tag("claim-a", "sess-a"), tag("claim-b", "sess-b")] {
+            ledger.tag_session(1, 10, &create, t0);
+            ledger.opened_tagged(1, 10, Some(100), "transcode", Some(&create), t0);
+        }
+        let settled = ledger.settle(1, 10, None, "ttff", t0).expect("newest");
+        assert_eq!(settled.attempt, "claim-b");
+        assert_eq!(ledger.settle(1, 10, None, "ttff", t0), None);
+        assert_eq!(
+            ledger
+                .settle(1, 10, Some("sess-a"), "ttff", t0)
+                .map(|s| s.attempt),
+            Some("claim-a".to_owned()),
+            "the older create was only reachable by its session"
+        );
+    }
+
+    #[test]
+    fn a_create_nobody_reports_on_is_forgotten_after_the_start_deadline() {
+        let ledger = StartAttempts::new();
+        let t0 = Instant::now();
+        ledger.tag_session(1, 10, &tag("claim-a", "sess-a"), t0);
+        assert_eq!(
+            ledger.settle(1, 10, Some("sess-a"), "ttff", t0 + START_DEADLINE),
+            None
+        );
+    }
+
+    #[test]
+    fn a_create_reports_its_attempt_and_owner_out_of_a_timed_out_future() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let (result, note) = runtime.block_on(with_create_note(async {
+            note_create_attempt("claim-a");
+            note_create_owner("node-b");
+            // A future the caller's timeout drops mid-flight has still said
+            // what it reached.
+            tokio::time::timeout(Duration::from_millis(5), std::future::pending::<()>()).await
+        }));
+        assert!(result.is_err());
+        assert_eq!(note.attempt(), Some("claim-a"));
+        assert_eq!(note.owner_node(), Some("node-b"));
+        // Outside a scope the notes are no-ops, not panics.
+        note_create_attempt("ignored");
+    }
+
+    #[test]
+    fn phases_parse_into_rows_and_an_unreadable_one_is_skipped() {
+        assert_eq!(
+            parse_phases("plan:12ms/1a/2l/0w,claim:340ms/0a/1l/3w,garbled,tail:1ms/x/0l/0w"),
+            vec![
+                json!({"name": "plan", "ms": 12, "authority_reads": 1, "local_reads": 2, "mutations": 0}),
+                json!({"name": "claim", "ms": 340, "authority_reads": 0, "local_reads": 1, "mutations": 3}),
+            ]
+        );
+        assert!(parse_phases("").is_empty());
+    }
+
+    #[test]
+    fn a_record_is_one_sidecar_row_with_the_cost_in_extra() {
+        let event = StartAttemptRecord {
+            at_unix_ms: 1_700_000_000_000,
+            user_id: 7,
+            file_id: 42,
+            attempt: "claim-a".to_owned(),
+            session_id: Some("session-a".to_owned()),
+            route: Some("rolling"),
+            refusal: Some("startup_timeout".to_owned()),
+            refusal_message: Some("exceeded".to_owned()),
+            client_build: "web/Chrome\nforged".to_owned(),
+            owner_node: Some("node-b".to_owned()),
+            phases: "plan:12ms/1a/2l/0w".to_owned(),
+            authority_reads: 1,
+            local_reads: 2,
+            mutations: 3,
+            store_ms: 4,
+            elapsed_ms: 5,
+        }
+        .into_event();
+        assert_eq!(event.event, "start_attempt");
+        assert_eq!(event.attempt.as_deref(), Some("claim-a"));
+        assert_eq!(event.reason.as_deref(), Some("startup_timeout"));
+        assert_eq!(event.method.as_deref(), Some("rolling"));
+        assert_eq!(
+            event.session_id,
+            Some(crate::transcode::session_log_id("session-a"))
+        );
+        let extra: serde_json::Value =
+            serde_json::from_str(event.extra.as_deref().expect("extra")).expect("JSON");
+        assert_eq!(extra["owner_node"], "node-b");
+        assert_eq!(
+            extra["client_build"], "web/Chromeforged",
+            "control characters dropped"
+        );
+        assert_eq!(extra["phases"][0]["ms"], 12);
+        assert_eq!(
+            [
+                extra["authority_reads"].as_u64(),
+                extra["local_reads"].as_u64(),
+                extra["mutations"].as_u64(),
+                extra["store_ms"].as_u64(),
+                extra["elapsed_ms"].as_u64()
+            ],
+            [Some(1), Some(2), Some(3), Some(4), Some(5)]
+        );
     }
 }

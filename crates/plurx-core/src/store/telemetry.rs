@@ -190,6 +190,12 @@ pub(crate) fn query(
     query: &PlaybackEventQuery,
 ) -> Result<Vec<PlaybackEvent>, StoreError> {
     let limit = query.limit.clamp(1, MAX_QUERY_ROWS);
+    // The event-name list is bound as one JSON array so the statement text
+    // stays constant however many names a caller passes.
+    let events = (!query.events.is_empty())
+        .then(|| serde_json::to_string(&query.events))
+        .transpose()
+        .map_err(|error| StoreError::Task(error.to_string()))?;
     let mut statement = conn.prepare(
         "SELECT id, at_unix_ms, user_id, session_id, file_id, event, level,
                 method, encoder, height, ms, runway_ds, bandwidth_kbps,
@@ -198,37 +204,42 @@ pub(crate) fn query(
          FROM playback_events
          WHERE (?1 IS NULL OR at_unix_ms >= ?1)
            AND (?2 IS NULL OR event = ?2)
+           AND (?4 IS NULL OR at_unix_ms < ?4)
+           AND (?5 IS NULL OR event IN (SELECT value FROM json_each(?5)))
          ORDER BY at_unix_ms DESC, id DESC
          LIMIT ?3",
     )?;
-    let rows = statement.query_map(params![query.since_ms, query.event, limit], |row| {
-        Ok(PlaybackEvent {
-            id: row.get(0)?,
-            at_unix_ms: row.get(1)?,
-            user_id: row.get(2)?,
-            session_id: row.get(3)?,
-            file_id: row.get(4)?,
-            event: row.get(5)?,
-            level: row.get(6)?,
-            method: row.get(7)?,
-            encoder: row.get(8)?,
-            height: row.get(9)?,
-            ms: row.get(10)?,
-            runway_ds: row.get(11)?,
-            bandwidth_kbps: row.get(12)?,
-            speed_recent: row.get(13)?,
-            ahead_seconds: row.get(14)?,
-            suspended: row.get::<_, Option<i64>>(15)?.map(|value| value != 0),
-            hold_reason: row.get(16)?,
-            delivered_bps: row.get(17)?,
-            readrate: row.get(18)?,
-            detail: row.get(19)?,
-            attempt: row.get(20)?,
-            reason: row.get(21)?,
-            ua: row.get(22)?,
-            extra: row.get(23)?,
-        })
-    })?;
+    let rows = statement.query_map(
+        params![query.since_ms, query.event, limit, query.before_ms, events],
+        |row| {
+            Ok(PlaybackEvent {
+                id: row.get(0)?,
+                at_unix_ms: row.get(1)?,
+                user_id: row.get(2)?,
+                session_id: row.get(3)?,
+                file_id: row.get(4)?,
+                event: row.get(5)?,
+                level: row.get(6)?,
+                method: row.get(7)?,
+                encoder: row.get(8)?,
+                height: row.get(9)?,
+                ms: row.get(10)?,
+                runway_ds: row.get(11)?,
+                bandwidth_kbps: row.get(12)?,
+                speed_recent: row.get(13)?,
+                ahead_seconds: row.get(14)?,
+                suspended: row.get::<_, Option<i64>>(15)?.map(|value| value != 0),
+                hold_reason: row.get(16)?,
+                delivered_bps: row.get(17)?,
+                readrate: row.get(18)?,
+                detail: row.get(19)?,
+                attempt: row.get(20)?,
+                reason: row.get(21)?,
+                ua: row.get(22)?,
+                extra: row.get(23)?,
+            })
+        },
+    )?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -1242,6 +1253,90 @@ mod tests {
                 .len(),
             64
         );
+    }
+
+    /// G1: a start attempt and its presentation are ordinary sidecar rows
+    /// under their own event names, readable newest-first in pages by time,
+    /// and a page can ask for several event names at once (the presented row
+    /// and the failure beacons that settle an attempt).
+    #[tokio::test]
+    async fn start_attempt_rows_are_written_and_paged_newest_first() {
+        let root = tempfile::tempdir().expect("sidecar root");
+        let sidecar =
+            NodeLocalTelemetry::open(&root.path().join("telemetry.db")).expect("open sidecar");
+        let at = 1_700_000_000_000;
+        let mut events = Vec::new();
+        for index in 0..5 {
+            events.push(PlaybackEvent {
+                attempt: Some(format!("attempt-{index}")),
+                reason: (index == 3).then(|| "startup_timeout".to_owned()),
+                method: Some("rolling".to_owned()),
+                file_id: Some(7),
+                extra: Some(r#"{"elapsed_ms":12}"#.to_owned()),
+                ..event("start_attempt", at + index * 1_000)
+            });
+        }
+        events.push(PlaybackEvent {
+            attempt: Some("attempt-4".to_owned()),
+            ms: Some(1_800),
+            ..event("start_presented", at + 4_500)
+        });
+        events.push(event("stall", at + 4_600));
+        sidecar
+            .record_batch_with_priors(events, Vec::new())
+            .await
+            .expect("batch");
+
+        let first = sidecar
+            .events(PlaybackEventQuery {
+                event: Some("start_attempt".to_owned()),
+                limit: 2,
+                ..PlaybackEventQuery::default()
+            })
+            .await
+            .expect("first page");
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| row.attempt.as_deref().expect("attempt id"))
+                .collect::<Vec<_>>(),
+            ["attempt-4", "attempt-3"]
+        );
+        assert_eq!(first[1].reason.as_deref(), Some("startup_timeout"));
+        let second = sidecar
+            .events(PlaybackEventQuery {
+                event: Some("start_attempt".to_owned()),
+                before_ms: Some(first.last().expect("page row").at_unix_ms),
+                limit: 2,
+                ..PlaybackEventQuery::default()
+            })
+            .await
+            .expect("second page");
+        assert_eq!(
+            second
+                .iter()
+                .map(|row| row.attempt.as_deref().expect("attempt id"))
+                .collect::<Vec<_>>(),
+            ["attempt-2", "attempt-1"],
+            "the cursor is exclusive: no row repeats across pages"
+        );
+        let both = sidecar
+            .events(PlaybackEventQuery {
+                events: vec!["start_presented".to_owned(), "start_attempt".to_owned()],
+                since_ms: Some(at + 4_000),
+                limit: 10,
+                ..PlaybackEventQuery::default()
+            })
+            .await
+            .expect("event-name list");
+        assert_eq!(
+            both.iter()
+                .map(|row| row.event.as_str())
+                .collect::<Vec<_>>(),
+            ["start_presented", "start_attempt"],
+            "an unlisted event name (the stall) is excluded"
+        );
+        assert_eq!(both[0].ms, Some(1_800));
     }
 
     /// One batch is one lease even when the network-prior opt-in is on.

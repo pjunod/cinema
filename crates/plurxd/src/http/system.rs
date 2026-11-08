@@ -885,6 +885,7 @@ fn bounded_playback_query(query: PlaybackEventsQuery) -> PlaybackEventQuery {
         since_ms: query.since,
         event: query.event,
         limit: query.limit.clamp(1, 2_000),
+        ..PlaybackEventQuery::default()
     }
 }
 
@@ -1325,7 +1326,7 @@ pub async fn client_log(
         tracing::warn!(target: "plurxd::client", "{line}");
     }
 
-    let event = client_playback_event(&ev, user.id);
+    let mut event = client_playback_event(&ev, user.id);
     // A first frame or a failure report settles the start attempt this
     // node opened for the viewer and file (C-08 M5 row 4); any other beacon
     // about a play in progress keeps that play alive. The beacon's own
@@ -1339,6 +1340,34 @@ pub async fn client_log(
             event.reason.as_deref(),
             std::time::Instant::now(),
         );
+        // The same report also settles the create it answers (G1): carry that
+        // create's attempt id on the beacon, and record the first frame as a
+        // row of its own. Matched by the session the report names, so two
+        // devices of one viewer on one title settle their own creates.
+        let session = event.session_id.clone();
+        if let Some(settled) = state.start_attempts.settle(
+            user.id,
+            file_id,
+            session.as_deref(),
+            &event.event,
+            std::time::Instant::now(),
+        ) {
+            carry_create_attempt(&mut event, &settled.attempt);
+            if settled.outcome == crate::playstart::SettledOutcome::Presented {
+                crate::telemetry::emit(
+                    Arc::clone(&state.store),
+                    crate::playstart::presented_event(
+                        &settled.attempt,
+                        (user.id, file_id),
+                        session.as_deref(),
+                        event.method.as_deref(),
+                        event.ms,
+                        event.reason.as_deref(),
+                        event.at_unix_ms,
+                    ),
+                );
+            }
+        }
     }
     // Deliberately not `ev.ua`: the class must come from the same input the
     // read paths use, or the prior is written under a key nothing reads.
@@ -1627,6 +1656,27 @@ fn emit_client_playback_event(
         .as_deref()
         .map(crate::transcode::session_log_id);
     crate::telemetry::emit_with_network(store, event, network, client);
+}
+
+/// Put the create's attempt id in the beacon's `attempt` column, where the
+/// Starts view joins on it. The player's own per-page counter (`a1`, `a2`, …)
+/// names an attempt only within one page and so cannot tell two devices
+/// apart; it moves to `extra.client_attempt` rather than being lost.
+fn carry_create_attempt(event: &mut PlaybackEvent, attempt: &str) {
+    let mut extra = event
+        .extra
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .and_then(|value| match value {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if let Some(client) = event.attempt.take() {
+        extra.insert("client_attempt".to_owned(), client.into());
+    }
+    event.attempt = Some(attempt.chars().take(64).collect());
+    event.extra = Some(serde_json::Value::Object(extra).to_string());
 }
 
 fn normalize_client_marker_prewarm(event: &mut PlaybackEvent) {

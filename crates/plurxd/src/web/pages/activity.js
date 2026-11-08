@@ -104,14 +104,18 @@ function activitySourceRecoveryHtml(d){
   if(!holders.length)return "";
   return `<section class="system-attention" data-activity-source-recovery role="status"><h2>Shared source reads need recovery</h2><p>These reservations can block queued scans and other media work even when their jobs are no longer listed. Lease expiry does not prove a physical read has stopped. Recovery must confirm it has stopped before releasing capacity.</p><ul>${holders.map(holder=>`<li><b>${esc(holder.work_id)}</b> · ${esc(holder.resource_key)} · ${holder.phase==="cleanup_pending"?"cleanup pending":"lease expired"} · ${holder.lease_expires_at_ms===0?"previous authority expired":`authority expiry ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}`}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
 }
+const ACTIVITY_TABS=["status","jobs","starts"];
+const ACTIVITY_TAB_LABELS={status:"Status",jobs:"Jobs",starts:"Starts"};
+function activityTabNeighbor(tab,step){return ACTIVITY_TABS[(ACTIVITY_TABS.indexOf(tab)+step+ACTIVITY_TABS.length)%ACTIVITY_TABS.length];}
 function setActivityTab(tab){
-  ACTIVITY_VIEW.tab=tab==="jobs"&&ME?.is_admin?"jobs":"status";
-  for(const name of ["status","jobs"]){const pane=document.getElementById("activity-"+name);if(pane)pane.hidden=name!==ACTIVITY_VIEW.tab;const button=document.getElementById("activity-tab-"+name);if(button)button.setAttribute("aria-selected",String(name===ACTIVITY_VIEW.tab));}
+  ACTIVITY_VIEW.tab=(tab==="jobs"||tab==="starts")&&ME?.is_admin?tab:"status";
+  for(const name of ACTIVITY_TABS){const pane=document.getElementById("activity-"+name);if(pane)pane.hidden=name!==ACTIVITY_VIEW.tab;const button=document.getElementById("activity-tab-"+name);if(button)button.setAttribute("aria-selected",String(name===ACTIVITY_VIEW.tab));}
   if(ACTIVITY_VIEW.tab==="jobs")refreshDurableActivity();
+  if(ACTIVITY_VIEW.tab==="starts")refreshActivityStarts();
 }
 function activityTabsHtml(){
   if(!ME?.is_admin)return "";
-  return `<div class="activity-tabs" role="tablist" aria-label="Activity views">${["status","jobs"].map(tab=>`<button class="ghost" role="tab" id="activity-tab-${tab}" data-activity-view="${tab}" aria-controls="activity-${tab}" aria-selected="${ACTIVITY_VIEW.tab===tab}" onclick="setActivityTab('${tab}')" onkeydown="if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();setActivityTab('${tab==="status"?"jobs":"status"}');document.getElementById('activity-tab-${tab==="status"?"jobs":"status"}').focus()}">${tab==="status"?"Status":"Jobs"}</button>`).join("")}</div>`;
+  return `<div class="activity-tabs" role="tablist" aria-label="Activity views">${ACTIVITY_TABS.map(tab=>`<button class="ghost" role="tab" id="activity-tab-${tab}" data-activity-view="${tab}" aria-controls="activity-${tab}" aria-selected="${ACTIVITY_VIEW.tab===tab}" onclick="setActivityTab('${tab}')" onkeydown="if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();const next=activityTabNeighbor('${tab}',event.key==='ArrowRight'?1:-1);setActivityTab(next);document.getElementById('activity-tab-'+next).focus()}">${ACTIVITY_TAB_LABELS[tab]}</button>`).join("")}</div>`;
 }
 function durableTypeBreakdownHtml(){
   const q=DURABLE_ACTIVITY,kinds=[...new Set((q.counts||[]).map(c=>c.kind))].sort();

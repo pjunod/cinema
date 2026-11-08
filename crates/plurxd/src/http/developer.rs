@@ -520,6 +520,7 @@ pub(crate) async fn readiness(
             ),
             event: Some("playback_display_mode".into()),
             limit: 2_000,
+            ..PlaybackEventQuery::default()
         })
         .await?;
 

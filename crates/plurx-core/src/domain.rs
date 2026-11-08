@@ -2009,7 +2009,13 @@ pub struct PlaybackEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaybackEventQuery {
     pub since_ms: Option<i64>,
+    /// Exclusive upper bound on `at_unix_ms`: the cursor of a newest-first
+    /// page is the oldest time of the page before it.
+    pub before_ms: Option<i64>,
     pub event: Option<String>,
+    /// When non-empty, the row's event must be one of these (and `event`, if
+    /// also set, must match as well).
+    pub events: Vec<String>,
     pub limit: i64,
 }
 

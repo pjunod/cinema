@@ -224,6 +224,7 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
   const d=detail;
   ACTIVITY_SNAPSHOT=d;
+  if(ME?.is_admin&&ACTIVITY_VIEW.tab==="starts")refreshActivityStarts();
   try{
     if(d.dvr){dvrSetOverview(d.dvr);ACTIVITY_DVR.rows=d.dvr.active||[];}
     else ACTIVITY_DVR.rows=[];
@@ -340,7 +341,8 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     ${section("processes","Processes on this server",activityProcessesHtml(d.processes))}
     <div class="activity-idle">${[!d.scans.length?"No scans running":"",!p?"No media preparation running":"",!offline.length?"No downloads in progress":""].filter(Boolean).join(" · ")}</div>
     ${section("trakt","Trakt",trakt)}</section>
-    ${ME?.is_admin?`<section id="activity-jobs" role="tabpanel" aria-labelledby="activity-tab-jobs"${ACTIVITY_VIEW.tab!=="jobs"?" hidden":""}><div id="durable-activity">${durableQueueHtml(nodeNames)}</div></section>`:""}`;
+    ${ME?.is_admin?`<section id="activity-jobs" role="tabpanel" aria-labelledby="activity-tab-jobs"${ACTIVITY_VIEW.tab!=="jobs"?" hidden":""}><div id="durable-activity">${durableQueueHtml(nodeNames)}</div></section>`:""}
+    ${activityStartsPaneHtml(nodeNames)}`;
   dvrRestoreUi(m,dvrUi);
   paintActivityInspector();
   if(durableFocus)restoreDurableFocus(m,durableFocus);
