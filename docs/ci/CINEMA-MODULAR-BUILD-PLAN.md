@@ -537,17 +537,20 @@ Record Astra's findings and individual dispositions with the review, then
 update this ledger and the backlog row in the same task changes. Retain the
 original before measurements and failures when adding after results.
 
-## 9. Integrated delivery evidence — 2026-11-07
+## 9. Integrated delivery evidence — 2026-11-08
 
-[Task PR #1396](http://forge.lan:3000/noirr/plurx/pulls/1396) merged as
-`ca6c894381` after gate6532. Its nine focused qualification steps passed on
-`02ea8ed11d61f737f660a1f60d2f20223d8487c0`, including actual AUTH81/AUTH82
-CLI handoff, native reopen, preserved data/keys and five child-owner controls.
-CLI receipt: `e3c20b408c784497ba2611d5f8f2d7c5`. Historical packaging passed
-121 tests with one environment skip and one Python3.12 fixture retry.
+[Task #1396](http://forge.lan:3000/noirr/plurx/pulls/1396) merged after gate6532;
+Its retained nine-step qualification includes AUTH81/AUTH82 CLI conversion,
+native reopen and data/key preservation.
+[Correction task #1442](http://forge.lan:3000/noirr/plurx/pulls/1442) integrates
+current-main contracts and confines new diagnostic workers to explicit clusters.
 
-The [measurement ledger](CINEMA-BUILD-MEASUREMENTS.md) retains each measured
-source, all samples and failed attempts; its latest section owns the final
-comparison. Cold-build gains remain unproven. Current-main qualification and
-landing belong to [promotion PR #1397](http://forge.lan:3000/noirr/plurx/pulls/1397)
-and its exact-head receipt. Further extraction is deferred.
+The [measurement ledger §6](CINEMA-BUILD-MEASUREMENTS.md#6-integrated-standalone-build--2026-11-08)
+records source `83da88f89e`, all final warm samples and the sealed
+bundle. The actual daemon compiles 380 units with no Hiqlite/WAL/OpenRaft.
+Cold-build gains and further crate extraction remain outside this delivery.
+
+[Promotion #1397](http://forge.lan:3000/noirr/plurx/pulls/1397) owns exact-head
+full qualification, migration/graph replay, final receipt and landing. SQLite124
+remains the published dispatch migration; native identity/census is125. Models,
+quorum guards and data/credential preservation rules are unchanged.
