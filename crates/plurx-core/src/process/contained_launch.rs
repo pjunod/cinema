@@ -17,6 +17,7 @@ use std::sync::{mpsc, OnceLock};
 use std::time::Duration;
 
 mod linux;
+mod sandbox;
 
 const MAX_ROOTS: usize = 16;
 const MAX_STRINGS: usize = 64;
@@ -30,6 +31,8 @@ pub(super) struct SealedLaunchSpec {
     input: File,
     arguments: Vec<CString>,
     environment: Vec<CString>,
+    sandbox: Option<sandbox::PreparedSandbox>,
+    finite_inputs: Vec<File>,
 }
 
 impl SealedLaunchSpec {
@@ -63,6 +66,45 @@ impl SealedLaunchSpec {
             input,
             arguments,
             environment,
+            sandbox: None,
+            finite_inputs: Vec::new(),
+        };
+        spec.validate()?;
+        Ok(spec)
+    }
+
+    #[cfg(test)]
+    fn test_finite_executable(
+        executable: File,
+        inputs: Vec<File>,
+        arguments: Vec<CString>,
+        environment: Vec<CString>,
+    ) -> io::Result<Self> {
+        if !(1..=2).contains(&inputs.len()) || inputs.capacity() > 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "finite input slots exceed fixed profile",
+            ));
+        }
+        for file in std::iter::once(&executable).chain(inputs.iter()) {
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+            if flags < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if !file.metadata()?.is_file() || flags & libc::O_ACCMODE != libc::O_RDONLY {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "finite executable/input must be a read-only regular object",
+                ));
+            }
+        }
+        let spec = Self {
+            executable,
+            input: File::open("/dev/null")?,
+            arguments,
+            environment,
+            sandbox: None,
+            finite_inputs: inputs,
         };
         spec.validate()?;
         Ok(spec)
@@ -81,7 +123,9 @@ impl SealedLaunchSpec {
             .try_fold(0usize, |sum, value| {
                 sum.checked_add(value.as_bytes_with_nul().len())
             });
-        if self.arguments.is_empty()
+        if self.finite_inputs.len() > 2
+            || self.finite_inputs.capacity() > 2
+            || self.arguments.is_empty()
             || count.is_none_or(|n| n > MAX_STRINGS)
             || capacity.is_none_or(|n| n > MAX_STRINGS)
             || bytes.is_none_or(|n| n > MAX_STRING_BYTES)
@@ -738,6 +782,323 @@ mod tests {
                 libc::_exit(0);
             }
         }
+    }
+
+    #[test]
+    #[ignore = "private sandbox child; invoked only by the capped delegated parent"]
+    fn private_restricted_child_entry() {
+        assert_eq!(
+            std::env::var("PLURX_PRIVATE_SANDBOX_TEST").as_deref(),
+            Ok("read-only-v1")
+        );
+        let denied = std::env::var("PLURX_PRIVATE_SANDBOX_FILE").unwrap();
+        assert_eq!(
+            File::open(&denied).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&denied)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let root = std::env::var("PLURX_TEST_CGROUP_ROOT").unwrap();
+        assert_eq!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(Path::new(&root).join("cgroup.procs"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let path = CString::new(root).unwrap();
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        // O_PATH is deliberately not a filesystem read. The syscall policy
+        // must deny clone3 even when an untrusted child acquires this fd.
+        assert!(fd >= 0);
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut args = [0u64; 11];
+        args[0] = 0x2_0000_0000; // CLONE_INTO_CGROUP
+        args[4] = libc::SIGCHLD as u64;
+        args[10] = fd.as_raw_fd() as u64;
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_clone3,
+                args.as_ptr(),
+                std::mem::size_of_val(&args),
+            )
+        };
+        if result == 0 {
+            unsafe { libc::_exit(71) }
+        }
+        if result > 0 {
+            unsafe {
+                libc::waitpid(result as i32, std::ptr::null_mut(), 0);
+            }
+        }
+        assert_eq!(result, -1);
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOSYS)
+        );
+        assert_eq!(unsafe { libc::unshare(libc::CLONE_NEWUSER) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+        assert_eq!(
+            unsafe { libc::syscall(libc::SYS_pidfd_getfd, -1, 0, 0) },
+            -1
+        );
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+        assert_eq!(
+            unsafe { libc::syscall(libc::SYS_ptrace, u64::MAX, 0, 0, 0) },
+            -1
+        );
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+        assert_eq!(
+            unsafe { libc::syscall(libc::SYS_socket, libc::AF_UNIX, libc::SOCK_STREAM, 0) },
+            -1
+        );
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+        let thread = std::thread::spawn(|| 42);
+        assert_eq!(
+            thread.join().unwrap(),
+            42,
+            "constrained legacy thread creation still works"
+        );
+        println!("restricted-file-controller-namespace-and-descriptor-access");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore = "requires capped delegated cgroup2 root and Landlock ABI6; run explicitly with --ignored"]
+    fn strict_sandbox_denies_controller_namespace_and_descriptor_escape() {
+        let parent = std::env::var_os("PLURX_TEST_CGROUP_ROOT").unwrap();
+        let root = NativeDomainRoot::open(Path::new(&parent)).unwrap();
+        let domain = root
+            .create_domain(NativeDomainLimits::new(2 * 1024 * 1024 * 1024, 32).unwrap())
+            .unwrap();
+        let forbidden = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(forbidden.path(), b"original must remain untouched").unwrap();
+        let parent_env = format!("PLURX_TEST_CGROUP_ROOT={}", Path::new(&parent).display());
+        let denied_env = format!("PLURX_PRIVATE_SANDBOX_FILE={}", forbidden.path().display());
+        let mut spec = spec(
+            &[
+                "sandbox-test",
+                "--exact",
+                "process::contained_launch::tests::private_restricted_child_entry",
+                "--ignored",
+                "--nocapture",
+                "--color",
+                "never",
+            ],
+            &[
+                "PLURX_PRIVATE_SANDBOX_TEST=read-only-v1",
+                "RUST_TEST_THREADS=1",
+                &parent_env,
+                &denied_env,
+            ],
+        );
+        let interpreter = File::open("/lib64/ld-linux-x86-64.so.2").unwrap();
+        let read_only = [
+            "/lib",
+            "/lib64",
+            "/usr/lib",
+            "/usr/lib64",
+            "/etc/ld.so.cache",
+        ]
+        .into_iter()
+        .filter_map(|name| File::open(name).ok())
+        .collect::<Vec<_>>();
+        spec.sandbox = Some(
+            sandbox::PreparedSandbox::read_only(
+                &spec.executable,
+                &spec.input,
+                &[interpreter],
+                &read_only,
+            )
+            .unwrap(),
+        );
+        let mut child = launch(domain, spec).unwrap_or_else(|failure| {
+            panic!(
+                "actual restricted launch required: {}",
+                launch_failure(&failure)
+            )
+        });
+        let status = wait_private_root(&mut child);
+        let mut output = String::new();
+        child.stdout().unwrap().read_to_string(&mut output).unwrap();
+        let mut errors = String::new();
+        child.stderr().unwrap().read_to_string(&mut errors).unwrap();
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "restricted child: {status}; {output}; {errors}"
+        );
+        assert!(
+            output.contains("restricted-file-controller-namespace-and-descriptor-access"),
+            "{output}; {errors}"
+        );
+        assert_eq!(
+            std::fs::read(forbidden.path()).unwrap(),
+            b"original must remain untouched"
+        );
+        child.close_output_pipes();
+        assert!(child.try_native_extinction().unwrap().is_some());
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore = "requires explicit capped delegated cgroup root, native FFmpeg and Landlock ABI6"]
+    fn strict_restricted_ffmpeg_uses_original_fd_three_four_and_nine() {
+        use std::io::Write;
+        let parent = std::env::var_os("PLURX_TEST_CGROUP_ROOT").unwrap();
+        let program = std::env::var_os("PLURX_TEST_FFMPEG").unwrap();
+        let libraries = std::env::var_os("PLURX_TEST_FFMPEG_LIBDIR").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("original.y4m");
+        let audio = dir.path().join("original.pcm");
+        let mut file = File::create(&video).unwrap();
+        file.write_all(b"YUV4MPEG2 W64 H64 F4:1 Ip A1:1 C420jpeg\n")
+            .unwrap();
+        for _ in 0..2 {
+            file.write_all(b"FRAME\n").unwrap();
+            file.write_all(&[128; 64 * 64 * 3 / 2]).unwrap();
+        }
+        drop(file);
+        std::fs::write(&audio, [0; 8000]).unwrap();
+        let inputs = vec![File::open(&video).unwrap(), File::open(&audio).unwrap()];
+        let arguments = [
+            "/proc/self/fd/9",
+            "-nostdin",
+            "-v",
+            "error",
+            "-filter_threads",
+            "1",
+            "-filter_complex_threads",
+            "1",
+            "-i",
+            "/dev/fd/3",
+            "-f",
+            "s16le",
+            "-ar",
+            "8000",
+            "-ac",
+            "1",
+            "-i",
+            "/dev/fd/4",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "libx264",
+            "-threads",
+            "1",
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-f",
+            "mp4",
+            "-movflags",
+            "frag_keyframe+empty_moov",
+            "pipe:1",
+        ]
+        .into_iter()
+        .map(|x| CString::new(x).unwrap())
+        .collect();
+        let env = [
+            format!("LD_LIBRARY_PATH={}", Path::new(&libraries).display()),
+            "LANG=C".into(),
+            "LC_ALL=C".into(),
+            "AV_LOG_FORCE_NOCOLOR=1".into(),
+        ]
+        .into_iter()
+        .map(|x| CString::new(x).unwrap())
+        .collect();
+        let mut spec = SealedLaunchSpec::test_finite_executable(
+            File::open(program).unwrap(),
+            inputs,
+            arguments,
+            env,
+        )
+        .unwrap();
+        let interpreter = File::open("/lib64/ld-linux-x86-64.so.2").unwrap();
+        let mut reads = [
+            "/lib",
+            "/lib64",
+            "/usr/lib",
+            "/usr/lib64",
+            "/etc/ld.so.cache",
+        ]
+        .into_iter()
+        .filter_map(|x| File::open(x).ok())
+        .collect::<Vec<_>>();
+        reads.push(File::open(&libraries).unwrap());
+        reads.extend(spec.finite_inputs.iter().map(|f| f.try_clone().unwrap()));
+        spec.sandbox = Some(
+            sandbox::PreparedSandbox::read_only(
+                &spec.executable,
+                &spec.input,
+                &[interpreter],
+                &reads,
+            )
+            .unwrap(),
+        );
+        let root = NativeDomainRoot::open(Path::new(&parent)).unwrap();
+        let domain = root
+            .create_domain(NativeDomainLimits::new(2 * 1024 * 1024 * 1024, 32).unwrap())
+            .unwrap();
+        let mut child = launch(domain, spec).unwrap_or_else(|failure| {
+            panic!(
+                "actual FFmpeg launch required: {}",
+                launch_failure(&failure)
+            )
+        });
+        let status = wait_private_root(&mut child);
+        let mut output = Vec::new();
+        child.stdout().unwrap().read_to_end(&mut output).unwrap();
+        let mut errors = String::new();
+        child.stderr().unwrap().read_to_string(&mut errors).unwrap();
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "FFmpeg status {status}: {errors}"
+        );
+        assert!(
+            output.windows(4).any(|x| x == b"ftyp")
+                && output.windows(4).any(|x| x == b"moof")
+                && output.windows(4).any(|x| x == b"mdat"),
+            "actual fragmented output required: {errors}"
+        );
+        child.close_output_pipes();
+        assert!(child.try_native_extinction().unwrap().is_some());
+    }
+
+    #[test]
+    fn finite_descriptor_profile_refuses_writable_original_input_before_entry() {
+        let input = tempfile::NamedTempFile::new().unwrap();
+        let writable = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(input.path())
+            .unwrap();
+        let result = SealedLaunchSpec::test_finite_executable(
+            File::open(std::env::current_exe().unwrap()).unwrap(),
+            vec![writable],
+            vec![CString::new("fixed-finite").unwrap()],
+            Vec::new(),
+        );
+        assert_eq!(
+            result
+                .err()
+                .expect("inherited writable source cannot be sandboxed retroactively")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     fn delegated_child(mode: &str, memory: u64, tasks: u32) -> OwnedContainedChild {

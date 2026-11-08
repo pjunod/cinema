@@ -45,19 +45,21 @@ fn high_copy(file: &File) -> io::Result<OwnedFd> {
     }
 }
 
-pub(super) struct PreparedChild {
+pub(super) struct PreparedChild<'spec> {
     executable: OwnedFd,
     input: OwnedFd,
+    finite_inputs: Vec<OwnedFd>,
     output: OwnedFd,
     errors: OwnedFd,
     error_writer: OwnedFd,
     arguments: Vec<*const libc::c_char>,
     environment: Vec<*const libc::c_char>,
+    sandbox: Option<&'spec super::sandbox::PreparedSandbox>,
 }
 
-impl PreparedChild {
+impl<'spec> PreparedChild<'spec> {
     pub(super) fn new(
-        spec: &SealedLaunchSpec,
+        spec: &'spec SealedLaunchSpec,
         output: File,
         errors: File,
         error_writer: File,
@@ -70,14 +72,20 @@ impl PreparedChild {
             .map(|value| value.as_ptr())
             .collect();
         environment.push(std::ptr::null());
+        let mut finite_inputs = Vec::with_capacity(spec.finite_inputs.len());
+        for file in &spec.finite_inputs {
+            finite_inputs.push(high_copy(file)?);
+        }
         Ok(Self {
             executable: high_copy(&spec.executable)?,
+            finite_inputs,
             input: high_copy(&spec.input)?,
             output: high_copy(&output)?,
             errors: high_copy(&errors)?,
             error_writer: high_copy(&error_writer)?,
             arguments,
             environment,
+            sandbox: spec.sandbox.as_ref(),
         })
     }
 
@@ -206,8 +214,23 @@ impl PreparedChild {
                 unsafe { fail(error_fd, 4) }
             }
         }
+        for (index, source) in self.finite_inputs.iter().enumerate() {
+            if unsafe { libc::dup3(source.as_raw_fd(), 3 + index as i32, 0) } < 0 {
+                unsafe { fail(error_fd, 8) }
+            }
+        }
+        if !self.finite_inputs.is_empty()
+            && unsafe { libc::dup3(self.executable.as_raw_fd(), 9, 0) } < 0
+        {
+            unsafe { fail(error_fd, 9) }
+        }
         if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
             unsafe { fail(error_fd, 5) }
+        }
+        if let Some(sandbox) = self.sandbox {
+            if !unsafe { sandbox.apply() } {
+                unsafe { fail(error_fd, 7) }
+            }
         }
         unsafe {
             libc::syscall(
