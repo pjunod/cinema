@@ -4542,7 +4542,6 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
     request.kind = crate::transcode::SessionKind::Transcode { height: 720 };
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
         catalog_query: None,
-        prepared_processing: None,
         display_target: None,
         display_target_note: None,
         ordinary_request: None,
@@ -4984,7 +4983,6 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
         .request;
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
         catalog_query: None,
-        prepared_processing: None,
         display_target: None,
         display_target_note: None,
         ordinary_request: None,
@@ -5712,7 +5710,6 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
         assert_eq!(TranscodeManager::processed_qualification_input(&snapshot, &request, 180)
             .expect("description re-enters fresh qualification").0.dv_processing_destination,
             Some(DvDestination::Profile81));
-        assert!(request.candidate_context.as_ref().expect("description only").prepared_processing.is_none());
 
         for (copy, native, conversion, fel) in [(true, true, true, true), (false, false, true, true),
             (true, false, false, true), (true, false, true, false)] {

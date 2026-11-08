@@ -1758,7 +1758,6 @@ impl TranscodeManager {
     pub(crate) fn candidate_context(candidate: &QualityCandidate) -> CandidateExecutionContext {
         CandidateExecutionContext {
             catalog_query: None,
-            prepared_processing: None,
             display_target: None,
             display_target_note: None,
             ordinary_request: None,

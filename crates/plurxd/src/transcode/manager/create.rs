@@ -920,7 +920,6 @@ impl TranscodeManager {
                     serving_admission,
                     retained_capture,
                     revalidated.as_ref(),
-                    recovery,
                 )
                 .await;
             tracing::info!(
@@ -2163,7 +2162,6 @@ impl TranscodeManager {
                 .candidate_context
                 .as_mut()
                 .ok_or("processed trial context missing")?;
-            context.prepared_processing = None;
             context.display_target = display_target;
             context.display_target_note = display_target_note.clone();
             context.retained_output = None;
@@ -2431,8 +2429,6 @@ impl TranscodeManager {
         };
         self.validate_processed_root(req, &context, &file, &root)
             .await?;
-        let mut context = context;
-        context.prepared_processing = None;
         remote.request.candidate_context = Some(context);
         Ok(root)
     }
@@ -3834,36 +3830,6 @@ impl TranscodeManager {
         )
     }
 
-    /// Consume the prepared processing graph a processed candidate was
-    /// qualified with, or say exactly why it cannot be: the typed refusal
-    /// `try_vod_session` reports, or degrades from, with the ordinary request.
-    async fn admit_prepared_processing(
-        &self,
-        req: &SessionRequest,
-        context: &CandidateExecutionContext,
-        recovery: Option<&SessionRecoveryIdentity>,
-        file: &plurx_core::domain::MediaFile,
-    ) -> Result<crate::vodserve::PreparedRootAdmission, String> {
-        let recovery = recovery.ok_or("processed candidate requires typed recovery identity")?;
-        let prepared = context
-            .prepared_processing
-            .as_ref()
-            .ok_or_else(|| {
-                vod_refusal_error(
-                    "candidate_recipe_unavailable",
-                    "processed candidate requires fresh admitted owner qualification",
-                )
-            })?
-            .take(
-                req.processed_preparation_binding(recovery)
-                    .map_err(|error| vod_refusal_error("candidate_recipe_changed", error))?,
-            )
-            .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
-        self.validate_processed_root(req, context, file, &prepared)
-            .await?;
-        Ok(prepared)
-    }
-
     /// Rebuild descriptive inputs only under a verified first-preparation
     /// expectation, borrowing custody from its exact process-local predecessor.
     /// This does not relax generic serialized catalog restoration.
@@ -4141,7 +4107,6 @@ impl TranscodeManager {
         // source row and HWACCEL preference come from it: it was taken in
         // this task, moments ago, and a second read would answer the same.
         revalidated: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
-        recovery: Option<&SessionRecoveryIdentity>,
     ) -> Result<StartInfo, String> {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
@@ -4196,17 +4161,22 @@ impl TranscodeManager {
         // itself is refused.
         let mut degraded_processing = None;
         let degraded_request;
-        let (req, root_admission) = match req
+        let req = match req
             .candidate_context
             .as_ref()
             .filter(|context| context.selected_candidate.processed_dv)
         {
-            Some(context) => match self
-                .admit_prepared_processing(req, context, recovery, &file)
-                .await
-            {
-                Ok(prepared) => (req, Some(prepared)),
-                Err(error) => match context.ordinary_request.as_deref() {
+            // Processed Dolby Vision is an upgrade after the first frame
+            // (playback start D1): no create holds a prepared processing
+            // graph, and a staged or upgrade successor brings its root through
+            // its own restore path. A processed candidate here therefore
+            // serves the ordinary request it enhances, or is refused.
+            Some(context) => {
+                let error = vod_refusal_error(
+                    "candidate_recipe_unavailable",
+                    "processed candidate requires fresh admitted owner qualification",
+                );
+                match context.ordinary_request.as_deref() {
                     Some(ordinary) if ordinary.file_id == req.file_id => {
                         let reason = vod_refusal(&error)
                             .map_or_else(|| error.clone(), |(_, detail)| detail.to_owned());
@@ -4222,26 +4192,22 @@ impl TranscodeManager {
                             request_id: req.request_id.clone(),
                             ..ordinary.clone()
                         };
-                        (&degraded_request, None)
+                        &degraded_request
                     }
                     _ => return Err(error),
-                },
-            },
-            None => (req, None),
+                }
+            }
+            None => req,
         };
         let mut processing_note = None;
-        let encoding = match root_admission.as_ref() {
-            Some(prepared) => Some(Arc::clone(&prepared.encoding)),
-            None => {
-                self.prepare_vod_encoding_noting(
-                    req,
-                    &file,
-                    revalidated.map(super::planning_hwaccel_preference),
-                    Some(&mut processing_note),
-                )
-                .await?
-            }
-        };
+        let encoding = self
+            .prepare_vod_encoding_noting(
+                req,
+                &file,
+                revalidated.map(super::planning_hwaccel_preference),
+                Some(&mut processing_note),
+            )
+            .await?;
         let processed_dv_profile = encoding
             .as_ref()
             .filter(|encoding| encoding.preserves_processed_dv())
@@ -4290,7 +4256,6 @@ impl TranscodeManager {
         // Only when the Developer switch admits this kind: a play must not
         // queue a whole-title background job the operator never turned on.
         let output_enqueue = (complete_candidate_output
-            && root_admission.is_none()
             && settings.output_preparation.admits(encoding.is_some())
             && matches!(
                 &retained_capture,
@@ -4309,7 +4274,7 @@ impl TranscodeManager {
             )
         });
         let prepared = crate::vodserve::VodRecipeRequest {
-            root_admission,
+            root_admission: None,
             companion,
             measured_candidate,
             retained_capture: match retained_capture {
