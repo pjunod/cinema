@@ -1,12 +1,15 @@
 //! Recovery evidence is distinct from a pre-read activation or a joined receipt.
-//! Only a verified reboot of the same physical host proves all former readers,
-//! including escaped process groups, stopped. Same-boot evidence stays held.
+//! Mediated reader lifetime witnesses work on native macOS/Linux and in
+//! containers. Legacy unmediated evidence retains its separate physical proof.
 use super::*;
 use plurx_core::store::background_jobs_resources::{
     BackgroundSourceCustodyToken, BackgroundSourceOwner,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Read;
+
+mod reader;
+pub(super) use reader::Witness;
 
 const MAX_BYTES: u64 = 1_048_576;
 const MAX_RECORDS: usize = 128;
@@ -36,6 +39,10 @@ pub(super) fn configure_backend(
 ) -> Result<(), String> {
     if authoritative && data_dir.as_os_str().is_empty() {
         return Err("authoritative source recovery needs a persistent data directory".into());
+    }
+    if authoritative {
+        plurx_core::process::source_lifetime::install_observer(reader::observe_children)
+            .map_err(|error| error.to_string())?;
     }
     let context = Context {
         store: Arc::downgrade(store),
@@ -338,33 +345,31 @@ fn write_active_at(dir: &Path, record: Record, identity: Option<Identity>) -> Re
 pub(super) fn foreground(
     store: &Arc<dyn Store>,
     token: &ForegroundSourceToken,
-) -> Result<(), String> {
+    activation_id: &str,
+) -> Result<Option<Arc<Witness>>, String> {
     let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
-        return Ok(());
+        return Ok(None);
     };
-    write_active_at(
-        &context.dir,
-        Record::Foreground {
-            token: token.clone(),
-        },
-        Identity::current(),
-    )
+    let record = Record::Foreground {
+        token: token.clone(),
+    };
+    write_active_at(&context.dir, record.clone(), Identity::current())?;
+    reader::prepare_at(&context.dir.with_file_name("v2"), record, activation_id)
 }
 
 pub(super) fn background(
     store: &Arc<dyn Store>,
     token: &BackgroundSourceCustodyToken,
-) -> Result<(), String> {
+    activation_id: &str,
+) -> Result<Option<Arc<Witness>>, String> {
     let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
-        return Ok(());
+        return Ok(None);
     };
-    write_active_at(
-        &context.dir,
-        Record::Background {
-            token: token.clone(),
-        },
-        Identity::current(),
-    )
+    let record = Record::Background {
+        token: token.clone(),
+    };
+    write_active_at(&context.dir, record.clone(), Identity::current())?;
+    reader::prepare_at(&context.dir.with_file_name("v2"), record, activation_id)
 }
 
 pub(super) fn clear(store: &Arc<dyn Store>, receipt: &SettlementReceipt) -> Result<(), String> {
@@ -380,7 +385,8 @@ pub(super) fn clear(store: &Arc<dyn Store>, receipt: &SettlementReceipt) -> Resu
         },
         _ => return Ok(()),
     };
-    clear_at(&context.dir, &record)
+    clear_at(&context.dir, &record)?;
+    reader::complete_at(&context.dir.with_file_name("v2"), &record)
 }
 
 /// Activation success also clears its legacy intent. Only this separate path
@@ -425,6 +431,7 @@ pub(super) async fn clear_aborted_if_absent(
         _ => return Err("abort cleanup requires an exact activation receipt".into()),
     };
     clear_at(&context.dir, &record)?;
+    reader::complete_at(&context.dir.with_file_name("v2"), &record)?;
     Ok(true)
 }
 
@@ -471,10 +478,15 @@ pub(super) async fn replay(store: &Arc<dyn Store>, node: &str) -> Result<(), Str
     let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
         return Ok(());
     };
-    let Some(identity) = Identity::current() else {
-        return Ok(());
+    let reader_result =
+        reader::replay_at(store, &context.dir.with_file_name("v2"), &context.dir, node).await;
+    // Native macOS needs no Linux host identity for the common reader path.
+    let legacy_result = if let Some(identity) = Identity::current() {
+        replay_at(store, &context.dir, &identity, node).await
+    } else {
+        Ok(())
     };
-    replay_at(store, &context.dir, &identity, node).await
+    reader_result.and(legacy_result)
 }
 
 async fn replay_at(
@@ -528,52 +540,7 @@ async fn replay_at(
         if !verified(&envelope, identity, node) {
             continue;
         }
-        for record in &envelope.records {
-            match record {
-                Record::Background { token } => {
-                    if store
-                        .mark_background_source_settled(token.clone())
-                        .await
-                        .map_err(|error| error.to_string())?
-                        && !store
-                            .release_background_source_custody(
-                                token.clone(),
-                                crate::state::clock_ms(),
-                            )
-                            .await
-                            .map_err(|error| error.to_string())?
-                    {
-                        return Err(
-                            "background reboot recovery release needs reconciliation".into()
-                        );
-                    }
-                }
-                Record::Foreground { token } => {
-                    if store
-                        .mark_foreground_source_settled(token.clone())
-                        .await
-                        .map_err(|error| error.to_string())?
-                    {
-                        if let Some(current) = store
-                            .resolve_foreground_source(token.clone())
-                            .await
-                            .map_err(|error| error.to_string())?
-                        {
-                            if !store
-                                .release_foreground_source(current, crate::state::clock_ms())
-                                .await
-                                .map_err(|error| error.to_string())?
-                            {
-                                return Err(
-                                    "foreground reboot recovery release needs reconciliation"
-                                        .into(),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        settle_records(store, &envelope.records).await?;
         // Record removal only follows authoritative settlement acknowledgement.
         std::fs::remove_file(&path).map_err(|error| error.to_string())?;
         std::fs::File::open(dir)
@@ -583,6 +550,48 @@ async fn replay_at(
             records = envelope.records.len(),
             "source custody recovered after verified host reboot"
         );
+    }
+    Ok(())
+}
+
+async fn settle_records(store: &Arc<dyn Store>, records: &[Record]) -> Result<(), String> {
+    for record in records {
+        match record {
+            Record::Background { token } => {
+                if store
+                    .mark_background_source_settled(token.clone())
+                    .await
+                    .map_err(|error| error.to_string())?
+                    && !store
+                        .release_background_source_custody(token.clone(), crate::state::clock_ms())
+                        .await
+                        .map_err(|error| error.to_string())?
+                {
+                    return Err("background recovery release needs reconciliation".into());
+                }
+            }
+            Record::Foreground { token } => {
+                if store
+                    .mark_foreground_source_settled(token.clone())
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    if let Some(current) = store
+                        .resolve_foreground_source(token.clone())
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        if !store
+                            .release_foreground_source(current, crate::state::clock_ms())
+                            .await
+                            .map_err(|error| error.to_string())?
+                        {
+                            return Err("foreground recovery release needs reconciliation".into());
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
