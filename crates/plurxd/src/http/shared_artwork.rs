@@ -965,6 +965,7 @@ mod tests {
         grant: uuid::Uuid,
         lifecycle: i64,
         viewer: i64,
+        token: String,
         remote: SharingIdentity,
     }
     /// An active B import whose Source endpoint cannot be reached, so any
@@ -1110,6 +1111,7 @@ mod tests {
             grant,
             lifecycle,
             viewer: user.id,
+            token,
             remote,
         }
     }
@@ -1244,5 +1246,61 @@ mod tests {
             .artwork_authority(state, &reference)
             .await
             .is_err());
+    }
+    /// A poster burst that exceeds Source scope-check capacity is told to come
+    /// back (429 + Retry-After, which the loader retries); it is not refused,
+    /// and nothing is served without the live proof.
+    #[tokio::test]
+    async fn sharing_art_scope_saturation_is_a_typed_429_not_a_503() {
+        use axum::response::IntoResponse;
+        let _serial = ART_FIXTURES.lock().await;
+        let fixture = receiver_art_fixture().await;
+        let state = &fixture.state;
+        let reference = fixture.reference(clock_ms());
+        let summary = state
+            .sharing
+            .artwork_authority(state, &reference)
+            .await
+            .expect("assigned viewer of an active import")
+            .summary;
+        let mut held = Vec::new();
+        while let Some(permit) = state
+            .sharing
+            .scope_permit_within(std::time::Duration::ZERO)
+            .await
+        {
+            held.push(permit);
+        }
+        assert_eq!(held.len(), 32, "all scope capacity held");
+        let mut response = Response::new(Body::empty());
+        let busy = super::super::shared_library::attach_receiver_art_authority(
+            state,
+            &fixture.token,
+            fixture.viewer,
+            &summary,
+            &reference,
+            &mut response,
+        )
+        .await
+        .expect_err("saturated scope capacity")
+        .into_response();
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(busy.headers()[header::RETRY_AFTER], "1");
+        // With capacity free the proof runs; the unreachable Source then
+        // cannot confirm the scope, which stays a refusal, never a 429.
+        drop(held);
+        let refused = super::super::shared_library::attach_receiver_art_authority(
+            state,
+            &fixture.token,
+            fixture.viewer,
+            &summary,
+            &reference,
+            &mut response,
+        )
+        .await
+        .expect_err("unreachable Source cannot prove scope")
+        .into_response();
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.sharing.scope_control_available(), 32);
     }
 }

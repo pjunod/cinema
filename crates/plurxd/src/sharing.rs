@@ -1929,11 +1929,39 @@ impl SharingManager {
         items: Vec<plurx_core::sharing_catalogue_details::SourceScopeItem>,
         files: Vec<plurx_core::sharing_catalogue_details::SourceScopeFile>,
     ) -> bool {
-        use crate::sharing_client::{PeerConnection, PeerError};
-        use plurx_core::{sharing::SharingIdentity, sharing_catalogue_details::SourceScopeRequest};
-        let Ok(_permit) = self.scope_control.clone().try_acquire_owned() else {
+        let Ok(permit) = self.scope_control.clone().try_acquire_owned() else {
             return false;
         };
+        matches!(
+            self.scope_proof(state, permit, captured, items, files)
+                .await,
+            Ok(true)
+        )
+    }
+    /// Waits up to `wait` for scope-control capacity. `None` means the Source
+    /// scope checks are saturated, which says nothing about the grant.
+    pub(crate) async fn scope_permit_within(
+        &self,
+        wait: Duration,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        tokio::time::timeout(wait, self.scope_control.clone().acquire_owned())
+            .await
+            .ok()?
+            .ok()
+    }
+    /// The live Source scope check, with its capacity already held. `Ok(false)`
+    /// and `Authentication` are refusals; a deadline is `Busy` (not proven
+    /// either way), so callers can tell "revoked" from "too slow right now".
+    pub(crate) async fn scope_proof(
+        &self,
+        state: &AppState,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+        captured: &plurx_core::store::sharing_catalogue::ReceiverCatalogueScope,
+        items: Vec<plurx_core::sharing_catalogue_details::SourceScopeItem>,
+        files: Vec<plurx_core::sharing_catalogue_details::SourceScopeFile>,
+    ) -> Result<bool, crate::sharing_client::PeerError> {
+        use crate::sharing_client::{PeerConnection, PeerError};
+        use plurx_core::{sharing::SharingIdentity, sharing_catalogue_details::SourceScopeRequest};
         tokio::time::timeout(Duration::from_secs(1), async {
             let import = state
                 .store
@@ -1990,7 +2018,9 @@ impl SharingManager {
             peer.current_scope(&credentials.credential, &request).await
         })
         .await
-        .is_ok_and(|result| matches!(result, Ok(true)))
+        .map_err(|_| PeerError::Busy {
+            retry_after_secs: 1,
+        })?
     }
     pub async fn read_admin_libraries(
         &self,
