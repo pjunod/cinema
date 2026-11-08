@@ -1,0 +1,87 @@
+name: Cinema landed main isolated voter campaign
+on:
+  workflow_dispatch:
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: '2'
+  CINEMA_MAIN_COMMIT: 'c470d5aa033e84b4a2de1f8d36aa4180d62cd971'
+concurrency:
+  group: cinema-main-voter-recovery-c470d5aa033e
+  cancel-in-progress: false
+jobs:
+  cluster_transport_recovery_voter:
+    name: cluster transport recovery voter role
+    runs-on: [self-hosted, Linux, X64, lab, incus, ubuntu-24.04, android-kvm]
+    timeout-minutes: 240
+    steps:
+      - name: Record the role job budget start
+        run: echo "RECOVERY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: c470d5aa033e84b4a2de1f8d36aa4180d62cd971
+          persist-credentials: false
+      - name: Verify actual merged main source
+        run: |
+          test "$(git rev-parse HEAD)" = "$CINEMA_MAIN_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = c84c24964c1c00b3cdc3e06c8a7489c71ab6a95b
+
+      - name: Isolate the voter job's Rust toolchain installation
+        shell: bash
+        run: |
+          set -eu
+          test -n "$RUNNER_TEMP"
+          job_rustup=$(mktemp -d "$RUNNER_TEMP/cinema-voter-rustup.XXXXXXXX")
+          echo "RUSTUP_HOME=$job_rustup" >> "$GITHUB_ENV"
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: cluster-transport-recovery-voter
+      - name: Build the exact voter role runner
+        env:
+          PLURX_BUILD_SHA: c470d5aa033e84b4a2de1f8d36aa4180d62cd971
+        run: cargo build --locked --profile transport-recovery -p plurx-cluster-check
+      - name: Run 20 voter snapshot recovery cycles
+        id: voter_recovery
+        continue-on-error: true
+        shell: bash
+        env:
+          PLURX_BUILD_SHA: c470d5aa033e84b4a2de1f8d36aa4180d62cd971
+          PLURX_RUNNER_LABEL: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/validation
+          elapsed=$(( $(date +%s) - RECOVERY_JOB_STARTED ))
+          role_budget=$(( 13800 - elapsed ))
+          if [ "$role_budget" -le 0 ]; then
+            echo "No positive voter role budget remains before the ten-minute evidence reserve"
+            exit 1
+          fi
+          make cluster-transport-recovery-voter-check \
+            RECOVERY_EXECUTION_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            RECOVERY_OUTPUT_DIR=target/validation/transport-recovery-voter \
+            RECOVERY_MAX_RUN_SECONDS="$role_budget" \
+            RECOVERY_CARGO_PROFILE=transport-recovery \
+            RECOVERY_BINARY="${{ steps.cargo-cache.outputs.target-dir }}/transport-recovery/plurx-cluster-check" \
+            2>&1 | tee target/validation/cluster-transport-recovery-voter.log
+      - name: Retain voter report, diagnostics, and log
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: cluster-transport-recovery-voter
+          path: |
+            target/validation/cluster-transport-recovery-voter.log
+            target/validation/transport-recovery-voter/voter-role.json
+            target/validation/transport-recovery-voter/voter-diagnostics
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Propagate the voter role result
+        if: always() && steps.voter_recovery.outcome != 'success'
+        run: exit 1
