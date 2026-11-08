@@ -1220,13 +1220,14 @@ for any other id — including one that does not exist, so a scan key cannot
 probe which requests exist. `status` is `queued` · `running` · `done` · `failed`; `report` and
 `items` appear at `done`, `error` on failure (with `code: "path_unreadable"`
 when the root dropped mid-scan). A request made through this route also carries
-`waiting_on` — `full_scan:<library>` while a full scan or a metadata refresh
-holds a source reader or the fence the request needs, `heavy_lane:<kind>` while
-another background job holds that reader (a source's second reader is kept for
-playback), `root_unreadable:<path>` while the claiming node cannot read a root,
-`queue_position:<n>` when it joined a targeted pass already running with `n`
-requests ahead of it, empty once its turn starts — and `files`, the per-file
-report above; their absence means a request from before contract v2.
+`waiting_on` — `full_scan:<library>` while a full scan or a metadata refresh of
+the request's own library holds that library's fence, `root_unreadable:<path>`
+while the claiming node cannot read a root, `queue_position:<n>` when it joined
+a targeted pass already running with `n` requests ahead of it, empty once its
+turn starts — and `files`, the per-file report above; their absence means a
+request from before contract v2. A targeted request takes no background source
+reader, so a scan of another library on the same storage does not hold it, and
+the contract's `heavy_lane:<holder>` is never produced for it.
 Request receipts and results persist for seven days. The recent list is bounded
 to 256 records; an older record can still be read by ID until its receipt
 expires. A library admits at most 256 pending requests; overload is an explicit
