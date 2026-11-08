@@ -38,6 +38,9 @@ const MAX_LIMIT: i64 = 100;
 const PEER_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PEER_BYTES: usize = 512 * 1024;
 const PEER_CONCURRENCY: usize = 8;
+/// How many creates sharing a page's oldest millisecond one node adds to its
+/// page ([`local_page`]); a peer's page is at most `MAX_LIMIT` plus these.
+const MAX_TIE_ROWS: i64 = MAX_LIMIT;
 /// How many settling reports one page reads back from the sidecar.
 const SETTLING_ROWS: i64 = 2_000;
 /// The index projection is advisory: it must not hold a page of starts up.
@@ -168,6 +171,11 @@ struct Settling {
 }
 
 /// This node's newest-first page of creates older than `before_ms`.
+///
+/// A full page is extended across its oldest millisecond: every create this
+/// node holds at that millisecond comes back (up to [`MAX_TIE_ROWS`] more),
+/// so the merged page's cursor -- strictly older than its last row -- skips
+/// none of them.
 pub(crate) async fn local_page(
     store: &Arc<dyn Store>,
     node_id: &str,
@@ -176,7 +184,7 @@ pub(crate) async fn local_page(
     now_ms: i64,
 ) -> Result<Vec<StartRow>, ApiError> {
     let limit = limit.clamp(1, MAX_LIMIT);
-    let attempts = store
+    let mut attempts = store
         .playback_events(&PlaybackEventQuery {
             event: Some("start_attempt".to_owned()),
             before_ms,
@@ -187,6 +195,19 @@ pub(crate) async fn local_page(
     let Some(oldest) = attempts.last().map(|event| event.at_unix_ms) else {
         return Ok(Vec::new());
     };
+    if attempts.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
+        let tied = store
+            .playback_events(&PlaybackEventQuery {
+                event: Some("start_attempt".to_owned()),
+                since_ms: Some(oldest),
+                before_ms: Some(oldest.saturating_add(1)),
+                limit: MAX_TIE_ROWS,
+                ..PlaybackEventQuery::default()
+            })
+            .await?;
+        attempts.retain(|event| event.at_unix_ms != oldest);
+        attempts.extend(tied);
+    }
     // The first-frame rows and the failure beacons that settled these creates
     // were written after them, so one read from the oldest create onward
     // holds every one of them; they are matched on (attempt, session).
@@ -280,14 +301,18 @@ fn failure_reason(error: PeerTransportError) -> &'static str {
     }
 }
 
-/// Ask every peer the membership directory lists for its page. `Err` means
-/// the directory itself could not be read, so the peers are unknown.
+/// Ask every committed member -- voters and learners, stale ones included
+/// (`operations_peers`) -- for its page. A learner is an ingress too, so its
+/// starts are asked for, and a member that is down is named unavailable
+/// rather than left out (`activity_peers` lists voters only, which would
+/// drop a learner's starts without saying so). `Err` means the directory
+/// itself could not be read, so the peers are unknown.
 async fn peer_reports(
     state: &AppState,
     before_ms: Option<i64>,
     limit: i64,
 ) -> Result<Vec<NodeReport>, ()> {
-    let peers = state.membership.activity_peers().await.map_err(|_| ())?;
+    let peers = state.membership.operations_peers().await.map_err(|_| ())?;
     let transport = PeerTransport::new(state.membership.clone());
     let body = serde_json::to_vec(&PeerRequest { limit, before_ms }).map_err(|_| ())?;
     let deadline = deadline_after(PEER_TIMEOUT);
@@ -325,7 +350,7 @@ async fn peer_reports(
                     match serde_json::from_slice::<PeerPage>(&answer.body) {
                         Ok(page)
                             if page.node_id == peer.node_id
-                                && page.rows.len() <= MAX_LIMIT as usize
+                                && page.rows.len() <= (MAX_LIMIT + MAX_TIE_ROWS) as usize
                                 && page.rows.iter().all(|row| row.node_id == peer.node_id) =>
                         {
                             NodeReport {
@@ -437,41 +462,33 @@ pub(crate) enum IndexJob {
     None,
 }
 
-/// The jobs by file from one history read of working and one of attention
-/// rows (active work wins over a terminal row for the same file).
+/// The job by file, from each file's own fragment-index request (the Store
+/// answers an active one when there is any, else the newest): active work is
+/// joined, a failed or cancelled request is retried, and a superseded one --
+/// or a finished one -- leaves the file to be asked afresh.
 pub(crate) fn jobs_by_file(
-    working: &[plurx_core::store::AnalysisHistoryRow],
-    attention: &[plurx_core::store::AnalysisHistoryRow],
+    requests: &[plurx_core::store::AnalysisRequest],
 ) -> HashMap<i64, IndexJob> {
-    let mut jobs = HashMap::new();
-    for row in attention
+    requests
         .iter()
-        .filter(|row| row.component == "fragment_index")
-    {
-        if matches!(row.state.as_str(), "failed" | "cancelled")
-            && row.job_error_code != "source_superseded"
-            && row.request_error_code != "source_superseded"
-        {
-            jobs.entry(row.file_id)
-                .or_insert_with(|| IndexJob::Terminal {
-                    request_id: row.request_id.clone(),
-                    state: row.state.clone(),
-                });
-        }
-    }
-    for row in working
-        .iter()
-        .filter(|row| row.component == "fragment_index")
-    {
-        jobs.insert(
-            row.file_id,
-            IndexJob::Active {
-                request_id: row.request_id.clone(),
-                state: row.state.clone(),
-            },
-        );
-    }
-    jobs
+        .filter(|request| request.component == "fragment_index")
+        .filter_map(|request| {
+            let job = match request.state.as_str() {
+                "queued" | "running" | "submitted" => IndexJob::Active {
+                    request_id: request.request_id.clone(),
+                    state: request.state.clone(),
+                },
+                "failed" | "cancelled" if request.last_error_code != "source_superseded" => {
+                    IndexJob::Terminal {
+                        request_id: request.request_id.clone(),
+                        state: request.state.clone(),
+                    }
+                }
+                _ => return None,
+            };
+            Some((request.file_id, job))
+        })
+        .collect()
 }
 
 /// The action object a row offers for its title's index.
@@ -533,30 +550,18 @@ async fn index_states(state: &AppState, file_ids: &BTreeSet<i64>) -> HashMap<i64
     else {
         return out;
     };
-    let history = |filter| plurx_core::store::AnalysisHistoryQuery {
-        limit: 100,
-        cursor: None,
-        filter,
-        search: String::new(),
-        states: Vec::new(),
-        now_ms: crate::state::clock_ms(),
-    };
-    let working = state
+    // Each file's own request, however deep the queue is.
+    let ids = files
+        .iter()
+        .map(|file| file.id)
+        .take(plurx_core::store::MAX_FILE_REQUEST_LOOKUP)
+        .collect::<Vec<_>>();
+    let jobs = state
         .store
-        .analysis_history(&history(plurx_core::store::AnalysisHistoryFilter::Working))
+        .fragment_index_requests_for_files(&ids)
         .await
-        .map(|page| page.rows);
-    let attention = state
-        .store
-        .analysis_history(&history(
-            plurx_core::store::AnalysisHistoryFilter::Attention,
-        ))
-        .await
-        .map(|page| page.rows);
-    let jobs = match (&working, &attention) {
-        (Ok(working), Ok(attention)) => Some(jobs_by_file(working, attention)),
-        _ => None,
-    };
+        .ok()
+        .map(|requests| jobs_by_file(&requests));
     for (file, coverage) in files.iter().zip(coverage) {
         let action = match &jobs {
             Some(jobs) => index_action(

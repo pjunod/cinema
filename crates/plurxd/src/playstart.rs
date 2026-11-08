@@ -270,7 +270,15 @@ pub enum SettledOutcome {
 pub struct SettledStart {
     pub attempt: String,
     pub outcome: SettledOutcome,
+    /// The session the settled create answered with; `None` for a direct or
+    /// progressive start, which has none. The first-frame row names this,
+    /// so it pairs with the attempt row whatever the beacon carried.
+    pub session: Option<String>,
 }
+
+/// The sessions index key of a direct or progressive start (no session of
+/// its own): its attempt id behind a prefix no session id carries.
+const REQUEST_START_PREFIX: &str = "request-start:";
 
 /// C-08 M5 row 4, failed starts per attempt: one entry per (viewer, file)
 /// on this node, opened where media is really requested and resolved exactly
@@ -418,6 +426,9 @@ impl StartAttempts {
     /// report back to the create is [`Self::tag_session`]'s, taken at the
     /// create itself rather than in the detached task that opens the entry,
     /// so no report can beat it.
+    ///
+    /// True when this request opened a new attempt (not a join, a refresh
+    /// or a possible resume).
     pub fn opened_tagged(
         &self,
         user_id: i64,
@@ -426,10 +437,10 @@ impl StartAttempts {
         method: &str,
         tag: Option<&AttemptTag>,
         now: Instant,
-    ) {
+    ) -> bool {
         let attempt = tag.map(|tag| tag.attempt.clone());
         let Ok(mut entries) = self.entries.lock() else {
-            return;
+            return false;
         };
         self.sweep_locked(&mut entries, now);
         let method = start_method(Some(method));
@@ -445,13 +456,13 @@ impl StartAttempts {
                     entry.last_seen = now;
                     entry.item_id = item_id.or(entry.item_id);
                     entry.attempt = attempt.or(entry.attempt.take());
-                    return;
+                    return false;
                 }
                 StartPhase::Playing
                     if now.saturating_duration_since(entry.last_seen) < PLAY_QUIET =>
                 {
                     entry.last_seen = now;
-                    return;
+                    return false;
                 }
                 StartPhase::Playing => {
                     entry.phase = StartPhase::Pending {
@@ -463,12 +474,12 @@ impl StartAttempts {
                     entry.last_seen = now;
                     entry.item_id = item_id.or(entry.item_id);
                     entry.attempt = attempt.or(entry.attempt.take());
-                    return;
+                    return false;
                 }
                 StartPhase::Closed { .. } => {}
             }
         } else if entries.len() >= START_LEDGER_CAP {
-            return;
+            return false;
         }
         entries.insert(
             key,
@@ -483,6 +494,28 @@ impl StartAttempts {
                 last_seen: now,
                 attempt,
             },
+        );
+        true
+    }
+
+    /// A direct or progressive request opened attempt `attempt`: name it on
+    /// the (viewer, file) entry and wait for its client's report, which can
+    /// name no session of this server's (there is none) and is matched by
+    /// that newest attempt instead.
+    pub fn tag_request(&self, user_id: i64, file_id: i64, attempt: &str, now: Instant) {
+        if let Ok(mut entries) = self.entries.lock() {
+            if let Some(entry) = entries.get_mut(&(user_id, file_id)) {
+                entry.attempt = Some(attempt.to_owned());
+            }
+        }
+        self.tag_session(
+            user_id,
+            file_id,
+            &AttemptTag {
+                attempt: attempt.to_owned(),
+                session_id: format!("{REQUEST_START_PREFIX}{attempt}"),
+            },
+            now,
         );
     }
 
@@ -534,36 +567,44 @@ impl StartAttempts {
         };
         // The entry's newest attempt, read before the session index is taken
         // so the two locks are never held together.
-        let newest = match session_id {
-            Some(_) => None,
-            None => self
-                .entries
-                .lock()
-                .ok()?
-                .get(&(user_id, file_id))
-                .and_then(|entry| entry.attempt.clone()),
-        };
+        let newest = self
+            .entries
+            .lock()
+            .ok()?
+            .get(&(user_id, file_id))
+            .and_then(|entry| entry.attempt.clone());
         let mut sessions = self.sessions.lock().ok()?;
         sessions.retain(|_, pending| now.saturating_duration_since(pending.at) < START_DEADLINE);
-        let key = match (session_id, newest) {
-            (Some(session), _) => sessions
+        let mine =
+            |pending: &PendingStart| pending.user_id == user_id && pending.file_id == file_id;
+        let by_session = session_id.and_then(|session| {
+            sessions
                 .get(session)
-                .filter(|pending| pending.user_id == user_id && pending.file_id == file_id)
-                .map(|_| session.to_owned())?,
-            (None, Some(attempt)) => sessions
-                .iter()
-                .find(|(_, pending)| {
-                    pending.attempt == attempt
-                        && pending.user_id == user_id
-                        && pending.file_id == file_id
-                })
-                .map(|(session, _)| session.clone())?,
-            (None, None) => return None,
+                .filter(|pending| mine(pending))
+                .map(|_| session.to_owned())
+        });
+        let key = match by_session {
+            Some(key) => key,
+            // A report naming a session no create of this node answered with
+            // may still be about a direct or progressive start, which has no
+            // session; one naming none gets the newest create, whatever it is.
+            None => {
+                let attempt = newest?;
+                sessions
+                    .iter()
+                    .find(|(key, pending)| {
+                        pending.attempt == attempt
+                            && mine(pending)
+                            && (session_id.is_none() || key.starts_with(REQUEST_START_PREFIX))
+                    })
+                    .map(|(key, _)| key.clone())?
+            }
         };
         let pending = sessions.remove(&key)?;
         Some(SettledStart {
             attempt: pending.attempt,
             outcome,
+            session: (!key.starts_with(REQUEST_START_PREFIX)).then_some(key),
         })
     }
 
@@ -964,6 +1005,118 @@ pub fn note_playback_started(
     playback_id: Option<&str>,
     tag: Option<AttemptTag>,
 ) {
+    note_started(
+        state,
+        (user_id, user_name),
+        file_id,
+        method,
+        playback_id,
+        tag.map_or(StartIdentity::None, StartIdentity::Create),
+    );
+}
+
+/// [`note_playback_started`] for a direct or progressive request, which has
+/// no create of its own: the request that opens a new attempt also writes
+/// the `start_attempt` row (route `direct` or `progressive`), so a start
+/// that fell back from HLS (`vod_index_pending` → progressive remux) shows
+/// as the second start it is. `client_build` is the request's own label.
+pub fn note_request_started(
+    state: &crate::state::AppState,
+    user_id: i64,
+    user_name: &str,
+    file_id: i64,
+    method: Method,
+    playback_id: Option<&str>,
+    client_build: String,
+) {
+    note_started(
+        state,
+        (user_id, user_name),
+        file_id,
+        method,
+        playback_id,
+        StartIdentity::Request { client_build },
+    );
+}
+
+/// A create that answered by replaying the session another create of the
+/// same request published -- a retry that joined its owner, on this ingress
+/// or another. Tagged as the publishing create is, so the client's first
+/// frame, which names that session, settles this create here.
+pub(crate) fn note_replayed_create(
+    state: &crate::state::AppState,
+    user: &plurx_core::domain::User,
+    file_id: i64,
+    attempt: &str,
+    (session_id, copy): (&str, bool),
+    library_channel: bool,
+) {
+    if library_channel {
+        return;
+    }
+    let tag = AttemptTag {
+        attempt: attempt.to_owned(),
+        session_id: session_id.to_owned(),
+    };
+    state
+        .start_attempts
+        .tag_session(user.id, file_id, &tag, Instant::now());
+    note_playback_started(
+        state,
+        user.id,
+        &user.username,
+        file_id,
+        if copy {
+            Method::HlsCopy
+        } else {
+            Method::Transcode
+        },
+        None,
+        Some(tag),
+    );
+}
+
+/// A request's client label for its start row: the `User-Agent` (clipped
+/// where the row is written), or `unknown`.
+pub(crate) fn request_client_build(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty())
+        .map_or_else(|| "unknown".to_owned(), str::to_owned)
+}
+
+/// What a media request knows about the start it may open.
+enum StartIdentity {
+    None,
+    /// A create, tagged with its claim id and the session it answered with.
+    Create(AttemptTag),
+    /// A direct or progressive request: no create, so the attempt it opens
+    /// is recorded here.
+    Request {
+        client_build: String,
+    },
+}
+
+fn note_started(
+    state: &crate::state::AppState,
+    (user_id, user_name): (i64, &str),
+    file_id: i64,
+    method: Method,
+    playback_id: Option<&str>,
+    identity: StartIdentity,
+) {
+    let (tag, request_build) = match identity {
+        StartIdentity::None => (None, None),
+        StartIdentity::Create(tag) => (Some(tag), None),
+        StartIdentity::Request { client_build } => (None, Some(client_build)),
+    };
+    let route = match method {
+        Method::Direct => "direct",
+        Method::Remux => "progressive",
+        Method::HlsCopy | Method::Transcode => "rolling",
+    };
     let registry_key = method
         .needs_registry()
         .then(|| Key::new(user_id, file_id, playback_id));
@@ -986,7 +1139,7 @@ pub fn note_playback_started(
         }
         // Every media request, like the registry above: the first opens a
         // start attempt (C-08 M5 row 4) and the rest join or refresh it.
-        state.start_attempts.opened_tagged(
+        let opened = state.start_attempts.opened_tagged(
             user_id,
             file_id,
             Some(file.item_id),
@@ -994,6 +1147,34 @@ pub fn note_playback_started(
             tag.as_ref(),
             Instant::now(),
         );
+        if let (true, Some(client_build)) = (opened, request_build) {
+            let attempt = uuid::Uuid::new_v4().to_string();
+            state
+                .start_attempts
+                .tag_request(user_id, file_id, &attempt, Instant::now());
+            crate::telemetry::emit(
+                Arc::clone(&state.store),
+                StartAttemptRecord {
+                    at_unix_ms: crate::state::clock_ms(),
+                    user_id,
+                    file_id,
+                    attempt,
+                    session_id: None,
+                    route: Some(route),
+                    refusal: None,
+                    refusal_message: None,
+                    client_build,
+                    owner_node: Some(state.node_id.clone()),
+                    phases: String::new(),
+                    authority_reads: 0,
+                    local_reads: 0,
+                    mutations: 0,
+                    store_ms: 0,
+                    elapsed_ms: 0,
+                }
+                .into_event(),
+            );
+        }
         if !state.starts.claim(user_id, file.item_id) {
             return;
         }
@@ -1485,7 +1666,8 @@ mod start_record_tests {
             ledger.settle(1, 10, Some("sess-b"), "ttff", later),
             Some(SettledStart {
                 attempt: "claim-b".to_owned(),
-                outcome: SettledOutcome::Presented
+                outcome: SettledOutcome::Presented,
+                session: Some("sess-b".to_owned()),
             }),
             "the second device's picture settles the second device's create"
         );
@@ -1493,7 +1675,8 @@ mod start_record_tests {
             ledger.settle(1, 10, Some("sess-a"), "hls_fatal", later),
             Some(SettledStart {
                 attempt: "claim-a".to_owned(),
-                outcome: SettledOutcome::Failed
+                outcome: SettledOutcome::Failed,
+                session: Some("sess-a".to_owned()),
             }),
             "and the first device's failure settles the first"
         );

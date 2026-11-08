@@ -1359,7 +1359,7 @@ pub async fn client_log(
                     crate::playstart::presented_event(
                         &settled.attempt,
                         (user.id, file_id),
-                        session.as_deref(),
+                        settled.session.as_deref(),
                         event.method.as_deref(),
                         event.ms,
                         event.reason.as_deref(),
