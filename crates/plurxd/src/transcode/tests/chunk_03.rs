@@ -910,7 +910,7 @@
         session.progress.recent_milli.store(900, Relaxed);
         tokio::fs::write(
             directory.path().join("index.m3u8"),
-            rolling_playlist(&[8.0; 4], false),
+            rolling_playlist(&[8.0; 6], false),
         )
         .await
         .expect("writer inventory");
@@ -2039,13 +2039,10 @@
         assert_rolling_test_frontiers(&run, 1.0);
     }
 
-    /// The next-publication release target is the clock's own desired end
-    /// plus a rate-scaled guard, capped at the clock's `allowed_end_ms`. At
-    /// every rate a producer that has reached `allowed_end_ms` with a batch
-    /// staged is held; at 1x one that is a batch past publication but still
-    /// short of `desired + guard` keeps producing.
+    /// Private production banks a bounded shared-read turn while advertised
+    /// publication continues to obey its separate allowance.
     #[test]
-    fn rolling_flow_release_target_is_capped_by_the_publication_allowance() {
+    fn rolling_flow_release_target_keeps_the_bounded_private_source_bank() {
         let limits = AheadLimits {
             max_secs: HLS_AHEAD_MAX_SECS_DEFAULT,
             max_bytes: HLS_AHEAD_MAX_BYTES_DEFAULT,
@@ -2072,42 +2069,27 @@
             .hold
             .map(|hold| hold.reason)
         };
-        for rate in [1.0, 1.6, 2.0, 4.0] {
+        // At 1x the private bank is 80s plus the 10s exchange guard.
+        // Faster play reaches the common 124s physical reserve ceiling.
+        // Advertised publication limits are checked independently above.
+        for (rate, bank_ms) in [(1.0, 90_000), (1.6, 124_000), (2.0, 124_000), (4.0, 124_000)] {
             let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Web,
             );
             demand.playback_rate = rate;
             let age = Duration::from_secs(3);
-            let ends = rolling_explicit_publication_ends(&demand, age, 5_000);
+            let consumed = 10_000 + ((3_000.0 * rate) as i64) - 5_000;
             assert_eq!(
-                ends.consumed_end_ms,
-                10_000 + ((3_000.0 * rate) as i64) - 5_000,
-                "the flow reads the clock's projected position at {rate}x"
-            );
-            assert_eq!(
-                evaluate(&demand, age, ends.allowed_end_ms),
+                evaluate(&demand, age, consumed + bank_ms),
                 Some(AheadHoldReason::Time),
-                "held at allowed_end_ms at {rate}x"
+                "hold at the bounded private bank at {rate}x"
             );
             assert_eq!(
-                evaluate(&demand, age, ends.allowed_end_ms - 1_000),
-                (rate < 1.6).then_some(AheadHoldReason::Time),
-                "one second short of allowed_end_ms at {rate}x"
+                evaluate(&demand, age, consumed + bank_ms - 1_000),
+                None,
+                "finish the private read turn before yielding at {rate}x"
             );
         }
-        let demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
-            crate::playback_control::ClientPlatform::Web,
-        );
-        let ends = rolling_explicit_publication_ends(&demand, Duration::ZERO, 5_000);
-        assert_eq!(
-            evaluate(&demand, Duration::ZERO, ends.desired_end_ms + 9_000),
-            None,
-            "short of desired + guard at 1x the producer keeps producing"
-        );
-        assert_eq!(
-            evaluate(&demand, Duration::ZERO, ends.desired_end_ms + 10_000),
-            Some(AheadHoldReason::Time)
-        );
     }
 
     #[test]
@@ -2399,7 +2381,10 @@
     async fn scratch_hold_publication_deadline_prepublication_capacity_waits_out_a_global_scratch_hold(
     ) {
         let directory = crate::test_tempdir().expect("publication deadline");
-        let session = test_session(directory.path().to_path_buf());
+        let mut session = test_session(directory.path().to_path_buf());
+        session.start_seconds = 10.0;
+        session.publication.lock().await
+            .bind_startup_candidate_for_test(RollingStartupPolicy::Conservative);
         let started = Instant::now();
         // Even a slow producer is not judged below the fixed initial runway.
         session.progress.recent_milli.store(500, Relaxed);
@@ -3747,7 +3732,10 @@
                     seconds: 60,
                     bytes: 1_000,
                 }),
-                produced_end_ms: Some(80_000),
+                produced_end_ms: Some(
+                    20_000 + rolling_source_bank_target_ms(1.0, false)
+                        + ROLLING_PUBLICATION_GUARD_MS,
+                ),
                 staged_publication_seconds: Some(16),
                 // Pre-existing coverage: the startup grant is already spent, so
                 // these assertions are about steady-state flow control.
@@ -3835,7 +3823,7 @@
                 seconds: 60,
                 bytes: 1_000,
             }),
-            produced_end_ms: Some(80_000),
+            produced_end_ms: Some(20_000 + rolling_source_bank_target_ms(1.0, false) + ROLLING_PUBLICATION_GUARD_MS),
             staged_publication_seconds: Some(16),
             startup_protected: false,
             media_origin_ms: 100_000,

@@ -3168,7 +3168,12 @@ async fn servable_state() -> (AppState, plurx_core::domain::User, i64) {
             item,
             source.to_str().expect("a utf-8 fixture path"),
             metadata.len() as i64,
-            1,
+            metadata
+                .modified()
+                .expect("fixture mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("fixture epoch")
+                .as_secs() as i64,
             &ProbeResult {
                 duration_ms: Some(12_000),
                 ..ProbeResult::default()

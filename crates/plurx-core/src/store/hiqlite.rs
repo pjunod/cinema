@@ -5,6 +5,8 @@
 //! [`Store`](super::Store) until M2 imports existing state and activates this
 //! backend; backend completeness alone is not permission to skip that gate.
 
+mod dispatch_turns;
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
@@ -2052,6 +2054,7 @@ impl HiqliteAuthStore {
         store.install_library_annotations_schema(None).await?;
         store.install_dv_title_jobs_schema(None).await?;
         store.install_playback_handoffs_schema(None).await?;
+        store.install_dispatch_turns(None).await?;
         Ok(store)
     }
 
@@ -2243,7 +2246,8 @@ impl HiqliteAuthStore {
                     self.install_shared_caption_schema(admission).await?;
                     self.install_library_annotations_schema(admission).await?;
                     self.install_dv_title_jobs_schema(admission).await?;
-                    return self.install_playback_handoffs_schema(admission).await;
+                    self.install_playback_handoffs_schema(admission).await?;
+                    return self.install_dispatch_turns(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -3970,6 +3974,7 @@ impl HiqliteAuthStore {
                 "foreground source arbitration extension has incompatible shape".into(),
             ));
         }
+        // authority: reader admission requires the committed source-arbitration singleton.
         let marker=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1",params!()).await?;
         Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
     }
@@ -6062,6 +6067,7 @@ impl MetricsStore for HiqliteAuthStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000) \
                             + (SELECT COUNT(*) FROM analysis_source_reservations \
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000)), \
+                        'source_recovery_pending', (SELECT COUNT(DISTINCT custody_id) FROM source_io_occupancy WHERE custody_id IS NOT NULL AND active_occupancy=1 AND expires_at_ms <= $2 * 1000), \
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json, ")
                     + &request_health
                     + " FROM offline_packages WHERE node_id = $1",

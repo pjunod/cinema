@@ -153,7 +153,35 @@ def job_steps(workflow, job):
             for i, start in enumerate(starts)]
 
 
+# Run 6713 shipped conditional full/compile-only Rust steps. The complete
+# original workflow pins checkout, scope, all four job bodies and the branch
+# that invokes each Make recipe. Its event supplied no retained-unit inputs.
+ORIGINAL_RUST_6713_SOURCE = '65905cc9ae76d428374d5a383246ed1d7d12d5c2'
+ORIGINAL_RUST_6713_WORKFLOW = '34342f9bb8841f6b2b64f0aee490d78343df44421f5b33b56dff6b09de10f52d'
+ORIGINAL_RUST_6713_JOBS = {
+    'store_contract': (63624, 26546, 'failure'),
+    'wal': (63633, 26608, 'success'),
+    'topology': (63628, 26563, 'success'),
+    'transport': (63629, 26599, 'success'),
+}
+
+
+def original_conditional_rust_workflow(workflow, kind):
+    return (kind in ORIGINAL_RUST_6713_JOBS
+            and retention.digest(workflow.encode()) == ORIGINAL_RUST_6713_WORKFLOW)
+
+
+def require_original_conditional_rust_dispatch(source, inputs, run_id, job, kind):
+    receipts.require(source == ORIGINAL_RUST_6713_SOURCE and run_id == 6713
+                     and (job.get('id'), job.get('task_id'), job.get('status')) == ORIGINAL_RUST_6713_JOBS[kind]
+                     and inputs == {'promotion_pr': '1399', 'promotion_head_sha': source,
+                                    'promotion_base_sha': '8c654d37b5ee3f1418fa3393662c671a6555455e'},
+                     'Historical conditional Rust job lacks its exact unretained dispatch')
+
+
 def historical_command(workflow, kind):
+    if original_conditional_rust_workflow(workflow, kind):
+        return True
     job = {'store_contract': 'cluster_store_legacy', 'wal': 'cluster_wal',
            'android_jvm': 'android_jvm', 'topology':'cluster_topology',
            'transport':'cluster_transport_recovery_contracts'}.get(kind, 'preflight')
@@ -589,7 +617,18 @@ def historical_recipe(record,kind):
             'topology':'cluster-harness-check','transport':'cluster-transport-recovery-contracts'}[kind]
     if kind=='topology' and b'cluster-harness-unit-check: ##' in text:
         target='cluster-harness-unit-check'
-    return make_commands(text.decode(),target)
+    recipes = make_commands(text.decode(),target)
+    if kind == 'topology' and record.get('origin', {}).get('kind') == 'authenticated-ci':
+        workflow = retention.git_bytes(record['source_commit'], '.github/workflows/ci.yml')
+        receipts.require(workflow is not None and historical_command(workflow.decode(), kind),
+                         'Native topology workflow tail requires reviewed executor source')
+        # The source Make wrapper follows its unit target with this nonunit
+        # target. Its first actual command bounds the last unit's output.
+        tail = make_commands(text.decode(), 'cluster-harness-nonunit-check')
+        receipts.require(tail and tail[0] == '$(CARGO) run --locked -p plurx-cluster-check -- check',
+                         'Native topology nonunit boundary changed')
+        recipes.append(tail[0])
+    return recipes
 
 
 def display_tokens(command,kind):
@@ -1267,6 +1306,9 @@ def bound_execution(record, item, raw, source_commands=historical_canonical, *, 
     lines = raw.splitlines()
     first = witness['first_line']
     receipts.require(type(first) is int and 0 < first <= len(lines), 'Invalid command anchor')
+    if witness['mode'] == 'archived-store-native':
+        from validation import store_native_capture
+        return store_native_capture.bound(record, item, raw, proof)
     if witness['mode'] == 'original-effort-native':
         return original_effort_native(record, item, raw, proof)
     if witness['mode'] == 'original-serial-rotation':
@@ -1396,6 +1438,15 @@ def bound_execution(record, item, raw, source_commands=historical_canonical, *, 
         name = witness['historical_name']
         receipts.require(name in historical and name.split(':')[0] == kind, 'Unknown historical command ordinal')
         expected = rust_identity(historical[name]);current = rust_identity(item['invocation']);same_target(expected,current)
+        if (expected['cargo'].get('--manifest-path') == openraft_package.MANIFEST_VARIABLE
+                and origin['kind'] == 'authenticated-ci'
+                and lines[first - 1].lstrip().startswith('Running unittests src/lib.rs (target/openraft-regression/')):
+            from validation.native_wal_openraft import execution
+            body = execution(record, item, raw)
+            actual = retention.log_outcomes(body, record['coverage']['format'])
+            receipts.require(actual == record['coverage']['outcomes'],
+                             'Cropped or contradictory native Openraft outcomes')
+            return body
         start = first-1;end_command = start;parts = []
         while True:
             line = lines[end_command];parts.append(line.removesuffix('\\').strip())
@@ -1416,6 +1467,16 @@ def bound_execution(record, item, raw, source_commands=historical_canonical, *, 
         end=terminal[0] if terminal is not None else len(lines)
         progressed=False
         for index in range(end_command+1,end):
+            if (origin['kind'] == 'authenticated-ci' and next_command
+                    and openraft_package.MANIFEST_VARIABLE in shlex.split(next_command)
+                    and lines[index].lstrip().startswith('Running unittests src/lib.rs (target/openraft-regression/')):
+                from validation.native_wal_openraft import interval
+                span = interval(record, raw)
+                receipts.require(span['previous_line'] == first and span['first_line'] == index + 1,
+                                 'Unprinted external command belongs to another predecessor')
+                end = index
+                progressed = True
+                break
             if re.match(r'^(?:(?:[A-Z_]+=[^ ]+|scripts/require-test-count) +)*(?:cargo|/[^ ]+/cargo) (?:test|run|clippy|check)(?: |$)',lines[index]):
                 value,_=logged_command(lines,index)
                 receipts.require(next_command is not None and display_tokens(value,kind)==display_tokens(next_command,kind),
@@ -1612,8 +1673,19 @@ def authenticate(api, proof, document, repository, live_logs=None):
                              and inputs['promotion_head_sha'] == record['source_commit'],
                              'Historical commands did not run on this main-bound effort')
             workflow = retention.git_bytes(record['source_commit'], '.github/workflows/ci.yml')
-            receipts.require(workflow is not None and historical_command(workflow.decode(), kind),
-                             'Historical command executor differs')
+            receipts.require(workflow is not None, 'Historical workflow unavailable')
+            if execution.get('native_discovery') is True:
+                from validation.native_python_discovery import native_event
+                receipts.require(item.get('protocol') == 'source-cohort-v1'
+                                 and kind in {'validation', 'operations'} and jobs[0]['status'] == 'success',
+                                 'Native discovery belongs to another command or unsuccessful job')
+                native_event(record['source_commit'], workflow.decode(), inputs)
+            elif original_conditional_rust_workflow(workflow.decode(), kind):
+                require_original_conditional_rust_dispatch(record['source_commit'], inputs,
+                                                       run_id, jobs[0], kind)
+            else:
+                receipts.require(historical_command(workflow.decode(), kind),
+                                 'Historical command executor differs')
             key=(run_id,record['source_commit'])
             if key not in scopes:
                 authenticate_scope(api,run_id,run,workflow.decode(),document,record['source_commit'],repository)
