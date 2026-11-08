@@ -496,3 +496,79 @@ reason = "Corrective commit a96f58b5 reached main directly without a recognized 
 [[errata]]
 commit = "54d6f2dae1c16b6e39d9b94bc6a01ea2a4060d6a"
 reason = "Corrective commit 54d6f2da reached main directly without a recognized landing. It keeps Debian security indexes on the signed snapshot while fetching only package payloads from live mirrors. Its immutable Regression-Test field uses a dotted class.method name; tests/operations/test_docker_snapshot.py::test_live_mirrors_serve_only_debs_and_indexes_stay_pinned resolves in the corrective tree, and its test file is unchanged in PR #1437. Main fast lane #6691 reported the direct-main carrier omission. This permanent erratum records that specific immutable history gap and retains the existing audit boundary and future regression-field checks."
+
+[[errata]]
+commit = "d25a35ea323e432369cd64f76c4dc076fffab0c2"
+reason = "Corrective commit d25a35ea (fix(test): finish pending-media and served-window fixtures [skip ci]) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. The immutable commit has no Regression-Test field. A source-review regression candidate names crates/plurxd/src/transcode/tests/chunk_05.rs::retention_keeps_a_reload_margin_above_the_observed_fetch_lead, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "9fde9d14821a12f382c958744739c50a765da8de"
+reason = "Corrective commit 9fde9d14 (fix(test): honor bounded pending native HLS initialization responses) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. The immutable commit has no Regression-Test field. A source-review regression candidate names crates/plurxd/src/http/jellyfin/tests.rs::jellyfin_native_hls_encoded_without_copy_index_preserves_ranges_clock_and_stop, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "ad4acb07c01971e1dabe123408fc7605b116a6be"
+reason = "Corrective commit ad4acb07 (fix(subtitles): preserve committed completion when pressure observes retirement) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. The immutable commit has no Regression-Test field. A source-review regression candidate names crates/plurxd/src/subtitle_work.rs::subtitle_pressure_preserves_committed_success_after_join, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "79bf8e4785815cd04d8e4892a6635bed68cacbe3"
+reason = "Corrective commit 79bf8e47 (fix(test): declare presentation before testing retained reload margins) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. The immutable commit has no Regression-Test field. A source-review regression candidate names crates/plurxd/src/transcode/tests/chunk_05.rs::retention_keeps_a_reload_margin_above_the_observed_fetch_lead, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "3ea9de3e5c10c3d79b33a90cd45866b92af4598e"
+reason = "Corrective commit 3ea9de3e (fix(test): defer source proofs to their owned executor and reap the real publisher) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. The immutable commit has no Regression-Test field. A source-review regression candidate names crates/plurxd/src/http/offline.rs::offline_request_defers_profile5_proof_until_owned_execution, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "0a33ddc0281d580208b985b79202814debaa96df"
+reason = "Corrective commit 0a33ddc0 (fix(logging): keep source-retirement events in their operator channels) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. The immutable commit has no Regression-Test field. A source-review regression candidate names crates/plurxd/src/http/tests.rs::sharing_http_claim_approval_rotation_and_pending_catalogue_denial, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "4b85fe759eba55cdd1095c927493a3e4481fc3dc"
+reason = "Corrective commit 4b85fe75 (fix(test): keep private source-bank flow separate from advertised media) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. The immutable commit has no Regression-Test field. A source-review regression candidate names crates/plurxd/src/transcode/tests/chunk_03.rs::rolling_flow_release_target_keeps_the_bounded_private_source_bank, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "00903c2e826906c56a1950d133c21f970b8c4c93"
+reason = "Corrective commit 00903c2e (fix(test): bind source authority and stage the measured rolling runway) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. The immutable commit has no Regression-Test field. A source-review regression candidate names crates/plurxd/src/state/tests.rs::playback_preparation_wakes_busy_analysis_for_any_live_request_waiter, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "c5245d27e950ff6bf206e0dd15beacd486b5707b"
+reason = "Corrective commit c5245d27 (fix(test): declare current source capabilities and complete worker budgets) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. The immutable commit has no Regression-Test field. A source-review regression candidate names crates/plurxd/src/source_probe/fel_qualification.rs::a_qualification_inside_its_title_job_is_not_preempted_by_itself_and_stores_its_verdict, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "3e21ab435a00d373e97e0e997d98e4b1231fc423"
+reason = "Corrective commit 3e21ab43 (fix(stream): preserve missing-source responses and child cleanup contracts) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. The immutable commit has no Regression-Test field. A source-review regression candidate names crates/plurxd/src/http/tests.rs::the_delivery_plan_carries_a_selected_non_default_audio_track, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "8fab88105e5d046e3fc2b29e9f9e9c9a8ef55efe"
+reason = "Corrective commit 8fab8810 (fix(test): give the rolling fixture its own child process group) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. An immutable Regression-Test field names crates/plurxd/src/http/hls/tests/chunk_01.rs::cancelling_public_delete_does_not_cancel_its_admitted_cleanup_owner, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "25b7bdeca4007040449ebad35b8f69ae986b6202"
+reason = "Corrective commit 25b7bdec (fix(test): honor process-group and private recovery fixture contracts) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. An immutable Regression-Test field names crates/plurxd/src/prodrun.rs::a_real_child_is_stopped_resumed_and_reaped_through_the_slot, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "3c1321ee9cad8b21530213844d011e39d309a4bc"
+reason = "Corrective commit 3c1321ee (fix(test): give seeded HTTP sources their actual modification times) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. An immutable Regression-Test field names crates/plurxd/src/http/tests.rs::a_direct_play_get_credits_exactly_its_body_to_delivered_bytes, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "37deab2f7e253dd684a2ada6e61b1dc4b5b6f582"
+reason = "Corrective commit 37deab2f (fix(test): distinguish caller timeout from detached collection cancellation) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. An immutable Regression-Test field names crates/plurxd/src/decode_facts/tests.rs::pidfd_read_failure_retains_source_ownership_until_reap, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "67331b733a96b95c8e9c0059c66ce39841fa877e"
+reason = "Corrective commit 67331b73 (fix(test): bind media fixtures to actual file identity and caption task) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. An immutable Regression-Test field names crates/plurxd/src/http/hls/tests/chunk_05.rs::passive_vod_public_get_resurrects_same_route_and_stop_fences_late_get, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "c4ade27aee3386f560e3598c617c8e50e2c075c9"
+reason = "Corrective commit c4ade27a (fix(test): echo the caption heartbeat continuity in its fixture) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. An immutable Regression-Test field names tests/web/subtitle-translation.browser.cjs::progressive translation retains the shipped video, literal cues, original captions and Stop intent, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "b1193ad6525a99f7509ab4da3e16acd9ef6dcec9"
+reason = "Corrective commit b1193ad6 (fix(test): provide current speech-caption fixture authority) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. An immutable Regression-Test field names tests/web/subtitle-translation.browser.cjs::progressive translation retains the shipped video, literal cues, original captions and Stop intent, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "4f417e8527d7fa54b752969e556b8fd9a751ae38"
+reason = "Corrective commit 4f417e85 (fix(test): align recovery fixtures with joined source ownership) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. An immutable Regression-Test field names crates/plurxd/src/background_jobs.rs::lost_claim_acknowledgement_resolves_the_original_attempt, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "87770f69abcfeac6c4df137a2663f7177e9c0525"
+reason = "Corrective commit 87770f69 (fix(ci): publish the verified image configuration by digest) reached main in the direct-publication chain ending at d0e9349c without a recognized landing carrier. An immutable Regression-Test field names tests/operations/test_registry_push.py::test_verified_publication_requires_the_reviewed_manifest_and_configuration, which resolves in the corrective tree and this candidate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
