@@ -378,7 +378,8 @@ async function saveLibDrawer(id,btn){
 async function enableReconcile(id,btn){
   // One click from Never to the six-hourly reconcile, keeping the library's
   // refresh interval; the schedule endpoint never starts a scan by itself.
-  const ref=Number((document.getElementById(`sched-ref-${id}`)||{}).value||0);
+  const refresh=/** @type {HTMLInputElement|HTMLSelectElement|null} */ (document.getElementById(`sched-ref-${id}`));
+  const ref=Number(refresh?.value||0);
   const err=document.getElementById("ele-"+id); if(err) err.textContent="";
   btn.disabled=true;
   try{
