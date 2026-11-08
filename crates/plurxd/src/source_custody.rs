@@ -179,12 +179,23 @@ pub(crate) async fn activate_foreground_with_journal(
     };
     let lock = receipt_lock(&settlement_name(&receipt));
     let _guard = lock.lock().await;
-    recovery::foreground(store, &token)?;
+    let reader = recovery::foreground(store, &token, activation_id)?;
     write_settlement_receipt(&receipt)?;
     let activated = store
         .activate_foreground_source_custody(token.clone(), activation_id.clone())
         .await;
+    let reader_armed = if activated.as_ref().is_ok_and(|value| *value) {
+        reader
+            .as_ref()
+            .map_or(Ok(()), |reader| reader.arm(activation_id))
+    } else {
+        Ok(())
+    };
+    if let Err(error) = &reader_armed {
+        tracing::warn!(%error, "reader activation proof needs abort reconciliation");
+    }
     if activated.as_ref().is_ok_and(|value| *value)
+        && reader_armed.is_ok()
         && clear_settlement_receipt(store, &receipt).is_ok()
     {
         return Ok(());
@@ -253,12 +264,23 @@ pub(crate) async fn activate_background_with_journal(
     };
     let lock = receipt_lock(&settlement_name(&receipt));
     let _guard = lock.lock().await;
-    recovery::background(store, &token)?;
+    let reader = recovery::background(store, &token, activation_id)?;
     write_settlement_receipt(&receipt)?;
     let activated = store
         .activate_background_source_custody(token.clone(), activation_id.clone())
         .await;
+    let reader_armed = if activated.as_ref().is_ok_and(|value| *value) {
+        reader
+            .as_ref()
+            .map_or(Ok(()), |reader| reader.arm(activation_id))
+    } else {
+        Ok(())
+    };
+    if let Err(error) = &reader_armed {
+        tracing::warn!(%error, "reader activation proof needs abort reconciliation");
+    }
     if activated.as_ref().is_ok_and(|value| *value)
+        && reader_armed.is_ok()
         && clear_settlement_receipt(store, &receipt).is_ok()
     {
         return Ok(());

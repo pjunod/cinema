@@ -1678,6 +1678,7 @@ impl TranscodeManager {
                             session
                                 .rolling_provenance
                                 .as_ref()
+                                .filter(|_| source_input.is_none())
                                 .map(|proof| proof.source_fd()),
                             None,
                             session

@@ -324,7 +324,10 @@ async fn execute(
                         path: file.path.display().to_string(),
                         reason,
                     })?;
-            let result = probe::probe_single_threaded(std::path::Path::new(input.url())).await;
+            let result = plurx_core::process::source_lifetime::mediated(
+                probe::probe_single_threaded(std::path::Path::new(input.url())),
+            )
+            .await;
             input
                 .close_and_wait()
                 .await
