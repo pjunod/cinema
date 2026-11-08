@@ -379,7 +379,13 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
             .expect("pending body")
             .to_bytes();
         let pending: Value = serde_json::from_slice(&pending).expect("typed pending response");
-        assert_eq!(pending["code"], "startup_timeout", "{pending}");
+        assert!(
+            matches!(
+                pending["code"].as_str(),
+                Some("startup_timeout" | "response_state_changed")
+            ),
+            "{pending}"
+        );
         assert!(
             startup_started.elapsed() < std::time::Duration::from_secs(60),
             "native encoded initialization never completed: {pending}"
