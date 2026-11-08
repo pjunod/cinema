@@ -1785,7 +1785,9 @@ mod tests {
 
     /// Contract v2 §5.1: a targeted request is its own job. Behind a
     /// *pending* full scan of a 1,000-file library it is claimed first; beside
-    /// a *running* full scan it waits on the library's mutation fence with
+    /// a *running* full scan of another library on the same volume it runs,
+    /// because it takes no background source reader; beside a *running* full
+    /// scan of its own library it waits on the library's mutation fence with
     /// `waiting_on = full_scan:<library>`, runs once the fence is released,
     /// and what it inserted survives the next full scan's reconciliation.
     #[tokio::test]
@@ -1851,10 +1853,130 @@ mod tests {
             );
         }
 
-        // Beside a running full scan it waits, says so, then runs. The running
-        // scan holds this library's source reader and the claim keeps the
-        // second reader for live demand, so the targeted job is not claimed
-        // at all while it runs (the per-library fence would refuse it next).
+        // A running full scan of another library on the same volume does not
+        // hold it: a targeted probe takes no background source reader
+        // (contract v2 §5.1), so the only wait it has is its own library's
+        // fence.
+        {
+            let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+            let volume = crate::test_tempdir().expect("volume");
+            let (alpha_root, beta_root) = (volume.path().join("alpha"), volume.path().join("beta"));
+            std::fs::create_dir_all(&alpha_root).expect("alpha root");
+            std::fs::create_dir_all(&beta_root).expect("beta root");
+            media_file(&beta_root, "Long Scan (1990)");
+            let mut libraries = Vec::new();
+            for (name, root) in [("Alpha", &alpha_root), ("Beta", &beta_root)] {
+                libraries.push(
+                    store
+                        .create_library(&NewLibrary {
+                            name: name.into(),
+                            kind: LibraryKind::Movies,
+                            paths: vec![root.clone()],
+                            anime: false,
+                        })
+                        .await
+                        .expect("library"),
+                );
+            }
+            let (alpha, beta) = (&libraries[0], &libraries[1]);
+            let mappings = libraries
+                .iter()
+                .flat_map(|library| {
+                    library.paths.iter().map(|root| {
+                        plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                            library_id: library.id,
+                            root_path: root.display().to_string(),
+                            domain_id: "volume-1".into(),
+                        }
+                    })
+                })
+                .collect();
+            assert!(store
+                .replace_storage_domains(mappings, clock_ms())
+                .await
+                .expect("one storage domain for both libraries"));
+            enqueue_full(store.as_ref(), beta.id, "beta-running", false).await;
+            let full_jobs = JobManager::test_new_for_node(
+                Arc::clone(&store),
+                volume.path().join("artwork-w1"),
+                "w1",
+            );
+            let full_transcode =
+                transcode_for(Arc::clone(&store), &volume.path().join("transcode-w1"));
+            let (tx, mut events) = mpsc::unbounded_channel();
+            let (full, _, resume_full) = spawn_worker(
+                "w1",
+                full_jobs,
+                full_transcode,
+                tx,
+                Some(WorkerPoint::BeforeScan),
+                false,
+                0,
+            );
+            next_worker_event(&mut events, "w1", WorkerPoint::BeforeScan).await;
+            let beta_job = request_record(store.as_ref(), "beta-running").await.job_id;
+            assert!(
+                store
+                    .source_io_holders(crate::media_sessions::unix_ms())
+                    .await
+                    .expect("source readers")
+                    .iter()
+                    .any(|holder| holder.work_id == beta_job
+                        && holder.resource_key == "source_io:volume-1"),
+                "the running full scan of Beta holds the volume's reader"
+            );
+            let new = media_file(&alpha_root, "Alpha Import (2025)");
+            enqueue_targeted(
+                store.as_ref(),
+                alpha.id,
+                "alpha-targeted",
+                new.parent().expect("folder"),
+                &[&new],
+            )
+            .await;
+            let jobs = JobManager::test_new_for_node(
+                Arc::clone(&store),
+                volume.path().join("artwork-w2"),
+                "w2",
+            );
+            let transcode = transcode_for(Arc::clone(&store), &volume.path().join("transcode-w2"));
+            assert!(
+                jobs.work_library_queue(&transcode, None).await,
+                "the targeted job for Alpha is claimed beside Beta's running scan"
+            );
+            assert_eq!(
+                request_record(store.as_ref(), "alpha-targeted").await.state,
+                "succeeded"
+            );
+            assert_eq!(
+                store
+                    .scan_request_v2("alpha-targeted")
+                    .await
+                    .expect("sidecar")
+                    .expect("v2 request")
+                    .waiting_on,
+                "",
+                "it waited on nothing"
+            );
+            assert_ne!(
+                request_record(store.as_ref(), "beta-running").await.state,
+                "succeeded",
+                "Beta's scan was still running"
+            );
+            resume_full
+                .expect("full scan barrier")
+                .send(())
+                .expect("resume full scan");
+            assert!(full.await.expect("full scan worker joined").0);
+            assert_eq!(
+                request_record(store.as_ref(), "beta-running").await.state,
+                "succeeded"
+            );
+        }
+
+        // Beside a running full scan of its own library it is claimed, yields
+        // at the library's fence with `waiting_on = full_scan:<library>`, and
+        // runs once the fence is released.
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let root = crate::test_tempdir().expect("root");
         media_file(root.path(), "Old Film (1999)");
@@ -1896,20 +2018,8 @@ mod tests {
             JobManager::test_new_for_node(Arc::clone(&store), root.path().join("artwork-w2"), "w2");
         let transcode = transcode_for(Arc::clone(&store), &root.path().join("transcode-w2"));
         assert!(
-            !jobs.work_library_queue(&transcode, None).await,
-            "a running full scan of the library refuses the targeted claim"
-        );
-        let full_job = request_record(store.as_ref(), "full-running").await.job_id;
-        let now_ms = crate::media_sessions::unix_ms();
-        assert!(
-            store
-                .source_io_holders(now_ms)
-                .await
-                .expect("source readers")
-                .iter()
-                .any(|holder| holder.work_id == full_job
-                    && holder.resource_key.starts_with("source_io")),
-            "the refusal is the full scan's source reader"
+            jobs.work_library_queue(&transcode, None).await,
+            "the targeted job is claimed and yields at the fence"
         );
         assert_eq!(
             request_record(store.as_ref(), "targeted-fenced")

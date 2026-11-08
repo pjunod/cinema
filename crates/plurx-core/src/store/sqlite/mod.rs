@@ -1337,6 +1337,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_job_turns::SCHEMA,
     // v125: pipeline contract v2 sidecar for targeted scan requests.
     super::scan_request_v2::SCHEMA,
+    // v126: targeted library probes do not reserve a background source reader.
+    super::subtitle_managed_schema::TARGETED_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1798,6 +1800,9 @@ impl SqliteStore {
             }
             if version == super::subtitle_managed_schema::PREPARED_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_prepared_predecessor(&tx)?;
+            }
+            if version == super::subtitle_managed_schema::TARGETED_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_targeted_predecessor(&tx)?;
             }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;

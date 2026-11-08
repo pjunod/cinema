@@ -23,12 +23,15 @@ pub const MAX_LIBRARY_RESULT_BYTES: usize = 64 * 1024;
 /// `library:metadata:{id}`.
 pub const LIBRARY_WORK_GENERATION: &str = "library-work-v1";
 /// Targeted requests are their own job, `library:targeted:{id}` (contract v2
-/// §5.1): claimed with a probe admission, ahead of a pending full scan, and
-/// serialised against a running one by the same `scan:library:{id}` lease.
-/// It keeps the `library_scan` kind so the fence binding, the provider and
-/// source-I/O reservations and every older node's decoder accept the row; an
-/// older node does not claim it, because its claimer runs only
-/// [`LIBRARY_WORK_GENERATION`].
+/// §5.1): claimed with a probe admission and no background source reader,
+/// ahead of a pending full scan. Its only wait is the per-library
+/// `scan:library:{id}` fence, which serialises it against a running scan of
+/// its own library; a scan of another library on the same volume does not
+/// hold it. It keeps the `library_scan` kind so the fence binding, the
+/// provider reservations and every older node's decoder accept the row; the
+/// managed resource view (v5, SQLite v126) drops its source-I/O requirement
+/// by this generation. An older node does not claim it, because its claimer
+/// runs only [`LIBRARY_WORK_GENERATION`].
 pub const LIBRARY_TARGETED_GENERATION: &str = "library-targeted-v1";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
