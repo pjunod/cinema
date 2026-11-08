@@ -2257,8 +2257,11 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
         .create_user("offline-proof-owner", "hash", true)
         .await
         .expect("offline user");
+    let audio_delivery = offline.speculative_producer_options(
+        offline.rate_control_snapshot(), Encoder::Software, &file, 1080, None, None,
+    ).audio.expect("frozen offline audio");
     let package = NewOfflinePackage {
-        audio_recipe: None,
+        audio_recipe: Some(serde_json::to_string(&audio_delivery).expect("audio recipe")),
         id: "2079fce0-e3b6-4ed1-a2cd-aa2b7f1025af".into(),
         request_id: "owned-background-pixel-proof-request".into(),
         user_id: user.id,
@@ -2293,7 +2296,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
         .expect("claim package")
         .expect("queued package");
     let spec = OfflineSpec {
-        audio_delivery: None,
+        audio_delivery: Some(audio_delivery),
         target_height: 1080,
         audio_index: None,
         subtitle: OfflineSubtitle::None,
@@ -2311,14 +2314,14 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     assert!(
         refused.is_err()
             || matches!(
-                refused,
+                &refused,
                 Ok(OfflineProduceOutcome::Yielded("source_proof_pending"))
             ),
         "the non-Dolby fixture cannot produce a proved Dolby package"
     );
     assert!(
         spawns_of(background) >= before + 2,
-        "the offline package's pixel proof did not run at the background class"
+        "the offline package's pixel proof did not run at the background class: {refused:?}"
     );
 }
 

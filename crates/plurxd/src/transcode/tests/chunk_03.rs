@@ -2039,11 +2039,8 @@
         assert_rolling_test_frontiers(&run, 1.0);
     }
 
-    /// The next-publication release target is the clock's own desired end
-    /// plus a rate-scaled guard, capped at the clock's `allowed_end_ms`. At
-    /// every rate a producer that has reached `allowed_end_ms` with a batch
-    /// staged is held; at 1x one that is a batch past publication but still
-    /// short of `desired + guard` keeps producing.
+    /// Private production banks a bounded shared-read turn while advertised
+    /// publication continues to obey its separate allowance.
     #[test]
     fn rolling_flow_release_target_keeps_the_bounded_private_source_bank() {
         let limits = AheadLimits {
@@ -2384,7 +2381,8 @@
     async fn scratch_hold_publication_deadline_prepublication_capacity_waits_out_a_global_scratch_hold(
     ) {
         let directory = crate::test_tempdir().expect("publication deadline");
-        let session = test_session(directory.path().to_path_buf());
+        let mut session = test_session(directory.path().to_path_buf());
+        session.start_seconds = 10.0;
         session.publication.lock().await
             .bind_startup_candidate_for_test(RollingStartupPolicy::Conservative);
         let started = Instant::now();

@@ -12161,7 +12161,14 @@ async fn sharing_http_rejects_secret_bearing_unknown_fields_and_oversized_claims
 #[tokio::test]
 async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
     use plurx_core::{secrets::Secret, sharing::Invitation};
-    let (app, state) = test_app_with_state();
+    let storage = crate::test_tempdir().expect("private network storage");
+    let (_, mut state) = test_app_with_state();
+    state.sharing = Arc::new(crate::sharing::SharingManager::new(
+        state.sharing.key.clone(),
+        storage.path().join("sharing-tls"),
+        Default::default(),
+    ));
+    let app = router(state.clone());
     let admin = setup_admin(&app).await;
     let seeded = seed_content(&state).await;
     let endpoints = json!([{"ipv4":"100.101.102.103","ipv6":null,"ts_fqdn":"source.fixture.ts.net","port":32443,"spki_sha256":"a".repeat(64)}]);
