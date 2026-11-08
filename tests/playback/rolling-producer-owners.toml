@@ -4000,7 +4000,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # aborts it there; it owns nothing else.
 # Review 2 fixes (#1438): +1 is the fleet route test's server thread in
 # http/activity_starts/tests.rs, joined before the test returns; no production launcher.
-expected_occurrences = 92
+# Gate fixes (2026-11-08): +1 is the replicated browse K04 fixture's 8 MiB test thread in
+# http/browse.rs, joined before the test returns; no production launcher.
+expected_occurrences = 93
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6740,7 +6742,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Pipeline contract v2 (promotion merge, 2026-11-08): +1 in `http/tests.rs`, a
 # `response.status()` assertion on a 503 scan reply. It matches the `.status(` shape but
 # launches no process.
-expected_occurrences = 893
+# Gate fixes (2026-11-08): +1 in `http/browse.rs`, the replicated browse K04 fixture's
+# 8 MiB test thread (a thread-builder call), joined before the test returns; it
+# launches no process.
+expected_occurrences = 894
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
