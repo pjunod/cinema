@@ -2161,9 +2161,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(workflow_step_literal(operations_run, "run"), [
             'if [ "$RETAIN_OPERATIONS_UNITS" = true ]; then',
             '  echo "Adopted authenticated complete operations unit discovery"',
+            'elif [ -n "$PYTHON_SELECTION_SHA256" ]; then',
+            '  python3 -m validation.native_python_execute operations',
             "else", "  make operations-check", "fi",
         ])
         self.assertIn("RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}", operations_run)
+        self.assertIn("PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}", operations_run)
         effort_preflight = workflow_job_blocks(".github/workflows/effort-ci.yml")[
             "preflight"
         ]
