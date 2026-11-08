@@ -2548,7 +2548,7 @@ async fn offline_preempts_speculation_and_resumes_its_published_part() {
         subtitle_mode: "none".to_owned(),
         estimated_bytes: 1_000_000,
         reserved_bytes: 1_100_000,
-        expires_at: i64::MAX,
+        expires_at: crate::state::clock_ms() / 1_000 + 600,
     };
     assert!(matches!(
         store

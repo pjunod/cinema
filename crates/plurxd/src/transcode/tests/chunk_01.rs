@@ -1657,12 +1657,9 @@ async fn accepted_hold_and_active_control_signal_the_real_producer_immediately()
         );
         snapshot.demand = demand;
         // The started fixture has produced 64 s and published 48 s, one
-        // whole batch staged. Held on time additionally requires the
-        // producer to have reached what the next publication will ask
-        // for: the clock's desired end (position + 48 s initial runway)
-        // plus the 10 s guard, capped at its allowed end (+64 s). From
-        // position 0 that is 58 s, which 64 s of produced media covers;
-        // from position 10 s it is 68 s, which it does not.
+        // whole batch staged. A held producer releases below its 48s
+        // source-bank low watermark: 64s covers position 0, but position
+        // 20s needs 68s and must resume the producer.
         snapshot.position_ms = position_ms;
         snapshot.buffered_from_ms = Some(position_ms);
         if demand != crate::playback_control::PlaybackDemand::Active {
@@ -1777,7 +1774,7 @@ async fn accepted_hold_and_active_control_signal_the_real_producer_immediately()
         .hls_session_control(request(
             3,
             crate::playback_control::PlaybackDemand::Active,
-            10_000,
+            20_000,
         ))
         .await
         .expect("local worker")

@@ -3781,7 +3781,7 @@
                 seconds: 60,
                 bytes: 1_000,
             }),
-            produced_end_ms: Some(80_000),
+            produced_end_ms: Some(20_000 + rolling_source_bank_target_ms(1.0, false) + ROLLING_PUBLICATION_GUARD_MS),
             staged_publication_seconds: Some(16),
             startup_protected: false,
             media_origin_ms: 100_000,
