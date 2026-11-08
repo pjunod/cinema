@@ -207,6 +207,13 @@ impl SourceReadBudget {
             pause_controller: Mutex::new(None),
         })
     }
+    pub(super) fn job_token(&self) -> Option<&plurx_core::store::background_jobs::JobToken> {
+        match &self.owner {
+            BackgroundSourceOwner::Job { token } => Some(token),
+            _ => None,
+        }
+    }
+
     /// The existing operation supervisor retains this exact receipt and must
     /// release it explicitly after every read/bridge joins. The budget owns no
     /// cleanup actor and never treats Drop or lease expiry as completion.

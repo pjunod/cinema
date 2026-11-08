@@ -20,19 +20,34 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "tools/dv_processing/dv_dm.h"
 
 
+def scalar_pq_source(header):
+    # Read the C string literals, then find complete GLSL functions, including
+    # nested blocks that span several literals.
+    literals = re.findall(r'^\s*("(?:[^"\\\n]|\\.)*")', header, re.MULTILINE)
+    shader = "".join(json.loads(literal) for literal in literals)
+    functions = []
+    for name in ("pq_log1p", "pq_expm1", "pq_eotf_ext", "pq_eotf", "pq_oetf"):
+        start, = re.finditer(rf"\bfloat\s+{name}\s*\(float\s+\w+\)\s*\{{", shader)
+        depth = 1
+        for brace in re.finditer(r"[{}]", shader[start.end():]):
+            depth += 1 if brace.group() == "{" else -1
+            if depth == 0:
+                functions.append(shader[start.start():start.end() + brace.end()])
+                break
+        else:
+            raise ValueError(f"unterminated GLSL function {name}")
+    # Unsuffixed GLSL floating literals use binary32; C defaults to binary64.
+    decimal = r"(?<![\w.])((?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)(?![\w.])"
+    return re.sub(decimal, r"\1f", "\n".join(functions))
+
+
 class ShaderPQPrecision(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         compiler = shutil.which("cc")
         if not compiler:
             raise RuntimeError("C compiler required for shader PQ precision regression")
-        functions = []
-        for line in SOURCE.read_text().splitlines():
-            if re.match(r'\s*"float pq_\w+\(float ', line):
-                functions.append(json.loads(line.strip()))
-        glsl = "".join(functions)
-        # GLSL decimal constants are float32. C's unsuffixed decimals are double.
-        glsl = re.sub(r"(?<![\w.])(\d+\.\d*(?:[eE][+-]?\d+)?)(?![\w.])", r"\1f", glsl)
+        glsl = scalar_pq_source(SOURCE.read_text())
         harness = (
             '#include "dm_closed_form.h"\n'
             'double reference_oetf(double y) { return dm_pq_oetf(y); }\n'
@@ -42,26 +57,57 @@ class ShaderPQPrecision(unittest.TestCase):
             '#define pow powf\n#define log logf\n#define exp expf\n' + glsl
         )
         cls.scratch = tempfile.TemporaryDirectory()
-        src = Path(cls.scratch.name) / "pq.c"
-        lib = Path(cls.scratch.name) / "pq.so"
+        cls.addClassCleanup(cls.scratch.cleanup)
+        tmp = Path(cls.scratch.name)
+        src = tmp / "pq.c"
         src.write_text(harness)
-        try:
-            subprocess.run([compiler, "-std=c11", "-O2", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror",
-                            "-Wno-unused-function", "-I", str(SOURCE.parent), str(src), "-o", str(lib), "-lm"], check=True)
-            cls.lib = ctypes.CDLL(str(lib))
-            for name in ("pq_oetf", "pq_eotf", "pq_eotf_ext"):
-                fn = getattr(cls.lib, name)
-                fn.argtypes = [ctypes.c_float]; fn.restype = ctypes.c_float
-            for name in ("reference_oetf", "reference_eotf", "reference_ext"):
-                fn = getattr(cls.lib, name)
-                fn.argtypes = [ctypes.c_double]; fn.restype = ctypes.c_double
-        except BaseException:
-            cls.scratch.cleanup()
-            raise
+        cls.implementations = {}
+        for mode, flags in (("default", []), ("fast-math", ["-ffast-math"])):
+            obj = tmp / (mode + ".o")
+            lib = tmp / (mode + ".so")
+            subprocess.run([compiler, "-std=c11", "-O2", "-fPIC", "-Wall", "-Wextra", "-Werror",
+                            "-Wno-unused-function", *flags, "-I", str(SOURCE.parent),
+                            "-c", str(src), "-o", str(obj)], check=True)
+            # Keep fast-math initialization out of the Python process's FP environment.
+            subprocess.run([compiler, "-shared", str(obj), "-o", str(lib), "-lm"], check=True)
+            compiled = ctypes.CDLL(str(lib))
+            cls.implementations[mode] = compiled
+            for name in ("pq_log1p", "pq_expm1", "pq_oetf", "pq_eotf", "pq_eotf_ext"):
+                fn = getattr(compiled, name)
+                fn.argtypes = [ctypes.c_float]
+                fn.restype = ctypes.c_float
+        cls.lib = cls.implementations["default"]
+        for name in ("reference_oetf", "reference_eotf", "reference_ext"):
+            fn = getattr(cls.lib, name)
+            fn.argtypes = [ctypes.c_double]
+            fn.restype = ctypes.c_double
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
+    def test_elementary_functions_resist_float32_cancellation(self):
+        # On |x| <= 1/4 the Taylor terms have magnitude <= |x|^j/j.
+        # At most 2j+1 binary32 roundings affect term j. Summing their
+        # weighted errors gives <= 4u|x|/(1-25u), u=2^-24. The omitted
+        # log tail at 21/128 and exp tail at 1/4 each use < 0.001u|x|.
+        unit = 2**-24
+        for name, endpoint, reference, observed in (
+            ("pq_log1p", -21/128, math.log1p, -0.014437053352594376),
+            ("pq_expm1", 0.25, math.expm1, 0.16448824107646942),
+        ):
+            arguments = [ctypes.c_float(endpoint * i / 65535).value for i in range(65536)]
+            arguments += [math.ldexp(endpoint, -i) for i in range(1, 65)]
+            arguments.append(observed)
+            if name == "pq_expm1":
+                arguments.append(0.25 - 2**-26)  # adjacent binary32 inside the series
+            for mode, compiled in self.implementations.items():
+                fn = getattr(compiled, name)
+                with self.subTest(function=name, mode=mode):
+                    for x in arguments:
+                        error = abs(fn(x) - reference(x))
+                        self.assertLessEqual(error, 5 * unit * abs(x), x)
+                    if name == "pq_expm1":
+                        # Just outside the series the exp(x)-1 fallback carries
+                        # absolute rounding error on exp(x), whose scale is near one.
+                        x = 0.25 + 2**-25
+                        self.assertLessEqual(abs(fn(x) - reference(x)), 4 * unit * math.exp(x))
 
     def test_shader_pq_oetf_preserves_float_precision(self):
         # Log-spaced luminance includes the near-zero channels of saturated
