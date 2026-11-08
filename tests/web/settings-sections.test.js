@@ -705,6 +705,7 @@ function developerPanels(){
       // The main-merge defects build (2026-10-04): complete-output
       // preparation and rolling retention arrived with their Developer cards.
       shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
+      shippedSource("indexingWhileServingCard"),
       shippedSource("subtitleTranscriptionCard"),
       shippedSource("subtitleTranslationCard"),
       shippedSource("clusterClockCard"),
@@ -856,6 +857,14 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     panels.developerPanel({ ...settings, vod_output_preparation: "copy_and_encoded" }, readiness),
     /<option value="copy_and_encoded" selected>/,
   );
+  // C1: indexing while serving has no switch; four advisory rows and the
+  // evidence it graduates on.
+  const indexing = /CARDHEAD:Indexing while serving\|[\s\S]*?(?=<div class="setsection"|$)/.exec(html);
+  assert.ok(indexing, "Developer shows the indexing-while-serving card");
+  for (const id of ["serving_live_waiters", "serving_slots_in_use", "serving_domain_readers", "serving_cross_node"])
+    assert.match(indexing[0], new RegExp(`data-devstat="indexing_while_serving:${id}"`), `indexing reports ${id}`);
+  assert.doesNotMatch(indexing[0], /TOG:|FOOT:/, "advisory only: no switch and no Save");
+  assert.match(indexing[0], /Leaves Developer when/);
   const retention = /Rolling output retention[\s\S]*?(?=<div class="setsection")/.exec(html);
   assert.ok(retention, "Developer shows the rolling retention card");
   assert.match(retention[0], /TOG:vod-rolling-retention\|[^|]*\|[^|]*\|checked=false/, "retention is off by default");

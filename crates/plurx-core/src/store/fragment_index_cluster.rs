@@ -91,20 +91,57 @@ BEGIN
 END;
 "#;
 
-/// Shared capacity predicate for the pre-artifact source read. Both Store
-/// backends place it in candidate selection and the fenced claim mutation.
-pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
-    format!(
-        r#"NOT EXISTS (SELECT 1 FROM analysis_required_resources required
-      WHERE required.request_id = analysis_requests.request_id AND (
-        EXISTS(SELECT 1 FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
-          AND held.custody_id IS NOT NULL AND held.active_occupancy=1 AND held.expires_at_ms<={now})
-        OR EXISTS(SELECT 1 FROM foreground_source_permissions fg WHERE (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
+/// The terms of [`analysis_source_capacity_clause`], each with the reason it
+/// names. Each term is evaluated for one required resource (`required`) of
+/// one `analysis_requests` row; any true term refuses the source read.
+///
+/// `exclude_self` leaves the row's own holdings out of every count, so the
+/// same rule can be asked again after the claim, while the request holds its
+/// reservation and custody (`BackgroundJobStore::analysis_source_admission`).
+/// Claim selection passes `false`: an unclaimed row holds nothing.
+pub(crate) fn analysis_source_capacity_terms(
+    now: &str,
+    exclude_self: bool,
+) -> [(&'static str, String); 4] {
+    let (own_occupancy, own_reservation) = if exclude_self {
+        (
+            " AND NOT (held.owner_kind='analysis' AND held.work_id=analysis_requests.request_id)",
+            " AND held.request_id<>analysis_requests.request_id",
+        )
+    } else {
+        ("", "")
+    };
+    [
+        // A reader whose authority lapsed may still be reading.
+        (
+            "source_custody_unsettled",
+            format!(
+                r#"EXISTS(SELECT 1 FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
+          AND held.custody_id IS NOT NULL AND held.active_occupancy=1 AND held.expires_at_ms<={now}{own_occupancy})"#
+            ),
+        ),
+        // A foreground stream needs this domain now.
+        (
+            "foreground_source",
+            format!(
+                r#"EXISTS(SELECT 1 FROM foreground_source_permissions fg WHERE (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
           AND (fg.lease_expires_at_ms>{now} OR fg.custody_held=1)
-          AND (fg.lease_expires_at_ms<={now} OR COALESCE(fg.permits_through_ms,0)<={now}))
-        OR (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
-          AND held.active_occupancy=1 AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL))>=2
-        OR (NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
+          AND (fg.lease_expires_at_ms<={now} OR COALESCE(fg.permits_through_ms,0)<={now}))"#
+            ),
+        ),
+        // Two readers already occupy the domain.
+        (
+            "domain_readers_full",
+            format!(
+                r#"(SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
+          AND held.active_occupancy=1 AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL){own_occupancy})>=2"#
+            ),
+        ),
+        // Without a live viewer, a background read takes only an idle domain.
+        (
+            "background_reader_busy",
+            format!(
+                r#"(NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
               WHERE viewer.request_scope = 'playback-analysis'
                 AND viewer.job_id = analysis_requests.request_id
                 AND viewer.state = 'pending' AND viewer.deadline_ms > {now})
@@ -129,7 +166,7 @@ pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
                               AND source.trigger = 'playback'
                               AND source.state IN ('queued','running'))))))
             + (SELECT COUNT(*) FROM analysis_source_reservations held
-                WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.expires_at_ms > {now}
+                WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.expires_at_ms > {now}{own_reservation}
                   AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
                       WHERE viewer.request_scope = 'playback-analysis'
                         AND viewer.job_id = held.request_id
@@ -137,7 +174,66 @@ pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
             + (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
               WHERE held.owner_kind IN ('lease','offline') AND held.active_occupancy=1
                 AND (held.resource_key=required.resource_key OR held.resource_key='source_io' OR required.resource_key='source_io')
-                AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL)) >= 1)))"#
+                AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL)) >= 1)"#
+            ),
+        ),
+    ]
+}
+
+/// Shared capacity predicate for the pre-artifact source read. Both Store
+/// backends place it in candidate selection and the fenced claim mutation.
+pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
+    let [custody, foreground, readers, background] =
+        analysis_source_capacity_terms(now, false).map(|(_, term)| term);
+    format!(
+        "NOT EXISTS (SELECT 1 FROM analysis_required_resources required
+      WHERE required.request_id = analysis_requests.request_id AND (
+        {custody}
+        OR {foreground}
+        OR {readers}
+        OR {background}))"
+    )
+}
+
+/// The cross-node arm of the analysis claim (`cross_node`): a fragment-index
+/// row another live member targeted. `node` is the claimant's placeholder;
+/// the claim's own digest filter already pins `pipeline_version`.
+pub(crate) fn analysis_cross_node_clause(node: &str) -> String {
+    format!(
+        "(analysis_requests.component = 'fragment_index' AND analysis_requests.target_node_id <> ''
+        AND analysis_requests.target_node_id <> {node}
+        AND NOT EXISTS (SELECT 1 FROM settings
+          WHERE key = 'internal.cluster_job_owner_removed.' || analysis_requests.target_node_id))"
+    )
+}
+
+/// The same rule as [`analysis_source_capacity_clause`], asked of a claimed
+/// request: `"admit"`, the first term's reason, or `"not_owned"` when the
+/// row is no longer this owner's running fence (or membership removed the
+/// owner, as `background_source_may_continue` also refuses). `$1` is
+/// `{request_id, owner_node_id, fence, now_ms}`.
+pub(crate) fn analysis_source_admission_sql() -> String {
+    let now = "json_extract($1,'$.now_ms')";
+    let mut cases = String::new();
+    for (reason, term) in analysis_source_capacity_terms(now, true) {
+        cases.push_str(&format!(
+            "\n  WHEN EXISTS (SELECT 1 FROM analysis_requests JOIN analysis_required_resources required
+        ON required.request_id = analysis_requests.request_id
+      WHERE analysis_requests.request_id = json_extract($1,'$.request_id') AND {term})
+    THEN '\"{reason}\"'"
+        ));
+    }
+    format!(
+        "SELECT CASE
+  WHEN NOT EXISTS (SELECT 1 FROM analysis_requests
+      WHERE request_id = json_extract($1,'$.request_id') AND state = 'running'
+        AND owner_node_id = json_extract($1,'$.owner_node_id')
+        AND fence = json_extract($1,'$.fence') AND cancel_requested = 0
+        AND lease_expires_ms > {now}
+        AND NOT EXISTS (SELECT 1 FROM settings
+          WHERE key = 'internal.cluster_job_owner_removed.' || analysis_requests.owner_node_id))
+    THEN '\"not_owned\"'{cases}
+  ELSE '\"admit\"' END AS result_json"
     )
 }
 
@@ -2028,6 +2124,7 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
             lease_expires_ms,
             false,
             false,
+            false,
         )
         .await
     }
@@ -2039,6 +2136,14 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     /// `targeted_only` limits the claim to requests naming `node_id`: a
     /// learner resolves what is targeted at it, and leaves the untargeted
     /// requests any node may take to the voters.
+    ///
+    /// `cross_node` (with a `pipeline_version`) also admits fragment-index
+    /// requests targeted at another node that asked for exactly this engine:
+    /// an idle node takes a busy one's work, builds the index under the
+    /// requester's `target_node_id`, and delivery hydrates the target. This
+    /// node's own rows (and untargeted ones) come first; a target membership
+    /// has removed is never worked for.
+    #[allow(clippy::too_many_arguments)]
     async fn claim_analysis_request_for_capacity(
         &self,
         node_id: &str,
@@ -2047,12 +2152,14 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         lease_expires_ms: i64,
         viewer_only: bool,
         targeted_only: bool,
+        cross_node: bool,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     /// Retire the active (queued, running or submitted) requests targeted at
     /// `node_id`, which membership has removed: nothing but the target ever
     /// claims a targeted request, so they would otherwise stay active --
-    /// counted against [`MAX_ACTIVE_ANALYSIS_REQUESTS`] -- for good. Each is
+    /// counted against [`MAX_ACTIVE_ANALYSIS_REQUESTS`] -- for good (a
+    /// cross-node claim skips a removed target too). Each is
     /// cancelled with `node_removed`; returns how many.
     async fn retire_analysis_requests_for_node(
         &self,

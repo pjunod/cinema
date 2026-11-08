@@ -6003,6 +6003,30 @@ re-arms after the verdict has been clean for several consecutive samples — a
 queue that flaps between `degraded` and `healthy` logs on the hour, not on every
 sample.
 
+### Indexing while serving
+
+A node no longer stops indexing because one of its encoders is in use. The
+analysis worker claims requests one after another for as long as the claim's
+source-capacity rule admits one (two readers per storage domain; without a live
+viewer, a background read takes only a domain no other reader holds), and the
+rule is asked again before the read starts, while it reads and before the
+result is submitted — a foreground stream that takes the source in between makes
+the request yield, back to the queue uncharged, as `foreground_preempted`. A
+viewer queuing for this node's encoder limits claims to requests a playback is
+waiting on.
+
+An idle node (no encoder in use, nobody queuing) also claims other nodes'
+fragment-index requests that asked for exactly its engine, after its own. The
+request keeps its target: the executor builds the index and publishes its own
+copy, delivery hydrates the node that asked, and the request is `ready` only
+once that node holds it. A target membership has removed is never worked for.
+`plurx_analysis_completed_total{node}` counts, per executing node, the
+fragment-index requests it ran that reached their target since the process
+started (it reads the attempt history, so pruning after 30 days can lower it,
+which reads as a counter reset). **Settings → Developer → Indexing while
+serving** shows what this node's indexer may do right now; it is advisory and
+switches nothing.
+
 ### Putting a failed queue back to work
 
 **Unfinished requests after a worker update:** Open **Activity → Content

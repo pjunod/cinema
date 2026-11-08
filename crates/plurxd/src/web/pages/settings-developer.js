@@ -337,6 +337,17 @@ async function saveCinemaRemoteInvitations(button){
 }
 
 function diagnosticDeveloperCard(){return setCard(`${cardHead("Diagnostic ZIP reports","Bounded local evidence for bug and issue attachments.",'<span class="pill">Qualification pending</span>')}<p>Help → Report a problem saves a ZIP with a readable summary and structured evidence. Attach it to an issue using your usual reporting channel. Web download and phone sharing are available. Native TVs offer a temporary local QR download on trusted Wi-Fi; physical-device sampling remains.</p>${devGraduation("archive export, privacy and recovery have applicable client and device receipts, including native TV file transfer.","this advisory card is removed; reporting remains in Help and the player.")}<button type="button" onclick="showDiagnostics()">Open reporting</button>`);}
+// C1 (playback start): the indexer no longer waits for an idle node. No
+// switch; the rows say what this node's indexer may do right now.
+function indexingWhileServingCard(readiness){
+  return setCard(`${cardHead("Indexing while serving","Content analysis keeps indexing while this node serves: a viewer waiting for an encoder still comes first, and an idle node takes other nodes' indexing.",'<span class="pill ok">automatic</span>')}
+    ${devReq(readiness,"indexing_while_serving","serving_live_waiters","No viewer queuing for an encoder","While a viewer waits for this node's encoder, analysis claims only requests a playback is waiting on.")}
+    ${devReq(readiness,"indexing_while_serving","serving_slots_in_use","Encoder slots in use","An encoder in use no longer stops analysis; the read holds a storage-domain reservation instead.")}
+    ${devReq(readiness,"indexing_while_serving","serving_domain_readers","Storage-domain reader slots","Two source readers per domain. The same rule is checked when a request is claimed, before its read, while it reads and before it is submitted.")}
+    ${devReq(readiness,"indexing_while_serving","serving_cross_node","Takes other nodes' indexing","An idle node with fragment-index authority builds other nodes' requests for its own engine; delivery copies the index to the node that asked.")}
+    <p class="hint">Advisory: nothing here switches anything on or off.</p>
+    ${devGraduation("after a deploy, idle nodes' analysis claims rise while another node serves, plurx_analysis_completed_total shows completions that reached their target, and no storage domain holds more than its two readers.","this card goes; indexing while serving is simply how analysis works.")}`,{id:"indexing-while-serving-card"});
+}
 function developerPanel(settings,readiness,httpsCard=""){
   // Only features that are not yet fully active or fully tested wait here,
   // each saying what it waits on (devGraduation). Everything that graduated
@@ -360,6 +371,7 @@ function developerPanel(settings,readiness,httpsCard=""){
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
+      <div class="setsection" id="enable-indexing-while-serving"><h2>Indexing while serving</h2><p>Content analysis beside playback. Automatic; the rows are advisory.</p></div>${indexingWhileServingCard(readiness)}
       <div class="setsection" id="enable-macos-video"><h2>Mac video processing</h2><p>Worker-local compatibility and outstanding visual and streaming qualification.</p></div>${macosVideoProcessingCard(settings,readiness)}
       <div class="setsection" id="enable-macos-hevc"><h2>Mac HEVC output</h2><p>Independent output negotiation and HDR presentation qualification.</p></div>${macosHevcOutputCard(settings,readiness)}`;
 }

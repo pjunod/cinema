@@ -571,6 +571,7 @@ pub(crate) async fn readiness(
             },
             clock_measurement(&state, clock_guard_enforced),
             durable_cluster_work(&state).await,
+            indexing_while_serving(&state).await,
             bounded_catalogue_reads(
                 &state,
                 plurx_core::store::stored_switch(
@@ -1152,6 +1153,124 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
             DeveloperRequirement { id: "durable_sources", title: "Source access on a worker", status: Unknown,
                 evidence: "This page does not scan library mounts. Each claimed job checks its source generation and readable descriptor on the chosen worker.".into() },
             DeveloperRequirement { id: "durable_peers", title: "Compatible peers", status: peer_status, evidence: peer_evidence },
+        ],
+    }
+}
+
+/// Content analysis no longer waits for an idle node (C1): a serving node
+/// keeps indexing its own requests, an idle one takes other nodes'. Nothing
+/// to switch; these rows say what this node's indexer may do right now.
+async fn indexing_while_serving(state: &AppState) -> DeveloperEnableItem {
+    use plurx_core::cluster::coordination::ClusterJobAuthority as _;
+    use plurx_core::store::background_jobs::JobKind;
+    use RequirementStatus::{Met, Unavailable, Unmet};
+    let observe = std::time::Duration::from_secs(3);
+    let live_waiting = state.transcode.admissions().live_is_waiting();
+    let (hardware, hardware_cap) = state.transcode.hardware_slots().await;
+    let software = state.transcode.admissions().software_in_use();
+    let idle = state.transcode.pretranscode_worker_idle();
+    let (readers_status, readers_evidence) = match tokio::time::timeout(
+        observe,
+        state.store.source_io_holders(crate::state::clock_ms()),
+    )
+    .await
+    {
+        Ok(Ok(holders)) => {
+            let mut domains = std::collections::BTreeMap::<String, usize>::new();
+            for holder in holders.iter().filter(|holder| holder.active_occupancy) {
+                *domains.entry(holder.resource_key.clone()).or_default() += 1;
+            }
+            let full = domains.values().any(|readers| *readers >= 2);
+            let listed = if domains.is_empty() {
+                "No storage domain has an active source reader".to_owned()
+            } else {
+                domains
+                    .iter()
+                    .take(8)
+                    .map(|(domain, readers)| format!("{domain}: {readers} of 2"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            (
+                if full { Unmet } else { Met },
+                format!(
+                    "{listed}. Each domain admits two source readers; without a live viewer a \
+                     background read takes only a domain no other reader holds"
+                ),
+            )
+        }
+        Ok(Err(error)) => (
+            Unavailable,
+            format!("The source-reader ledger could not be read: {error}"),
+        ),
+        Err(_) => (
+            Unavailable,
+            "The source-reader ledger did not answer within the three-second observation budget."
+                .into(),
+        ),
+    };
+    let (cross_status, cross_evidence) = match tokio::time::timeout(
+        observe,
+        state
+            .membership
+            .may_execute_job(JobKind::FragmentIndexBuild),
+    )
+    .await
+    {
+        Ok(authority) => (
+            if authority && idle { Met } else { Unmet },
+            format!(
+                "Fragment-index execution authority: {authority}; idle: {idle}. Only an idle \
+                 node with that authority claims other nodes' fragment-index requests for its \
+                 own engine; a serving node claims its own"
+            ),
+        ),
+        Err(_) => (
+            Unavailable,
+            "Worker authority did not answer within the three-second observation budget.".into(),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "indexing_while_serving",
+        title: "Indexing while serving",
+        enabled: None,
+        setting: None,
+        requirements: vec![
+            DeveloperRequirement {
+                id: "serving_live_waiters",
+                title: "No viewer queuing for an encoder",
+                status: if live_waiting { Unmet } else { Met },
+                evidence: if live_waiting {
+                    "A viewer is queuing for this node's encoder: analysis claims only requests \
+                     with a live playback waiter until it is admitted"
+                } else {
+                    "No viewer is queuing for this node's encoder, so analysis claims any \
+                     request its source capacity admits"
+                }
+                .into(),
+            },
+            DeveloperRequirement {
+                id: "serving_slots_in_use",
+                title: "Encoder slots in use",
+                status: Met,
+                evidence: format!(
+                    "{hardware} of {hardware_cap} hardware slots and {software} software threads \
+                     are in use. An encoder in use does not stop analysis: its read holds a \
+                     source-domain reservation, not an encoder slot"
+                ),
+            },
+            DeveloperRequirement {
+                id: "serving_domain_readers",
+                title: "Storage-domain reader slots",
+                status: readers_status,
+                evidence: readers_evidence,
+            },
+            DeveloperRequirement {
+                id: "serving_cross_node",
+                title: "Takes other nodes' indexing",
+                status: cross_status,
+                evidence: cross_evidence,
+            },
         ],
     }
 }

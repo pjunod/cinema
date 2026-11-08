@@ -8640,6 +8640,9 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // `met` and the offset and NTP rows `unobservable`.
             "cluster_clock",
             "durable_cluster_work",
+            // C1: what this node's indexer may do while it serves. All four
+            // rows describe an idle standalone node here.
+            "indexing_while_serving",
             "bounded_catalogue_reads",
             "cluster_backup",
             "windows_server",
@@ -8865,6 +8868,10 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "rolling_contract_built",
             "runtime",
             "server_preparation_is_real",
+            "serving_cross_node",
+            "serving_domain_readers",
+            "serving_live_waiters",
+            "serving_slots_in_use",
             "source_fencing",
             "stored_source_producer",
             "tuner_reserve",
