@@ -920,7 +920,6 @@ impl TranscodeManager {
                     serving_admission,
                     retained_capture,
                     revalidated.as_ref(),
-                    recovery,
                 )
                 .await;
             tracing::info!(
@@ -4108,7 +4107,6 @@ impl TranscodeManager {
         // source row and HWACCEL preference come from it: it was taken in
         // this task, moments ago, and a second read would answer the same.
         revalidated: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
-        recovery: Option<&SessionRecoveryIdentity>,
     ) -> Result<StartInfo, String> {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
