@@ -1131,9 +1131,9 @@ pub use fragment_index_cluster::{
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
     ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
     ClusterFragmentIndexStore, ClusterIndexAvailabilityProbe, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
-    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
-    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
+    LiveAnalysisEngines, NewAnalysisRequest, NewClusterFragmentIndexJob, StrandedRemedy,
+    SubtitleBackfillCandidate, SubtitleBackfillDiagnostics, SubtitleSourcePublication,
+    SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
     CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
     DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
     DEFAULT_SUBTITLE_WINDOW_SECS, FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS,
@@ -1437,10 +1437,11 @@ pub struct AnalysisQueueHealth {
     /// that has not run yet; a standing count is the outage's own signature.
     pub running_past_lease: i64,
     pub last_ready_at_ms: i64,
-    /// Pre-worker fragment-index requests (`analysis_requests`, `queued`,
-    /// no worker cache key yet) still inside their `not_before_ms` wait.
-    /// The jobs-table inputs above never see this lifecycle: a request only
-    /// gains a job row once a worker claims it.
+    /// Fragment-index work inside a retry wait: pre-worker requests
+    /// (`analysis_requests`, `queued`, no worker cache key yet) before their
+    /// `not_before_ms`, plus queued worker jobs backing off after a failed
+    /// attempt. `claimable` counts neither, so without this a queue whose
+    /// whole backlog is backing off reads `idle`.
     pub waiting: i64,
     /// Due pre-worker requests whose `pipeline_version` no live engine runs —
     /// work that cannot be claimed by anyone until it is reconciled. Zero
@@ -1722,16 +1723,17 @@ pub(crate) fn analysis_store_metrics(
 pub trait MetricsStore: Send + Sync + 'static {
     /// One complete Store-backed metrics sample. `now` is Unix seconds.
     ///
-    /// `live_fragment_engines` is the set of fragment-index engine digests
-    /// some live worker runs (this node's plus each fresh peer's). It splits
-    /// due pre-worker requests into `eligible` and `incompatible`; `None`
-    /// means the set is unknown, and every due request then counts as
-    /// eligible rather than as stranded.
+    /// `live_fragment_engines` is the last worker inventory (this node's
+    /// engine plus each fresh peer's). It splits due pre-worker requests into
+    /// `eligible` and `incompatible` by the stranded rule the reconciler and
+    /// the enqueue cap share ([`LiveAnalysisEngines`]); `None` means the
+    /// inventory is unknown, and every due request then counts as eligible
+    /// rather than as stranded.
     async fn prometheus_store_snapshot_with(
         &self,
         node_id: &str,
         now: i64,
-        live_fragment_engines: Option<&[String]>,
+        live_fragment_engines: Option<&LiveAnalysisEngines>,
     ) -> Result<PrometheusStoreSnapshot, StoreError>;
 
     async fn prometheus_store_snapshot(
@@ -1744,9 +1746,10 @@ pub trait MetricsStore: Send + Sync + 'static {
     }
 }
 
-/// The JSON-array parameter both backends bind for a live engine set.
-pub(crate) fn live_engines_param(live: Option<&[String]>) -> Option<String> {
-    live.map(|digests| serde_json::to_string(digests).unwrap_or_else(|_| "[]".to_owned()))
+/// The JSON-array parameter both backends bind for a live engine set: the
+/// distinct digests, or NULL when the inventory is unknown.
+pub(crate) fn live_engines_param(live: Option<&LiveAnalysisEngines>) -> Option<String> {
+    live.map(|live| serde_json::to_string(&live.digests()).unwrap_or_else(|_| "[]".to_owned()))
 }
 
 /// Shared SQL for the pre-worker request half of [`AnalysisQueueHealth`] and
@@ -1755,18 +1758,26 @@ pub(crate) fn live_engines_param(live: Option<&[String]>) -> Option<String> {
 /// own placeholders. Pre-worker means `queued` with no worker cache key: once
 /// a worker claims a request it gains a `cluster_fragment_index_jobs` row and
 /// the jobs-table inputs take over, so the two lifecycles never double count.
+///
+/// `waiting` is every fragment-index row inside a retry wait: pre-worker
+/// requests not yet due, plus worker jobs (`cluster_fragment_index_jobs`)
+/// backing off after a failed attempt. Without the jobs half, 3,000 jobs in
+/// a job-level retry wait read `idle`. `incompatible` and `eligible` split
+/// the due pre-worker requests by the one stranded rule
+/// ([`fragment_index_cluster::analysis_request_stranded_sql`]).
 pub(crate) fn analysis_request_health_sql(now: &str, live: &str) -> String {
     let pre_worker = "component = 'fragment_index' AND state = 'queued' \
         AND COALESCE(result_cache_key, '') = ''";
+    let stranded = fragment_index_cluster::analysis_request_stranded_sql(live);
     format!(
-        "(SELECT COUNT(*) FROM analysis_requests WHERE {pre_worker} \
-            AND not_before_ms > {now} * 1000) AS analysis_waiting, \
+        "((SELECT COUNT(*) FROM analysis_requests WHERE {pre_worker} \
+            AND not_before_ms > {now} * 1000) \
+          + (SELECT COUNT(*) FROM cluster_fragment_index_jobs WHERE state = 'queued' \
+            AND not_before_ms > {now} * 1000)) AS analysis_waiting, \
          (SELECT COUNT(*) FROM analysis_requests WHERE {pre_worker} \
-            AND not_before_ms <= {now} * 1000 AND {live} IS NOT NULL \
-            AND pipeline_version NOT IN (SELECT value FROM json_each({live}))) AS analysis_incompatible, \
+            AND not_before_ms <= {now} * 1000 AND {stranded}) AS analysis_incompatible, \
          (SELECT COUNT(*) FROM analysis_requests WHERE {pre_worker} \
-            AND not_before_ms <= {now} * 1000 AND ({live} IS NULL \
-              OR pipeline_version IN (SELECT value FROM json_each({live})))) AS analysis_eligible_requests, \
+            AND not_before_ms <= {now} * 1000 AND NOT {stranded}) AS analysis_eligible_requests, \
          (SELECT COALESCE(MIN(created_at_ms), 0) FROM analysis_requests WHERE {pre_worker}) \
             AS analysis_oldest_queued_at_ms, \
          (SELECT COALESCE(json_group_array(json_object('code', grouped.code, 'count', grouped.n)), '[]') \

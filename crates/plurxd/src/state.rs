@@ -1452,16 +1452,13 @@ impl AppState {
             .await
             .ok()
             .filter(|engines| !engines.is_empty())
-            .map(|engines| {
-                engines
-                    .into_values()
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
+            .map(|engines| plurx_core::store::LiveAnalysisEngines {
+                engines,
+                members: None,
             });
         match self
             .store
-            .prometheus_store_snapshot_with(&self.node_id, now, live.as_deref())
+            .prometheus_store_snapshot_with(&self.node_id, now, live.as_ref())
             .await
         {
             Ok(snapshot) => {
@@ -3943,6 +3940,7 @@ impl JobManager {
             tracing::info!(
                 scanned = report.scanned,
                 retired = report.retired,
+                absent_target = report.absent_target,
                 replaced = report.replaced,
                 skipped_unfresh = report.skipped_unfresh,
                 wrapped = report.wrapped,
@@ -5151,9 +5149,10 @@ impl JobManager {
                 source_mtime: file.mtime,
                 pipeline_version: subtitle_source_pipeline_version().await,
             };
+            let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
             let request = self
                 .store
-                .enqueue_or_promote_subtitle_source(
+                .enqueue_or_promote_subtitle_source_with(
                     &stamp,
                     if trigger == "playback" {
                         "foreground"
@@ -5161,6 +5160,7 @@ impl JobManager {
                         "normal"
                     },
                     clock_ms(),
+                    live.as_deref(),
                 )
                 .await?
                 .ok_or_else(|| {
@@ -9167,7 +9167,13 @@ impl JobManager {
                     };
                     match self
                         .store
-                        .enqueue_or_promote_subtitle_source(&stamp, "normal", clock_ms())
+                        .enqueue_or_promote_subtitle_source_with(
+                            &stamp,
+                            "normal",
+                            clock_ms(),
+                            crate::background_jobs::analysis_reconcile::live_engines_snapshot()
+                                .as_deref(),
+                        )
                         .await
                     {
                         Ok(Some(request)) if request.state == "queued" => {

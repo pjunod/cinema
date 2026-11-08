@@ -2316,13 +2316,17 @@ async fn stranded_backlog_does_not_hold_the_ceiling_against_runnable_work() {
         not_before_ms: 0,
         created_at_ms: 2,
     };
+    let live_set = crate::store::LiveAnalysisEngines {
+        engines: [("node-a".to_owned(), live.clone())].into(),
+        members: None,
+    };
     let unknown = store.enqueue_analysis_request(&request("unknown")).await;
     assert!(
         unknown.is_err(),
         "an unknown live set counts every active row, and the table is at the ceiling"
     );
     store
-        .enqueue_analysis_request_with(&request("runnable"), Some(std::slice::from_ref(&live)))
+        .enqueue_analysis_request_with(&request("runnable"), Some(&live_set))
         .await
         .expect("stranded backlog does not hold the ceiling against a live engine");
 
@@ -2337,32 +2341,106 @@ async fn stranded_backlog_does_not_hold_the_ceiling_against_runnable_work() {
     )
     .await;
     assert!(store
-        .enqueue_analysis_request_with(&request("over-bound"), Some(&[live]))
+        .enqueue_analysis_request_with(&request("over-bound"), Some(&live_set))
         .await
         .is_err());
 }
 
-/// Both twins carry the same runnable-versus-backlog cap, so the SQLite
-/// behaviour above is the replicated one too (the replicated twin cannot be
-/// filled to 16,384 rows inside a unit run).
+/// The subtitle-source twin of the cap above (review S6): stranded
+/// fragment-index backlog at the ceiling refused every subtitle source
+/// enqueue too, live set or not. Now the live set admits it, an unknown set
+/// still counts every row, and the hard bound still refuses.
+#[tokio::test]
+async fn stranded_backlog_does_not_hold_the_ceiling_against_a_subtitle_source() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    seed_files(&store).await;
+    let live = crate::store::LiveAnalysisEngines {
+        engines: [("node-a".to_owned(), "a".repeat(64))].into(),
+        members: None,
+    };
+    fill_backlog(&store, MAX_ACTIVE_JOBS, "b".repeat(64), "stranded-").await;
+    let stamp = |file_id: i64, mtime: i64| SubtitleSourceStamp {
+        file_id,
+        source_size: 100,
+        source_mtime: mtime,
+        pipeline_version: "subtitle-source-v1".to_owned(),
+    };
+    assert!(
+        store
+            .enqueue_or_promote_subtitle_source(&stamp(1, 10), "normal", 5)
+            .await
+            .is_err(),
+        "an unknown live set counts every active row, and the table is at the ceiling"
+    );
+    let admitted = store
+        .enqueue_or_promote_subtitle_source_with(&stamp(1, 10), "normal", 5, Some(&live))
+        .await
+        .expect("stranded backlog does not hold the ceiling against a subtitle source")
+        .expect("inside the repair budget");
+    assert_eq!(
+        (admitted.component.as_str(), admitted.state.as_str()),
+        ("subtitle_source", "queued")
+    );
+    fill_backlog(
+        &store,
+        MAX_ACTIVE_JOBS * crate::store::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR
+            - MAX_ACTIVE_JOBS
+            - 1,
+        "b".repeat(64),
+        "bound-",
+    )
+    .await;
+    assert!(store
+        .enqueue_or_promote_subtitle_source_with(&stamp(2, 20), "normal", 6, Some(&live))
+        .await
+        .is_err());
+}
+
+/// Both twins of both enqueues (an analysis request and a subtitle source)
+/// carry the same runnable-versus-backlog cap, through the one stranded rule,
+/// so the SQLite behaviour above is the replicated one too (the replicated
+/// twin cannot be filled to 16,384 rows inside a unit run; store_contract
+/// runs the cap path on both backends with a live set).
 #[test]
 fn both_enqueue_twins_measure_the_ceiling_against_runnable_work() {
     let sqlite = include_str!("../fragment_index_cluster.rs");
     let hiqlite = include_str!("../../hiqlite_fragment_index_cluster.rs");
-    for (name, source, live, factor) in [
-        ("sqlite", sqlite, "?18", "?16 * ?19"),
-        ("hiqlite", hiqlite, "$18", "$16 * $19"),
+    for (name, source, placeholders) in [
+        (
+            "sqlite",
+            sqlite,
+            [("?18", "?16 * ?19"), ("?11", "?9 * ?12")],
+        ),
+        (
+            "hiqlite",
+            hiqlite,
+            [("$18", "$16 * $19"), ("$15", "$13 * $16")],
+        ),
     ] {
-        assert!(
-            source.contains(&format!(
-                "OR pipeline_version IN (SELECT value FROM json_each({live}))))"
-            )),
-            "{name}: runnable rows exclude stranded fragment-index backlog"
-        );
-        assert!(
-            source.contains(factor),
-            "{name}: the hard bound on all active rows"
-        );
+        for (method, (live, factor)) in [
+            "async fn enqueue_analysis_request_with(",
+            "async fn enqueue_or_promote_subtitle_source_with(",
+        ]
+        .into_iter()
+        .zip(placeholders)
+        {
+            let start = source
+                .find(method)
+                .unwrap_or_else(|| panic!("{name}: {method}"));
+            let body = &source[start..];
+            let body = &body[..body[1..]
+                .find("\n    async fn ")
+                .map_or(body.len(), |end| end + 1)];
+            assert!(
+                body.contains(&format!("analysis_request_stranded_sql(\"{live}\")"))
+                    && body.contains("AND NOT {stranded})"),
+                "{name} {method}: runnable rows exclude stranded fragment-index backlog"
+            );
+            assert!(
+                body.contains(factor),
+                "{name} {method}: the hard bound on all active rows"
+            );
+        }
     }
 }
 

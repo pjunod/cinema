@@ -1,5 +1,7 @@
 -- Both stores execute these statements in one transaction. The JSON parameters
--- are server-derived snapshots, never SQL supplied by the caller.
+-- are server-derived snapshots, never SQL supplied by the caller. A request
+-- whose target membership has fenced as removed is never reconciled: removal
+-- retires it (`retire_analysis_requests_for_node`), nothing works for it.
 WITH input AS (SELECT $1 AS original, $2 AS replacement, $3 AS now_ms)
 INSERT INTO analysis_requests
   (request_id, file_id, source_size, source_mtime, component, pipeline_version,
@@ -18,6 +20,8 @@ WHERE old.request_id = json_extract((SELECT original FROM input), '$.request_id'
   AND old.updated_at_ms = json_extract((SELECT original FROM input), '$.updated_at_ms')
   AND old.state = 'queued' AND old.component = 'fragment_index'
   AND COALESCE(old.result_cache_key, '') = '' AND old.cancel_requested = 0
+  AND NOT EXISTS (SELECT 1 FROM settings
+    WHERE key = 'internal.cluster_job_owner_removed.' || old.target_node_id)
   AND EXISTS (SELECT 1 FROM files WHERE id = old.file_id
     AND size = json_extract((SELECT replacement FROM input), '$.source_size')
     AND mtime = json_extract((SELECT replacement FROM input), '$.source_mtime'))
@@ -46,6 +50,8 @@ WHERE old.request_id = json_extract((SELECT original FROM input), '$.request_id'
   AND old.updated_at_ms = json_extract((SELECT original FROM input), '$.updated_at_ms')
   AND old.state = 'queued' AND old.component = 'fragment_index'
   AND COALESCE(old.result_cache_key, '') = '' AND old.cancel_requested = 0
+  AND NOT EXISTS (SELECT 1 FROM settings
+    WHERE key = 'internal.cluster_job_owner_removed.' || old.target_node_id)
   AND EXISTS (SELECT 1 FROM files WHERE id = old.file_id
     AND size = json_extract((SELECT replacement FROM input), '$.source_size')
     AND mtime = json_extract((SELECT replacement FROM input), '$.source_mtime'))

@@ -2136,7 +2136,7 @@ impl MetricsStore for SqliteStore {
         &self,
         node_id: &str,
         now: i64,
-        live_fragment_engines: Option<&[String]>,
+        live_fragment_engines: Option<&super::LiveAnalysisEngines>,
     ) -> Result<PrometheusStoreSnapshot, StoreError> {
         let node_id = node_id.to_owned();
         let live = super::live_engines_param(live_fragment_engines);

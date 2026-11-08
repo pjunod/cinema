@@ -406,11 +406,12 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
-    async fn enqueue_or_promote_subtitle_source(
+    async fn enqueue_or_promote_subtitle_source_with(
         &self,
         stamp: &SubtitleSourceStamp,
         priority: &str,
         now_ms: i64,
+        live_engines: Option<&super::super::LiveAnalysisEngines>,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if stamp.file_id <= 0
             || stamp.source_size < 0
@@ -429,6 +430,13 @@ impl ClusterFragmentIndexStore for SqliteStore {
         self.retire_subtitle_source_ready(stamp, now_ms).await?;
         let stamp = stamp.clone();
         let priority = priority.to_owned();
+        let live = super::super::live_engines_param(live_engines);
+        // The same cap as `enqueue_analysis_request_with`: runnable work holds
+        // the ceiling (?9 + the viewer's headroom ?10), stranded
+        // fragment-index backlog (?11 the live digests) only the hard bound
+        // (?12 x the ceiling).
+        let stranded = super::super::fragment_index_cluster::analysis_request_stranded_sql("?11");
+        let insert = format!("INSERT INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT ?1,?2,?3,?4,'subtitle_source',?5,'',?1,'',?6,?7,0,'','queued',NULL,0,NULL,0,?8,NULL,NULL,0,?8,?8 WHERE EXISTS (SELECT 1 FROM files WHERE id = ?2 AND size = ?3 AND mtime = ?4) AND ?9 + CASE WHEN ?6 = 'foreground' THEN ?10 ELSE 0 END > (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted') AND NOT {stranded}) AND ?9 * ?12 + CASE WHEN ?6 = 'foreground' THEN ?10 ELSE 0 END > (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted'))");
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let existing = tx.query_row(
@@ -466,8 +474,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 return Ok(Some(request));
             }
             tx.execute(
-                "INSERT INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT ?1,?2,?3,?4,'subtitle_source',?5,'',?1,'',?6,?7,0,'','queued',NULL,0,NULL,0,?8,NULL,NULL,0,?8,?8 WHERE EXISTS (SELECT 1 FROM files WHERE id = ?2 AND size = ?3 AND mtime = ?4) AND (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')) < ?9 + CASE WHEN ?6 = 'foreground' THEN ?10 ELSE 0 END",
-                params![generation, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, priority, if priority == "foreground" { "playback" } else { "background" }, now_ms, MAX_ANALYSIS_REQUESTS, super::super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM],
+                &insert,
+                params![generation, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, priority, if priority == "foreground" { "playback" } else { "background" }, now_ms, MAX_ANALYSIS_REQUESTS, super::super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM, live, super::super::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR],
             )?;
             let result = tx.query_row(&format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"), params![generation], request_from_row).optional()?;
             tx.commit()?;
@@ -579,12 +587,13 @@ impl ClusterFragmentIndexStore for SqliteStore {
     async fn enqueue_analysis_request_with(
         &self,
         request: &NewAnalysisRequest,
-        live_engines: Option<&[String]>,
+        live_engines: Option<&super::super::LiveAnalysisEngines>,
     ) -> Result<AnalysisRequest, StoreError> {
         if !valid_request(request) {
             return Err(StoreError::Task("invalid analysis request".to_owned()));
         }
         let live = super::super::live_engines_param(live_engines);
+        let stranded = super::super::fragment_index_cluster::analysis_request_stranded_sql("?18");
         let request = request.clone();
         let semantic_fingerprint = crate::segplan::argv_fingerprint(&[
             "timeline-annotations".to_owned(),
@@ -593,7 +602,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
         self.with_conn(move |conn| {
             let transaction = conn.unchecked_transaction()?;
             transaction.execute(
-                "INSERT INTO analysis_requests
+                &format!(
+                    "INSERT INTO analysis_requests
                     (request_id, file_id, source_size, source_mtime, component,
                      pipeline_version, video_identity, requested_generation,
                      expected_predecessor_generation,
@@ -630,16 +640,16 @@ impl ClusterFragmentIndexStore for SqliteStore {
                       AND json_extract(prediction.request_json,'$.component') = ?5
                       AND json_extract(prediction.request_json,'$.pipeline_version') = ?6
                       AND json_extract(prediction.request_json,'$.target_node_id') = ?12))
-                    -- Runnable work holds the ceiling; a fragment-index row
-                    -- under an engine no live worker runs (?18) is backlog
-                    -- and holds only the hard bound (?19 x the ceiling).
-                    -- ?18 NULL: unknown, every active row counts.
+                    -- Runnable work holds the ceiling; a stranded
+                    -- fragment-index request (`LiveAnalysisEngines`, ?18 the
+                    -- live digests) is backlog and holds only the hard bound
+                    -- (?19 x the ceiling). ?18 NULL: unknown, every active
+                    -- row counts.
                     AND ?16 + CASE WHEN ?9 = 'foreground' AND ?10 = 'playback'
                                    THEN ?17 ELSE 0 END
                       > (SELECT COUNT(*) FROM analysis_requests
                           WHERE state IN ('queued', 'running', 'submitted')
-                            AND (?18 IS NULL OR component <> 'fragment_index'
-                              OR pipeline_version IN (SELECT value FROM json_each(?18))))
+                            AND NOT {stranded})
                     AND ?16 * ?19 + CASE WHEN ?9 = 'foreground' AND ?10 = 'playback'
                                         THEN ?17 ELSE 0 END
                       > (SELECT COUNT(*) FROM analysis_requests
@@ -671,7 +681,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                           AND video_identity = ?7
                           AND requested_generation = ?8 AND target_node_id = ?12)
                     ))
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT DO NOTHING"
+                ),
                 params![
                     request.request_id,
                     request.file_id,

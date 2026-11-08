@@ -1788,11 +1788,12 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .collect())
     }
 
-    async fn enqueue_or_promote_subtitle_source(
+    async fn enqueue_or_promote_subtitle_source_with(
         &self,
         stamp: &SubtitleSourceStamp,
         priority: &str,
         now_ms: i64,
+        live_engines: Option<&super::LiveAnalysisEngines>,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if stamp.file_id <= 0
             || stamp.source_size < 0
@@ -1805,6 +1806,12 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             ));
         }
         self.retire_subtitle_source_ready(stamp, now_ms).await?;
+        let live = super::live_engines_param(live_engines);
+        // See the SQLite twin: runnable work holds the ceiling, stranded
+        // fragment-index backlog only the hard bound. Ceiling-first, so
+        // $13/$14 bind before $15/$16 (`validate_parameter_order`).
+        let stranded = super::fragment_index_cluster::analysis_request_stranded_sql("$15");
+        let insert = format!("INSERT OR IGNORE INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT $1,$2,$3,$4,'subtitle_source',$5,'',$1,'',$6,$7,0,'','queued',NULL,0,NULL,0,$8,NULL,NULL,0,$8,$8 WHERE $9 < $10 AND COALESCE((SELECT next_epoch FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $11 AND COALESCE((SELECT COALESCE(last_1_ms >= $12, 0) + COALESCE(last_2_ms >= $12, 0) + COALESCE(last_3_ms >= $12, 0) FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $9 AND EXISTS (SELECT 1 FROM files WHERE id = $2 AND size = $3 AND mtime = $4) AND NOT EXISTS (SELECT 1 FROM analysis_requests WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state IN ('queued','running','submitted')) AND $13 + CASE WHEN $6 = 'foreground' THEN $14 ELSE 0 END > (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted') AND NOT {stranded}) AND $13 * $16 + CASE WHEN $6 = 'foreground' THEN $14 ELSE 0 END > (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted'))");
         for _ in 0..4 {
             let repairs = self.client().query_consistent_map::<SubtitleRepairCountsRow, _>(
                 "SELECT next_epoch AS lifetime, COALESCE(last_1_ms >= $1, 0) + COALESCE(last_2_ms >= $1, 0) + COALESCE(last_3_ms >= $1, 0) AS recent FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5",
@@ -1821,8 +1828,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                  params!(now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version)),
                 ("UPDATE analysis_requests SET priority = 'foreground', trigger = 'playback', updated_at_ms = $1 WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state = 'queued' AND priority = 'normal' AND $6 = 'foreground'".to_owned(),
                  params!(now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, priority)),
-                ("INSERT OR IGNORE INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT $1,$2,$3,$4,'subtitle_source',$5,'',$1,'',$6,$7,0,'','queued',NULL,0,NULL,0,$8,NULL,NULL,0,$8,$8 WHERE $9 < $10 AND COALESCE((SELECT next_epoch FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $11 AND COALESCE((SELECT COALESCE(last_1_ms >= $12, 0) + COALESCE(last_2_ms >= $12, 0) + COALESCE(last_3_ms >= $12, 0) FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $9 AND EXISTS (SELECT 1 FROM files WHERE id = $2 AND size = $3 AND mtime = $4) AND NOT EXISTS (SELECT 1 FROM analysis_requests WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state IN ('queued','running','submitted')) AND (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')) < $13 + CASE WHEN $6 = 'foreground' THEN $14 ELSE 0 END".to_owned(),
-                 params!(&generation, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, priority, trigger, now_ms, repairs.recent, SUBTITLE_SOURCE_REPAIR_LIMIT, repairs.lifetime, now_ms.saturating_sub(SUBTITLE_SOURCE_REPAIR_WINDOW_MS), MAX_ANALYSIS_REQUESTS, super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM)),
+                (insert.clone(),
+                 params!(&generation, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, priority, trigger, now_ms, repairs.recent, SUBTITLE_SOURCE_REPAIR_LIMIT, repairs.lifetime, now_ms.saturating_sub(SUBTITLE_SOURCE_REPAIR_WINDOW_MS), MAX_ANALYSIS_REQUESTS, super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM, live.clone(), super::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR)),
             ]).await?.into_iter().collect::<Result<Vec<_>, _>>().map_err(database_error)?;
             let _ = results;
             let active = self.client().query_consistent_map::<RequestRow, _>(
@@ -1985,12 +1992,13 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
     async fn enqueue_analysis_request_with(
         &self,
         request: &NewAnalysisRequest,
-        live_engines: Option<&[String]>,
+        live_engines: Option<&super::LiveAnalysisEngines>,
     ) -> Result<AnalysisRequest, StoreError> {
         if !valid_request(request) {
             return Err(StoreError::Task("invalid analysis request".to_owned()));
         }
         let live = super::live_engines_param(live_engines);
+        let stranded = super::fragment_index_cluster::analysis_request_stranded_sql("$18");
         let semantic_fingerprint = crate::segplan::argv_fingerprint(&[
             "timeline-annotations".to_owned(),
             request.pipeline_version.clone(),
@@ -1998,7 +2006,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         self.client()
             .txn(vec![
                 (
-                    "INSERT INTO analysis_requests
+                    format!(
+                        "INSERT INTO analysis_requests
                 (request_id, file_id, source_size, source_mtime, component,
                  pipeline_version, video_identity, requested_generation,
                  expected_predecessor_generation,
@@ -2042,8 +2051,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                                    THEN $17 ELSE 0 END
                       > (SELECT COUNT(*) FROM analysis_requests
                           WHERE state IN ('queued', 'running', 'submitted')
-                            AND ($18 IS NULL OR component <> 'fragment_index'
-                              OR pipeline_version IN (SELECT value FROM json_each($18))))
+                            AND NOT {stranded})
                     AND $16 * $19 + CASE WHEN $9 = 'foreground' AND $10 = 'playback'
                                         THEN $17 ELSE 0 END
                       > (SELECT COUNT(*) FROM analysis_requests
@@ -2072,7 +2080,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       AND requested_generation = $8 AND target_node_id = $12)
                 ))
              ON CONFLICT DO NOTHING"
-                        .to_owned(),
+                    ),
                     params!(
                         &request.request_id,
                         request.file_id,

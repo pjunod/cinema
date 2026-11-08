@@ -287,10 +287,42 @@ mod background_pass_tests {
         reconcile_retired_against, ReconcileContext, ReconcileReport,
     };
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
-    use plurx_core::store::{AnalysisRequest, NewAnalysisRequest};
-    use std::collections::BTreeMap;
+    use plurx_core::store::{AnalysisRequest, LiveAnalysisEngines, NewAnalysisRequest};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn inventory(engines: &[(&str, &str)], members: Option<&[&str]>) -> LiveAnalysisEngines {
+        LiveAnalysisEngines {
+            engines: engines
+                .iter()
+                .map(|(node, engine)| ((*node).to_owned(), (*engine).to_owned()))
+                .collect::<BTreeMap<_, _>>(),
+            members: members.map(|members| {
+                members
+                    .iter()
+                    .map(|node| (*node).to_owned())
+                    .collect::<BTreeSet<_>>()
+            }),
+        }
+    }
 
     async fn fixture_file(state: &AppState, name: &str) -> i64 {
+        fixture_file_at(
+            state,
+            name,
+            &format!("/missing-reconcile-{name}/movie.mkv"),
+            100,
+            1,
+        )
+        .await
+    }
+
+    async fn fixture_file_at(
+        state: &AppState,
+        name: &str,
+        path: &str,
+        size: i64,
+        mtime: i64,
+    ) -> i64 {
         let library = state
             .store
             .create_library(&NewLibrary {
@@ -316,26 +348,52 @@ mod background_pass_tests {
             .expect("item");
         state
             .store
-            .upsert_file(
-                item,
-                &format!("/missing-reconcile-{name}/movie.mkv"),
-                100,
-                1,
-                &ProbeResult::default(),
-            )
+            .upsert_file(item, path, size, mtime, &ProbeResult::default())
             .await
             .expect("file")
     }
 
     async fn queued(state: &AppState, name: &str, engine: &str, target: &str) -> AnalysisRequest {
         let file_id = fixture_file(state, name).await;
+        enqueue(state, name, file_id, (100, 1), engine, target).await
+    }
+
+    /// A queued row over a real source on this node, so the reassign path's
+    /// source check passes.
+    async fn queued_on_disk(
+        state: &AppState,
+        dir: &std::path::Path,
+        name: &str,
+        engine: &str,
+        target: &str,
+    ) -> AnalysisRequest {
+        let path = dir.join(format!("{name}.mkv"));
+        std::fs::write(&path, [0_u8; 100]).expect("source");
+        let mtime = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_secs() as i64;
+        let file_id = fixture_file_at(state, name, path.to_str().expect("utf-8"), 100, mtime).await;
+        enqueue(state, name, file_id, (100, mtime), engine, target).await
+    }
+
+    async fn enqueue(
+        state: &AppState,
+        name: &str,
+        file_id: i64,
+        (source_size, source_mtime): (i64, i64),
+        engine: &str,
+        target: &str,
+    ) -> AnalysisRequest {
         state
             .store
             .enqueue_analysis_request(&NewAnalysisRequest {
                 request_id: format!("reconcile-{name}"),
                 file_id,
-                source_size: 100,
-                source_mtime: 1,
+                source_size,
+                source_mtime,
                 component: "fragment_index".into(),
                 pipeline_version: engine.into(),
                 video_identity: "selected-video".into(),
@@ -362,7 +420,10 @@ mod background_pass_tests {
         let retired = queued(&state, "retired", &old, &local).await;
         let current = queued(&state, "current", &live, &local).await;
         let unfresh = queued(&state, "unfresh", &old, "silent-peer").await;
-        let engines = BTreeMap::from([(local.clone(), live.clone())]);
+        let engines = inventory(
+            &[(local.as_str(), live.as_str())],
+            Some(&[local.as_str(), "silent-peer"]),
+        );
         let ctx = ReconcileContext::of_state(&state);
         let mut cursor = String::new();
         let report = reconcile_retired_against(ctx, &engines, &mut cursor, 400, false)
@@ -424,7 +485,7 @@ mod background_pass_tests {
         let mut cursor = String::new();
         let report = reconcile_retired_against(
             ReconcileContext::of_state(&state),
-            &BTreeMap::new(),
+            &LiveAnalysisEngines::default(),
             &mut cursor,
             400,
             false,
@@ -441,6 +502,120 @@ mod background_pass_tests {
                 .expect("row")
                 .state,
             "queued"
+        );
+    }
+
+    /// A row some live worker can still claim is not stranded, whatever its
+    /// own target runs: an idle member running the row's engine takes it
+    /// through the claim's cross-node arm. The pass and the health's
+    /// `incompatible` agree on that (review S7); before, the pass replaced
+    /// it because its target reported something else.
+    #[tokio::test]
+    async fn a_row_another_live_worker_can_claim_is_left_alone() {
+        let (_, state) = crate::http::tests::test_app_with_state();
+        let (mine, theirs) = ("a".repeat(64), "b".repeat(64));
+        let local = state.node_id.clone();
+        let row = queued(&state, "claimable", &theirs, &local).await;
+        let engines = inventory(
+            &[
+                (local.as_str(), mine.as_str()),
+                ("idle-peer", theirs.as_str()),
+            ],
+            Some(&[local.as_str(), "idle-peer"]),
+        );
+        let mut cursor = String::new();
+        let report = reconcile_retired_against(
+            ReconcileContext::of_state(&state),
+            &engines,
+            &mut cursor,
+            400,
+            false,
+        )
+        .await
+        .expect("pass");
+        assert_eq!((report.retired, report.replaced), (0, 0));
+        let after = state
+            .store
+            .analysis_request(&row.request_id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(after.state, "queued");
+        assert!(!engines.is_stranded(&after));
+    }
+
+    /// A stranded row whose target is not a committed member is re-homed
+    /// here through the reassign path, source checked on this node; a
+    /// silent member's row stays; a removed target's row is never touched —
+    /// removal retires it and the reconcile statements refuse it.
+    #[tokio::test]
+    async fn a_stranded_row_whose_target_left_membership_is_rehomed_here() {
+        let (_, state) = crate::http::tests::test_app_with_state();
+        let dir = tempfile::tempdir().expect("sources");
+        let (live, old) = ("a".repeat(64), "b".repeat(64));
+        let local = state.node_id.clone();
+        let departed = queued_on_disk(&state, dir.path(), "departed", &old, "departed-node").await;
+        let silent = queued_on_disk(&state, dir.path(), "silent", &old, "silent-member").await;
+        let removed = queued_on_disk(&state, dir.path(), "removed", &old, "removed-node").await;
+        state
+            .store
+            .put_setting("internal.cluster_job_owner_removed.removed-node", "1")
+            .await
+            .expect("removal fence");
+        let engines = inventory(
+            &[(local.as_str(), live.as_str())],
+            Some(&[local.as_str(), "silent-member"]),
+        );
+        let mut cursor = String::new();
+        let report = reconcile_retired_against(
+            ReconcileContext::of_state(&state),
+            &engines,
+            &mut cursor,
+            400,
+            false,
+        )
+        .await
+        .expect("pass");
+        assert_eq!(
+            (
+                report.retired,
+                report.absent_target,
+                report.replaced,
+                report.skipped_unfresh
+            ),
+            (2, 2, 1, 1),
+            "departed and removed are absent; only departed commits; silent waits"
+        );
+        let state_of = |id: String| {
+            let state = state.clone();
+            async move {
+                state
+                    .store
+                    .analysis_request(&id)
+                    .await
+                    .expect("read")
+                    .expect("row")
+                    .state
+            }
+        };
+        assert_eq!(state_of(departed.request_id.clone()).await, "cancelled");
+        assert_eq!(state_of(silent.request_id.clone()).await, "queued");
+        assert_eq!(state_of(removed.request_id.clone()).await, "queued");
+        let page = state
+            .store
+            .analysis_reconciliation_page("", 100)
+            .await
+            .expect("page");
+        let successor = page
+            .iter()
+            .find(|row| row.file_id == departed.file_id && row.state == "queued")
+            .expect("a queued successor on this node");
+        assert_eq!(
+            (
+                successor.target_node_id.as_str(),
+                successor.pipeline_version.as_str()
+            ),
+            (local.as_str(), live.as_str())
         );
     }
 }
