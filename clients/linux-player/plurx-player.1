@@ -1,4 +1,4 @@
-.TH PLURX-PLAYER 1 2026-10-28 "plurx-player 0.4.1" "User Commands"
+.TH PLURX-PLAYER 1 2026-11-07 "plurx-player 0.4.3" "User Commands"
 .SH NAME
 plurx-player \- play a plurx title handed over by the plurx web app
 .SH SYNOPSIS
@@ -45,6 +45,24 @@ with
 and
 .B code
 is refused.
+.SH HDR SAMPLING
+Software native-endian planar 10-bit Dolby Vision and limited-range BT.2020
+non-constant-luminance/PQ pictures use high-aligned upload storage to preserve
+filtering precision. This includes ordinary HDR10 and server-produced HDR10-E.
+Hardware imports, P010 and integer-format fallback retain their existing paths.
+Other non-DV color descriptions, including SDR, HLG and full range, do likewise.
+The existing
+.B --vf=format:enhancement-layer=no
+option suppresses FEL application while retaining RPU reconstruction and display
+management. The enhancement-layer decoder still runs; accidental loss of a
+required layer is refused. This internal correction adds no option.
+.PP
+Vulkan rounds the final Dolby Vision mapped RGB to the nearest 16-bit code
+with ties to even when storing in its 16-bit normalized cache.
+.PP
+The 0.4.2 candidate's bounded image controls do not establish universal HDR or
+Dolby conformance, physical display output, playback performance, or that server
+compression errors are fixed.
 .SH PLAYBACK CONTROLS
 Cinema-style controls replace mpv's stock on-screen controller inside the
 same video surface. Drag the full-film timeline and release to seek.

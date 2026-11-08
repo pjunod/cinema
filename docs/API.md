@@ -914,6 +914,28 @@ with the same labels and observation fields as `jobs`. `active_truncated`
 indicates more assignments exist. Lease expiration must still be checked;
 a durable running row does not prove a physical worker is alive.
 
+The same response includes `processing: {window_ms: 300000, nodes:
+[{node_id, succeeded, failed}]}` across all filters. Each row counts terminal
+worker attempts with a finish time in the five minutes ending at
+`observed_at_ms` (start exclusive, end inclusive). Sum the node counts for
+the cluster total and divide by five for jobs per minute. Nodes with zero
+qualifying attempts have no row. Yields, retries, cancellations and expired
+leases are excluded. Counts come from retained attempt history and are lower
+bounds if queue maintenance pruned records inside the window.
+
+Each job-count group includes `overdue_manual`. For queued library scans and
+metadata refreshes this counts jobs with a pending manual or targeted request
+that is at least five minutes old and whose job has been due for dispatch
+for at least five minutes. Joining an older scheduled job starts the clock at
+the time of the manual request. Other groups report zero.
+
+Admin Activity source-holder rows include the original reader's
+`origin_node_id` and, for retained durable jobs, `origin_job_kind` and
+`origin_job_state`. A succeeded job can still have a reader awaiting recovery.
+`plurx_background_source_recovery_pending` counts distinct background readers
+that still occupy shared capacity after authority expired; the metrics sampler
+also logs a warning while recovery is pending.
+
 `DELETE /api/v1/activity/processes/{pid}` kills one listed child through the
 pidfd taken when it was started, so a pid the kernel has since reused for an
 unrelated process cannot be signalled: `404` for a pid the list does not
