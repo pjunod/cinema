@@ -1221,12 +1221,12 @@ probe which requests exist. `status` is `queued` · `running` · `done` · `fail
 `items` appear at `done`, `error` on failure (with `code: "path_unreadable"`
 when the root dropped mid-scan). A request made through this route also carries
 `waiting_on` — `full_scan:<library>` while a full scan or a metadata refresh
-holds the library's fence, `root_unreadable:<path>` while the claiming node
-cannot read a root, `queue_position:<n>` when it joined a targeted pass already
-running with `n` requests ahead of it, empty once its turn starts (the
-contract's `heavy_lane:<holder>` is never produced: the targeted job takes no
-heavy admission) — and `files`, the per-file report above; their absence means
-a request from before contract v2.
+holds a source reader or the fence the request needs, `heavy_lane:<kind>` while
+another background job holds that reader (a source's second reader is kept for
+playback), `root_unreadable:<path>` while the claiming node cannot read a root,
+`queue_position:<n>` when it joined a targeted pass already running with `n`
+requests ahead of it, empty once its turn starts — and `files`, the per-file
+report above; their absence means a request from before contract v2.
 Request receipts and results persist for seven days. The recent list is bounded
 to 256 records; an older record can still be read by ID until its receipt
 expires. A library admits at most 256 pending requests; overload is an explicit
