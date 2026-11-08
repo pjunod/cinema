@@ -206,16 +206,23 @@ final class PreparedSwitchMeasurementTests: XCTestCase {
 
     func testSeamBeaconNamesEachOutcomeAndCountsOnlyACommit() throws {
         let clean = PreparedSeamEvidence(framesComplete: true, droppedFrames: 0, audioObserved: true)
-        let committed = try XCTUnwrap(PreparedSeamBeacon.seam(.committed(firstFrameUnixMs: 1), evidence: clean))
+        let committed = try XCTUnwrap(PreparedSeamBeacon.seam(.committed(firstFrameUnixMs: 1), evidence: clean,
+                                                              reopened: false))
         XCTAssertEqual(committed.platform, "apple")
         XCTAssertEqual(committed.outcome, "committed")
         XCTAssertTrue(committed.frames_complete && committed.audio_observed && !committed.reopened)
-        let refused = try XCTUnwrap(PreparedSeamBeacon.seam(.refused, evidence: clean))
+        // Review 3 B2: the reopen leg is what ran, never implied by the outcome.
+        let reopenedCommit = try XCTUnwrap(PreparedSeamBeacon.seam(.committed(firstFrameUnixMs: 1),
+                                                                   evidence: clean, reopened: true))
+        XCTAssertTrue(reopenedCommit.reopened)
+        let refused = try XCTUnwrap(PreparedSeamBeacon.seam(.refused, evidence: clean, reopened: false))
         XCTAssertEqual(refused.outcome, "refused")
-        XCTAssertTrue(refused.reopened && !refused.frames_complete && !refused.audio_observed)
-        let blank = try XCTUnwrap(PreparedSeamBeacon.seam(.switchedWithoutAFrame, evidence: clean))
+        XCTAssertTrue(!refused.reopened && !refused.frames_complete && !refused.audio_observed,
+                      "a refusal whose reopen never ran is not a reopen")
+        XCTAssertTrue(try XCTUnwrap(PreparedSeamBeacon.seam(.refused, evidence: nil, reopened: true)).reopened)
+        let blank = try XCTUnwrap(PreparedSeamBeacon.seam(.switchedWithoutAFrame, evidence: clean, reopened: true))
         XCTAssertEqual(blank.outcome, "switched_without_a_frame")
-        XCTAssertNil(PreparedSeamBeacon.seam(.failedWithoutReopen, evidence: clean))
+        XCTAssertNil(PreparedSeamBeacon.seam(.failedWithoutReopen, evidence: clean, reopened: false))
         let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PreparedSeamBeacon(
             message: "m", detail: "committed", session_id: "s", prepared_seam: committed))) as? [String: Any]
         XCTAssertEqual(json?["event"] as? String, "prepared_seam")
