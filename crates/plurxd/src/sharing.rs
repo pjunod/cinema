@@ -148,6 +148,7 @@ impl SharingManager {
             ) -> Result<(), crate::sharing_client::PeerError>
             + Send,
         clock: Option<&crate::media_pool::CreateStartupBudget>,
+        rejoin_window: Option<tokio::time::Instant>,
         mut retrying: impl FnMut(crate::sharing_client::StartRetry) -> bool + Send,
     ) -> Result<ReceiverSourceStartResult, crate::sharing_client::PeerError> {
         use crate::sharing_client::{PeerConnection, PeerError, StartRetry};
@@ -253,13 +254,9 @@ impl SharingManager {
         // One Start, re-posted with the same bytes on the same pinned
         // connection after each typed "not yet": the Source's retained entry
         // for this request is rejoined, never a second producer. The viewer's
-        // clock bounds the re-posts by the local create's owner window.
-        let window = clock.map(|clock| {
-            clock.owner_window(
-                tokio::time::Instant::now() + Duration::from_secs(305),
-                crate::http::hls::OWNED_CREATE_REPOST_GRACE,
-            )
-        });
+        // clock bounds the re-posts by the attempt's fixed rejoin window, the
+        // same instant its abandonment decision reads.
+        let window = rejoin_window.filter(|_| clock.is_some());
         let reply = loop {
             match peer
                 .file_start(

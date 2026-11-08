@@ -125,6 +125,11 @@ struct ReceiverStartInner {
     /// The viewer's start clock from the Start that created this attempt, or
     /// unset for a client that sent none: it then keeps today's fixed bounds.
     clock: std::sync::OnceLock<crate::media_pool::CreateStartupBudget>,
+    /// When the viewer's retries can no longer rejoin this attempt: its
+    /// whole remaining start plus one re-post's grace (the local create's
+    /// owner window), fixed once with the clock. Both the re-post loop and
+    /// the abandonment decision read this one instant.
+    rejoin_window: std::sync::OnceLock<tokio::time::Instant>,
 }
 #[derive(Clone, Default)]
 enum ReceiverClaimStage {
@@ -536,6 +541,10 @@ impl ReceiverStartRegistry {
         }
         // Before the owner exists, so its first Source send already has it.
         if let Some(clock) = clock {
+            let _ = entry.rejoin_window.set(clock.owner_window(
+                tokio::time::Instant::now() + Duration::from_secs(305),
+                crate::http::hls::OWNED_CREATE_REPOST_GRACE,
+            ));
             let _ = entry.clock.set(clock);
         }
         Ok(self.spawn_owner(state, entry, source_wrapper))
@@ -686,6 +695,7 @@ impl ReceiverStartRegistry {
             retirement_task: Mutex::new(None),
             changed: tokio::sync::Notify::new(),
             clock: std::sync::OnceLock::new(),
+            rejoin_window: std::sync::OnceLock::new(),
         });
         entries.push(entry.clone());
         Ok((entry, true))
@@ -1408,28 +1418,29 @@ impl ReceiverStartActor {
     /// retry can still rejoin it. This is the one place that decides
     /// abandonment; the End it triggers is the ordinary retirement owner's.
     ///
-    /// The retry grace (S7): a viewer that sent its start clock was answered
-    /// a typed "not yet" and re-posts the same `request_id`, so between its
-    /// waiters there are none. Until the viewer's owner window (its whole
-    /// remaining start plus one re-post's grace, the local create's rule)
-    /// ends, an empty waiter count is that gap, not abandonment.
+    /// Only an attempt whose viewer sent its start clock can be abandoned,
+    /// and only once its fixed rejoin window has ended. Inside the window a
+    /// viewer told a typed "not yet" is between re-posts of the same
+    /// `request_id`, so an empty waiter count is that gap. A clockless client
+    /// (today's native players) has no such contract: it may time out its
+    /// request and re-post the same `request_id` whenever it likes, so its
+    /// attempt is never retired on a dropped waiter and keeps today's
+    /// lifetime, ended by its owner.
     fn abandoned_before_publication(
         entry: &ReceiverStartInner,
         owned: &ReceiverStartState,
     ) -> bool {
-        let rejoinable = entry.clock.get().is_some_and(|clock| {
-            tokio::time::Instant::now()
-                < clock.owner_window(
-                    tokio::time::Instant::now() + Duration::from_secs(305),
-                    crate::http::hls::OWNED_CREATE_REPOST_GRACE,
-                )
-        });
-        owned.waiters == 0 && owned.start.is_none() && !owned.retirement_started && !rejoinable
+        let window_ended = entry
+            .rejoin_window
+            .get()
+            .is_some_and(|window| tokio::time::Instant::now() >= *window);
+        window_ended && owned.waiters == 0 && owned.start.is_none() && !owned.retirement_started
     }
-    /// Register an HTTP waiter. When the last waiter of an unpublished Start
-    /// goes away (client disconnect, handler deadline), the guard hands the
-    /// attempt to its single retirement owner, which sends the Source its End
-    /// and frees the Source's registry slot and source-copy permit.
+    /// Register an HTTP waiter. When the last waiter of an unpublished,
+    /// clocked Start goes away after its rejoin window (or the window ends
+    /// with none left; the owner asks then), the attempt goes to its single
+    /// retirement owner, which sends the Source its End and frees the
+    /// Source's registry slot and source-copy permit.
     pub(crate) fn join_waiter(&self, state: Arc<AppState>) -> ReceiverWaiter {
         self.0.state.lock().expect("receiver owner").waiters += 1;
         ReceiverWaiter {
@@ -1665,6 +1676,7 @@ async fn run_owner(
             })
         },
         entry.clock.get(),
+        entry.rejoin_window.get().copied(),
         move |retry| {
             // The Source keeps its entry for this request alive; so does B.
             // The waiters present now take this answer, typed, and the owner
@@ -1681,6 +1693,12 @@ async fn run_owner(
     let mut timer = tokio::time::interval(Duration::from_secs(10));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut pending_authorized = true;
+    // The owner holds the rejoin window's end. A viewer who left inside it
+    // dropped its last waiter while the attempt was still rejoinable, so the
+    // one abandonment decision is asked again when the window ends, whether
+    // or not B authority is still renewing.
+    let rejoin_window = entry.rejoin_window.get().copied();
+    let mut rejoin_open = rejoin_window.is_some();
     let result = loop {
         tokio::select! {
             result = &mut start => break result.map_err(|error| match error {
@@ -1692,24 +1710,20 @@ async fn run_owner(
                 _ => ReceiverStartError::Unresolved,
             })?,
             _ = entry.stop.cancelled(), if pending_authorized => pending_authorized = false,
-            _ = timer.tick(), if pending_authorized => {
-                // A viewer that left during its retry grace dropped its last
-                // waiter while the attempt was still rejoinable. The grace
-                // ends between waiters, so the owner re-asks the one
-                // abandonment decision on its own lease tick. Only an attempt
-                // with a clock has a grace; without one the last waiter's
-                // drop already decided.
-                let abandoned = entry.clock.get().is_some()
-                    && ReceiverStartActor::abandoned_before_publication(
-                        &entry,
-                        &entry.state.lock().expect("receiver owner"),
-                    );
+            _ = tokio::time::sleep_until(rejoin_window.unwrap_or_else(tokio::time::Instant::now)), if rejoin_open => {
+                rejoin_open = false;
+                let abandoned = ReceiverStartActor::abandoned_before_publication(
+                    &entry,
+                    &entry.state.lock().expect("receiver owner"),
+                );
                 if abandoned {
                     ReceiverStartActor(entry.clone()).begin_retirement(
                         state.clone(),
                         plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked,
                     );
                 }
+            }
+            _ = timer.tick(), if pending_authorized => {
                 let renewed = async {
                     let authority = state.store.prepare_receiver_session_authority(intent.clone()).await
                         .map_err(|_| ReceiverStartError::Unresolved)?.ok_or(ReceiverStartError::Unresolved)?;
@@ -2718,30 +2732,58 @@ mod tests {
             actor.wait_ready(Instant::now() + Duration::from_millis(50), true).await,
             Err(ReceiverStartError::NotYet(retry)) if retry == startup_timeout
         ));
-        // The one abandonment decision: with no waiter, an attempt without a
-        // clock is abandoned (S10), but one whose viewer sent a clock is
-        // still rejoinable inside its owner window, so the waiter a typed
-        // "not yet" released does not send the Source its End.
-        assert!(ReceiverStartActor::abandoned_before_publication(
-            &entry,
-            &entry.state.lock().expect("state")
-        ));
-        let _ = entry
-            .clock
-            .set(crate::media_pool::CreateStartupBudget::new(20_000));
+        // A clockless attempt (today's native client) is never abandoned on
+        // a dropped waiter: a waiter it drops leaves it running, and the same
+        // request still rejoins it.
         assert!(!ReceiverStartActor::abandoned_before_publication(
             &entry,
             &entry.state.lock().expect("state")
         ));
         drop(actor.join_waiter(Arc::new(crate::http::source_actor_test_state())));
         assert!(!entry.state.lock().expect("state").retirement_started);
-        // The attempt was not retired: the same request rejoins it.
         let (joined, created) = registry
             .register(first.clone(), "attempt".into(), "player", &wrapper(&first))
             .expect("exact retry rejoins");
         assert!(!created);
         assert!(Arc::ptr_eq(&entry, &joined));
         assert!(!entry.state.lock().expect("state").retirement_started);
+    }
+
+    /// S10 with S7's grace, on a paused clock: a clocked attempt with no
+    /// waiter is rejoinable until its fixed rejoin window ends, and abandoned
+    /// after it; the window does not move between checks.
+    #[tokio::test(start_paused = true)]
+    async fn sharing_receiver_clocked_attempt_is_abandoned_only_after_its_fixed_rejoin_window() {
+        let registry = ReceiverStartRegistry::default();
+        let first = intent("attempt");
+        let (entry, _) = registry
+            .register(first.clone(), "attempt".into(), "player", &wrapper(&first))
+            .expect("owner");
+        let window = tokio::time::Instant::now() + Duration::from_secs(5);
+        let _ = entry
+            .clock
+            .set(crate::media_pool::CreateStartupBudget::new(3_000));
+        let _ = entry.rejoin_window.set(window);
+        let actor = ReceiverStartActor(entry.clone());
+        // The waiter a typed "not yet" released leaves no End behind.
+        drop(actor.join_waiter(Arc::new(crate::http::source_actor_test_state())));
+        assert!(!entry.state.lock().expect("state").retirement_started);
+        tokio::time::advance(Duration::from_millis(4_900)).await;
+        assert!(!ReceiverStartActor::abandoned_before_publication(
+            &entry,
+            &entry.state.lock().expect("state")
+        ));
+        tokio::time::advance(Duration::from_millis(200)).await;
+        assert!(ReceiverStartActor::abandoned_before_publication(
+            &entry,
+            &entry.state.lock().expect("state")
+        ));
+        // A viewer waiting, or a published start, is never abandoned.
+        entry.state.lock().expect("state").waiters = 1;
+        assert!(!ReceiverStartActor::abandoned_before_publication(
+            &entry,
+            &entry.state.lock().expect("state")
+        ));
     }
 
     fn dispatch() -> DispatchedSource {
