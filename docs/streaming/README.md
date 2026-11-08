@@ -11,6 +11,7 @@ Start-path owner: the lane owner recorded in PLAYBACK-START-PLAN.md §6 until th
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract for Opus: all nine lanes. | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Playback-start effort: rulings, lanes, reviews, lane status. | open |
+| [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
 | [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold first-playlist consumption and web Resume fault ownership: implementation, review, validation and merge ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs; review and acceptance. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
@@ -86,13 +87,13 @@ Start-path owner: the lane owner recorded in PLAYBACK-START-PLAN.md §6 until th
 | [PLAYBACK-STARTUP-LATENCY-M0-20261002.json](PLAYBACK-STARTUP-LATENCY-M0-20261002.json) | Sanitized retained phase receipt for the native Safari incident; no successful presentation claim. | done |
 | [PLAYBACK-STARTUP-LATENCY-REVIEW-20261002.md](PLAYBACK-STARTUP-LATENCY-REVIEW-20261002.md) | Supplied proposal review, single final implementation review and conservative admission disposition. | done |
 | [HDR-CONTENT-LIGHT-INDEX.md](HDR-CONTENT-LIGHT-INDEX.md) | Why changing HDR light-level metadata forced rolling startup, and the indexed-copy metadata repair. | open |
-| [PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md](PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md) | Monotonic phase origins, exact incident replay, repeated index/resource observations, transport measurement limits, and the A-M0 target/bootstrap startup lab with its decision rule. | open |
-| [PLAYBACK-STARTUP-LATENCY-BUILD.md](PLAYBACK-STARTUP-LATENCY-BUILD.md) | Sol execution handoff: isolated clone, latest user CI/CD rulings, milestone deliverables, one reviewed PR, fast lane, merge and cleanup. | open |
+| [PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md](PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md) | Phase origins, incident replay, index/resource observations, transport limits, and the A-M0 startup lab with its decision rule. | open |
+| [PLAYBACK-STARTUP-LATENCY-BUILD.md](PLAYBACK-STARTUP-LATENCY-BUILD.md) | Sol handoff: clone, CI/CD rulings, milestones, one reviewed PR, fast lane, merge, cleanup. | open |
 | [PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md](PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md) | Reviewed runtime build contract for the measured 14.2-second start, index availability, qualified publication policy and cross-client acceptance. | open |
 | [STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md) | Reviewed rev 6 handoff: 8 s encoded rolling target, fewer create-path quorum reads and operator tone-map census before changes. | open |
 | [PLAYBACK-STARTUP-PATH-FINDINGS.md](PLAYBACK-STARTUP-PATH-FINDINGS.md) | Play-to-first-frame waits across routes: fixed 40 ms consistent-read ACK stall and web scrim, plus ranked remaining waits and owners. | open |
 | [PLAYBACK-STARTUP-LATENCY-REVIEW.md](PLAYBACK-STARTUP-LATENCY-REVIEW.md) | Independent adversarial plan review, three findings and verified dispositions. | open |
-| [Playback startup build status](PLAYBACK-STARTUP-LATENCY-STATUS.html) | Live Sol build status: current phase, source, PR, evidence, review, fast lane and decisions. | open |
+| [Playback startup build status](PLAYBACK-STARTUP-LATENCY-STATUS.html) | Live Sol build status: phase, PR, evidence, review, lane, decisions. | open |
 | [SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md](SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md) | Why repeated seeks refuse playback and then reap the incumbent: retired streams retain a producer's whole reservation, and a refused destination poisons the incumbent's control snapshot. | open |
 | [WEB-SEEK-LATENCY-RCA-AND-FIX.md](WEB-SEEK-LATENCY-RCA-AND-FIX.md) | October 2 VOD loader deadlock, false seek-presentation evidence and native rolling reopen latency: controlled causal evidence, proposed repair and adversarial review. | open |
 | [Web seek incident evidence](../evidence/web-seek-rca-2026-10-02.json) · [mechanism replay](../evidence/web-seek-mechanism-replay.cjs) | Sanitized live seek traces, same-session loader intervention and executable incident-source mechanisms. | done |
