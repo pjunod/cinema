@@ -14131,6 +14131,13 @@ async fn seed_content(state: &AppState) -> Seed {
     const PLACEHOLDER: &[u8] = b"\x00\x00\x00\x18ftypmp42 tiny placeholder bytes";
     std::fs::write(&mpath, PLACEHOLDER).expect("write");
     let placeholder_len = PLACEHOLDER.len() as i64;
+    let placeholder_mtime = std::fs::metadata(&mpath)
+        .expect("fixture metadata")
+        .modified()
+        .expect("fixture mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("fixture epoch")
+        .as_secs() as i64;
     let probe = ProbeResult {
             duration_ms: Some(9_000_000),
             container: Some("mp4".into()),
@@ -14161,7 +14168,13 @@ async fn seed_content(state: &AppState) -> Seed {
         };
     let file = state
         .store
-        .upsert_file(movie, &mpath.to_string_lossy(), placeholder_len, 1, &probe)
+        .upsert_file(
+            movie,
+            &mpath.to_string_lossy(),
+            placeholder_len,
+            placeholder_mtime,
+            &probe,
+        )
         .await
         .expect("file");
     let show = state
@@ -14205,7 +14218,13 @@ async fn seed_content(state: &AppState) -> Seed {
         .expect("ep");
     state
         .store
-        .upsert_file(ep, &mpath.to_string_lossy(), placeholder_len, 1, &probe)
+        .upsert_file(
+            ep,
+            &mpath.to_string_lossy(),
+            placeholder_len,
+            placeholder_mtime,
+            &probe,
+        )
         .await
         .expect("epfile");
     Seed {
@@ -14276,7 +14295,13 @@ async fn seed_home(state: &AppState) -> HomeSeed {
             video,
             &vpath.to_string_lossy(),
             HOME_PLACEHOLDER.len() as i64,
-            1,
+            std::fs::metadata(&vpath)
+                .expect("video metadata")
+                .modified()
+                .expect("video mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("video epoch")
+                .as_secs() as i64,
             &ProbeResult {
                 duration_ms: Some(12_000),
                 container: Some("mp4".into()),
@@ -14298,7 +14323,13 @@ async fn seed_home(state: &AppState) -> HomeSeed {
             photo,
             &ppath.to_string_lossy(),
             photo_bytes.len() as i64,
-            1,
+            std::fs::metadata(&ppath)
+                .expect("photo metadata")
+                .modified()
+                .expect("photo mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("photo epoch")
+                .as_secs() as i64,
             &ProbeResult {
                 container: Some("jpg".into()),
                 width: Some(4032),
