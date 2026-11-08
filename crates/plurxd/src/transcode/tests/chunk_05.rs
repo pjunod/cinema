@@ -921,13 +921,16 @@
     async fn retention_keeps_a_reload_margin_above_the_observed_fetch_lead() {
         let dir = crate::test_tempdir().expect("tempdir");
         let p = dir.path();
-        // 100 segments of 4s = 400s of media.
-        seeded_session_dir(p, 100, 4.0).await;
+        // Begin with the already-served 300s window this steady-state
+        // retention regression observes, then extend writer inventory to 400s.
+        seeded_session_dir(p, 75, 4.0).await;
         tokio::fs::write(p.join("init.mp4"), b"i")
             .await
             .expect("write init");
 
         let session = Arc::new(test_session(p.to_path_buf()));
+        install_seeded_served_playlist(&session, 0).await;
+        seeded_session_dir(p, 100, 4.0).await;
         session.refresh_segments().await;
         assert_eq!(
             session.segments.lock().await.produced_playable_end_ms(),
@@ -957,6 +960,9 @@
             commit_rolling_publication_media(&session, 74, observed_fetched_end_ms).await,
             "download frontier must reach the publication actor"
         );
+        // This regression starts after presentation; the hand-built segment
+        // inventory does not emit the actor's real advancing frame reports.
+        session.control.mark_startup_presented_for_test().await;
         expire_seeded_prefix(&session, 30).await;
         gc_expired_segments(&session).await;
         // This fixture expires files directly instead of advancing them
