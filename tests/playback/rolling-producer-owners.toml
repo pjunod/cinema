@@ -1219,7 +1219,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # fixtures under a paused clock; one in publication.rs is a source-pin
 # string (`match_indices`) proving the 100 ms init poll is the only sleep in
 # both pre-object wait branches. No shipped sleep is added.
-expected_occurrences = 88
+# +1 is the retention fixture's awaited 300ms control cadence, with no detached owner.
+expected_occurrences = 89
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -5479,7 +5480,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Encoded Jellyfin qualification follows at most four typed pending replies
 # per phase on the original activation; the one-second awaited retry adds
 # one timer site and retains all native byte/clock/Stop assertions.
-expected_occurrences = 2098
+# Retention fixture: one awaited 300ms cadence between owned control exchanges,
+# respecting the unchanged 250ms admission limit; no detached task or runtime timer.
+expected_occurrences = 2099
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

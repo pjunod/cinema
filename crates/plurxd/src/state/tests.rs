@@ -2243,6 +2243,7 @@ async fn full_subtitle_coverage_settles_ready_without_spawning_a_pass() {
 #[tokio::test]
 async fn remove_original_complete_publisher_and_request_third_ordinal_recovers_through_repair() {
     use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use plurx_core::store::BackgroundJobStore;
 
     let fixture = fixture(9, &[Sub::Srt, Sub::Srt, Sub::Srt]);
     let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -2262,7 +2263,10 @@ async fn remove_original_complete_publisher_and_request_third_ordinal_recovers_t
         .expect("initial request");
     assert!(
         jobs.self_claim_subtitle_source(&initial.request_id, work.path())
-            .await
+            .await,
+        "initial subtitle extraction failed: request={:?}; history={:?}",
+        store.analysis_request(&initial.request_id).await,
+        store.media_preparation_history(file.id).await
     );
     let stamp = SubtitleSourceStamp {
         file_id: file.id,

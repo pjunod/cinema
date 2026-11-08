@@ -1001,6 +1001,10 @@
                     .end_ms,
                 expected_end_ms,
             );
+            // The real control actor uses a monotonic 250 ms admission limit.
+            // Respect it between fixture observations, including the final
+            // in-window playhead report; do not bypass its ownership checks.
+            tokio::time::sleep(Duration::from_millis(300)).await;
         }
         {
             let clock = session.publication.lock().await;
@@ -1026,13 +1030,16 @@
         session
             .fetched_end_ms
             .store(observed_fetched_end_ms, Relaxed);
+        // Retention is measured against this exact observed playhead. A
+        // Rendering report would project consumption as the actor and future
+        // publication tick advance; Waiting keeps the 180 s coordinate fixed.
         accept_rolling_publication_demand(
             &session,
             8,
             observed_playhead_ms,
             1.0,
             crate::playback_control::PlaybackDemand::Active,
-            crate::playback_control::RenderState::Rendering,
+            crate::playback_control::RenderState::Waiting,
         )
         .await;
         assert!(

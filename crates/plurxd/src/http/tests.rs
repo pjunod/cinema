@@ -17761,8 +17761,7 @@ async fn seeded_write_surface() {
 
     // Reanalyze: admin-only, 404 for an item that isn't there, and for a
     // real item it reports per-file rather than pretending to succeed. The
-    // seeded file is 35 placeholder bytes, so ffprobe refuses it — which is
-    // exactly the shape this endpoint exists to report honestly.
+    // source in this case has been replaced since the scan.
     assert_eq!(
         call(
             &app,
@@ -17801,6 +17800,17 @@ async fn seeded_write_surface() {
         .0,
         StatusCode::BAD_REQUEST
     );
+    // A changed source is re-statted and probed during the request. An
+    // unchanged source belongs to the durable probe worker.
+    let file = state
+        .store
+        .get_file(s.file)
+        .await
+        .expect("read seeded media")
+        .expect("seeded media remains catalogued");
+    let replacement = b"truncated replacement";
+    std::fs::write(&file.path, replacement).expect("replace seeded media");
+    assert_ne!(file.size, replacement.len() as i64);
     let (st, report) = call(
         &app,
         post(
