@@ -584,3 +584,19 @@ reason = "Corrective commit d9a0ebc7 (fix(activity): account for learner workers
 [[errata]]
 commit = "55f84b0e8535336dadb5d9e058d3f093c57cab1c"
 reason = "Corrective commit 55f84b0e (fix(jellyfin): await encoded segment readiness after idle reap [skip ci]) is an ancestor of main ce11e8fd but reached that ancestry without a recognized or verified landing that introduces it. Its immutable message contains 1 Regression-Test field. This permanent row records only that exact immutable landing/regression-publication omission; it changes no implementation, audit boundary or future evidence checks and claims no test execution or retrospective coverage."
+
+[[landings]]
+commit = "52904d9d4f3f6da1aa71637b1afcd79eaae582cc"
+tree = "74ec110fe692c3624bc440b826abcb26601f364d"
+parents = ["c32bf261c13b7d137449432f39c1b020da1b0f4b", "fddbf07e7cbda64b5fec4bd2558432deaf08ec8b"]
+title = "fix(ci): publish verified immutable Cinema main recovery artifact (#1456) [skip ci]"
+pull = "1456"
+reason = "Verified actual PR #1456 main merge. Its immutable subject appends [skip ci] after (#1456), so the existing landing parser does not recognize it. This record pins the real commit, tree, ordered parents and PR identity; all 4 original Regression-Test fields resolve in this exact merge tree and remain mandatory evidence. It moves no audit boundary, waives no checks and claims no runtime execution."
+
+[[landings]]
+commit = "ce11e8fd230a053596a4e5ad1fcd88adb99f85c8"
+tree = "e0ca540febcf6b4e9847d8764b51ba5b8c8d91e8"
+parents = ["52904d9d4f3f6da1aa71637b1afcd79eaae582cc", "df2ea967c5374efbc0cff323a819d747f23f3d54"]
+title = "fix(ci): recognize exact missing immutable image diagnostic (#1457) [skip ci]"
+pull = "1457"
+reason = "Verified actual PR #1457 main merge. Its immutable subject appends [skip ci] after (#1457), so the existing landing parser does not recognize it. This record pins the real commit, tree, ordered parents and PR identity; all 1 original Regression-Test field resolves in this exact merge tree and remains mandatory evidence. It moves no audit boundary, waives no checks and claims no runtime execution."
