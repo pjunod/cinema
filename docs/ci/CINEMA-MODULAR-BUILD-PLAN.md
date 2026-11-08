@@ -545,8 +545,8 @@ native reopen and data/key preservation.
 [Correction task #1442](http://forge.lan:3000/noirr/plurx/pulls/1442) integrates
 current-main contracts and confines new diagnostic workers to explicit clusters.
 
-The [measurement ledger §6](CINEMA-BUILD-MEASUREMENTS.md#6-integrated-standalone-build--2026-11-08)
-records source `83da88f89e`, all final warm samples and the sealed
+The [measurement ledger §7](CINEMA-BUILD-MEASUREMENTS.md#7-final-standalone-build--2026-11-08)
+records source `96685a8069`, all final warm samples and the sealed
 bundle. The actual daemon compiles 380 units with no Hiqlite/WAL/OpenRaft.
 Cold-build gains and further crate extraction remain outside this delivery.
 

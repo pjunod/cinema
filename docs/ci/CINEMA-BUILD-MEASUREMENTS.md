@@ -1,6 +1,6 @@
 # Cinema build measurements — reproducible developer comparisons
 
-**Status:** open — P1 merged; capped linker comparison complete with no useful gain; SDK-free before/after measurements complete; focused runtime qualification passed; main promotion is tracked in the canonical plan.
+**Status:** built — SDK-free build comparisons and focused migration/authority checks pass; exact-candidate main promotion is tracked in the canonical plan.
 **Written:** 2026-11-04 · **Owner:** Codex.
 
 The [modular-build plan](CINEMA-MODULAR-BUILD-PLAN.md) owns the phases and
@@ -305,3 +305,42 @@ Before run `5872a61e8c6a4412b06144ff1147210e`, bundle SHA-256
 The source-specific runtime/migration qualification and exact final-tree
 promotion receipt belong to [PR #1397](http://forge.lan:3000/noirr/plurx/pulls/1397);
 this measurement alone does not qualify a release.
+
+## 7. Final standalone build — 2026-11-08
+
+Measured commit `96685a8069609267189f0413a92f32075e8eb0ae`, tree
+`c2b86b14c6c5b74dea35170fb02be268e8f8882e`, includes actual main
+`99d08f9b5ed0ecfd8992e82ac5d2ff93f59a2b5c` and its qualified reader/FEL
+recovery changes. The frozen runner, seven tool hashes, SDK, Rust 1.97.1,
+full dev debug level 2, four CPUs, 24 GiB and no-swap controls match the before
+run in §6. This is another actual daemon compile and link, not `cargo check`:
+
+```bash
+cargo +1.97.1 build --locked --offline -p plurxd --message-format=json-render-diagnostics --timings -j4
+```
+
+| Probe | Before median (s) | Final samples (s) | Final median (s) | Reduction |
+|---|---:|---|---:|---:|
+| No-op | 0.215781 | 0.215427, 0.214653, 0.165313 | 0.214653 | effectively unchanged |
+| Embedded asset | 17.652122 | 15.766353, 15.635129, 15.851877 | 15.766353 | 10.68% |
+| Daemon code | 18.031873 | 16.168842, 15.643953, 15.955543 | 15.955543 | 11.51% |
+| Shared API | 26.948786 | 24.531714, 23.746568, 23.403503 | 23.746568 | 11.88% |
+
+The selected daemon again compiles **380 units, zero Hiqlite, Hiqlite WAL or
+OpenRaft units**, versus 448 before. All no-op units were fresh; each changed
+probe rebuilt its expected artifacts. Complete source restoration matches the
+original inventory. The separately checked daemon/controller/tray normal/build
+graph also contains no cluster SDKs.
+
+Run `d7cb4a7b7bd64653a486f666db82bd4f`, sealed bundle SHA-256
+`ab0220f88d6ea94673f40e471da8854fa1d6a409632f7b9416e4d7c10783b60e`, retains
+the exact samples, Cargo events/timings, source/SDK/tool identities and successful
+terminal-scope/resource proofs. Before run and bundle remain those in §6;
+earlier measurements and failed runs remain retained.
+
+These are three-run warm medians on the same Linux compiler host and observed
+version comparisons, including the correctness changes. They do not isolate a
+causal SDK-only gain. The 133.883112-second warmup used the existing warm target;
+it establishes no cold, release, macOS or size improvement. The mixed target
+cache is not a distribution-size measurement. Final source qualification and
+the provider receipt remain owned by [PR #1397](http://forge.lan:3000/noirr/plurx/pulls/1397).
