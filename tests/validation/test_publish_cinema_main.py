@@ -152,6 +152,45 @@ class CinemaPublisherCase(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ReceiptError):
                 publish.partial_workspace_outcomes(invalid.encode(), rust)
 
+    def test_registry_missing_tag_requires_exact_reference_and_refuses_auth_failures(self):
+        workflow = (Path(__file__).resolve().parents[2] /
+                    '.github/workflows/cinema-main-publish.yml').read_text()
+        block = workflow.split('          immutable=', 1)[1].split('\n      - name:', 1)[0]
+        block = 'immutable=' + block.replace('\n          ', '\n')
+        reference = 'registry.invalid/noirr/plurxd:sha-' + 'a' * 12
+        with tempfile.TemporaryDirectory(prefix='cinema-registry-') as directory:
+            root = Path(directory)
+            docker = root / 'docker'
+            docker.write_text('#!/bin/sh\n'
+                              'if [ "$1" = buildx ]; then printf "%s\\n" "$REGISTRY_ERROR" >&2; exit 1; fi\n'
+                              'printf "%s\\n" "$1" >> "$REGISTRY_CALLS"\n')
+            docker.chmod(0o755)
+            import os
+            environment = dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'],
+                               REGISTRY='registry.invalid', SOURCE_SHA='a' * 40,
+                               EXPECTED_IMAGE_ID='sha256:measured', RUNNER_TEMP=str(root),
+                               REGISTRY_CALLS=str(root / 'calls'))
+            cases = [
+                ('ERROR: ' + reference + ': not found', True),
+                ('manifest unknown', True),
+                ('ERROR: registry.invalid/noirr/other: not found', False),
+                ('unrelated not found', False),
+                ('unauthorized: manifest unknown', False),
+                ('timeout: manifest unknown', False),
+                ('denied\nERROR: ' + reference + ': not found', False),
+                ('ERROR: ' + reference + ': not found\nunknown diagnostic', False),
+            ]
+            for error, should_publish in cases:
+                with self.subTest(error=error):
+                    (root / 'calls').unlink(missing_ok=True)
+                    result = subprocess.run(['bash', '-euo', 'pipefail', '-c', block],
+                                            env=dict(environment, REGISTRY_ERROR=error),
+                                            text=True, capture_output=True)
+                    self.assertEqual(result.returncode == 0, should_publish,
+                                     result.stdout + result.stderr)
+                    calls = (root / 'calls').read_text().splitlines() if (root / 'calls').exists() else []
+                    self.assertEqual(calls, ['tag', 'push'] if should_publish else [])
+
     def test_evidence_cache_preserves_values_and_refreshes_main(self):
         class API:
             def __init__(self):
