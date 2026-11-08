@@ -11,7 +11,7 @@ concurrency:
 jobs:
   cluster_transport_recovery_voter:
     name: cluster transport recovery voter role
-    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    runs-on: [self-hosted, Linux, X64, lab, incus, ubuntu-24.04, android-kvm]
     timeout-minutes: 240
     steps:
       - name: Record the role job budget start
@@ -81,7 +81,7 @@ jobs:
 
   cluster_transport_recovery_learner:
     name: cluster transport recovery learner role
-    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    runs-on: [self-hosted, Linux, X64, lab, incus, ubuntu-24.04, android-kvm]
     timeout-minutes: 240
     steps:
       - name: Record the role job budget start
