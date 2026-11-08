@@ -186,8 +186,15 @@ arch = "X64"
 # a merge slot. One daemon per 8 GiB guest; duplicate services are disabled.
 labels = ["lab", "incus", "ubuntu-24.04", "ci-coverage"]
 
-# lab3 runners are retired (2026-10-11): observability and production share
-# its disk. boot.autostart=false and no recovery allowlist entry keep them off.
+# The former lab3 guests remain retired. A dedicated host registration
+# is dedicated to effort metadata compilation with explicit 8 GiB/no-swap,
+# four-CPU child bounds. It cannot take Store/topology or general jobs.
+[[runners]]
+name = "gha-lab3-effort-compile-01"
+host = "lab3"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "baremetal", "ubuntu-26.04", "ci-effort-compile"]
 
 # The former lab6 general and lab4 guests are retired; recovery must not
 # recreate the obsolete FFmpeg capability. The diagnostic guest remains.

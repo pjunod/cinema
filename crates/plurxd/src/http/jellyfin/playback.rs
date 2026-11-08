@@ -188,7 +188,7 @@ pub(super) async fn activate(
         .map_err(|_| ApiError::Conflict("play selection changed; renegotiate".into()))?;
     if let Some(vod) = selection.get("vod").filter(|v| !v.is_null()) {
         let started = Box::pin(super::startup::create(state, &play, vod)).await?;
-        let outcome = bind_native_start(state, &play, &started.session_id).await;
+        let outcome = bind_native_start(state, &play, started.session_id()).await;
         if let Ok(Some(bound)) = outcome {
             release_superseded(state, &bound).await;
             return Ok(bound);
@@ -197,12 +197,12 @@ pub(super) async fn activate(
         // this waiter releases the start only when no binding claims it, and
         // leaves it to native idle expiry when that cannot be established.
         if matches!(
-            unclaimed_native_start(state, &play, &started.session_id).await,
+            unclaimed_native_start(state, &play, started.session_id()).await,
             Ok(true)
         ) {
             super::super::hls::release_with_terminal(
                 state.clone(),
-                started.session_id,
+                started.session_id().to_owned(),
                 crate::vodserve::Terminal::Deleted,
                 "compatibility activation refused",
             )

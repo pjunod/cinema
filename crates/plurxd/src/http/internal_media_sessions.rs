@@ -188,6 +188,49 @@ async fn authorize_read(
     }
 }
 
+/// Independent output custody admitted BEFORE an adaptive RPC can mutate its
+/// original owner. Consuming serialization leaves the original allocation in
+/// core until the final transport alias is actually destroyed.
+#[cfg(target_os = "linux")]
+struct AdaptiveRpcReply {
+    funding: plurx_core::adaptive_resources::runtime::attempt_root::ReplyPermit,
+}
+#[cfg(target_os = "linux")]
+impl AdaptiveRpcReply {
+    fn reserve(state: &AppState) -> Result<Self, StatusCode> {
+        Self::admit(|| state.transcode.reserve_adaptive_origin_reply())
+    }
+    fn admit(
+        reserve: impl FnOnce() -> Result<
+            plurx_core::adaptive_resources::runtime::attempt_root::ReplyPermit,
+            String,
+        >,
+    ) -> Result<Self, StatusCode> {
+        reserve()
+            .map(|funding| Self { funding })
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+    }
+    fn json<T: serde::Serialize>(self, status: StatusCode, value: T) -> Response {
+        let bytes = serde_json::to_vec(&value);
+        drop(value); // Actual DTO and temporary JSON graph precede its alias.
+        let Ok(bytes) = bytes else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        match self.funding.publish_serialized(bytes) {
+            Ok(body) => (
+                status,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                axum::body::Body::from(body),
+            )
+                .into_response(),
+            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    }
+    fn error(self, error: super::error::ApiError) -> Response {
+        error.fund_origin(self.funding).into_response()
+    }
+}
+
 /// A status read reports the durable Store row and the local registered
 /// original owner separately. The Store row cannot manufacture native proof.
 #[cfg(target_os = "linux")]
@@ -211,6 +254,10 @@ pub(crate) async fn adaptive_attempt_status(
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    let funding = match AdaptiveRpcReply::reserve(&state) {
+        Ok(funding) => funding,
+        Err(status) => return status.into_response(),
+    };
     let status = match state
         .store
         .adaptive_request_status(&request.binding.key, &request.binding.principal)
@@ -227,15 +274,14 @@ pub(crate) async fn adaptive_attempt_status(
         .transcode
         .adaptive_attempt_local_status(request.key.attempt_id)
         .await;
-    (
+    funding.json(
         StatusCode::OK,
-        Json(serde_json::json!({
+        serde_json::json!({
             "version": crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
             "request": status,
             "local": local,
-        })),
+        }),
     )
-        .into_response()
 }
 
 #[cfg(target_os = "linux")]
@@ -268,6 +314,10 @@ pub(crate) async fn adaptive_attempt_prepare(
     {
         return StatusCode::CONFLICT.into_response();
     }
+    let funding = match AdaptiveRpcReply::reserve(&state) {
+        Ok(funding) => funding,
+        Err(status) => return status.into_response(),
+    };
     // A foreign wall-clock expiry and even a received relative allowance
     // cannot prove the origin's remaining monotonic B under unknown delivery
     // or skew. Never mint a fresh native window here. Existing registered
@@ -278,23 +328,21 @@ pub(crate) async fn adaptive_attempt_prepare(
         .await
     {
         Ok(Some(crate::transcode::adaptive_attempts::AdaptivePrepareReplay::Prepared(reply))) => {
-            (StatusCode::OK, Json(reply)).into_response()
+            reply.into_http_response()
         }
         Ok(Some(crate::transcode::adaptive_attempts::AdaptivePrepareReplay::Pending)) => {
             StatusCode::ACCEPTED.into_response()
         }
-        Ok(None) => (
+        Ok(None) => funding.json(
             StatusCode::PRECONDITION_REQUIRED,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "code": "insufficient_evidence",
                 "error": "new remote preparation requires proof of the original create deadline"
-            })),
-        )
-            .into_response(),
+            }),
+        ),
         Err(error) => match error.trial_refusal {
-            Some(reason) => crate::media_sessions::AdaptiveTrialRefusalV1::new(reason)
-                .into_api_error()
-                .into_response(),
+            Some(reason) => funding
+                .error(crate::media_sessions::AdaptiveTrialRefusalV1::new(reason).into_api_error()),
             None => StatusCode::CONFLICT.into_response(),
         },
     }
@@ -324,6 +372,10 @@ async fn adaptive_attempt_causal_prepare(
             {
                 return StatusCode::CONFLICT.into_response();
             }
+            let funding = match AdaptiveRpcReply::reserve(state) {
+                Ok(funding) => funding,
+                Err(status) => return status.into_response(),
+            };
             // Original registered replay does not acquire fresh restart or
             // serving authority, including while a drain waits for its owner.
             let started = match state
@@ -348,14 +400,14 @@ async fn adaptive_attempt_causal_prepare(
             };
             match started {
                 Ok(AdaptiveRemoteRegistrationStart::Registered(reply)) => {
-                    (StatusCode::OK, Json(reply)).into_response()
+                    funding.json(StatusCode::OK, reply)
                 }
                 Ok(AdaptiveRemoteRegistrationStart::Pending) => {
                     StatusCode::ACCEPTED.into_response()
                 }
                 Ok(AdaptiveRemoteRegistrationStart::Started { reply, deadline }) => {
                     match tokio::time::timeout_at(deadline.into(), reply).await {
-                        Ok(Ok(Ok(reply))) => (StatusCode::OK, Json(reply)).into_response(),
+                        Ok(Ok(Ok(reply))) => funding.json(StatusCode::OK, reply),
                         Err(_) => StatusCode::ACCEPTED.into_response(),
                         _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
                     }
@@ -381,51 +433,59 @@ async fn adaptive_attempt_causal_prepare(
             {
                 return StatusCode::CONFLICT.into_response();
             }
+            let funding = match AdaptiveRpcReply::reserve(state) {
+                Ok(funding) => funding,
+                Err(status) => return status.into_response(),
+            };
             match state
                 .transcode
                 .grant_remote_adaptive_registration(&claim, nonce, allowance_ms)
                 .await
             {
-                Ok(AdaptivePrepareReplay::Prepared(reply)) => {
-                    (StatusCode::OK, Json(reply)).into_response()
-                }
+                Ok(AdaptivePrepareReplay::Prepared(reply)) => reply.into_http_response(),
                 Ok(AdaptivePrepareReplay::Pending) => {
                     match state
                         .transcode
                         .wait_remote_adaptive_prepared(claim.key.attempt_id)
                         .await
                     {
-                        Ok(reply) => (StatusCode::OK, Json(reply)).into_response(),
+                        Ok(reply) => reply.into_http_response(),
                         Err(error) => match error.trial_refusal {
-                            Some(reason) => {
+                            Some(reason) => funding.error(
                                 crate::media_sessions::AdaptiveTrialRefusalV1::new(reason)
-                                    .into_api_error()
-                                    .into_response()
-                            }
+                                    .into_api_error(),
+                            ),
                             None => StatusCode::ACCEPTED.into_response(),
                         },
                     }
                 }
                 Err(crate::transcode::adaptive_attempts::RemoteGrantError::TrialRefused(
                     reason,
-                )) => crate::media_sessions::AdaptiveTrialRefusalV1::new(reason)
-                    .into_api_error()
-                    .into_response(),
+                )) => funding.error(
+                    crate::media_sessions::AdaptiveTrialRefusalV1::new(reason).into_api_error(),
+                ),
                 // Cluster-clock evidence is capacity-like, not a protocol
                 // fault: the registration stays ungranted and fenceable, and
                 // the coordinator retries its next candidate.
                 Err(
                     error @ crate::transcode::adaptive_attempts::RemoteGrantError::ClusterClock(_),
-                ) => super::error::ApiError::typed(
+                ) => funding.error(super::error::ApiError::typed(
                     StatusCode::SERVICE_UNAVAILABLE,
                     crate::media_sessions::ADAPTIVE_GRANT_CLOCK_REFUSED,
                     error.to_string(),
-                )
-                .into_response(),
+                )),
                 Err(_) => StatusCode::PRECONDITION_REQUIRED.into_response(),
             }
         }
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) async fn adaptive_attempt_causal_prepare_for_test(
+    state: &AppState,
+    control: crate::media_sessions::AdaptiveAttemptPrepareControlV2,
+) -> Response {
+    adaptive_attempt_causal_prepare(state, control).await
 }
 
 #[cfg(target_os = "linux")]
@@ -473,6 +533,10 @@ pub(crate) async fn adaptive_attempt_adopt(
         return StatusCode::CONFLICT.into_response();
     }
     let deadline = Instant::now() + Duration::from_millis(remaining);
+    let funding = match AdaptiveRpcReply::reserve(&state) {
+        Ok(funding) => funding,
+        Err(status) => return status.into_response(),
+    };
     let receiver =
         match state
             .transcode
@@ -482,15 +546,14 @@ pub(crate) async fn adaptive_attempt_adopt(
             Err(_) => return StatusCode::CONFLICT.into_response(),
         };
     match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receiver).await {
-        Ok(Ok(Ok(start))) => (
+        Ok(Ok(Ok(start))) => funding.json(
             StatusCode::OK,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "version": crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
                 "session_id": start.session_id,
                 "duration_ms": start.duration_ms,
-            })),
-        )
-            .into_response(),
+            }),
+        ),
         Ok(Ok(Err(_))) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         Ok(Err(_)) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         Err(_) => StatusCode::ACCEPTED.into_response(),
@@ -1529,6 +1592,132 @@ pub(crate) fn output_capture_test_state() -> AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn adaptive_rpc_original_wire_aliases_hold_paid_root_and_full_pool_refuses_before_dispatch(
+    ) {
+        use http_body_util::BodyExt;
+        use plurx_core::adaptive_resources::runtime::attempt_root;
+        let session_id = uuid::Uuid::new_v4();
+        let cases = [
+            serde_json::json!({ "version": crate::media_sessions::ADAPTIVE_CAUSAL_PREPARE_VERSION,
+                "nonce": uuid::Uuid::new_v4(), "attempt_id": uuid::Uuid::new_v4(),
+                "worker_instance_id": uuid::Uuid::new_v4(), "serving_generation": 7 }),
+            serde_json::json!({ "version": crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
+                "session_id": session_id, "duration_ms": 1234 }),
+        ];
+        for expected in cases {
+            let (_dir, runtime, mut root, client) = attempt_root::bookkeeping_fixture().await;
+            let before = runtime.accounting().expect("actual paid root").used;
+            let reply = AdaptiveRpcReply::admit(|| {
+                client.reserve_reply().map_err(|error| format!("{error:?}"))
+            })
+            .unwrap_or_else(|_| panic!("independent custody before protocol dispatch"));
+            let response = reply.json(StatusCode::OK, expected.clone());
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("actual axum body")
+                .to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).expect("same protocol wire"),
+                expected
+            );
+            let alias = body.slice(1..4);
+            drop(body);
+            let others: Vec<_> = (1..64)
+                .map(|_| {
+                    client
+                        .reserve_reply()
+                        .expect("other independent response records")
+                })
+                .collect();
+            let dispatched = std::cell::Cell::new(false);
+            let refusal = AdaptiveRpcReply::admit(|| {
+                client.reserve_reply().map_err(|error| format!("{error:?}"))
+            })
+            .map(|funding| {
+                dispatched.set(true);
+                funding.json(
+                    StatusCode::OK,
+                    serde_json::json!({"unexpected": "dispatch"}),
+                )
+            });
+            assert!(refusal.is_err());
+            assert!(
+                !dispatched.get(),
+                "full original response pool refuses before the side-effect dispatcher can execute"
+            );
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            assert!(
+                client.reserve_reply().is_err(),
+                "transport slice still owns the actual original backing"
+            );
+            assert_eq!(
+                runtime.accounting().expect("same original charge").used,
+                before
+            );
+            drop((others, client));
+            assert!(
+                root.shutdown(Instant::now() + Duration::from_millis(120))
+                    .await
+                    .is_err(),
+                "root cannot release while actual dynamic RPC wire backing survives"
+            );
+            drop(alias);
+            root.shutdown(Instant::now() + Duration::from_secs(1))
+                .await
+                .expect("same original root resumes and closes after final backing destruction");
+            assert!(runtime
+                .accounting()
+                .expect("actual support released")
+                .attempt_support
+                .is_none());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn adaptive_rpc_refusal_body_preserves_code_and_original_transport_custody() {
+        use http_body_util::BodyExt;
+        use plurx_core::adaptive_resources::runtime::attempt_root;
+        let (_dir, _runtime, mut root, client) = attempt_root::bookkeeping_fixture().await;
+        let reply = AdaptiveRpcReply::admit(|| {
+            client.reserve_reply().map_err(|error| format!("{error:?}"))
+        })
+        .unwrap_or_else(|_| panic!("original RPC error custody"));
+        let response = reply.error(super::super::error::ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "original-trial-refusal",
+            "same original diagnostic",
+        ));
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("actual funded error body")
+            .to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body)
+                .expect("same existing wire contract"),
+            serde_json::json!({"code": "original-trial-refusal", "message": "same original diagnostic"})
+        );
+        drop(client);
+        assert!(
+            root.shutdown(Instant::now() + Duration::from_millis(120))
+                .await
+                .is_err(),
+            "error transport output retains actual original storage"
+        );
+        drop(body);
+        root.shutdown(Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("original error backing actually destroyed");
+    }
 
     /// A durable route this node does not own, already outside its lease.
     async fn activate_expired_relay_route(

@@ -1866,6 +1866,44 @@ assert.equal(context.ACT_TIMER, null);
                 for name, block in jobs.items():
                     self.assertTrue(set(workflow_job_needs(block)) <= jobs.keys(), name)
 
+    def test_effort_compile_pool_checks_real_bounds_before_compilation(self):
+        job = workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"]
+        header = job.split("    steps:", 1)[0]
+        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-effort-compile]", header)
+        self.assertNotIn("ci-topology", header)
+        self.assertIn("options: --memory 8g --memory-swap 8g --cpus 4 --pids-limit 4096", header)
+        self.assertRegex(header, r'(?m)^      CARGO_BUILD_JOBS: "1"$')
+        bound_check = job.split("- name: Verify compile container bounds", 1)[1].split("- name: Install Rust gate prerequisites", 1)[0]
+        for fact in (
+            'test "$(cat /sys/fs/cgroup/memory.max)" = 8589934592',
+            'test "$(cat /sys/fs/cgroup/memory.swap.max)" = 0',
+            'test "$quota" != max',
+            'test "$quota" -le "$((period * 4))"',
+            'test "$(cat /sys/fs/cgroup/pids.max)" = 4096',
+            'test "$CARGO_BUILD_JOBS" = 1',
+        ):
+            self.assertIn(fact, bound_check)
+        self.assertLess(job.index("- name: Verify compile container bounds"), job.index("- name: Install Rust gate prerequisites"))
+        self.assertIn("make effort-rust-check", job)
+        self.assertIn("make hiqlite-vendor-clippy", job)
+        self.assertNotIn("cargo test", job)
+        eligible = [(name, labels) for name, labels in rostered_runners() if "ci-effort-compile" in labels]
+        self.assertEqual(len(eligible), 1)
+        self.assertNotIn("ci-topology", eligible[0][1])
+        self.assertNotIn("ci-store", eligible[0][1])
+        self.assertNotIn("general", eligible[0][1])
+        workflows = runner_fleet_module.parse_workflows({
+            str(path.relative_to(ROOT)): read(str(path.relative_to(ROOT)))
+            for path in (ROOT / ".github/workflows").glob("*.yml")
+        })
+        matching_jobs = {
+            (workflow.file, candidate.key)
+            for workflow in workflows
+            for candidate in workflow.jobs
+            if any(runner_fleet_module.eligible(eligible[0][1], frozenset(labels)) for labels in candidate.label_sets)
+        }
+        self.assertEqual(matching_jobs, {(".github/workflows/effort-ci.yml", "rust_compile")})
+
     def test_pr_ci_selects_expensive_surfaces_and_has_one_aggregate_gate(self):
         workflow = read(".github/workflows/ci.yml")
         fast_lane = read(".github/workflows/main-fast-lane.yml")
@@ -1901,7 +1939,6 @@ assert.equal(context.ACT_TIMER, null);
         for compiler_job in (
             metadata_jobs["rust_compile"],
             metadata_jobs["cluster_wal"],
-            workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
         ):
             compiler_header = compiler_job.split("    steps:", 1)[0]
             self.assertIn(

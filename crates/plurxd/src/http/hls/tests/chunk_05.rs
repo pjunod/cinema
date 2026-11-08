@@ -2766,7 +2766,7 @@ fn a_viewer() -> plurx_core::domain::User {
 async fn create_with(
     state: &AppState,
     body: CreateSession,
-) -> Result<Json<StartResponse>, ApiError> {
+) -> Result<super::create::FundedStartReply, ApiError> {
     create(
         crate::http::extract::AuthUser(a_viewer()),
         State(state.clone()),
@@ -3214,7 +3214,7 @@ async fn sdr_master_codecs_is_frozen_when_the_session_is_created() {
         )
         .await
         .expect("the create must be accepted");
-        let id = accepted.0.session_id.clone();
+        let id = accepted.session_id().to_owned();
         state
             .store
             .put_setting(

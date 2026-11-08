@@ -41,6 +41,23 @@ The final repair check found a later compiler exhausting the initial 10 GiB
 combined limit; the additional swap raises that limit to 14 GiB without
 increasing host resident allocations.
 
+### Effort metadata compilation has a separate bounded slot
+
+The effort Rust job uses `ci-effort-compile`, separate from `ci-topology`.
+It runs all-target checking and vendor Clippy, with no topology or Rust unit
+execution. Its Docker child has 8 GiB memory, no swap, four CPUs and at most
+4,096 PIDs; Cargo uses one build job. Before installing prerequisites, the job
+checks actual cgroup v2 memory, swap, CPU and PID limits. Runner service limits
+alone do not constrain Docker children.
+
+The dedicated `gha-lab3-effort-compile-01` host registration has capacity one and only
+the dedicated compile label, not `general`, `ci-store` or `ci-topology`.
+Its persistent child options repeat the workflow caps. This bounded compile
+slot does not certify host-wide voter isolation or permit replicated tests
+on a voter. The older retired guests remain retired. Keep the existing general runners and their jobs unchanged. Create only a
+repository-scoped registration, with credentials retained on that host, and
+verify its effective server labels and actual child limits before acceptance.
+
 ### Dedicated full-unit resident capacity
 
 The full Rust unit job uses the dedicated `unit-memory-16g` label and the

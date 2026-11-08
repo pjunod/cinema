@@ -473,7 +473,7 @@ pub async fn scoped_hls_create(
     headers: HeaderMap,
     remote: RemoteAddress,
     body: Json<super::hls::CreateSession>,
-) -> Result<Json<super::hls::StartResponse>, ApiError> {
+) -> Result<super::hls::FundedStartReply, ApiError> {
     principal.require_file(id)?;
     super::hls::create(
         AuthUser(principal.user),

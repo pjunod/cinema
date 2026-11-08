@@ -34,6 +34,7 @@ hiqlite-contract-tests = ["hiqlite-store"]
 scratch-fault-injection = []
 
 [dependencies]
+bytes = { workspace = true }
 hickory-proto = { version = "=0.26.3", default-features = false, features = ["std"] }
 tempfile = { workspace = true }
 dolby_vision = { workspace = true }
