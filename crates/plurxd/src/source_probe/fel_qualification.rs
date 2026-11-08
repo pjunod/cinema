@@ -14,7 +14,6 @@
 use crate::dv_segment::RendererDecode;
 use plurx_core::process::ChildWork;
 use plurx_core::transcode::dv_fel_qualification::{self as q, Lattice, WindowScore};
-use std::io::{Seek, SeekFrom};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process::Stdio;
@@ -342,9 +341,151 @@ fn read_end_file(pipe: std::io::PipeReader) -> std::fs::File {
     std::os::fd::OwnedFd::from(pipe).into()
 }
 
+/// Only the renderer's private evidence directory and write-only NUT pipe
+/// cross exec. Original media stays behind SourceInput's revocable HTTP URL.
+/// This deliberately does not clear or bypass a general descriptor-handoff tag.
+fn inherit_renderer_outputs(
+    command: &mut tokio::process::Command,
+    directory: &std::fs::File,
+    output: &std::fs::File,
+) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::process::CommandExt;
+    if !directory
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_dir()
+        || !output
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .file_type()
+            .is_fifo()
+    {
+        return Err("FEL renderer handoff requires an output directory and pipe".into());
+    }
+    // SAFETY: F_GETFL only inspects the already-owned pipe descriptor.
+    let flags = unsafe { libc::fcntl(output.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 || flags & libc::O_ACCMODE != libc::O_WRONLY {
+        return Err("FEL renderer pipe must be write-only".into());
+    }
+    let descriptors = [(directory.as_raw_fd(), 4), (output.as_raw_fd(), 5)];
+    // SAFETY: the post-fork hook uses only descriptor syscalls. Duplicate every
+    // source before assigning targets, since either source may occupy 4 or 5.
+    unsafe {
+        command.as_std_mut().pre_exec(move || {
+            let mut copies = [-1; 2];
+            for (index, (source, _)) in descriptors.iter().enumerate() {
+                copies[index] = libc::fcntl(*source, libc::F_DUPFD_CLOEXEC, 10);
+                if copies[index] < 0 {
+                    let error = std::io::Error::last_os_error();
+                    for copy in copies.into_iter().filter(|copy| *copy >= 0) {
+                        libc::close(copy);
+                    }
+                    return Err(error);
+                }
+            }
+            for (copy, (_, target)) in copies.into_iter().zip(descriptors) {
+                if libc::dup2(copy, target) < 0 {
+                    let error = std::io::Error::last_os_error();
+                    for copy in copies {
+                        libc::close(copy);
+                    }
+                    return Err(error);
+                }
+            }
+            for copy in copies {
+                libc::close(copy);
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+/// Retain child registrations and the input bridge until every child has been
+/// positively reaped and every physical read joined, including setup errors.
+struct QualificationStage {
+    children: Vec<(tokio::process::Child, crate::process_control::ChildJob)>,
+    input: Option<crate::source_input::SourceInput>,
+    input_close: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+}
+impl QualificationStage {
+    fn new(input: Option<crate::source_input::SourceInput>) -> Self {
+        Self {
+            children: Vec::new(),
+            input,
+            input_close: None,
+        }
+    }
+
+    async fn close_and_wait(&mut self) {
+        for (child, _) in &mut self.children {
+            let _ = child.start_kill();
+        }
+        for (child, _) in &mut self.children {
+            reap(child).await;
+        }
+        self.children.clear();
+        if let Some(input) = self.input.take() {
+            // The owned task survives cancellation of this await. Stage Drop
+            // retains its join handle instead of dropping the close future.
+            self.input_close = Some(tokio::spawn(input.close_and_wait()));
+        }
+        let closed = match self.input_close.as_mut() {
+            Some(close) => Some(close.await),
+            None => None,
+        };
+        self.input_close.take();
+        if let Some(closed) = closed {
+            if !matches!(closed, Ok(Ok(()))) {
+                tracing::error!(
+                    ?closed,
+                    "FEL source bridge could not confirm physical close; retaining owner"
+                );
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+impl Drop for QualificationStage {
+    fn drop(&mut self) {
+        for (child, _) in &mut self.children {
+            let _ = child.start_kill();
+        }
+        let mut children = std::mem::take(&mut self.children);
+        let input = self.input.take();
+        let input_close = self.input_close.take();
+        if children.is_empty() && input.is_none() && input_close.is_none() {
+            return;
+        }
+        // An abandoned future transfers its owned children and broker, never
+        // a settled receipt. Job registrations survive through the real joins.
+        tokio::spawn(async move {
+            for (child, _) in &mut children {
+                reap(child).await;
+            }
+            drop(children);
+            let closed = match input_close {
+                Some(close) => close
+                    .await
+                    .map_err(std::io::Error::other)
+                    .and_then(|closed| closed),
+                None => match input {
+                    Some(input) => input.close_and_wait().await,
+                    None => Ok(()),
+                },
+            };
+            if let Err(error) = closed {
+                tracing::error!(%error, "abandoned FEL source bridge close remains unconfirmed");
+                std::future::pending::<()>().await;
+            }
+        });
+    }
+}
+
 /// Render one window. With `encode_to`, the picture goes through the route's
 /// encode into that file and nothing is returned; otherwise its R'G'B'
-/// lattices come back.
+/// lattices come back. A qualification must have an existing admitted reader.
 async fn render(
     sample: &Sample<'_>,
     window: (Instant, Instant),
@@ -353,24 +494,50 @@ async fn render(
     scratch: &Path,
     encode_to: Option<&Path>,
 ) -> Result<Vec<Lattice>, String> {
+    let input = crate::source_input::SourceInput::open_current_held(
+        sample.source,
+        "FEL qualification renderer",
+    )
+    .await?
+    .ok_or("FEL qualification requires an admitted source input")?;
+    let mut stage = QualificationStage::new(Some(input));
+    let result = render_owned(sample, window, mode, export, scratch, encode_to, &mut stage).await;
+    stage.close_and_wait().await;
+    result
+}
+
+async fn render_owned(
+    sample: &Sample<'_>,
+    window: (Instant, Instant),
+    mode: &str,
+    export: &str,
+    scratch: &Path,
+    encode_to: Option<&Path>,
+    stage: &mut QualificationStage,
+) -> Result<Vec<Lattice>, String> {
     let evidence = scratch.join(format!("render-{mode}-{export}"));
-    std::fs::create_dir(&evidence).map_err(|e| e.to_string())?;
+    std::fs::create_dir(&evidence).map_err(|error| error.to_string())?;
     let directory = plurx_core::fs_secure::open_directory_nofollow_blocking(&evidence)
-        .map_err(|e| e.to_string())?;
-    let (read, write) = std::io::pipe().map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
+    let (read, write) = std::io::pipe().map_err(|error| error.to_string())?;
     let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
-    let mut source = sample.source;
-    source.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let diagnostics = std::fs::File::create(scratch.join(format!("{mode}-{export}.log")))
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
+    let mut args = helper_args(&sample.clock, window, mode, export);
+    args[0] = stage
+        .input
+        .as_ref()
+        .expect("owned source input")
+        .url()
+        .into();
     let mut helper = tokio::process::Command::new(sample.renderer);
     helper
-        .args(helper_args(&sample.clock, window, mode, export))
+        .args(args)
         .envs(
             sample
                 .renderer_env
                 .iter()
-                .map(|(k, v)| (k.as_str(), v.as_os_str())),
+                .map(|(key, value)| (key.as_str(), value.as_os_str())),
         )
         .env("MESA_SHADER_CACHE_DIR", scratch)
         .env("MESA_SHADER_CACHE_MAX_SIZE", "64M")
@@ -378,20 +545,16 @@ async fn render(
         .stdout(Stdio::piped())
         .stderr(Stdio::from(diagnostics))
         .kill_on_drop(true);
-    crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
-        &mut helper,
-        &[
-            (sample.source.as_raw_fd(), 3),
-            (directory.as_raw_fd(), 4),
-            (write.as_raw_fd(), 5),
-        ],
-        None,
-    );
-    let (mut helper, _helper_job) = plurx_core::process::spawn_job_owned(
-        &mut helper,
-        ChildWork::background("Dolby Vision FEL qualification render"),
-    )
-    .map_err(|e| e.to_string())?;
+    inherit_renderer_outputs(&mut helper, &directory, &write)?;
+    let helper = plurx_core::process::source_lifetime::mediated(async {
+        plurx_core::process::spawn_job_owned(
+            &mut helper,
+            ChildWork::background("Dolby Vision FEL qualification render"),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    stage.children.push(helper);
     drop(write);
     let mut consumer = tokio::process::Command::new(&sample.ffmpeg);
     match encode_to {
@@ -413,11 +576,18 @@ async fn render(
     } else {
         "Dolby Vision FEL qualification sample"
     };
-    let (mut consumer, _consumer_job) =
+    // This consumer receives only the renderer's NUT pipe, never original media.
+    let consumer = plurx_core::process::source_lifetime::mediated(async {
         plurx_core::process::spawn_job_owned(&mut consumer, ChildWork::background(work))
-            .map_err(|e| e.to_string())?;
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    stage.children.push(consumer);
+    let (helper, consumer) = stage.children.split_at_mut(1);
+    let helper = &mut helper[0].0;
+    let consumer = &mut consumer[0].0;
     let trace = helper.stdout.take().ok_or("the renderer has no trace")?;
-    let outcome = supervised(&sample.cancel, async {
+    supervised(&sample.cancel, async {
         let consume = async {
             match consumer.stdout.take() {
                 Some(stdout) => lattices(stdout, sample.clock.raster).await,
@@ -426,8 +596,8 @@ async fn render(
         };
         let (lattices, trace) = tokio::join!(consume, read_trace(trace));
         let lattices = lattices?;
-        let consumed = finish(&mut consumer, "the window's consumer").await;
-        let rendered = helper.wait().await.map_err(|e| e.to_string())?;
+        let consumed = finish(consumer, "the window's consumer").await;
+        let rendered = helper.wait().await.map_err(|error| error.to_string())?;
         if !rendered.success() {
             let log = std::fs::read_to_string(scratch.join(format!("{mode}-{export}.log")))
                 .unwrap_or_default();
@@ -451,12 +621,7 @@ async fn render(
         }
         Ok(lattices)
     })
-    .await;
-    if outcome.is_err() {
-        reap(&mut helper).await;
-        reap(&mut consumer).await;
-    }
-    outcome
+    .await
 }
 
 async fn read_trace(stdout: tokio::process::ChildStdout) -> Result<String, String> {
@@ -496,7 +661,16 @@ async fn supervised<T>(
 /// Kill and reap a stage child that did not finish on its own.
 async fn reap(child: &mut tokio::process::Child) {
     let _ = child.start_kill();
-    let _ = child.wait().await;
+    loop {
+        match child.wait().await {
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(%error, "FEL child join failed; retaining its owner");
+                let _ = child.start_kill();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
 }
 
 async fn decode(sample: &Sample<'_>, encoded: &Path) -> Result<Vec<Lattice>, String> {
@@ -507,21 +681,26 @@ async fn decode(sample: &Sample<'_>, encoded: &Path) -> Result<Vec<Lattice>, Str
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _job) = plurx_core::process::spawn_job_owned(
-        &mut command,
-        ChildWork::background("Dolby Vision FEL qualification sample"),
-    )
-    .map_err(|e| e.to_string())?;
+    // The decoder sees only this qualification's generated scratch file.
+    let child = plurx_core::process::source_lifetime::mediated(async {
+        plurx_core::process::spawn_job_owned(
+            &mut command,
+            ChildWork::background("Dolby Vision FEL qualification sample"),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    let mut stage = QualificationStage::new(None);
+    stage.children.push(child);
+    let child = &mut stage.children[0].0;
     let outcome = supervised(&sample.cancel, async {
         let stdout = child.stdout.take().ok_or("decoder has no output")?;
         let lattices = lattices(stdout, sample.clock.raster).await?;
-        finish(&mut child, "the served window's decoder").await?;
+        finish(child, "the served window's decoder").await?;
         Ok(lattices)
     })
     .await;
-    if outcome.is_err() {
-        reap(&mut child).await;
-    }
+    stage.close_and_wait().await;
     outcome
 }
 
@@ -812,6 +991,237 @@ pub(crate) async fn qualify_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real child can use the evidence directory and NUT writer, while
+    /// the parent's original source descriptor remains close-on-exec.
+    #[tokio::test]
+    async fn fel_output_handoff_withholds_original_source_and_preserves_outputs() {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+        let root = crate::test_tempdir().expect("FEL output fixture");
+        let original = root.path().join("original.bin");
+        std::fs::write(&original, b"original movie source").expect("original bytes");
+        let source = std::fs::File::open(original).expect("held original source");
+        let identity = source.metadata().expect("source identity");
+        let evidence = root.path().join("evidence");
+        std::fs::create_dir(&evidence).expect("private output directory");
+        let directory = plurx_core::fs_secure::open_directory_nofollow_blocking(&evidence)
+            .expect("held output directory");
+        let (mut read, write) = std::io::pipe().expect("NUT pipe");
+        let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
+        let mut command =
+            tokio::process::Command::new(std::env::current_exe().expect("test image"));
+        command
+            .args([
+                "--exact",
+                "source_probe::fel_qualification::tests::fel_output_handoff_fixture",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PLURX_FEL_OUTPUT_SOURCE_DEVICE", identity.dev().to_string())
+            .env("PLURX_FEL_OUTPUT_SOURCE_INODE", identity.ino().to_string());
+        // The source-only compiler's verified SDK supplies shared libraries.
+        // Preserve only loader paths needed by this same test executable.
+        for name in ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        assert!(
+            inherit_renderer_outputs(&mut command, &directory, &source).is_err(),
+            "a regular source file must never qualify as an output pipe"
+        );
+        inherit_renderer_outputs(&mut command, &directory, &write).expect("output-only handoff");
+        assert!(
+            !plurx_core::process::source_lifetime::has_descriptor_handoff(command.as_std()),
+            "the audited outputs do not clear or require a raw-source exemption"
+        );
+        // This isolated self-exec needs the fixture values and loader paths
+        // above. The service API clears them, making the child return before
+        // exercising its descriptor checks. Preserve this
+        // explicitly cleared configuration through the same bounded owner.
+        let output = plurx_core::process::source_lifetime::mediated(
+            plurx_core::process::bounded::output_command_inherited_env(
+                &mut command,
+                Duration::from_secs(10),
+                32 * 1024,
+                ChildWork::background("FEL output-only handoff fixture"),
+            ),
+        )
+        .await
+        .expect("owned output fixture");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        drop(write);
+        let mut bytes = Vec::new();
+        read.read_to_end(&mut bytes).expect("settled NUT output");
+        assert_eq!(bytes, b"NUT output only");
+    }
+
+    #[tokio::test]
+    async fn fel_stage_cancellation_keeps_close_owner_and_reaps_both_children() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let root = crate::test_tempdir().expect("FEL cancellation fixture");
+        let source_path = root.path().join("physical-source");
+        std::fs::write(&source_path, b"held source").expect("physical source");
+        let source = std::fs::File::open(source_path).expect("held source descriptor");
+        let anchor_path = root.path().join("read-join.anchor");
+        let anchor = std::fs::File::create_new(&anchor_path).expect("lifetime anchor");
+        anchor.lock().expect("physical read owns anchor");
+        let contender = std::fs::File::open(&anchor_path).expect("same inode contender");
+        let mut stage = QualificationStage::new(None);
+        let mut pids = Vec::new();
+        for index in 0..2 {
+            let marker = root.path().join(format!("child-{index}.ready"));
+            let mut command =
+                tokio::process::Command::new(std::env::current_exe().expect("test image"));
+            command
+                .args([
+                    "--exact",
+                    "source_probe::fel_qualification::tests::fel_output_handoff_fixture",
+                    "--nocapture",
+                ])
+                .env("PLURX_FEL_STAGE_WAIT", &marker)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            let child = plurx_core::process::source_lifetime::mediated(async {
+                plurx_core::process::spawn_job_owned(
+                    &mut command,
+                    ChildWork::background("FEL cancellation stage fixture"),
+                )
+            })
+            .await
+            .expect("owned stage child");
+            pids.push(child.0.id().expect("child process identity"));
+            stage.children.push(child);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !marker.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("child ready");
+        }
+        let (allow_close, close_allowed) = tokio::sync::oneshot::channel();
+        let (close_finished, close_observed) = tokio::sync::oneshot::channel();
+        stage.input_close = Some(tokio::spawn(async move {
+            let held_source = source;
+            let read_anchor = anchor;
+            close_allowed.await.map_err(std::io::Error::other)?;
+            drop(held_source);
+            drop(read_anchor);
+            let _ = close_finished.send(());
+            Ok(())
+        }));
+        let settled = Arc::new(AtomicBool::new(false));
+        let published = Arc::clone(&settled);
+        let close = tokio::spawn(async move {
+            stage.close_and_wait().await;
+            published.store(true, Ordering::Release);
+        });
+        tokio::task::yield_now().await;
+        close.abort();
+        assert!(close
+            .await
+            .expect_err("close future cancelled")
+            .is_cancelled());
+        assert!(
+            !settled.load(Ordering::Acquire),
+            "abandonment cannot publish physical settlement"
+        );
+        assert!(
+            matches!(contender.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "abandoning the waiter cannot release the real read anchor"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while plurx_core::process::priority::running()
+                .iter()
+                .any(|child| pids.contains(&child.pid))
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both child registrations survive through real reap");
+        allow_close
+            .send(())
+            .expect("the detached physical-close owner is still alive");
+        tokio::time::timeout(Duration::from_secs(10), close_observed)
+            .await
+            .expect("physical close completed")
+            .expect("close receipt");
+        contender
+            .try_lock()
+            .expect("anchor available only after source close");
+        assert!(!settled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn fel_output_handoff_fixture() {
+        use std::io::Write;
+        use std::os::fd::BorrowedFd;
+        if let Some(marker) = std::env::var_os("PLURX_FEL_STAGE_WAIT") {
+            std::fs::write(marker, b"ready").expect("stage child ready");
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        let Ok(device) = std::env::var("PLURX_FEL_OUTPUT_SOURCE_DEVICE") else {
+            return;
+        };
+        let device: u64 = device.parse().expect("original source device");
+        let inode: u64 = std::env::var("PLURX_FEL_OUTPUT_SOURCE_INODE")
+            .expect("original source inode")
+            .parse()
+            .expect("inode integer");
+        for entry in std::fs::read_dir("/proc/self/fd").expect("child descriptor census") {
+            let entry = entry.expect("child descriptor");
+            let Ok(fd) = entry.file_name().to_string_lossy().parse::<i32>() else {
+                continue;
+            };
+            let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: fstat initializes the complete output on success.
+            if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } == 0 {
+                let metadata = unsafe { metadata.assume_init() };
+                assert_ne!(
+                    (metadata.st_dev, metadata.st_ino),
+                    (device, inode),
+                    "original source escaped through descriptor {fd}"
+                );
+            }
+        }
+        let mut directory = std::mem::MaybeUninit::<libc::stat>::uninit();
+        assert_eq!(unsafe { libc::fstat(4, directory.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { directory.assume_init() }.st_mode & libc::S_IFMT,
+            libc::S_IFDIR
+        );
+        let mut output = std::mem::MaybeUninit::<libc::stat>::uninit();
+        assert_eq!(unsafe { libc::fstat(5, output.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { output.assume_init() }.st_mode & libc::S_IFMT,
+            libc::S_IFIFO
+        );
+        let flags = unsafe { libc::fcntl(5, libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_WRONLY);
+        // SAFETY: descriptor 5 is the fixture's validated inherited NUT writer.
+        let writer = unsafe { BorrowedFd::borrow_raw(5) }
+            .try_clone_to_owned()
+            .expect("writer reference");
+        std::fs::File::from(writer)
+            .write_all(b"NUT output only")
+            .expect("NUT bytes");
+    }
 
     fn document() -> serde_json::Value {
         serde_json::json!({"format":{"start_time":"0.000000"},"streams":[

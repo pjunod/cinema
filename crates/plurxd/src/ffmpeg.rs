@@ -111,6 +111,20 @@ pub(crate) fn inherit_raw_file_descriptors_with_cwd(
     descriptors: &[(std::os::fd::RawFd, i32)],
     cwd_target: Option<i32>,
 ) {
+    // No capability crosses exec when the broker replaced every descriptor.
+    if descriptors.is_empty() {
+        assert!(cwd_target.is_none());
+        return;
+    }
+    plurx_core::process::source_lifetime::tag_descriptor_handoff(command);
+    if let Err(error) = plurx_core::process::source_lifetime::unmediated_descriptor() {
+        let code = error.raw_os_error().unwrap_or(libc::EIO);
+        // SAFETY: the child performs only an allocation-free errno rejection.
+        unsafe {
+            command.pre_exec(move || Err(std::io::Error::from_raw_os_error(code)));
+        }
+    }
+
     assert!(
         descriptors.len() <= 7
             && descriptors
@@ -982,7 +996,9 @@ pub(crate) async fn held_source_packet_probe_json(
     };
     let mut command = tokio::process::Command::new(ffprobe_bin());
     #[cfg(unix)]
-    inherit_file_descriptors(&mut command, &[(source, 3)]);
+    if input.is_none() {
+        inherit_file_descriptors(&mut command, &[(source, 3)]);
+    }
     command.args([
         "-v",
         "error",
@@ -1024,11 +1040,13 @@ pub(crate) async fn held_source_packet_probe_json(
     if let Some(input) = input {
         let cap = usize::try_from(max_stdout_bytes.saturating_add(1))
             .map_err(|error| HeldPacketProbeError::Process(error.to_string()))?;
-        let output = plurx_core::process::bounded::output_command(
-            &mut command,
-            timeout,
-            cap,
-            crate::process_control::ChildWork::background("fragment index packet probe"),
+        let output = plurx_core::process::source_lifetime::mediated(
+            plurx_core::process::bounded::output_command(
+                &mut command,
+                timeout,
+                cap,
+                crate::process_control::ChildWork::background("fragment index packet probe"),
+            ),
         )
         .await;
         input.close_and_wait().await.map_err(|error| {

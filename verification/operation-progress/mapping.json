@@ -237,7 +237,7 @@
         "table": "39 bounded process cancellation",
         "source": "crates/plurx-core/src/process/bounded.rs",
         "anchor": "pub async fn cancellable<T>(",
-        "sha256": "8a16f36568f60da317832d311e25ba4c359bcbc3052de0a525581a5ab4bb961e"
+        "sha256": "b823d6b9373267f0617cdebd42ec56bc810d22df2db267272510feead1a42f41"
       },
       {
         "table": "40 provider item deadline",
@@ -357,13 +357,13 @@
         "table": "recovery dependency outside model: custody activation and cleanup",
         "source": "crates/plurxd/src/source_custody.rs",
         "anchor": "pub(crate) async fn activate_background_with_journal(",
-        "sha256": "7a5be2eed10037efa81fec1dc8d9729fdae6a28c47d0910a10e93325b63db447"
+        "sha256": "8ab10a046a2eded649af5286c0e7602f9eeff78db2fc371ce17540b7941f921f"
       },
       {
         "table": "recovery dependency outside model: exact-Store verified boot replay",
         "source": "crates/plurxd/src/source_custody/recovery.rs",
         "anchor": "pub(super) fn configure_backend(",
-        "sha256": "da2beef3125dff120e14e6c10825ec2c3d5bc8b898ff6cf736f51f7b2a311ade"
+        "sha256": "a5603d4a16f89b1aac3efb9fc5068c64825629d55c2fd977c4376b66093b7fac"
       },
       {
         "table": "recovery dependency outside model: prepared host-reboot challenge",
