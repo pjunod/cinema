@@ -1903,6 +1903,10 @@ mod tests {
                     width: Some(3840),
                     height: Some(2160),
                     bit_depth: Some(10),
+                    dolby_vision: plurx_core::domain::DolbyVisionFacts {
+                        profile: Some(5),
+                        ..Default::default()
+                    },
                     hdr: Some("dolby_vision".into()),
                     hdr_format: Some("Dolby Vision · Profile 5".into()),
                     audio_streams: vec![AudioStream {

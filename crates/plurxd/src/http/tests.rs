@@ -12196,6 +12196,15 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1["code"], "sharing_invalid_request");
     }
+    // Production creates the node data directory before network storage.
+    std::fs::create_dir_all(
+        state
+            .sharing
+            .host_directory()
+            .parent()
+            .expect("node data directory"),
+    )
+    .expect("node data directory");
     // Combined external invitations are the production default. This owned
     // fixture has no provider authorization and must retain that refusal.
     let (status, denied) = call(
