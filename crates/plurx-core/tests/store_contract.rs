@@ -19046,7 +19046,8 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
     // The report covers the entire current import plan, including later families
-    // with no rows in v14. SQLite v122 added seven durable source-arbitration tables.
+    // with no rows in v14. SQLite v122 added the source-arbitration tables
+    // and v124 added the three dispatch-turn tables.
     let mut imported_tables = report
         .tables
         .iter()
@@ -19090,6 +19091,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "cluster_fragment_index_locations",
             "cluster_fragment_index_sources",
             "continuous_quality_ledgers",
+            "dispatch_turn_attempt",
+            "dispatch_turn_ready",
+            "dispatch_turn_wait",
             "dv_conversions",
             "dv_recovery_guards",
             "dvr_recordings",
@@ -19236,6 +19240,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     );
     assert!(report.imported_rows >= 16);
     for table in [
+        "dispatch_turn_attempt",
+        "dispatch_turn_ready",
+        "dispatch_turn_wait",
         "library_roots",
         "scan_reconcile_guards",
         "scan_reconcile_items",
