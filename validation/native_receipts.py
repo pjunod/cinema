@@ -73,13 +73,15 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed Makefile change adds only the Node resume-position suite; native
-    # targets, build scripts and bundled-resource boundaries are unchanged.
-    'Makefile': 'd74b5626264702988ac3d7bc9f64aac246a1656e8408d539c0241659375971d8',
-    # Reviewed 0.8.0 build 289: only CURRENT_PROJECT_VERSION differs from the
-    # reviewed build 288 bytes. Pin this exact spec; build-288 case receipts do
-    # not transfer, and added resources or scripts still change its digest.
-    'clients/apple/project.yml': 'a1abf8c51320464b6133191c377489e83c3e2d11e97d7477848b2549c6c9353a',
+    # Reviewed Makefile change adds only the Node Activity → Starts suite
+    # (playback start G1) to web-unit-check; native targets, build scripts and
+    # bundled-resource boundaries are unchanged.
+    'Makefile': '96e975a246267c49bd836c175bcda84b8457f5b78ff4470dff0f5d9b3d40fcc0',
+    # Reviewed 0.8.0 build 293 (playback start Phase 1): only
+    # CURRENT_PROJECT_VERSION differs from the reviewed build 289 bytes. Pin
+    # this exact spec; build-289 case receipts do not transfer, and added
+    # resources or scripts still change its digest.
+    'clients/apple/project.yml': '8fd6904a47c0dd3de95be3e983bb39f1fb89554a37e26e59b45ff94936a79b95',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     'clients/server-tray/macos/build': 'b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0',
