@@ -9,43 +9,43 @@
         "table": "01 candidate admission",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "348fa5ce9ffc5da68631eeeff5acf983e13b52f58ff6af09b8f44a6ce67cf0c0"
+        "sha256": "dd3be7c02a22d527b6a4cd85638b9e3f5f2127349f5820097b1f8b00d5f5a192"
       },
       {
         "table": "02 claim ambiguity deadline",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn claim_with_resolution_inner(",
-        "sha256": "348fa5ce9ffc5da68631eeeff5acf983e13b52f58ff6af09b8f44a6ce67cf0c0"
+        "sha256": "dd3be7c02a22d527b6a4cd85638b9e3f5f2127349f5820097b1f8b00d5f5a192"
       },
       {
         "table": "03 queue heartbeat lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn renew(&self) -> Result<bool, StoreError> {",
-        "sha256": "348fa5ce9ffc5da68631eeeff5acf983e13b52f58ff6af09b8f44a6ce67cf0c0"
+        "sha256": "dd3be7c02a22d527b6a4cd85638b9e3f5f2127349f5820097b1f8b00d5f5a192"
       },
       {
         "table": "04 bind queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn bind_library(",
-        "sha256": "348fa5ce9ffc5da68631eeeff5acf983e13b52f58ff6af09b8f44a6ce67cf0c0"
+        "sha256": "dd3be7c02a22d527b6a4cd85638b9e3f5f2127349f5820097b1f8b00d5f5a192"
       },
       {
         "table": "05 complete queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn complete_library(",
-        "sha256": "348fa5ce9ffc5da68631eeeff5acf983e13b52f58ff6af09b8f44a6ce67cf0c0"
+        "sha256": "dd3be7c02a22d527b6a4cd85638b9e3f5f2127349f5820097b1f8b00d5f5a192"
       },
       {
         "table": "06 queue heartbeat retirement",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn finish(mut self) {",
-        "sha256": "348fa5ce9ffc5da68631eeeff5acf983e13b52f58ff6af09b8f44a6ce67cf0c0"
+        "sha256": "dd3be7c02a22d527b6a4cd85638b9e3f5f2127349f5820097b1f8b00d5f5a192"
       },
       {
         "table": "07 queue retirement lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
-        "sha256": "348fa5ce9ffc5da68631eeeff5acf983e13b52f58ff6af09b8f44a6ce67cf0c0"
+        "sha256": "dd3be7c02a22d527b6a4cd85638b9e3f5f2127349f5820097b1f8b00d5f5a192"
       },
       {
         "table": "08 worker acquisition and cleanup",
