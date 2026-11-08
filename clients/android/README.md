@@ -20,8 +20,9 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.8.0**, build `189` — media waits retire with their settled or superseded
-> destination intent, matching the shared playback-surface contract. Native qualification
+> Status: **v0.8.0**, build `190` — every session create tells the server what its start
+> sequence has left (`X-Plurx-Startup-Remaining-Ms`); media waits retire with their settled
+> or superseded destination intent, matching the shared playback-surface contract. Native qualification
 > is tracked in PR #1378; physical acceptance remains open.
 >
 > Build `188` — progressive captions discover stopped operations before explicit Resume

@@ -156,8 +156,10 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
         require(body.request_id?.let { Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(it) } == true)
         val encoded = Net.json.encodeToString(body); require(encoded.toByteArray().size <= 24_576)
         val retained = Net.json.decodeFromString<CreateSessionReq>(encoded)
+        val remaining = coroutineContext[StartupAllowance]?.remainingMs?.coerceAtLeast(0)
         val request = Request.Builder().url(auth.origin + context.path("hls/sessions"))
-            .header("Authorization", "Bearer ${auth.token}").post(encoded.toRequestBody("application/json".toMediaType())).build()
+            .header("Authorization", "Bearer ${auth.token}").post(encoded.toRequestBody("application/json".toMediaType()))
+            .apply { if (remaining != null) header("X-Plurx-Startup-Remaining-Ms", remaining.toString()) }.build()
         val bytes = read(request, auth, transport, initialStart = true) { requireCurrent(); context.path("hls/sessions") }
         coroutineContext.ensureActive(); requireCurrent()
         return strictUtf8(bytes) to retained

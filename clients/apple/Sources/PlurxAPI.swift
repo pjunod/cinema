@@ -5,6 +5,13 @@ enum PlaybackLinkRequestContext {
     @TaskLocal static var receipt: String?
 }
 
+/// What the current start sequence has left of its own deadline, sent on a
+/// session create as `X-Plurx-Startup-Remaining-Ms` so the server answers
+/// inside it (and never waits past its own 10 s clamp) instead of guessing.
+enum PlaybackStartupRequestContext {
+    @TaskLocal static var remainingMs: Int?
+}
+
 enum APIError: Error, LocalizedError {
     case badURL
     /// A non-2xx answer with no legible `{code, message}` body — and every
@@ -157,6 +164,10 @@ struct PlurxAPI {
            let receipt = PlaybackLinkRequestContext.receipt,
            UUID(uuidString: receipt)?.uuidString.lowercased() == receipt {
             req.setValue(receipt, forHTTPHeaderField: "X-Plurx-Link-Receipt")
+        }
+        if path.hasPrefix("files/"), path.hasSuffix("/hls/sessions"),
+           let remaining = PlaybackStartupRequestContext.remainingMs {
+            req.setValue(String(max(0, remaining)), forHTTPHeaderField: "X-Plurx-Startup-Remaining-Ms")
         }
         Session.shared.authorize(&req)
         return try await run(req, using: session)
