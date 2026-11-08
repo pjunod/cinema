@@ -1397,16 +1397,27 @@ impl TranscodeManager {
         // has not published as the deadline does: the startup future is
         // dropped, and the preparation owners held outside it are cancelled
         // and settled below, releasing the registry slot and copy permit.
+        //
+        // Only while the future is in that preparation, though. Before the
+        // route-absence proof, `unowned_existing` still says "not ours", and
+        // dropping there would make settlement refuse a route this owner
+        // never touched. From VOD admission on, the admission and the
+        // reservation are held inside the future, and only the reservation's
+        // own retirement proves "admitted, never spawned"; dropping mid-way
+        // would leave settlement nothing to prove it with. That section ends
+        // in the explicit retirement check after reservation, as before.
+        let abandonable = std::sync::atomic::AtomicBool::new(false);
         let retirement = async {
             loop {
                 let notification = owner.changed.notified();
                 tokio::pin!(notification);
                 notification.as_mut().enable();
-                if owner
-                    .state
-                    .lock()
-                    .expect("Source worker state")
-                    .retirement_requested
+                if abandonable.load(std::sync::atomic::Ordering::Acquire)
+                    && owner
+                        .state
+                        .lock()
+                        .expect("Source worker state")
+                        .retirement_requested
                 {
                     return Err(SourceWorkerError::Unavailable);
                 }
@@ -1434,6 +1445,10 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unresolved);
                 }
                 unowned_existing = false;
+                // Preparation from here is owned outside this future. A
+                // retirement requested earlier is acted on now.
+                abandonable.store(true, std::sync::atomic::Ordering::Release);
+                owner.changed.notify_waiters();
                 // This actual worker owns the configured queue/materialization
                 // allowance. Its inherited deadline can only become shorter.
                 startup_stage = "startup_budget";
@@ -1494,6 +1509,7 @@ impl TranscodeManager {
                     None
                 };
                 startup_stage = "vod_admission";
+                abandonable.store(false, std::sync::atomic::Ordering::Release);
                 let admitted = Box::pin(self.vod.prepare_admitted_source_vod(
                     &prepared,
                     &owner.assignment,
