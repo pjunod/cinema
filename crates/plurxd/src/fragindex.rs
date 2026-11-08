@@ -3428,6 +3428,10 @@ fn finish_header_scans(
     {
         return;
     }
+    // `-xerror` is not on the index argv (it also aborts on a DTS head the muxer
+    // corrects), so a truncated or corrupt source no longer fails the child.
+    // FFmpeg's own messages for it are matched in the stderr scan instead.
+    let fault = trace.as_ref().and_then(|trace| trace.source_fault());
     let proof = trace.map(|trace| {
         trace.finish(
             expectation.source_object_version.clone(),
@@ -3436,7 +3440,13 @@ fn finish_header_scans(
     });
     for outcome in outcomes {
         if let IndexOutcome::Built(index) = outcome {
-            if hevc && proof.is_none() {
+            if let Some(fault) = fault {
+                *outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
+                    IndexFailureCode::IndexProcessFailed,
+                    format!("ffmpeg reported a damaged source packet ({fault}); the index is incomplete"),
+                    index.rows.len(),
+                )));
+            } else if hevc && proof.is_none() {
                 *outcome = IndexOutcome::Failed(Box::new(
                     IndexFailure::new(
                         IndexFailureCode::IndexProcessFailed,

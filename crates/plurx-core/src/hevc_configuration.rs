@@ -14,6 +14,53 @@ const MAX_PARAMETER: usize = 65536;
 /// evidence; `parse` ignores the rest.
 const TRACE_PREFIX: &[u8] = b"[trace_headers @ ";
 
+/// FFmpeg messages that mean the pass read a damaged source and went on.
+/// `-xerror` used to turn each of them into a non-zero exit; the index argv no
+/// longer carries it, because the same flag also made the mp4 muxer's
+/// correctable `Non-monotonic DTS` fatal. Without it a truncated or corrupt
+/// packet is dropped and the pass exits 0 with a short but well-formed
+/// index, so these are matched explicitly. None of them is a muxer message.
+const SOURCE_FAULTS: &[&str] = &[
+    // Demuxer flagged the packet (truncated fragment, "partial file").
+    "corrupt input packet",
+    "Packet corrupt",
+    // trace_headers could not parse a packet, which is then dropped.
+    "Error applying bitstream filters",
+    // A demux error other than EOF, which ffmpeg otherwise treats as EOF.
+    "Error during demuxing",
+    "Error retrieving a packet from demuxer",
+];
+/// Only the head of a line is searched: FFmpeg prints these at the start.
+const FAULT_WINDOW: usize = 256;
+
+/// Line-oriented, bounded scan of all stderr for [`SOURCE_FAULTS`]. It sees
+/// every byte, including after the trace has been refused.
+#[derive(Default)]
+struct FaultScan {
+    line: Vec<u8>,
+    fault: Option<&'static str>,
+}
+
+impl FaultScan {
+    fn feed(&mut self, bytes: &[u8]) {
+        if self.fault.is_some() {
+            return;
+        }
+        for &byte in bytes {
+            if byte == b'\n' || byte == b'\r' {
+                let line = String::from_utf8_lossy(&self.line);
+                self.fault = SOURCE_FAULTS.iter().copied().find(|m| line.contains(m));
+                self.line.clear();
+                if self.fault.is_some() {
+                    return;
+                }
+            } else if self.line.len() < FAULT_WINDOW {
+                self.line.push(byte);
+            }
+        }
+    }
+}
+
 /// Streaming search of one line for anything that could be trace output:
 /// the [`TRACE_PREFIX`], or a trace field's ` = <integer>`. FFmpeg omits the
 /// prefix on a message that follows an unterminated one, so a field glued onto
@@ -129,9 +176,16 @@ pub struct Trace {
     /// content anywhere in it still fails closed.
     evidence: Evidence,
     refusal: Option<String>,
+    faults: FaultScan,
 }
 
 impl Trace {
+    /// The first FFmpeg message showing the pass read a damaged source, if
+    /// any. Independent of the trace verdict: the caller refuses the index.
+    pub fn source_fault(&self) -> Option<&'static str> {
+        self.faults.fault
+    }
+
     fn reject(&mut self, reason: &str) {
         if self.refusal.is_none() {
             self.refusal = Some(reason.to_owned());
@@ -139,6 +193,7 @@ impl Trace {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.faults.feed(bytes);
         // A rejection is terminal: keep draining stderr, but bound parsing work.
         if self.refusal.is_some() {
             return;
@@ -473,6 +528,31 @@ mod tests {
             trace.feed(fixture().as_bytes());
             assert!(!trace.finish("source".into(), 0).permits("source"));
         }
+    }
+    /// With `-xerror` gone, a damaged source is caught by message, and the
+    /// muxer's correctable DTS warning is not mistaken for one.
+    #[test]
+    fn damaged_source_messages_are_faults_and_muxer_dts_is_not() {
+        for text in [
+            "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] Packet corrupt (stream = 0, dts = 75328).\n",
+            "[in#0/mov,mp4 @ 0x1] corrupt input packet in stream 0\n",
+            "[vost#0:0/copy @ 0x1] Error applying bitstream filters to a packet\n",
+            "[in#0/matroska @ 0x1] Error during demuxing: Invalid data\n",
+        ] {
+            for split in [text.len(), 7] {
+                let mut trace = Trace::default();
+                trace.feed(fixture().as_bytes());
+                trace.feed(&text.as_bytes()[..split.min(text.len())]);
+                trace.feed(&text.as_bytes()[split.min(text.len())..]);
+                assert!(trace.source_fault().is_some(), "{text}");
+            }
+        }
+        let mut trace = Trace::default();
+        trace.feed(fixture().as_bytes());
+        trace.feed(
+            b"[mp4 @ 0x1] Non-monotonic DTS in output stream 0:0; previous: 2000, current: 672; changing to 2001.\n",
+        );
+        assert!(trace.source_fault().is_none());
     }
     /// The index pass's stderr also carries FFmpeg's own output banner, and
     /// with one tee slave per PGS track that single line outgrows `MAX_LINE`
