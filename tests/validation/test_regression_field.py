@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
+import os
+import sys
+from unittest import mock
 from pathlib import Path
 import subprocess
 import tempfile
@@ -326,6 +330,55 @@ class RegressionFieldCase(unittest.TestCase):
             "validation/merge-errata.toml's enforce_after and the lane step's "
             "continue-on-error must change together",
         )
+
+
+class PrDescriptionTransportCase(unittest.TestCase):
+    def test_large_unicode_event_body_reaches_real_validator_without_exec_environment_payload(self):
+        from validation.regression_field import description_from_environment
+
+        field = "Regression-Test: tests/validation/test_regression_field.py::test_a_field_naming_a_test_this_tree_defines_passes"
+        body = "λ" * 150_000 + "\n" + field + "\n" + field + "\n"
+        with tempfile.TemporaryDirectory() as directory:
+            event = Path(directory) / "event.json"
+            event.write_text(json.dumps({"pull_request": {"body": body}}), encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if k not in {"PR_BODY", "PR_BASE_SHA", "PR_HEAD_SHA", "PR_TITLE"}}
+            env.update(PR_BODY_FROM_EVENT="1", GITHUB_EVENT_PATH=str(event))
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(description_from_environment(), body)
+            result = subprocess.run([sys.executable, "-m", "validation.regression_field", "--landing-lines"],
+                cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, field + "\n" + field + "\n")
+            self.assertNotIn("PR_BODY", env)
+
+    def test_selected_event_body_fails_closed_for_missing_or_malformed_payload(self):
+        from validation.regression_field import description_from_environment
+
+        with tempfile.TemporaryDirectory() as directory:
+            event = Path(directory) / "event.json"
+            with mock.patch.dict(os.environ, {"PR_BODY_FROM_EVENT": "1", "GITHUB_EVENT_PATH": str(event)}, clear=True):
+                with self.assertRaises(OSError): description_from_environment()
+                for payload in ["not JSON", "[]", '{}', '{"pull_request":{"body":7}}']:
+                    event.write_text(payload, encoding="utf-8")
+                    with self.assertRaises(ValueError): description_from_environment()
+                event.write_text('{"pull_request":{"body":null}}', encoding="utf-8")
+                self.assertEqual(description_from_environment(), "")
+            with mock.patch.dict(os.environ, {"PR_BODY_FROM_EVENT": "1"}, clear=True):
+                with self.assertRaises(ValueError): description_from_environment()
+
+    def test_explicit_environment_body_remains_verbatim_and_event_loading_is_opt_in(self):
+        from validation.regression_field import description_from_environment
+
+        with mock.patch.dict(os.environ, {"PR_BODY": "actual\nfields", "PR_BODY_FROM_EVENT": "1", "GITHUB_EVENT_PATH": "/missing"}, clear=True):
+            self.assertEqual(description_from_environment(), "actual\nfields")
+        with mock.patch.dict(os.environ, {"GITHUB_EVENT_PATH": "/missing"}, clear=True):
+            self.assertEqual(description_from_environment(), "")
+
+    def test_all_pr_description_consumers_select_event_file_instead_of_large_environment_value(self):
+        for name, count in [("paperwork.yml", 1), ("main-fast-lane.yml", 2)]:
+            source = (REPO_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+            self.assertNotIn("PR_BODY: ${{ github.event.pull_request.body }}", source)
+            self.assertEqual(source.count('PR_BODY_FROM_EVENT: "1"'), count)
 
 
 if __name__ == "__main__":

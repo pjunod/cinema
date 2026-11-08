@@ -22,6 +22,14 @@ The CI job is the guarantee; the hook only moves the failure earlier. A
 session that never ran `make hooks` still meets the rules within a minute of
 opening its pull request, before any compiler job is allocated.
 
+PR workflows read the complete description from the runner-owned event file.
+They set `PR_BODY_FROM_EVENT=1`; paperwork and the regression-field validator
+require a valid `GITHUB_EVENT_PATH` with a string or null `pull_request.body`.
+This keeps large effort histories out of individual process environment values,
+which Linux limits separately from the total environment. Missing or malformed
+selected event data fails the check. Local `--body-file`, explicit `PR_BODY`
+and `--body` inputs keep their existing precedence; no fields are truncated.
+
 ## The rules
 
 `scripts/paperwork --list` prints this table from the script itself.
