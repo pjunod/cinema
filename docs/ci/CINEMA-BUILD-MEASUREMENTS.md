@@ -235,3 +235,34 @@ resource receipts and restored source inventories outside disposable caches.
 All nine focused runtime/graph qualification steps passed on the measured
 after tree, including the separate AUTH81/AUTH82 CLI and real FFmpeg HTTP.
 The main promotion receipt remains separate release acceptance evidence.
+
+## 5. Post-decoder standalone build — 2026-11-07
+
+Intermediate source `45e4402c276b53892368c02bade9a96837092249`
+(tree `fad0b461e25846c0f82dd1f62a70f520094f5e10`) includes main `ae779d141f`
+and decoder corrections, before the retained-HLS repair correction.
+This retains a second actual SDK-free compile measurement after §4. The same before source, unchanged runner, SDK,
+Cargo command, debug level, four CPUs, 24 GiB and no-swap cap apply.
+All probes use three samples; complete source restoration and changed-artifact
+freshness were verified again.
+
+| Probe | Before median (s) | Post-decoder samples (s) | Post-decoder median (s) | Reduction |
+|---|---:|---|---:|---:|
+| No-op | 0.215781 | 0.215759, 0.215361, 0.215624 | 0.215624 | unchanged |
+| Embedded asset | 17.652122 | 15.822141, 15.696399, 15.851703 | 15.822141 | 10.4% |
+| Daemon code | 18.031873 | 16.149660, 15.669881, 15.449537 | 15.669881 | 13.1% |
+| Shared API | 26.948786 | 24.073589, 23.841190, 23.658487 | 23.841190 | 11.5% |
+
+This actual daemon build contains **380 units and zero Hiqlite, Hiqlite WAL
+or OpenRaft units**, versus 448 units before. No-op time is effectively unchanged;
+changed-source medians improve 10–13%. These remain warm rebuild measurements.
+The 107.422269-second warmup uses an already populated shared slot and establishes
+no cold-build gain. The mixed target cache is not a standalone size measurement.
+
+Run `5467c91e828947749766617ae51b7091`, sealed bundle SHA-256
+`5da0cdd71f0f1a1678723d42ae96935ebd7a070fd85f2e22cffccf5ad24a8e5c`, retains
+Cargo events/timings, all samples, exact source/tool identities, resource receipts
+and restored inventories. The intermediate `ae41a3edb` measurement remains
+retained as run `d8f1e9d2108e4a6fa5a0b46eed8e50f8`, bundle
+`94f099f9a28e2be030cd5b76a50c4828214054dd85c97f5751c5bda2ec646dd9`.
+No failed measurements or earlier reports were replaced.

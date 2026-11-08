@@ -5474,7 +5474,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # commit and pressure-check event ordering (15 s), scan acknowledgement
 # (3 s), and renewal visibility (12 s with a 50 ms poll).
 # The worker's existing idle sleep changes delay in place (zero net sites).
-expected_occurrences = 2097
+# Encoded Jellyfin qualification follows at most four typed pending replies
+# per phase on the original activation; the one-second awaited retry adds
+# one timer site and retains all native byte/clock/Stop assertions.
+expected_occurrences = 2098
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

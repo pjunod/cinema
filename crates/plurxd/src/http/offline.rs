@@ -1954,6 +1954,39 @@ mod tests {
             .test_script_offline_production([OfflineProduceOutcome::Yielded(
                 "unexpected_unproved_render",
             )]);
+        fn output_files(
+            root: &std::path::Path,
+        ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+            fn visit(
+                root: &std::path::Path,
+                path: &std::path::Path,
+                files: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+            ) {
+                for entry in std::fs::read_dir(path).expect("output directory") {
+                    let entry = entry.expect("output entry");
+                    let kind = entry.file_type().expect("output type");
+                    if kind.is_dir() {
+                        visit(root, &entry.path(), files);
+                    } else {
+                        assert!(kind.is_file(), "unexpected output link");
+                        files.insert(
+                            entry
+                                .path()
+                                .strip_prefix(root)
+                                .expect("owned output")
+                                .to_path_buf(),
+                            std::fs::read(entry.path()).expect("output bytes"),
+                        );
+                    }
+                }
+            }
+            let mut files = std::collections::BTreeMap::new();
+            for name in ["cache", "transcode", "renditions"] {
+                visit(root, &root.join(name), &mut files);
+            }
+            files
+        }
+        let initial_output = output_files(fixture._root.path());
         let assert_no_output = || {
             assert!(fixture
                 .state
@@ -1961,15 +1994,11 @@ mod tests {
                 .test_offline_produced_recipes()
                 .is_empty());
             assert_eq!(fixture.state.transcode.test_manifests_published(), 0);
-            for name in ["cache", "transcode", "renditions"] {
-                assert!(
-                    std::fs::read_dir(fixture._root.path().join(name))
-                        .expect("output directory")
-                        .next()
-                        .is_none(),
-                    "unproved output in {name}"
-                );
-            }
+            assert_eq!(
+                output_files(fixture._root.path()),
+                initial_output,
+                "an unproved package must create no media artifacts"
+            );
         };
         let (code, body) = create_response(
             &fixture,

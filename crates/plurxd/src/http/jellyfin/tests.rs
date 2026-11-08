@@ -194,6 +194,54 @@ async fn jellyfin_native_hls_duplicate_entries_share_one_activation_and_preserve
 async fn jellyfin_native_hls_encoded_without_copy_index_preserves_ranges_clock_and_stop() {
     Box::pin(native_hls_copy_flow(false, true)).await;
 }
+async fn retry_native_pending(
+    f: &PlaybackFixture,
+    url: &str,
+    token: Option<&str>,
+    range: Option<&str>,
+    code: &str,
+    mut response: axum::response::Response,
+) -> axum::response::Response {
+    // Cold encoded media has explicit pending responses at both init and
+    // segment publication. Retry the same authorized request a bounded number
+    // of times; never recreate the play or accept another error as pending.
+    for _ in 0..4 {
+        if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+            break;
+        }
+        let pending = response
+            .into_body()
+            .collect()
+            .await
+            .expect("pending body")
+            .to_bytes();
+        let pending: Value = serde_json::from_slice(&pending).expect("typed pending response");
+        assert_eq!(pending["code"], code, "{pending}");
+        assert_eq!(
+            f.state
+                .transcode
+                .vod_live_or_preparing_session_ids()
+                .await
+                .len(),
+            1,
+            "pending retry must retain the original native activation"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let mut next = request("GET", url, token, Value::Null);
+        if let Some(range) = range {
+            next.headers_mut()
+                .insert("range", range.parse().expect("same range"));
+        }
+        response = f
+            .app
+            .clone()
+            .oneshot(next)
+            .await
+            .expect("retry original native request");
+    }
+    response
+}
+
 async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
     let f = playback_fixture().await;
     // Production renews the native route's 12-second lease from the
@@ -321,7 +369,7 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         .replace("MediaSourceId=", "mediaSourceId=")
         .replace("PlaySessionId=", "playSessionId=")
         .replace("ApiKey=", "apiKey=");
-    let response = if duplicate {
+    let mut response = if duplicate {
         let (first, second) = tokio::join!(
             f.app
                 .clone()
@@ -363,6 +411,17 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
             .await
             .expect("native root")
     };
+    if encoded {
+        response = Box::pin(retry_native_pending(
+            &f,
+            &lowered,
+            None,
+            None,
+            "startup_timeout",
+            response,
+        ))
+        .await;
+    }
     let status = response.status();
     let bytes = response
         .into_body()
@@ -526,14 +585,23 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         .await
         .expect("init bytes")
         .to_bytes();
+    let range_value = format!("bytes={}-{}", init.len() - 3, init.len() + 4);
     let mut range = request("GET", segment_url, Some(&f.token), Value::Null);
-    range.headers_mut().insert(
-        "range",
-        format!("bytes={}-{}", init.len() - 3, init.len() + 4)
-            .parse()
-            .expect("range"),
-    );
-    let response = f.app.clone().oneshot(range).await.expect("crossing range");
+    range
+        .headers_mut()
+        .insert("range", range_value.parse().expect("range"));
+    let mut response = f.app.clone().oneshot(range).await.expect("crossing range");
+    if encoded {
+        response = Box::pin(retry_native_pending(
+            &f,
+            segment_url,
+            Some(&f.token),
+            Some(&range_value),
+            "segment_pending",
+            response,
+        ))
+        .await;
+    }
     let status = response.status();
     let bytes = response
         .into_body()
@@ -671,12 +739,23 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         .lines()
         .rfind(|line| !line.is_empty() && !line.starts_with("#"))
         .expect("last segment");
-    let resumed = f
+    let mut resumed = f
         .app
         .clone()
         .oneshot(request("GET", resume_url, Some(&f.token), Value::Null))
         .await
         .expect("resume after idle reap");
+    if encoded {
+        resumed = Box::pin(retry_native_pending(
+            &f,
+            resume_url,
+            Some(&f.token),
+            None,
+            "segment_pending",
+            resumed,
+        ))
+        .await;
+    }
     let resumed_status = resumed.status();
     let resumed_bytes = resumed
         .into_body()

@@ -403,8 +403,8 @@ async fn dispatch_turn_import_preserves_rows_and_respects_the_v124_source_floor(
                 INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms)
                   VALUES('dispatch-job','artifact_hydrate',1,'{}','dispatch-job',1,'queued',0,0,0);
                 INSERT INTO dispatch_turn_ready VALUES('dispatch-job','fixture-node',0,9999,'["/library"]');
-                INSERT INTO dispatch_turn_wait VALUES('maintenance','retained','["source_io"]',1,1000,7);
                 INSERT INTO dispatch_turn_attempt VALUES(1,'analysis','attempt','["source_io"]',10,1,0,NULL,0);
+                INSERT INTO dispatch_turn_wait VALUES('maintenance','retained','["source_io"]',1,1000,7);
             "#).expect("retained dispatch demand, fairness and verdict");
         }
         drop(connection);

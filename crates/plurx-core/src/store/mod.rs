@@ -525,16 +525,11 @@ pub fn media_session_principal_rebuild_schema() -> String {
     // The v122 interest trigger reads media_session_requests while attached to
     // background_job_commands. SQLite validates it during each table rename.
     let interest = sharing_source_schema::restore_interest_trigger();
-    let declaration = interest
-        .trim_end_matches(';')
-        .replace("CREATE TRIGGER IF NOT EXISTS", "CREATE TRIGGER")
-        .replace('\'', "''");
+    let dependency_guard = session_dependency_guard();
     format!(
         "CREATE TABLE media_session_principal_dependency_guard(exact INTEGER NOT NULL CHECK(exact=1));
 -- next statement
-INSERT INTO media_session_principal_dependency_guard SELECT EXISTS(
-    SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='playback_analysis_restore_effects'
-    AND tbl_name='background_job_commands' AND sql='{declaration}');
+INSERT INTO media_session_principal_dependency_guard SELECT ({dependency_guard});
 -- next statement
 DROP TABLE media_session_principal_dependency_guard;
 -- next statement
@@ -551,13 +546,13 @@ DROP TRIGGER playback_analysis_restore_effects;
 /// with any audited membership triggers, before applying this inner layout.
 fn media_session_principal_rebuild_after_external_detach() -> String {
     let separator = "\n-- next statement\n";
-    let dependencies = session_dependency_triggers().collect::<Vec<_>>();
+    let dependencies = jellyfin_watch::session_dependency_triggers().collect::<Vec<_>>();
     let mut statements = dependencies
         .iter()
-        .map(|(name, _, _)| format!("DROP TRIGGER {name};"))
+        .map(|(name, _)| format!("DROP TRIGGER {name};"))
         .collect::<Vec<_>>();
     statements.push(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.to_owned());
-    statements.extend(dependencies.into_iter().map(|(_, _, sql)| sql.to_owned()));
+    statements.extend(dependencies.into_iter().map(|(_, sql)| sql.to_owned()));
     statements.join(separator)
 }
 
