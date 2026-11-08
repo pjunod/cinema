@@ -3085,6 +3085,7 @@ pub async fn direct(
                 id,
                 crate::delivery::Method::Direct,
                 q.stream.as_deref(),
+                None,
             )
         }
         // HEAD and rejected ranges carry no media and are not playback.
@@ -3381,6 +3382,7 @@ async fn serve_stream_mp4(
         id,
         crate::delivery::Method::Remux,
         q.stream.as_deref(),
+        None,
     );
     let readrate = readrate_setting(&state).await;
     // A remux copies the video untouched, so the wire and the source read both

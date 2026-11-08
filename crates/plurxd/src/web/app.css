@@ -3614,9 +3614,14 @@
 .cluster-worker-assignments span,.cluster-worker-assignments small { display:block; }
 .cluster-worker-node>small { display:block; margin-top:12px; }
 
-/* Activity: two bounded workspaces; watching remains above both tabs. */
+/* Activity: three bounded workspaces (status, jobs, starts); watching remains above them. */
 .activity-tabs { display:flex; gap:16px; border-bottom:1px solid var(--line); margin:18px 0; }
 .activity-tabs button[aria-selected=true],.activity-tabs button[aria-pressed=true] { border-bottom:2px solid var(--accent); color:var(--accent); }
+.starts-observation { display:flex; flex-wrap:wrap; gap:4px 10px; margin:10px 0; }
+.activity-starts td { vertical-align:top; }
+.activity-starts .starts-failed,.activity-starts .starts-refused { color:var(--bad); }
+.activity-starts .starts-presented { color:var(--good); }
+.activity-starts .starts-unobserved,.activity-starts .starts-pending { color:var(--warn); }
 .activity-section { border-top:1px solid var(--line); padding:14px 0; }
 .activity-section>summary { font-weight:600; }
 .activity-node-matrix small { display:block; margin-top:4px; }

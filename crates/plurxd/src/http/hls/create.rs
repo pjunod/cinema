@@ -2950,12 +2950,24 @@ async fn create_with_purpose(
     // A viewer whose allowance ends first is told `startup_timeout`, and its
     // retry with the same `request_id` joins this owner through the claim
     // row instead of starting a second producer.
+    //
+    // What the start record (G1, below) says about the caller is taken before
+    // the create consumes it; what the create says about itself comes back
+    // through the note, which the task fills and this boundary reads whether
+    // or not the viewer is still waiting.
+    let (user_id, store) = (user.id, Arc::clone(&state.store));
+    let client_build = client_build_label(req.caps.as_ref(), &headers);
+    let requested_id = req.request_id.clone();
+    let note = crate::playstart::CreateNote::shared();
     let mut create = crate::media_pool::OwnedCreate::spawn(
         &budget,
-        budget.scope(plurx_core::store::scope_http_store_operations(
-            counts.clone(),
-            create_with_purpose_inner(user, state, id, headers, remote, req, purpose),
-        )),
+        crate::playstart::scope_create_note(
+            Arc::clone(&note),
+            budget.scope(plurx_core::store::scope_http_store_operations(
+                counts.clone(),
+                create_with_purpose_inner(user, state, id, headers, remote, req, purpose),
+            )),
+        ),
     );
     let result = tokio::time::timeout_at(budget.deadline, create.join()).await;
     let after = counts.snapshot();
@@ -2987,7 +2999,96 @@ async fn create_with_purpose(
         result.as_ref().err().map_or(Some("ok"), ApiError::code),
         started.elapsed(),
     );
+    emit_start_attempt(
+        store,
+        StartAttemptContext {
+            user_id,
+            file_id: id,
+            requested_id,
+            client_build,
+            note: crate::playstart::CreateNote::take(&note),
+            phases: budget.phases(),
+            authority_reads: after[1].saturating_sub(before[1]),
+            local_reads: after[0].saturating_sub(before[0]),
+            mutations: after[2].saturating_sub(before[2]),
+            store_ms: counts
+                .store_time()
+                .saturating_sub(store_before)
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        },
+        &result,
+    );
     result
+}
+
+struct StartAttemptContext {
+    user_id: i64,
+    file_id: i64,
+    requested_id: Option<String>,
+    client_build: String,
+    note: crate::playstart::CreateNote,
+    phases: String,
+    authority_reads: u64,
+    local_reads: u64,
+    mutations: u64,
+    store_ms: u64,
+    elapsed_ms: u64,
+}
+
+/// One durable row per create, in this node's telemetry sidecar: the attempt
+/// (the create's claim id), what it cost, and why it was refused.
+fn emit_start_attempt(
+    store: Arc<dyn plurx_core::store::Store>,
+    context: StartAttemptContext,
+    outcome: &Result<Json<StartResponse>, ApiError>,
+) {
+    let (route, session_id, refusal, refusal_message) = match outcome {
+        Ok(Json(response)) => (
+            Some(if response.vod { "vod" } else { "rolling" }),
+            Some(response.session_id.clone()),
+            None,
+            None,
+        ),
+        Err(error) => (
+            None,
+            None,
+            Some(error.code().map_or_else(
+                || format!("http_{}", error.http_status().as_u16()),
+                str::to_owned,
+            )),
+            Some(error.refusal_text()),
+        ),
+    };
+    crate::telemetry::emit(
+        store,
+        crate::playstart::StartAttemptRecord {
+            at_unix_ms: unix_ms(),
+            user_id: context.user_id,
+            file_id: context.file_id,
+            attempt: context
+                .note
+                .attempt()
+                .map(str::to_owned)
+                .or(context.requested_id)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            session_id,
+            route,
+            refusal,
+            refusal_message,
+            client_build: context.client_build,
+            owner_node: context.note.owner_node().map(str::to_owned),
+            phases: context.phases,
+            authority_reads: context.authority_reads,
+            local_reads: context.local_reads,
+            mutations: context.mutations,
+            store_ms: context.store_ms,
+            elapsed_ms: context.elapsed_ms,
+        }
+        .into_event(),
+    );
 }
 
 /// What the viewer has left of its own start, from the client's
@@ -3356,6 +3457,7 @@ async fn create_with_purpose_inner(
         .request_id
         .clone()
         .unwrap_or_else(|| incarnation_id.clone());
+    crate::playstart::note_create_attempt(&request_claim_id);
     crate::media_pool::mark_create_phase("plan");
     // A retry of a request whose owner is still starting joins it through the
     // replicated claim row, on any ingress, for as long as this viewer's
@@ -3443,6 +3545,7 @@ async fn create_with_purpose_inner(
                         route.owner_epoch,
                     );
                 }
+                crate::playstart::note_create_owner(&route.owner_node_id);
                 return Ok(Json(response));
             }
             MediaSessionRequestClaim::Resolved(route)
@@ -3543,6 +3646,7 @@ async fn create_with_purpose_inner(
                             route.owner_epoch,
                         );
                     }
+                    crate::playstart::note_create_owner(&route.owner_node_id);
                     return Ok(Json(response));
                 }
                 // The owner has not activated yet. Wait on the durable row rather
@@ -4886,7 +4990,17 @@ async fn create_with_purpose_inner(
             }
         }
     }
+    crate::playstart::note_create_owner(&published_route.owner_node_id);
     if library_channel.is_none() {
+        let tag = crate::playstart::AttemptTag {
+            attempt: request_claim_id.clone(),
+            session_id: response.session_id.clone(),
+        };
+        // Here, not in the detached task below: the client's first-frame
+        // report names this session and may not wait for that task.
+        state
+            .start_attempts
+            .tag_session(user.id, id, &tag, Instant::now());
         crate::playstart::note_playback_started(
             &state,
             user.id,
@@ -4894,6 +5008,7 @@ async fn create_with_purpose_inner(
             id,
             method,
             Some(&request.playback_id),
+            Some(tag),
         );
     }
     crate::media_pool::mark_create_phase("registration");

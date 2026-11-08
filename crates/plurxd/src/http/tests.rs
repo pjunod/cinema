@@ -10722,6 +10722,174 @@ async fn a_first_frame_beacon_settles_the_start_its_direct_play_opened() {
     assert_eq!(ledger.count("transcode", "failed"), 1);
 }
 
+/// G1: every create leaves one `start_attempt` row in the node-local
+/// sidecar, keyed by the create's claim id (the request's `request_id`), and
+/// the client's first-frame report settles the create it names. Two devices
+/// of one viewer starting one title are two attempts, each settled by its own
+/// session; the (viewer, file)-keyed ledger alone cannot tell them apart.
+#[tokio::test]
+async fn each_create_is_one_start_attempt_and_two_devices_on_a_title_are_two() {
+    use super::test_agents::{CHROME_WINDOWS_UA, FIREFOX_WINDOWS_UA};
+    use plurx_core::domain::PlaybackEventQuery;
+
+    crate::transcode::require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let s = seed_content(&state).await;
+    prepare_vod_copy_fixture(&state, s.file, 16).await;
+    let create = format!("/api/v1/files/{}/hls/sessions", s.file);
+    let with_ua = |mut request: Request<Body>, ua: &'static str| {
+        request.headers_mut().insert(
+            axum::http::header::USER_AGENT,
+            axum::http::HeaderValue::from_static(ua),
+        );
+        request
+    };
+
+    // A refusal with no code of its own is still a row, and says so.
+    let (status, _) = call(
+        &app,
+        post(
+            &create,
+            Some(&admin),
+            json!({ "playback_id": "   ", "request_id": "claim-refused" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let mut sessions = Vec::new();
+    for (device, claim, ua) in [
+        ("device-a", "claim-a", CHROME_WINDOWS_UA),
+        ("device-b", "claim-b", FIREFOX_WINDOWS_UA),
+    ] {
+        let (status, session) = call(
+            &app,
+            with_ua(
+                post(
+                    &create,
+                    Some(&admin),
+                    json!({ "playback_id": device, "request_id": claim, "copy": true }),
+                ),
+                ua,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{session}");
+        sessions.push(session["session_id"].as_str().expect("session").to_owned());
+    }
+
+    let rows_of = |event: &'static str| {
+        let store = std::sync::Arc::clone(&state.store);
+        async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let rows = store
+                    .playback_events(&PlaybackEventQuery {
+                        event: Some(event.to_owned()),
+                        limit: 50,
+                        ..PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("events");
+                let expected = if event == "start_attempt" { 3 } else { 2 };
+                if rows.len() >= expected || tokio::time::Instant::now() > deadline {
+                    return rows;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    };
+    let attempts = rows_of("start_attempt").await;
+    assert_eq!(attempts.len(), 3, "one row per create, refused or not");
+    let by_attempt = |rows: &[plurx_core::domain::PlaybackEvent], claim: &str| {
+        rows.iter()
+            .find(|row| row.attempt.as_deref() == Some(claim))
+            .cloned()
+            .unwrap_or_else(|| panic!("no row for attempt {claim}"))
+    };
+    let refused = by_attempt(&attempts, "claim-refused");
+    assert_eq!(refused.reason.as_deref(), Some("http_400"));
+    assert_eq!(refused.session_id, None);
+    for (claim, session, agent) in [
+        ("claim-a", &sessions[0], "Mozilla"),
+        ("claim-b", &sessions[1], "Mozilla"),
+    ] {
+        let row = by_attempt(&attempts, claim);
+        assert_eq!(row.reason, None, "a served create has no refusal");
+        assert!(matches!(row.method.as_deref(), Some("vod" | "rolling")));
+        assert_eq!(
+            row.session_id,
+            Some(crate::transcode::session_log_id(session)),
+            "the row names the session it answered with"
+        );
+        assert_eq!(row.file_id, Some(s.file));
+        let extra: serde_json::Value =
+            serde_json::from_str(row.extra.as_deref().expect("extra")).expect("extra JSON");
+        assert_eq!(extra["owner_node"], "test-node");
+        assert!(extra["client_build"]
+            .as_str()
+            .expect("client_build")
+            .starts_with(agent));
+        assert!(extra["elapsed_ms"].is_u64() && extra["store_ms"].is_u64());
+        assert!(
+            extra["phases"].as_array().is_some_and(
+                |phases| !phases.is_empty() && phases.iter().all(|p| p["name"].is_string())
+            ),
+            "{extra}"
+        );
+    }
+
+    // Device B's picture arrives first, then A's: each settles its own create.
+    for (session, ms) in [(&sessions[1], 4_200), (&sessions[0], 1_500)] {
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({
+                    "level": "info", "event": "ttff", "file_id": s.file,
+                    "session_id": session, "ms": ms, "reason": "cold-start",
+                    "method": "remux", "attempt": "a1",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    let presented = rows_of("start_presented").await;
+    assert_eq!(presented.len(), 2);
+    assert_eq!(by_attempt(&presented, "claim-a").ms, Some(1_500));
+    assert_eq!(by_attempt(&presented, "claim-b").ms, Some(4_200));
+    // The beacons themselves now carry the create's id, and keep the page's.
+    let beacons = rows_of("ttff").await;
+    let beacon = by_attempt(&beacons, "claim-b");
+    let extra: serde_json::Value =
+        serde_json::from_str(beacon.extra.as_deref().expect("beacon extra")).expect("JSON");
+    assert_eq!(extra["client_attempt"], "a1");
+
+    // The page the Activity tab reads joins them.
+    let rows = super::activity_starts::local_page(
+        &state.store,
+        &state.node_id,
+        None,
+        25,
+        crate::state::clock_ms(),
+    )
+    .await
+    .expect("page");
+    let outcomes = |claim: &str| {
+        let row = rows.iter().find(|row| row.attempt == claim).expect("row");
+        (row.outcome.clone(), row.ttff_ms)
+    };
+    assert_eq!(outcomes("claim-a"), ("presented".to_owned(), Some(1_500)));
+    assert_eq!(outcomes("claim-b"), ("presented".to_owned(), Some(4_200)));
+    assert_eq!(outcomes("claim-refused").0, "refused");
+    for session in &sessions {
+        state.transcode.stop_session(session, "test").await;
+    }
+}
+
 /// C-08 M5 row 4: a start request the server answers with an error is a
 /// refused start, on each of the three routes that begin one; a HEAD is
 /// not a start.
