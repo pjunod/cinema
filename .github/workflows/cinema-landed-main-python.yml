@@ -1,0 +1,38 @@
+name: Cinema landed main remaining Python contracts
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: cinema-landed-main-python-c470d5aa033e
+  cancel-in-progress: false
+
+jobs:
+  remaining_python:
+    name: nine remaining Python contracts on landed main
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 12
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: c470d5aa033e84b4a2de1f8d36aa4180d62cd971
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify immutable main, test tree and ordered promotion parents
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = c470d5aa033e84b4a2de1f8d36aa4180d62cd971
+          test "$(git show -s --format=%P HEAD)" = "8b03c07ebfbc019d1ee1d273d592165985359ab8 0d05ba03455b0ad67990acacb5e6551baaec9326"
+          test "$(git rev-parse HEAD^{tree})" = c84c24964c1c00b3cdc3e06c8a7489c71ab6a95b
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+      - name: Execute the selected live workflow, runner and catalog contracts
+        run: >-
+          python3 -m unittest -v
+          tests.operations.test_contracts.OperationsContractCase.test_ci_artifacts_are_bounded_and_pr_builds_do_not_retain_binaries
+          tests.operations.test_contracts.OperationsContractCase.test_every_self_hosted_runs_on_is_satisfiable_by_a_rostered_runner
+          tests.operations.test_contracts.OperationsContractCase.test_external_actions_are_immutable_and_checkout_drops_credentials
+          tests.operations.test_contracts.OperationsContractCase.test_fleet_registry_variable_always_carries_its_fallback
+          tests.operations.test_contracts.OperationsContractCase.test_forgejo_workflows_do_not_declare_ignored_github_permissions
+          tests.operations.test_contracts.OperationsContractCase.test_no_workflow_pipes_git_show_into_an_early_exiting_grep
+          tests.operations.test_contracts.OperationsContractCase.test_the_runner_roster_keeps_heavy_cluster_lanes_off_shared_hosts
+          tests.operations.test_contracts.OperationsContractCase.test_workflows_have_no_hosted_runner_escape
+          tests.validation.test_playback_routing_inventory.PlaybackRoutingInventoryTest.test_client_fix_anchors_are_unique_live_and_commit_bound
