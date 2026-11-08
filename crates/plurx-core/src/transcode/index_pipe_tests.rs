@@ -707,7 +707,6 @@ fn frozen_copy_index_pipe_args_with_input(
     );
     if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         args[2] = "info".to_owned();
-        args.insert(3, "-xerror".to_owned());
         if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
             args[index + 1] = format!("trace_headers,{}", args[index + 1]);
         } else {
@@ -808,4 +807,93 @@ fn a_shared_index_pass_is_one_input_then_each_identitys_own_block() {
             assert_eq!(shared.iter().filter(|arg| *arg == "-i").count(), 1);
         }
     }
+}
+
+/// The HEVC index pass must not carry `-xerror`: FFmpeg's global flag turns
+/// the mp4 muxer's correctable `Non-monotonic DTS` at a reordered head into
+/// a fatal exit, which left 262 fleet titles unindexable while rolling copy
+/// (no `-xerror`) played them. What the header proof must refuse is refused
+/// by the trace parser, which this test also runs on the real stderr.
+#[test]
+fn the_hevc_index_pass_survives_a_correctable_dts_head_and_still_proves_the_trace() {
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let base = dir.path().join("base.mkv");
+    let head = dir.path().join("reordered-head.mkv");
+    let ffmpeg = |args: &[&str]| {
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args(args)
+            .output()
+            .expect("ffmpeg must be installed to run this test");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x240:rate=25",
+        "-t",
+        "3",
+        "-c:v",
+        "libx265",
+        "-x265-params",
+        "bframes=4:keyint=50:log-level=error",
+        "-pix_fmt",
+        "yuv420p",
+        base.to_str().unwrap(),
+    ]);
+    // The first packet is stamped after its successors: a head that the mp4
+    // muxer corrects when asked to and aborts on only under `-xerror`.
+    ffmpeg(&[
+        "-i",
+        base.to_str().unwrap(),
+        "-c",
+        "copy",
+        "-bsf:v",
+        "setts=pts=if(eq(PTS\\,0)\\,2000\\,PTS)",
+        head.to_str().unwrap(),
+    ]);
+
+    let mut source = hevc_dv();
+    source.hdr = None;
+    source.hdr_format = None;
+    source.video_profile = Some("Main".into());
+    source.bit_depth = Some(8);
+    let argv = copy_index_pipe_args_with_input(
+        &source,
+        head.to_str().unwrap(),
+        CopyVideoOptions::new(false, false),
+    );
+    assert!(!argv.iter().any(|arg| arg == "-xerror"), "{argv:?}");
+
+    let run = |argv: &[String]| {
+        Command::new("ffmpeg")
+            .args(argv)
+            .stdout(Stdio::null())
+            .output()
+            .expect("ffmpeg")
+    };
+    let out = run(&argv);
+    assert!(
+        out.status.success(),
+        "index pass must survive the corrected head: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut trace = crate::hevc_configuration::Trace::default();
+    trace.feed(&out.stderr);
+    assert!(
+        trace.finish("source".into(), 0).permits("source"),
+        "a clean trace must still be proven"
+    );
+
+    // Control: the old argv aborts on this very file.
+    let mut strict = argv.clone();
+    strict.insert(3, "-xerror".into());
+    assert!(!run(&strict).status.success(), "fixture must trip -xerror");
 }

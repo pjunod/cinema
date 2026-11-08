@@ -2689,9 +2689,6 @@ pub fn copy_index_shared_args_with_input(
         "-loglevel".into(),
         if hevc { "info" } else { "error" }.into(),
     ];
-    if hevc {
-        args.push("-xerror".into());
-    }
     args.push("-i".into());
     args.push(input.to_owned());
     for (at, video) in videos.iter().enumerate() {

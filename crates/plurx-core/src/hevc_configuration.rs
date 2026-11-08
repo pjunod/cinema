@@ -461,6 +461,9 @@ mod tests {
     fn trace_errors_and_oversized_lines_fail_closed() {
         for bad in [
             line("Invalid NAL unit, skipping"),
+            // What `trace_headers` logs when a unit will not parse; with
+            // `-xerror` gone from the index argv this is what refuses it.
+            line("Failed to read unit 0 (type 33)."),
             line("0 unrecognized field"),
             "x".repeat(MAX_LINE + 1),
         ] {
