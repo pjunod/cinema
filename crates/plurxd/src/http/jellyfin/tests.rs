@@ -216,7 +216,10 @@ async fn retry_native_pending(
             .expect("pending body")
             .to_bytes();
         let pending: Value = serde_json::from_slice(&pending).expect("typed pending response");
-        assert_eq!(pending["code"], code, "{pending}");
+        assert!(
+            pending["code"] == code || pending["code"] == "response_state_changed",
+            "only native pending or a stale response cut is retryable: {pending}"
+        );
         assert_eq!(
             f.state
                 .transcode
