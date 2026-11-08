@@ -67,6 +67,29 @@ fn fragment_analysis_wake() -> &'static broadcast::Sender<()> {
     WAKE.get_or_init(|| broadcast::channel(8).0)
 }
 
+/// `plurx_analysis_completed_total{node}`: fragment-index requests this node
+/// executed that reached their target (settlement marks a request `ready`
+/// only once the target holds the index, so a cross-node execution counts
+/// when delivery has hydrated the requester). Read from the Store's attempt
+/// rows, settled since this process first looked; refreshed by the queue
+/// pass at most every 30 s, so a scrape reads an atomic.
+static ANALYSIS_COMPLETED: AtomicI64 = AtomicI64::new(0);
+static ANALYSIS_COMPLETED_READ_MS: AtomicI64 = AtomicI64::new(0);
+static ANALYSIS_COMPLETED_SINCE_MS: OnceLock<i64> = OnceLock::new();
+
+pub(crate) fn analysis_completed_prometheus(node_id: &str) -> String {
+    format!(
+        "# HELP plurx_analysis_completed_total Fragment-index requests this node executed that reached their target, since this process started.\n\
+         # TYPE plurx_analysis_completed_total counter\n\
+         plurx_analysis_completed_total{{node=\"{}\"}} {}\n",
+        node_id
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n"),
+        ANALYSIS_COMPLETED.load(Ordering::Relaxed)
+    )
+}
+
 pub(crate) fn fragment_index_validation_prometheus() -> String {
     format!(
         "# HELP plurx_index_validation_backfill_total Legacy fragment-index validation attempts by result.\n\
@@ -9434,7 +9457,7 @@ impl JobManager {
         // Settling, pruning and artifact delivery are cluster-wide duties
         // and stay with the voters. Resolving is not: a learner allowed to
         // execute this job (above) resolves the requests targeted at itself,
-        // which no other node ever claims.
+        // and, while idle, other nodes' fragment-index requests too.
         let may_produce = self.may_run_cluster_jobs().await;
         let analysis = if !self.cluster_analysis_working.swap(true, Ordering::AcqRel) {
             let analysis_state = Arc::clone(&self);
@@ -9493,6 +9516,7 @@ impl JobManager {
             self.reconcile_retired_analysis_requests(RECONCILE_ROWS_PER_PASS, !may_produce)
                 .await;
         }
+        self.refresh_analysis_completed(now).await;
         if !fragment_engine_current {
             drop(_guard);
             if let Some(analysis) = analysis {
@@ -9511,6 +9535,31 @@ impl JobManager {
         drop(_guard);
         if let Some(analysis) = analysis {
             let _ = analysis.await;
+        }
+    }
+
+    /// Refresh [`analysis_completed_prometheus`] from the Store, at most
+    /// every 30 s.
+    async fn refresh_analysis_completed(&self, now: i64) {
+        const EVERY_MS: i64 = 30_000;
+        let since = *ANALYSIS_COMPLETED_SINCE_MS.get_or_init(|| now);
+        let last = ANALYSIS_COMPLETED_READ_MS.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < EVERY_MS
+            || ANALYSIS_COMPLETED_READ_MS
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        match self
+            .store
+            .analysis_completions_executed_by(self.coordinator.node_id(), since)
+            .await
+        {
+            // Monotonic while the rows live; history pruning (30 days) can
+            // only lower it, which a counter reader sees as a reset.
+            Ok(count) => ANALYSIS_COMPLETED.store(count, Ordering::Relaxed),
+            Err(error) => tracing::debug!(%error, "reading analysis completions"),
         }
     }
 
@@ -9542,27 +9591,45 @@ impl JobManager {
         }
     }
 
+    /// Claim and resolve analysis requests while this node has a free source
+    /// reader.
+    ///
+    /// This pass is the node's one analysis reader, so it takes the next
+    /// request as soon as the last one settles; the claim's own capacity
+    /// clause is the free-capacity test (it returns nothing when the
+    /// request's storage domain has no reader slot this request may take),
+    /// and the pass ends when nothing is claimable. Before every claim it
+    /// re-reads what may be claimed: a viewer queuing for this node's
+    /// encoder (`live_is_waiting`) limits the claim to rows with a live
+    /// playback waiter -- an encoder that is merely in use does not, since
+    /// the read holds a source-domain reservation, not an encoder slot --
+    /// and only an idle node (`pretranscode_worker_idle`) that may execute
+    /// fragment-index work takes another node's fragment-index rows.
     async fn resolve_analysis_requests(self: &Arc<Self>, transcode: Arc<TranscodeManager>) {
-        const MAX_REQUESTS_PER_PASS: usize = 2;
-        /// Hard background I/O budget. HEVC copy proof hashes the full source;
-        /// other consumers still sample. Large/slow files may exhaust this
-        /// budget and remain unverified, with bounded charged retries.
-        const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-
         if !self.cluster_fragment_index_enabled().await {
             return;
         }
         let node_id = self.coordinator.node_id().to_owned();
-        let retry_policy = self.analysis_retry_policy().await;
         let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
-        let have_dovi = transcode.dv_strippable();
-        // A learner takes only what names it; untargeted requests any node
-        // may take stay with the voters.
-        let targeted_only = !self.may_run_cluster_jobs().await;
-        for _ in 0..MAX_REQUESTS_PER_PASS {
-            if !self.cluster_fragment_index_enabled().await {
+        loop {
+            if !self.cluster_fragment_index_enabled().await
+                || !crate::ffmpeg::fragment_index_engine_is_current().await
+                || !self
+                    .job_authority
+                    .may_execute_job(
+                        plurx_core::store::background_jobs::JobKind::FragmentIndexBuild,
+                    )
+                    .await
+            {
                 break;
             }
+            let retry_policy = self.analysis_retry_policy().await;
+            // A learner takes only what names it; untargeted requests any node
+            // may take stay with the voters.
+            let targeted_only = !self.may_run_cluster_jobs().await;
+            // Ruling 4: an idle node takes others' work, a serving node only
+            // its own (the authority check above admits learners too).
+            let cross_node = transcode.pretranscode_worker_idle();
             let now = clock_ms();
             let request = match self
                 .store
@@ -9571,8 +9638,9 @@ impl JobManager {
                     Some(&engine_sha256),
                     now,
                     now.saturating_add(retry_policy.lease_ms),
-                    !transcode.pretranscode_worker_idle(),
+                    transcode.admissions().live_is_waiting(),
                     targeted_only,
+                    cross_node,
                 )
                 .await
             {
@@ -9583,155 +9651,176 @@ impl JobManager {
                     break;
                 }
             };
-            let _progress = self.start_analysis_progress(
-                (&request.request_id, &request.target_node_id),
-                request.file_id,
-                &request.component,
-                "probing",
-                request.source_size.max(0) as u64,
-                0,
-            );
+            self.work_claimed_analysis_request(
+                &request,
+                &node_id,
+                &engine_sha256,
+                &transcode,
+                retry_policy,
+            )
+            .await;
+        }
+    }
 
-            let stop = tokio_util::sync::CancellationToken::new();
-            let lost = tokio_util::sync::CancellationToken::new();
-            let heartbeat = {
-                let store = Arc::clone(&self.store);
-                let request_id = request.request_id.clone();
-                let node_id = node_id.clone();
-                let metrics = Arc::clone(&self.analysis_metrics);
-                let stop = stop.clone();
-                let lost = lost.clone();
-                let fence = request.fence;
-                let beat = LeaseHeartbeat {
-                    queue: "analysis-request",
-                    row: request.request_id.clone(),
-                    fence: request.fence,
-                    attempts: request.attempts,
-                    known_expiry_ms: request.lease_expires_ms,
-                    lease_ms: retry_policy.lease_ms,
-                    renew_every: retry_policy.renew_every(),
-                    metrics,
-                    stop,
-                    lost,
-                };
-                tokio::spawn(async move {
-                    beat.run(move |now, expires_at| {
-                        let store = Arc::clone(&store);
-                        let request_id = request_id.clone();
-                        let node_id = node_id.clone();
-                        async move {
-                            store
-                                .renew_analysis_request(
-                                    &request_id,
-                                    &node_id,
-                                    fence,
-                                    now,
-                                    expires_at,
-                                )
-                                .await
-                        }
-                    })
-                    .await;
-                })
+    /// Resolve one claimed request under its renewed lease and settle what
+    /// the attempt decided: an uncharged or charged retry, a terminal
+    /// failure, or nothing when the claim was lost.
+    async fn work_claimed_analysis_request(
+        self: &Arc<Self>,
+        request: &AnalysisRequest,
+        node_id: &str,
+        engine_sha256: &str,
+        transcode: &Arc<TranscodeManager>,
+        retry_policy: AnalysisRetryPolicy,
+    ) {
+        /// Hard background I/O budget. HEVC copy proof hashes the full source;
+        /// other consumers still sample. Large/slow files may exhaust this
+        /// budget and remain unverified, with bounded charged retries.
+        const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+        let have_dovi = transcode.dv_strippable();
+        let node_id = node_id.to_owned();
+        let _progress = self.start_analysis_progress(
+            (&request.request_id, &request.target_node_id),
+            request.file_id,
+            &request.component,
+            "probing",
+            request.source_size.max(0) as u64,
+            0,
+        );
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let lost = tokio_util::sync::CancellationToken::new();
+        let heartbeat = {
+            let store = Arc::clone(&self.store);
+            let request_id = request.request_id.clone();
+            let node_id = node_id.clone();
+            let metrics = Arc::clone(&self.analysis_metrics);
+            let stop = stop.clone();
+            let lost = lost.clone();
+            let fence = request.fence;
+            let beat = LeaseHeartbeat {
+                queue: "analysis-request",
+                row: request.request_id.clone(),
+                fence: request.fence,
+                attempts: request.attempts,
+                known_expiry_ms: request.lease_expires_ms,
+                lease_ms: retry_policy.lease_ms,
+                renew_every: retry_policy.renew_every(),
+                metrics,
+                stop,
+                lost,
             };
-
-            let outcome = self
-                .resolve_analysis_request(
-                    &request,
-                    &node_id,
-                    &engine_sha256,
-                    have_dovi,
-                    transcode.as_ref(),
-                    &stop,
-                    &lost,
-                    ATTEST_TIMEOUT,
-                )
-                .await;
-            // Before the outcome write, for the same reason the job runner
-            // retires first: a tick landing between the write and the cancel
-            // renews a row the write has already settled.
-            stop.cancel();
-            let _ = heartbeat.await;
-            if let Err(resolution_error) = outcome {
-                let now = clock_ms();
-                match resolution_error {
-                    AnalysisResolutionError::ClaimLost => {}
-                    AnalysisResolutionError::Retry {
-                        code,
-                        charge_attempt,
-                    } => {
-                        let delay_ms =
-                            retry_policy.backoff_ms(&request.request_id, request.attempts.max(1));
-                        match self
-                            .store
-                            .retry_analysis_request(
-                                &request,
-                                code,
-                                now,
-                                now.saturating_add(delay_ms),
-                                charge_attempt,
-                            )
+            tokio::spawn(async move {
+                beat.run(move |now, expires_at| {
+                    let store = Arc::clone(&store);
+                    let request_id = request_id.clone();
+                    let node_id = node_id.clone();
+                    async move {
+                        store
+                            .renew_analysis_request(&request_id, &node_id, fence, now, expires_at)
                             .await
-                        {
-                            Ok(true) => {
-                                // Best effort: the retry transition already
-                                // committed; this row is diagnostic history.
-                                crate::store_result::observe(
-                                    crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
-                                    crate::store_result::Discard::BestEffort,
-                                    self.store
-                                        .record_analysis_request_phase(
-                                            &request,
-                                            "retry_wait",
-                                            Some(code),
-                                            now,
-                                        )
-                                        .await,
-                                );
-                            }
-                            Ok(false) => {}
-                            Err(error) => tracing::warn!(
-                                request_id = request.request_id,
-                                %error,
-                                "queueing an analysis request retry"
-                            ),
-                        }
                     }
-                    AnalysisResolutionError::Terminal(code) => {
-                        match self
-                            .store
-                            .fail_analysis_request(
-                                &request.request_id,
-                                &node_id,
-                                request.fence,
-                                code,
-                                now,
-                            )
-                            .await
-                        {
-                            Ok(true) => {
-                                // Best effort: the failed terminal state is
-                                // durable already; this row explains it.
-                                crate::store_result::observe(
-                                    crate::store_result::Operation::RecordAnalysisFailedPhase,
-                                    crate::store_result::Discard::BestEffort,
-                                    self.store
-                                        .record_analysis_request_phase(
-                                            &request,
-                                            "failed",
-                                            Some(code),
-                                            now,
-                                        )
-                                        .await,
-                                );
-                            }
-                            Ok(false) => {}
-                            Err(error) => tracing::warn!(
-                                request_id = request.request_id,
-                                %error,
-                                "failing an analysis request"
-                            ),
+                })
+                .await;
+            })
+        };
+
+        let outcome = self
+            .resolve_analysis_request(
+                request,
+                &node_id,
+                engine_sha256,
+                have_dovi,
+                transcode.as_ref(),
+                &stop,
+                &lost,
+                ATTEST_TIMEOUT,
+            )
+            .await;
+        // Before the outcome write, for the same reason the job runner
+        // retires first: a tick landing between the write and the cancel
+        // renews a row the write has already settled.
+        stop.cancel();
+        let _ = heartbeat.await;
+        if let Err(resolution_error) = outcome {
+            let now = clock_ms();
+            match resolution_error {
+                AnalysisResolutionError::ClaimLost => {}
+                AnalysisResolutionError::Retry {
+                    code,
+                    charge_attempt,
+                } => {
+                    let delay_ms =
+                        retry_policy.backoff_ms(&request.request_id, request.attempts.max(1));
+                    match self
+                        .store
+                        .retry_analysis_request(
+                            request,
+                            code,
+                            now,
+                            now.saturating_add(delay_ms),
+                            charge_attempt,
+                        )
+                        .await
+                    {
+                        Ok(true) => {
+                            // Best effort: the retry transition already
+                            // committed; this row is diagnostic history.
+                            crate::store_result::observe(
+                                crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
+                                crate::store_result::Discard::BestEffort,
+                                self.store
+                                    .record_analysis_request_phase(
+                                        request,
+                                        "retry_wait",
+                                        Some(code),
+                                        now,
+                                    )
+                                    .await,
+                            );
                         }
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            request_id = request.request_id,
+                            %error,
+                            "queueing an analysis request retry"
+                        ),
+                    }
+                }
+                AnalysisResolutionError::Terminal(code) => {
+                    match self
+                        .store
+                        .fail_analysis_request(
+                            &request.request_id,
+                            &node_id,
+                            request.fence,
+                            code,
+                            now,
+                        )
+                        .await
+                    {
+                        Ok(true) => {
+                            // Best effort: the failed terminal state is
+                            // durable already; this row explains it.
+                            crate::store_result::observe(
+                                crate::store_result::Operation::RecordAnalysisFailedPhase,
+                                crate::store_result::Discard::BestEffort,
+                                self.store
+                                    .record_analysis_request_phase(
+                                        request,
+                                        "failed",
+                                        Some(code),
+                                        now,
+                                    )
+                                    .await,
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            request_id = request.request_id,
+                            %error,
+                            "failing an analysis request"
+                        ),
                     }
                 }
             }
@@ -10358,6 +10447,7 @@ impl JobManager {
             let chapters = match stored_chapters {
                 Some(chapters) => chapters,
                 None => {
+                    self.admit_background_source(request, lost).await?;
                     let chapters = match crate::http::stream::probe_chapters_until(
                         &file.path,
                         lost,
@@ -10472,6 +10562,15 @@ impl JobManager {
             // A request that names an identity this node no longer emits is
             // superseded, not retryable: the pipeline or the probe facts
             // moved, and no number of retries brings the old identity back.
+            // On another node's request this node is only the executor: an
+            // identity it cannot emit says nothing about the target, so the
+            // row goes back uncharged for a node that can.
+            Err(StoreError::Task(_)) if request.target_node_id != node_id => {
+                return Err(AnalysisResolutionError::Retry {
+                    code: "pipeline_version_unavailable",
+                    charge_attempt: false,
+                })
+            }
             Err(StoreError::Task(_)) => {
                 return Err(AnalysisResolutionError::Terminal("pipeline_superseded"))
             }
@@ -10496,6 +10595,9 @@ impl JobManager {
                 code: "source_catalog_read_failed",
                 charge_attempt: true,
             })?;
+        // The claim admitted this read; ask the same rule again before the
+        // first source byte, now that the request holds its reservation.
+        self.admit_background_source(request, lost).await?;
         if !self
             .store
             .record_analysis_request_phase(request, "hashing", None, clock_ms())
@@ -10578,11 +10680,10 @@ impl JobManager {
         if lost.is_cancelled() {
             return Err(AnalysisResolutionError::ClaimLost);
         }
-        if !self
-            .analysis_source_may_continue(transcode, Some(request))
-            .await
-            || !self.cluster_fragment_index_enabled().await
-        {
+        // The read is over; what remains is submission, which the same
+        // admission decision must still cover.
+        self.admit_background_source(request, lost).await?;
+        if !self.cluster_fragment_index_enabled().await {
             return Err(AnalysisResolutionError::Retry {
                 code: "foreground_preempted",
                 charge_attempt: false,
@@ -10944,6 +11045,63 @@ impl JobManager {
         AnalysisRetryPolicy::from_settings(&settings)
     }
 
+    /// The source-capacity decision the claim made, asked again of the
+    /// claimed request (`analysis_source_capacity_clause`, read from the
+    /// Store's ledger rows with the request's own holdings left out). A
+    /// Store that cannot answer refuses: the read retries uncharged.
+    pub(crate) async fn background_source_admission(
+        &self,
+        request: &AnalysisRequest,
+    ) -> plurx_core::store::background_jobs::AnalysisSourceAdmission {
+        match self
+            .store
+            .analysis_source_admission(
+                &request.request_id,
+                &request.owner_node_id,
+                request.fence,
+                clock_ms(),
+            )
+            .await
+        {
+            Ok(admission) => admission,
+            Err(error) => {
+                tracing::warn!(request_id = %request.request_id, %error,
+                    "reading analysis source admission");
+                plurx_core::store::background_jobs::AnalysisSourceAdmission::Yield(
+                    "admission_unavailable",
+                )
+            }
+        }
+    }
+
+    /// [`Self::background_source_admission`] as a resolution step: a yield is
+    /// an uncharged `foreground_preempted` retry, a lost fence is claim loss.
+    async fn admit_background_source(
+        &self,
+        request: &AnalysisRequest,
+        lost: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), AnalysisResolutionError> {
+        use plurx_core::store::background_jobs::AnalysisSourceAdmission;
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        match self.background_source_admission(request).await {
+            AnalysisSourceAdmission::Admit => Ok(()),
+            AnalysisSourceAdmission::NotOwned => Err(AnalysisResolutionError::ClaimLost),
+            AnalysisSourceAdmission::Yield(reason) => {
+                tracing::debug!(request_id = %request.request_id, reason,
+                    "analysis source read yields");
+                Err(AnalysisResolutionError::Retry {
+                    code: "foreground_preempted",
+                    charge_attempt: false,
+                })
+            }
+        }
+    }
+
+    /// Whether an attesting read may keep reading: the Store's admission
+    /// still admits it, and no viewer is queuing for this node's encoder --
+    /// unless this request has a live viewer of its own.
     async fn analysis_source_may_continue(
         &self,
         transcode: &TranscodeManager,
@@ -10952,28 +11110,27 @@ impl JobManager {
         let Some(request) = request else {
             return false;
         };
-        let source_allowed = self
-            .store
-            .background_source_may_continue(
-                plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Analysis {
-                    request_id: request.request_id.clone(),
-                    node_id: request.owner_node_id.clone(),
-                    fence: request.fence,
-                },
-                clock_ms(),
-            )
-            .await
-            .unwrap_or(false);
-        if !source_allowed {
+        if self.background_source_admission(request).await
+            != plurx_core::store::background_jobs::AnalysisSourceAdmission::Admit
+        {
             return false;
         }
-        if transcode.pretranscode_worker_idle() {
+        self.analysis_source_local_rule(transcode, request).await
+    }
+
+    /// The node-local half of [`Self::analysis_source_may_continue`]. The
+    /// read holds the Store's bounded source-I/O reservation, not an encoder
+    /// slot, so an encoder merely in use does not stop it; a viewer queuing
+    /// for this node's encoder does, unless this request has a live viewer
+    /// of its own. Expired/departed viewers and failed reads fail closed.
+    async fn analysis_source_local_rule(
+        &self,
+        transcode: &TranscodeManager,
+        request: &AnalysisRequest,
+    ) -> bool {
+        if !transcode.admissions().live_is_waiting() {
             return true;
         }
-        // Source attestation holds the Store's bounded source-I/O reservation,
-        // not an encoder slot. After the domain-wide source decision, a live
-        // playback waiter permits the read while this node's encoder is busy. Expired/departed viewers and failed
-        // reads fail closed.
         self.store
             .analysis_preparation_observation(&request.request_id, clock_ms())
             .await

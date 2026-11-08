@@ -1143,9 +1143,10 @@ async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() 
     )
     .await
     .expect("join requesting viewer");
+    // The node-local half of the rule; the Store half (the claim's own
+    // capacity decision) needs a claimed row, which the worker takes below.
     assert!(
-        jobs.analysis_source_may_continue(&transcode, Some(&request))
-            .await,
+        jobs.analysis_source_local_rule(&transcode, &request).await,
         "any live request waiter permits the source read on a busy node"
     );
     assert!(
@@ -4761,6 +4762,199 @@ async fn the_queue_worker_row_carries_its_ride_along() {
         "the queue's row names the track: {row:?}"
     );
     assert!(row.fragments_indexed > 0, "{row:?}");
+}
+
+/// C1: one admission decision through execution. A foreground stream that
+/// takes the source between the claim and the hash stops the read before its
+/// first byte, and the request goes back to the queue uncharged.
+#[tokio::test]
+async fn a_foreground_permission_after_the_claim_yields_before_the_hash() {
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use plurx_core::store::background_jobs::BackgroundJobStore as _;
+    use plurx_core::store::background_jobs_resources::{
+        ForegroundSourceOwner, ForegroundSourcePolicy,
+    };
+    use plurx_core::store::ClusterFragmentIndexStore as _;
+
+    let fixture = fixture(0, &[Sub::Pgs]);
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+        .await
+        .expect("the queue on");
+    let file = catalogued_fixture(&store, &fixture).await;
+    let artwork = tempfile::tempdir().expect("artwork");
+    let transcode_dir = crate::test_tempdir().expect("transcode");
+    let jobs = manager(store.clone(), artwork.path());
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        transcode_dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let (request, _) = jobs
+        .request_file_analysis(file.id, false, "fragment_index", "admin")
+        .await
+        .expect("requested");
+    let node = jobs.coordinator.node_id().to_owned();
+    let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+    let policy = jobs.analysis_retry_policy().await;
+    let now = clock_ms();
+    let claimed = store
+        .claim_analysis_request_for_capacity(
+            &node,
+            Some(&engine),
+            now,
+            now + policy.lease_ms,
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("claim")
+        .expect("an idle domain admits the claim");
+    assert_eq!(claimed.request_id, request.request_id);
+    // Playback takes the source after the claim.
+    store
+        .register_foreground_source(
+            ForegroundSourceOwner {
+                owner_id: uuid::Uuid::new_v4().to_string(),
+                lifetime_id: "c1-gesture".into(),
+                session_incarnation: uuid::Uuid::new_v4().to_string(),
+                producer_attempt: "producer-1".into(),
+                node_id: node.clone(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_generation: "c1-source".into(),
+                policy: ForegroundSourcePolicy::Rolling,
+            },
+            clock_ms(),
+            clock_ms() + 20_000,
+        )
+        .await
+        .expect("register")
+        .expect("playback takes the source");
+    jobs.work_claimed_analysis_request(&claimed, &node, &engine, &transcode, policy)
+        .await;
+    let row = store
+        .analysis_request(&request.request_id)
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, "queued", "{row:?}");
+    assert_eq!(row.attempts, 0, "the yield is uncharged: {row:?}");
+    assert_eq!(row.last_error_code, "foreground_preempted", "{row:?}");
+    let progress = finished_row_of(&jobs, file.id);
+    assert_eq!(
+        progress.bytes_read, 0,
+        "no source byte was hashed: {progress:?}"
+    );
+    assert_ne!(
+        progress.stage, "verifying",
+        "the hash never started: {progress:?}"
+    );
+}
+
+/// C1: an encoder in use no longer stops the indexer. A serving node (one
+/// software encoder held, nobody queuing) claims and resolves its own
+/// request but leaves another node's alone; once idle it takes that one too,
+/// and the work keeps the requester as its target.
+#[tokio::test]
+async fn a_serving_node_indexes_its_own_requests_and_an_idle_one_takes_others() {
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use plurx_core::store::ClusterFragmentIndexStore as _;
+
+    let fixture = fixture(0, &[Sub::Pgs]);
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+        .await
+        .expect("the queue on");
+    let file = catalogued_fixture(&store, &fixture).await;
+    let artwork = tempfile::tempdir().expect("artwork");
+    let transcode_dir = crate::test_tempdir().expect("transcode");
+    let jobs = manager(store.clone(), artwork.path());
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        transcode_dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let (own, _) = jobs
+        .request_file_analysis(file.id, false, "fragment_index", "admin")
+        .await
+        .expect("requested");
+    let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+    let now = clock_ms();
+    let foreign = store
+        .enqueue_analysis_request(&plurx_core::store::NewAnalysisRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            component: "fragment_index".into(),
+            pipeline_version: engine.clone(),
+            video_identity: own.video_identity.clone(),
+            requested_generation: "c1-foreign-generation".into(),
+            priority: "normal".into(),
+            trigger: "admin".into(),
+            force_rebuild: false,
+            target_node_id: "serving-peer".into(),
+            not_before_ms: now,
+            created_at_ms: now,
+        })
+        .await
+        .expect("another node's request");
+    let row = |id: String| {
+        let store = Arc::clone(&store);
+        async move {
+            store
+                .analysis_request(&id)
+                .await
+                .expect("read")
+                .expect("row")
+        }
+    };
+
+    let encoder = transcode
+        .test_hold_source_software_capacity()
+        .expect("an encoder in use");
+    assert!(!transcode.pretranscode_worker_idle(), "the node is serving");
+    Arc::clone(&jobs)
+        .resolve_analysis_requests(Arc::clone(&transcode))
+        .await;
+    let own_row = row(own.request_id.clone()).await;
+    assert!(
+        own_row.fence > 0,
+        "an encoder in use does not stop the claim: {own_row:?}"
+    );
+    assert_eq!(
+        own_row.state, "submitted",
+        "nor the read it admitted: {own_row:?}"
+    );
+    let foreign_row = row(foreign.request_id.clone()).await;
+    assert_eq!(
+        foreign_row.fence, 0,
+        "a serving node claims only its own: {foreign_row:?}"
+    );
+
+    drop(encoder);
+    assert!(transcode.pretranscode_worker_idle(), "the node is idle");
+    Arc::clone(&jobs)
+        .resolve_analysis_requests(Arc::clone(&transcode))
+        .await;
+    let foreign_row = row(foreign.request_id.clone()).await;
+    assert!(
+        foreign_row.fence > 0,
+        "an idle node takes another node's request: {foreign_row:?}"
+    );
+    assert_eq!(foreign_row.state, "submitted", "{foreign_row:?}");
+    assert_eq!(
+        foreign_row.target_node_id, "serving-peer",
+        "the requester keeps it"
+    );
 }
 
 /// A learner membership lets execute fragment-index work.
