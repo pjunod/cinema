@@ -787,6 +787,65 @@ mod seek_coalescing {
         0, 3, 1, 6, 2, 9, 4, 11, 5, 13, 8, 14, 7, 12, 10, 6, 9, 3, 11, 7,
     ];
 
+    /// A Source segment is cut from the window the cache can serve now; a cold
+    /// cache never makes it wait for the extraction, which warms behind it.
+    #[tokio::test]
+    async fn a_source_window_is_served_warm_and_never_waits_for_a_cold_extraction() {
+        let dir = crate::test_tempdir().expect("session directory");
+        let session_id = &uuid::Uuid::new_v4().to_string();
+        let (fixture, file) = cold_windowed_fixture(dir.path(), session_id).await;
+        let source = Arc::new(WindowFixtureSubtitleSource::counting());
+        let window_seconds = fixture.state.subtitle_window_seconds().await;
+
+        let cold = tokio::time::timeout(
+            Duration::from_secs(3),
+            source_window_cues_with(
+                source.as_ref(),
+                session_id,
+                &fixture.state.subs_dir,
+                &file,
+                0,
+                0,
+                window_seconds,
+                Instant::now() + Duration::from_secs(5),
+            ),
+        )
+        .await
+        .expect("a cold window answers while its producers stay parked");
+        assert_eq!(cold, (b"WEBVTT\n\n".to_vec(), false));
+        let _window = tokio::time::timeout(Duration::from_secs(2), source.started.acquire())
+            .await
+            .expect("the window warms in the background");
+        let _whole = tokio::time::timeout(Duration::from_secs(2), source.whole_started.acquire())
+            .await
+            .expect("the whole track warms in the background");
+
+        source.release.add_permits(1);
+        let warm = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (bytes, absolute) = source_window_cues_with(
+                    source.as_ref(),
+                    session_id,
+                    &fixture.state.subs_dir,
+                    &file,
+                    0,
+                    0,
+                    window_seconds,
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await;
+                if absolute {
+                    break bytes;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the published window is served");
+        assert!(String::from_utf8_lossy(&warm).contains("ready cue"));
+        crate::subtitles::release_session_window(session_id).await;
+    }
+
     #[tokio::test]
     async fn a_twenty_seek_storm_starts_work_only_for_the_settled_target() {
         let dir = crate::test_tempdir().expect("session directory");

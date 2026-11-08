@@ -10,7 +10,7 @@ use crate::playback_control::{
 pub(crate) struct SourceOpenedControl {
     result: Result<LocalControlResult, ControlStateError>,
     guard: SourceResponseGuard,
-    subtitle_revision: Option<String>,
+    subtitle: Option<(crate::playback_control::SubtitleTrackCache, Option<String>)>,
     projection: Box<(
         MediaSessionRoute,
         crate::http::hls::StartResponse,
@@ -35,9 +35,13 @@ impl SourceOpenedControl {
                 &result,
                 crate::media_sessions::unix_ms(),
             );
-            if let Some(revision) = self.subtitle_revision {
-                response.delivery.subtitle_readiness = Some("ready".into());
-                response.delivery.subtitle_revision = Some(revision);
+            if let Some((cache, revision)) = self.subtitle {
+                response.delivery.subtitle_readiness =
+                    crate::playback_control::subtitle_readiness_value(
+                        &request.selection.subtitle,
+                        Some(cache),
+                    );
+                response.delivery.subtitle_revision = revision;
             }
             response
         });
@@ -289,23 +293,34 @@ impl SourceViewerActor {
             .await
             .ok_or(SourceWorkerError::Unavailable)?;
         drop(authority);
-        let subtitle_revision = {
-            let state = self.0.state.lock().expect("Source native control");
-            match (
-                request.selection.subtitle.mode,
-                request.selection.subtitle.track,
-                state.native.as_ref(),
-            ) {
-                (crate::playback_control::SubtitleMode::Native, Some(index), Some(tracks)) => {
-                    u16::try_from(index)
-                        .ok()
-                        .and_then(|index| tracks.revision(index))
-                }
-                _ => None,
+        // The same readiness local control reports, from the same cache: the
+        // Source only observes it here and starts no extraction.
+        let native = self
+            .0
+            .state
+            .lock()
+            .expect("Source native control")
+            .native
+            .clone();
+        let subtitle = match (
+            request.selection.subtitle.mode,
+            request.selection.subtitle.track,
+            native,
+        ) {
+            (crate::playback_control::SubtitleMode::Native, Some(index), Some(tracks)) => {
+                let demand = request.seek_target_ms.unwrap_or(request.position_ms).max(0) / 1_000;
+                Some(match u16::try_from(index) {
+                    Ok(index) => tracks.readiness(index, demand).await,
+                    Err(_) => (
+                        crate::playback_control::SubtitleTrackCache::Unavailable,
+                        None,
+                    ),
+                })
             }
+            _ => None,
         };
         Ok(SourceOpenedControl {
-            subtitle_revision,
+            subtitle,
             result,
             guard,
             projection: Box::new((route, current_response, recipe)),

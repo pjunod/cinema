@@ -785,6 +785,22 @@ pub fn valid_cached_subtitle_revision(revision: &str) -> bool {
 #[cfg(test)]
 mod cached_caption_tests {
     use super::*;
+    /// Sources and receivers run different builds: the retired in-session
+    /// identity must stay parseable (an old peer may still send or receive it),
+    /// beside the versioned window grammar a current Source publishes.
+    #[test]
+    fn cached_caption_revision_grammars_old_and_versioned_both_parse() {
+        for revision in [
+            "source-7f3a9c1e-2b4d-4c11-9a6e-0d5f8e2b1a34-3-0.vtt",
+            "f7-s1-123-456.vtt",
+            "f7-s1-123-456-w600-200.vtt",
+        ] {
+            let resource = SharingHlsResource::parse(&format!("subs/0/cached-{revision}"))
+                .unwrap_or_else(|_| panic!("{revision}"));
+            assert_eq!(resource.cached_subtitle_revision(), Some(revision));
+        }
+    }
+
     #[test]
     fn cached_caption_session_resource_is_bounded_and_cannot_escape_its_namespace() {
         let revision = "f7-s1-123-456-w0-200.vtt";

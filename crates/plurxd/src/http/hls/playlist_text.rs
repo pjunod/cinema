@@ -583,30 +583,27 @@ pub(crate) fn source_native_master(
 pub(crate) fn source_native_playlist(video: &[u8]) -> Vec<u8> {
     subtitle_media_playlist(video).into_bytes()
 }
-pub(crate) fn source_native_segment(
-    video: &[u8],
-    track: &[u8],
-    sequence: u64,
-    origin: f64,
-) -> Option<Vec<u8>> {
-    if !origin.is_finite() || origin < 0.0 {
-        return None;
-    }
+/// The window one Source subtitle segment covers, in session-local seconds.
+pub(crate) fn source_native_segment_window(video: &[u8], sequence: u64) -> Option<(f64, f64)> {
     let timeline = subtitle_timeline(video);
     let window = timeline
         .segments
         .iter()
         .find(|window| window.sequence == sequence)?;
-    if !window.start_seconds.is_finite()
-        || !window.end_seconds.is_finite()
-        || window.end_seconds <= window.start_seconds
-    {
+    (window.start_seconds.is_finite()
+        && window.end_seconds.is_finite()
+        && window.end_seconds > window.start_seconds)
+        .then_some((window.start_seconds, window.end_seconds))
+}
+/// Slice cues (absolute source time) to one segment window. Pure.
+pub(crate) fn source_native_slice(
+    track: &[u8],
+    origin: f64,
+    start: f64,
+    end: f64,
+) -> Option<Vec<u8>> {
+    if !origin.is_finite() || origin < 0.0 {
         return None;
     }
-    Some(slice_webvtt(
-        track,
-        origin,
-        window.start_seconds,
-        window.end_seconds,
-    ))
+    Some(slice_webvtt(track, origin, start, end))
 }
