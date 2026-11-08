@@ -1857,6 +1857,20 @@ jobs:
         uses: ./.github/actions/buildx-cache
         with:
           lane: package-smoke-${{ matrix.arch }}
+      - name: Bound the AMD package builder before compilation
+        if: matrix.arch == 'amd64'
+        env:
+          BUILDER: ${{ steps.buildx-cache.outputs.builder-name }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]]
+          test "$(docker buildx inspect --format '{{.Name}} {{.Driver}}')" = "$BUILDER docker-container"
+          container="buildx_buildkit_${BUILDER}0"
+          test "$(docker inspect --format '{{.Name}}' "$container")" = "/$container"
+          # This runner pool includes Raft voters. Match the voter-build CPU
+          # and memory limits, including zero additional swap.
+          docker update --memory 8g --memory-swap 8g --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"
+          test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}}' "$container")" = '8589934592 8589934592 400000 100000 0-3'
       - name: Derive the binary-only Bookworm build
         id: binary-build
         run: |

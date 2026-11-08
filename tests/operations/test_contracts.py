@@ -3638,6 +3638,26 @@ assert.equal(context.ACT_TIMER, null);
             "if: always() && steps.store_backstop.outcome != 'success'", job
         )
 
+    def test_amd_package_bounds_its_active_builder_before_building(self):
+        package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        guard = workflow_step_blocks(package)["Bound the AMD package builder before compilation"]
+        self.assertLess(package.index("uses: ./.github/actions/buildx-cache"), package.index(guard))
+        self.assertLess(package.index(guard), package.index("uses: https://github.com/docker/build-push-action@"))
+        self.assertEqual(workflow_step_scalar(guard, "if"), "matrix.arch == 'amd64'")
+        self.assertNotIn("continue-on-error:", guard)
+        for required in (
+            "BUILDER: ${{ steps.buildx-cache.outputs.builder-name }}",
+            "set -euo pipefail",
+            '[[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]]',
+            'test "$(docker buildx inspect --format \'{{.Name}} {{.Driver}}\')" = "$BUILDER docker-container"',
+            'container="buildx_buildkit_${BUILDER}0"',
+            'test "$(docker inspect --format \'{{.Name}}\' "$container")" = "/$container"',
+            'docker update --memory 8g --memory-swap 8g --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"',
+            "{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}}",
+            "= '8589934592 8589934592 400000 100000 0-3'",
+        ):
+            self.assertIn(required, guard)
+
     def test_required_arm_package_is_native_and_serialized_with_apple(self):
         workflow = read(".github/workflows/ci.yml")
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
