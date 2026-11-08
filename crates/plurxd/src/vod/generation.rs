@@ -631,8 +631,15 @@ pub(super) async fn spawn_generation(
             .flatten();
         #[cfg(unix)]
         let descriptors = crate::producer_spawn::Descriptors::from_files(
-            rendition.source.as_ref().map(|source| &source.handle),
-            audio_source.as_ref().map(|audio| &audio.handle),
+            rendition
+                .source
+                .as_ref()
+                .filter(|_| source_custody.is_none())
+                .map(|source| &source.handle),
+            audio_source
+                .as_ref()
+                .filter(|_| source_custody.is_none())
+                .map(|audio| &audio.handle),
             recipe
                 .encoding
                 .as_ref()
