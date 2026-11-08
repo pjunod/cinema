@@ -10393,7 +10393,7 @@ async fn tone_map_census_routes_are_admin_only_and_report_idle() {
 
 #[tokio::test]
 async fn activity_requires_auth_and_reports_idle() {
-    let app = test_app();
+    let (app, state) = test_app_with_state();
     let (status, _) = call(&app, get("/api/v1/activity", None)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
@@ -10434,6 +10434,7 @@ async fn activity_requires_auth_and_reports_idle() {
             "sessions",
             "trakt",
             // Local worker observations are useful on SQLite too.
+            "worker_observed_nodes",
             "workers",
         ]
         .into_iter()
@@ -10445,6 +10446,7 @@ async fn activity_requires_auth_and_reports_idle() {
         detail["clustered"], false,
         "SQLite reports its standalone role"
     );
+    assert_eq!(detail["worker_observed_nodes"], json!([state.node_id]));
     assert_eq!(detail["analysis"]["enabled"], false);
     assert_eq!(detail["analysis"]["total"], 0);
     assert!(
@@ -10477,7 +10479,8 @@ async fn activity_requires_auth_and_reports_idle() {
         "operator queue health stays out of ordinary household responses"
     );
     assert!(
-        viewer_detail.get("workers").is_none(),
+        viewer_detail.get("workers").is_none()
+            && viewer_detail.get("worker_observed_nodes").is_none(),
         "worker capacity and process observations remain admin-only"
     );
 }

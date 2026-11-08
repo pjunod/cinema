@@ -3924,13 +3924,6 @@ pub(crate) mod tests {
             .expect("predecessor heartbeat")
             .await
             .expect("predecessor heartbeat joined");
-        let custody = active
-            .fence
-            .0
-            .source_custody
-            .clone()
-            .expect("source custody");
-        settle_joined_source_custody(&store, custody).await;
         let candidate = store.background_job(&id).await.expect("read").expect("job");
         let now_ms = candidate
             .token

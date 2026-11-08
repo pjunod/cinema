@@ -16,10 +16,13 @@ that set complete or that the abstractions are correct.
 
 ## Source custody fixture review on 2026-11-08
 
-Integrating `d0e9349cb` into `0e2e8dd76` adds an explicit settlement to
-the lost claim acknowledgement test. The fixture joins its predecessor
-heartbeat and settles that owner's source custody before the successor claim.
-The cache-part producer change adds whitespace to its existing warning.
+Integration at `244a7d04b` duplicated source custody settlement in the
+lost claim acknowledgement test. The corrected fixture joins its predecessor
+heartbeat, attempts takeover after lease expiry, and verifies that outstanding
+custody yields contention with one attempt on record. It then settles the
+predecessor's exact receipt and recovers the successor's committed claim
+after a lost acknowledgement. The cache-part producer change from
+`d0e9349cb` adds whitespace to its existing warning.
 The mapped claim, renewal, retirement and publication operations retain
 their reviewed behavior.
 
