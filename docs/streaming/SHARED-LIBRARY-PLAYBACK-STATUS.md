@@ -9,8 +9,9 @@ state. The larger [playback-start effort](PLAYBACK-START-PLAN.md) owns A1.
 ## Current state
 
 PR **#1472**, branch `claude/shared-library-standalone-fixes`, remains draft.
-The resumed source is `0b3c0dfc3`; the relay work and prior Opus adversarial
-review fixes are integrated. No passing fast-lane result is claimed.
+The resumed source was `0b3c0dfc3`; the relay work and prior Opus fixes are
+integrated. Final review corrections are in validation candidate `418927ce7`.
+No passing final fast-lane result is claimed.
 
 The implementation covers NULL-principal consumers (§4), committed membership
 (§6), RPC attribution (§7 step 2), Source admission (§8/S12), poster retries
@@ -26,13 +27,33 @@ a client release. The RX ring and deployment remain separate operations work.
 | Stage | State |
 |---|---|
 | Compiler | Pinned Rust 1.97.1 verified on the existing build host and in a resource-capped build container; warm target retained. |
-| Prior review | PR body records one Opus adversarial review and applied fixes; the API has no formal review or attached report. Preserve that attribution; do not claim a new independent review. |
-| Existing focused tests | Latest retained run: 143 passed, two failed; pinned fixtures: four passed, three failed. The final scope-status commit postdates those results. |
+| Final review | Independent Codex review of `28bc0aacc`: one P1 and one P2; both addressed below. Prior Opus review remains attributed to the earlier owner because no report was retained. |
+| Existing focused tests | Latest historical run: 143 passed, two failed; pinned fixtures: four passed, three failed. These are not final-source passes. The native Source HTTP cases pass after the S5 revert; the older caption failures predate it. |
 | Core | Retained focused run: 27 passed; separate replicated-store run: five passed. Applicability remains bounded to the source and features actually exercised. |
 | Counterfactuals | Prior evidence covers NULL principals and Source admission. Other counterfactual execution is not established. |
-| Paperwork | Prior CI failed for missing `Regression-Test:` lines in the PR body. |
-| Next | Repair the remaining fixture/production failures, compile final source, complete merge prerequisites, run the final fast lane, rerun failures only, merge on green. |
+| Paperwork | Prior CI failed for missing `Regression-Test:` lines; valid references are now in the PR body. Final check pending. |
+| Next | Finish the exact-source compiler checks; run final focused regressions and fast lane; fix and rerun failures only; merge on green. |
 
 The fixture investigation uses a separate owned clone. User-owned source is
 not a build or scratch workspace. No watchdog, feature gate or authorization
 cache is introduced by the resumption.
+
+## Final review and dispositions
+
+The final independent review examined `28bc0aacc` against `8ab61a779` plus the
+pinned asset diagnostic. No tests or builds were run by the reviewer.
+
+| Finding | Root cause and correction |
+|---|---|
+| P1 · Ready result abandoned in a retry gap | Readiness ended the abandonment phase although no accepted Start writer had claimed the result. `824e19044` preserves the existing rejoin deadline through readiness and serializes response claim against abandonment under the same mutex. Its ordinary End owner settles the Source; no watchdog is added. A real pinned test covers readiness before the window ends, and retry coverage checks an accepted result survives it. |
+| P2 · Discovery restarted the peer clock | The clock was constructed after discovery, and Local fall-through parsed the unchanged allowance again. `63a92adf3` constructs it once at ingress and carries it into the Local handler. Only the discovery answer waiter is cancelled: filesystem inspection remains with accepted-driver monitors, and no Start dispatch or registration is dropped. The real Source regression covers parked discovery and delayed Local fall-through. |
+
+The fixture repairs also establish their actual preconditions: End uses an
+independent driver; a long pause occurs after scan admission rather than
+expiring its five-second authority; abandonment observes the running scan
+before the caller leaves. The unresolved pinned pre-session WebVTT case
+retains Source warnings so a final failure can identify its extraction cause.
+
+The first serialized compiler check passed but test-target Clippy exceeded the
+8 GiB container cap. The final loop keeps that cap, uses one compiler, disables
+incremental compilation and omits debug data. No unit tests have been repeated.
