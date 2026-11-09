@@ -58,6 +58,13 @@ authored audit note changed; the failed method then passed. The completed
 Python journal retains 2,408 passes, of which 2,402 have unchanged inputs and
 remain eligible for reuse after the ownership metadata update.
 
+The three new CGNAT-only abandonment/rejoin fixtures are registered as
+operator-run fixtures with exact identities, reasons and commands. They are
+not known-red admissions; all three have executed passing receipts. The
+unadmitted-identity bound remains unchanged at 39, and the single failed
+bookkeeping method passed after registration. CI reused 2,408 prior Python
+passes before this correction.
+
 One combined-run encoded/native Start returned 503 after successful
 pre-session WebVTT. It did not recur in six subsequent runs, including standalone, original-order
 and current-base qualification. Its cause remains unattributed; the failed receipt
