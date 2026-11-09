@@ -11,7 +11,7 @@ queue recovery and physical-device acceptance remain open. Media1 still
 reports degraded, 3,840 eligible index requests and 0 ready in 24 hours.
 Persisted failed-row counts are not new failures over that interval.
 
-## Current batch — index timestamp repair and Source locate eligibility
+## Merged batch — index timestamp repair and Source locate eligibility
 
 S4 removes the index-only fatal muxer-diagnostic policy while retaining
 HEVC tracing, configuration and complete-video validation. S12 uses the
@@ -21,19 +21,43 @@ the [shared-library RCA](SHARED-LIBRARY-PLAYBACK-RCA.md). GPT 6.1 Sol built
 S12; Codex owns S4, integration and merge.
 
 Independent implementation review found no actionable findings. Local
-Clippy, syntax checks and both focused regressions passed. PR #1475
-owns current CI and merge state; no merge credit is claimed here. The first
+Clippy, syntax checks and both focused regressions passed. PR #1475 merged
+as `2ad533907` after exact-candidate promotion run 7052 passed. Deployment
+of this batch remains separate from the observed `8ab61a779` fleet. The first
 preflight stopped on the intentionally pinned membership file hash. Tables
 31/32 were refreshed after confirming both mapped authority bodies are
 byte-identical to the base; only the media directory changed. Local macOS Clippy
 also exposed existing Linux-only processed-upgrade imports/test helpers;
 the batch aligns their declarations with their consuming platform.
 
-Mobile publication remains unverified: the last attempted export reported
-no account and no distribution identity/private key. The actual signing
-controller and its original setup receipts have now been located; its
-runner is running. A later green workflow skipped publication. Native
-prepared-switch measurements and matched cold TTFF remain outstanding.
+Apple build 294 is live in internal TestFlight for iOS and tvOS, both
+`VALID` and `IN_BETA_TESTING`. Export and upload succeeded from the M5
+with the signed-in Xcode account and Cloud Managed Apple Distribution;
+[the publishing recovery notes](../PUBLISHING.md) retain the proven method.
+The standing publisher has not been migrated or requalified. Android 193
+and native prepared-switch/TTFF measurements remain open.
+
+## Current batch — A1/B1
+
+Codex owns `codex/playback-start-phase2`; no pull request is open yet.
+GPT 6.1 Sol extracted the canonical video-only fragment row observation
+for reuse by the growing engine; integration and identity design are in
+progress. No growing-engine behavior or qualification is claimed yet.
+Server/web development and web testing proceed independently of mobile
+publication. The deployed Phase 1 web build can be tested now.
+
+The queue stall is traced to an identifier-contract mismatch. Subtitle-source
+requests use the 64-character digest returned by
+`SubtitleSourceStamp::generation`; both queue backends persist that as the
+request ID. `background_owner_key` incorrectly requires a UUID for analysis
+custody. Registration rejects a legitimate request before creating custody;
+`settle_unstarted_analysis_source` retries the deterministic rejection while
+the independent heartbeat retains its lease and maintenance source-I/O
+reservation. The live owner logged that rejection at its attempt start and
+never reached source probing. Repair the custody validator to match queue
+admission and exercise registration/settlement with a real generated ID;
+retain the exact owner/fence checks and ambiguous-write recovery protocol.
+The fix is being built; the fleet queue has not yet been repaired.
 
 ## Current process — one final candidate review and validation
 

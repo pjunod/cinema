@@ -915,10 +915,54 @@ mod source_tests {
             .is_empty());
     }
 
+    #[test]
+    fn analysis_source_owner_preserves_bounded_queue_identity_and_fence_isolation() {
+        let request_id = "a".repeat(64);
+        let request_id = request_id.as_str();
+        let owner = |request: &str, node: &str, fence| BackgroundSourceOwner::Analysis {
+            request_id: request.into(),
+            node_id: node.into(),
+            fence,
+        };
+        let key = background_owner_key(&owner(request_id, "worker", 7))
+            .expect("digest ID is a queue identifier");
+        for other in [
+            owner(&"b".repeat(64), "worker", 7),
+            owner(request_id, "other-worker", 7),
+            owner(request_id, "worker", 8),
+        ] {
+            assert_ne!(key, background_owner_key(&other).expect("distinct owner"));
+        }
+        for invalid in [
+            owner("", "worker", 7),
+            owner(&"a".repeat(65), "worker", 7),
+            owner("request with spaces", "worker", 7),
+            owner("request/control", "worker", 7),
+            owner(request_id, "", 7),
+            owner(request_id, "worker", 0),
+            owner(request_id, "worker", -1),
+        ] {
+            assert!(background_owner_key(&invalid).is_err());
+        }
+    }
+
     #[tokio::test]
     async fn analysis_source_join_replays_only_its_fenced_receipt() {
+        let subtitle_request_id = crate::store::SubtitleSourceStamp {
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 1,
+            pipeline_version: "subtitle-pipeline".into(),
+        }
+        .generation(0);
+        assert_eq!(subtitle_request_id.len(), 64);
+        for request_id in [uuid::Uuid::new_v4().to_string(), subtitle_request_id] {
+            analysis_source_join_replays_exact_request(request_id).await;
+        }
+    }
+
+    async fn analysis_source_join_replays_exact_request(request_id: String) {
         let store = fixture();
-        let request_id = uuid::Uuid::new_v4().to_string();
         {
             let connection = store.0.lock().expect("connection");
             connection.execute("INSERT INTO analysis_requests(request_id,owner_node_id,fence,state,cancel_requested,lease_expires_ms,file_id,source_size,source_mtime) VALUES(?1,'worker',7,'running',0,30000,1,100,1)", [&request_id]).expect("analysis owner");
@@ -934,6 +978,23 @@ mod source_tests {
             node_id: "worker".into(),
             fence: 7,
         };
+        for stale in [
+            BackgroundSourceOwner::Analysis {
+                request_id: request_id.clone(),
+                node_id: "different-worker".into(),
+                fence: 7,
+            },
+            BackgroundSourceOwner::Analysis {
+                request_id: request_id.clone(),
+                node_id: "worker".into(),
+                fence: 6,
+            },
+        ] {
+            assert!(register_background_custody(&store, stale, 1000)
+                .await
+                .expect("valid shape with stale authority")
+                .is_none());
+        }
         let receipt = register_background_custody(&store, owner, 1000)
             .await
             .expect("register")
@@ -2094,7 +2155,14 @@ pub fn background_owner_key(owner: &BackgroundSourceOwner) -> Result<String, Sto
             node_id,
             fence,
         } => {
-            if uuid::Uuid::parse_str(request_id).is_err() || !identifier(node_id) || *fence <= 0 {
+            // Analysis IDs include SubtitleSourceStamp's content digest as
+            // well as UUIDs. Use the queue identifier contract and analysis
+            // admission's 64-byte bound, not the custody receipt's UUID shape.
+            if !identifier(request_id)
+                || request_id.len() > 64
+                || !identifier(node_id)
+                || *fence <= 0
+            {
                 return Err(StoreError::Task("invalid analysis source custody".into()));
             }
             crate::segplan::argv_fingerprint(&[
