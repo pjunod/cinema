@@ -3823,36 +3823,11 @@ async fn extract_vtt_without_demux(
             .map_err(|e| e.to_string())?;
         return Ok(true);
     }
-    let sparse = match sparse_subtitle_input(
-        file,
-        &[index],
-        None,
-        SparseTimeline::Rebased,
-        None,
-        work,
-    )
-    .await
-    {
-        Ok(sparse) => sparse,
-        // A failed range read cancels its helper child, not the extraction.
-        // Genuine operation or Source-budget cancellation still ends work.
-        // While both remain active, the cue index is an optional fast path;
-        // its failed read falls back to the ordinary whole-source demux.
-        Err(crate::mkv_sparse::SparseError::Cancelled)
-            if plurx_core::process::bounded::check_cancellation().is_ok()
-                && !crate::background_jobs::source_budget()
-                    .is_some_and(|budget| budget.cancellation().is_cancelled()) =>
-        {
-            tracing::warn!(
-                file_id = file.id,
-                index,
-                "the cue-index read failed without the extraction being cancelled; demuxing the whole source"
-            );
-            return Ok(false);
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    let Some(sparse) = sparse else {
+    let Some(sparse) =
+        sparse_subtitle_input(file, &[index], None, SparseTimeline::Rebased, None, work)
+            .await
+            .map_err(|error| error.to_string())?
+    else {
         return Ok(false);
     };
     let converted = if sparse.blocks == 0 {
