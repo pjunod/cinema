@@ -39,7 +39,7 @@ step "apt snapshot"
 bash "$packaging/apt-snapshot.sh" "$packaging/upstream.lock" > /tmp/apt.txt 2>&1 || { cat /tmp/apt.txt; fail "apt snapshot"; }
 tail -n1 /tmp/apt.txt
 # desktop-file-utils owns the update-desktop-database trigger, as on a desktop.
-apt-get install -y -q --no-install-recommends desktop-file-utils lintian binutils git lua5.2 >/dev/null || fail "install the tools"
+apt-get install -y -q --no-install-recommends build-essential desktop-file-utils lintian binutils git lua5.2 >/dev/null || fail "install the tools"
 pass "tools installed"
 
 step "lintian $deb $dsc"
