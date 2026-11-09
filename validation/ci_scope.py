@@ -233,6 +233,9 @@ RELEASE_BUILD_PATHS = (
     # build.rs includes these with #[path]; `**/build.rs` alone misses them.
     "crates/plurxd/build_support/**",
     "Dockerfile",
+    "Dockerfile.media-runtime",
+    "scripts/media-runtime",
+    ".github/workflows/media-runtime.yml",
     "rust-toolchain.toml",
     # Copied into the runtime-assets stage that package-smoke builds.
     "scripts/build-static-ffprobe",
@@ -253,6 +256,9 @@ CONTAINER_PATHS = (
     "Cargo.lock",
     "Cargo.toml",
     "Dockerfile",
+    "Dockerfile.media-runtime",
+    "scripts/media-runtime",
+    ".github/workflows/media-runtime.yml",
     "deploy/**",
     "plurx.example.toml",
     "rust-toolchain.toml",

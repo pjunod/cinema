@@ -44,7 +44,7 @@ class DockerSnapshotTests(unittest.TestCase):
             self.assertIn('Acquire::Retries "5";', (apt / "apt.conf.d/99plurx-snapshot").read_text())
 
     def test_every_snapshot_stage_configures_package_fallback(self):
-        dockerfile = (ROOT / "Dockerfile").read_text()
+        dockerfile = (ROOT / "Dockerfile.media-runtime").read_text()
         for stage in dockerfile.split("\nFROM "):
             if "ARG DEBIAN_SNAPSHOT=" in stage:
                 self.assertIn("source=scripts/configure-debian-snapshot", stage)
