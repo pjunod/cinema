@@ -1383,7 +1383,10 @@ async fn canceled_source_budget_cannot_be_mistaken_for_a_failed_sparse_optimizat
         ),
     )
     .await;
-    assert!(!operation.is_cancelled(), "only the source owner was stopped");
+    assert!(
+        !operation.is_cancelled(),
+        "only the source owner was stopped"
+    );
     assert!(result
         .expect_err("a stopped owner must not request the full-demux fallback")
         .contains("cancelled"));
