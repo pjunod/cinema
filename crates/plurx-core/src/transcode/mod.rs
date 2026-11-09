@@ -2689,9 +2689,10 @@ pub fn copy_index_shared_args_with_input(
         "-loglevel".into(),
         if hevc { "info" } else { "error" }.into(),
     ];
-    if hevc {
-        args.push("-xerror".into());
-    }
+    // Match ordinary copy playback: the muxer may repair a reordered DTS
+    // head. Treating every muxer diagnostic as fatal makes those playable
+    // titles permanently unindexable. HEVC trace parsing, parameter-set
+    // validation and complete-video coverage still decide artifact validity.
     args.push("-i".into());
     args.push(input.to_owned());
     for (at, video) in videos.iter().enumerate() {

@@ -4,10 +4,11 @@ Delivery, Dolby Vision, capabilities and playback reliability. The
 [docs index](../README.md) defines status words and documentation rules.
 Add each document's row here in the same commit.
 
-Start-path owner: the lane owner recorded in PLAYBACK-START-PLAN.md §6 until the effort closes.
+Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
 | File | Answers | |
 |---|---|---|
+| [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract for Opus: all nine lanes. | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Playback-start effort: rulings, lanes, reviews, lane status. | open |
@@ -42,11 +43,11 @@ Start-path owner: the lane owner recorded in PLAYBACK-START-PLAN.md §6 until th
 | [PREPARATION-BUFFER-PRESSURE-RCA-AND-IMPLEMENTATION.md](PREPARATION-BUFFER-PRESSURE-RCA-AND-IMPLEMENTATION.md) | October 8 Apple TV freeze from full-title preparation; merged ownership repair and postmerge checks, deployment/device acceptance open. | open |
 | [HONEST-MASTER-PLAYLIST.md](HONEST-MASTER-PLAYLIST.md) | M1/M2 landed; bounded M3/M4, retained VOD M5 and copy/encoded preparation implemented. M3/M4 review, unseen-tail publication and device acceptance remain open. | open |
 | [MACOS-VIDEO-PROCESSING-DESIGN.md](MACOS-VIDEO-PROCESSING-DESIGN.md) | Proposed native Mac acceleration: shared-memory cost model, VideoToolbox/Metal processing, Jellyfin dependency preservation, P5 hardware-decode experiment, contracts and measured acceptance. | open |
-| [MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md) | Opus review and build handoff: baseline/package proof, processing milestones, code ownership, regression matrix, rollout and independent Dolby/Live TV/HEVC extensions. | open |
+| [MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md) | Build handoff: package proof, milestone owners, regressions, rollout and independent codec extensions. | open |
 | [MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md](MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md) | Accepted five-part HDR10 Metal/CPU comparison; broader playback follow-ups remain open. | open |
 | [Metal HDR evidence manifest](evidence/macos-metal-hdr-20261012/evidence-manifest.json) · [all text receipts](evidence/macos-metal-hdr-20261012/text-receipts.tar.gz) | Checksum-indexed captures, neutralized logs and API/CI/landing receipts; screenshots retained privately on PR #1038. | done |
 | [MACOS-VIDEO-PROCESSING-STATUS.md](MACOS-VIDEO-PROCESSING-STATUS.md) | Completed supported implementation and hardware qualification; final QSV closeout PR, exact evidence, decisions and separate broader acceptance. | done |
-| [MACOS-VIDEO-PROCESSING-EVIDENCE.md](MACOS-VIDEO-PROCESSING-EVIDENCE.md) | Native processing experiments, subtitle graphs, text/caption delivery, font identity, Linux SDK/build evidence, AMD qualification, Jellyfin identities and retained failures. | open |
+| [MACOS-VIDEO-PROCESSING-EVIDENCE.md](MACOS-VIDEO-PROCESSING-EVIDENCE.md) | Processing, subtitle/font, Linux SDK and AMD evidence, dependency identities and retained failures. | open |
 | [Active-font release and API evidence](evidence/macos-video-20261008/font-active-e9fd-evidence.tar.gz) | Matched release/symbols and actual native subtitle delivery while inactive font configuration changes; performance remains separate. | open |
 | [Linux SDK and compiler evidence](evidence/macos-video-20261008/linux-sdk-and-compile-evidence.tar.gz) | Hash-bound SDK generation, exact-source Linux compilation and isolated runtime dependency evidence; shipping and hardware acceptance remain open. | open |
 | [Linux producer and sealed-parser build evidence](evidence/macos-video-20261008/linux-producer-parser-build-evidence.tar.gz) | Full-featured Bookworm producer and matching static AC-4 parser build receipts; package and hardware/API acceptance remain open. | open |

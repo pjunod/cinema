@@ -1,8 +1,9 @@
 # Playback start — implementation plan
 
-**Status:** open — revision 3 (Fable adversarial review and Astra independent review applied, §7). Build plan for [CINEMA-END-TO-END-REVIEW-2026-11-07.md](../reviews/CINEMA-END-TO-END-REVIEW-2026-11-07.md). Rulings 2026-11-07 (§0). This file is the ONE shared status: claim a lane by editing its §6 row in a draft PR; log in §8. Build agents work from the plan revision named in the lane row, never an earlier one.
+**Status:** open — revision 3 (Fable adversarial review and Astra independent review applied, §7). Build plan for [CINEMA-END-TO-END-REVIEW-2026-11-07.md](../reviews/CINEMA-END-TO-END-REVIEW-2026-11-07.md). Rulings 2026-11-07 (§0). Claim lanes in §6; the [continuation ledger](PLAYBACK-START-STATUS.md) records execution and merge evidence. Build agents work from the plan revision named in the lane row, never an earlier one.
 **Routing:** lanes in §3 → build agents (Opus; Sonnet where marked). No feature gates in code: enable rows go in Settings → Developer as advisory readiness, never blocking.
-**Branch:** `effort/playback-start`. Lane PRs land in the effort branch (draft → one adversarial review per lane deliverable → fix → effort gate once on the final lane head); effort → main after one unit run and the main promotion gate on the final integration candidate, merged by the lane owner. Paul deploys. "Built on effort" and "accepted on fleet" are separate columns in §6; an after-deploy reading never blocks the deploy that produces it.
+**Phase 1:** merged to `main` in #1454 (`b08b5b8ec`); Apple build 294 landed in #1466 (`09097650f`). Fleet/device acceptance remains open. **Continuation owner:** Codex, session `01a1c166-b5b2-7033-bd74-77816ba09733` (2026-11-09).
+**Original branch process:** `effort/playback-start`. Lane PRs land in the effort branch (draft → one adversarial review per lane deliverable → fix → effort gate once on the final lane head); effort → main after one unit run and the main promotion gate on the final integration candidate, merged by the lane owner. Paul deploys. "Built on effort" and "accepted on fleet" are separate columns in §6; an after-deploy reading never blocks the deploy that produces it.
 **Author:** Claude (claude-fable-5-1, session 01BCWLA2SJPLAmibeaz9L5xb).
 
 ## 0. Rulings (Paul, 2026-11-07)
@@ -105,15 +106,15 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 
 | Lane | Owner (model, session) | Plan rev | Built on effort | Accepted on fleet (before → after) |
 |---|---|---|---|---|
-| H2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on effort (#1424, review 1) | build/protocol/owner inventory; placement through each mixed cohort → |
-| C2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on effort (#1424, review 1 fixes #1436) | verdict idle; 3,878 waiting unreported; 2026-11-07 22:3x UTC media1 (`4ddbf1229`): verdict `degraded`, claimable 2, ready_24h 0, claimed_24h 0, claims_since_start 36, depth `retry_wait` fragment_index 3,881 (due rows mislabelled: ms compared to s) → |
-| C3 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on effort (#1424, review 1 fixes #1436) | active 4,097/4,096; retired-digest queued 3,878; ready_24h 0 → |
-| C1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1434, review 2 fixes #1438) | claims/2.7 d 16 (media1); lab4/lab6 cannot claim → |
-| D2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1431, review 1 fixes #1440) | codeless 503s; create p99 → |
-| D1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | claimed (last) | DV vs non-DV cold TTFF; 20 switches/platform → |
-| G1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1433, review 2 fixes #1438) | — |
-| R1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1428, review 1 fix #1440) | authority_fence won 16/18 → by cause |
-| H1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1427) | — |
+| H2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (#1424, review 1) | build/protocol/owner inventory; placement through each mixed cohort → |
+| C2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (#1424, review 1 fixes #1436) | verdict idle; 3,878 waiting unreported; 2026-11-07 22:3x UTC media1 (`4ddbf1229`): verdict `degraded`, claimable 2, ready_24h 0, claimed_24h 0, claims_since_start 36, depth `retry_wait` fragment_index 3,881 (due rows mislabelled: ms compared to s) → |
+| C3 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (#1424, review 1 fixes #1436) | active 4,097/4,096; retired-digest queued 3,878; ready_24h 0 → |
+| C1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1434, review 2 fixes #1438) | claims/2.7 d 16 (media1); lab4/lab6 cannot claim → |
+| D2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1431, review 1 fixes #1440) | codeless 503s; create p99 → |
+| D1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (review 3) | DV vs non-DV cold TTFF; 20 switches/platform → |
+| G1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1433, review 2 fixes #1438) | — |
+| R1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1428, review 1 fix #1440) | authority_fence won 16/18 → by cause |
+| H1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1427) | — |
 | A1 | — | 3 | unclaimed (design review first); shared S1–S12: [RCA](SHARED-LIBRARY-PLAYBACK-RCA.md) | vod_index_pending fallbacks 18/29; remux ≤5 s share; p90 → |
 | A2 | — | 3 | unclaimed | HW/SW transcode TTFF → |
 | A3 | — | 3 | unclaimed | — |
@@ -132,13 +133,4 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 
 ## 8. Execution log
 
-| Date | Lane | Model / session | Action |
-|---|---|---|---|
-| 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Rev 1 written from the review; rulings 1–4 recorded. |
-| 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Fleet state read (queue wedged at cap; release-as-fence); Fable review applied (rev 2, not what #1401 merged — bridge propagation). |
-| 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Astra review applied; rev 3 is the first revision build agents may claim. |
-| 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Ruling 3 mechanism settled (M6); Phase 1 build contracts written (QUEUE, CREATE). |
-| 2026-11-07 | H2, C2, C3, C1, D2, R1, H1, G1, D1 | claude-opus-5-5 / 01BCWL9xwmpSjitHqZMTRAht | Phase 1 claimed. Lanes integrate on `effort/playback-start`; per Paul (2026-11-07) one adversarial review and one fast-lane run on effort → main rather than per lane. H2/C2/C3 built; H1 built by a Sonnet sub-agent; C1, D2, R1 by Opus sub-agents. |
-| 2026-11-08 | D2 (review 1 S4) | claude-opus-5-5 / 01BCWL9xwmpSjitHqZMTRAht | Open gap, not fixed: a remote start whose reply is lost on both the ask and the one re-ask (`start_remote_recovering_lost_reply`) moves to the next candidate under the same incarnation while the first worker may still hold a session for it. That first producer runs until its confirmation watcher sees another owner's activation of the incarnation (≤ 500 ms after it lands) or, when no activation comes, to `REMOTE_ACTIVATION_CONFIRMATION_WINDOW`. Closing it needs the transport to tell "never delivered" from "delivered, reply lost" (`PeerTransportError` does not) so only the first moves on. Pinned by `media_sessions::tests::a_dropped_remote_start_reply_takes_the_session_the_worker_already_holds`. |
-| 2026-11-08 | H2, C2, C3, H1, R1, D2, C1, G1 | claude-opus-5-5 / 01BCWL9xwmpSjitHqZMTRAht | Landed on the effort: #1424, #1427, #1428, #1431, #1433, #1434. Fable review 1 (landed lanes) → fixes #1436, #1440; Fable review 2 (C1, G1) → fixes #1438. Combined effort head clippy-clean; paperwork vs main 16/16. D1 building; then D1 review, one fast-lane run, effort → main. |
-| 2026-11-08 | D1 (review 3 S7) | claude-opus-5-5 / 01BCWL9xwmpSjitHqZMTRAht | Open gap: remote-owned ordinary sessions never upgrade (the create registers the intent only where the ingress owns the route). Follow-up: carry the intent on the remote start dispatch and trigger from the owner actor's presented phase. |
+Execution history and current ownership live in [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md). The lane table in §6 distinguishes built work from fleet acceptance.
