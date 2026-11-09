@@ -6,12 +6,14 @@
 Companion to the [implementation plan](PLAYBACK-START-PLAN.md) and
 [Phase 1 build contract](PLAYBACK-START-BUILD.md). Phase 1 merged in
 #1454 (`b08b5b8ec`); Apple build 294 landed in #1466 (`09097650f`).
-All four fleet nodes report main `49c4ec103` (includes #1475 and #1476); all were healthy and ready after the 2026-11-09 serial rollout. Build deployment is established;
-queue recovery and physical-device acceptance remain open. Media1 still
-reports degraded, 3,840 eligible index requests and 0 ready in 24 hours.
-Persisted failed-row counts are not new failures over that interval.
+The 2026-11-09 21:16 UTC fleet verification has all four nodes on
+`49c4ec103` (includes #1475/#1476), healthy and ready. This supersedes the
+20:23 UTC mixed-build snapshot. Queue and physical-device acceptance remain
+open: media1's 20:23 snapshot reported degraded, 3,841 eligible requests and
+0 ready in 24 hours; no newer queue measurement is claimed here. Persisted
+failure counts are not new failures in that interval.
 
-## Current batch — index timestamp repair and Source locate eligibility
+## Merged batch — index timestamp repair and Source locate eligibility
 
 S4 removes the index-only fatal muxer-diagnostic policy while retaining
 HEVC tracing, configuration and complete-video validation. S12 uses the
@@ -21,19 +23,50 @@ the [shared-library RCA](SHARED-LIBRARY-PLAYBACK-RCA.md). GPT 6.1 Sol built
 S12; Codex owns S4, integration and merge.
 
 Independent implementation review found no actionable findings. Local
-Clippy, syntax checks and both focused regressions passed. PR #1475
-owns current CI and merge state; no merge credit is claimed here. The first
+Clippy, syntax checks and both focused regressions passed. PR #1475 merged
+as `2ad533907` after exact-candidate promotion run 7052 passed. Deployment is included in the later verified `49c4ec103` fleet. The first
 preflight stopped on the intentionally pinned membership file hash. Tables
 31/32 were refreshed after confirming both mapped authority bodies are
 byte-identical to the base; only the media directory changed. Local macOS Clippy
 also exposed existing Linux-only processed-upgrade imports/test helpers;
 the batch aligns their declarations with their consuming platform.
 
-Mobile publication remains unverified: the last attempted export reported
-no account and no distribution identity/private key. The actual signing
-controller and its original setup receipts have now been located; its
-runner is running. A later green workflow skipped publication. Native
-prepared-switch measurements and matched cold TTFF remain outstanding.
+Apple build 294 is live in internal TestFlight for iOS and tvOS, both
+`VALID` and `IN_BETA_TESTING`. Export and upload succeeded from the M5
+with the signed-in Xcode account and Cloud Managed Apple Distribution;
+[the publishing recovery notes](../PUBLISHING.md) retain the proven method.
+The standing publisher has not been migrated or requalified. Android 193
+and native prepared-switch/TTFF measurements remain open.
+
+## Current batch — A1/B1
+
+Codex owns `codex/playback-start-phase2`; no pull request is open yet.
+GPT 6.1 Sol extracted the canonical video-only fragment row observation
+for reuse by the growing engine; integration and identity design are in
+progress. No growing-engine behavior or qualification is claimed yet.
+Server/web development and web testing proceed independently of mobile
+publication. The deployed Phase 1 web build can be tested now.
+
+The queue stall is traced to an identifier-contract mismatch. Analysis
+requests accept opaque identifiers, including 64-character generation
+digests. Both stores retain the normal 64-byte creation limit and the
+legacy repair path's 128-byte limit. Shared validators now preserve both
+limits while custody accepts every admitted identity. The old
+`background_owner_key` incorrectly required a UUID for analysis custody.
+Registration rejects a legitimate request before creating custody;
+`settle_unstarted_analysis_source` retries the deterministic rejection while
+the independent heartbeat retains its lease and maintenance source-I/O
+reservation. The measured request is `fragment_index`; its ID matches the captured
+registration rejection and its stored requested generation. The earlier
+subtitle-source classification was unsupported and is corrected. The old
+attempt later expired around a container restart and is queued again with
+no owner; this is not deployment or acceptance of the repair. The final repair matches custody
+validation to every admission path and exercises registration/settlement
+with real generated and opaque legacy IDs;
+retain the exact owner/fence checks and ambiguous-write recovery protocol.
+The fix is being qualified in PR #1478; fleet acceptance remains open.
+The learner currently has a separate active `transcode_prepare` custody
+owner, which must be preserved.
 
 ## Native admission — A1-N, PR #1476
 
@@ -78,7 +111,7 @@ qualification test helper now uses the same platform guard as its callers,
 repairing the macOS lint failure found by the required hook.
 Explicit viewer changes keep their existing owner. Regressions and plan
 acceptance include the exact slow-create/default-forced-subtitle case.
-No new main landing, image deployment or ten-start acceptance is claimed yet.
+Current landing and fleet acceptance authority: [PR #1480](http://forge.lan:3000/noirr/plurx/pulls/1480). Its source diff, review, current checks and later deployment/measurement receipts supersede this initial qualification snapshot; no ten-start acceptance was claimed at that snapshot.
 The temporary non-admin Safari account protects the user's actively advancing
 resume position and will be removed after qualification. Private runtime
 receipts are retained outside the repository in the owning task's status page.
