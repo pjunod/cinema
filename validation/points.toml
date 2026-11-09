@@ -1172,6 +1172,7 @@ paths = [
   "scripts/audio-downmix-qualification/**",
   "tests/fixtures/audio-downmix/**",
   "scripts/playback-startup-lab",
+  "scripts/safari-startup-acceptance",
   "scripts/playback-startup-trace",
   "scripts/web-hls-startup-browser-check",
   "scripts/subtitle-readiness-browser-check",
