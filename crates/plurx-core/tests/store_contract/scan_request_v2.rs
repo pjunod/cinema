@@ -28,6 +28,7 @@ fn targeted(library_id: i64, path: &str) -> NewLibraryWork {
 fn seed(key_id: i64, request_key: &str) -> ScanRequestV2Seed {
     ScanRequestV2Seed {
         key_id,
+        key_hash: format!("{key_id:064x}"),
         request_key: request_key.into(),
         expected_files: vec![ExpectedFile {
             path: "/tv/Show/Season 1/Show.S01E01.mkv".into(),
@@ -70,10 +71,11 @@ async fn scan_request_sidecar_round_trips_and_key_is_unique_on_every_backend() {
             (7, "t-1/0/abc/1"),
             "{backend}"
         );
+        assert_eq!(row.key_hash, seed(7, "").key_hash, "{backend}");
         assert_eq!(row.expected_files, seed(7, "").expected_files, "{backend}");
         assert_eq!(
             store
-                .scan_request_by_key(7, "t-1/0/abc/1")
+                .scan_request_by_key(&seed(7, "").key_hash, "t-1/0/abc/1")
                 .await
                 .expect("lookup"),
             Some(first.request_id.clone()),
@@ -81,7 +83,7 @@ async fn scan_request_sidecar_round_trips_and_key_is_unique_on_every_backend() {
         );
         assert_eq!(
             store
-                .scan_request_by_key(8, "t-1/0/abc/1")
+                .scan_request_by_key(&seed(8, "").key_hash, "t-1/0/abc/1")
                 .await
                 .expect("lookup"),
             None
@@ -176,6 +178,29 @@ async fn scan_request_sidecar_round_trips_and_key_is_unique_on_every_backend() {
                 "{backend}"
             );
         }
+        // Numeric API-key ids can be reused after deletion. Credential hashes
+        // remain distinct on both backends, including the unique admission index.
+        let replacement = targeted(library.id, "/tv/Show/Season 1");
+        let mut replacement_seed = seed(7, "t-1/0/abc/1");
+        replacement_seed.key_hash = "b".repeat(64);
+        store
+            .enqueue_library_work_v2(replacement.clone(), replacement_seed.clone())
+            .await
+            .expect("same numeric key id, different credential");
+        assert_eq!(
+            store
+                .scan_request_by_key(&replacement_seed.key_hash, "t-1/0/abc/1")
+                .await
+                .expect("replacement lookup"),
+            Some(replacement.request_id)
+        );
+        assert_eq!(
+            store
+                .scan_request_by_key(&seed(7, "").key_hash, "t-1/0/abc/1")
+                .await
+                .expect("original lookup"),
+            Some(first.request_id)
+        );
     })
     .await;
 }

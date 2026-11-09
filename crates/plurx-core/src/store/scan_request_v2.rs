@@ -78,8 +78,10 @@ impl PlacedReport {
 /// What a v2 request carries into its admission transaction.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanRequestV2Seed {
-    /// `ApiKey.id` of the key that created the request.
+    /// `ApiKey.id` at admission, retained for audit only: ids may be reused.
     pub key_id: i64,
+    /// Stable credential identity: the existing SHA-256 API-key hash.
+    pub key_hash: String,
     /// Empty when the caller sent none; only a non-empty key is unique.
     pub request_key: String,
     pub expected_files: Vec<ExpectedFile>,
@@ -90,6 +92,14 @@ impl ScanRequestV2Seed {
         let invalid = |what: &str| Err(StoreError::Task(format!("invalid scan request: {what}")));
         if self.key_id <= 0 {
             return invalid("key id");
+        }
+        if self.key_hash.len() != 64
+            || !self
+                .key_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return invalid("key hash must be 64 lowercase hexadecimal bytes");
         }
         if self.request_key.len() > MAX_REQUEST_KEY_BYTES
             || self.request_key.chars().any(char::is_control)
@@ -120,6 +130,7 @@ impl ScanRequestV2Seed {
 pub struct ScanRequestV2 {
     pub request_id: String,
     pub key_id: i64,
+    pub key_hash: String,
     pub request_key: String,
     pub expected_files: Vec<ExpectedFile>,
     /// `full_scan:<library>` · `root_unreadable:<path>` · `queue_position:<n>`,
@@ -140,7 +151,8 @@ fn waiting_on_ok(waiting_on: &str) -> bool {
     waiting_on.len() <= MAX_WAITING_ON_BYTES && !waiting_on.chars().any(char::is_control)
 }
 
-const ROW_JSON: &str = "json_object('request_id', request_id, 'key_id', key_id, \
+const ROW_JSON: &str =
+    "json_object('request_id', request_id, 'key_id', key_id, 'key_hash', key_hash, \
      'request_key', request_key, 'expected_files', json(expected_files_json), \
      'waiting_on', waiting_on, 'files', json(files_json), \
      'created_at_ms', created_at_ms, 'updated_at_ms', updated_at_ms)";
@@ -167,7 +179,7 @@ pub(super) async fn get<T: QueueSql>(
 
 pub(super) async fn by_key<T: QueueSql>(
     store: &T,
-    key_id: i64,
+    key_hash: &str,
     request_key: &str,
 ) -> Result<Option<String>, StoreError> {
     if request_key.is_empty() || request_key.len() > MAX_REQUEST_KEY_BYTES {
@@ -176,10 +188,10 @@ pub(super) async fn by_key<T: QueueSql>(
     store
         .queue_sql(
             "SELECT json_quote(request_id) AS result_json FROM background_scan_request_v2 \
-             WHERE key_id = json_extract($1, '$.key_id') AND request_key = json_extract($1, '$.request_key') \
+             WHERE key_hash = json_extract($1, '$.key_hash') AND request_key = json_extract($1, '$.request_key') \
                AND request_key != ''"
                 .into(),
-            encode(&serde_json::json!({ "key_id": key_id, "request_key": request_key }))?,
+            encode(&serde_json::json!({ "key_hash": key_hash, "request_key": request_key }))?,
             false,
             true,
         )
@@ -373,6 +385,7 @@ mod tests {
     fn seed(key_id: i64, request_key: &str) -> ScanRequestV2Seed {
         ScanRequestV2Seed {
             key_id,
+            key_hash: format!("{key_id:064x}"),
             request_key: request_key.into(),
             expected_files: vec![ExpectedFile {
                 path: "/tv/Show/Season 1/Show.S01E01.mkv".into(),
@@ -437,20 +450,21 @@ mod tests {
             .expect("read")
             .expect("written in the admission");
         assert_eq!(row.key_id, 7);
+        assert_eq!(row.key_hash, seed(7, "").key_hash);
         assert_eq!(row.request_key, "t-1/0/abc/1");
         assert_eq!(row.expected_files, seed(7, "").expected_files);
         assert_eq!(row.waiting_on, "");
         assert!(row.files.is_empty());
         assert_eq!(
             store
-                .scan_request_by_key(7, "t-1/0/abc/1")
+                .scan_request_by_key(&seed(7, "").key_hash, "t-1/0/abc/1")
                 .await
                 .expect("lookup"),
             Some(first.request_id.clone())
         );
         assert_eq!(
             store
-                .scan_request_by_key(8, "t-1/0/abc/1")
+                .scan_request_by_key(&seed(8, "").key_hash, "t-1/0/abc/1")
                 .await
                 .expect("lookup"),
             None,
@@ -535,7 +549,10 @@ mod tests {
             );
         }
         assert_eq!(
-            store.scan_request_by_key(7, "").await.expect("lookup"),
+            store
+                .scan_request_by_key(&seed(7, "").key_hash, "")
+                .await
+                .expect("lookup"),
             None
         );
 

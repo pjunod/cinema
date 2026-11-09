@@ -5685,13 +5685,19 @@ impl JobManager {
         );
         // Files the caller says it just placed are probed whatever their
         // size and whole-second mtime say (contract v2 §5.1).
-        let force_probe = library_work::canonical_expected(expected).await;
+        let force_probe = library_work::canonical_expected(expected, &library, &req.path).await;
         let (mut out, detail) = scan::scan_path_targeted(
             publisher,
             &library,
             &req.path,
             &scan::TargetedOptions {
-                force_probe: force_probe.values().cloned().collect(),
+                force_probe: force_probe
+                    .values()
+                    .filter_map(|path| match path {
+                        library_work::ExpectedPath::Canonical(path) => Some(path.clone()),
+                        _ => None,
+                    })
+                    .collect(),
             },
         )
         .await?;

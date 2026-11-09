@@ -176,6 +176,7 @@ pub async fn scan(
     }
     let seed = ScanRequestV2Seed {
         key_id: key.0.id,
+        key_hash: key.0.key_hash.clone(),
         request_key,
         expected_files,
     };
@@ -187,7 +188,7 @@ pub async fn scan(
     if !seed.request_key.is_empty() {
         if let Some(existing) = state
             .store
-            .scan_request_by_key(seed.key_id, &seed.request_key)
+            .scan_request_by_key(&seed.key_hash, &seed.request_key)
             .await?
         {
             return answer(&state, &existing, wait, body.correlation_id.clone()).await;
@@ -560,7 +561,7 @@ pub async fn request_status(
     )
     .await?;
     if !key.0.allows(scopes::STATUS_READ)
-        && state.jobs.scan_request_creator(&id).await? != Some(key.0.id)
+        && state.jobs.scan_request_creator(&id).await? != Some(key.0.key_hash)
     {
         // Another key's request, one from before keys were recorded, or no
         // such request: all 403 for a key without `status:read`, so a scan

@@ -1157,6 +1157,9 @@ whole-second mtime say — the catalogue's cache cannot tell a same-path
 replacement with equal size from the file it replaced — and reported once the
 scan finishes, in `files`, as `placed {item_id, file_id, bytes, mtime_ns}`
 (from a fresh `stat`, mtime in nanoseconds), `skipped {reason}` or `missing`.
+Expected paths outside the requested directory or library, and paths containing
+a symlink below the configured root, are skipped without probing their targets.
+Existing and missing out-of-scope paths receive the same skip reason.
 Other files under `path` are scanned as before.
 
 **Containment is lexical first.** The request path, with `.` and `..` resolved

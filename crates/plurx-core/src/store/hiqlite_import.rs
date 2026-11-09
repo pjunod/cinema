@@ -2047,6 +2047,7 @@ const TABLES: &[TablePlan] = &[
         columns: &[
             "request_id",
             "key_id",
+            "key_hash",
             "request_key",
             "expected_files_json",
             "waiting_on",

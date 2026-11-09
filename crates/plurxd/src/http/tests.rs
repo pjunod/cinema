@@ -22076,6 +22076,70 @@ async fn the_creating_scan_key_reads_its_own_request_and_another_scan_key_gets_4
     );
 }
 
+/// A replacement credential never inherits a deleted key's scan ownership or
+/// idempotency namespace, even when SQLite reuses its numeric API-key id.
+#[tokio::test]
+async fn a_recreated_api_key_cannot_read_or_replay_the_deleted_keys_scan() {
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    let creator = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let original = state
+        .store
+        .api_key_for_hash(&plurx_core::auth::hash_token(&creator))
+        .await
+        .expect("lookup creator")
+        .expect("creator");
+    let dir = crate::test_tempdir().expect("library root");
+    let movie = dir.path().join("Heat (1995)");
+    std::fs::create_dir_all(&movie).expect("movie");
+    v2_library(&app, &admin, dir.path()).await;
+    let input = json!({"path": movie, "request_key": "delivery/0/movie/1"});
+    let (status, first) = call(&app, post("/api/v1/scan", Some(&creator), input.clone())).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{first}");
+    let first_id = first["request_id"].as_str().expect("request id");
+    let uri = format!("/api/v1/scan/requests/{first_id}");
+    let (status, _) = call(
+        &app,
+        delete_req(&format!("/api/v1/keys/{}", original.id), Some(&admin)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let replacement = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let replacement_row = state
+        .store
+        .api_key_for_hash(&plurx_core::auth::hash_token(&replacement))
+        .await
+        .expect("lookup replacement")
+        .expect("replacement");
+    assert_eq!(replacement_row.id, original.id, "exercise numeric id reuse");
+    assert_ne!(replacement_row.key_hash, original.key_hash);
+    let (status, _) = call(&app, get(&uri, Some(&replacement))).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a different credential owns the old request"
+    );
+    let (status, second) = call(
+        &app,
+        post("/api/v1/scan", Some(&replacement), input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{second}");
+    assert_ne!(
+        second["request_id"], first["request_id"],
+        "the same request key belongs to a new credential"
+    );
+    let (status, replay) = call(&app, post("/api/v1/scan", Some(&replacement), input)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{replay}");
+    assert_eq!(replay["request_id"], second["request_id"]);
+    let second_uri = format!(
+        "/api/v1/scan/requests/{}",
+        second["request_id"].as_str().expect("new id")
+    );
+    let (status, _) = call(&app, get(&second_uri, Some(&replacement))).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 /// Contract v2 §5.3: the connection test names the library roots Curator
 /// expects and hears which plurx can see. Only a configured root or a path
 /// under one is looked at; anything else is `outside_roots`, never `stat`ed —

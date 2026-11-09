@@ -194,7 +194,7 @@ what separates a key from a login token, whichever header carries it.
 |---|---|---|
 | `path` | yes, unless `probe_paths` | Absolute directory or file under a configured library root |
 | `request_key` | no | Curator's idempotency key, attempt number last. The same key from the same API key returns the same `request_id` and result, so a lost response never becomes a second scan. A new attempt suffix is a new request |
-| `expected_files` | no | `[{"path","bytes","mtime_ns"}]`, each path absolute. Every listed file is probed whatever plurx's size+mtime cache says, and reported in `files` |
+| `expected_files` | no | `[{"path","bytes","mtime_ns"}]`, each path absolute. Every in-scope file is probed whatever plurx's size+mtime cache says, and reported in `files`; outside paths and paths below a symlink are skipped without probing their targets |
 | `wait_ms` | no | Hold the response up to this long for the result. Default `0` (answer at once) |
 | `hint` | no | `movie` · `episode` · `season` · `book`. Advisory: the library's kind decides how a file is parsed; the hint only picks which item an id applies to |
 | `ids` | no | `{"tmdb","imdb"}` for the item itself |

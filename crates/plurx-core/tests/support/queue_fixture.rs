@@ -1852,7 +1852,7 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
             "unowned-text-index" => "CREATE INDEX unexpected_text_index ON subtitle_text_translation_cues(cue_index);",
             "unowned-managed-index" => "CREATE INDEX unexpected_receipt_index ON subtitle_model_receipts(model_id);",
             "legacy-with-current-translation" => "DROP TABLE shared_caption_read_leases; DROP TABLE shared_caption_schema; DROP TABLE subtitle_text_translation_cues; DROP TABLE subtitle_text_translation_schema; PRAGMA user_version=115;",
-            "retained-scan-request" => "INSERT INTO background_scan_request_v2(request_id,key_id,created_at_ms,updated_at_ms) VALUES('retained',1,0,0);",
+            "retained-scan-request" => "INSERT INTO background_scan_request_v2(request_id,key_id,key_hash,created_at_ms,updated_at_ms) VALUES('retained',1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0,0);",
             "scan-request-marker" => "DELETE FROM background_scan_request_v2_schema;",
             "scan-request-trigger" => "DROP TRIGGER background_scan_request_v2_retired;",
             // Published managed v4 beside the sidecar, so only the sidecar is

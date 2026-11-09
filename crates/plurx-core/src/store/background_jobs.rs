@@ -2332,7 +2332,7 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn complete_library_work(&self, request: CompleteLibraryWork)
         -> Result<bool, StoreError>;
     /// Admit targeted library work with its contract v2 sidecar in the same
-    /// transaction. A `(key_id, request_key)` already taken aborts the whole
+    /// transaction. A `(key_hash, request_key)` already taken aborts the whole
     /// admission; the caller then answers with the request that holds it.
     async fn enqueue_library_work_v2(
         &self,
@@ -2346,7 +2346,7 @@ pub trait BackgroundJobStore: Send + Sync {
     /// The request a creating key's idempotency key names, if any.
     async fn scan_request_by_key(
         &self,
-        key_id: i64,
+        key_hash: &str,
         request_key: &str,
     ) -> Result<Option<String>, StoreError>;
     async fn set_scan_request_waiting_on(
@@ -3215,10 +3215,10 @@ LIMIT 1
     }
     async fn scan_request_by_key(
         &self,
-        key_id: i64,
+        key_hash: &str,
         request_key: &str,
     ) -> Result<Option<String>, StoreError> {
-        super::scan_request_v2::by_key(self, key_id, request_key).await
+        super::scan_request_v2::by_key(self, key_hash, request_key).await
     }
     async fn set_scan_request_waiting_on(
         &self,

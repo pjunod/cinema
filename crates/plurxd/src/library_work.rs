@@ -95,7 +95,7 @@ impl JobManager {
         req: ScanRequest,
         seed: ScanRequestV2Seed,
     ) -> Result<ScanAdmission, TargetError> {
-        let (key_id, request_key) = (seed.key_id, seed.request_key.clone());
+        let (key_hash, request_key) = (seed.key_hash.clone(), seed.request_key.clone());
         let input = NewLibraryWork {
             request_id: req.id.clone(),
             library_id: req.library_id,
@@ -122,8 +122,10 @@ impl JobManager {
             }
             Err(error) => {
                 if !request_key.is_empty() {
-                    if let Some(existing) =
-                        self.store.scan_request_by_key(key_id, &request_key).await?
+                    if let Some(existing) = self
+                        .store
+                        .scan_request_by_key(&key_hash, &request_key)
+                        .await?
                     {
                         return Ok(ScanAdmission::Replay(existing));
                     }
@@ -288,8 +290,12 @@ impl JobManager {
     }
 
     /// The API key that created a contract v2 request, if it is one.
-    pub async fn scan_request_creator(&self, id: &str) -> Result<Option<i64>, StoreError> {
-        Ok(self.store.scan_request_v2(id).await?.map(|row| row.key_id))
+    pub async fn scan_request_creator(&self, id: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .store
+            .scan_request_v2(id)
+            .await?
+            .map(|row| row.key_hash))
     }
 
     pub(super) async fn durable_library_statuses(&self) -> HashMap<i64, ScanStatus> {
@@ -710,14 +716,59 @@ impl JobManager {
     }
 }
 
-/// Each expected path and its canonical form; a path that cannot be
-/// canonicalized (it is not there, or a parent is unreadable) is absent.
-pub(super) async fn canonical_expected(expected: &[ExpectedFile]) -> BTreeMap<String, PathBuf> {
+/// An expected file may be outside the request scope even when it exists.
+/// Keep that verdict separate from `Missing`, without probing outside paths.
+#[derive(Debug)]
+pub(super) enum ExpectedPath {
+    Outside,
+    Missing,
+    Canonical(PathBuf),
+}
+
+/// Resolve expected files only after lexical scope and no-follow checks.
+/// Revalidate stored intent in the worker, rather than trusting HTTP admission.
+pub(super) async fn canonical_expected(
+    expected: &[ExpectedFile],
+    library: &plurx_core::domain::Library,
+    target: &std::path::Path,
+) -> BTreeMap<String, ExpectedPath> {
+    use plurx_core::scan::containment;
+    let target = containment::lexical(target);
     let mut canonical = BTreeMap::new();
     for file in expected {
-        if let Ok(path) = tokio::fs::canonicalize(&file.path).await {
-            canonical.insert(file.path.clone(), path);
-        }
+        let path = std::path::Path::new(&file.path);
+        let normalized = containment::lexical(path);
+        let verdict = if !path.is_absolute() || !normalized.starts_with(&target) {
+            ExpectedPath::Outside
+        } else if let Some((_, root)) =
+            containment::lexical_root(std::slice::from_ref(library), path)
+        {
+            let root_for_check = root.clone();
+            let path_for_check = normalized.clone();
+            match tokio::task::spawn_blocking(move || {
+                containment::symlink_below_root(&root_for_check, &path_for_check)
+            })
+            .await
+            {
+                Ok(Ok(true)) => ExpectedPath::Outside,
+                Ok(Ok(false)) => {
+                    match (
+                        tokio::fs::canonicalize(&root).await,
+                        tokio::fs::canonicalize(&normalized).await,
+                    ) {
+                        (Ok(root), Ok(real)) if real.starts_with(&root) => {
+                            ExpectedPath::Canonical(real)
+                        }
+                        (Ok(_), Ok(_)) => ExpectedPath::Outside,
+                        _ => ExpectedPath::Missing,
+                    }
+                }
+                _ => ExpectedPath::Missing,
+            }
+        } else {
+            ExpectedPath::Outside
+        };
+        canonical.insert(file.path.clone(), verdict);
     }
     canonical
 }
@@ -728,16 +779,26 @@ pub(super) async fn canonical_expected(expected: &[ExpectedFile]) -> BTreeMap<St
 /// `skipped` with the reason, or `missing`.
 pub(super) async fn placed_reports(
     expected: &[ExpectedFile],
-    canonical: &BTreeMap<String, PathBuf>,
+    canonical: &BTreeMap<String, ExpectedPath>,
     scan: &TargetedScan,
     detail: &plurx_core::scan::TargetedDetail,
 ) -> Vec<PlacedReport> {
     let mut reports = Vec::with_capacity(expected.len());
     for file in expected {
         let path = file.path.clone();
-        let Some(real) = canonical.get(&file.path) else {
-            reports.push(PlacedReport::Missing { path });
-            continue;
+        let real = match canonical.get(&file.path) {
+            Some(ExpectedPath::Canonical(real)) => real,
+            Some(ExpectedPath::Outside) => {
+                reports.push(PlacedReport::Skipped {
+                    path,
+                    reason: "outside the requested path or library, or contains a symlink".into(),
+                });
+                continue;
+            }
+            _ => {
+                reports.push(PlacedReport::Missing { path });
+                continue;
+            }
         };
         let real_str = real.to_string_lossy().into_owned();
         if let Some(placed) = scan.items.iter().find(|placed| placed.path == real_str) {
@@ -1743,6 +1804,84 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn expected_files_never_probe_outside_the_requested_scope() {
+        let root = crate::test_tempdir().expect("library root");
+        let outside = crate::test_tempdir().expect("outside root");
+        let target = root.path().join("target");
+        std::fs::create_dir(&target).expect("target");
+        let valid = target.join("valid.mkv");
+        std::fs::write(&valid, b"fixture").expect("valid file");
+        let existing = outside.path().join("existing");
+        std::fs::write(&existing, b"private").expect("outside file");
+        let absent = outside.path().join("absent");
+        let sibling = root.path().join("sibling");
+        std::fs::write(&sibling, b"outside requested directory").expect("sibling");
+        let library = Library {
+            id: 1,
+            name: "Scope".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![root.path().to_path_buf()],
+            anime: false,
+            created_at: 0,
+            scan_interval_mins: 0,
+            refresh_interval_mins: 0,
+            last_scan_at: None,
+            last_refresh_at: None,
+        };
+        let expected: Vec<_> = [&existing, &absent, &sibling, &valid]
+            .into_iter()
+            .map(|path| ExpectedFile {
+                path: path.display().to_string(),
+                bytes: 0,
+                mtime_ns: 0,
+            })
+            .collect();
+        let resolved = canonical_expected(&expected, &library, &target).await;
+        for file in &expected[..3] {
+            assert!(matches!(
+                resolved.get(&file.path),
+                Some(ExpectedPath::Outside)
+            ));
+        }
+        assert!(matches!(
+            resolved.get(&expected[3].path),
+            Some(ExpectedPath::Canonical(_))
+        ));
+        let reports = placed_reports(
+            &expected,
+            &resolved,
+            &TargetedScan {
+                report: Default::default(),
+                items: vec![],
+            },
+            &plurx_core::scan::TargetedDetail::default(),
+        )
+        .await;
+        let reasons: Vec<_> = reports[..3]
+            .iter()
+            .map(|report| match report {
+                PlacedReport::Skipped { reason, .. } => reason,
+                other => panic!("out-of-scope existence leaked: {other:?}"),
+            })
+            .collect();
+        assert!(reasons.windows(2).all(|pair| pair[0] == pair[1]));
+        #[cfg(unix)]
+        {
+            let link = target.join("link");
+            std::os::unix::fs::symlink(outside.path(), &link).expect("outside symlink");
+            let through_link = ["existing", "absent"].map(|name| ExpectedFile {
+                path: link.join(name).display().to_string(),
+                bytes: 0,
+                mtime_ns: 0,
+            });
+            let resolved = canonical_expected(&through_link, &library, &target).await;
+            assert!(through_link
+                .iter()
+                .all(|file| matches!(resolved.get(&file.path), Some(ExpectedPath::Outside))));
+        }
+    }
+
     async fn enqueue_targeted(
         store: &dyn Store,
         library_id: i64,
@@ -1783,6 +1922,7 @@ mod tests {
                     },
                     plurx_core::store::scan_request_v2::ScanRequestV2Seed {
                         key_id: 1,
+                        key_hash: "a".repeat(64),
                         request_key: String::new(),
                         expected_files,
                     },

@@ -3752,7 +3752,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # (stat and containment checks on the library roots) off the request task. Each is awaited by
 # the handler under its `wait_ms` bound, so it is joined, not detached; no rolling producer,
 # child, session or source owner is created.
-expected_occurrences = 1099
+# Pipeline-v2 final containment fix adds one awaited no-follow lstat worker;
+# it owns no producer, timer or process, and completes before canonicalization.
+expected_occurrences = 1100
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes

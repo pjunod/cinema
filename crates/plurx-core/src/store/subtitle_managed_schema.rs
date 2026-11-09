@@ -666,6 +666,10 @@ mod tests {
             let conn = rusqlite::Connection::open_in_memory().expect("schema contract fixture");
             SqliteStore::apply_migrations_for_test(&conn, 110).expect("schema contract fixture");
             conn.execute_batch("PRAGMA foreign_keys=OFF; CREATE TABLE cluster_meta(singleton INTEGER PRIMARY KEY,schema_version INTEGER); INSERT INTO cluster_meta VALUES(1,81);").expect("schema contract fixture");
+            // Source arbitration is installed before the managed adjunct in production.
+            // Its restore trigger is a required Source81 predecessor dependency.
+            conn.execute_batch(super::super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA)
+                .expect("source arbitration prerequisite");
             // Source activation normally follows membership/purpose-key setup.
             // These presence-only fixtures are NOT cluster admission evidence.
             for name in [

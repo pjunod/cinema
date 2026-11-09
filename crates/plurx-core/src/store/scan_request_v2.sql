@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS background_scan_request_v2_schema (
 CREATE TABLE IF NOT EXISTS background_scan_request_v2 (
     request_id TEXT PRIMARY KEY,
     key_id INTEGER NOT NULL,
+    key_hash TEXT NOT NULL CHECK (length(key_hash) = 64 AND key_hash NOT GLOB '*[^0-9a-f]*'),
     request_key TEXT NOT NULL DEFAULT '',
     expected_files_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(expected_files_json) AND length(CAST(expected_files_json AS BLOB)) <= 16384),
     waiting_on TEXT NOT NULL DEFAULT '' CHECK (length(CAST(waiting_on AS BLOB)) <= 1024),
@@ -24,11 +25,11 @@ CREATE TABLE IF NOT EXISTS background_scan_request_v2 (
 ) STRICT;
 -- next statement
 CREATE UNIQUE INDEX IF NOT EXISTS background_scan_request_v2_key
-    ON background_scan_request_v2 (key_id, request_key) WHERE request_key != '';
+    ON background_scan_request_v2 (key_hash, request_key) WHERE request_key != '';
 -- The sidecar is written in the admission transaction, from the same
 -- ephemeral enqueue command that creates the request row. A worker can claim
 -- and finish a request between an enqueue and any later write, so a sidecar
--- written afterwards could miss the job it describes. A `(key_id,
+-- written afterwards could miss the job it describes. A `(key_hash,
 -- request_key)` collision aborts the whole admission: a concurrent identical
 -- request already won, and the caller answers with that one.
 -- next statement
@@ -40,8 +41,9 @@ WHEN EXISTS (SELECT 1 FROM background_job_commands command WHERE command.operati
     AND json_type(command.request_json, '$.scan_request_v2') = 'object')
 BEGIN
     INSERT INTO background_scan_request_v2
-        (request_id, key_id, request_key, expected_files_json, created_at_ms, updated_at_ms)
+        (request_id, key_id, key_hash, request_key, expected_files_json, created_at_ms, updated_at_ms)
     SELECT NEW.request_id, json_extract(command.request_json, '$.scan_request_v2.key_id'),
+        json_extract(command.request_json, '$.scan_request_v2.key_hash'),
         json_extract(command.request_json, '$.scan_request_v2.request_key'),
         json_extract(command.request_json, '$.scan_request_v2.expected_files'),
         json_extract(command.request_json, '$.now_ms'), json_extract(command.request_json, '$.now_ms')
