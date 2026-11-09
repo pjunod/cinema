@@ -9,10 +9,11 @@ state. The larger [playback-start effort](PLAYBACK-START-PLAN.md) owns A1.
 ## Current state
 
 PR **#1472**, branch `claude/shared-library-standalone-fixes`, remains draft.
-The resumed source was `0b3c0dfc3`; the relay work and prior Opus fixes are
-integrated. Final review corrections are in code candidate `dc38044c4`, with later
-documentation-only commits.
-No passing final fast-lane result is claimed.
+The resumed source was `0b3c0dfc3`; relay and review fixes are integrated.
+Current code candidate `537b4cf2d` contains the subtitle follow-up and its
+cancellation control. Nine unaffected focused cases passed; affected daemon
+lint and the failed fixture plus two controls are in progress. The final fast
+lane has not started.
 
 The implementation covers NULL-principal consumers (§4), committed membership
 (§6), RPC attribution (§7 step 2), Source admission (§8/S12), poster retries
@@ -27,7 +28,7 @@ a client release. The RX ring and deployment remain separate operations work.
 
 | Stage | State |
 |---|---|
-| Compiler | Pinned Rust 1.97.1 formatting, daemon/core all-target Clippy and canonical production Hiqlite Clippy passed. Building the focused executable remains pending; no focused Rust results claimed. |
+| Compiler | Pinned Rust 1.97.1 checks passed before the subtitle follow-up; core/vendor passes are retained. Affected daemon all-target Clippy is running on `537b4cf2d`. |
 | Final review | Independent Codex review of `28bc0aacc`: one P1 and one P2; both addressed below. Prior Opus review remains attributed to the earlier owner because no report was retained. |
 | Existing focused tests | Latest historical run: 143 passed, two failed; pinned fixtures: four passed, three failed. These are not final-source passes. The native Source HTTP cases pass after the S5 revert; the older caption failures predate it. |
 | Core | Retained focused run: 27 passed; separate replicated-store run: five passed. Applicability remains bounded to the source and features actually exercised. |
