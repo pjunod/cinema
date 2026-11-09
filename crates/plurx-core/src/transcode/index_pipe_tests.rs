@@ -830,3 +830,119 @@ fn index_pipe_allows_timestamp_repair_and_keeps_the_hevc_header_proof() {
         }
     }
 }
+
+#[test]
+fn playback_measurement_shares_one_input_and_preserves_both_output_recipes() {
+    for codec in ["hevc", "h264"] {
+        for preserve in [false, true] {
+            for start_seconds in [0.0, 5_400.0] {
+                let mut file = hevc_dv();
+                file.video_codec = Some(codec.into());
+                let video = CopyVideoOptions::new(false, preserve);
+                let mut playback = copy_pipe_args_with_audio_delivery(
+                    &file,
+                    start_seconds,
+                    None,
+                    true,
+                    Pacing::unpaced(),
+                    video,
+                    None,
+                );
+                let measured = copy_pipe_args_with_index_measurement(
+                    &file,
+                    start_seconds,
+                    None,
+                    true,
+                    Pacing::unpaced(),
+                    video,
+                    None,
+                    "pipe:4",
+                )
+                .expect("one input and explicit measurement descriptor");
+                if codec == "hevc" {
+                    let level = playback
+                        .iter()
+                        .position(|arg| arg == "-loglevel")
+                        .expect("playback loglevel");
+                    playback[level + 1] = "info".into();
+                }
+                assert_eq!(&measured[..playback.len()], playback.as_slice());
+                let measurement = &measured[playback.len()..];
+                assert_eq!(
+                    measurement,
+                    copy_index_output_args(&file, video, "pipe:4", true)
+                );
+                assert_eq!(
+                    measured.iter().filter(|arg| arg.as_str() == "-i").count(),
+                    1
+                );
+                assert!(!measurement.contains(&"-i".to_owned()));
+                assert!(measurement.contains(&"-an".to_owned()));
+                assert!(!playback.iter().any(|arg| arg.contains("trace_headers")));
+                assert_eq!(
+                    measured
+                        .iter()
+                        .filter(|arg| arg.contains("trace_headers"))
+                        .count(),
+                    usize::from(codec == "hevc")
+                );
+                let index = copy_index_output_args(&file, video, "pipe:1", false);
+                assert_eq!(
+                    &index[index.len() - 9..index.len() - 1],
+                    &playback[playback.len() - 9..playback.len() - 1]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn playback_measurement_refuses_non_pipe_outputs_and_duplicate_input_recipes() {
+    let mut file = hevc_dv();
+    let video = CopyVideoOptions::new(false, false);
+    for url in [
+        "pipe:0",
+        "pipe:1",
+        "pipe:2",
+        "pipe:-3",
+        "pipe:",
+        "pipe:2147483648",
+        "/output.mp4",
+    ] {
+        assert!(copy_pipe_args_with_index_measurement(
+            &file,
+            0.0,
+            None,
+            false,
+            Pacing::unpaced(),
+            video,
+            None,
+            url,
+        )
+        .is_err());
+    }
+    file.audio_offset_ms = 500;
+    file.audio_streams.push(crate::domain::AudioStream {
+        index: 0,
+        codec: "aac".into(),
+        channels: Some(2),
+        ..Default::default()
+    });
+    let production =
+        copy_pipe_args_with_audio_delivery(&file, 0.0, None, false, Pacing::unpaced(), video, None);
+    assert_eq!(
+        production.iter().filter(|arg| arg.as_str() == "-i").count(),
+        2
+    );
+    assert!(copy_pipe_args_with_index_measurement(
+        &file,
+        0.0,
+        None,
+        false,
+        Pacing::unpaced(),
+        video,
+        None,
+        "pipe:4",
+    )
+    .is_err());
+}

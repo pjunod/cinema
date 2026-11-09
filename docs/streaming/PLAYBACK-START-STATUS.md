@@ -40,10 +40,14 @@ and native prepared-switch/TTFF measurements remain open.
 
 ## Current batch — A1/B1
 
-Codex owns `codex/playback-start-phase2`; no pull request is open yet.
+Codex owns `effort/playback-start-phase2`; the next A1/B1 pull request is not open yet.
 GPT 6.1 Sol extracted the canonical video-only fragment row observation
-for reuse by the growing engine; integration and identity design are in
-progress. No growing-engine behavior or qualification is claimed yet.
+for reuse by the growing engine. The owner-accepted
+[A1/B1 implementation contract](PLAYBACK-START-A1-B1-BUILD.md) now records
+Analysis coordination, one-input canonical measurements, source-DTS normalization,
+sparse publication and explicit target/init failure outcomes. Shared argv and
+checked measurements are in progress; growing-engine behavior and qualification
+remain unbuilt.
 Server/web development and web testing proceed independently of mobile
 publication. The deployed Phase 1 web build can be tested now.
 
@@ -64,7 +68,9 @@ no owner; this is not deployment or acceptance of the repair. The final repair m
 validation to every admission path and exercises registration/settlement
 with real generated and opaque legacy IDs;
 retain the exact owner/fence checks and ambiguous-write recovery protocol.
-The fix is being qualified in PR #1478; fleet acceptance remains open.
+PR #1478 merged as `30f4343bad` after final independent review, the two focused
+regressions and Main promotion gate 7079 passed. Publication is coordinated
+with the existing release qualification; fleet acceptance remains open.
 The learner currently has a separate active `transcode_prepare` custody
 owner, which must be preserved.
 

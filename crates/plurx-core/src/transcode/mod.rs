@@ -2730,6 +2730,21 @@ pub fn copy_index_output_args(
         "-sn".into(),
     ];
     args.extend(strip_plurx_markers(&copy_video_args(source, video)));
+    append_copy_mp4_output(&mut args, url);
+    if trace && matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+        if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
+            args[index + 1] = format!("trace_headers,{}", args[index + 1]);
+        } else {
+            // Insert before the output URL so this remains an output option.
+            let at = args.len() - 1;
+            args.splice(at..at, ["-bsf:v".to_owned(), "trace_headers".to_owned()]);
+        }
+    }
+    args
+}
+
+/// The common fragmented MP4 mux contract for playback and index outputs.
+fn append_copy_mp4_output(args: &mut Vec<String>, url: &str) {
     args.extend(
         [
             "-avoid_negative_ts",
@@ -2745,16 +2760,6 @@ pub fn copy_index_output_args(
         .map(|s| s.to_string()),
     );
     args.push(url.to_owned());
-    if trace && matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
-        if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
-            args[index + 1] = format!("trace_headers,{}", args[index + 1]);
-        } else {
-            // Insert before the output URL so this remains an output option.
-            let at = args.len() - 1;
-            args.splice(at..at, ["-bsf:v".to_owned(), "trace_headers".to_owned()]);
-        }
-    }
-    args
 }
 
 /// Build ffmpeg args for a copy session that plurx segments itself.
@@ -2834,22 +2839,57 @@ pub fn copy_pipe_args_with_audio_delivery(
         video,
         audio,
     );
-    args.extend(
-        [
-            "-avoid_negative_ts",
-            "make_zero",
-            "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
-            "-use_editlist",
-            "0",
-            "-f",
-            "mp4",
-            "pipe:1",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
+    append_copy_mp4_output(&mut args, "pipe:1");
     args
+}
+
+/// One production playback output plus canonical video-only measurement,
+/// sharing the input and selected video recipe. The caller must inherit and
+/// concurrently drain `measurement_url` (a `pipe:N` descriptor with N >= 3).
+/// HEVC tracing belongs only to the measurement output and requires info logs.
+///
+/// Recipes needing a second audio-offset input are refused. This argv alone
+/// does not qualify seeked measurements as equal to the whole-file index.
+#[allow(clippy::too_many_arguments)]
+pub fn copy_pipe_args_with_index_measurement(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    measurement_url: &str,
+) -> Result<Vec<String>, &'static str> {
+    let descriptor = measurement_url
+        .strip_prefix("pipe:")
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|descriptor| *descriptor >= 3);
+    if descriptor.is_none() {
+        return Err("index measurement requires an inherited pipe descriptor >= 3");
+    }
+    let mut args = copy_pipe_args_with_audio_delivery(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+    );
+    if args.iter().filter(|arg| arg.as_str() == "-i").count() != 1 {
+        return Err("index measurement requires a single production input");
+    }
+    if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+        // This is a global option; change the existing option before the
+        // input rather than appending another loglevel between outputs.
+        if let Some(level) = args.iter().position(|arg| arg == "-loglevel") {
+            args[level + 1] = "info".to_owned();
+        }
+    }
+    args.extend(copy_index_output_args(source, video, measurement_url, true));
+    Ok(args)
 }
 
 /// Build ffmpeg args to *copy* the source video into HLS (fMP4 segments) with

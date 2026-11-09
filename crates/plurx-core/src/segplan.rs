@@ -37,6 +37,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::fmp4::{CutClass, CutPolicy, CutReason, PromotionInputs};
 
+/// Sparse canonical observations and exact source-clock normalization.
+pub mod ranges;
+
 /// Bumped when a stored index or plan stops being readable by this binary.
 /// A persisted row from a newer version is discarded and rebuilt rather than
 /// misinterpreted — an index is always cheaper to rebuild than to get wrong.
@@ -607,11 +610,25 @@ impl IndexRow {
         let track = fragment
             .track(video.id)
             .ok_or("a fragment carried no video track")?;
+        // A row is an exact planning observation. Saturation would make
+        // distinct fragments indistinguishable and publish a false byte budget.
+        let bytes = u32::try_from(fragment.len())
+            .map_err(|_| "fragment wire bytes exceed the index row limit")?;
+        let video_bytes = track
+            .samples()
+            .try_fold(0u32, |total, sample| total.checked_add(sample.size))
+            .ok_or("video payload bytes exceed the index row limit")?;
+        let duration = track
+            .samples()
+            .try_fold(0u64, |total, sample| {
+                total.checked_add(u64::from(sample.duration))
+            })
+            .ok_or("video duration exceeds the index row limit")?;
         Ok(Self {
             dts: track.base_decode_time,
-            duration: fragment.video_duration(init),
-            bytes: u32::try_from(fragment.len()).unwrap_or(u32::MAX),
-            video_bytes: u32::try_from(track.byte_len()).unwrap_or(u32::MAX),
+            duration,
+            bytes,
+            video_bytes,
             class: crate::fmp4::classify(fragment, init),
         })
     }
@@ -1309,6 +1326,59 @@ pub fn discards_to(index: &FragmentIndex, landed_row: usize, entry: &PlanEntry) 
 mod tests {
     use super::{FragmentIndexOutcome, IndexOutcomeState, IndexRefusal, SourceIdentity};
     use crate::content_analysis::{IndexFailureCode, INDEX_FAILURE_POLICY_REVISION};
+
+    /// Oversized sample declarations must not become a seemingly exact
+    /// u32::MAX observation. No multi-gigabyte allocation is needed to exercise
+    /// the declaration boundary handed to the shared row extractor.
+    #[test]
+    fn canonical_row_rejects_payload_overflow_instead_of_saturating() {
+        use crate::fmp4::{FragmentReader, Unit};
+        let mut reader = FragmentReader::new();
+        reader.push(&crate::testfixtures::pipe("h264"));
+        let Some(Unit::Init(init)) = reader.next_unit().expect("fixture measurement") else {
+            panic!("fixture init");
+        };
+        let Some(Unit::Fragment(mut fragment)) = reader.next_unit().expect("fixture measurement")
+        else {
+            panic!("fixture fragment");
+        };
+        assert!(super::IndexRow::from_fragment(&fragment, &init).is_ok());
+        let video_id = init.video().expect("fixture measurement").id;
+        let track = fragment
+            .tracks
+            .iter_mut()
+            .find(|t| t.track_id == video_id)
+            .expect("fixture measurement");
+        let run = track
+            .runs
+            .iter_mut()
+            .find(|r| !r.samples.is_empty())
+            .expect("fixture measurement");
+        let mut sample = run.samples[0];
+        sample.size = u32::MAX;
+        run.samples = vec![sample];
+        let only_run = run.clone();
+        track.runs = vec![only_run];
+        // The representable boundary remains exact (even if the payload is
+        // malformed, classification is a separate concern).
+        assert_eq!(
+            super::IndexRow::from_fragment(&fragment, &init)
+                .expect("fixture measurement")
+                .video_bytes,
+            u32::MAX
+        );
+        let track = fragment
+            .tracks
+            .iter_mut()
+            .find(|t| t.track_id == video_id)
+            .expect("fixture measurement");
+        sample.size = 1;
+        track.runs[0].samples.push(sample);
+        assert_eq!(
+            super::IndexRow::from_fragment(&fragment, &init),
+            Err("video payload bytes exceed the index row limit")
+        );
+    }
 
     fn outcome(
         typed_retryable: Option<bool>,

@@ -1086,6 +1086,7 @@ paths = [
   "crates/plurx-core/src/playback/**",
   "crates/plurx-core/src/tracks.rs",
   "crates/plurx-core/src/segplan.rs",
+  "crates/plurx-core/src/segplan/*.rs",
   "crates/plurx-core/src/output_measurement.rs",
   "crates/plurx-core/src/transcode/**",
   "tools/dv_quality/bt2020_pq_rgb48.filter",
