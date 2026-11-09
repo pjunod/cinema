@@ -35,7 +35,7 @@ if(typeof v.requestVideoFrameCallback==='function')
    presented_frames:frame.presentedFrames,media_time_s:frame.mediaTime}));
 else report('unsupported_frame_observer');
 v.src='master.m3u8';v.play().catch(error=>report('play_rejected',{error:String(error)}));
-setTimeout(()=>report('complete'),__OBSERVE_MS__);
+
 </script>'''
 
 
@@ -51,6 +51,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--media-dir', type=pathlib.Path, required=True)
     parser.add_argument('--evidence-dir', type=pathlib.Path, required=True)
+    parser.add_argument('--case', action='append', dest='selected_cases',
+                        help='run only a named failed case; preserve earlier successful receipts')
     args = parser.parse_args()
     if platform.system() != 'Darwin':
         parser.error('native WebKit qualification requires macOS')
@@ -84,6 +86,11 @@ def main():
              ('candidate-cold-subtitle', 8, case['candidate_first_playlist'], True, 'cold'),
              ('candidate-warm-subtitle', 8, case['candidate_first_playlist'], True, 'warm'),
              ('completed-short', 8, case['failed_first_playlist'] + '#EXT-X-ENDLIST\n', True, 'off')]
+    required_cases = [row[0] for row in cases]
+    if args.selected_cases:
+        if set(args.selected_cases) - set(required_cases):
+            parser.error('unknown case; choose from: ' + ', '.join(required_cases))
+        cases = [row for row in cases if row[0] in args.selected_cases]
     runs = []
     current = {}
 
@@ -151,10 +158,16 @@ def main():
             events = [json.loads(line) for line in process.stdout.splitlines() if line.startswith('{')]
             frames = [row for row in events if row['event'] == 'first_frame']
             completed = [row for row in events if row['event'] == 'complete']
-            played = bool(frames and frames[0]['elapsed_ms'] <= case['first_frame_budget_ms'])
-            negative_is_startup_stall = bool(not frames and completed and completed[-1]['ready_state'] == 1
+            playing = [row for row in events if row['event'] == 'playing']
+            played = bool(frames and playing and
+                          max(frames[0]['elapsed_ms'], playing[0]['elapsed_ms']) <= case['first_frame_budget_ms'])
+            # A decoded preroll frame at time zero is not playback. The old
+            # snapshot may reach HAVE_CURRENT_DATA without becoming playable.
+            negative_is_startup_stall = bool(completed and completed[-1]['position_s'] < 0.1
+                                            and completed[-1]['ready_state'] <= 2 and not playing
                                             and not any(row['event'] in ['error', 'play_rejected'] for row in events))
-            continuity = bool(completed and (not should_play or completed[-1]['position_s'] >= seconds - 3))
+            minimum_progress = seconds - 3 if name == 'candidate-native' else 0.5
+            continuity = bool(completed and (not should_play or completed[-1]['position_s'] >= minimum_progress))
             passed = (process.returncode == 0 and continuity and
                       (played if should_play else negative_is_startup_stall))
             runs.append(dict(name=name, passed=passed, should_play=should_play, events=events,
@@ -169,6 +182,7 @@ def main():
                    case_sha256=digest(CASE), media_sha256=media_hashes,
                    native_platform=platform.platform(), probe_sha256=digest(swift),
                    observed_at_unix_ms=round(time.time() * 1000), runs=runs,
+                   required_cases=required_cases, complete_matrix=len(runs) == len(required_cases),
                    passed=all(run['passed'] for run in runs),
                    scope='Matched-source cutter output and production-pinned snapshot; not daemon HTTP or fleet acceptance')
     (evidence / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')

@@ -30,8 +30,19 @@ let window = NSWindow(
 window.contentView = view
 window.orderFront(nil)
 view.load(URLRequest(url: URL(string: CommandLine.arguments[1])!))
-let until = Date().addingTimeInterval(Double(CommandLine.arguments[2])! + 1)
+let until = Date().addingTimeInterval(Double(CommandLine.arguments[2])!)
 while Date() < until {
     RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+}
+// Query from the native observation clock. A stalled offscreen page can
+// throttle JS timers; that must not erase the negative control's final state.
+var sampled = false
+view.evaluateJavaScript("report('complete')") { _, error in
+    if let error { print("observation_error: \(error)") }
+    sampled = true
+}
+let sampleDeadline = Date().addingTimeInterval(2)
+while !sampled && Date() < sampleDeadline {
+    RunLoop.current.run(until: Date().addingTimeInterval(0.05))
 }
 window.close()
