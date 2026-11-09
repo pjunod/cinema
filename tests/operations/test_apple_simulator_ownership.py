@@ -92,7 +92,7 @@ class AppleSimulatorOwnershipTests(unittest.TestCase):
             xcrun = bin_dir / "xcrun"
             xcrun.write_text("""#!/bin/bash
 set -euo pipefail
-printf 'simctl %s\\n' "$*" >> "$SIMCTL_CALLS"
+printf '%s\\n' "$*" >> "$SIMCTL_CALLS"
 case "$1 $2" in
   'simctl list')
     if [[ "${3:-}" == "devices" && "${4:-}" == "--json" ]]; then
