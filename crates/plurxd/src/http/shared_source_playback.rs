@@ -2584,9 +2584,11 @@ async fn build_real_source_start_fixture(
         .await
         .expect("actual startup factory"));
     let client = selected.local_client().expect("local voter client");
-    let mut state = Arc::new(crate::http::source_actor_test_state());
+    let mut state = Arc::new(super::tests::test_state_with_store(
+        Arc::clone(&selected.store),
+        selected.identity.node_id.clone(),
+    ));
     let state_mut = Arc::get_mut(&mut state).expect("sole initial State");
-    state_mut.store = Arc::clone(&selected.store);
     state_mut.membership = selected.membership_manager();
     state_mut.clock_observer = if let Some(clock) = &startup_clock {
         clock
@@ -2971,6 +2973,8 @@ async fn build_real_source_start_fixture(
             plurx_core::transcode::EncoderCaps::default(),
             plurx_core::transcode::Pipeline::Cpu,
         )
+        .with_source_identity(state.node_id.clone(), state.sharing.accepted_drivers.boot_id())
+        .with_subtitle_jobs(Arc::clone(&state.jobs))
         // The boot proof the HDR10 rung needs; the planner still decides the
         // grade from the player's caps.
         .with_hdr10_passthrough(matches!(mode, SourceFixtureMode::Hdr10)),
