@@ -1207,7 +1207,9 @@ const PROCESSED_UPGRADE_SWITCHES: u64 = 20;
 /// run an upgrade now. Advisory: nothing here gates anything.
 async fn processed_dv_upgrade(state: &AppState) -> DeveloperEnableItem {
     use crate::playback_control::{prepared_seam_counts, processed_upgrade_count, ClientPlatform};
-    use RequirementStatus::{Met, Unavailable, Unmet};
+    #[cfg(target_os = "linux")]
+    use RequirementStatus::Unavailable;
+    use RequirementStatus::{Met, Unmet};
     let platform = |id: &'static str, title: &'static str, client: ClientPlatform, note: &str| {
         // The processed upgrade's own switches: prepared switches to a
         // processed successor. Ordinary rung changes ride the same seam but

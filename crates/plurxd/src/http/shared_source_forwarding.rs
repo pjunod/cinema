@@ -1956,7 +1956,12 @@ pub(super) async fn collect_fresh_location(
     let deadline = deadline.min(Instant::now() + Duration::from_secs(9));
     let mut peers = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        state.membership.media_peers(),
+        state
+            .membership
+            .media_peers_for_route(crate::http::learner_route_eligible(
+                &axum::http::Method::POST,
+                LOCATE_PATH,
+            )),
     )
     .await
     .map_err(|_| unavailable())?
