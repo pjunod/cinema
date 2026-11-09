@@ -531,6 +531,8 @@ async fn actual_pinned_playback(
 ) {
     use axum::http::StatusCode;
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
+    let logs = Arc::new(crate::logbuf::LogBuffer::new(256));
+    let _capture = crate::logbuf::capture_for_test(&logs);
     let fixture = build_receiver_fixture(address, mode, None, fixture_body_budget).await;
     let tls = Arc::new(
         LiveNodeTls::open(
@@ -733,8 +735,9 @@ async fn actual_pinned_playback(
         assert_eq!(
             status,
             StatusCode::OK,
-            "actual pre-session WebVTT; H2={h2}: {}",
-            String::from_utf8_lossy(&bytes)
+            "actual pre-session WebVTT; H2={h2}: {}; Source warnings: {:?}",
+            String::from_utf8_lossy(&bytes),
+            logs.tail("warn", 8)
         );
         assert_eq!(headers["content-type"], "text/vtt; charset=utf-8");
         assert_eq!(headers["cache-control"], "no-store");
