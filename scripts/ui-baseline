@@ -701,13 +701,13 @@ class SelfHost:
         self.media_dir = Path(args.out).resolve() / "media"
         self.config = self.root / "plurx.toml"
         self.log = self.root / "plurxd.log"
-        # Standalone opens only HTTP and Jellyfin. Reserve this fixture's real
-        # listeners without configuring or starting any cluster services.
-        self.port, self.jellyfin_port = free_ports(args.port, 2)
-        self.base_url = f"http://127.0.0.1:{self.port}"
+        # Select the actual HTTP and Jellyfin listeners only after the build.
+        self.port = self.jellyfin_port = None
+        self.base_url = None
         self.proc = None
         self.token = None
         self.routes = {}
+        self._storage_binding = None
 
     def server_bin(self):
         if self.args.server_bin:
@@ -724,16 +724,29 @@ class SelfHost:
         return path
 
     def spawn(self):
+        binary = getattr(self, "_server_binary", None) or self.server_bin()
         handle = open(self.log, "a")
+        # TLS listeners are outside this disposable HTTP/Jellyfin fixture.
+        # Unset these overrides: an empty value has configuration semantics.
+        environment = {key: value for key, value in os.environ.items() if key not in {
+            "PLURX_HTTPS_ENABLED", "PLURX_HTTPS_PORT", "PLURX_HTTPS_CERT_FILE",
+            "PLURX_HTTPS_KEY_FILE", "PLURX_HTTPS_SANS", "PLURX_HTTPS_REDIRECT_PORT",
+        }}
         # start_new_session so a Ctrl-C in the terminal does not race us to the
         # child: this script stops it explicitly, in `stop`.
         self.proc = subprocess.Popen(
-            [str(self.server_bin()), "--config", str(self.config), "run"],
+            [str(binary), "--config", str(self.config), "run"],
             cwd=ROOT, stdout=handle, stderr=handle, stdin=subprocess.DEVNULL,
             start_new_session=True,
             # Do not inherit an operator's legacy activation test injection.
-            env={**os.environ, "PLURX_LOG": "info", "TZ": "UTC",
+            env={**environment, "PLURX_LOG": "info", "TZ": "UTC",
+                 "PLURX_SERVER_NAME": "plurx",
                  "PLURX_CLUSTER_ACTIVATION_FAILPOINT": "",
+                 "PLURX_BIND": f"127.0.0.1:{self.port}",
+                 "PLURX_DATA_DIR": str(self.data_dir),
+                 "PLURX_CACHE_DIR": "", "PLURX_TRANSCODE_DIR": "",
+                 "PLURX_CREDENTIAL_KEY_FILE": "",
+                 "PLURX_SHARED_CACHE_DIR": "", "PLURX_SHARED_CACHE_ID": "",
                  "PLURX_JELLYFIN_PORT": str(self.jellyfin_port)},
         )
         deadline = time.time() + 60
@@ -742,11 +755,55 @@ class SelfHost:
                 raise Fail(f"plurxd exited {self.proc.returncode}; see {self.log}")
             try:
                 with urllib.request.urlopen(self.base_url + "/healthz", timeout=1) as r:
-                    if r.status == 200:
-                        return
+                    healthy = r.status == 200
             except Exception:
-                time.sleep(0.2)
+                healthy = False
+            if healthy:
+                self.require_owned_server()
+                return
+            time.sleep(0.2)
         raise Fail(f"plurxd never became healthy; see {self.log}")
+
+    def require_owned_server(self):
+        """Bind HTTP readiness to this root before sending any setup mutation."""
+        if self.proc is None or self.proc.poll() is not None:
+            raise Fail("fixture HTTP readiness requires its live daemon child")
+        try:
+            root = self.data_dir.resolve(strict=True)
+            if root != self.data_dir or self.data_dir.is_symlink():
+                raise Fail("fixture storage root must be its canonical directory")
+            manifest_path = root / "storage-mode.json"
+            database = root / "plurx.db"
+            for path in [manifest_path, database]:
+                metadata = path.lstat()
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                    raise Fail(f"native fixture file is not canonical: {path}")
+            manifest = json.loads(manifest_path.read_text())
+            if (not isinstance(manifest, dict) or manifest.get("version") != 1
+                    or manifest.get("mode") != "sqlite"
+                    or manifest.get("database") != "plurx.db"
+                    or any(not isinstance(manifest.get(key), str) or not manifest[key]
+                           for key in ["instance_id", "node_id", "generation"])):
+                raise Fail("fixture readiness requires its bound native storage manifest")
+            with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+                binding = db.execute("SELECT instance_id,node_id,generation FROM storage_identity WHERE singleton=1").fetchone()
+                if binding != tuple(manifest[key] for key in ["instance_id", "node_id", "generation"]):
+                    raise Fail("fixture readiness manifest/database identity mismatch")
+            previous = getattr(self, "_storage_binding", None)
+            if previous is not None and binding != previous:
+                raise Fail("native fixture identity changed across the capture restart")
+            info = api(self.base_url, "/server", timeout=5)
+            if (not isinstance(info, dict) or info.get("storage_mode") != "sqlite"
+                    or info.get("cluster_enabled") is not False
+                    or any(info.get(key) != manifest[key] for key in ["instance_id", "node_id"])):
+                raise Fail("fixture HTTP listener belongs to another server; refusing to seed")
+            if info.get("setup_required") is not (self.token is None):
+                raise Fail("owned fixture setup state differs from this boot; refusing to seed")
+            if self.proc.poll() is not None:
+                raise Fail("fixture daemon exited during HTTP readiness verification")
+            self._storage_binding = binding
+        except (OSError, ValueError, sqlite3.Error) as error:
+            raise Fail(f"cannot verify owned native fixture HTTP readiness: {error}; see {self.log}") from error
 
     def stop(self, *, require_clean=False):
         if not self.proc:
@@ -767,6 +824,12 @@ class SelfHost:
 
     def start(self):
         generate_media(self.media_dir, self.args.ffmpeg)
+        # Finish a possibly cold build before selecting the listeners. The
+        # host network is shared with other runner jobs; a port chosen before
+        # an eight-minute build is no longer a reservation when it ends.
+        self._server_binary = self.server_bin()
+        self.port, self.jellyfin_port = free_ports(self.args.port, 2)
+        self.base_url = f"http://127.0.0.1:{self.port}"
         # The database is rebuilt from scratch every run. Reusing it would carry
         # last run's ids, scan results and watch rows into this one, and the
         # first divergence would be invisible until a screenshot moved.
@@ -947,6 +1010,8 @@ class SelfHost:
                         or binding != tuple(manifest[key] for key in ["instance_id", "node_id", "generation"])
                         or instance != (manifest["instance_id"],)):
                     raise Fail("native fixture manifest/database identity or schema mismatch")
+                if binding != getattr(self, "_storage_binding", None):
+                    raise Fail("stopped native fixture identity differs from its verified seed boot")
                 yield db
             finally:
                 db.close()
