@@ -920,28 +920,11 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         }
                     }
                     let fragment = fragment;
-                    let Some(video) = init.video() else {
-                        return IndexOutcome::Unsupported("the moov lost its video track".into());
+                    let row = match IndexRow::from_fragment(&fragment, init) {
+                        Ok(row) => row,
+                        Err(reason) => return IndexOutcome::Unsupported(reason.into()),
                     };
-                    let Some(track) = fragment.track(video.id) else {
-                        // A video-only pipe emitting a fragment with no video
-                        // in it describes nothing the plan can use.
-                        return IndexOutcome::Unsupported(
-                            "a fragment carried no video track".into(),
-                        );
-                    };
-                    let dts = track.base_decode_time;
-                    let duration = fragment.video_duration(init);
-                    covered_ticks = covered_ticks.saturating_add(duration);
-                    let bytes = u32::try_from(fragment.len()).unwrap_or(u32::MAX);
-                    // The landing matcher's quantity. Container overhead is
-                    // excluded deliberately: a production generation carries
-                    // audio, so its `moof` and `mdat` are tens of kilobytes
-                    // larger than this pipe's and vary with the audio track,
-                    // while the video samples themselves are copied and come
-                    // out byte for byte identical.
-                    let video_bytes = u32::try_from(track.byte_len()).unwrap_or(u32::MAX);
-                    let class = fmp4::classify(&fragment, init);
+                    covered_ticks = covered_ticks.saturating_add(row.duration);
 
                     // Only a clean fragment can begin a segment, so only a
                     // clean fragment can ever be a generation's first — which
@@ -953,7 +936,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     if hdr10.observe_fragment(&fragment, init).is_err() {
                         parameter_sets_constant = false;
                     }
-                    if class.is_clean() {
+                    if row.clean() {
                         let mut here = PromotionInputs::from_fragment(&fragment, init);
                         here.hdr10_sei.clear();
                         match promotion {
@@ -972,13 +955,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         }
                     }
 
-                    rows.push(IndexRow {
-                        dts,
-                        duration,
-                        bytes,
-                        video_bytes,
-                        class,
-                    });
+                    rows.push(row);
                 }
                 // ffmpeg's random-access index, written at EOF. Seeing it is
                 // the strongest evidence the pass was complete.

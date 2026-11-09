@@ -445,13 +445,30 @@ static const char dv_dm_body_lattice[] = // CM2.9 pass 0: the frame's output lat
   "color=vec4(c29vertex(origin+idx*step),1.0);\n";
 static const char dv_dm_body_h[] =       // pass 2: horizontal Gaussian and derivative
   "ivec2 q=ivec2(gl_FragCoord.xy); int w=textureSize(dpass,0).x; vec4 acc=vec4(0.0);\n"
-  "int lo=0,hi=w-1; if(u[18].x==4.0 && u[20].z>u[20].x){ lo=int(u[20].x); hi=int(u[20].z)-1; }\n"
+  "for(int j=-5;j<=5;j++){ int x=clamp(q.x-j,0,w-1); vec2 d=texelFetch(dpass,ivec2(x,q.y),0).xy; float g=GX[j+5], dg=-float(j)/4.0*g;\n"
+  " acc+=vec4(g*d.x,dg*d.x,g*d.y,dg*d.y); }\n"
+  "color=acc;\n";
+// Only partial CM4 active areas use this shader; full-frame bodies stay literal-identical.
+static const char dv_dm_body_h_active_cm4[] =       // pass 2: horizontal Gaussian and derivative
+  "ivec2 q=ivec2(gl_FragCoord.xy); vec4 acc=vec4(0.0);\n"
+  "int lo=int(u[20].x),hi=int(u[20].z)-1;\n"
   "for(int j=-5;j<=5;j++){ int x=clamp(q.x-j,lo,hi); vec2 d=texelFetch(dpass,ivec2(x,q.y),0).xy; float g=GX[j+5], dg=-float(j)/4.0*g;\n"
   " acc+=vec4(g*d.x,dg*d.x,g*d.y,dg*d.y); }\n"
   "color=acc;\n";
 static const char dv_dm_body_final_cm4[] =   // pass 3: vertical, detail, finish
   "ivec2 q=ivec2(gl_FragCoord.xy); vec3 rgb=texelFetch(master,q,0).rgb; float wgt=u[18].y;\n"
-  "ivec2 size=textureSize(hpass,0); ivec4 a=u[20].z>u[20].x ? ivec4(u[20]) : ivec4(0,0,size.x,size.y);\n"
+  "float B1=0.0,dx1=0.0,dy1=0.0,B2=0.0,dx2=0.0,dy2=0.0;\n"
+  "if(wgt>-1.0){ int h=textureSize(hpass,0).y;\n"
+  " for(int j=-2;j<=2;j++){ int y=clamp(q.y-j,0,h-1); vec4 t=texelFetch(hpass,ivec2(q.x,y),0); float g=GY[j+2], dg=-float(j)*g;\n"
+  "  B1+=g*t.x; dx1+=g*t.y; dy1+=dg*t.x; B2+=g*t.z; dx2+=g*t.w; dy2+=dg*t.z; } }\n"
+  " vec3 ic=ictcp(rgb); vec3 o=c4point(rgb);\n"
+  " if(wgt>-1.0){ float D=ic.x-o.x; float r=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); o.x=o.x+r*(D-B1); }\n"
+  " vec3 res=c4finish(o); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
+  ;
+// Only partial CM4 active areas use this shader; full-frame bodies stay literal-identical.
+static const char dv_dm_body_final_active_cm4[] =   // pass 3: vertical, detail, finish
+  "ivec2 q=ivec2(gl_FragCoord.xy); vec3 rgb=texelFetch(master,q,0).rgb; float wgt=u[18].y;\n"
+  "ivec4 a=ivec4(u[20]);\n"
   "if(q.x<a.x || q.y<a.y || q.x>=a.z || q.y>=a.w){ color=vec4(vec3(7.309559025783966e-7),1.0); }else{\n"
   "float B1=0.0,dx1=0.0,dy1=0.0,B2=0.0,dx2=0.0,dy2=0.0;\n"
   "if(wgt>-1.0){\n"
@@ -513,7 +530,8 @@ static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_f
   // u[20] was unused. Full-frame/no-L5 keeps its old all-zero words; the
   // other colour/curve words remain unchanged.
   dv_dm_put(f->u[20], 0, 0, 0, 0);
-  if (f->algo == 4 && (active.x0 || active.y0 || active.x1 != w || active.y1 != h))
+  bool active_cm4 = f->algo == 4 && (active.x0 || active.y0 || active.x1 != w || active.y1 != h);
+  if (active_cm4)
     dv_dm_put(f->u[20], active.x0, active.y0, active.x1, active.y1);
   if (!dv_dm_gpu.dispatch) dv_dm_gpu.dispatch = pl_dispatch_create(log, gpu);
   if (!dv_dm_gpu.dispatch || !dv_dm_tex(gpu, &dv_dm_gpu.dtex, w, h) || !dv_dm_tex(gpu, &dv_dm_gpu.htex, w, h) ||
@@ -541,11 +559,13 @@ static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_f
     if (!dv_dm_pass(sh, desc, f->algo == 4 ? dv_dm_body_point_cm4 : dv_dm_body_point_cm29, source, "master", NULL, "unused", NULL, "unused2", f->u, w, h) ||
         !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.dtex))) return NULL;
     sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
-    if (!dv_dm_pass(sh, desc, dv_dm_body_h, dv_dm_gpu.dtex, "dpass", NULL, "unused", NULL, "unused2", f->u, w, h) ||
+    if (!dv_dm_pass(sh, desc, active_cm4 ? dv_dm_body_h_active_cm4 : dv_dm_body_h, dv_dm_gpu.dtex, "dpass", NULL, "unused", NULL, "unused2", f->u, w, h) ||
         !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.htex))) return NULL;
   }
   sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
-  if (!dv_dm_pass(sh, desc, f->algo == 4 ? dv_dm_body_final_cm4 : dv_dm_body_final_cm29, source, "master", dv_dm_gpu.htex, "hpass", lattice, "lpass", f->u, w, h) ||
+  const char *final_body = f->algo == 4 ?
+      (active_cm4 ? dv_dm_body_final_active_cm4 : dv_dm_body_final_cm4) : dv_dm_body_final_cm29;
+  if (!dv_dm_pass(sh, desc, final_body, source, "master", dv_dm_gpu.htex, "hpass", lattice, "lpass", f->u, w, h) ||
       !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.out))) return NULL;
   return dv_dm_gpu.out;
 }
