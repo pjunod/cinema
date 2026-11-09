@@ -223,8 +223,12 @@ mutation.
 ## Instrumentation
 
 Activity/status exposes the actor's bounded terminal cause through
-`lease_state`: `active`, `ended`, `authority_fenced`, `expired`, or
-`unavailable`. No free-form reason or node identifier becomes a metric label.
+`lease_state`: `active`, `ended`, `authority_fenced`, `expired`,
+`startup_expired`, `pause_expired`, `released` (client release), `stopped`
+(operator stop), or `unavailable`. A release or stop is never an authority
+fence: it retires the generation with its own cause, and its HTTP 410 body
+keeps the existing durable reason (`deleted`, `admin_stop`). No free-form
+reason or node identifier becomes a metric label.
 
 Prometheus adds:
 
@@ -235,7 +239,14 @@ plurx_playback_rolling_terminal_events_total{event="authority_fence",outcome="wo
 plurx_playback_rolling_terminal_events_total{event="authority_fence",outcome="already_terminal"}
 plurx_playback_rolling_terminal_events_total{event="lease_expired",outcome="won"}
 plurx_playback_rolling_terminal_events_total{event="lease_expired",outcome="already_terminal"}
+plurx_playback_rolling_terminal_events_total{event="released",outcome="won"}
+plurx_playback_rolling_terminal_events_total{event="stopped",outcome="won"}
 ```
+
+(`startup_expired`, `pause_expired`, `released` and `stopped` carry both
+outcomes like the rest. The retirement owner of a released or stopped
+generation observes the committed cause instead of sending a second End, so a
+release adds no `end`/`already_terminal`.)
 
 The existing aggregate expiry and non-expiry retirement counters remain during
 M3c3 for dashboard continuity. M4 may remove them only after consumers move to

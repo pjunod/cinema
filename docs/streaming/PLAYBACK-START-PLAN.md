@@ -98,23 +98,23 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 ## 5. Routing
 
 - **Review:** this plan — Fable and Astra applied (§7). A1+B1 and E1 designs: Fable again before build.
-- **Build contracts (Opus):** Phase 1 is written up in [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) (one document, all nine lanes). Phase 2+ (A1, A2, A3, B1, D3, E1, F1) get contracts after the A1+B1 design review.
+- **Build contracts (Opus):** Phase 1 is written up in [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md). Phase 2+ (A1, A2, A3, B1, D3, E1, F1) get contracts after the A1+B1 design review.
 - **Build (Sonnet):** C2, G1 web, A3, H1.
 
 ## 6. Lane status
 
 | Lane | Owner (model, session) | Plan rev | Built on effort | Accepted on fleet (before → after) |
 |---|---|---|---|---|
-| H2 | — | 3 | unclaimed | build/protocol/owner inventory; placement through each mixed cohort → |
-| C2 | — | 3 | unclaimed | verdict idle; 3,878 waiting unreported → |
-| C3 | — | 3 | unclaimed | active 4,097/4,096; retired-digest queued 3,878; ready_24h 0 → |
-| C1 | — | 3 | unclaimed | claims/2.7 d 16 (media1); lab4/lab6 cannot claim → |
-| D2 | — | 3 | unclaimed | codeless 503s; create p99 → |
-| D1 | — | 3 | unclaimed | DV vs non-DV cold TTFF; 20 switches/platform → |
-| G1 | — | 3 | unclaimed | — |
-| R1 | — | 3 | unclaimed | authority_fence won 16/18 → by cause |
-| H1 | — | 3 | unclaimed | — |
-| A1 | — | 3 | unclaimed (design review first) | vod_index_pending fallbacks 18/29; remux ≤5 s share; p90 → |
+| H2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on effort (#1424, review 1) | build/protocol/owner inventory; placement through each mixed cohort → |
+| C2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on effort (#1424, review 1 fixes #1436) | verdict idle; 3,878 waiting unreported; 2026-11-07 22:3x UTC media1 (`4ddbf1229`): verdict `degraded`, claimable 2, ready_24h 0, claimed_24h 0, claims_since_start 36, depth `retry_wait` fragment_index 3,881 (due rows mislabelled: ms compared to s) → |
+| C3 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on effort (#1424, review 1 fixes #1436) | active 4,097/4,096; retired-digest queued 3,878; ready_24h 0 → |
+| C1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1434, review 2 fixes #1438) | claims/2.7 d 16 (media1); lab4/lab6 cannot claim → |
+| D2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1431, review 1 fixes #1440) | codeless 503s; create p99 → |
+| D1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | claimed (last) | DV vs non-DV cold TTFF; 20 switches/platform → |
+| G1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1433, review 2 fixes #1438) | — |
+| R1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1428, review 1 fix #1440) | authority_fence won 16/18 → by cause |
+| H1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1427) | — |
+| A1 | — | 3 | unclaimed (design review first); shared S1–S12: [RCA](SHARED-LIBRARY-PLAYBACK-RCA.md) | vod_index_pending fallbacks 18/29; remux ≤5 s share; p90 → |
 | A2 | — | 3 | unclaimed | HW/SW transcode TTFF → |
 | A3 | — | 3 | unclaimed | — |
 | B1 | — | 3 | unclaimed (design with A1) | artifacts matched across a deploy → |
@@ -138,3 +138,7 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 | 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Fleet state read (queue wedged at cap; release-as-fence); Fable review applied (rev 2, not what #1401 merged — bridge propagation). |
 | 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Astra review applied; rev 3 is the first revision build agents may claim. |
 | 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Ruling 3 mechanism settled (M6); Phase 1 build contracts written (QUEUE, CREATE). |
+| 2026-11-07 | H2, C2, C3, C1, D2, R1, H1, G1, D1 | claude-opus-5-5 / 01BCWL9xwmpSjitHqZMTRAht | Phase 1 claimed. Lanes integrate on `effort/playback-start`; per Paul (2026-11-07) one adversarial review and one fast-lane run on effort → main rather than per lane. H2/C2/C3 built; H1 built by a Sonnet sub-agent; C1, D2, R1 by Opus sub-agents. |
+| 2026-11-08 | D2 (review 1 S4) | claude-opus-5-5 / 01BCWL9xwmpSjitHqZMTRAht | Open gap, not fixed: a remote start whose reply is lost on both the ask and the one re-ask (`start_remote_recovering_lost_reply`) moves to the next candidate under the same incarnation while the first worker may still hold a session for it. That first producer runs until its confirmation watcher sees another owner's activation of the incarnation (≤ 500 ms after it lands) or, when no activation comes, to `REMOTE_ACTIVATION_CONFIRMATION_WINDOW`. Closing it needs the transport to tell "never delivered" from "delivered, reply lost" (`PeerTransportError` does not) so only the first moves on. Pinned by `media_sessions::tests::a_dropped_remote_start_reply_takes_the_session_the_worker_already_holds`. |
+| 2026-11-08 | H2, C2, C3, H1, R1, D2, C1, G1 | claude-opus-5-5 / 01BCWL9xwmpSjitHqZMTRAht | Landed on the effort: #1424, #1427, #1428, #1431, #1433, #1434. Fable review 1 (landed lanes) → fixes #1436, #1440; Fable review 2 (C1, G1) → fixes #1438. Combined effort head clippy-clean; paperwork vs main 16/16. D1 building; then D1 review, one fast-lane run, effort → main. |
+| 2026-11-08 | D1 (review 3 S7) | claude-opus-5-5 / 01BCWL9xwmpSjitHqZMTRAht | Open gap: remote-owned ordinary sessions never upgrade (the create registers the intent only where the ingress owns the route). Follow-up: carry the intent on the remote start dispatch and trigger from the owner actor's presented phase. |

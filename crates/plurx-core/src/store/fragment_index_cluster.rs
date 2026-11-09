@@ -91,20 +91,57 @@ BEGIN
 END;
 "#;
 
-/// Shared capacity predicate for the pre-artifact source read. Both Store
-/// backends place it in candidate selection and the fenced claim mutation.
-pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
-    format!(
-        r#"NOT EXISTS (SELECT 1 FROM analysis_required_resources required
-      WHERE required.request_id = analysis_requests.request_id AND (
-        EXISTS(SELECT 1 FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
-          AND held.custody_id IS NOT NULL AND held.active_occupancy=1 AND held.expires_at_ms<={now})
-        OR EXISTS(SELECT 1 FROM foreground_source_permissions fg WHERE (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
+/// The terms of [`analysis_source_capacity_clause`], each with the reason it
+/// names. Each term is evaluated for one required resource (`required`) of
+/// one `analysis_requests` row; any true term refuses the source read.
+///
+/// `exclude_self` leaves the row's own holdings out of every count, so the
+/// same rule can be asked again after the claim, while the request holds its
+/// reservation and custody (`BackgroundJobStore::analysis_source_admission`).
+/// Claim selection passes `false`: an unclaimed row holds nothing.
+pub(crate) fn analysis_source_capacity_terms(
+    now: &str,
+    exclude_self: bool,
+) -> [(&'static str, String); 4] {
+    let (own_occupancy, own_reservation) = if exclude_self {
+        (
+            " AND NOT (held.owner_kind='analysis' AND held.work_id=analysis_requests.request_id)",
+            " AND held.request_id<>analysis_requests.request_id",
+        )
+    } else {
+        ("", "")
+    };
+    [
+        // A reader whose authority lapsed may still be reading.
+        (
+            "source_custody_unsettled",
+            format!(
+                r#"EXISTS(SELECT 1 FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
+          AND held.custody_id IS NOT NULL AND held.active_occupancy=1 AND held.expires_at_ms<={now}{own_occupancy})"#
+            ),
+        ),
+        // A foreground stream needs this domain now.
+        (
+            "foreground_source",
+            format!(
+                r#"EXISTS(SELECT 1 FROM foreground_source_permissions fg WHERE (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
           AND (fg.lease_expires_at_ms>{now} OR fg.custody_held=1)
-          AND (fg.lease_expires_at_ms<={now} OR COALESCE(fg.permits_through_ms,0)<={now}))
-        OR (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
-          AND held.active_occupancy=1 AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL))>=2
-        OR (NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
+          AND (fg.lease_expires_at_ms<={now} OR COALESCE(fg.permits_through_ms,0)<={now}))"#
+            ),
+        ),
+        // Two readers already occupy the domain.
+        (
+            "domain_readers_full",
+            format!(
+                r#"(SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
+          AND held.active_occupancy=1 AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL){own_occupancy})>=2"#
+            ),
+        ),
+        // Without a live viewer, a background read takes only an idle domain.
+        (
+            "background_reader_busy",
+            format!(
+                r#"(NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
               WHERE viewer.request_scope = 'playback-analysis'
                 AND viewer.job_id = analysis_requests.request_id
                 AND viewer.state = 'pending' AND viewer.deadline_ms > {now})
@@ -129,7 +166,7 @@ pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
                               AND source.trigger = 'playback'
                               AND source.state IN ('queued','running'))))))
             + (SELECT COUNT(*) FROM analysis_source_reservations held
-                WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.expires_at_ms > {now}
+                WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.expires_at_ms > {now}{own_reservation}
                   AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
                       WHERE viewer.request_scope = 'playback-analysis'
                         AND viewer.job_id = held.request_id
@@ -137,7 +174,144 @@ pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
             + (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
               WHERE held.owner_kind IN ('lease','offline') AND held.active_occupancy=1
                 AND (held.resource_key=required.resource_key OR held.resource_key='source_io' OR required.resource_key='source_io')
-                AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL)) >= 1)))"#
+                AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL)) >= 1)"#
+            ),
+        ),
+    ]
+}
+
+/// Shared capacity predicate for the pre-artifact source read. Both Store
+/// backends place it in candidate selection and the fenced claim mutation.
+pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
+    let [custody, foreground, readers, background] =
+        analysis_source_capacity_terms(now, false).map(|(_, term)| term);
+    format!(
+        "NOT EXISTS (SELECT 1 FROM analysis_required_resources required
+      WHERE required.request_id = analysis_requests.request_id AND (
+        {custody}
+        OR {foreground}
+        OR {readers}
+        OR {background}))"
+    )
+}
+
+/// The cross-node arm of the analysis claim (`cross_node`): a fragment-index
+/// row another live member targeted. `node` is the claimant's placeholder;
+/// the claim's own digest filter already pins `pipeline_version`.
+pub(crate) fn analysis_cross_node_clause(node: &str) -> String {
+    format!(
+        "(analysis_requests.component = 'fragment_index' AND analysis_requests.target_node_id <> ''
+        AND analysis_requests.target_node_id <> {node}
+        AND NOT EXISTS (SELECT 1 FROM settings
+          WHERE key = 'internal.cluster_job_owner_removed.' || analysis_requests.target_node_id))"
+    )
+}
+
+/// How many copy-video identities one claim may name as ones its executor
+/// cannot emit. An identity is an argv fingerprint shared by every file of
+/// one pipeline class, so a handful covers a library; the bound keeps the
+/// bound parameter small on every claim.
+pub const MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES: usize = 256;
+
+/// The claim's executor exclusion: another node's row naming a copy-video
+/// identity in `excluded` (a JSON array) is not this executor's to take. The
+/// claimant's own and untargeted rows are never excluded -- an identity its
+/// own node cannot emit is superseded there, not handed on. `node` and
+/// `excluded` are the claim's placeholders.
+pub(crate) fn analysis_executor_exclusion_clause(node: &str, excluded: &str) -> String {
+    format!(
+        "(analysis_requests.target_node_id IN ({node}, '')
+        OR analysis_requests.video_identity NOT IN (SELECT value FROM json_each({excluded})))"
+    )
+}
+
+/// The claim's order: work a viewer is waiting on first, wherever it is
+/// targeted (a foreign row with a live playback waiter outranks this node's
+/// own background rows), then this node's own and untargeted rows, then age
+/// (forced work boosted). `node`, `now` and `boost` are the claim's
+/// placeholders.
+pub(crate) fn analysis_claim_order(node: &str, now: &str, boost: &str) -> String {
+    format!(
+        "CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
+            OR (component = 'fragment_index' AND EXISTS (
+                SELECT 1 FROM background_job_waiters waiter
+                WHERE waiter.request_scope = 'playback-analysis'
+                  AND waiter.job_id = analysis_requests.request_id
+                  AND waiter.state = 'pending' AND waiter.deadline_ms > {now}))
+            THEN 0 ELSE 1 END,
+         CASE WHEN target_node_id IN ({node}, '') THEN 0 ELSE 1 END,
+         created_at_ms - CASE WHEN priority = 'forced' THEN {boost} ELSE 0 END,
+         created_at_ms, request_id"
+    )
+}
+
+/// How many files one [`ClusterFragmentIndexStore::fragment_index_requests_for_files`]
+/// read may name.
+pub const MAX_FILE_REQUEST_LOOKUP: usize = 256;
+
+/// The request per file for `fragment_index_requests_for_files`. `files` is
+/// the JSON array of file ids; columns are `REQUEST_COLS` from `ranked`.
+pub(crate) fn fragment_index_requests_for_files_sql(files: &str, columns: &str) -> String {
+    format!(
+        "WITH ranked AS (
+           SELECT analysis_requests.*, ROW_NUMBER() OVER (
+             PARTITION BY file_id
+             ORDER BY CASE WHEN state IN ('queued', 'running', 'submitted') THEN 0 ELSE 1 END,
+                      created_at_ms DESC, request_id DESC) AS file_rank
+             FROM analysis_requests
+            WHERE component = 'fragment_index'
+              AND file_id IN (SELECT CAST(value AS INTEGER) FROM json_each({files})))
+         SELECT {columns} FROM ranked WHERE file_rank = 1 ORDER BY file_id"
+    )
+}
+
+/// Validate a per-file lookup and bind its file ids as one JSON array.
+pub(crate) fn file_request_lookup_json(file_ids: &[i64]) -> Result<String, StoreError> {
+    if file_ids.len() > MAX_FILE_REQUEST_LOOKUP || file_ids.iter().any(|id| *id <= 0) {
+        return Err(StoreError::Task("invalid file request lookup".to_owned()));
+    }
+    serde_json::to_string(file_ids).map_err(|error| StoreError::Task(error.to_string()))
+}
+
+/// Validate a claim's exclusion list and bind it as one JSON array.
+pub(crate) fn analysis_claim_exclusions_json(excluded: &[String]) -> Result<String, StoreError> {
+    if excluded.len() > MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES
+        || excluded
+            .iter()
+            .any(|identity| identity.is_empty() || identity.len() > 128)
+    {
+        return Err(StoreError::Task("invalid analysis claim".to_owned()));
+    }
+    serde_json::to_string(excluded).map_err(|error| StoreError::Task(error.to_string()))
+}
+
+/// The same rule as [`analysis_source_capacity_clause`], asked of a claimed
+/// request: `"admit"`, the first term's reason, or `"not_owned"` when the
+/// row is no longer this owner's running fence (or membership removed the
+/// owner, as `background_source_may_continue` also refuses). `$1` is
+/// `{request_id, owner_node_id, fence, now_ms}`.
+pub(crate) fn analysis_source_admission_sql() -> String {
+    let now = "json_extract($1,'$.now_ms')";
+    let mut cases = String::new();
+    for (reason, term) in analysis_source_capacity_terms(now, true) {
+        cases.push_str(&format!(
+            "\n  WHEN EXISTS (SELECT 1 FROM analysis_requests JOIN analysis_required_resources required
+        ON required.request_id = analysis_requests.request_id
+      WHERE analysis_requests.request_id = json_extract($1,'$.request_id') AND {term})
+    THEN '\"{reason}\"'"
+        ));
+    }
+    format!(
+        "SELECT CASE
+  WHEN NOT EXISTS (SELECT 1 FROM analysis_requests
+      WHERE request_id = json_extract($1,'$.request_id') AND state = 'running'
+        AND owner_node_id = json_extract($1,'$.owner_node_id')
+        AND fence = json_extract($1,'$.fence') AND cancel_requested = 0
+        AND lease_expires_ms > {now}
+        AND NOT EXISTS (SELECT 1 FROM settings
+          WHERE key = 'internal.cluster_job_owner_removed.' || analysis_requests.owner_node_id))
+    THEN '\"not_owned\"'{cases}
+  ELSE '\"admit\"' END AS result_json"
     )
 }
 
@@ -1779,6 +1953,121 @@ pub struct AnalysisHistoryPage {
 /// other producer needs to be able to enqueue into at all.
 pub const MAX_ACTIVE_ANALYSIS_REQUESTS: i64 = 4_096;
 
+/// The hard bound on *all* active analysis requests, runnable or not, as a
+/// multiple of [`MAX_ACTIVE_ANALYSIS_REQUESTS`]: stranded backlog may not
+/// grow the table without limit while it waits to be reconciled.
+pub const ANALYSIS_BACKLOG_BOUND_FACTOR: i64 = 4;
+
+/// The prefix of the durable fence membership writes for a removed (or
+/// removal-pending) node. A request targeted at a fenced node is never worked
+/// for: the claim's cross-node arm skips it, removal retires it
+/// (`retire_analysis_requests_for_node`) and the settle pass catches any it
+/// missed.
+pub(crate) const REMOVED_TARGET_FENCE_PREFIX: &str = "internal.cluster_job_owner_removed.";
+
+/// What the last worker inventory read knows about who can run a
+/// fragment-index request: the fresh engine digest each reporting node runs,
+/// and the committed members (this node included) when membership could be
+/// read.
+///
+/// It carries the one rule for *stranded* work, shared by the enqueue cap,
+/// the queue health (`incompatible` against `eligible`) and the background
+/// reconciler. A pre-worker fragment-index request (`queued`, no worker cache
+/// key) is claimable by its own target when that target runs its digest, and
+/// by any other idle member that does (the claim's cross-node arm) unless the
+/// target is fenced as removed. So it is **stranded** exactly when no live
+/// worker runs its digest, or its target is removed
+/// ([`analysis_request_stranded_sql`] in SQL, [`Self::is_stranded`] for a row
+/// in hand). Which of the two remedies applies depends on the target
+/// ([`Self::remedy`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveAnalysisEngines {
+    /// Node id to the engine digest it reported inside the freshness window.
+    pub engines: std::collections::BTreeMap<String, String>,
+    /// Committed members, this node included; `None` when membership could
+    /// not be read, which disables the absent-target remedy.
+    pub members: Option<std::collections::BTreeSet<String>>,
+}
+
+/// What the background reconciler does with a stranded request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StrandedRemedy {
+    /// The target reports, fresh, this engine: replace the request onto it
+    /// under the same target (`engine_changed`).
+    TargetEngine(String),
+    /// The target is not a committed member and reports nothing: re-home the
+    /// request through the reconcile candidate's reassign path
+    /// (`target_changed`), source checked on the new node. A removed
+    /// target's request is never re-homed — the Store refuses it and removal
+    /// retires it.
+    TargetAbsent,
+    /// The target is a member that has not reported inside the window:
+    /// absence of evidence retires nothing. It stays counted `incompatible`
+    /// until the target reports again or membership removes it.
+    TargetSilent,
+}
+
+impl LiveAnalysisEngines {
+    /// The distinct digests some live worker runs, the JSON array the SQL
+    /// half binds.
+    #[must_use]
+    pub fn digests(&self) -> Vec<String> {
+        self.engines
+            .values()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// The row-in-hand half of [`analysis_request_stranded_sql`], short of
+    /// the removed-target fence (a Store fact; the reconcile statements
+    /// refuse a fenced target themselves).
+    #[must_use]
+    pub fn is_stranded(&self, request: &AnalysisRequest) -> bool {
+        request.component == "fragment_index"
+            && request.state == "queued"
+            && request.result_cache_key.is_empty()
+            && !self
+                .engines
+                .values()
+                .any(|engine| engine == &request.pipeline_version)
+    }
+
+    /// The remedy for a stranded request, `None` when it is not stranded.
+    #[must_use]
+    pub fn remedy(&self, request: &AnalysisRequest) -> Option<StrandedRemedy> {
+        if !self.is_stranded(request) {
+            return None;
+        }
+        Some(match self.engines.get(&request.target_node_id) {
+            Some(engine) => StrandedRemedy::TargetEngine(engine.clone()),
+            None if self
+                .members
+                .as_ref()
+                .is_some_and(|members| !members.contains(&request.target_node_id)) =>
+            {
+                StrandedRemedy::TargetAbsent
+            }
+            None => StrandedRemedy::TargetSilent,
+        })
+    }
+}
+
+/// [`LiveAnalysisEngines`]'s stranded rule over an unqualified
+/// `analysis_requests` row. `live` is the placeholder bound to the JSON array
+/// of [`LiveAnalysisEngines::digests`], or NULL when the inventory is
+/// unknown — then nothing is stranded, every row counts as before.
+pub(crate) fn analysis_request_stranded_sql(live: &str) -> String {
+    format!(
+        "({live} IS NOT NULL AND component = 'fragment_index' AND state = 'queued' \
+          AND COALESCE(result_cache_key, '') = '' \
+          AND (pipeline_version NOT IN (SELECT value FROM json_each({live})) \
+            OR EXISTS (SELECT 1 FROM settings \
+              WHERE key = '{REMOVED_TARGET_FENCE_PREFIX}' || target_node_id)))"
+    )
+}
+
 /// Room above [`MAX_ACTIVE_ANALYSIS_REQUESTS`] that only a viewer's own
 /// request may use: copy preparation (`priority = foreground`,
 /// `trigger = playback`) and a viewer's subtitle source (`foreground`). Background discovery that filled the queue to the ceiling refused
@@ -1923,6 +2212,20 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         stamp: &SubtitleSourceStamp,
         priority: &str,
         now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.enqueue_or_promote_subtitle_source_with(stamp, priority, now_ms, None)
+            .await
+    }
+
+    /// [`Self::enqueue_or_promote_subtitle_source`] with the same cap as
+    /// [`Self::enqueue_analysis_request_with`]: runnable work holds the
+    /// ceiling, stranded fragment-index backlog only the hard bound.
+    async fn enqueue_or_promote_subtitle_source_with(
+        &self,
+        stamp: &SubtitleSourceStamp,
+        priority: &str,
+        now_ms: i64,
+        live_engines: Option<&LiveAnalysisEngines>,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     async fn retire_subtitle_source_ready(
@@ -1976,6 +2279,23 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     async fn enqueue_analysis_request(
         &self,
         request: &NewAnalysisRequest,
+    ) -> Result<AnalysisRequest, StoreError> {
+        self.enqueue_analysis_request_with(request, None).await
+    }
+
+    /// [`Self::enqueue_analysis_request`] with the cap measured against
+    /// *runnable* work. `live_engines` is the last worker inventory; an
+    /// active pre-worker `fragment_index` row it calls stranded
+    /// ([`LiveAnalysisEngines`]) is backlog nobody can claim and does not hold the
+    /// [`MAX_ACTIVE_ANALYSIS_REQUESTS`] ceiling against new runnable work —
+    /// on 2026-11-07 3,878 such rows held it at 4,097/4,096 and refused every
+    /// background enqueue. All active rows stay bounded by
+    /// [`ANALYSIS_BACKLOG_BOUND_FACTOR`] times the ceiling. `None` (inventory
+    /// unknown) counts every active row, as before.
+    async fn enqueue_analysis_request_with(
+        &self,
+        request: &NewAnalysisRequest,
+        live_engines: Option<&LiveAnalysisEngines>,
     ) -> Result<AnalysisRequest, StoreError>;
 
     async fn claim_analysis_request(
@@ -2006,6 +2326,8 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
             lease_expires_ms,
             false,
             false,
+            false,
+            &[],
         )
         .await
     }
@@ -2017,6 +2339,22 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     /// `targeted_only` limits the claim to requests naming `node_id`: a
     /// learner resolves what is targeted at it, and leaves the untargeted
     /// requests any node may take to the voters.
+    ///
+    /// `cross_node` (with a `pipeline_version`) also admits fragment-index
+    /// requests targeted at another node that asked for exactly this engine:
+    /// an idle node takes a busy one's work, builds the index under the
+    /// requester's `target_node_id`, and delivery hydrates the target. This
+    /// node's own rows (and untargeted ones) come after work a viewer waits
+    /// on, wherever that is targeted; a target membership has removed is
+    /// never worked for.
+    ///
+    /// `excluded_video_identities` (at most
+    /// [`MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES`]) are copy-video identities
+    /// this executor has found it cannot emit: another node's row naming one
+    /// stays queued for a node that can, instead of being claimed, refused
+    /// and requeued uncharged here on every pass. The executor keeps the list
+    /// (node-local); the claimant's own rows are never excluded.
+    #[allow(clippy::too_many_arguments)]
     async fn claim_analysis_request_for_capacity(
         &self,
         node_id: &str,
@@ -2025,12 +2363,15 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         lease_expires_ms: i64,
         viewer_only: bool,
         targeted_only: bool,
+        cross_node: bool,
+        excluded_video_identities: &[String],
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     /// Retire the active (queued, running or submitted) requests targeted at
     /// `node_id`, which membership has removed: nothing but the target ever
     /// claims a targeted request, so they would otherwise stay active --
-    /// counted against [`MAX_ACTIVE_ANALYSIS_REQUESTS`] -- for good. Each is
+    /// counted against [`MAX_ACTIVE_ANALYSIS_REQUESTS`] -- for good (a
+    /// cross-node claim skips a removed target too). Each is
     /// cancelled with `node_removed`; returns how many.
     async fn retire_analysis_requests_for_node(
         &self,
@@ -2102,6 +2443,16 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
 
     async fn analysis_requests(&self, limit: i64) -> Result<Vec<AnalysisRequest>, StoreError>;
 
+    /// For each of `file_ids` (at most [`MAX_FILE_REQUEST_LOOKUP`]), the
+    /// fragment-index request that says what "index now" would do: an active
+    /// (`queued`, `running`, `submitted`) one when there is any, else the
+    /// newest. Files with no request are absent. An advisory read from this
+    /// node's replica: it labels an action the server re-validates.
+    async fn fragment_index_requests_for_files(
+        &self,
+        file_ids: &[i64],
+    ) -> Result<Vec<AnalysisRequest>, StoreError>;
+
     /// Complete keyset inventory of active requests, including older work.
     async fn analysis_reconciliation_page(
         &self,
@@ -2141,9 +2492,15 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ///
     /// Rows are ordered oldest-terminal first, so paging through a backlog
     /// makes progress rather than re-offering the same head.
+    ///
+    /// `error_code` narrows the selection to terminal rows whose
+    /// `last_error_code` is exactly that code, so an operator can put back one
+    /// cause (say, `pipeline_version_unavailable` after a deploy) without the
+    /// rest.
     async fn reopenable_analysis_requests(
         &self,
         component: Option<&str>,
+        error_code: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AnalysisRequest>, StoreError>;
 

@@ -565,6 +565,7 @@ pub(crate) async fn readiness(
             ),
             event: Some("playback_display_mode".into()),
             limit: 2_000,
+            ..PlaybackEventQuery::default()
         })
         .await?;
 
@@ -615,6 +616,8 @@ pub(crate) async fn readiness(
             },
             clock_measurement(&state, clock_guard_enforced),
             durable_cluster_work(&state).await,
+            indexing_while_serving(&state).await,
+            processed_dv_upgrade(&state).await,
             bounded_catalogue_reads(
                 &state,
                 plurx_core::store::stored_switch(
@@ -1258,6 +1261,295 @@ async fn subtitle_peer_observation(state: &AppState) -> (RequirementStatus, Stri
     }
     let observation = absent_cluster_requirement(state, "reachable_peer", "A reachable media peer");
     (observation.status, observation.evidence)
+}
+
+/// Two source-I/O resource keys contend when they are the same domain or
+/// either is the whole-source wildcard `source_io` -- the overlap rule of the
+/// claim's `domain_readers_full` term.
+fn source_domains_overlap(a: &str, b: &str) -> bool {
+    a == b
+        || (a.starts_with("source_io")
+            && b.starts_with("source_io")
+            && (a == "source_io" || b == "source_io"))
+}
+
+/// Readers per storage domain as the claim counts them: every distinct
+/// active reader (kind and work id, however many rows it holds) whose key
+/// overlaps the domain, a wildcard reader counting against every domain.
+fn domain_readers(
+    holders: &[plurx_core::store::background_jobs::SourceIoHolder],
+) -> std::collections::BTreeMap<String, usize> {
+    let active = holders
+        .iter()
+        .filter(|holder| holder.active_occupancy)
+        .collect::<Vec<_>>();
+    active
+        .iter()
+        .map(|holder| holder.resource_key.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|domain| {
+            let readers = active
+                .iter()
+                .filter(|holder| source_domains_overlap(&holder.resource_key, &domain))
+                .map(|holder| (holder.kind.as_str(), holder.work_id.as_str()))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            (domain, readers)
+        })
+        .collect()
+}
+
+/// How many measured switches each platform needs before the processed
+/// Dolby Vision upgrade leaves the Developer tab (Paul, 2026-11-07).
+const PROCESSED_UPGRADE_SWITCHES: u64 = 20;
+
+/// Processed Dolby Vision / HDR10-E is an upgrade after the first frame,
+/// switched in through the M6 prepared replacement (plan ruling 3). It always
+/// runs when the processing settings are on; these rows say whether the
+/// switch it rides on is qualified on each platform, from the `prepared_seam`
+/// reports this node has counted since it started, and whether this node can
+/// run an upgrade now. Advisory: nothing here gates anything.
+async fn processed_dv_upgrade(state: &AppState) -> DeveloperEnableItem {
+    use crate::playback_control::{prepared_seam_counts, processed_upgrade_count, ClientPlatform};
+    use RequirementStatus::{Met, Unavailable, Unmet};
+    let platform = |id: &'static str, title: &'static str, client: ClientPlatform, note: &str| {
+        // The processed upgrade's own switches: prepared switches to a
+        // processed successor. Ordinary rung changes ride the same seam but
+        // say nothing about the processed output's.
+        let (qualified, reported) = prepared_seam_counts(client, true);
+        DeveloperRequirement {
+            id,
+            title,
+            status: if qualified >= PROCESSED_UPGRADE_SWITCHES {
+                Met
+            } else {
+                Unmet
+            },
+            evidence: format!(
+                "{}: {qualified} of {PROCESSED_UPGRADE_SWITCHES} measured switches to a processed \
+                 successor (committed, complete ±2 s frame samples, zero dropped frames, \
+                 independently observed audio continuity, no reopen); {reported} prepared \
+                 switches to a processed successor reported to this node since it started.{note}",
+                if qualified >= PROCESSED_UPGRADE_SWITCHES {
+                    "qualified"
+                } else {
+                    "unqualified"
+                }
+            ),
+        }
+    };
+    #[cfg(target_os = "linux")]
+    let renderer = match crate::vodencode::dv_runtime::ToolSet::capture().await {
+        Ok(Some(_)) => (
+            Met,
+            "The processing helper is installed on this node.".to_owned(),
+        ),
+        Ok(None) => (
+            Unmet,
+            "No processing helper on this node: its sessions start ordinary and stay so."
+                .to_owned(),
+        ),
+        Err(error) => (
+            Unavailable,
+            format!("The processing helper could not be read: {error}"),
+        ),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let renderer = (
+        Unmet,
+        "Processed output is rendered only on Linux workers.".to_owned(),
+    );
+    let slot = match state.transcode.processed_preparation_slot_free() {
+        Some(true) => (
+            Met,
+            "This node's one processed-preparation slot is free.".to_owned(),
+        ),
+        Some(false) => (
+            Unmet,
+            "This node's processed-preparation slot is in use: an upgrade that finds it busy \
+             declines and its session keeps playing ordinary."
+                .to_owned(),
+        ),
+        None => (
+            Unmet,
+            "This node has no processed-preparation slot.".to_owned(),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "processed_dv_upgrade",
+        title: "Processed DV upgrade",
+        enabled: None,
+        setting: None,
+        requirements: vec![
+            platform(
+                "processed_upgrade_web",
+                "Web switches measured",
+                ClientPlatform::Web,
+                " The web client does not measure audio at the seam (an analyser would capture \
+                 the element's audio for its lifetime), so its switches report audio unobserved.",
+            ),
+            platform(
+                "processed_upgrade_apple",
+                "Apple switches measured",
+                ClientPlatform::Apple,
+                "",
+            ),
+            platform(
+                "processed_upgrade_android",
+                "Android switches measured",
+                ClientPlatform::Android,
+                "",
+            ),
+            DeveloperRequirement {
+                id: "processed_upgrade_renderer",
+                title: "Renderer present",
+                status: renderer.0,
+                evidence: renderer.1,
+            },
+            DeveloperRequirement {
+                id: "processed_upgrade_slot",
+                title: "Slot free",
+                status: slot.0,
+                evidence: slot.1,
+            },
+            DeveloperRequirement {
+                id: "processed_upgrade_activity",
+                title: "Upgrades on this node",
+                status: Met,
+                evidence: format!(
+                    "Since start: {} scheduled by a first frame, {} staged as a prepared \
+                     successor, {} declined, {} not admitted, {} cancelled. A declined or \
+                     cancelled upgrade leaves its session playing ordinary.",
+                    processed_upgrade_count("scheduled"),
+                    processed_upgrade_count("staged"),
+                    processed_upgrade_count("declined"),
+                    processed_upgrade_count("admission_refused"),
+                    processed_upgrade_count("cancelled"),
+                ),
+            },
+        ],
+    }
+}
+
+/// Content analysis no longer waits for an idle node (C1): a serving node
+/// keeps indexing its own requests, an idle one takes other nodes'. Nothing
+/// to switch; these rows say what this node's indexer may do right now.
+async fn indexing_while_serving(state: &AppState) -> DeveloperEnableItem {
+    use plurx_core::store::background_jobs::JobKind;
+    use RequirementStatus::{Met, Unavailable, Unmet};
+    let observe = std::time::Duration::from_secs(3);
+    let live_waiting = state.transcode.admissions().live_is_waiting();
+    let (hardware, hardware_cap) = state.transcode.hardware_slots().await;
+    let software = state.transcode.admissions().software_in_use();
+    let idle = state.transcode.pretranscode_worker_idle();
+    let (readers_status, readers_evidence) = match tokio::time::timeout(
+        observe,
+        state.store.source_io_holders(crate::state::clock_ms()),
+    )
+    .await
+    {
+        Ok(Ok(holders)) => {
+            let domains = domain_readers(&holders);
+            let full = domains.values().any(|readers| *readers >= 2);
+            let listed = if domains.is_empty() {
+                "No storage domain has an active source reader".to_owned()
+            } else {
+                domains
+                    .iter()
+                    .take(8)
+                    .map(|(domain, readers)| format!("{domain}: {readers} of 2"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            (
+                if full { Unmet } else { Met },
+                format!(
+                    "{listed}. Each domain admits two source readers; without a live viewer a \
+                     background read takes only a domain no other reader holds"
+                ),
+            )
+        }
+        Ok(Err(error)) => (
+            Unavailable,
+            format!("The source-reader ledger could not be read: {error}"),
+        ),
+        Err(_) => (
+            Unavailable,
+            "The source-reader ledger did not answer within the three-second observation budget."
+                .into(),
+        ),
+    };
+    let (cross_status, cross_evidence) = if state.is_replicated() {
+        let authority = state.jobs.execution_authority();
+        match tokio::time::timeout(
+            observe,
+            authority.may_execute_job(JobKind::FragmentIndexBuild),
+        )
+        .await
+        {
+            Ok(authority) => (
+                if authority && idle { Met } else { Unmet },
+                format!(
+                    "Fragment-index execution authority: {authority}; idle: {idle}. Only an idle \
+                     node with that authority claims other nodes' fragment-index requests for its \
+                     own engine; a serving node claims its own"
+                ),
+            ),
+            Err(_) => (
+                Unavailable,
+                "Worker authority did not answer within the three-second observation budget."
+                    .into(),
+            ),
+        }
+    } else {
+        let observation =
+            absent_cluster_requirement(state, "serving_cross_node", "Takes other nodes' indexing");
+        (observation.status, observation.evidence)
+    };
+    DeveloperEnableItem {
+        id: "indexing_while_serving",
+        title: "Indexing while serving",
+        enabled: None,
+        setting: None,
+        requirements: vec![
+            DeveloperRequirement {
+                id: "serving_live_waiters",
+                title: "No viewer queuing for an encoder",
+                status: if live_waiting { Unmet } else { Met },
+                evidence: if live_waiting {
+                    "A viewer is queuing for this node's encoder: analysis claims only requests \
+                     with a live playback waiter until it is admitted"
+                } else {
+                    "No viewer is queuing for this node's encoder, so analysis claims any \
+                     request its source capacity admits"
+                }
+                .into(),
+            },
+            DeveloperRequirement {
+                id: "serving_slots_in_use",
+                title: "Encoder slots in use",
+                status: Met,
+                evidence: format!(
+                    "{hardware} of {hardware_cap} hardware slots and {software} software threads \
+                     are in use. An encoder in use does not stop analysis: its read holds a \
+                     source-domain reservation, not an encoder slot"
+                ),
+            },
+            DeveloperRequirement {
+                id: "serving_domain_readers",
+                title: "Storage-domain reader slots",
+                status: readers_status,
+                evidence: readers_evidence,
+            },
+            DeveloperRequirement {
+                id: "serving_cross_node",
+                title: "Takes other nodes' indexing",
+                status: cross_status,
+                evidence: cross_evidence,
+            },
+        ],
+    }
 }
 
 /// Readiness is a report about this node and the peers it can currently see.
@@ -3472,6 +3764,42 @@ mod tests {
                 .status,
             RequirementStatus::Unknown
         );
+    }
+
+    /// Review 2 of C1 (S9): the row counts readers the way the claim does --
+    /// a whole-source (`source_io`) reader contends with every domain, and a
+    /// reader holding several rows is one reader.
+    #[test]
+    fn domain_readers_follow_the_claims_overlap_and_distinct_reader_rules() {
+        use plurx_core::store::background_jobs::SourceIoHolder;
+        let holder = |key: &str, work: &str, active: bool| SourceIoHolder {
+            active_occupancy: active,
+            resource_key: key.to_owned(),
+            work_id: work.to_owned(),
+            kind: "analysis_source".to_owned(),
+            priority: "maintenance".to_owned(),
+            started_at_ms: 0,
+            lease_expires_at_ms: 0,
+            phase: None,
+            last_phase_at_ms: None,
+            origin_node_id: None,
+            origin_job_kind: None,
+            origin_job_state: None,
+        };
+        let readers = domain_readers(&[
+            holder("source_io:nas-a", "one", true),
+            holder("source_io:nas-a", "one", true),
+            holder("source_io", "everything", true),
+            holder("source_io:nas-b", "two", true),
+            holder("source_io:nas-b", "paused", false),
+        ]);
+        assert_eq!(readers.get("source_io:nas-a"), Some(&2), "{readers:?}");
+        assert_eq!(readers.get("source_io:nas-b"), Some(&2), "{readers:?}");
+        assert_eq!(readers.get("source_io"), Some(&3), "{readers:?}");
+        assert!(!source_domains_overlap(
+            "source_io:nas-a",
+            "source_io:nas-b"
+        ));
     }
 
     #[test]

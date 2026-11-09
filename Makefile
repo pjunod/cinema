@@ -1632,6 +1632,8 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/web/theme-family.test.js
 	@node tests/web/meridian.test.js
 	@node tests/web/activity-node-names.test.js
+	# Activity → Starts: one row per create, the nodes that did not answer, Index now.
+	@node tests/web/activity-starts.test.js
 	# Every child process is listed with its priority class and a stop (P-02 §3.2).
 	@node tests/web/activity-processes.test.js
 	@node tests/web/analysis-node-names.test.js

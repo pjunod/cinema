@@ -3399,6 +3399,39 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn media_session_request_progress(
+        &self,
+        principal: &crate::playback_principal::PlaybackPrincipal,
+        request_id: &str,
+    ) -> Result<Option<crate::domain::MediaSessionRequestProgress>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
+        if user_id <= 0 || request_id.is_empty() || request_id.len() > 128 {
+            return Ok(None);
+        }
+        let request_id = request_id.to_owned();
+        self.with_read(move |conn| {
+            let rebuilt = route_projection(conn)? == PRINCIPAL_ROUTE_COLS;
+            let owner_1 = local_owner_predicate(rebuilt, 1);
+            Ok(conn
+                .query_row(
+                    &format!(
+                        "SELECT state, incarnation_id, claim_expires_at_ms
+                           FROM media_session_requests WHERE {owner_1} AND request_id = ?2"
+                    ),
+                    params![user_id, request_id],
+                    |row| {
+                        Ok(crate::domain::MediaSessionRequestProgress {
+                            state: row.get(0)?,
+                            incarnation_id: row.get(1)?,
+                            claim_expires_at_ms: row.get(2)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+        .await
+    }
+
     async fn fail_media_session_request(
         &self,
         principal: &crate::playback_principal::PlaybackPrincipal,

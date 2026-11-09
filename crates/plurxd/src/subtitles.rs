@@ -1107,8 +1107,14 @@ async fn cluster_vtt_into(
         source_mtime: file.mtime,
         pipeline_version: crate::state::subtitle_source_pipeline_version().await,
     };
+    let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
     let mut request = match store
-        .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+        .enqueue_or_promote_subtitle_source_with(
+            &stamp,
+            "foreground",
+            subtitle_clock_ms(),
+            live.as_deref(),
+        )
         .await
     {
         Ok(Some(request)) => {
@@ -1136,7 +1142,12 @@ async fn cluster_vtt_into(
                     crate::telemetry::SubtitleSourceMetric::Repair,
                 );
                 request = match store
-                    .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+                    .enqueue_or_promote_subtitle_source_with(
+                        &stamp,
+                        "foreground",
+                        subtitle_clock_ms(),
+                        live.as_deref(),
+                    )
                     .await
                 {
                     Ok(Some(request)) => request,
@@ -2002,8 +2013,14 @@ async fn cluster_wait_burn(
             _ => return Ok(StoredBurn::Extract),
         }
     }
+    let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
     let mut request = match store
-        .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+        .enqueue_or_promote_subtitle_source_with(
+            &stamp,
+            "foreground",
+            subtitle_clock_ms(),
+            live.as_deref(),
+        )
         .await
     {
         Ok(Some(request)) => {
@@ -2032,7 +2049,12 @@ async fn cluster_wait_burn(
                     crate::telemetry::SubtitleSourceMetric::Repair,
                 );
                 request = match store
-                    .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+                    .enqueue_or_promote_subtitle_source_with(
+                        &stamp,
+                        "foreground",
+                        subtitle_clock_ms(),
+                        live.as_deref(),
+                    )
                     .await
                 {
                     Ok(Some(request)) => request,

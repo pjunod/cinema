@@ -688,6 +688,10 @@ fn the_queue_verdict_is_exposed_as_one_series_per_verdict_with_its_evidence() {
         claimable: 1_118,
         running_past_lease: 11,
         last_ready_at_ms: 1_700_000_000_000,
+        eligible: 1_118,
+        waiting: 7,
+        incompatible: 3_878,
+        ..Default::default()
     };
     let rendered = render_store_metrics(StoreMetricsView {
         sample: Some(plurx_core::store::PrometheusStoreSnapshot::default()),
@@ -721,6 +725,9 @@ fn the_queue_verdict_is_exposed_as_one_series_per_verdict_with_its_evidence() {
         "plurx_analysis_queue_claimed_24h 396\n",
         "plurx_analysis_queue_claimable 1118\n",
         "plurx_analysis_queue_running_past_lease 11\n",
+        "plurx_analysis_queue_eligible 1118\n",
+        "plurx_analysis_queue_waiting 7\n",
+        "plurx_analysis_queue_incompatible 3878\n",
         "plurx_analysis_queue_claims_since_start 412\n",
         "plurx_analysis_queue_lease_losses_since_start 398\n",
     ] {
@@ -921,6 +928,7 @@ fn raft_exposition_is_fixed_and_privacy_safe() {
 
 fn beacon(event: &str, ms: i64) -> ClientLog {
     ClientLog {
+        prepared_seam: None,
         transport: None,
         frame_drop: None,
         level: "warn".into(),
@@ -1754,4 +1762,136 @@ fn playback_event_reader_caps_the_requested_row_count() {
         .limit,
         2_000
     );
+}
+
+#[test]
+fn failed_by_code_is_one_bounded_series_per_code_the_page_explains() {
+    let mut sample = plurx_core::store::PrometheusStoreSnapshot::default();
+    let slot = |code: &str| {
+        plurx_core::store::ANALYSIS_FAILURE_CODES
+            .iter()
+            .position(|value| *value == code)
+            .expect("bounded code")
+    };
+    sample.analysis.failed_by_code[slot("pipeline_version_unavailable")] = 150;
+    sample.analysis.failed_by_code[slot("other")] = 2;
+    let rendered = render_store_metrics(StoreMetricsView {
+        sample: Some(sample),
+        age_seconds: Some(4),
+        valid: true,
+        errors: 0,
+        queue_health: None,
+    });
+    assert!(rendered.contains(
+        "plurx_analysis_queue_failed_by_code{code=\"pipeline_version_unavailable\"} 150\n"
+    ));
+    assert!(rendered.contains("plurx_analysis_queue_failed_by_code{code=\"other\"} 2\n"));
+    assert_eq!(
+        rendered
+            .matches("plurx_analysis_queue_failed_by_code{")
+            .count(),
+        plurx_core::store::ANALYSIS_FAILURE_CODE_SLOTS
+    );
+    // The label set is the page's: every bounded code but `other` is one
+    // `analysisErrorInfo` explains, and every code it explains is bounded.
+    let page = include_str!("../../web/pages/analysis.js");
+    let start = page
+        .find("function analysisErrorInfo(")
+        .expect("analysisErrorInfo");
+    let body = &page[start..start + page[start..].find("\n}\n").expect("end")];
+    let explained: Vec<&str> = body
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("    ")?
+                .split_once(":[")
+                .map(|(code, _)| code)
+        })
+        .collect();
+    let bounded: Vec<&str> = plurx_core::store::ANALYSIS_FAILURE_CODES
+        .iter()
+        .copied()
+        .filter(|code| *code != "other")
+        .collect();
+    assert_eq!(
+        explained, bounded,
+        "analysis.js and ANALYSIS_FAILURE_CODES must agree"
+    );
+}
+
+/// A `prepared_seam` beacon is counted for its platform and outcome; only a
+/// committed switch with its ±2 s frame window fully sampled, zero dropped
+/// frames, independently observed audio and no reopen counts toward the
+/// twenty the processed upgrade waits on. A word outside the vocabulary is
+/// dropped rather than guessed at.
+#[test]
+fn a_prepared_seam_counts_toward_graduation_only_when_clean_and_fully_measured() {
+    use crate::playback_control::{prepared_seam_counts, record_prepared_seam, ClientPlatform};
+    let parse = |json: serde_json::Value| -> ClientPreparedSeam {
+        serde_json::from_value(json).expect("seam beacon")
+    };
+    let clean = parse(
+        serde_json::json!({"platform":"android","outcome":"committed",
+        "frames_complete":true,"dropped_frames":0,"audio_observed":true,"reopened":false}),
+    );
+    let (platform, report) = clean.report().expect("in vocabulary");
+    assert_eq!(platform, ClientPlatform::Android);
+    assert!(report.qualifies());
+    for unclean in [
+        serde_json::json!({"platform":"android","outcome":"committed","frames_complete":false,
+            "dropped_frames":0,"audio_observed":true}),
+        serde_json::json!({"platform":"android","outcome":"committed","frames_complete":true,
+            "dropped_frames":1,"audio_observed":true}),
+        serde_json::json!({"platform":"android","outcome":"committed","frames_complete":true,
+            "dropped_frames":0,"audio_observed":false}),
+        serde_json::json!({"platform":"android","outcome":"committed","frames_complete":true,
+            "dropped_frames":0,"audio_observed":true,"reopened":true}),
+        serde_json::json!({"platform":"android","outcome":"refused"}),
+        serde_json::json!({"platform":"android","outcome":"switched_without_a_frame"}),
+    ] {
+        let (_, report) = parse(unclean.clone()).report().expect("in vocabulary");
+        assert!(!report.qualifies(), "{unclean}");
+    }
+    assert!(
+        parse(serde_json::json!({"platform":"roku","outcome":"committed"}))
+            .report()
+            .is_none()
+    );
+    assert!(
+        parse(serde_json::json!({"platform":"web","outcome":"teleported"}))
+            .report()
+            .is_none()
+    );
+    let (qualified, total) = prepared_seam_counts(ClientPlatform::Linux, false);
+    let processed_before = prepared_seam_counts(ClientPlatform::Linux, true);
+    let (_, refused) = parse(serde_json::json!({"platform":"linux","outcome":"refused"}))
+        .report()
+        .expect("in vocabulary");
+    record_prepared_seam(ClientPlatform::Linux, false, refused);
+    let (_, linux_clean) = parse(serde_json::json!({"platform":"linux","outcome":"committed",
+        "frames_complete":true,"dropped_frames":0,"audio_observed":true}))
+    .report()
+    .expect("in vocabulary");
+    record_prepared_seam(ClientPlatform::Linux, false, linux_clean);
+    let (after_qualified, after_total) = prepared_seam_counts(ClientPlatform::Linux, false);
+    assert_eq!(after_total - total, 2);
+    assert_eq!(after_qualified - qualified, 1);
+    // Review 3 S4: an ordinary rung change is not one of the processed
+    // upgrade's switches; a processed successor's is counted on its own.
+    assert_eq!(
+        prepared_seam_counts(ClientPlatform::Linux, true),
+        processed_before
+    );
+    record_prepared_seam(ClientPlatform::Linux, true, linux_clean);
+    let (processed_qualified, processed_total) = prepared_seam_counts(ClientPlatform::Linux, true);
+    assert_eq!(processed_qualified - processed_before.0, 1);
+    assert_eq!(processed_total - processed_before.1, 1);
+    let metrics = crate::playback_control::prometheus();
+    assert!(metrics.contains(
+        "plurx_playback_preparation_seams_total{platform=\"linux\",processed=\"false\",outcome=\"refused\"}"
+    ));
+    assert!(metrics.contains(
+        "plurx_playback_preparation_seams_qualified_total{platform=\"linux\",processed=\"true\"}"
+    ));
+    assert!(metrics
+        .contains("plurx_playback_preparation_processed_upgrades_total{outcome=\"scheduled\"}"));
 }

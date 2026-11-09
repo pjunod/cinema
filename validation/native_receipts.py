@@ -73,14 +73,16 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed cluster-wal-check daemon commands explicitly select cluster; the native
-    # desktop/Apple recipe blocks and resource closures are unchanged. Keep one
-    # exact current pin: earlier Makefile receipts require fresh native evidence.
-    'Makefile': '669a366f9082769752437d388a9a68466486a13d403a26a25633120003555a79',
-    # Reviewed 0.8.0 build 289: only CURRENT_PROJECT_VERSION differs from the
-    # reviewed build 288 bytes. Pin this exact spec; build-288 case receipts do
-    # not transfer, and added resources or scripts still change its digest.
-    'clients/apple/project.yml': 'a1abf8c51320464b6133191c377489e83c3e2d11e97d7477848b2549c6c9353a',
+    # Reviewed combined boundary: the cluster-only WAL commands remain explicit;
+    # main adds only the two-line Activity Starts Node suite to web-unit-check.
+    # Removing those two lines reproduces the prior reviewed Makefile exactly;
+    # native desktop/Apple recipes and resource closures remain byte-identical.
+    # Keep one exact current pin: prior receipts need fresh native evidence.
+    'Makefile': '95f08f6c6f7f4ee747e9909e16b3aad25ff1ffe66d4eea69842b02c35f529f8d',
+    # Reviewed build 294 differs from the prior reviewed build 289 spec only in
+    # CURRENT_PROJECT_VERSION. Old case receipts do not transfer; resource or
+    # script changes still change this exact digest and refuse reuse.
+    'clients/apple/project.yml': 'cacfa63dab169bb5fef1137c0b82805a2fead471c37b3054c6a950c48707307c',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     'clients/server-tray/macos/build': 'b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0',

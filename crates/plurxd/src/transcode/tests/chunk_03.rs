@@ -3414,12 +3414,54 @@
             "a full scratch budget is temporary contention, not a server fault: {refusal}"
         );
         assert!(
+            matches!(
+                capacity_refusal(&refusal),
+                Some((CapacityRefusal::Waitable { .. }, _))
+            ),
+            "a full budget frees when a session ends, so it is a wait: {refusal}"
+        );
+        assert!(
             refusal.contains(&reservation.to_string()),
             "the operator needs the figures to tell a full budget from a stuck cleanup: {refusal}"
         );
         assert_eq!(
             crate::http::hls::session_start_error_status_for_test(7, refusal),
             axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// D2 item 2: a full budget is a wait, but one start's grant above the
+    /// whole ceiling waits for nothing — no other session ending makes room.
+    /// The real admission path classifies the two apart.
+    #[tokio::test]
+    async fn scratch_grant_above_the_ceiling_is_a_terminal_refusal() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let per_session = 100_i64;
+        let reservation = per_session + ROLLING_SCRATCH_IN_FLIGHT_BYTES;
+        store
+            .put_setting(keys::HLS_AHEAD_MAX_BYTES, &per_session.to_string())
+            .await
+            .expect("per-session ceiling");
+        store
+            .put_setting(keys::HLS_SCRATCH_MAX_BYTES, &(reservation - 1).to_string())
+            .await
+            .expect("global ceiling below one grant");
+        let refusal = mgr
+            .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
+            .await
+            .expect_err("a grant above the ceiling is refused on an empty ledger");
+        assert_eq!(
+            capacity_refusal(&refusal).map(|(class, _)| class),
+            Some(CapacityRefusal::Terminal(TRANSCODE_SCRATCH_EXHAUSTED)),
+            "{refusal}"
         );
     }
 

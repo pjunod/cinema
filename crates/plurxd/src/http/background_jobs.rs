@@ -293,24 +293,28 @@ pub async fn retry(
                 "the original video identity is ambiguous; request a specific analysis".into(),
             ));
         }
+        let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
         let request = state
             .store
-            .enqueue_analysis_request(&plurx_core::store::NewAnalysisRequest {
-                request_id: request_id.clone(),
-                file_id,
-                source_size,
-                source_mtime,
-                component: "fragment_index".into(),
-                pipeline_version: engine,
-                video_identity,
-                requested_generation: request_id.clone(),
-                priority: "forced".into(),
-                trigger: "admin".into(),
-                force_rebuild: true,
-                target_node_id: state.node_id.clone(),
-                not_before_ms: now_ms,
-                created_at_ms: now_ms,
-            })
+            .enqueue_analysis_request_with(
+                &plurx_core::store::NewAnalysisRequest {
+                    request_id: request_id.clone(),
+                    file_id,
+                    source_size,
+                    source_mtime,
+                    component: "fragment_index".into(),
+                    pipeline_version: engine,
+                    video_identity,
+                    requested_generation: request_id.clone(),
+                    priority: "forced".into(),
+                    trigger: "admin".into(),
+                    force_rebuild: true,
+                    target_node_id: state.node_id.clone(),
+                    not_before_ms: now_ms,
+                    created_at_ms: now_ms,
+                },
+                live.as_deref(),
+            )
             .await?;
         if request.request_id != request_id {
             return Err(ApiError::Conflict(

@@ -4293,3 +4293,139 @@ async fn processing_owner_header_preserves_old_control_body_and_refuses_wrong_in
         assert_eq!(parsed, expected);
     }
 }
+
+/// Review 1, S4 (D2: a dropped remote reply). A start whose reply was lost
+/// asks the same worker again and takes the session that worker already
+/// holds under the incarnation (`Recovered`), so the claim keeps one producer;
+/// a definitive answer is never asked twice; and a loss that persists through
+/// the re-ask comes back as that loss, which is when the create moves to its
+/// next candidate (the remaining second-producer window, PLAYBACK-START-PLAN
+/// §8).
+#[tokio::test]
+async fn a_dropped_remote_start_reply_takes_the_session_the_worker_already_holds() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let held = |ownership| {
+        Ok(RemoteSessionStart {
+            info: valid_start_response(),
+            ownership,
+        })
+    };
+
+    for lost in [
+        PeerTransportError::TimedOut,
+        PeerTransportError::Unreachable,
+    ] {
+        let asks = AtomicUsize::new(0);
+        let started = start_remote_recovering_lost_reply(deadline, || {
+            let ask = asks.fetch_add(1, SeqCst);
+            async move {
+                if ask == 0 {
+                    // The worker created the session; its reply never arrived.
+                    Err(RemoteStartFailure::Transport(lost))
+                } else {
+                    held(RemoteSessionStartOwnership::Recovered)
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            asks.load(SeqCst),
+            2,
+            "{lost:?}: the same worker is asked again"
+        );
+        let started = match started {
+            Ok(started) => started,
+            Err(failure) => panic!("{lost:?}: the re-ask was not recovered: {failure:?}"),
+        };
+        assert_eq!(started.ownership, RemoteSessionStartOwnership::Recovered);
+        assert_eq!(started.info.session_id, valid_start_response().session_id);
+    }
+
+    for answer in [
+        held(RemoteSessionStartOwnership::Created),
+        Err(RemoteStartFailure::Unavailable),
+        Err(RemoteStartFailure::Terminal(
+            crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE,
+        )),
+        Err(RemoteStartFailure::Transport(
+            PeerTransportError::InvalidResponse,
+        )),
+    ] {
+        let asks = AtomicUsize::new(0);
+        let expected_failure = answer.as_ref().err().copied();
+        let mut answer = Some(answer);
+        let result = start_remote_recovering_lost_reply(deadline, || {
+            asks.fetch_add(1, SeqCst);
+            std::future::ready(answer.take().expect("asked once"))
+        })
+        .await;
+        assert_eq!(
+            asks.load(SeqCst),
+            1,
+            "a definitive answer is not asked twice"
+        );
+        assert_eq!(result.err(), expected_failure);
+    }
+
+    // Still lost on the re-ask: the loss is the answer, and the caller moves on.
+    let asks = AtomicUsize::new(0);
+    let result = start_remote_recovering_lost_reply(deadline, || {
+        asks.fetch_add(1, SeqCst);
+        std::future::ready(Err(RemoteStartFailure::Transport(
+            PeerTransportError::TimedOut,
+        )))
+    })
+    .await;
+    assert_eq!(asks.load(SeqCst), 2);
+    assert_eq!(
+        result.err(),
+        Some(RemoteStartFailure::Transport(PeerTransportError::TimedOut))
+    );
+
+    // Past the placement deadline there is no second ask.
+    let asks = AtomicUsize::new(0);
+    let result = start_remote_recovering_lost_reply(tokio::time::Instant::now(), || {
+        asks.fetch_add(1, SeqCst);
+        std::future::ready(Err(RemoteStartFailure::Transport(
+            PeerTransportError::TimedOut,
+        )))
+    })
+    .await;
+    assert_eq!(asks.load(SeqCst), 1);
+    assert!(result.is_err());
+}
+
+/// D2 item 2, remote arm: a worker's terminal capacity refusal reaches the
+/// ingress as its code, so the viewer is not told to wait for a start that no
+/// retry can make; every other 503 — an older worker's bodiless one, a fence,
+/// a waitable refusal — stays the waitable answer.
+#[tokio::test]
+async fn a_worker_terminal_capacity_refusal_crosses_to_the_ingress_by_code() {
+    use axum::response::IntoResponse;
+    let worker = crate::http::internal_media_sessions::RemoteStartError::TerminalCapacity(
+        crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE,
+    )
+    .into_response();
+    assert_eq!(worker.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(worker.into_body(), 4096)
+        .await
+        .expect("worker body");
+    assert_eq!(
+        remote_start_refusal(&body),
+        RemoteStartFailure::Terminal(crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE)
+    );
+    for waitable in [
+        &b""[..],
+        crate::serving_fence::SERVING_FENCED_JSON.as_bytes(),
+        br#"{"code":"transcode_capacity_pending"}"#,
+        br#"{"code":"not_a_contract_code"}"#,
+    ] {
+        assert_eq!(
+            remote_start_refusal(waitable),
+            RemoteStartFailure::Unavailable,
+            "{}",
+            String::from_utf8_lossy(waitable)
+        );
+    }
+}

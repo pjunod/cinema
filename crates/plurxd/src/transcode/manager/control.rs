@@ -1023,7 +1023,7 @@ impl TranscodeManager {
                 "authority_fence"
             }
             SessionRegistrationRejection::SessionRelease => {
-                session.project_authority_fence();
+                session.project_release(crate::playback_control::RollingTerminalCause::Released);
                 "client_released"
             }
             SessionRegistrationRejection::Producer(_) => "failed",
@@ -1052,37 +1052,73 @@ impl TranscodeManager {
     /// opposite things: a client releasing a stream it has finished with is
     /// routine, and an admin killing one from the activity page is somebody
     /// intervening.
+    /// Retire a session for an internal `reason` (supersession, a source
+    /// change, a start that was aborted). A viewer's release and an operator's
+    /// stop carry their own cause and go through
+    /// [`stop_session_for_terminal`](Self::stop_session_for_terminal).
     pub async fn stop_session(&self, session_id: &str, reason: &'static str) -> bool {
         // A VOD session ends with a tombstone rather than a retirement: its
         // rendition may outlive it (admitted cache, other readers), but this
         // id answers 410 ever after. The cause keys off the same reason
         // strings the live path already uses.
-        {
-            let cause = if reason.contains("superseded") {
-                crate::vodserve::Terminal::Superseded
-            } else if reason.contains("revoked") || reason.contains("credential") {
-                crate::vodserve::Terminal::Revoked
-            } else if reason.contains("replaced") || reason.contains("rescan") {
-                crate::vodserve::Terminal::Replaced
-            } else if reason.contains("admin") || reason.contains("operator") {
-                crate::vodserve::Terminal::AdminStop
-            } else {
-                crate::vodserve::Terminal::Deleted
-            };
-            if self.vod.end(session_id, cause).await {
-                return true;
-            }
+        let vod_cause = if reason.contains("superseded") {
+            crate::vodserve::Terminal::Superseded
+        } else if reason.contains("revoked") || reason.contains("credential") {
+            crate::vodserve::Terminal::Revoked
+        } else if reason.contains("replaced") || reason.contains("rescan") {
+            crate::vodserve::Terminal::Replaced
+        } else if reason.contains("admin") || reason.contains("operator") {
+            crate::vodserve::Terminal::AdminStop
+        } else {
+            crate::vodserve::Terminal::Deleted
+        };
+        self.stop_session_with(session_id, reason, vod_cause, None)
+            .await
+    }
+
+    /// Retire a session for the durable terminal `terminal` that won it. A
+    /// viewer's release (`Deleted`) and an operator's stop (`AdminStop`)
+    /// retire the generation with their own cause (`client_released`,
+    /// `killed`), typed here rather than read back out of `reason`; every
+    /// other terminal is an ordinary retirement under `reason`.
+    pub(crate) async fn stop_session_for_terminal(
+        &self,
+        session_id: &str,
+        terminal: crate::vodserve::Terminal,
+        reason: &'static str,
+    ) -> bool {
+        self.stop_session_with(
+            session_id,
+            reason,
+            terminal,
+            crate::playback_control::RollingTerminalCause::release_for(terminal),
+        )
+        .await
+    }
+
+    async fn stop_session_with(
+        &self,
+        session_id: &str,
+        reason: &'static str,
+        vod_cause: crate::vodserve::Terminal,
+        release: Option<crate::playback_control::RollingTerminalCause>,
+    ) -> bool {
+        if self.vod.end(session_id, vod_cause).await {
+            return true;
         }
         let Some(session) = self.sessions.lock().await.get(session_id).cloned() else {
             return false;
         };
-        let event_reason = if reason.contains("released") {
-            "client_released"
-        } else if reason.contains("admin") {
-            "killed"
-        } else {
-            reason
+        let event_reason = match release {
+            Some(crate::playback_control::RollingTerminalCause::Released) => "client_released",
+            Some(crate::playback_control::RollingTerminalCause::Stopped) => "killed",
+            _ => reason,
         };
+        // A release or operator stop retires the generation with its own
+        // cause; a serving fence that already retired it keeps its cause.
+        if let Some(release) = release {
+            session.project_release(release);
+        }
         let Ok(outcome) = self
             .retire_session_until_with_cause(session_id, &session, None, event_reason)
             .await
@@ -1181,6 +1217,25 @@ impl TranscodeManager {
         }
         let control = self.sessions.lock().await.get(session_id)?.control.clone();
         Some(Arc::new(control) as Arc<dyn crate::playback_control::PreparationGate>)
+    }
+
+    /// Where the viewer of `session_id` is now on the source timeline: its
+    /// latest accepted control demand advanced by that observation's age,
+    /// the playhead estimate the producers read
+    /// ([`crate::playback_control::rolling_estimated_position_ms`]), from
+    /// whichever engine serves the session. `None` before any exchange was
+    /// accepted, or for a session this node does not serve.
+    pub(crate) async fn session_playhead_estimate_ms(&self, session_id: &str) -> Option<i64> {
+        if let Some(estimate) = self.vod.accepted_playhead_estimate_ms(session_id).await {
+            return Some(estimate);
+        }
+        let control = self.sessions.lock().await.get(session_id)?.control.clone();
+        let lease = control.snapshot().await?;
+        let demand = lease.demand.as_ref()?;
+        Some(crate::playback_control::rolling_estimated_position_ms(
+            demand,
+            lease.demand_observation_age?,
+        ))
     }
 
     pub(crate) async fn promote_prepared_session(&self, session_id: &str) {
@@ -1362,6 +1417,28 @@ impl TranscodeManager {
     /// CAS then persists the first winning cause, and `begin_session_terminal`
     /// projects that exact winner in phase two.
     pub(crate) async fn begin_session_publication_fence(self: &Arc<Self>, session_id: &str) {
+        self.begin_session_publication_fence_for(session_id, None)
+            .await;
+    }
+
+    /// Phase one for a requested release or operator stop. Publication closes
+    /// exactly as in [`Self::begin_session_publication_fence`]; the actor
+    /// mirror carries the requester's typed cause instead of an authority
+    /// fence, so the first local terminal transition is the release itself.
+    pub(crate) async fn begin_session_release_fence(
+        self: &Arc<Self>,
+        session_id: &str,
+        intent: crate::vodserve::Terminal,
+    ) {
+        self.begin_session_publication_fence_for(session_id, Some(intent))
+            .await;
+    }
+
+    async fn begin_session_publication_fence_for(
+        self: &Arc<Self>,
+        session_id: &str,
+        intent: Option<crate::vodserve::Terminal>,
+    ) {
         let gate = self.activate_session_release_gate(session_id);
         let _transition = Arc::clone(&gate.transition).lock_owned().await;
         // This is the publication linearization point. Once set, every media
@@ -1369,7 +1446,11 @@ impl TranscodeManager {
         // optional actor mirror below from running.
         gate.released.store(true, Release);
         if let Some(session) = self.sessions.lock().await.get(session_id).cloned() {
-            session.project_authority_fence();
+            match intent {
+                Some(intent) => session.project_terminal_intent(intent),
+                // Lease loss and stale-owner settlement: authority is gone.
+                None => session.project_authority_fence(),
+            }
         }
     }
 
@@ -1459,12 +1540,16 @@ impl TranscodeManager {
         if let Some(session) = &rolling {
             // This atomic projection is the response-publication boundary.
             // Actor settlement and physical reap must not delay durable End;
-            // the detached retirement owner below retains both.
-            session.project_authority_fence();
+            // the detached retirement owner below retains both. A release or
+            // operator stop keeps its own cause; every other durable winner
+            // withdraws serving authority.
+            session.project_terminal_intent(terminal);
         }
         let manager = Arc::clone(&self);
         tokio::spawn(async move {
-            manager.stop_session(&session_id, reason).await;
+            manager
+                .stop_session_for_terminal(&session_id, terminal, reason)
+                .await;
         });
     }
 

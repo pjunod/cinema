@@ -10,7 +10,6 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-#[cfg(feature = "cluster")]
 use axum::Json;
 
 #[cfg(feature = "cluster")]
@@ -32,6 +31,10 @@ pub(crate) enum RemoteStartError {
     #[cfg(feature = "cluster")]
     RestartDrain,
     ServingFence,
+    /// A capacity refusal no retry of the same start can outlive. Still the
+    /// 503 every refusal of the class answers, so an older ingress reads it
+    /// exactly as before; the body names the code for one that can tell.
+    TerminalCapacity(&'static str),
 }
 
 impl From<StatusCode> for RemoteStartError {
@@ -69,6 +72,11 @@ impl IntoResponse for RemoteStartError {
                     .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
                 response
             }
+            Self::TerminalCapacity(code) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "code": code })),
+            )
+                .into_response(),
         }
     }
 }
@@ -378,7 +386,12 @@ pub(crate) async fn start(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|error| {
-            if error.contains("already used") {
+            if let Some((crate::transcode::CapacityRefusal::Terminal(code), _)) =
+                crate::transcode::capacity_refusal(&error)
+            {
+                return RemoteStartError::TerminalCapacity(code);
+            }
+            RemoteStartError::from(if error.contains("already used") {
                 StatusCode::CONFLICT
             } else if crate::transcode::is_serving_fence_error(&error)
                 || crate::transcode::is_start_infrastructure_error(&error)
@@ -387,7 +400,7 @@ pub(crate) async fn start(
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::UNPROCESSABLE_ENTITY
-            }
+            })
         })?;
     let status = remote_start_success_status(&headers, created);
     let processed_header = response.processed_dv_header();

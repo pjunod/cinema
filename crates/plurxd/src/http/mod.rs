@@ -30,6 +30,7 @@ pub(crate) mod extract;
 pub(crate) mod file_grants;
 pub(crate) mod playback_handoffs;
 pub(crate) use extract::CacheOnlyAdminProofCache;
+pub(crate) mod activity_starts;
 pub(crate) mod hls;
 mod https_admin;
 pub(crate) mod images;
@@ -571,6 +572,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/activity/producer"
         | "/api/v1/activity/retained/{nonce}"
         | "/api/v1/activity/processes/{pid}"
+        | "/api/v1/activity/starts"
         | "/api/v1/trakt/status"
         | "/api/v1/trakt/link"
         | "/api/v1/trakt/sync"
@@ -643,6 +645,7 @@ fn http_route_group(path: &str) -> usize {
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         crate::diagnostics::PEER_PATH
         | internal_activity::PATH
+        | activity_starts::PEER_PATH
         | "/_internal/v1/clock"
         | "/api/v1/internal/cluster/operations-status"
         | "/api/v1/internal/auth/cache-revocation"
@@ -1626,6 +1629,7 @@ pub fn router(state: AppState) -> Router {
         .route("/scan/status", get(system::scan_status))
         .route("/activity", get(system::activity))
         .route("/activity/detail", get(system::activity_detail))
+        .route("/activity/starts", get(activity_starts::starts))
         .route(
             "/activity/sessions/{id}",
             axum::routing::delete(system::stop_session),
@@ -2372,6 +2376,10 @@ pub fn router(state: AppState) -> Router {
             internal_activity::PATH,
             get(internal_activity::snapshot)
         )))
+        .merge(cluster_route!(Router::new().route(
+            activity_starts::PEER_PATH,
+            post(activity_starts::peer).layer(DefaultBodyLimit::max(1_024)),
+        )))
         .merge(cluster_route!(
             Router::new().route("/_internal/v1/clock", get(internal_clock::snapshot))
         ))
@@ -2735,6 +2743,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     if https_admin::eligible(method, path)
         || remote::eligible(method, path)
         || crate::diagnostics::eligible(method, path)
+        || activity_starts::eligible(method, path)
         || crate::diagnostics_delivery::eligible(method, path)
     {
         return true;

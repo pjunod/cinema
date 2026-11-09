@@ -2243,15 +2243,18 @@ impl SqliteStore {
 
 #[async_trait]
 impl MetricsStore for SqliteStore {
-    async fn prometheus_store_snapshot(
+    async fn prometheus_store_snapshot_with(
         &self,
         node_id: &str,
         now: i64,
+        live_fragment_engines: Option<&super::LiveAnalysisEngines>,
     ) -> Result<PrometheusStoreSnapshot, StoreError> {
         let node_id = node_id.to_owned();
+        let live = super::live_engines_param(live_fragment_engines);
+        let request_health = super::analysis_request_health_sql("?2", "?3");
         self.with_read(move |conn| {
             conn.query_row(
-                "SELECT
+                &(String::from("SELECT
                     (SELECT COUNT(*) FROM libraries),
                     (SELECT COUNT(*) FROM users),
                     COALESCE(SUM(state = 'queued'), 0),
@@ -2292,7 +2295,7 @@ impl MetricsStore for SqliteStore {
                        FROM (SELECT component,
                               CASE
                                 WHEN last_error_code = 'source_superseded' THEN 'stale'
-                                WHEN state = 'queued' AND not_before_ms > ?2 THEN 'retry_wait'
+                                WHEN state = 'queued' AND not_before_ms > ?2 * 1000 THEN 'retry_wait'
                                 WHEN state = 'running' THEN 'claimed'
                                 WHEN state = 'submitted' THEN 'staged'
                                 WHEN state = 'ready' THEN 'published'
@@ -2300,8 +2303,8 @@ impl MetricsStore for SqliteStore {
                                 ELSE state END AS durable_state,
                               priority, trigger,
                               COUNT(*) AS depth,
-                              CASE WHEN ?2 > MIN(created_at_ms)
-                                THEN (?2 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds
+                              CASE WHEN ?2 * 1000 > MIN(created_at_ms)
+                                THEN (?2 * 1000 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds
                          FROM (
                            SELECT component, state, last_error_code, not_before_ms,
                                   priority, trigger, created_at_ms
@@ -2380,9 +2383,10 @@ impl MetricsStore for SqliteStore {
                             + (SELECT COUNT(*) FROM analysis_source_reservations
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
                         'source_recovery_pending', (SELECT COUNT(DISTINCT custody_id) FROM source_io_occupancy WHERE custody_id IS NOT NULL AND active_occupancy=1 AND expires_at_ms <= ?2 * 1000),
-                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import')))
-                 FROM offline_packages WHERE node_id = ?1",
-                params![node_id, now],
+                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))), ")
+                    + &request_health
+                    + " FROM offline_packages WHERE node_id = ?1"),
+                params![node_id, now, live],
                 |row| {
                     Ok(PrometheusStoreSnapshot {
                         background_jobs: super::background_jobs_observation::background_job_metrics(&row.get::<_, String>(24)?)
@@ -2406,14 +2410,18 @@ impl MetricsStore for SqliteStore {
                             &row.get::<_, String>(15)?,
                             &row.get::<_, String>(16)?,
                             &row.get::<_, String>(17)?,
-                            super::AnalysisQueueHealth {
-                                ready_24h: row.get(18)?,
-                                attempt_limit_24h: row.get(19)?,
-                                claimed_24h: row.get(20)?,
-                                claimable: row.get(21)?,
-                                running_past_lease: row.get(22)?,
-                                last_ready_at_ms: row.get(23)?,
-                            },
+                            &row.get::<_, String>(29)?,
+                            super::AnalysisQueueHealth::with_requests(
+                                [
+                                    row.get(18)?,
+                                    row.get(19)?,
+                                    row.get(20)?,
+                                    row.get(21)?,
+                                    row.get(22)?,
+                                    row.get(23)?,
+                                ],
+                                [row.get(25)?, row.get(26)?, row.get(27)?, row.get(28)?],
+                            ),
                         ),
                     })
                 },

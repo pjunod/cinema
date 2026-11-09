@@ -680,14 +680,14 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
-        method: "enqueue_or_promote_subtitle_source",
+        method: "enqueue_or_promote_subtitle_source_with",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
-        method: "enqueue_analysis_request",
+        method: "enqueue_analysis_request_with",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,

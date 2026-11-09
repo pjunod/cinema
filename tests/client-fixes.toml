@@ -8366,3 +8366,44 @@ source = "clients/linux-player/packaging/patches/mpv/0007-vo_gpu_next-preserve-D
 source_anchor = "+static bool frame_needs_precise_sw10(const struct pl_frame *frame)"
 test = "clients/linux-player/tests/dv_render_controls.c"
 test_anchor = "assert(upload_planes_sw(&vo,&gpu,&mpi,&hdr10,tex,frame_needs_precise_sw10(&hdr10)));"
+
+# Playback start Phase 1 (effort/playback-start, PR #1454): D1 prepared-switch seams.
+[[fixes]]
+id = "android.prepared-seam-reopen-on-every-refusal"
+commits = ["3b1a05c241e3fddb1886a75924420fa685068baa"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun reportPreparedSeam("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSwitchMeasurementTest.kt"
+test_anchor = "fun theSeamReportNamesEachOutcomeAndOnlyACommitCanCount()"
+
+[[fixes]]
+id = "apple.shared-alignment-one-budget"
+commits = ["d686e9d8b1812f3d2f6605ab3188a573ccaec8ce"]
+source = "clients/apple/Sources/SharedPlayerController.swift"
+source_anchor = "let alignmentDeadlineMs = Int(ProcessInfo.processInfo.systemUptime * 1_000)"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "func testSharedCommitShowsADecodedFrameBeforeExposingTheSuccessor() throws {"
+
+[[fixes]]
+id = "apple.prepared-seam-reopen-from-window"
+commits = ["c13ff41721ad555dcbb3f4f845805c98e8f4037d"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let reopensAtOutcome = reopensStarted"
+test = "clients/apple/Tests/PreparedSwitchMeasurementTests.swift"
+test_anchor = "func testSeamBeaconNamesEachOutcomeAndCountsOnlyACommit() throws {"
+
+[[fixes]]
+id = "clients.prepared-successor-decoded-frame-first"
+commits = ["6e970ed36e57d96e5b1b478f79be6e95647c53f0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private var mediaSessionRebindAwaitsFrame = false"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSwitchMeasurementTest.kt"
+test_anchor = "fun mediaSessionMovesToTheSuccessorOnlyAfterItsFrame()"
+
+[[fixes]]
+id = "playback.create-codes-in-surface-contract"
+commits = ["b452e7756ed67e7c06e27b093e08f64fb308dd5a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.kt"
+source_anchor = 'const val CREATE_CAPACITY_TERMINAL = "create_capacity_terminal"'
+test = "tests/validation/test_control_wire_conformance.py"
+test_anchor = "def test_every_code_a_create_answers_with_is_in_the_contract(self) -> None:"

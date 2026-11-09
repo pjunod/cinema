@@ -96,6 +96,8 @@ const PRELUDE = `
   let ACTIVITY_SNAPSHOT = {};
   const ACTIVITY_VIEW={tab:"status",inspector:null,detailTab:"summary"};
   const DVR_PAGE={selectedId:null};
+  // The Starts tab has its own suite (activity-starts.test.js).
+  function activityStartsPaneHtml(){ return ""; }
   function paintActivityInspector(){}
   // The painter reads the open disclosures back out of #main before it
   // repaints; a string-backed stand-in has none unless a test plants some.

@@ -317,6 +317,12 @@ class NativeCaseReceiptTests(unittest.TestCase):
         prior_makefile = source['Makefile'].replace(
             b'-p plurxd --features cluster --bin plurxd \\\n',
             b'-p plurxd --bin plurxd \\\n')
+        # Reconstruct the original immutable boundary before main added this
+        # web-only suite; retain the historical digest and refusal assertions.
+        starts_suite = ('\t# Activity → Starts: one row per create, the nodes that did not answer, Index now.\n'
+                        '\t@node tests/web/activity-starts.test.js\n').encode()
+        self.assertEqual(prior_makefile.count(starts_suite), 1)
+        prior_makefile = prior_makefile.replace(starts_suite, b'')
         self.assertEqual(hashlib.sha256(prior_makefile).hexdigest(),
                          '7e12d06f8372e36a851f58ad5846f303b00cf87bca13717193dafd2a23068443')
         tree = ''.join('100644 blob ' + 'a' * 40 + '\t' + path + '\0' for path in specs)

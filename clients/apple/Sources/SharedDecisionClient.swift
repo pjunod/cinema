@@ -87,6 +87,9 @@ struct SharedDecisionClient {
         guard let url = URL(string: origin + (try context.path("hls/sessions"))) else { throw APIError.badURL }
         var request = URLRequest(url: url); request.httpMethod = "POST"; request.httpBody = encoded; request.timeoutInterval = 310
         try authorize(&request); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let remaining = PlaybackStartupRequestContext.remainingMs {
+            request.setValue(String(max(0, remaining)), forHTTPHeaderField: "X-Plurx-Startup-Remaining-Ms")
+        }
         let data = try await SharedDecisionReadOperation(request: request, configuration: configuration) {
             try requireCurrent(); _ = try context.path("hls/sessions")
         }.read()
