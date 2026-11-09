@@ -631,9 +631,9 @@
             env!("CARGO_MANIFEST_DIR"),
             "/../../tests/playback/fixtures/gran-turismo-safari-startup.json"
         ))).expect("shared Safari acceptance case");
-        let durations: Vec<f64> = case["segment_durations_ms"].as_array().unwrap().iter()
-            .map(|ms| ms.as_i64().unwrap() as f64 / 1_000.0).collect();
-        let first_count = case["candidate_first_segment_count"].as_u64().unwrap() as usize;
+        let durations: Vec<f64> = case["segment_durations_ms"].as_array().expect("fixture segment durations").iter()
+            .map(|ms| ms.as_i64().expect("fixture duration milliseconds") as f64 / 1_000.0).collect();
+        let first_count = case["candidate_first_segment_count"].as_u64().expect("fixture first segment count") as usize;
         for transport in [None, Some("native"), Some("future-native")] {
             for explicit in [false, true] {
                 let directory = crate::test_tempdir().expect("Gran Turismo native start");
@@ -648,8 +648,8 @@
                     tokio::fs::write(directory.path().join("index.m3u8"),
                         rolling_playlist(&durations[..count], false)
                             .replace("#EXTM3U\n", "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"init.mp4\"\n")
-                            .replace(".ts\n", ".m4s\n")).await.unwrap();
-                    session.publication_cycle("gran-turismo-safari").await.unwrap();
+                            .replace(".ts\n", ".m4s\n")).await.expect("publication operation");
+                    session.publication_cycle("gran-turismo-safari").await.expect("publication operation");
                     let clock = session.publication.lock().await;
                     if count < first_count {
                         assert!(clock.served.is_none(),
@@ -657,13 +657,13 @@
                     } else {
                         let served = clock.served.as_ref().expect("native admission");
                         let text = String::from_utf8_lossy(&served.raw);
-                        assert_eq!(text, case["candidate_first_playlist"].as_str().unwrap(),
+                        assert_eq!(text, case["candidate_first_playlist"].as_str().expect("fixture native first playlist"),
                             "native replay consumes the exact production snapshot bytes");
                         assert!(!text.contains("PLAYLIST-TYPE"));
                         assert!(!text.contains("ENDLIST"));
                         let advertised = parse_playlist(&text);
                         assert_eq!(advertised.len(), first_count);
-                        assert_eq!(advertised.last().unwrap().end_ms, 53_220);
+                        assert_eq!(advertised.last().expect("admitted final segment").end_ms, 53_220);
                         assert!(served.duration_ms >= ROLLING_INITIAL_RUNWAY_MS);
                         assert_eq!(served.first_segment, 0);
                     }
@@ -680,24 +680,24 @@
             }
         }
         // The qualified JS transport still owns its smaller reload bootstrap.
-        let directory = crate::test_tempdir().unwrap();
+        let directory = crate::test_tempdir().expect("publication directory");
         let session = test_session(directory.path().to_path_buf());
         session.publication.lock().await.bind_startup_transport(Some("hlsjs"));
         tokio::fs::write(directory.path().join("index.m3u8"),
-            rolling_playlist(&durations[..3], false)).await.unwrap();
-        session.publication_cycle("gran-turismo-hlsjs").await.unwrap();
-        assert_eq!(session.publication.lock().await.served.as_ref().unwrap().end_ms, 21_897);
+            rolling_playlist(&durations[..3], false)).await.expect("publication operation");
+        session.publication_cycle("gran-turismo-hlsjs").await.expect("publication operation");
+        assert_eq!(session.publication.lock().await.served.as_ref().expect("served JS snapshot").end_ms, 21_897);
     }
 
     #[tokio::test]
     async fn native_bootstrap_finishes_short_titles_without_waiting_for_a_live_window() {
         for durations in [&[1.25][..], &[4.380, 8.758, 8.759][..]] {
-            let directory = crate::test_tempdir().unwrap();
+            let directory = crate::test_tempdir().expect("publication directory");
             let session = test_session(directory.path().to_path_buf());
             session.publication.lock().await.bind_startup_transport(Some("native"));
             tokio::fs::write(directory.path().join("index.m3u8"),
-                rolling_playlist(durations, true)).await.unwrap();
-            session.publication_cycle("native-short-endlist").await.unwrap();
+                rolling_playlist(durations, true)).await.expect("publication operation");
+            session.publication_cycle("native-short-endlist").await.expect("publication operation");
             let clock = session.publication.lock().await;
             let served = clock.served.as_ref().expect("completed title is immediately playable");
             assert!(served.end_list);
