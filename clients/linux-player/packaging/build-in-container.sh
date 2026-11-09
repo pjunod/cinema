@@ -40,7 +40,15 @@ dpkg-source -b plurx-player
 rm -rf "$player"
 dpkg-source -x "plurx-player_$version.dsc" "$player"
 cd "$player"
-DEB_BUILD_OPTIONS="parallel=$jobs noddebs" dpkg-buildpackage -b -us -uc
+# Apt and source extraction need the container's root; the actual build does
+# not. Use the image's unprivileged UID 1000 (create it if absent).
+if ! getent passwd 1000 >/dev/null; then
+  useradd --uid 1000 --create-home --shell /bin/bash cinema-build
+fi
+build_user=$(getent passwd 1000 | cut -d: -f1)
+chown -R 1000:1000 /build
+runuser -u "$build_user" -- env DEB_BUILD_OPTIONS="parallel=$jobs noddebs" \
+  nice -n 15 dpkg-buildpackage -b -us -uc
 
 cd /build
 artifacts=("plurx-player_${version}_amd64.deb" "plurx-player_$version.dsc"
