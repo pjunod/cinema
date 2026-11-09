@@ -531,7 +531,7 @@ async fn actual_pinned_playback(
 ) {
     use axum::http::StatusCode;
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
-    let logs = Arc::new(crate::logbuf::LogBuffer::new(256));
+    let logs = Arc::new(crate::logbuf::LogBuffer::new(4096));
     let _capture = crate::logbuf::capture_for_test(&logs);
     let fixture = build_receiver_fixture(address, mode, None, fixture_body_budget).await;
     let tls = Arc::new(
@@ -845,9 +845,10 @@ async fn actual_pinned_playback(
     .await;
     if status != StatusCode::OK {
         eprintln!(
-            "actual Source HTTP diagnostic starts={}, last_status={}",
+            "actual Source HTTP diagnostic mode={mode:?}, H2={h2}, starts={}, last_status={}; warnings={:?}",
             source_starts.load(std::sync::atomic::Ordering::Relaxed),
-            source_start_status.load(std::sync::atomic::Ordering::Relaxed)
+            source_start_status.load(std::sync::atomic::Ordering::Relaxed),
+            logs.tail("warn", 64)
         );
         eprintln!(
             "actual B diagnostic claim-stage counts: {}",

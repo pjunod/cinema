@@ -1198,6 +1198,8 @@ impl SourceStartFailure {
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable"),
             Self::Deadline => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_deadline"),
         };
+        #[cfg(test)]
+        eprintln!("actual Source Start refusal={code}");
         ApiError::typed(status, code, "Shared start is unavailable")
     }
 }
@@ -2465,7 +2467,7 @@ pub(crate) fn real_source_start_fixture(
     real_source_start_fixture_with(SourceFixtureMode::Copy, None)
 }
 #[cfg(test)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum SourceFixtureMode {
     Copy,
     /// The Copy fixture with no pre-built fragment index (its scan facts and
