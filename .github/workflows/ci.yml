@@ -1878,8 +1878,28 @@ jobs:
           BUILDER: ${{ steps.buildx-cache.outputs.builder-name }}
         run: |
           set -euo pipefail
-          [[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]]
-          test "$(docker buildx inspect --format '{{.Name}} {{.Driver}}')" = "$BUILDER docker-container"
+          [[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]] || exit 1
+          builder_info="$(docker buildx inspect "$BUILDER" | python3 -c 'import sys; data = sys.stdin.buffer.read(65537); len(data) <= 65536 or sys.exit("Buildx inspection exceeds 64 KiB"); sys.stdout.buffer.write(data)')"
+          printf '%s\n' "$builder_info" | awk -v expected="$BUILDER" '
+            /^Nodes:[[:space:]]*$/ { nodes = 1 }
+            !nodes && /^[[:space:]]*Name[[:space:]]*:/ {
+              names++
+              if ($0 !~ /^Name:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Name:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != expected) invalid = 1
+            }
+            !nodes && /^[[:space:]]*Driver[[:space:]]*:/ {
+              drivers++
+              if ($0 !~ /^Driver:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Driver:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != "docker-container") invalid = 1
+            }
+            END { if (names != 1 || drivers != 1 || !nodes || invalid) exit 1 }
+          '
           container="buildx_buildkit_${BUILDER}0"
           test "$(docker inspect --format '{{.Name}}' "$container")" = "/$container"
           # This runner pool includes Raft voters. Match the voter-build CPU
@@ -1896,6 +1916,7 @@ jobs:
       - name: Compile and export the exact candidate binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
+          builder: ${{ steps.buildx-cache.outputs.builder-name }}
           context: .
           file: Dockerfile.binaries
           target: release-binaries
@@ -1927,6 +1948,7 @@ jobs:
         if: matrix.arch == 'amd64'
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
+          builder: ${{ steps.buildx-cache.outputs.builder-name }}
           context: .
           file: Dockerfile
           target: linux-dolby-package-export
@@ -1940,6 +1962,7 @@ jobs:
       - name: Build the runtime from only the verified binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
+          builder: ${{ steps.buildx-cache.outputs.builder-name }}
           context: .
           file: Dockerfile.release
           build-contexts: ${{ matrix.arch == 'amd64' && 'linux-dolby-package=./linux-dolby-export/package' || '' }}
@@ -1970,6 +1993,7 @@ jobs:
       - name: Build the explicitly selected cluster profile
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
+          builder: ${{ steps.buildx-cache.outputs.builder-name }}
           context: .
           file: Dockerfile
           target: runtime-cluster

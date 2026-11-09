@@ -3649,7 +3649,12 @@ assert.equal(context.ACT_TIMER, null);
             "BUILDER: ${{ steps.buildx-cache.outputs.builder-name }}",
             "set -euo pipefail",
             '[[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]]',
-            'test "$(docker buildx inspect --format \'{{.Name}} {{.Driver}}\')" = "$BUILDER docker-container"',
+            'docker buildx inspect "$BUILDER"',
+            'data = sys.stdin.buffer.read(65537)',
+            'len(data) <= 65536 or sys.exit("Buildx inspection exceeds 64 KiB")',
+            'names != 1 || drivers != 1 || !nodes || invalid',
+            'if (value != expected) invalid = 1',
+            'if (value != "docker-container") invalid = 1',
             'container="buildx_buildkit_${BUILDER}0"',
             'test "$(docker inspect --format \'{{.Name}}\' "$container")" = "/$container"',
             'docker update --memory 8g --memory-swap 8g --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"',
@@ -3657,6 +3662,13 @@ assert.equal(context.ACT_TIMER, null);
             "= '8589934592 8589934592 400000 100000 0-3'",
         ):
             self.assertIn(required, guard)
+        self.assertNotIn("docker buildx inspect --format", guard)
+        build_steps = [step for step in workflow_step_blocks(package).values()
+                       if "uses: https://github.com/docker/build-push-action@" in step]
+        self.assertEqual(len(build_steps), 4)
+        for step in build_steps:
+            self.assertEqual(re.findall(r"(?m)^          builder: ([^\n]+)$", step),
+                             ["${{ steps.buildx-cache.outputs.builder-name }}"])
 
     def test_required_arm_package_is_native_and_serialized_with_apple(self):
         workflow = read(".github/workflows/ci.yml")

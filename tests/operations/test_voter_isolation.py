@@ -12,8 +12,12 @@ import io
 import importlib.machinery
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -207,6 +211,119 @@ class VoterBuildTests(unittest.TestCase):
         argv = build.command([*options, "--", "image"])
         self.assertEqual(argv[2:2 + len(options)], options)
         self.assertEqual(argv[-1], "image")
+
+
+class AmdPackageBuilderGuardTests(unittest.TestCase):
+    BUILDER = "plurx-fixture-runner"
+    CONTAINER = "buildx_buildkit_plurx-fixture-runner0"
+    CAPS = "8589934592 8589934592 400000 100000 0-3"
+    CAP_FORMAT = ("{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} "
+                  "{{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}}")
+    INSPECTION = ("Name:          plurx-fixture-runner\nDriver:        docker-container\n"
+                  "Last Activity: 2026-11-09\n\nNodes:\nName: plurx-fixture-runner0\n"
+                  "Endpoint: unix:///var/run/docker.sock\nDriver: node-detail\n")
+
+    def guard(self, *, inspection=None, builder=None, name=None, caps=None, buildx_status=0):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        step = workflow.split("      - name: Bound the AMD package builder before compilation\n", 1)[1]
+        body = step.split("        run: |\n", 1)[1].split("      - name:", 1)[0]
+        script = textwrap.dedent(body)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stub = root / "docker"
+            stub.write_text("#!" + sys.executable + "\n" + textwrap.dedent('''\
+                import json, os, sys
+                args = sys.argv[1:]
+                with open(os.environ['DOCKER_CALLS'], 'a') as output:
+                    output.write(json.dumps(args) + '\\n')
+                if args[:2] == ['buildx', 'inspect']:
+                    if '--format' in args:
+                        print('unknown flag: --format', file=sys.stderr)
+                        raise SystemExit(64)
+                    if args != ['buildx', 'inspect', os.environ['BUILDER']]:
+                        raise SystemExit(65)
+                    sys.stdout.write(os.environ['BUILDX_TEXT'])
+                    raise SystemExit(int(os.environ['BUILDX_STATUS']))
+                if args[:2] == ['inspect', '--format'] and len(args) == 4:
+                    if args[2] == '{{.Name}}':
+                        print(os.environ['CONTAINER_NAME'])
+                    elif args[2] == os.environ['CAP_FORMAT']:
+                        print(os.environ['CAPS_TEXT'])
+                    else:
+                        raise SystemExit(66)
+                elif args[:1] == ['update']:
+                    print(args[-1])
+                else:
+                    raise SystemExit(67)
+                '''))
+            stub.chmod(0o755)
+            log = root / "calls.jsonl"
+            result = subprocess.run(["bash", "-c", script], text=True, capture_output=True,
+                                    timeout=10, env={**os.environ,
+                                        "PATH": os.pathsep.join((str(root), str(Path(sys.executable).parent),
+                                                                 os.environ.get("PATH", ""))),
+                                        "BUILDER": self.BUILDER if builder is None else builder,
+                                        "BUILDX_TEXT": self.INSPECTION if inspection is None else inspection,
+                                        "BUILDX_STATUS": str(buildx_status),
+                                        "CONTAINER_NAME": "/" + self.CONTAINER if name is None else name,
+                                        "CAPS_TEXT": self.CAPS if caps is None else caps,
+                                        "CAP_FORMAT": self.CAP_FORMAT, "DOCKER_CALLS": str(log)})
+            calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return result, calls
+
+    def test_actual_workflow_checks_named_buildx_headers_then_exact_effective_caps(self):
+        result, calls = self.guard()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [
+            ["buildx", "inspect", self.BUILDER],
+            ["inspect", "--format", "{{.Name}}", self.CONTAINER],
+            ["update", "--memory", "8g", "--memory-swap", "8g", "--cpuset-cpus", "0-3",
+             "--cpu-period", "100000", "--cpu-quota", "400000", self.CONTAINER],
+            ["inspect", "--format", self.CAP_FORMAT, self.CONTAINER],
+        ])
+
+    def test_wrong_missing_duplicate_or_malformed_root_headers_refuse_before_container_update(self):
+        variants = [self.INSPECTION.replace(self.BUILDER, "plurx-foreign", 1),
+                    self.INSPECTION.replace("docker-container", "docker", 1),
+                    self.INSPECTION.replace("Name:          " + self.BUILDER + "\n", "", 1),
+                    self.INSPECTION.replace("Driver:        docker-container\n", "", 1),
+                    "Name: " + self.BUILDER + "\n" + self.INSPECTION,
+                    "Driver: docker-container\n" + self.INSPECTION,
+                    self.INSPECTION.replace("Name:          ", " Name: ", 1),
+                    self.INSPECTION.replace("Name:          ", "Name : ", 1),
+                    self.INSPECTION.replace("Driver:        ", "Driver:", 1),
+                    self.INSPECTION.replace(self.BUILDER + "\n", self.BUILDER + " extra\n", 1),
+                    self.INSPECTION.replace("Nodes:", "Nodes: malformed", 1),
+                    "Nodes:\nName: " + self.BUILDER + "\nDriver: docker-container\n",
+                    self.INSPECTION + "x" * 65537,
+                    self.INSPECTION + "ä" * 32769,
+                    self.INSPECTION + "\n" * 65537]
+        for inspection in variants:
+            with self.subTest(inspection=inspection[:100]):
+                result, calls = self.guard(inspection=inspection)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [["buildx", "inspect", self.BUILDER]])
+
+    def test_buildx_failure_and_unsafe_configured_name_refuse_before_engine_inspection(self):
+        result, calls = self.guard(buildx_status=17)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [["buildx", "inspect", self.BUILDER]])
+        result, calls = self.guard(builder="foreign;unsafe")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_wrong_actual_container_refuses_before_update_and_inexact_caps_never_pass(self):
+        result, calls = self.guard(name="/foreign-container")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call[0] == "update" for call in calls))
+        for index, replacement in [(0, "0"), (1, "-1"), (2, "399999"),
+                                   (3, "99999"), (4, "0-2")]:
+            caps = self.CAPS.split()
+            caps[index] = replacement
+            with self.subTest(field=index):
+                result, calls = self.guard(caps=" ".join(caps))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls[-1], ["inspect", "--format", self.CAP_FORMAT, self.CONTAINER])
 
 
 class VoterSliceAndComposeTests(unittest.TestCase):
