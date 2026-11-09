@@ -2,7 +2,7 @@
 
 **Status:** built for supported bounded routes and merged to `main`; full-suite
 qualification, broader reference and hardware acceptance open ·
-**Updated:** 2026-10-15 · **Integration:** merged to `main` as `c96142ac` (#968)
+**Updated:** 2026-11-09 (America/New_York) · **Integration:** merged to `main` as `c96142ac` (#968)
 
 Companion to the [build handoff](DV_HDR_PROCESSING_BUILD.md) and
 [source feasibility findings](DV_HDR_PROCESSING_FEASIBILITY.md). This is the
@@ -11,6 +11,21 @@ remaining milestones stay in the build handoff. The
 [project backlog](../features/PROJECT-BACKLOG.md) points here for progress.
 
 ## 1. Current boundary
+
+**CM4 active-area repair candidate (2026-11-09):** source inspection and a
+24-point offline model isolate a missing L5 boundary in the spatial filter.
+The measured horizontal stage reproduces the native edge error in binary64;
+clamping its vertical neighbors to the source active rows matches all 54
+sampled active RGB codes from the separately labeled licensed expanded-XML
+render. This does not qualify a whole frame or replace the frozen P7/P8
+references. The candidate carries checked L5 offsets through the shared DM
+header, filters inside the uncropped native active rectangle, and writes PQ
+black outside it. Source compilation, CPU crop-domain controls and GPU parity
+are pending. CM v2.9 and the PQ equations remain unchanged.
+
+The preceding source-budget correction merged in PR #1477 at `49c4ec103` after
+all applicable current-head fast-lane jobs passed. Its bitrate, level and
+qualification fixes do not close picture, display or performance acceptance.
 
 The reviewed proposal landed in documentation PR #919, the comparator in
 PR #920, and the initial backend controls in PR #924. PR #928 merged at

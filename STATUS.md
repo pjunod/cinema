@@ -3,7 +3,9 @@
 **Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
-- **2026-11-09 · HDR enhancement source budget:** [scope and validation](docs/streaming/HDR-ENHANCEMENT-SOURCE-BUDGET.md). Owner Codex. Independent current-main port preserves measured Original video budgets and exact backend-bound FEL recipes while retaining current source custody and post-first-frame upgrades. Fresh compiler checks and all 39 focused Rust regressions pass; current-head CI remains pending. Picture fidelity and deployment remain open.
+- **2026-11-09 · CM4 active-area fidelity:** [processing ledger](docs/streaming/DV_HDR_PROCESSING_STATUS.md). Owner Codex. Shared display mapping now has a candidate L5 boundary repair for CM4 spatial filtering and inactive-area PQ black. Source compilation, crop-domain CPU controls and GPU parity are pending; full picture/display/performance acceptance stays open.
+
+- **2026-11-09 · HDR enhancement source budget:** [scope and validation](docs/streaming/HDR-ENHANCEMENT-SOURCE-BUDGET.md). Owner Codex. Independent current-main port preserves measured Original video budgets and exact backend-bound FEL recipes while retaining current source custody and post-first-frame upgrades. Fresh compiler checks and all 39 focused Rust regressions pass; PR #1477 merged after the applicable current-head fast lane passed. Picture fidelity and deployment remain open.
 
 ## 2026-11-07 · Pipeline contract v2 (cinema slice)
 

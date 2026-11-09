@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- CM4 display mapping uses the RPU's active picture boundary for spatial
+  filtering and writes PQ black outside it, keeping letterbox bars from
+  brightening the first and last active rows or side edges.
+
 - A client releasing a rolling stream, or an operator stopping it from
   Activity, now retires it as `released` / `stopped` instead of an authority
   fence. Metrics and session-end events no longer report every ordinary

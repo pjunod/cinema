@@ -16,6 +16,7 @@
 #ifndef PLURX_DV_DM_H
 #define PLURX_DV_DM_H
 #include <math.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <libplacebo/shaders/custom.h>
@@ -32,9 +33,29 @@ typedef struct {
   double weight;         // spatial detail weight (<= -1: detail stage off; controls only)
   const char *trim;      // selection description for the frame report
   int trim_targets;
+  // L5 is in the uncropped decoded BL raster, before any display/export scale.
+  bool has_l5;
+  uint64_t l5_left, l5_right, l5_top, l5_bottom;
   dm_cm4_state c4;       // CPU reference states (controls; the shader uses only u[])
   dm_cm29_state c29;
 } dv_dm_frame;
+
+// Resolve against the full native master, not its eventual display/export crop.
+// All production callers reconstruct this raster before scaling. Invalid L5
+// refuses mapping; offsets must never be rescaled or silently clipped to fit.
+// Bounds are half-open; subtract before comparing to avoid offset-sum overflow.
+typedef struct { int x0, y0, x1, y1; } dv_dm_rect;
+static inline bool dv_dm_active_rect(const dv_dm_frame *f, int w, int h, dv_dm_rect *r) {
+  if (w <= 0 || h <= 0) return false;
+  *r = (dv_dm_rect){0, 0, w, h};
+  if (f->algo != 4 || !f->has_l5) return true;
+  uint64_t width = (uint64_t)w, height = (uint64_t)h;
+  if (f->l5_left >= width || f->l5_right >= width - f->l5_left ||
+      f->l5_top >= height || f->l5_bottom >= height - f->l5_top) return false;
+  *r = (dv_dm_rect){(int)f->l5_left, (int)f->l5_top,
+                    w - (int)f->l5_right, h - (int)f->l5_bottom};
+  return true;
+}
 
 // Preset target displays referenced by L8 target_display_index (no L10 needed).
 static inline bool dv_dm_preset(unsigned id, double *peak, double *min_nits, enum dm_prim *prim) {
@@ -128,6 +149,13 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
   double tmin = floor_nits > 0 ? dm_pq_oetf(floor_nits) : 0, tmax = dm_pq_oetf(nits), smast = dm_pq_oetf(smast_nits);
   bool cm4 = d->level254 != NULL || d->level8.len > 0;
   if (cm4) {
+    if (d->level5) {
+      f->has_l5 = true;
+      f->l5_left = d->level5->active_area_left_offset;
+      f->l5_right = d->level5->active_area_right_offset;
+      f->l5_top = d->level5->active_area_top_offset;
+      f->l5_bottom = d->level5->active_area_bottom_offset;
+    }
     // effective L1: L1 + L3, anchors held one 12-bit code apart (measured on real titles)
     double q = 1.0 / 4095, e[3] = {L1[0] + L3[0], L1[1] + L3[1], L1[2] + L3[2]};
     e[0] = dm_mind(e[0], e[1] - q); e[2] = dm_maxd(e[2], e[1] + q);
@@ -221,6 +249,34 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
 
 // Double-precision CPU reference of the whole frame (controls only): rgba in/out, BT.2020/PQ.
 static inline bool dv_dm_cpu_render(const dv_dm_frame *f, const float *in, int w, int h, float *out) {
+  dv_dm_rect active;
+  if (!dv_dm_active_rect(f, w, h, &active)) return false;
+  if ((size_t)w > SIZE_MAX / (size_t)h / (3 * sizeof(double))) return false;
+  if (f->algo == 4 && (active.x0 || active.y0 || active.x1 != w || active.y1 != h)) {
+    // Reference definition: map the cropped active picture with the unchanged
+    // full-frame equations, then embed it in PQ black. This excludes bars from
+    // both separable spatial passes, including one-row/one-column pictures.
+    int cw = active.x1 - active.x0, ch = active.y1 - active.y0;
+    size_t bytes = (size_t)cw * ch * 4 * sizeof(float);
+    float *crop = malloc(bytes), *mapped = malloc(bytes);
+    if (!crop || !mapped) { free(crop); free(mapped); return false; }
+    for (int y = 0; y < ch; y++)
+      memcpy(crop + (size_t)y * cw * 4,
+             in + ((size_t)(y + active.y0) * w + active.x0) * 4,
+             (size_t)cw * 4 * sizeof(float));
+    dv_dm_frame full = *f; full.has_l5 = false;
+    bool ok = dv_dm_cpu_render(&full, crop, cw, ch, mapped);
+    if (ok) {
+      float black = (float)dm_pq_oetf(0.0);
+      for (size_t i = 0; i < (size_t)w * h; i++) {
+        out[4*i] = out[4*i+1] = out[4*i+2] = black; out[4*i+3] = 1;
+      }
+      for (int y = 0; y < ch; y++)
+        memcpy(out + ((size_t)(y + active.y0) * w + active.x0) * 4,
+               mapped + (size_t)y * cw * 4, (size_t)cw * 4 * sizeof(float));
+    }
+    free(crop); free(mapped); return ok;
+  }
   size_t n = (size_t)w * h;
   double *a = malloc(n * sizeof(double)), *b = malloc(n * sizeof(double)), *c = malloc(n * sizeof(double)),
          *e = malloc(n * sizeof(double)), *o3 = malloc(3 * n * sizeof(double));
@@ -389,18 +445,21 @@ static const char dv_dm_body_lattice[] = // CM2.9 pass 0: the frame's output lat
   "color=vec4(c29vertex(origin+idx*step),1.0);\n";
 static const char dv_dm_body_h[] =       // pass 2: horizontal Gaussian and derivative
   "ivec2 q=ivec2(gl_FragCoord.xy); int w=textureSize(dpass,0).x; vec4 acc=vec4(0.0);\n"
-  "for(int j=-5;j<=5;j++){ int x=clamp(q.x-j,0,w-1); vec2 d=texelFetch(dpass,ivec2(x,q.y),0).xy; float g=GX[j+5], dg=-float(j)/4.0*g;\n"
+  "int lo=0,hi=w-1; if(u[18].x==4.0 && u[20].z>u[20].x){ lo=int(u[20].x); hi=int(u[20].z)-1; }\n"
+  "for(int j=-5;j<=5;j++){ int x=clamp(q.x-j,lo,hi); vec2 d=texelFetch(dpass,ivec2(x,q.y),0).xy; float g=GX[j+5], dg=-float(j)/4.0*g;\n"
   " acc+=vec4(g*d.x,dg*d.x,g*d.y,dg*d.y); }\n"
   "color=acc;\n";
 static const char dv_dm_body_final_cm4[] =   // pass 3: vertical, detail, finish
   "ivec2 q=ivec2(gl_FragCoord.xy); vec3 rgb=texelFetch(master,q,0).rgb; float wgt=u[18].y;\n"
+  "ivec2 size=textureSize(hpass,0); ivec4 a=u[20].z>u[20].x ? ivec4(u[20]) : ivec4(0,0,size.x,size.y);\n"
+  "if(q.x<a.x || q.y<a.y || q.x>=a.z || q.y>=a.w){ color=vec4(vec3(7.309559025783966e-7),1.0); }else{\n"
   "float B1=0.0,dx1=0.0,dy1=0.0,B2=0.0,dx2=0.0,dy2=0.0;\n"
-  "if(wgt>-1.0){ int h=textureSize(hpass,0).y;\n"
-  " for(int j=-2;j<=2;j++){ int y=clamp(q.y-j,0,h-1); vec4 t=texelFetch(hpass,ivec2(q.x,y),0); float g=GY[j+2], dg=-float(j)*g;\n"
+  "if(wgt>-1.0){\n"
+  " for(int j=-2;j<=2;j++){ int y=clamp(q.y-j,a.y,a.w-1); vec4 t=texelFetch(hpass,ivec2(q.x,y),0); float g=GY[j+2], dg=-float(j)*g;\n"
   "  B1+=g*t.x; dx1+=g*t.y; dy1+=dg*t.x; B2+=g*t.z; dx2+=g*t.w; dy2+=dg*t.z; } }\n"
   " vec3 ic=ictcp(rgb); vec3 o=c4point(rgb);\n"
   " if(wgt>-1.0){ float D=ic.x-o.x; float r=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); o.x=o.x+r*(D-B1); }\n"
-  " vec3 res=c4finish(o); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
+  " vec3 res=c4finish(o); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0); }\n"
   ;
 static const char dv_dm_body_final_cm29[] =  // pass 3: vertical, detail, finish
   "ivec2 q=ivec2(gl_FragCoord.xy); vec3 rgb=texelFetch(master,q,0).rgb; float wgt=u[18].y;\n"
@@ -449,6 +508,13 @@ static inline bool dv_dm_pass(pl_shader sh, const char *desc, const char *body, 
 // Map the native master texture for the prepared frame. Returns the BT.2020/PQ output texture.
 static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_frame *f) {
   int w = source->params.w, h = source->params.h;
+  dv_dm_rect active;
+  if (!dv_dm_active_rect(f, w, h, &active)) return NULL;
+  // u[20] was unused. Full-frame/no-L5 keeps its old all-zero words; the
+  // other colour/curve words remain unchanged.
+  dv_dm_put(f->u[20], 0, 0, 0, 0);
+  if (f->algo == 4 && (active.x0 || active.y0 || active.x1 != w || active.y1 != h))
+    dv_dm_put(f->u[20], active.x0, active.y0, active.x1, active.y1);
   if (!dv_dm_gpu.dispatch) dv_dm_gpu.dispatch = pl_dispatch_create(log, gpu);
   if (!dv_dm_gpu.dispatch || !dv_dm_tex(gpu, &dv_dm_gpu.dtex, w, h) || !dv_dm_tex(gpu, &dv_dm_gpu.htex, w, h) ||
       !dv_dm_tex(gpu, &dv_dm_gpu.out, w, h)) return NULL;
