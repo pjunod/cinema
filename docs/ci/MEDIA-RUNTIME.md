@@ -85,14 +85,14 @@ smoke checks before promoting a dependency update.
 ## Initial publication — 2026-11-09
 
 The first ordinary base is pinned to index digest
-`sha256:f195c7b7071e384cbcc3bfffc92522d71c059b96f2d1a34bff4bf3d60d6aadd6`.
+`sha256:17b3bf9f0d3ed5dd167540a3c805e30a7624fbd93dad250e9e866799ecb22cae`.
 Both native platform builds succeeded. Media executable version checks passed;
 the amd64 helper loaders returned their expected usage errors. A cold
 `runtime-assets` application build with an empty source context resolved the
 published index and executed no `RUN` instructions.
 
-Validation: 81 focused publication, maintenance, snapshot, readiness and Dolby
-package tests passed with one platform-specific skip; nine affected Docker
-contracts passed; paperwork passed all 14 checks. This evidence covers base
+Validation: 97 focused publication, maintenance, snapshot, readiness and Dolby
+package tests completed with one platform-specific skip; nine affected Docker
+contracts passed; paperwork passed all 15 checks. This evidence covers base
 publication and consumption, without asserting a full daemon rebuild, hardware
 playback qualification or audited amd64 release readiness.

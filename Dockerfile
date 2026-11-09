@@ -49,7 +49,7 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
     && cp target-cluster-check/release/plurx-cluster-check.dwp /plurx-cluster-check.dwp
 
 # Published media dependencies are independent of application source.
-FROM ${PLURX_MEDIA_REGISTRY}/noirr/plurx-media-runtime@sha256:f195c7b7071e384cbcc3bfffc92522d71c059b96f2d1a34bff4bf3d60d6aadd6 AS runtime-assets
+FROM ${PLURX_MEDIA_REGISTRY}/noirr/plurx-media-runtime@sha256:17b3bf9f0d3ed5dd167540a3c805e30a7624fbd93dad250e9e866799ecb22cae AS runtime-assets
 
 # M5's CI image uses the shipped runtime's media assets, not a second ffmpeg
 # install on a persistent runner. These two tool images are pinned by index
@@ -99,7 +99,7 @@ RUN ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
 # runtime assertions could report a result.
 FROM runtime-assets AS runtime
 ARG PLURX_BUILD_SHA=""
-ARG PLURX_MEDIA_RUNTIME_DIGEST="sha256:f195c7b7071e384cbcc3bfffc92522d71c059b96f2d1a34bff4bf3d60d6aadd6"
+ARG PLURX_MEDIA_RUNTIME_DIGEST="sha256:17b3bf9f0d3ed5dd167540a3c805e30a7624fbd93dad250e9e866799ecb22cae"
 ENV PLURX_MEDIA_RUNTIME_DIGEST=${PLURX_MEDIA_RUNTIME_DIGEST}
 # The fleet rollout inspects this label on the pulled image ID before it trusts
 # checkout-owned deployment policy. Redeclare the build arg in this final stage:
