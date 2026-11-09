@@ -74,6 +74,49 @@ around by granting it more access. Export of the existing Cinema iOS and
 tvOS distribution archives succeeded with the Xcode account on 2026-11-03;
 these checks submitted no new builds to TestFlight.
 
+### Recover mobile signing
+
+Identify the actual signing controller from the current fleet/runner report
+before inspecting Keychain or asking the owner to supply a key. The current
+Codex host, a scrubbed host alias and an old DHCP address do not establish
+which Mac executes the publisher. Match the job's runner registration and
+work directory to the controller's hardware, user and running LaunchAgent.
+Private addresses and setup receipts belong in the private operational
+handoff, outside this mirrored repository.
+
+On the signing controller, check these existing paths first:
+
+```bash
+launchctl print gui/$(id -u)/tv.plurx.mobile-signing
+security list-keychains -d user
+security find-identity -v -p codesigning
+xcode-select -p
+xcodebuild -version
+```
+
+Inspect the configured `MOBILE_RELEASE_ENV` (default
+`~/.config/plurx/mobile-channels.env`) without printing its secrets. Its
+`PLURX_ANSIBLE_DIR` names the installed, versioned publisher, not necessarily
+the source checkout. The original setup/export receipts are under
+`~/.local/state/noirr/mobile-channels/setup-evidence-2026-11-03/`.
+
+The verified November 3 exports used the signed-in Xcode account and
+`-allowProvisioningUpdates`. Do not assume an exported mobile `.p12` was
+part of that setup, or confuse the standalone macOS Developer ID identity
+with an iOS/tvOS Apple Distribution identity. Xcode may use cloud-managed
+signing; account metadata alone does not establish that signing works now.
+A certificate marked **Not in keychain** on another Mac is not evidence
+that the controller's key was lost. [Apple describes the relationship
+between certificates and local private keys](https://help.apple.com/xcode/mac/current/en.lproj/dev97211aeac.html).
+
+Verify with an export-only check of an existing archive using the installed
+publisher's options. Keep agent output in the required external storage;
+never recreate signing or runner state from defaults merely because it is
+absent on the wrong host. If the actual controller requires account sign-in,
+the owner completes that step there. Record the exact repair, controller
+identity, export result and later store-processing result in the durable
+handoff. A green workflow that skips publication proves no upload.
+
 Cinema's internal TestFlight group `Developer Automatic` receives all current
 and future Apple builds. Its membership was verified on 2026-11-03 against
 the same one tester in `Internal Beta`; the original group was preserved.

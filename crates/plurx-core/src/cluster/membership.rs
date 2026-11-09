@@ -8888,41 +8888,33 @@ impl MembershipManager {
     /// from this directory before owned work is settled, and the progress row
     /// keeps a lagged learner out even while its heartbeat is fresh.
     pub async fn media_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
-        Ok(self
-            .media_peers_with_roles()
-            .await?
-            .into_iter()
-            .map(|(peer, _)| peer)
-            .collect())
+        self.media_peers_for_route(true).await
     }
 
-    /// [`Self::media_peers`] with each peer's committed serving role, read from
-    /// the same membership snapshot (no extra replicated read). A peer in the
-    /// committed voter set is [`LocalServingRole::Voter`]; any other member is
-    /// a [`LocalServingRole::Learner`].
-    pub async fn media_peers_with_roles(
+    /// Ready media targets restricted by the caller's learner route policy.
+    /// Read admission role with the endpoint/progress row, rather than joining
+    /// an independently fetched status snapshot onto this directory.
+    pub async fn media_peers_for_route(
         &self,
-    ) -> Result<Vec<(ActivityPeer, LocalServingRole)>, MembershipError> {
+        allow_learners: bool,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(Vec::new());
         };
         let now = unix_ms()?;
-        let metrics = inner.client.metrics_db().await?;
-        let members = metrics
+        let members = inner
+            .client
+            .metrics_db()
+            .await?
             .membership_config
             .nodes()
             .map(|(raft_id, _)| *raft_id)
             .take(MAX_ACTIVITY_PEERS.saturating_add(1))
             .collect::<BTreeSet<_>>();
-        let voters = metrics
-            .membership_config
-            .voter_ids()
-            .take(MAX_ACTIVITY_PEERS.saturating_add(1))
-            .collect::<BTreeSet<_>>();
         let rows = inner
             .client
             .query_map::<MediaPeerRow, _>(
-                "SELECT node.node_id, node.raft_id, node.last_seen_at, \
+                "SELECT node.node_id, node.raft_id, node.last_seen_at, node.role, \
                         http.public_http_url, \
                         COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
                         progress.observed_at \
@@ -8936,31 +8928,36 @@ impl MembershipManager {
                 params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
             )
             .await?;
-        Ok(rows
-            .into_iter()
-            .filter(|row| members.contains(&row.raft_id))
-            .filter(|row| {
-                row.bounded_read_ready
-                    && node_is_reachable(now, row.observed_at.unwrap_or_default())
-            })
-            .take(MAX_ACTIVITY_PEERS)
-            .map(|row| {
-                let role = if voters.contains(&row.raft_id) {
-                    LocalServingRole::Voter
-                } else {
-                    LocalServingRole::Learner
-                };
-                (
-                    ActivityPeer {
-                        http_base: row.http_base,
-                        node_id: row.node_id,
-                        raft_id: row.raft_id,
-                        reachable: node_is_reachable(now, row.last_seen_at),
-                    },
-                    role,
-                )
-            })
-            .collect())
+        Self::media_peer_directory(now, &members, rows, allow_learners)
+    }
+
+    fn media_peer_directory(
+        now: i64,
+        members: &BTreeSet<u64>,
+        rows: Vec<MediaPeerRow>,
+        allow_learners: bool,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
+        let mut peers = Vec::new();
+        for row in rows.into_iter().filter(|row| {
+            members.contains(&row.raft_id)
+                && row.bounded_read_ready
+                && node_is_reachable(now, row.observed_at.unwrap_or_default())
+        }) {
+            let role = ClusterRole::from_stored(row.admitted_role.as_deref())?;
+            if !allow_learners && role == ClusterRole::Learner {
+                continue;
+            }
+            peers.push(ActivityPeer {
+                http_base: row.http_base,
+                node_id: row.node_id,
+                raft_id: row.raft_id,
+                reachable: node_is_reachable(now, row.last_seen_at),
+            });
+            if peers.len() == MAX_ACTIVITY_PEERS {
+                break;
+            }
+        }
+        Ok(peers)
     }
 
     /// Number of committed voters, including this node. Media rollout gates
@@ -13754,6 +13751,7 @@ impl From<&mut Row<'_>> for NodeHostnameRow {
 
 struct MediaPeerRow {
     node_id: String,
+    admitted_role: Option<String>,
     raft_id: u64,
     last_seen_at: i64,
     http_base: Option<String>,
@@ -13766,6 +13764,7 @@ impl From<&mut Row<'_>> for MediaPeerRow {
         let raft_id: i64 = row.get("raft_id");
         Self {
             node_id: row.get("node_id"),
+            admitted_role: row.get("role"),
             raft_id: u64::try_from(raft_id).unwrap_or_default(),
             last_seen_at: row.get("last_seen_at"),
             http_base: row.get("public_http_url"),

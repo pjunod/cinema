@@ -903,3 +903,25 @@ fn the_hevc_index_pass_survives_a_correctable_dts_head_and_still_proves_the_trac
     strict.insert(3, "-xerror".into());
     assert!(!run(&strict).status.success(), "fixture must trip -xerror");
 }
+
+#[test]
+fn index_pipe_allows_timestamp_repair_and_keeps_the_hevc_header_proof() {
+    for codec in ["hevc", "h265"] {
+        let mut file = hevc_dv();
+        file.video_codec = Some(codec.to_owned());
+        for video in every_copy_option() {
+            let args = copy_index_pipe_args(&file, video);
+            assert!(
+                !args.iter().any(|arg| arg == "-xerror"),
+                "the muxer must be able to correct a reordered DTS head: {args:?}"
+            );
+            assert!(
+                args.windows(2).any(|pair| {
+                    pair[0] == "-bsf:v"
+                        && pair[1].split(',').any(|filter| filter == "trace_headers")
+                }),
+                "timestamp repair must not remove the HEVC proof: {args:?}"
+            );
+        }
+    }
+}

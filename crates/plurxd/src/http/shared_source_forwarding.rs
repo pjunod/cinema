@@ -16,7 +16,7 @@ use axum::{
 };
 use futures_util::{FutureExt, StreamExt};
 use plurx_core::{
-    cluster::membership::{ActivityPeer, LocalServingRole},
+    cluster::membership::ActivityPeer,
     playback_principal::PlaybackPrincipal,
 };
 use serde::{Deserialize, Serialize};
@@ -1954,7 +1954,7 @@ mod tests {
         assert!(credit_from(Operation::End, &media, &control, &cleanup).is_err());
     }
     #[test]
-    fn locate_asks_only_peers_whose_role_admits_it() {
+    fn locate_asks_only_reachable_addressable_other_peers() {
         let peer = |id: &str, raft_id| ActivityPeer {
             node_id: id.to_owned(),
             raft_id,
@@ -1963,8 +1963,10 @@ mod tests {
         };
         let targets = locate_targets(
             vec![
-                (peer("lab3", 7), LocalServingRole::Learner),
-                (peer("lab6", 6), LocalServingRole::Voter),
+                ActivityPeer { reachable: false, ..peer("lab3", 7) },
+                peer("lab6", 6),
+                peer("self", 1),
+                ActivityPeer { http_base: None, ..peer("lab4", 4) },
             ],
             "self",
         );
@@ -2054,22 +2056,19 @@ impl LocationReply {
     }
 }
 
-/// Peers worth asking to locate: reachable, addressable, and whose committed
-/// role admits the locate route (the receiving gate's own predicate), so a
-/// learner is never sent a request it is certain to refuse.
+/// Peers worth asking to locate after the membership directory applies the
+/// route policy: reachable, addressable, and distinct from this node.
 fn locate_targets(
-    peers: Vec<(ActivityPeer, LocalServingRole)>,
+    peers: Vec<ActivityPeer>,
     own_node_id: &str,
 ) -> Vec<ActivityPeer> {
     peers
         .into_iter()
-        .filter(|(peer, role)| {
+        .filter(|peer| {
             peer.node_id != own_node_id
                 && peer.reachable
                 && peer.http_base.is_some()
-                && crate::http::serving_role_admits(*role, &axum::http::Method::POST, LOCATE_PATH)
         })
-        .map(|(peer, _)| peer)
         .collect()
 }
 
@@ -2087,7 +2086,12 @@ pub(super) async fn collect_fresh_location(
     let deadline = deadline.min(Instant::now() + Duration::from_secs(9));
     let peers = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        state.membership.media_peers_with_roles(),
+        state
+            .membership
+            .media_peers_for_route(crate::http::learner_route_eligible(
+                &axum::http::Method::POST,
+                LOCATE_PATH,
+            )),
     )
     .await
     .map_err(|_| unavailable())?

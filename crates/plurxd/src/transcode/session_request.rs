@@ -516,6 +516,8 @@ pub struct CandidateExecutionContext {
     /// Explicit live-only policy, derived from current admitted caps and the
     /// fenced complete-title probe and resolved source mastering. The effective
     /// floor is fixed before preparation identity; ordinary VOD/pre-encode use None.
+    // Its processing consumer is Linux-only, like ProcessedUpgradeTrial.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display_target_note: Option<String>,
     pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
