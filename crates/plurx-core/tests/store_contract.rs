@@ -21281,7 +21281,9 @@ fn contract_inventory_matches_every_store_method() {
     // +4: main's analysis_completions_executed_by, analysis_source_admission,
     // media_session_request_progress and prometheus_store_snapshot_with, which
     // main declared (551) without naming them here; named above.
-    assert_eq!(declared.len(), 558, "review the Store method count");
+    // +1: request_dv_fel_variant is named in BACKGROUND_JOB_METHODS and
+    // exercised by the source-fenced DV title-job contracts.
+    assert_eq!(declared.len(), 559, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
