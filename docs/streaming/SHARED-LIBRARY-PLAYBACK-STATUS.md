@@ -49,6 +49,15 @@ the four nullable dump-row declarations reconstructs the entire base file.
 Five reviewed source hashes were refreshed. Guards, model pins and counts
 remain unchanged; both failed mapping checks then passed.
 
+The next preflight found three module-wide structural-count changes. The
+scoped ownership audit accounts for one production cache-read task retaining
+its file/admission lease, twelve fixture tasks, seven production waits and
+twenty-three fixture waits. Thirteen process-shaped matches are HTTP/TLS
+status observations; no OS launcher was added. Only the reviewed counts and
+authored audit note changed; the failed method then passed. The completed
+Python journal retains 2,408 passes, of which 2,402 have unchanged inputs and
+remain eligible for reuse after the ownership metadata update.
+
 One combined-run encoded/native Start returned 503 after successful
 pre-session WebVTT. It did not recur in six subsequent runs, including standalone, original-order
 and current-base qualification. Its cause remains unattributed; the failed receipt

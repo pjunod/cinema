@@ -1,3 +1,31 @@
+# Shared-library playback ownership audit (2026-11-09): authored static
+# comparison of main 30f4343ba with candidate 2285907fc, using the unchanged
+# rust_structural_source extractor over the declared module roots. This is
+# source ownership evidence, not fresh runtime or physical qualification.
+# Exact deltas: task shapes 1100->1113 (+13), time constructors 2122->2152
+# (+30), process-capable launch shapes 895->908 (+13).
+# The sole new production task is shared_artwork.rs's awaited spawn_blocking
+# cache read. It owns the open cache file and ArtBodyLease until the bounded
+# byte read/hash actually returns; its two-second waiter timeout cannot release
+# that closure's lease or prove its join. It starts no media reader or child.
+# Seven production timers are that cache-read bound, two fixed rejoin-window
+# wakes in the existing Receiver owner, the Source's answer-only deadline,
+# and sharing.rs's bounded retry sleep, artwork fetch and scope-permit wait.
+# Receiver retirement still uses its retained ordinary End owner; an answer
+# deadline drops a waiter, not the accepted Start, source reader or cleanup.
+# The other 12 task shapes and 23 timers are tests: shared_receiver_fixture
+# adds five tasks/twelve timers, shared_receiver_playback one task/two timers,
+# shared_source_playback/tests six tasks/eight timers, and forwarding_tests
+# one timer. Server handles retain shutdown channels, caller/End handles are
+# awaited, and normal fixture paths join/drain servers and release held seams.
+# Fixture timeouts remain failures, not evidence of process reap or settlement.
+# Three additional timer matches only moved (one receiver wait, two forwarding
+# deadlines); their three removed matches cancel them in the net count.
+# All 13 new process-capable shapes are observations: eleven HTTP status()
+# reads and two TLS status() reads. No new OS process launch is hidden here.
+# Patterns, roots, exclusions, aliases, forbidden zeroes, producer registrations
+# and every unrelated count retain their reviewed identities.
+#
 # Mediated reader/FEL close ownership audit (2026-11-08), relative to
 # main 29d61 plus source commits 51bc2fb3e/5cff6f430. Authored static review
 # only; this does not assert runtime qualification or legacy-reader settlement.
@@ -3753,7 +3781,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # `http::cluster_operations::worker_status_cache_loop`, a read-only refresh of local worker
 # capacity for Activity. It owns no child or source, and returns on `background_shutdown`, the
 # same cancellation as its sibling peer-status loop.
-expected_occurrences = 1100
+expected_occurrences = 1113
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5562,7 +5590,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # (`foreground_admission_tests`). Three are Jellyfin native-HLS test retries (d25a35ea3,
 # 9fde9d148, 55f84b0e8): 250 ms and 1 s sleeps while a fixture response is `503` pending.
 # No production producer, child or detached owner is added.
-expected_occurrences = 2122
+expected_occurrences = 2152
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6746,7 +6774,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +3 in `http/jellyfin/tests.rs` (d25a35ea3, 9fde9d148, 55f84b0e8): HTTP
 # `response.status()` reads in the pending-segment retry loops above. They match the
 # `.status(` shape but launch no process.
-expected_occurrences = 895
+expected_occurrences = 908
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
