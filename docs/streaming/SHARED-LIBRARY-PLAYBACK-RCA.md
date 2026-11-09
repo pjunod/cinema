@@ -6,12 +6,14 @@ independent repairs · **Written:** 2026-11-08 · **Evidence build:**
 `09097650f` on the receiver and `b08b5b8ec` on the source cluster ·
 **Review:** adversarial (Opus 5.5), 24 findings, all applied (§13)
 
-**Continuation (2026-11-09):** Codex owns the playback-start continuation.
-S4 (index DTS-head correction) and S12 (route-eligible locate peers) are
-implemented on the continuation branch; review, final-candidate checks and
-merge remain pending. S1–S3 and S5–S11 remain A1 integration work; this does
-not qualify shared playback or physical devices. The execution ledger is
-[the playback-start plan](PLAYBACK-START-PLAN.md#8-execution-log).
+**Continuation (2026-11-09):** Playback-start's S4 (index DTS-head
+correction) and S12 (route-eligible locate peers) landed in PR #1475.
+PR #1472 carries the independent repairs and relay budget, retry and
+abandonment work; its final review is complete. Validation and landing
+evidence are tracked in the delivery ledger and PR. S1–S3, S8 and S9 remain A1 work; S5's asynchronous subtitle
+preparation remains deferred for Source custody. This does not qualify
+physical devices. See [the shared-library delivery ledger](SHARED-LIBRARY-PLAYBACK-STATUS.md)
+and [the playback-start execution log](PLAYBACK-START-PLAN.md#8-execution-log).
 
 Companion to [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md), which covers
 how playback starts on your own server. This document covers playback from

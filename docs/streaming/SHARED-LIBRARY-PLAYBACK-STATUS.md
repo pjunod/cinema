@@ -1,97 +1,64 @@
 # Shared-library playback — implementation and merge status
 
-**Status:** open · **Updated:** 2026-11-09 · **Owner:** Codex integrator
+**Status:** built · **Updated:** 2026-11-09 · **Owner:** Codex/root
 
-Companion to [the root-cause analysis](SHARED-LIBRARY-PLAYBACK-RCA.md), which
-owns the design and accepted decisions. This page records PR #1472's delivery
-state. The larger [playback-start effort](PLAYBACK-START-PLAN.md) owns A1.
+PR #1472, `claude/shared-library-standalone-fixes`, carries the standalone
+repairs and relay budget, retry and abandonment work. Its live gate and
+landing state are recorded on the PR. The [root-cause analysis](SHARED-LIBRARY-PLAYBACK-RCA.md)
+owns the design and accepted decisions; [playback-start](PLAYBACK-START-PLAN.md)
+owns A1.
 
-## Current state
+## Delivered scope
 
-PR **#1472**, branch `claude/shared-library-standalone-fixes`, remains draft.
-The resumed source was `0b3c0dfc3`; relay and review fixes are integrated.
-Current code candidate `537b4cf2d` contains the subtitle follow-up and its
-cancellation control. Nine unaffected focused cases passed; affected daemon
-lint and the failed fixture plus two controls are in progress. The final fast
-lane has not started.
+The batch repairs NULL-principal consumers, committed membership bootstrap,
+RPC attribution, Source admission, poster retries and verified snapshots,
+owned abandonment, and startup clocks and retries across the relay. Main
+`30f4343ba` is integrated, retaining the canonical route policy, native startup,
+HDR and queued-analysis custody repairs from #1475–#1478.
 
-The implementation covers NULL-principal consumers (§4), committed membership
-(§6), RPC attribution (§7 step 2), Source admission (§8/S12), poster retries
-and snapshots (§9), the HEVC index argv (S4), owned abandonment (S10), and
-startup budgets and retries across the relay (S6/S7/S11).
+S5's asynchronous subtitle preparation needs Source custody and remains
+deferred. S1–S3, S8 and S9 remain A1 work. Native Apple/Android startup headers
+require a client release. RX-ring operations, deployment and physical
+playback acceptance remain separate.
 
-S5 was reverted: independent subtitle extraction lacked Source custody.
-S1–S3, S8 and S9 remain A1 work. Native Apple/Android startup headers require
-a client release. The RX ring and deployment remain separate operations work.
+## Fixture correction
 
-## Evidence and remaining work
+The native fixture replaced AppState's store after constructing its
+JobManager, leaving that manager attached to an empty SQLite store. Its
+pre-session WebVTT Source registration therefore found no matching file.
+`f23c6d8d1` constructs AppState and store-bound managers from the selected
+Hiqlite store together. The replacement TranscodeManager retains actual
+Source identity and the same jobs. Production custody predicates remain intact.
 
-| Stage | State |
+## Qualification evidence
+
+| Surface | Evidence |
 |---|---|
-| Compiler | Pinned Rust 1.97.1 checks passed before the subtitle follow-up; core/vendor passes are retained. Affected daemon all-target Clippy is running on `537b4cf2d`. |
-| Final review | Independent Codex review of `28bc0aacc`: one P1 and one P2; both addressed below. Prior Opus review remains attributed to the earlier owner because no report was retained. |
-| Existing focused tests | Latest historical run: 143 passed, two failed; pinned fixtures: four passed, three failed. These are not final-source passes. The native Source HTTP cases pass after the S5 revert; the older caption failures predate it. |
-| Core | Retained focused run: 27 passed; separate replicated-store run: five passed. Applicability remains bounded to the source and features actually exercised. |
-| Counterfactuals | Prior evidence covers NULL principals and Source admission. Other counterfactual execution is not established. |
-| Paperwork | Prior CI failed for missing `Regression-Test:` lines; valid references are now in the PR body. Final check pending. |
-| Next | Finish the exact-source compiler checks; run final focused regressions and fast lane; fix and rerun failures only; merge on green. |
+| Compiler | Pinned Rust 1.97.1 formatting and daemon/core all-target Clippy passed on `b4fc494ce`; production vendor checks are retained. Current-base `78317af96` formatting and daemon/core all-target Clippy also passed. |
+| Source and relay | Five real-Source cases passed together, including both abandonment orderings, same-entry retries and discovery/Local clock preservation. The encoded/native fixture passed four subsequent runs, including the original preceding-fixture order. The final `78317af96` daemon batch passed 3/3: encoded/native playback, snapshot decision and typed busy response. |
+| Additional regressions | The final restored SQL/dump/bootstrap batch passed 3/3 with `hiqlite-store`. Actor-caption and locate passed 2/2; earlier voter-route/fallback checks are retained. Earlier unaffected artwork/receiver controls and 27 core checks are retained. |
+| Historical failures | All 60 old full-run failures were compared by exact name: 17 also failed baseline, 37 passed both comparison runs, five had later focused passes, and the remaining actor-caption case now passes unchanged. This is retained evidence, not a claim that the full suite was rerun. |
+| Paperwork | All 16 checks passed on the earlier integrated base; the final lane validates current metadata. Regression references remain in the PR body and must accompany the landing message. |
+| Final review | Independent Codex review of `28bc0aacc` found one P1 and one P2; both are fixed below. The earlier owner reported an Opus review without retaining its report. |
+| Counterfactuals | Retained role/capacity reversals and HEVC strict-child control are executed evidence. Five nonshipping reversals failed at the intended SQL, dump, bootstrap, retirement and discovery assertions. The strengthened snapshot regression executes the production cache/fetch decision and verifies that the old always-fetch operation fails; its final positive run passed. |
+| Promotion | Require the current-head fast lane to pass; its receipt and landing commit are recorded on PR #1472. |
 
-The fixture investigation uses a separate owned clone. User-owned source is
-not a build or scratch workspace. No watchdog, feature gate or authorization
-cache is introduced by the resumption.
+One combined-run encoded/native Start returned 503 after successful
+pre-session WebVTT. It did not recur in six subsequent runs, including standalone, original-order
+and current-base qualification. Its cause remains unattributed; the failed receipt
+and bounded test diagnostics are retained. No playback workaround was added
+for that observation.
 
-## Final review and dispositions
+The task-specific compiler/test allowance is at most 24 GiB, four CPUs and
+no swap on the existing build host. Repository build policy is unchanged.
+Receipts and isolated workspaces remain on the external agent drive.
 
-The final independent review examined `28bc0aacc` against `8ab61a779` plus the
-pinned asset diagnostic. No tests or builds were run by the reviewer.
+## Final review dispositions
+
+The independent review examined `28bc0aacc` against `8ab61a779` plus the
+pinned asset diagnostic. The reviewer ran no tests or builds.
 
 | Finding | Root cause and correction |
 |---|---|
-| P1 · Ready result abandoned in a retry gap | Readiness ended the abandonment phase although no accepted Start writer had claimed the result. `824e19044` preserves the existing rejoin deadline through readiness and serializes response claim against abandonment under the same mutex. Its ordinary End owner settles the Source; no watchdog is added. A real pinned test covers readiness before the window ends, and retry coverage checks an accepted result survives it. |
-| P2 · Discovery restarted the peer clock | The clock was constructed after discovery, and Local fall-through parsed the unchanged allowance again. `63a92adf3` constructs it once at ingress and carries it into the Local handler. Only the discovery answer waiter is cancelled: filesystem inspection remains with accepted-driver monitors, and no Start dispatch or registration is dropped. The real Source regression covers parked discovery and delayed Local fall-through. |
-
-The fixture repairs also establish their actual preconditions: End uses an
-independent driver; a long pause occurs after scan admission rather than
-expiring its five-second authority; abandonment observes the running scan
-before the caller leaves. The unresolved pinned pre-session WebVTT case
-retains Source warnings so a final failure can identify its extraction cause.
-
-The first serialized type check passed, but test-target Clippy exceeded the
-8 GiB container cap even without debug data. On 2026-11-09 the owner explicitly
-authorized a task-specific 12 GiB, four-CPU, no-swap container on the existing
-build host. This is retained in the task receipt, not a repository policy change.
-A subsequent production lint failure is corrected by grouping the canonical
-request, clock, rejoin window and connection custody in one transport input.
-The initial focused run completed with nine passes and one failure, recorded below.
-
-Paperwork initially passed 15 of 16 rules. The new index row crossed the 40 KiB
-streaming-index budget; shortening an existing summary fixed it, and all five
-checks in that failed module passed on the rerun. The other rules were not rerun.
-
-
-The test executable also exceeded 12 GiB after limiting compiler affinity to
-one CPU. The owner then authorized **up to 24 GiB, four CPUs, no swap** for this
-task only. The existing host has 60 GiB total; its repository build policy is
-unchanged. The failed executable build is being retried with four-CPU affinity,
-retaining all passing compiler/lint checks. Kernel records identify cgroup
-memory-limit kills, not Rust diagnostics. The four HEVC fixture `unwrap()`
-lints were corrected with descriptive `expect()` messages in `dc38044c4`.
-
-## Focused correction — pre-session text subtitles
-
-The isolated final run on `dc38044c4` completed **9 passed, 1 failed**. Both
-abandonment orderings, the accepted-response lifetime, relay/rejoin clocks and
-artwork scope classification passed. The failed native-lane fixture returned 503
-for pre-session WebVTT; captured Source warnings identified
-`subtitle sparse read cancelled`.
-
-The sparse range reader cancels its helper child after a read failure. That
-is distinct from stopping the extraction. The correction restores the existing
-whole-source demux only while both the bounded operation and its Source-read
-budget remain active. The budget has a separate cancellation token, so it is
-checked explicitly rather than relying on delayed supervisor propagation.
-S5's asynchronous extraction remains deferred; no work is detached here.
-
-Candidate `537b4cf2d` is in affected daemon lint and a failed-only run: the
-native fixture plus the genuine operation- and budget-cancellation controls.
-The nine unaffected passes and passing core/vendor lint are retained.
+| P1 · Ready result abandoned in a retry gap | Readiness ended abandonment before an accepted Start writer claimed the result. `824e19044` preserves the existing rejoin deadline through readiness and serializes response claim against abandonment under the same mutex. Ordinary End settles the Source. |
+| P2 · Discovery restarted the peer clock | The clock was constructed after discovery, and Local fall-through parsed the unchanged allowance again. `63a92adf3` constructs it once at ingress and carries it into the Local handler. Only the discovery answer waiter is cancelled; accepted drivers retain filesystem and Start ownership. |

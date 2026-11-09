@@ -14,7 +14,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Playback-start effort: rulings, lanes, reviews, lane status. | open |
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions; current state is in the plan. | live |
 | [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
-| [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, implementation, retained evidence and merge prerequisites. | open |
+| [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, implementation, retained evidence and merge prerequisites. | built |
 | [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold publication and Resume fault repair: review and merge ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs; review and acceptance. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
