@@ -1583,28 +1583,75 @@ impl TranscodeManager {
     async fn reconstruction_qualified(
         &self,
         planning: &plurx_core::store::PlaybackPlanningSnapshot,
+        envelope: plurx_core::transcode::EnhancementRateEnvelope,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        grid: plurx_core::transcode::VodFrameGrid,
+        encoder: Encoder,
     ) -> Result<(), String> {
+        Self::require_fel_qualification_backend(encoder)?;
         if !self.fel_qualification_capable() {
             return Err(Self::fel_recipe_unqualified().into());
         }
         let tools = crate::vodencode::dv_runtime::ToolSet::capture()
             .await?
             .ok_or("the processing helper is unavailable on this node")?;
-        let identity = self.fel_identity(&tools.backend_digest()).await?;
-        self.fel_route_decision(
-            &planning.file,
-            planning.probe_json.as_deref(),
-            &tools.title_scanner_digest(),
-            &identity,
-        )
-        .await
+        use plurx_core::transcode::dv_fel_qualification as q;
+        let backend_identity = self.fel_identity(&tools.backend_digest()).await?;
+        let request = q::FelRecipeRequest::new(
+            backend_identity,
+            planning.file.size,
+            planning.file.mtime,
+            envelope,
+            q::FelRecipeOutput::new(
+                plan.decode().input_video_stream(),
+                plan.output_contract()
+                    .effective_width()
+                    .zip(plan.output_contract().effective_height())
+                    .ok_or("FEL recipe has no frozen output raster")?,
+                (grid.numerator, grid.denominator),
+            ),
+        );
+        match Self::fel_gate(
+            true,
+            q::verdict_state(
+                planning.probe_json.as_deref(),
+                planning.file.size,
+                planning.file.mtime,
+                &request.identity,
+            ),
+        ) {
+            FelGate::Serve => Ok(()),
+            FelGate::Decline(reason) => Err(reason),
+            FelGate::Measure => {
+                if !self
+                    .store
+                    .request_dv_fel_variant(planning.file.id, &request)
+                    .await
+                    .map_err(|e| e.to_string())?
+                {
+                    return Err("the enhancement recipe qualification request is full or its source changed".into());
+                }
+                Err(Self::fel_being_measured().into())
+            }
+        }
+    }
+
+    /// Qualification measures this actual encoder; saved preferences are never
+    /// overridden and another backend cannot consume a VA-API receipt.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn require_fel_qualification_backend(encoder: Encoder) -> Result<(), String> {
+        if encoder == Encoder::Vaapi {
+            Ok(())
+        } else {
+            Err(format!("the selected {encoder:?} reconstruction recipe has no matching FEL quality measurement (current measurements use radeonsi VA-API)"))
+        }
     }
 
     /// The route's answer for one title from its stored verdict for
     /// `identity`: served, declined with the verdict's reason, or (no
     /// verdict) measured: the title's qualification is requested and the play
     /// keeps the plain conversion meanwhile.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) async fn fel_route_decision(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -2099,9 +2146,7 @@ impl TranscodeManager {
                 .ok_or("the client did not report its playback capabilities")?;
             // Reconstruction is the better picture only for a title whose EL
             // adds more than the re-encode loses: its measured verdict decides.
-            if profile81 {
-                self.reconstruction_qualified(&planning).await?;
-            }
+
             let Ok(_preparation_slot) =
                 Arc::clone(&self.processed_preparation_slot).try_acquire_owned()
             else {
@@ -2187,6 +2232,41 @@ impl TranscodeManager {
                         && root.encoding.dv_runtime.as_ref().is_some_and(|runtime| runtime.display_target == display_target))
             } else {
                 None
+            };
+            let reused = if matches!(destination, DvDestination::Hdr10 | DvDestination::Profile81) {
+                match reused {
+                    Some(root) => {
+                        let desired = Self::processed_enhancement_envelope_with_source_rate(
+                            &planning,
+                            &trial,
+                            &root.encoding.options,
+                            root.encoding.plan.options().input_has_audio,
+                            crate::ffmpeg::has_dovi_rpu().await,
+                            destination,
+                            root.encoding.plan.enhancement_rate_envelope().filter(|envelope|envelope.provenance()==plurx_core::transcode::EnhancementRateProvenance::HeldVideoStream)
+                                .map(|envelope|u64::from(envelope.target_kbps())*1000),
+                        )?;
+                        if destination == DvDestination::Profile81 {
+                            self.reconstruction_qualified(
+                                &planning,
+                                desired,
+                                &root.encoding.plan,
+                                root.encoding.grid,
+                                root.encoding
+                                    .dv_runtime
+                                    .as_ref()
+                                    .ok_or("reused FEL root lost its runtime recipe")?
+                                    .encoder,
+                            )
+                            .await?;
+                        }
+                        (root.encoding.plan.enhancement_rate_envelope() == Some(desired))
+                            .then_some(root)
+                    }
+                    None => None,
+                }
+            } else {
+                reused
             };
             let mut root = match reused {
                 Some(root) => root,
@@ -3327,9 +3407,7 @@ impl TranscodeManager {
                     let (_, destination, _) = req.dv_processing_route()?;
                     // Every start, not only one the ingress offered: the title's
                     // FEL verdict decides whether it is reconstructed.
-                    if destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
-                        self.reconstruction_qualified(&planning).await?;
-                    }
+
                     let preferences = Self::vod_dv_preferences_from_snapshot(&planning);
                     let failure_episode = failure_episode_key(&req.playback_id, &source_object_version,
                         &tools, preferences, destination)?;
@@ -3364,18 +3442,29 @@ impl TranscodeManager {
                         Encoder::Software, file, target_height, 0.0, req.audio_index, None, Some(1),
                         OutputGrade::Hdr10).pipeline;
                     processed_options.software_threads = Some(1);
-                    // The reconstructed 8.1 replaces a copy of the disc's base
-                    // layer at full rate, so it is not held to the 2160p
-                    // transcode rung: min(source average, 60 Mb/s).
-                    if destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
-                        processed_options.video_bitrate_kbps =
-                            plurx_core::transcode::reconstructed_p81_video_kbps(file);
-                    }
+                    let enhancement_envelope = if matches!(destination,
+                        plurx_core::transcode::dv_processing::DvDestination::Profile81 |
+                        plurx_core::transcode::dv_processing::DvDestination::Hdr10) {
+                        let envelope = Self::processed_enhancement_envelope_with_source_rate(&planning, req,
+                            &processed_options, retained.0.options().input_has_audio,
+                            crate::ffmpeg::has_dovi_rpu().await, destination,
+                            plurx_core::transcode::enhancement_stream_rate(&document,retained.0.decode().input_video_stream()))?;
+                        processed_options.video_bitrate_kbps = envelope.target_kbps();
+                        Some(envelope)
+                    } else { None };
                     let held = source.handle.try_clone().map(Arc::new).map_err(|e| e.to_string())?;
-                    let processed_plan = self.resolve_vod_movie_plan(file, &processed_options, Encoder::Software, held).await?;
+                    let mut processed_plan = self.resolve_vod_movie_plan(file, &processed_options, Encoder::Software, held).await?;
+                    if let Some(envelope) = enhancement_envelope {
+                        processed_plan = processed_plan.with_enhancement_rate_envelope(envelope).map_err(str::to_owned)?;
+                    }
                     let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));
                     let processed_encoder = crate::vodencode::dv_runtime::completed_window_encoder(
                         worker_encoder, self.hdr10_passthrough_vaapi, &processed_plan, grid);
+                    if destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
+                        self.reconstruction_qualified(&planning,
+                            enhancement_envelope.ok_or("FEL recipe lost its frozen envelope")?,
+                            &processed_plan,grid,processed_encoder).await?;
+                    }
                     if source_frame_probe.as_ref().is_some_and(|probe| probe.absolute_stream() != retained.0.decode().input_video_stream()) {
                         return Err("source frame metadata selected stream differs from the held decoder plan".into());
                     }
@@ -6484,5 +6573,19 @@ mod display_target_policy_tests {
         let (target, note) = select(true, None, Some(high.as_str()));
         assert!(target.is_none());
         assert!(note.expect("unknown").contains("master grade"));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod exact_fel_backend_tests {
+    use super::*;
+    #[test]
+    fn actual_fel_backend_cannot_consume_another_encoders_quality_receipt() {
+        assert!(TranscodeManager::require_fel_qualification_backend(Encoder::Vaapi).is_ok());
+        for encoder in [Encoder::Software, Encoder::Nvenc, Encoder::Qsv] {
+            let reason = TranscodeManager::require_fel_qualification_backend(encoder)
+                .expect_err("unmeasured backend");
+            assert!(reason.contains(&format!("{encoder:?}")));
+        }
     }
 }
