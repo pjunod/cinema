@@ -4,8 +4,9 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use super::SqliteStore;
 use crate::error::StoreError;
 use crate::store::fragment_index_cluster::{
-    bounded_analysis_backoff_base_secs, bounded_analysis_backoff_max_secs,
-    bounded_analysis_max_attempts, valid_subtitle_source_publication,
+    analysis_request_id_is_valid, bounded_analysis_backoff_base_secs,
+    bounded_analysis_backoff_max_secs, bounded_analysis_max_attempts,
+    new_analysis_request_id_is_valid, valid_subtitle_source_publication,
 };
 use crate::store::fragment_index_cluster::{ANALYSIS_CANONICAL_CTE, ANALYSIS_SUMMARY_CTE};
 use crate::store::fragment_index_cluster::{
@@ -314,8 +315,7 @@ fn valid_hex_digest(value: &str) -> bool {
 }
 
 fn valid_request(request: &NewAnalysisRequest) -> bool {
-    !request.request_id.is_empty()
-        && request.request_id.len() <= 64
+    new_analysis_request_id_is_valid(&request.request_id)
         && request.file_id > 0
         && request.source_size >= 0
         && matches!(
@@ -1749,8 +1749,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         if candidate.repair_revision != super::super::CONTENT_ANALYSIS_REPAIR_REVISION
             || !candidate.has_valid_id()
             || candidate.eligibility != "eligible"
-            || successor_request_id.is_empty()
-            || successor_request_id.len() > 128
+            || !analysis_request_id_is_valid(successor_request_id)
         {
             return Err(StoreError::Task(
                 "invalid content-analysis repair candidate".to_owned(),

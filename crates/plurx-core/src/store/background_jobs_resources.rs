@@ -915,10 +915,83 @@ mod source_tests {
             .is_empty());
     }
 
+    #[test]
+    fn analysis_source_owner_preserves_bounded_queue_identity_and_fence_isolation() {
+        let request_id = "a".repeat(64);
+        let request_id = request_id.as_str();
+        let owner = |request: &str, node: &str, fence| BackgroundSourceOwner::Analysis {
+            request_id: request.into(),
+            node_id: node.into(),
+            fence,
+        };
+        let key = background_owner_key(&owner(request_id, "worker", 7))
+            .expect("digest ID is a queue identifier");
+        for other in [
+            owner(&"b".repeat(64), "worker", 7),
+            owner(request_id, "other-worker", 7),
+            owner(request_id, "worker", 8),
+        ] {
+            assert_ne!(key, background_owner_key(&other).expect("distinct owner"));
+        }
+        for valid in [
+            "request with spaces",
+            "../request/control:part?name='quoted'",
+            "字幕 / demande",
+            "request\0suffix\ncontrol",
+            &"é".repeat(32),
+            &"opaque / legacy ".repeat(8),
+            &"é".repeat(64),
+        ] {
+            assert!(background_owner_key(&owner(valid, "worker", 7)).is_ok());
+        }
+        assert!(
+            !super::super::fragment_index_cluster::new_analysis_request_id_is_valid(
+                &"a".repeat(65)
+            )
+        );
+        assert!(
+            super::super::fragment_index_cluster::new_analysis_request_id_is_valid(&"é".repeat(32))
+        );
+        assert!(
+            super::super::fragment_index_cluster::analysis_request_id_is_valid(&"é".repeat(64))
+        );
+        for invalid in [
+            owner("", "worker", 7),
+            owner(&"a".repeat(129), "worker", 7),
+            owner(&"é".repeat(65), "worker", 7),
+            owner(request_id, "", 7),
+            owner(request_id, "worker", 0),
+            owner(request_id, "worker", -1),
+        ] {
+            assert!(background_owner_key(&invalid).is_err());
+        }
+    }
+
     #[tokio::test]
     async fn analysis_source_join_replays_only_its_fenced_receipt() {
+        let subtitle_request_id = crate::store::SubtitleSourceStamp {
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 1,
+            pipeline_version: "subtitle-pipeline".into(),
+        }
+        .generation(0);
+        assert_eq!(subtitle_request_id.len(), 64);
+        for request_id in [
+            uuid::Uuid::new_v4().to_string(),
+            subtitle_request_id,
+            "../字幕 / request?name='quoted'".to_owned(),
+            "request\0suffix\ncontrol".to_owned(),
+            "é".repeat(32),
+            "opaque / legacy ".repeat(8),
+            "é".repeat(64),
+        ] {
+            analysis_source_join_replays_exact_request(request_id).await;
+        }
+    }
+
+    async fn analysis_source_join_replays_exact_request(request_id: String) {
         let store = fixture();
-        let request_id = uuid::Uuid::new_v4().to_string();
         {
             let connection = store.0.lock().expect("connection");
             connection.execute("INSERT INTO analysis_requests(request_id,owner_node_id,fence,state,cancel_requested,lease_expires_ms,file_id,source_size,source_mtime) VALUES(?1,'worker',7,'running',0,30000,1,100,1)", [&request_id]).expect("analysis owner");
@@ -934,6 +1007,23 @@ mod source_tests {
             node_id: "worker".into(),
             fence: 7,
         };
+        for stale in [
+            BackgroundSourceOwner::Analysis {
+                request_id: request_id.clone(),
+                node_id: "different-worker".into(),
+                fence: 7,
+            },
+            BackgroundSourceOwner::Analysis {
+                request_id: request_id.clone(),
+                node_id: "worker".into(),
+                fence: 6,
+            },
+        ] {
+            assert!(register_background_custody(&store, stale, 1000)
+                .await
+                .expect("valid shape with stale authority")
+                .is_none());
+        }
         let receipt = register_background_custody(&store, owner, 1000)
             .await
             .expect("register")
@@ -2094,7 +2184,12 @@ pub fn background_owner_key(owner: &BackgroundSourceOwner) -> Result<String, Sto
             node_id,
             fence,
         } => {
-            if uuid::Uuid::parse_str(request_id).is_err() || !identifier(node_id) || *fence <= 0 {
+            // The request ID is opaque, unlike the separate custody receipt's
+            // UUID. Include the wider IDs already admitted by analysis repair.
+            if !super::fragment_index_cluster::analysis_request_id_is_valid(request_id)
+                || !identifier(node_id)
+                || *fence <= 0
+            {
                 return Err(StoreError::Task("invalid analysis source custody".into()));
             }
             crate::segplan::argv_fingerprint(&[

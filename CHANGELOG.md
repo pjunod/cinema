@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Digest-keyed analysis requests can register their source custody,
+  allowing the index queue to progress instead of renewing a rejected request
+  indefinitely while holding its shared source-I/O slot.
+
 - A client releasing a rolling stream, or an operator stopping it from
   Activity, now retires it as `released` / `stopped` instead of an authority
   fence. Metrics and session-end events no longer report every ordinary

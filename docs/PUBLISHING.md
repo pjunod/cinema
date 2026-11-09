@@ -100,6 +100,21 @@ Inspect the configured `MOBILE_RELEASE_ENV` (default
 the source checkout. The original setup/export receipts are under
 `~/.local/state/noirr/mobile-channels/setup-evidence-2026-11-03/`.
 
+Check credentials in the controller's actual GUI session. An SSH-session
+Keychain lock result does not establish the signing runner's GUI access.
+Certificates may be listed without usable private credentials. If the GUI
+confirms a locked login Keychain, its owner unlocks it locally. A successful
+export, rather than certificate metadata, establishes signing recovery.
+
+**M5 verification, 2026-11-09:** iOS and tvOS build294 were exported and
+uploaded from the M5 with the signed-in Xcode account and automatic signing.
+The exported summary names **Cloud Managed Apple Distribution**. Both builds
+reached `VALID` and `IN_BETA_TESTING`; the existing automatic internal group
+receives them. The M5 needed no local Apple Distribution private-key bundle.
+Use this account-based path before looking for a `.p12` or creating a new
+certificate. The existing API key cannot create a distribution certificate
+(HTTP403); increasing that key's privileges was unnecessary.
+
 The verified November 3 exports used the signed-in Xcode account and
 `-allowProvisioningUpdates`. Do not assume an exported mobile `.p12` was
 part of that setup, or confuse the standalone macOS Developer ID identity
