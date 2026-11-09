@@ -20,8 +20,10 @@ sampled active RGB codes from the separately labeled licensed expanded-XML
 render. This does not qualify a whole frame or replace the frozen P7/P8
 references. The candidate carries checked L5 offsets through the shared DM
 header, filters inside the uncropped native active rectangle, and writes PQ
-black outside it. Source compilation, CPU crop-domain controls and GPU parity
-are pending. CM v2.9 and the PQ equations remain unchanged.
+black outside it. C/native compilation and three crop-domain CPU controls
+passed on this header. No-L5, zero/full-frame L5 and CM v2.9 retain the
+original shader literals byte for byte; the PQ equations remain unchanged.
+GPU parity and full picture/display/performance acceptance remain open.
 
 The preceding source-budget correction merged in PR #1477 at `49c4ec103` after
 all applicable current-head fast-lane jobs passed. Its bitrate, level and
