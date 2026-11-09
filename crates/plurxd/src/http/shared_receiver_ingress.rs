@@ -291,7 +291,7 @@ async fn start(
         || Instant::now() + Duration::from_secs(305),
         |clock| clock.deadline.into_std(),
     );
-    let response = actor
+    let (response, _waiter) = actor
         .wait_published(&shared_state, answer_by, clock.is_some())
         .await
         .map_err(actor_error)?;

@@ -2550,12 +2550,40 @@ async fn sharing_receiver_real_pinned_source_not_yet_rejoins_the_same_source_sta
                 address,
                 older_source,
                 unassigned,
+                false,
                 fixture_body_budget,
             )),
         )
         .await
         .expect("bounded relayed not-yet fixture");
     }
+}
+
+/// Readiness after the final not-yet waiter left does not give any viewer
+/// the session capability. The ordinary owner must End that ready result at
+/// its fixed window, while the paired rejoin fixture keeps a claimed result.
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_ready_in_retry_gap_is_retired_without_delivery() {
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    assert!(plurx_core::sharing::is_tailnet_address(address));
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        Box::pin(actual_pinned_not_yet(
+            address,
+            false,
+            false,
+            true,
+            fixture_body_budget,
+        )),
+    )
+    .await
+    .expect("bounded undelivered-ready retirement fixture");
 }
 
 /// With `unassigned`, the viewer loses the library between the Source's
@@ -2566,6 +2594,7 @@ async fn actual_pinned_not_yet(
     address: IpAddr,
     older_source: bool,
     unassigned: bool,
+    abandon_after_ready: bool,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) {
     use axum::http::StatusCode;
@@ -2604,12 +2633,18 @@ async fn actual_pinned_not_yet(
     type Arrival = (Option<String>, u16, String);
     let arrivals: Arc<std::sync::Mutex<Vec<Arrival>>> = Arc::default();
     let observed = arrivals.clone();
+    let ends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_ends = ends.clone();
     let source_app = super::sharing::peer_router((*fixture.source.state).clone()).layer(
         axum::middleware::from_fn(
             move |request: Request<Body>, next: axum::middleware::Next| {
                 let observed = observed.clone();
+                let ends = observed_ends.clone();
                 async move {
                     let path = request.uri().path().to_owned();
+                    if path.ends_with("/end") {
+                        ends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
                     let is_start =
                         request.method() == axum::http::Method::POST && path.ends_with("/sessions");
                     let clock = request
@@ -2803,8 +2838,68 @@ async fn actual_pinned_not_yet(
         fixture.shutdown().await;
         return;
     }
-    // The client's ladder: release the Source, re-post the same request.
+    if !older_source && !abandon_after_ready {
+        // B's answer clock starts before its Source exchange. Observe the
+        // Source's own typed answer before releasing the scan, so this case
+        // proves an actual Source re-post rather than only B's retry gap.
+        loop {
+            let source_answered = arrivals
+                .lock()
+                .expect("arrivals")
+                .iter()
+                .any(|(_, status, code)| *status == 503 && code == "startup_timeout");
+            if source_answered {
+                break;
+            }
+            assert!(began.elapsed() < Duration::from_secs(20));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    // Complete preparation inside the fixed retry window after the first
+    // waiter has left. No viewer owns a successful response yet.
     pause.release();
+    if abandon_after_ready {
+        loop {
+            let claim: Value =
+                serde_json::from_str(&receiver_claim_observation(&fixture, &request_id).await)
+                    .expect("actual B publication observation");
+            if claim["published"] == 1 && fixture.source.active_source_sessions().await == 1 {
+                break;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(20),
+                "readiness must precede the fixed retry window: {claim}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(ends.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // Do not send another Start or an explicit End: only the owner's
+        // retained deadline can retire this published, undelivered result.
+        loop {
+            if ends.load(std::sync::atomic::Ordering::SeqCst) > 0
+                && fixture.source.active_source_sessions().await == 0
+                && fixture.source.state.transcode.source_http_starts.live_entries() == 0
+                && fixture.source.state.transcode.source_worker_count() == 0
+            {
+                break;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(45),
+                "the undelivered result must settle through the ordinary Source End"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = b_stop.send(());
+        b_task.await.expect("B joined").expect("B result");
+        let _ = source_stop.send(());
+        source_task
+            .await
+            .expect("Source joined")
+            .expect("Source result");
+        fixture.shutdown().await;
+        return;
+    }
+    // The client's ladder rejoins that same ready result.
     tokio::time::sleep(Duration::from_secs(1)).await;
     let bytes = loop {
         let remaining = 20_000u64.saturating_sub(began.elapsed().as_millis() as u64);
@@ -2834,6 +2929,16 @@ async fn actual_pinned_not_yet(
         1
     );
     assert_eq!(fixture.source.active_source_sessions().await, 1);
+    if !older_source {
+        // An accepted Start writer claimed the result. Completing its waiter
+        // must not End the healthy session at the original retry deadline.
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            began + Duration::from_secs(23),
+        ))
+        .await;
+        assert_eq!(fixture.source.active_source_sessions().await, 1);
+        assert_eq!(ends.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
     let arrivals = arrivals.lock().expect("arrivals").clone();
     if older_source {
         // Today's wire exactly: one Start, no clock, held until it published.

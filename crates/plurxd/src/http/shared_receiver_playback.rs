@@ -154,9 +154,14 @@ struct ReceiverStartState {
     owner: Option<ReceiverSourceOwner>,
     planned_activation: Option<MediaSessionActivation>,
     retirement_started: bool,
-    /// HTTP waiters currently awaiting this Start's outcome
-    /// (`ReceiverWaiter`). Only the abandonment decision reads it.
+    /// HTTP waiters awaiting readiness or admitting its accepted Start writer.
     waiters: usize,
+    /// Readiness alone gives no viewer the session capability. Only actual
+    /// accepted Start response admission transfers its lifetime to the viewer.
+    start_response_claimed: bool,
+    /// Reserved under the same mutex as response claim, before the ordinary
+    /// retirement owner is started outside this lock.
+    abandonment_claimed: bool,
     ingress_owner_identity: Option<String>,
     /// Why retirement began; read by the connection monitors when it stops.
     retirement_reason: Option<plurx_core::sharing_receiver_retirement::ReceiverRetirementReason>,
@@ -1107,6 +1112,13 @@ impl ReceiverStartActor {
                 #[cfg(test)]
                 eprintln!("B protected Start stage=accepted_ingress error={error:?}");
             })?;
+        {
+            let mut owned = self.0.state.lock().expect("receiver owner");
+            if owned.abandonment_claimed || owned.retirement_started || owned.dispatch_closed {
+                return Err(ReceiverStartError::Unresolved);
+            }
+            owned.start_response_claimed = true;
+        }
         let (parts, body) = response.into_parts();
         let stream = body.into_data_stream().map(move |frame| {
             let _accepted_writer = &guard;
@@ -1414,9 +1426,9 @@ impl ReceiverStartActor {
         Ok(owner.confirmed_source_end.get_or_insert(receipt).clone())
     }
     /// Whether this attempt has been genuinely abandoned: it has no waiter,
-    /// it never published, its retirement has not already begun, and no
-    /// retry can still rejoin it. This is the one place that decides
-    /// abandonment; the End it triggers is the ordinary retirement owner's.
+    /// no accepted Start writer claimed its result, its retirement has not
+    /// already begun, and no retry can still rejoin it. This is the one place
+    /// that decides abandonment; its End is the ordinary retirement owner's.
     ///
     /// Only an attempt whose viewer sent its start clock can be abandoned,
     /// and only once its fixed rejoin window has ended. Inside the window a
@@ -1426,7 +1438,7 @@ impl ReceiverStartActor {
     /// request and re-post the same `request_id` whenever it likes, so its
     /// attempt is never retired on a dropped waiter and keeps today's
     /// lifetime, ended by its owner.
-    fn abandoned_before_publication(
+    fn abandoned_before_delivery(
         entry: &ReceiverStartInner,
         owned: &ReceiverStartState,
     ) -> bool {
@@ -1434,11 +1446,35 @@ impl ReceiverStartActor {
             .rejoin_window
             .get()
             .is_some_and(|window| tokio::time::Instant::now() >= *window);
-        window_ended && owned.waiters == 0 && owned.start.is_none() && !owned.retirement_started
+        window_ended
+            && owned.waiters == 0
+            && !owned.start_response_claimed
+            && !owned.abandonment_claimed
+            && !matches!(owned.start, Some(Err(_)))
+            && !owned.retirement_started
     }
-    /// Register an HTTP waiter. When the last waiter of an unpublished,
+    fn retire_if_abandoned(&self, state: Arc<AppState>) {
+        let abandoned = {
+            let mut owned = self.0.state.lock().expect("receiver owner");
+            if Self::abandoned_before_delivery(&self.0, &owned) {
+                // Response admission cannot claim the result between this
+                // decision and begin_retirement acquiring the owner mutex.
+                owned.abandonment_claimed = true;
+                true
+            } else {
+                false
+            }
+        };
+        if abandoned {
+            self.begin_retirement(
+                state,
+                plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked,
+            );
+        }
+    }
+    /// Register an HTTP waiter. When the last waiter of an unclaimed,
     /// clocked Start goes away after its rejoin window (or the window ends
-    /// with none left; the owner asks then), the attempt goes to its single
+    /// before any writer claimed it), the attempt goes to its single
     /// retirement owner, which sends the Source its End and frees the
     /// Source's registry slot and source-copy permit.
     pub(crate) fn join_waiter(&self, state: Arc<AppState>) -> ReceiverWaiter {
@@ -1448,15 +1484,18 @@ impl ReceiverStartActor {
             state,
         }
     }
-    /// `wait_ready` as an abandonable waiter.
+    /// Keep the waiter through accepted response admission, including all of
+    /// its authority awaits. Dropping a successful readiness wait alone must
+    /// neither abandon it before admission nor claim a response never sent.
     pub(crate) async fn wait_published(
         &self,
         state: &Arc<AppState>,
         deadline: Instant,
         retryable: bool,
-    ) -> Result<ReceiverPublished, ReceiverStartError> {
-        let _waiter = self.join_waiter(Arc::clone(state));
-        self.wait_ready(deadline, retryable).await
+    ) -> Result<(ReceiverPublished, ReceiverWaiter), ReceiverStartError> {
+        let waiter = self.join_waiter(Arc::clone(state));
+        let response = self.wait_ready(deadline, retryable).await?;
+        Ok((response, waiter))
     }
     /// Wait for this attempt's outcome until `deadline`. With `retryable`
     /// (the viewer sent its start clock), the wait ending first, or a fresh
@@ -1510,24 +1549,18 @@ impl ReceiverStartActor {
     }
 }
 /// An HTTP waiter for a shared Start. Dropping it is the only signal that a
-/// viewer left; see `ReceiverStartActor::abandoned_before_publication`.
+/// viewer left; see `ReceiverStartActor::abandoned_before_delivery`.
 pub(crate) struct ReceiverWaiter {
     actor: ReceiverStartActor,
     state: Arc<AppState>,
 }
 impl Drop for ReceiverWaiter {
     fn drop(&mut self) {
-        let abandoned = {
+        {
             let mut owned = self.actor.0.state.lock().expect("receiver owner");
             owned.waiters = owned.waiters.saturating_sub(1);
-            ReceiverStartActor::abandoned_before_publication(&self.actor.0, &owned)
-        };
-        if abandoned {
-            self.actor.begin_retirement(
-                self.state.clone(),
-                plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked,
-            );
         }
+        self.actor.retire_if_abandoned(self.state.clone());
     }
 }
 async fn run_owner(
@@ -1712,16 +1745,7 @@ async fn run_owner(
             _ = entry.stop.cancelled(), if pending_authorized => pending_authorized = false,
             _ = tokio::time::sleep_until(rejoin_window.unwrap_or_else(tokio::time::Instant::now)), if rejoin_open => {
                 rejoin_open = false;
-                let abandoned = ReceiverStartActor::abandoned_before_publication(
-                    &entry,
-                    &entry.state.lock().expect("receiver owner"),
-                );
-                if abandoned {
-                    ReceiverStartActor(entry.clone()).begin_retirement(
-                        state.clone(),
-                        plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked,
-                    );
-                }
+                ReceiverStartActor(entry.clone()).retire_if_abandoned(state.clone());
             }
             _ = timer.tick(), if pending_authorized => {
                 let renewed = async {
@@ -1962,6 +1986,13 @@ async fn run_owner(
         tokio::select! {
             _ = entry.stop.cancelled() => return Err(ReceiverStartError::Unresolved),
             () = state.shutdown.cancelled() => return Err(ReceiverStartError::Unresolved),
+            // Source readiness can arrive in a retry gap. Keep the same
+            // deadline until an accepted Start writer claims that result.
+            _ = tokio::time::sleep_until(rejoin_window.unwrap_or_else(tokio::time::Instant::now)), if rejoin_open => {
+                rejoin_open = false;
+                ReceiverStartActor(entry.clone()).retire_if_abandoned(state.clone());
+                continue;
+            }
             _ = renewal.tick() => {}
         }
         // An uncommitted successor ends at its deadline on this same tick:
@@ -2735,7 +2766,7 @@ mod tests {
         // A clockless attempt (today's native client) is never abandoned on
         // a dropped waiter: a waiter it drops leaves it running, and the same
         // request still rejoins it.
-        assert!(!ReceiverStartActor::abandoned_before_publication(
+        assert!(!ReceiverStartActor::abandoned_before_delivery(
             &entry,
             &entry.state.lock().expect("state")
         ));
@@ -2769,18 +2800,18 @@ mod tests {
         drop(actor.join_waiter(Arc::new(crate::http::source_actor_test_state())));
         assert!(!entry.state.lock().expect("state").retirement_started);
         tokio::time::advance(Duration::from_millis(4_900)).await;
-        assert!(!ReceiverStartActor::abandoned_before_publication(
+        assert!(!ReceiverStartActor::abandoned_before_delivery(
             &entry,
             &entry.state.lock().expect("state")
         ));
         tokio::time::advance(Duration::from_millis(200)).await;
-        assert!(ReceiverStartActor::abandoned_before_publication(
+        assert!(ReceiverStartActor::abandoned_before_delivery(
             &entry,
             &entry.state.lock().expect("state")
         ));
-        // A viewer waiting, or a published start, is never abandoned.
+        // A viewer awaiting response admission is not abandoned.
         entry.state.lock().expect("state").waiters = 1;
-        assert!(!ReceiverStartActor::abandoned_before_publication(
+        assert!(!ReceiverStartActor::abandoned_before_delivery(
             &entry,
             &entry.state.lock().expect("state")
         ));
