@@ -1,8 +1,9 @@
 # Playback start — implementation plan
 
-**Status:** open — revision 3 (Fable adversarial review and Astra independent review applied, §7). Build plan for [CINEMA-END-TO-END-REVIEW-2026-11-07.md](../reviews/CINEMA-END-TO-END-REVIEW-2026-11-07.md). Rulings 2026-11-07 (§0). This file is the ONE shared status: claim a lane by editing its §6 row in a draft PR; log in §8. Build agents work from the plan revision named in the lane row, never an earlier one.
+**Status:** open — revision 3 (Fable adversarial review and Astra independent review applied, §7). Build plan for [CINEMA-END-TO-END-REVIEW-2026-11-07.md](../reviews/CINEMA-END-TO-END-REVIEW-2026-11-07.md). Rulings 2026-11-07 (§0). Claim lanes in §6; the [continuation ledger](PLAYBACK-START-STATUS.md) records execution and merge evidence. Build agents work from the plan revision named in the lane row, never an earlier one.
 **Routing:** lanes in §3 → build agents (Opus; Sonnet where marked). No feature gates in code: enable rows go in Settings → Developer as advisory readiness, never blocking.
-**Branch:** `effort/playback-start`. Lane PRs land in the effort branch (draft → one adversarial review per lane deliverable → fix → effort gate once on the final lane head); effort → main after one unit run and the main promotion gate on the final integration candidate, merged by the lane owner. Paul deploys. "Built on effort" and "accepted on fleet" are separate columns in §6; an after-deploy reading never blocks the deploy that produces it.
+**Phase 1:** merged to `main` in #1454 (`b08b5b8ec`); Apple build 294 landed in #1466 (`09097650f`). Fleet/device acceptance remains open. **Continuation owner:** Codex, session `01a1c166-b5b2-7033-bd74-77816ba09733` (2026-11-09).
+**Original branch process:** `effort/playback-start`. Lane PRs land in the effort branch (draft → one adversarial review per lane deliverable → fix → effort gate once on the final lane head); effort → main after one unit run and the main promotion gate on the final integration candidate, merged by the lane owner. Paul deploys. "Built on effort" and "accepted on fleet" are separate columns in §6; an after-deploy reading never blocks the deploy that produces it.
 **Author:** Claude (claude-fable-5-1, session 01BCWLA2SJPLAmibeaz9L5xb).
 
 ## 0. Rulings (Paul, 2026-11-07)
@@ -109,16 +110,16 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 
 | Lane | Owner (model, session) | Plan rev | Built on effort | Accepted on fleet (before → after) |
 |---|---|---|---|---|
-| H2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on effort (#1424, review 1) | build/protocol/owner inventory; placement through each mixed cohort → |
-| C2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on effort (#1424, review 1 fixes #1436) | verdict idle; 3,878 waiting unreported; 2026-11-07 22:3x UTC media1 (`4ddbf1229`): verdict `degraded`, claimable 2, ready_24h 0, claimed_24h 0, claims_since_start 36, depth `retry_wait` fragment_index 3,881 (due rows mislabelled: ms compared to s) → |
-| C3 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on effort (#1424, review 1 fixes #1436) | active 4,097/4,096; retired-digest queued 3,878; ready_24h 0 → |
-| C1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1434, review 2 fixes #1438) | claims/2.7 d 16 (media1); lab4/lab6 cannot claim → |
-| D2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1431, review 1 fixes #1440) | codeless 503s; create p99 → |
-| D1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | claimed (last) | DV vs non-DV cold TTFF; 20 switches/platform → |
-| G1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1433, review 2 fixes #1438) | — |
-| R1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1428, review 1 fix #1440) | authority_fence won 16/18 → by cause |
-| H1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on effort (#1427) | — |
-| A1-N | Codex/root, chat `01a1c172-ef6a-77e3-8422-95798308bc5c` | 3 | [PR #1476](http://forge.lan:3000/noirr/plurx/pulls/1476); reviewed, local validation passed, main gate pending | matched-source off/cold/warm native playing 0.759/0.745/0.713 s; fleet pending |
+| H2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (#1424, review 1) | build/protocol/owner inventory; placement through each mixed cohort → |
+| C2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (#1424, review 1 fixes #1436) | verdict idle; 3,878 waiting unreported; 2026-11-07 22:3x UTC media1 (`4ddbf1229`): verdict `degraded`, claimable 2, ready_24h 0, claimed_24h 0, claims_since_start 36, depth `retry_wait` fragment_index 3,881 (due rows mislabelled: ms compared to s) → |
+| C3 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (#1424, review 1 fixes #1436) | active 4,097/4,096; retired-digest queued 3,878; ready_24h 0 → |
+| C1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1434, review 2 fixes #1438) | claims/2.7 d 16 (media1); lab4/lab6 cannot claim → |
+| D2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1431, review 1 fixes #1440) | codeless 503s; create p99 → |
+| D1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (review 3) | DV vs non-DV cold TTFF; 20 switches/platform → |
+| G1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1433, review 2 fixes #1438) | — |
+| R1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1428, review 1 fix #1440) | authority_fence won 16/18 → by cause |
+| H1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1427) | — |
+| A1-N | Codex/root, chat `01a1c172-ef6a-77e3-8422-95798308bc5c` | 3 | [PR #1476](http://forge.lan:3000/noirr/plurx/pulls/1476); reviewed, local acceptance passed; landing tracked in PR | matched-source off/cold/warm native playing 0.759/0.745/0.713 s; fleet pending |
 | A1 | — | 3 | unclaimed (design review first); shared S1–S12: [RCA](SHARED-LIBRARY-PLAYBACK-RCA.md) | vod_index_pending fallbacks 18/29; remux ≤5 s share; p90 → |
 | A2 | — | 3 | unclaimed | HW/SW transcode TTFF → |
 | A3 | — | 3 | unclaimed | — |
@@ -137,8 +138,4 @@ frontier cap. Its exact-case regression covers both legacy and explicit demand.
 
 ## 8. Execution log
 
-Earlier entries remain in the [execution history](PLAYBACK-START-HISTORY.md#8-execution-log).
-
-| Date | Lane | Owner | State |
-|---|---|---|---|
-| 2026-11-09 | A1-N | Codex, `01a1c172-ef6a-77e3-8422-95798308bc5c` | [PR #1476](http://forge.lan:3000/noirr/plurx/pulls/1476): final review addressed; eight focused Rust cases, six matched-source WebKit cases, strict workspace Clippy and 15/15 paperwork pass. This is a post-promotion repair to deployed Phase 1 targeting main; A1 remains unclaimed. Main gate and fleet acceptance remain outstanding. |
+Execution history and current ownership live in [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md). The lane table in §6 distinguishes built work from fleet acceptance.

@@ -141,6 +141,17 @@ card (and any temporary toggle) is removed and the feature is simply on.
 The rule and the current audit are in
 [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates).
 
+## Mobile publishing and signing
+
+Before diagnosing a missing signing identity or asking the owner for a key,
+read [the publishing recovery runbook](docs/PUBLISHING.md#recover-mobile-signing)
+and the previous setup receipts. Verify the actual signing controller from
+fresh fleet data; the current agent's Mac may be a different machine. Reuse
+and repair the existing account/runner configuration. Record the verified
+repair and private controller details in the durable external-drive handoff
+before declaring the task complete; keep secrets and real addresses out of
+this mirrored repository.
+
 ## Rust compile loop — do not use CI as a compiler
 
 At the start of any session that may change Rust, establish a working compiler
