@@ -15,10 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{FutureExt, StreamExt};
-use plurx_core::{
-    cluster::membership::ActivityPeer,
-    playback_principal::PlaybackPrincipal,
-};
+use plurx_core::{cluster::membership::ActivityPeer, playback_principal::PlaybackPrincipal};
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
@@ -1963,10 +1960,16 @@ mod tests {
         };
         let targets = locate_targets(
             vec![
-                ActivityPeer { reachable: false, ..peer("lab3", 7) },
+                ActivityPeer {
+                    reachable: false,
+                    ..peer("lab3", 7)
+                },
                 peer("lab6", 6),
                 peer("self", 1),
-                ActivityPeer { http_base: None, ..peer("lab4", 4) },
+                ActivityPeer {
+                    http_base: None,
+                    ..peer("lab4", 4)
+                },
             ],
             "self",
         );
@@ -2058,17 +2061,10 @@ impl LocationReply {
 
 /// Peers worth asking to locate after the membership directory applies the
 /// route policy: reachable, addressable, and distinct from this node.
-fn locate_targets(
-    peers: Vec<ActivityPeer>,
-    own_node_id: &str,
-) -> Vec<ActivityPeer> {
+fn locate_targets(peers: Vec<ActivityPeer>, own_node_id: &str) -> Vec<ActivityPeer> {
     peers
         .into_iter()
-        .filter(|peer| {
-            peer.node_id != own_node_id
-                && peer.reachable
-                && peer.http_base.is_some()
-        })
+        .filter(|peer| peer.node_id != own_node_id && peer.reachable && peer.http_base.is_some())
         .collect()
 }
 
