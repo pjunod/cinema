@@ -16,7 +16,10 @@ from validation import workspace_rust_outcomes as native
 # ownership prerequisite, Cargo flags and runtime limits. A changed historical
 # job needs explicit review before any earlier pass is usable.
 ORIGINAL_JOB = '1a68af55093f2b325f2187fe79082a03f1c6bf8b13ea75545e99f3155783f304'
-CURRENT_JOB = 'cc3cd0d1e30d16f4df37b689884de4294c0dc658e7304552a9b50378f2932b4f'
+# Reviewed four-line HDR inverse check uses the already pinned FFmpeg 8
+# action. Checkout/toolchain/image/Cargo commands/flags/limits are unchanged;
+# ORIGINAL_JOB and protected-input refusal remain exact and unchanged.
+CURRENT_JOB = '8672bfc684e8900df352a108a13fe12946ca6bde0f451b8895482379f3072da8'
 ROOT_SOURCES = {'tests/operations/test_source_custody_recovery.py', 'scripts/source-custody-recovery'}
 PROTECTED = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'Makefile'}
 NATIVE_ACTIONS = ('.cargo/', '.github/actions/rust-native-deps/', '.github/actions/ffmpeg/',
