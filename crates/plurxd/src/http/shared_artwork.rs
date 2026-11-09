@@ -279,17 +279,8 @@ pub(super) async fn receiver(
             .await
             .map_err(peer_refusal)?;
         let summary = import.summary.clone();
-        let (asset, from_peer) = match read_disk_snapshot(&state, &reference, lease.clone()).await {
-            Some(asset) => (asset, false),
-            None => (
-                state
-                    .sharing
-                    .fetch_artwork(&state, &reference, &import)
-                    .await
-                    .map_err(peer_refusal)?,
-                true,
-            ),
-        };
+        let (asset, from_peer) =
+            receiver_artwork_asset(&state, &reference, &import, lease.clone()).await?;
         key.verify_art(&resource, import_id, user.id, clock_ms())
             .map_err(|_| missing())?;
         let mut proof = Response::new(Body::empty());
@@ -495,6 +486,27 @@ fn remember_snapshot(view: [u8; 32], digest: [u8; 32], mime: &'static str) {
     let used = SNAPSHOT_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     index.insert(view, SnapshotRecord { digest, mime, used });
 }
+/// Choose verified local bytes before issuing an image fetch. The caller
+/// checks `artwork_authority` first and attaches the live response proof afterward.
+async fn receiver_artwork_asset(
+    state: &AppState,
+    reference: &plurx_core::sharing_artwork::ReceiverArtReference,
+    import: &plurx_core::sharing::StoredImport,
+    lease: Arc<ArtBodyLease>,
+) -> Result<(crate::sharing_client::PeerArtwork, bool), super::error::ApiError> {
+    match read_disk_snapshot(state, reference, lease).await {
+        Some(asset) => Ok((asset, false)),
+        None => Ok((
+            state
+                .sharing
+                .fetch_artwork(state, reference, import)
+                .await
+                .map_err(peer_refusal)?,
+            true,
+        )),
+    }
+}
+
 /// The receiver's own verified snapshot for this view, or `None` (then the
 /// caller dials the Source). Authority is the caller's: this runs only after
 /// `artwork_authority`. The disk bytes are re-hashed against the digest the
@@ -1165,7 +1177,7 @@ mod tests {
         let now = clock_ms();
         let reference = fixture.reference(now);
         // Every local authority check passes for the assigned viewer.
-        state
+        let import = state
             .sharing
             .artwork_authority(state, &reference)
             .await
@@ -1189,10 +1201,23 @@ mod tests {
         )
         .await
         .expect("first view publishes");
+        // Negative control: the original always-fetch path cannot serve this
+        // fixture, even though verified local bytes are available.
+        assert!(state
+            .sharing
+            .fetch_artwork(state, &reference, &import)
+            .await
+            .is_err());
         for _ in 0..2 {
-            let held = snapshot(state, &reference)
-                .await
-                .expect("served from the snapshot");
+            let (held, from_peer) = receiver_artwork_asset(
+                state,
+                &reference,
+                &import,
+                ArtBodyLease::receiver().expect("permit"),
+            )
+            .await
+            .expect("served from the snapshot without dialing the unavailable Source");
+            assert!(!from_peer, "the receiver uses its verified local bytes");
             assert_eq!(held.bytes, bytes);
             assert_eq!(held.digest, asset.digest);
             assert_eq!(held.mime, "image/png");
