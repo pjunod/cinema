@@ -35,6 +35,28 @@ controller and its original setup receipts have now been located; its
 runner is running. A later green workflow skipped publication. Native
 prepared-switch measurements and matched cold TTFF remain outstanding.
 
+## Native admission — A1-N, PR #1476
+
+**Owner:** Codex, chat `01a1c172-ef6a-77e3-8422-95798308bc5c`.
+Implementation and local acceptance are recorded in
+[PR #1476](http://forge.lan:3000/noirr/plurx/pulls/1476); that PR is the
+current landing-state authority. This is a post-promotion repair to Phase 1,
+not completion of A1's growing copy engine.
+
+The fixed target remains 16 seconds. Exact hls.js retains its qualified short
+bootstrap; native/absent/unknown transport admits three advertised target
+intervals, with one bounded complete cut for initial legacy admission. The
+normal download-frontier cap resumes afterward. No actor deadline or feature
+switch changes. The shared Gran Turismo fixture pins the actual emitted
+first snapshot; a count of three segments plus EVENT alone is insufficient.
+
+Eight focused Rust cases and strict workspace Clippy passed. Matched-source
+native WebKit off/cold/warm cases reached playing at 759/745/713 ms; the
+24-second positive continued past the first reload. The old short controls
+remain non-playing, and the completed short title starts. Successful cases
+were retained while failed observer checks alone were rerun. These are local
+matched-source receipts; full daemon/fleet acceptance remains open.
+
 ## Current process — one final candidate review and validation
 
 Paul's 2026-11-09 direction supersedes the original per-lane/design-review
