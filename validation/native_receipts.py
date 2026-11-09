@@ -73,11 +73,11 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed source-budget addition is only the dv-rgb-conversion-check
-    # media target. Apple/native targets, flags and bundled-resource inputs
-    # are unchanged. Only this exact current spec is accepted; this does not
-    # authorize old-to-new Makefile receipt adoption.
-    'Makefile': 'df9c99f78aab7649439e60cc376cf0796ee744ff19b39396ef78aad5a079a112',
+    # Reviewed media-runtime split against main 3b64433bd6: only Docker
+    # recipes and their lazy, non-exported registry default changed. Native
+    # targets, flags and bundled-resource inputs match that reviewed Makefile.
+    # Pin these exact bytes; this does not authorize old-to-new receipt adoption.
+    'Makefile': 'a885d4a9ef0500fea776527ed4b1a958a5c99269c39fd7ab94c2d17104e5076f',
     # Reviewed 0.8.0 build 294: only CURRENT_PROJECT_VERSION differs from the
     # reviewed build 293 bytes (d686e9d8b changed the Apple client after 293
     # was claimed). Pin this exact spec; build-293 case receipts do not
