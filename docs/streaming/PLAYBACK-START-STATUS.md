@@ -48,9 +48,11 @@ Server/web development and web testing proceed independently of mobile
 publication. The deployed Phase 1 web build can be tested now.
 
 The queue stall is traced to an identifier-contract mismatch. Analysis
-requests accept bounded identifiers, including 64-character generation
-digests; both queue backends accept nonempty IDs of up to 64 bytes.
-`background_owner_key` incorrectly requires a UUID for analysis custody.
+requests accept opaque identifiers, including 64-character generation
+digests. Both stores retain the normal 64-byte creation limit and the
+legacy repair path's 128-byte limit. Shared validators now preserve both
+limits while custody accepts every admitted identity. The old
+`background_owner_key` incorrectly required a UUID for analysis custody.
 Registration rejects a legitimate request before creating custody;
 `settle_unstarted_analysis_source` retries the deterministic rejection while
 the independent heartbeat retains its lease and maintenance source-I/O
@@ -58,9 +60,9 @@ reservation. The measured request is `fragment_index`; its ID matches the captur
 registration rejection and its stored requested generation. The earlier
 subtitle-source classification was unsupported and is corrected. The old
 attempt later expired around a container restart and is queued again with
-no owner; this is not deployment or acceptance of the repair. Match custody
-validation to queue admission and exercise registration/settlement with a
-real generated ID;
+no owner; this is not deployment or acceptance of the repair. The final repair matches custody
+validation to every admission path and exercises registration/settlement
+with real generated and opaque legacy IDs;
 retain the exact owner/fence checks and ambiguous-write recovery protocol.
 The fix is being qualified in PR #1478; fleet acceptance remains open.
 The learner currently has a separate active `transcode_prepare` custody

@@ -933,11 +933,32 @@ mod source_tests {
         ] {
             assert_ne!(key, background_owner_key(&other).expect("distinct owner"));
         }
+        for valid in [
+            "request with spaces",
+            "../request/control:part?name='quoted'",
+            "字幕 / demande",
+            "request\0suffix\ncontrol",
+            &"é".repeat(32),
+            &"opaque / legacy ".repeat(8),
+            &"é".repeat(64),
+        ] {
+            assert!(background_owner_key(&owner(valid, "worker", 7)).is_ok());
+        }
+        assert!(
+            !super::super::fragment_index_cluster::new_analysis_request_id_is_valid(
+                &"a".repeat(65)
+            )
+        );
+        assert!(
+            super::super::fragment_index_cluster::new_analysis_request_id_is_valid(&"é".repeat(32))
+        );
+        assert!(
+            super::super::fragment_index_cluster::analysis_request_id_is_valid(&"é".repeat(64))
+        );
         for invalid in [
             owner("", "worker", 7),
-            owner(&"a".repeat(65), "worker", 7),
-            owner("request with spaces", "worker", 7),
-            owner("request/control", "worker", 7),
+            owner(&"a".repeat(129), "worker", 7),
+            owner(&"é".repeat(65), "worker", 7),
             owner(request_id, "", 7),
             owner(request_id, "worker", 0),
             owner(request_id, "worker", -1),
@@ -956,7 +977,15 @@ mod source_tests {
         }
         .generation(0);
         assert_eq!(subtitle_request_id.len(), 64);
-        for request_id in [uuid::Uuid::new_v4().to_string(), subtitle_request_id] {
+        for request_id in [
+            uuid::Uuid::new_v4().to_string(),
+            subtitle_request_id,
+            "../字幕 / request?name='quoted'".to_owned(),
+            "request\0suffix\ncontrol".to_owned(),
+            "é".repeat(32),
+            "opaque / legacy ".repeat(8),
+            "é".repeat(64),
+        ] {
             analysis_source_join_replays_exact_request(request_id).await;
         }
     }
@@ -2155,11 +2184,9 @@ pub fn background_owner_key(owner: &BackgroundSourceOwner) -> Result<String, Sto
             node_id,
             fence,
         } => {
-            // Analysis IDs include SubtitleSourceStamp's content digest as
-            // well as UUIDs. Use the queue identifier contract and analysis
-            // admission's 64-byte bound, not the custody receipt's UUID shape.
-            if !identifier(request_id)
-                || request_id.len() > 64
+            // The request ID is opaque, unlike the separate custody receipt's
+            // UUID. Include the wider IDs already admitted by analysis repair.
+            if !super::fragment_index_cluster::analysis_request_id_is_valid(request_id)
                 || !identifier(node_id)
                 || *fence <= 0
             {

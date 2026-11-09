@@ -1576,6 +1576,18 @@ pub struct AnalysisRequest {
     pub updated_at_ms: i64,
 }
 
+/// Persisted analysis IDs are opaque UTF-8 strings. Repair admission has
+/// historically allowed 128 bytes, so custody must accept that full range.
+pub(super) fn analysis_request_id_is_valid(request_id: &str) -> bool {
+    !request_id.is_empty() && request_id.len() <= 128
+}
+
+/// Normal creation and reconciliation retain their existing 64-byte bound;
+/// the wider persisted-ID policy preserves already-admitted repair owners.
+pub(super) fn new_analysis_request_id_is_valid(request_id: &str) -> bool {
+    analysis_request_id_is_valid(request_id) && request_id.len() <= 64
+}
+
 pub(super) const ANALYSIS_RECONCILE_SQL: &str = include_str!("analysis_reconcile.sql");
 
 pub(super) fn reconciliation_parameters(
@@ -1589,8 +1601,7 @@ pub(super) fn reconciliation_parameters(
         || new.video_identity != old.video_identity
         || new.force_rebuild != old.force_rebuild
         || new.request_id == old.request_id
-        || new.request_id.is_empty()
-        || new.request_id.len() > 64
+        || !new_analysis_request_id_is_valid(&new.request_id)
         || new.priority != old.priority
         || new.trigger != old.trigger
         || new.target_node_id.is_empty()
