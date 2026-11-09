@@ -1367,6 +1367,31 @@ async fn a_cue_indexed_window_reads_only_its_span() {
 }
 
 #[tokio::test]
+async fn canceled_source_budget_cannot_be_mistaken_for_a_failed_sparse_optimization() {
+    let (_store, _job, active) = crate::background_jobs::tests::active().await;
+    let budget = active.fence().source_budget();
+    budget.cancellation().cancel();
+    let directory = crate::test_tempdir().expect("subtitle fixture");
+    let file = cue_indexed_file(directory.path(), 9_199, Default::default());
+    let output = directory.path().join("must-not-publish.vtt");
+    let operation = tokio_util::sync::CancellationToken::new();
+    let result = crate::background_jobs::budgeted(
+        budget,
+        plurx_core::process::bounded::cancellable(
+            operation.clone(),
+            super::extract_vtt_without_demux(&output, &file, 0, TEST_WORK),
+        ),
+    )
+    .await;
+    assert!(!operation.is_cancelled(), "only the source owner was stopped");
+    assert!(result
+        .expect_err("a stopped owner must not request the full-demux fallback")
+        .contains("cancelled"));
+    assert!(!output.exists());
+    active.finish().await;
+}
+
+#[tokio::test]
 async fn canceled_sparse_attempt_cannot_turn_into_full_source_demux() {
     let directory = tempfile::tempdir().expect("subtitle fixture");
     let file = media_file(directory.path().join("must-not-open-source.mkv"));
