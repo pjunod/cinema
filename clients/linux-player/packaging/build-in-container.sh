@@ -15,7 +15,7 @@ jobs=${JOBS:-8}
 player=/build/plurx-player
 
 bash /repo/clients/linux-player/packaging/apt-snapshot.sh /repo/clients/linux-player/packaging/upstream.lock
-apt-get install -y -q --no-install-recommends dpkg-dev git
+apt-get install -y -q --no-install-recommends build-essential dpkg-dev git
 
 rm -rf /build
 mkdir -p /build

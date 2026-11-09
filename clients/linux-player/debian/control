@@ -4,7 +4,6 @@ Priority: optional
 Maintainer: plurx maintainers <noreply@plurx.invalid>
 Build-Depends: debhelper-compat (= 13),
                dh-sequence-python3,
-               build-essential,
                git,
                lua5.2,
                python3 (>= 3.10)
