@@ -846,18 +846,18 @@ fn the_hevc_index_pass_survives_a_correctable_dts_head_and_still_proves_the_trac
         "bframes=4:keyint=50:log-level=error",
         "-pix_fmt",
         "yuv420p",
-        base.to_str().unwrap(),
+        base.to_str().expect("UTF-8 base fixture path"),
     ]);
     // The first packet is stamped after its successors: a head that the mp4
     // muxer corrects when asked to and aborts on only under `-xerror`.
     ffmpeg(&[
         "-i",
-        base.to_str().unwrap(),
+        base.to_str().expect("UTF-8 base fixture path"),
         "-c",
         "copy",
         "-bsf:v",
         "setts=pts=if(eq(PTS\\,0)\\,2000\\,PTS)",
-        head.to_str().unwrap(),
+        head.to_str().expect("UTF-8 corrected-head fixture path"),
     ]);
 
     let mut source = hevc_dv();
@@ -867,7 +867,7 @@ fn the_hevc_index_pass_survives_a_correctable_dts_head_and_still_proves_the_trac
     source.bit_depth = Some(8);
     let argv = copy_index_pipe_args_with_input(
         &source,
-        head.to_str().unwrap(),
+        head.to_str().expect("UTF-8 corrected-head fixture path"),
         CopyVideoOptions::new(false, false),
     );
     assert!(!argv.iter().any(|arg| arg == "-xerror"), "{argv:?}");
