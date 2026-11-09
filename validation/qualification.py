@@ -219,6 +219,55 @@ def resolve_effort_history_binding(environment: Mapping[str, str], repository: P
     return dict(base_sha=landed_base, effort_sha=task_base, head_sha=commit, pull_request=scope["pr"])
 
 
+def resolve_promotion_pr_history_binding(
+    environment: Mapping[str, str], repository: Path,
+) -> dict[str, object]:
+    """Bind an open promotion PR's landed history to incorporated live main."""
+    from validation.python_unit_receipts import ReceiptError, require
+
+    number = environment.get("PR_NUMBER", "")
+    commit = environment.get("GITHUB_SHA", "")
+    if (environment.get("GITHUB_EVENT_NAME") != "pull_request"
+            or environment.get("GITHUB_RUN_ATTEMPT") != "1"
+            or not re.fullmatch(r"[1-9][0-9]*", number)
+            or environment.get("GITHUB_REF") != "refs/pull/" + number + "/head"
+            or not re.fullmatch(r"[0-9a-f]{40}", commit)
+            or git_object(repository, "HEAD^{commit}") != commit):
+        raise QualificationError("promotion PR history checkout or event identity mismatch")
+    try:
+        repo = api_document(environment, "")
+        pr = api_document(environment, "/pulls/" + number)
+        head, base = pr["head"], pr["base"]
+        slug = environment.get("GITHUB_REPOSITORY", "")
+        require(type(repo["id"]) is int and repo["id"] > 0 and repo["full_name"] == slug,
+                "promotion repository identity mismatch")
+        require(type(pr["number"]) is int and pr["number"] == int(number)
+                and pr["state"] == "open" and pr.get("merged") is False,
+                "promotion PR is not the open requested identity")
+        require(head["repo"]["id"] == base["repo"]["id"] == repo["id"]
+                and head["repo"]["full_name"] == base["repo"]["full_name"] == slug,
+                "promotion PR must belong to this repository")
+        require(promotion_ref(head["ref"]) and base["ref"] == "main"
+                and environment.get("GITHUB_HEAD_REF") == head["ref"]
+                and environment.get("GITHUB_BASE_REF") == "main",
+                "promotion PR route mismatch")
+        head_tip = api_document(
+            environment, "/branches/" + urllib.parse.quote(head["ref"], safe=""),
+        )["commit"]["id"]
+        base_tip = api_document(environment, "/branches/main")["commit"]["id"]
+        require(head["sha"] == head_tip == commit
+                and base["sha"] == base_tip and re.fullmatch(r"[0-9a-f]{40}", base_tip),
+                "promotion PR live tips mismatch")
+        _ensure_task_history_tips(environment, repository, (commit, base_tip))
+        # A promotion already incorporates current main. Neither the effort
+        # head nor an input SHA may turn unlanded work into main history.
+        require(_unique_merge_base(repository, commit, base_tip) == base_tip == pr["merge_base"],
+                "promotion PR must incorporate current main")
+    except (ReceiptError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+        raise QualificationError("promotion PR identity, live tips or incorporated main mismatch") from exc
+    return dict(base_sha=base_tip, head_sha=commit, pull_request=int(number))
+
+
 def build_receipt(
     environment: Mapping[str, str],
     results: Mapping[str, str],

@@ -1221,18 +1221,23 @@ def _write_report(path: Path, report: HistoryReport) -> None:
 def authenticated_history_baseline(environment: dict[str, str], root: Path) -> str | None:
     """Inputs select authentication; they never authorize a baseline themselves."""
     fields = ("PLURX_PROMOTION_PR", "PLURX_PROMOTION_HEAD_SHA", "PLURX_PROMOTION_BASE_SHA")
-    effort_task = environment.get("PLURX_HISTORY_CONTEXT") == "effort-task"
-    if not effort_task and not any(environment.get(field) for field in fields):
+    context = environment.get("PLURX_HISTORY_CONTEXT", "")
+    if context not in {"", "effort-task", "promotion-pr"}:
+        raise HistoryError("unknown authenticated history context")
+    if not context and not any(environment.get(field) for field in fields):
         return None
     from validation.qualification import (
         QualificationError, resolve_effort_history_binding, resolve_manual_binding,
+        resolve_promotion_pr_history_binding,
     )
 
     try:
-        if effort_task:
+        if context:
             if any(environment.get(field) for field in fields):
                 raise QualificationError("ambiguous history context")
-            binding = resolve_effort_history_binding(environment, root)
+            resolver = (resolve_effort_history_binding if context == "effort-task"
+                        else resolve_promotion_pr_history_binding)
+            binding = resolver(environment, root)
         else:
             binding = resolve_manual_binding(environment, root)
     except QualificationError as exc:

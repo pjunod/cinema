@@ -1045,9 +1045,12 @@ impl Session {
         let first_new_segment = previous_served
             .as_ref()
             .map_or(i64::MIN, |served| served.last_segment.saturating_add(1));
+        let native_first_snapshot = previous_served.is_none()
+            && self.publication.lock().await.startup_policy
+                == RollingStartupPolicy::NativePresentationWindow;
         let selected_last = if end_list {
             last_segment
-        } else if budget.demand_sequence.is_none() {
+        } else if budget.demand_sequence.is_none() && !native_first_snapshot {
             // A legacy viewer has no accepted playback position with which to
             // authorize a rounded-up segment.  Its fixed wall/download clock
             // therefore exposes only the last complete endpoint *inside* the
@@ -1061,8 +1064,10 @@ impl Session {
             };
             selected.index
         } else {
-            // The producer retains its steady allowance plus a complete-cut
-            // envelope. An isolated candidate may use less of that paid allowance:
+            // Explicit demand and the frozen native bootstrap position can
+            // authorize the first complete cut beyond the admission floor.
+            // The producer retains its steady allowance plus that bounded
+            // complete-cut envelope. A short candidate may use less of it:
             // keep its first advertised endpoint within the policy ceiling.
             let first_web_snapshot = previous_served.is_none()
                 && self
@@ -1265,8 +1270,8 @@ impl Session {
                 .as_ref()
                 .is_some_and(|served| first_segment > served.first_segment)
         {
-            // Short bootstrap is permitted; removing a prefix must still leave
-            // three target durations. Retain the old prefix until it can.
+            // The audited hls.js bootstrap may be short. Native admission and
+            // every prefix removal retain three fixed target durations.
             let old_first = previous_served
                 .as_ref()
                 .expect("previous snapshot checked")
