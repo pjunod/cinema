@@ -10,7 +10,7 @@ state. The larger [playback-start effort](PLAYBACK-START-PLAN.md) owns A1.
 
 PR **#1472**, branch `claude/shared-library-standalone-fixes`, remains draft.
 The resumed source was `0b3c0dfc3`; the relay work and prior Opus fixes are
-integrated. Final review corrections are in validation candidate `418927ce7`.
+integrated. Final review corrections are in validation source `f4ec9aac5`.
 No passing final fast-lane result is claimed.
 
 The implementation covers NULL-principal consumers (§4), committed membership
@@ -54,6 +54,15 @@ expiring its five-second authority; abandonment observes the running scan
 before the caller leaves. The unresolved pinned pre-session WebVTT case
 retains Source warnings so a final failure can identify its extraction cause.
 
-The first serialized compiler check passed but test-target Clippy exceeded the
-8 GiB container cap. The final loop keeps that cap, uses one compiler, disables
-incremental compilation and omits debug data. No unit tests have been repeated.
+The first serialized type check passed, but test-target Clippy exceeded the
+8 GiB container cap even without debug data. On 2026-11-09 the owner explicitly
+authorized a task-specific 12 GiB, four-CPU, no-swap container on the existing
+build host. This is retained in the task receipt, not a repository policy change.
+A subsequent production lint failure is corrected by grouping the canonical
+request, clock, rejoin window and connection custody in one transport input.
+No unit tests have been repeated.
+
+Paperwork initially passed 15 of 16 rules. The new index row crossed the 40 KiB
+streaming-index budget; shortening an existing summary fixed it, and all five
+checks in that failed module passed on the rerun. The other rules were not rerun.
+
