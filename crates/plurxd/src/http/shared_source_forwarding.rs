@@ -1143,7 +1143,9 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
     #[cfg(test)]
     eprintln!("Source forwarding route resolution succeeded");
     if matches!(route, ForwardRoute::Local) {
-        parts.extensions.insert(clock);
+        if clocked {
+            parts.extensions.insert(clock);
+        }
         return Ok(next
             .run(Request::from_parts(parts, Body::from(bytes)))
             .await);
