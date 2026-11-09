@@ -119,6 +119,27 @@ class NativeCommandCase(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ReceiptError):
                 native.jvm_outcomes(raw)
 
+    def test_jvm_accepts_complete_task_records_after_interleaved_stderr(self):
+        mixed = JVM.replace('> Task :app:testDebugUnitTest',
+                            'WARNING: A restricted method in > Task :app:testDebugUnitTest')
+        mixed = mixed.replace('> Task :app:lintDebug',
+                              'another stderr fragment > Task :app:lintDebug')
+        self.assertEqual(native.jvm_outcomes(mixed), {'make android-test': 'pass'})
+
+    def test_jvm_interleaving_cannot_hide_cache_skips_or_duplicate_target_records(self):
+        for suffix in (' UP-TO-DATE', ' FROM-CACHE', ' SKIPPED', ' NO-SOURCE'):
+            mixed = JVM.replace('> Task :app:testDebugUnitTest',
+                                'WARNING: fragment > Task :app:testDebugUnitTest' + suffix)
+            for raw in (mixed, mixed.replace('BUILD SUCCESSFUL',
+                        '> Task :app:testDebugUnitTest\nBUILD SUCCESSFUL')):
+                with self.subTest(suffix=suffix), self.assertRaises(ReceiptError):
+                    native.jvm_outcomes(raw)
+        for extra in ('> Task :app:testDebugUnitTest',
+                      'stderr > Task :app:lintDebug'):
+            raw = JVM.replace('BUILD SUCCESSFUL', extra + '\nBUILD SUCCESSFUL')
+            with self.subTest(extra=extra), self.assertRaises(ReceiptError):
+                native.jvm_outcomes(raw)
+
     def test_node_rejects_missing_cases_skips_contradictions_and_false_summary(self):
         for raw in (WEB.replace('ok - custom contract\n', ''), WEB.replace('PASS source assertion\n', ''),
                     WEB.replace('ok 1 - native contract', 'not ok 1 - native contract'),

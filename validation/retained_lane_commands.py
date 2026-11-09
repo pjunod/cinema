@@ -62,11 +62,23 @@ def jvm_outcomes(raw):
     lines = [line.strip() for line in text.splitlines()]
     successful_terminal(lines)
     tasks = ['> Task :app:testDebugUnitTest', '> Task :app:lintDebug']
+    # The runner merges stdout and stderr without preserving write boundaries:
+    # a Java warning fragment can precede a complete Gradle task record. Keep
+    # every target record, including cache/skip suffixes, so a duplicate or an
+    # unexecuted task cannot be hidden by a separate successful-looking line.
+    records = []
+    for index, line in enumerate(lines):
+        match = re.search(
+            r'(?:^|[ \t])(> Task :app:(?:testDebugUnitTest|lintDebug)(?=$|[ \t]).*)$',
+            line,
+        )
+        if match:
+            records.append((index, match[1]))
     successful = [i for i, line in enumerate(lines) if re.fullmatch(r'BUILD SUCCESSFUL in .+', line)]
-    receipts.require(lines.count(JVM_ARGV) == 1 and all(lines.count(task) == 1 for task in tasks)
+    receipts.require(lines.count(JVM_ARGV) == 1 and [record for _, record in records] == tasks
                      and len(successful) == 1 and lines.count('🏁  Job succeeded') == 1
-                     and lines.index(JVM_ARGV) < lines.index(tasks[0])
-                     < lines.index(tasks[1]) < successful[0] < lines.index('🏁  Job succeeded')
+                     and lines.index(JVM_ARGV) < records[0][0]
+                     < records[1][0] < successful[0] < lines.index('🏁  Job succeeded')
                      and not re.search(r'^BUILD FAILED|^FAILURE: Build failed', text, re.M),
                      'Native Gradle command did not execute test and lint tasks successfully')
     return {'make android-test': 'pass'}
