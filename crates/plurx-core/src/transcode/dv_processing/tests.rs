@@ -2168,3 +2168,33 @@ fn reconstructed_profile81_owner_report_requires_its_dolby_vision_carrier() {
         .push(serde_json::json!({"DisplayTargetMapping":{"nits":1000}}));
     assert!(accept(&targeted, Some("dolby_vision")).is_none());
 }
+
+#[test]
+fn completed_profile81_signalling_uses_authored_level_instead_of_source_geometry_level() {
+    use crate::fmp4::{self, Unit};
+    let bytes = include_bytes!("../../../tests/fixtures/dv-runtime/authored.mp4");
+    let mut reader = fmp4::FragmentReader::new();
+    reader.push(bytes);
+    let Some(Unit::Init(mut init)) = reader.next_unit().expect("retained control init") else {
+        panic!("init");
+    };
+    let record =
+        fmp4::DolbyVisionRecord::new(8, 10, false, true, true, 1).expect("level10 declaration");
+    fmp4::set_dolby_vision_record(&mut init, &record).expect("authored declaration");
+    let authored = completed_authored_dv_level(&init.bytes, DvDestination::Profile81)
+        .expect("actual init level");
+    assert_eq!(authored, Some(10));
+    let mut selected = plan(DvDestination::Profile81);
+    selected.source.catalog.level = Some(6);
+    selected.capability.completed_window_checked = true;
+    selected.authored_dv_level = authored;
+    assert_eq!(selected.profile81_level(), Some(10));
+    let identity = selected.semantic_digest();
+    selected.authored_dv_level = Some(6);
+    assert_ne!(
+        identity,
+        selected.semantic_digest(),
+        "different coded declarations cannot alias"
+    );
+    // This is a retained declaration-only control, not pixel/decoder acceptance.
+}

@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-struct UnlimitedBudget(AtomicU64);
+pub(super) struct UnlimitedBudget(AtomicU64);
 impl SourceInputByteBudget for UnlimitedBudget {
     fn allowance(
         &self,
@@ -49,7 +49,7 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-async fn input(
+pub(super) async fn input(
     bytes: &[u8],
     window: usize,
     read_gate: Option<Arc<ReadGate>>,
@@ -67,7 +67,7 @@ async fn input(
         observer: None,
         purpose_budget: None,
         background_budget: Some(allocator.clone()),
-        pause: None,
+        pause: plurx_core::process::bounded::source_pause_controller(),
         budget: tokio::sync::Mutex::new(ByteBudget::default()),
         close: tokio_util::sync::CancellationToken::new(),
         read_slot: Arc::new(tokio::sync::Semaphore::new(1)),

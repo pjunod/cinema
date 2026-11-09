@@ -441,6 +441,11 @@ impl SourceInput {
         )
         .await
     }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn qualification_fixture(bytes: &[u8]) -> (Self, std::fs::File) {
+        let (input, file, _) = tests::input(bytes, SOURCE_HTTP_CHUNK, None).await;
+        (input, file)
+    }
     pub(crate) async fn open_background_held(
         source: crate::fragment_index_cluster::SourceFence,
         mime: &'static str,

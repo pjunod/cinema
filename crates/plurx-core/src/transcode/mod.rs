@@ -20,6 +20,7 @@ pub mod dv_fel_qualification;
 pub mod dv_processing;
 pub mod dvconvert;
 mod encoder;
+mod enhancement_rate;
 pub mod health;
 pub mod hevc_census;
 mod hevc_scan;
@@ -52,12 +53,17 @@ pub use dolby::{
 };
 pub use encoder::{
     benchmark_encoder, detect_encoders, detect_video_decoders, hevc_level_for,
-    reconstructed_p81_video_kbps, reconstructed_p81_window_encode_args, vaapi_device,
-    validate_quality_rate_control, validate_quality_rate_control_yielding, vbv_maxrate_bps,
-    vbv_maxrate_kbps, CompletedReconstructedOutputContract, EffectiveRateControl, Encoder,
-    EncoderCaps, EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
+    reconstructed_p81_video_kbps, reconstructed_p81_window_encode_args,
+    source_copy_hdr10_video_kbps, vaapi_device, validate_quality_rate_control,
+    validate_quality_rate_control_yielding, vbv_maxrate_bps, vbv_maxrate_kbps,
+    CompletedReconstructedOutputContract, EffectiveRateControl, Encoder, EncoderCaps,
+    EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
     QualityRateControlValidation, QualityRc, RateMode, VaapiHdrPolicy, VideoCodec,
-    RECONSTRUCTED_P81_MAX_VIDEO_KBPS, RECONSTRUCTED_P81_RECIPE,
+    RECONSTRUCTED_P81_RECIPE,
+};
+pub use enhancement_rate::{
+    enhancement_source_budget, enhancement_stream_rate, validate_encoded_enhancement_envelope,
+    EnhancementRateEnvelope, EnhancementRateLimits, EnhancementRateProvenance,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,

@@ -10,7 +10,7 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- Digest-keyed subtitle analysis requests can register their source custody,
+- Digest-keyed analysis requests can register their source custody,
   allowing the index queue to progress instead of renewing a rejected request
   indefinitely while holding its shared source-I/O slot.
 
@@ -35,6 +35,10 @@ bump may break compatibility and a **patch** bump never does.
 - Source-retirement and deferred-companion diagnostics remain in their parent
   operator log channels. Verified fleet publication checks the exact reviewed
   image configuration before advancing the main tag.
+
+- Original HDR enhancements preserve their measured video bitrate budget, select
+  legal HEVC/Dolby Vision levels and bind quality receipts to the actual
+  encoder recipe instead of lowering the source budget.
 
 - Linux Dolby Vision reconstruction avoids inherited display adjustments and
   preserves software planar 10-bit samples. Its final Vulkan RGB cache rounds

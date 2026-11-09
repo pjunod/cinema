@@ -6,10 +6,11 @@
 Companion to the [implementation plan](PLAYBACK-START-PLAN.md) and
 [Phase 1 build contract](PLAYBACK-START-BUILD.md). Phase 1 merged in
 #1454 (`b08b5b8ec`); Apple build 294 landed in #1466 (`09097650f`).
-All four fleet nodes report main `8ab61a779`. Build deployment is established;
-queue recovery and physical-device acceptance remain open. Media1 still
-reports degraded, 3,840 eligible index requests and 0 ready in 24 hours.
-Persisted failed-row counts are not new failures over that interval.
+The 2026-11-09 20:23 UTC snapshot has media1, lab3 and lab6 on
+`2ad533907`; lab4 remains on `8ab61a779`. This rollout occurred outside
+this continuation. Queue recovery and physical-device acceptance remain
+open: media1 reports degraded, 3,841 eligible requests and 0 ready in
+24 hours. Persisted failure counts are not new failures in that interval.
 
 ## Merged batch — index timestamp repair and Source locate eligibility
 
@@ -46,18 +47,24 @@ progress. No growing-engine behavior or qualification is claimed yet.
 Server/web development and web testing proceed independently of mobile
 publication. The deployed Phase 1 web build can be tested now.
 
-The queue stall is traced to an identifier-contract mismatch. Subtitle-source
-requests use the 64-character digest returned by
-`SubtitleSourceStamp::generation`; both queue backends persist that as the
-request ID. `background_owner_key` incorrectly requires a UUID for analysis
-custody. Registration rejects a legitimate request before creating custody;
+The queue stall is traced to an identifier-contract mismatch. Analysis
+requests accept bounded identifiers, including 64-character generation
+digests; both queue backends accept nonempty IDs of up to 64 bytes.
+`background_owner_key` incorrectly requires a UUID for analysis custody.
+Registration rejects a legitimate request before creating custody;
 `settle_unstarted_analysis_source` retries the deterministic rejection while
 the independent heartbeat retains its lease and maintenance source-I/O
-reservation. The live owner logged that rejection at its attempt start and
-never reached source probing. Repair the custody validator to match queue
-admission and exercise registration/settlement with a real generated ID;
+reservation. The measured request is `fragment_index`; its ID matches the captured
+registration rejection and its stored requested generation. The earlier
+subtitle-source classification was unsupported and is corrected. The old
+attempt later expired around a container restart and is queued again with
+no owner; this is not deployment or acceptance of the repair. Match custody
+validation to queue admission and exercise registration/settlement with a
+real generated ID;
 retain the exact owner/fence checks and ambiguous-write recovery protocol.
-The fix is being built; the fleet queue has not yet been repaired.
+The fix is being qualified in PR #1478; fleet acceptance remains open.
+The learner currently has a separate active `transcode_prepare` custody
+owner, which must be preserved.
 
 ## Native admission — A1-N, PR #1476
 
