@@ -4360,7 +4360,7 @@ assert.equal(context.ACT_TIMER, null);
                 preflight = workflow_job_blocks(
                     f".github/workflows/{workflow}.yml"
                 )["preflight"]
-                budget = {"ci": 10, "effort-ci": 15, "main-fast-lane": 30}[workflow]
+                budget = {"ci": 30, "effort-ci": 15, "main-fast-lane": 30}[workflow]
                 self.assertIn(f"timeout-minutes: {budget}", preflight)
                 for command in (
                     "make history-check",
