@@ -36,6 +36,15 @@ This is format negotiation, not a runtime feature switch or a version gate.
 The marker's provider boundary requires SDK 2. ROG's unmarked 5.1 renderer must
 be updated to its marked 5.2 successor before frontend installation.
 
+The existing mapper/client-log/OSD fact fields recognize only the shared
+renderer’s exact successful physical-target message from `vo/gpu-next` at
+Info level. Its finite physical peak overrides the signal-envelope property;
+the label is `shared native Dolby renderer`, without inventing a CM version.
+Facts reset on each load/start-file and observed target-policy changes. A new
+file with no new success stays unknown; a compiled marker alone never proves
+an active grade. Cinema Info’s VO-target rows retain their existing signal
+encoding observations. This diagnostic adaptation awaits focused review/tests.
+
 These are source changes pending review and execution. The selected system
 renderer owns HDR/DV/FEL support; historical private-renderer CPU controls and
 0.4.x receipts do not qualify it. Package/device qualification must record the

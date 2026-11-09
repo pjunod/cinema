@@ -27,6 +27,20 @@ SEEK_MARGIN_MS = 2000
 EXPLICIT_MAPPER = re.compile(r"plurx mapper:\s*(.+?)\s*$")
 BARE_MAPPER = re.compile(r"\b((?:closed-form )?CM v\d+(?:\.\d+)*)\b")
 
+# The shared renderer emits this only after a valid mapped texture. The VO's
+# public target property describes its signal encoding, not this physical fit.
+_DV_NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+NATIVE_TARGET = re.compile(
+    rf"automatic DV physical target {_DV_NUMBER}\.\.(?P<peak>{_DV_NUMBER}) nits; "
+    rf"encoding {_DV_NUMBER}\.\.{_DV_NUMBER}; reference {_DV_NUMBER}; "
+    rf"PQ transport gain {_DV_NUMBER} -> signal {_DV_NUMBER}\.\.{_DV_NUMBER}; "
+    r"generation \d{1,20}")
+NATIVE_MAPPER = "shared native Dolby renderer"
+TARGET_POLICY_PROPERTIES = tuple("options/" + name for name in (
+    "target-colorspace-hint", "target-colorspace-hint-mode", "target-prim",
+    "target-trc", "target-peak", "target-gamut", "target-contrast",
+    "hdr-reference-white", "icc-profile", "icc-profile-auto", "target-lut"))
+
 
 @dataclass
 class Timing:
@@ -103,6 +117,8 @@ class Playback:
         self.seeking = False
         self.last_position_ms = None
         self.mapper = None
+        self.physical_target_nits = None
+        self._target_policy = {}
         self.mapper_logged = False
         # mpv's fatal "Error opening/initializing the ... (--vo) device" line.
         self.vo_failed = False
@@ -238,7 +254,11 @@ class Playback:
 
     # -- mpv ----------------------------------------------------------------
 
+    def reset_renderer_facts(self):
+        self.mapper = self.physical_target_nits = self.facts = None
+
     def load(self, url, start_local_s):
+        self.reset_renderer_facts()
         if (self.mode == "direct" or self.sidecar) and not self._auth_header:
             # Over the private IPC socket, never argv: `ps` shows argv to everyone.
             self.mpv.set("http-header-fields", [f"Authorization: Bearer {self.http.token}"])
@@ -257,6 +277,11 @@ class Playback:
         self.mpv.command("observe_property", 1, "pause")
         self.mpv.command("observe_property", 2, "eof-reached")
         self.mpv.command("request_log_messages", "info")
+        for observer, name in enumerate(TARGET_POLICY_PROPERTIES, 3):
+            try:
+                self.mpv.command("observe_property", observer, name)
+            except MpvError:
+                pass  # Older/custom renderers may not expose every option.
         if self.mode == "direct":
             self.origin_ms = 0
             url, start_local = self.http.url(self.delivery.get("url")), self.start_ms / 1000
@@ -656,7 +681,15 @@ class Playback:
 
     def on_log(self, event):
         text = event.get("text") or ""
+        if not isinstance(text, str):
+            return
         prefix = str(event.get("prefix") or "")
+        if prefix == "vo/gpu-next" and event.get("level") == "info" and len(text) <= 512:
+            native = NATIVE_TARGET.fullmatch(text.rstrip("\r\n"))
+            peak = _float(native["peak"]) if native else None
+            if peak is not None and 0 < peak <= 10000:
+                self.mapper, self.physical_target_nits = NATIVE_MAPPER, peak
+                return
         if prefix == "cplayer" and event.get("level") in ("fatal", "error") \
                 and text.startswith("Error opening/initializing the"):
             self.vo_failed = True
@@ -674,7 +707,9 @@ class Playback:
         video = next((t for t in tracks if isinstance(t, dict) and t.get("type") == "video"
                       and t.get("selected")), {})
         profile = _track(video.get("dolby-vision-profile"))
-        nits = _number(target.get("max-luma")) if isinstance(target, dict) else None
+        nits = self.physical_target_nits
+        if nits is None:
+            nits = _number(target.get("max-luma")) if isinstance(target, dict) else None
         self.facts = {"dv_profile": profile, "mapper": self.mapper or "unknown",
                       "target_nits": round(nits) if nits else None,
                       "target_gamma": target.get("gamma") if isinstance(target, dict) else None,
@@ -726,7 +761,15 @@ class Playback:
             return False
         if name == "playback-restart" and self.pending_quality is not None and not self.pending_quality["loaded"]:
             return True  # An already queued incumbent seek cannot commit its successor.
-        if name == "file-loaded":
+        if name == "start-file":
+            self.reset_renderer_facts()
+        elif name == "property-change" and event.get("name") in TARGET_POLICY_PROPERTIES:
+            policy = event["name"]
+            value = event.get("data")
+            if policy in self._target_policy and self._target_policy[policy] != value:
+                self.reset_renderer_facts()
+            self._target_policy[policy] = value
+        elif name == "file-loaded":
             self.on_file_loaded()
         elif name == "playback-restart":
             self.eof_handled, self.ended = False, False
