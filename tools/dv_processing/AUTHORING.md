@@ -15,9 +15,12 @@ only after exit zero and output verification. It must preserve existing native
 DV, HDR10, and compatible-base fallbacks on every refusal.
 
 ```sh
-author_p81 encoded.mp4 timing.tsv rpus authored.mkv
+# Frozen video envelope: target kb/s, peak kb/s, CPB kbit,
+# HEVC general_level_idc, Dolby Vision level.
+author_p81 encoded.mp4 timing.tsv rpus authored.mkv 90893 130000 160000 153 6
 P81_HELPER=./author_p81 P81_ENCODED=encoded.mp4 \
-  P81_TIMING=timing.tsv P81_RPUS=rpus python3 test_author.py
+  P81_TIMING=timing.tsv P81_RPUS=rpus \
+  P81_ENVELOPE='90893 130000 160000 153 6' python3 test_author.py
 ```
 
 The helper associates encoded packets with renderer frames by exact rational
@@ -44,14 +47,20 @@ range HEVC. Existing RPUs, EL NALs, repeated/missing PTS, missing frames, partia
 NALs, unsupported layers/temporal IDs, missing source metadata, extended L8
 forms and L10/L255 metadata refuse. Supported L2, L3,
 L4, L5 and length-10 L8 display instructions remain unapplied in the
-reconstructed master and are verified unchanged across P8.1 adaptation. DV level is selected from the
-shortest actual interval and raster using FFmpeg's levels 1–9 table; each
-access unit must fit that level's high-tier peak bitrate bound. The renderer
+reconstructed master and are verified unchanged across P8.1 adaptation. The
+caller freezes DV level 1–13 from raster, shortest interval and the actual
+rate envelope; the helper validates those constraints and the encoded HEVC
+Main10 High tier/level before authoring the supplied DV level. Each access
+unit must fit that level's high-tier peak bitrate bound. The example's
+90.893 Mb/s target remains unchanged while peak and CPB fit HEVC High 5.1
+and DV level 6. It assumes a compatible raster/cadence and an input actually
+encoded with those parameters; the arguments cannot relabel an incompatible
+stream. The renderer
 retains the stronger mapping, signal, active-area and source-pair guards.
 
-## Evidence and limits
+## Historical evidence and current validation limits
 
-The final helper compiled with `-std=c11 -Wall -Wextra -Werror` against the
+The historical offline helper compiled with `-std=c11 -Wall -Wextra -Werror` against the
 retained FFmpeg 9 static prefix and libdovi C API. It does not mix FFmpeg 5
 system libraries into the reconstruction process. The runtime control image is
 SHA-256 `96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9`;
@@ -68,9 +77,14 @@ the six-picture control establishes reorder association. Synthetic decoded
 source controls do not establish movie quality, sustained throughput, physical
 DV-client rendering, independent reference conformance, or serving readiness.
 
+The source-budget CLI and current ABI 374 helper validation are tracked in
+[the source-budget ledger](../../docs/streaming/HDR-ENHANCEMENT-SOURCE-BUDGET.md).
+The historical controls above do not qualify that changed source.
+
 ## Fragmented MP4 output
 
-Append `fmp4` to the existing invocation to write an init plus one media fragment.
+Insert `fmp4` between the output path and the five envelope arguments to
+write an init plus one media fragment.
 The input must be keyframe-led with PTS equal to DTS and a uniform contiguous
 frame grid. Timestamp rescaling must be exact in the actual post-header output
 clock; the complete endpoint and FFmpeg timestamp-spacing limit are checked.

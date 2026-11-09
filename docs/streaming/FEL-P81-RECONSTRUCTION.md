@@ -4,7 +4,7 @@
 [the Linux player plan](../clients/LINUX-PLAYER-PLAN.md) §3.3) · not
 deployed · served only for a title whose own measurement admits it (§7);
 on lab6 neither measured title is admitted · physical Dolby Vision display
-acceptance open · **Written:** 2026-10-25 · **Updated:** 2026-10-26
+acceptance open · **Written:** 2026-10-25 · **Updated:** 2026-11-08 (America/New_York)
 
 Companion to [DV_PROCESSING_TOOLS.md](DV_PROCESSING_TOOLS.md) (the helpers)
 and [the authoring notes](../../tools/dv_processing/AUTHORING.md) (the P8.1
@@ -95,7 +95,7 @@ letterbox: Title A rows 274–1884, Title B rows 40–2118).
 | Composed, pre-encode 4:2:0 export | 53.16 · 1.01 · 6.19 / 51.94 · 1.22 · 6.98 | 57.27 · 0.92 · 2.87 / 57.14 · 0.93 · 2.92 |
 | EL dropped, same 4:2:0 export | 42.45 · 4.68 · 10.58 / 48.48 · 2.69 · 7.65 | 47.00 · 3.32 · 10.58 / 48.60 · 3.05 · 7.05 |
 | EL dropped, 4:4:4, unencoded (what the fallback shows) | 43.15 · 3.94 · 10.27 / 52.48 · 1.81 · 5.98 | 46.07 · 3.53 · 10.27 / 47.22 · 3.27 · 7.34 |
-| Served, current recipe (20 Mb/s rung, VBR, compression level 19) | 46.77 · 3.03 · 13.82 / 45.51 · 3.90 · 14.79 | 45.37 · 4.00 · 12.89 / 45.21 · 4.12 · 13.00 |
+| Served, then-current recipe (20 Mb/s rung, VBR, compression level 19) | 46.77 · 3.03 · 13.82 / 45.51 · 3.90 · 14.79 | 45.37 · 4.00 · 12.89 / 45.21 · 4.12 · 13.00 |
 | Served, VBR 50 Mb/s, `-qmax 16`, compression level 0 | 48.46 · 2.50 · 10.40 / 47.21 · 3.20 · 11.12 | 49.16 · 2.67 · 8.12 / 49.01 · 2.74 · 8.18 |
 | Served, VBR 60 Mb/s, `-qmax 14`, compression level 0 | 48.77 · 2.40 · 9.92 / 47.52 · 3.06 · 10.65 | 49.47 · 2.61 · 7.43 / 49.32 · 2.68 · 7.49 |
 
@@ -213,16 +213,28 @@ changes the picture by more than the encode loses.
 
 ### Recipe
 
-`RECONSTRUCTED_P81_RECIPE` (`p81-vbr:b=min(source,60000k):maxrate=1.5b:bufsize=2b:bf=0:radeonsi-compression_level=0:v1`):
-VBR at the source's average bitrate capped at 60 Mb/s
-(`reconstructed_p81_video_kbps`), the ordinary VBV (`-maxrate` 1.5×,
-`-bufsize` 2×), `-bf 0`, and radeonsi compression level 0 (VBAQ off). It is
-applied by `CompletedReconstructedOutputPlan::with_reconstructed_profile81`
-for this route only; every other radeonsi encode keeps compression level 19,
-and Software and NVENC are untouched (pinned by
+`RECONSTRUCTED_P81_RECIPE` now names the source-budget-preserved v2 recipe.
+When Original would otherwise copy the source, enhancement re-encoding keeps
+its positive measured video budget, rounded upward to whole kb/s. One frozen
+envelope binds the target, peak, CPB and legal HEVC/DV levels to the candidate,
+encoder, authored output and exact qualification recipe. Missing measurements
+remain unresolved. The [source-budget ledger](HDR-ENHANCEMENT-SOURCE-BUDGET.md)
+records the selection rules and current-source validation boundary.
+
+The route retains `-bf 0` and radeonsi compression level 0 (VBAQ off), applied
+by `CompletedReconstructedOutputPlan::with_reconstructed_profile81`. Every
+other radeonsi encode keeps its compression policy; the radeonsi flag does
+not apply to Software or NVENC (pinned by
 `the_reconstructed_profile81_route_alone_drops_vbaq_and_never_caps_qp`).
 
-**VBV check.** The decision asked for `-qmax 14`. radeonsi obeys `-qmax`
+The historical v1 recipe was
+`p81-vbr:b=min(source,60000k):maxrate=1.5b:bufsize=2b:bf=0:radeonsi-compression_level=0:v1`.
+Its 60 Mb/s cap and invented fallback budget are superseded; measurements and
+verdicts retain their original source/recipe attribution. The table's
+then-current 20 Mb/s recipe and the diagnostic 50/60 Mb/s variants below do
+not qualify the new source-budget recipe or its corrected measurement inverse.
+
+**Historical VBV check.** The decision asked for `-qmax 14`. radeonsi obeys `-qmax`
 over `-maxrate`, so a QP cap lets a hard scene run past the rate the variant
 advertises. The processed variant advertises `BANDWIDTH` = video × 1.5 +
 audio (`vbv_maxrate_kbps`), 90 Mb/s + audio at the 60 Mb/s target. 2 s

@@ -110,7 +110,11 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 17] = [
+    let inputs: [(&str, &[u8]); 18] = [
+        (
+            "author_p81.c",
+            include_bytes!("../../../tools/dv_processing/author_p81.c"),
+        ),
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -301,6 +305,12 @@ impl ToolSet {
         let root = std::env::var_os("PLURX_DV_PROCESSING_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/usr/lib/plurx/dv-processing".into());
+        Self::capture_at(root).await
+    }
+
+    // Keep the manifest-validation boundary identical for production discovery
+    // and fixture bundles without mutating process-global configuration.
+    async fn capture_at(root: PathBuf) -> Result<Option<Arc<Self>>, String> {
         tokio::task::spawn_blocking(move || {
             let manifest_path = root.join("build-identity.json");
             let bytes = match std::fs::read(&manifest_path) {
@@ -465,12 +475,12 @@ impl PrivateWindow {
         first_global_frame: u64,
         raster: (u32, u32),
         destination: plurx_core::transcode::dv_processing::DvDestination,
-        source_level: Option<u8>,
+        envelope: Option<plurx_core::transcode::EnhancementRateEnvelope>,
         runtime_cache: &Path,
         audio_channels: Option<u32>,
     ) -> Result<VerifiedWindow, String> {
         use plurx_core::transcode::dv_processing::{
-            dv_author_profile81_window, dv_validate_encoded_window, DvDestination,
+            dv_author_profile81_window_with_envelope, dv_validate_encoded_window, DvDestination,
         };
         if self
             .display_target
@@ -488,6 +498,14 @@ impl PrivateWindow {
         let origin =
             plurx_core::transcode::vod_reconstructed_video_origin(grid, first_global_frame)
                 .map_err(str::to_owned)?;
+        if let Some(envelope) = envelope {
+            let signalled_hrd = plurx_core::transcode::validate_encoded_enhancement_envelope(
+                &self.encoded,
+                envelope,
+            )
+            .map_err(str::to_owned)?;
+            tracing::debug!(target: "plurxd::dv", signalled_hrd, envelope = %envelope.identity(), "observed completed enhancement coded envelope");
+        }
         let bytes = match destination {
             DvDestination::Sdr => {
                 plurx_core::transcode::dv_processing::dv_author_sdr_window(&self.encoded)
@@ -506,14 +524,14 @@ impl PrivateWindow {
                 }
                 None => self.encoded,
             },
-            DvDestination::Profile81 => dv_author_profile81_window(
+            DvDestination::Profile81 => dv_author_profile81_window_with_envelope(
                 &self.encoded,
                 raster,
                 grid.numerator,
                 origin,
                 grid.denominator,
                 &rpus,
-                source_level.ok_or("held source has no DV level")?,
+                envelope.ok_or("frozen P81 rate envelope absent")?,
             )
             .map_err(|e| e.to_string())?,
         };
@@ -1343,9 +1361,7 @@ impl RuntimeRecipe {
                         first_frame,
                         raster,
                         self.destination,
-                        file.dolby_vision
-                            .level
-                            .and_then(|level| u8::try_from(level).ok()),
+                        plan.enhancement_rate_envelope(),
                         &self.runtime_cache,
                         plan.options()
                             .input_has_audio
@@ -3234,5 +3250,112 @@ mod title_scanner_identity_tests {
         assert!(create.contains(
             "planning.probe_json.as_deref(),\n            &tools.title_scanner_digest(),"
         ));
+    }
+}
+
+#[cfg(test)]
+mod bundle_capture_tests {
+    use super::*;
+
+    /// Generate the actual installer's manifest and enter the same capture
+    /// boundary as production. Stub artifacts are never executed.
+    #[tokio::test]
+    async fn revised_bundle_capture_accepts_current_sources_and_rejects_stale_or_incomplete_identity(
+    ) {
+        let fixture = tempfile::tempdir().expect("bundle fixture");
+        let root = fixture.path().join("bundle");
+        for directory in ["bin", "lib", "sources"] {
+            std::fs::create_dir_all(root.join(directory)).expect("fixture directory");
+        }
+        for name in [
+            "segment_decode_render",
+            "mux_rgb",
+            "author_p81",
+            "scan_title",
+        ] {
+            std::fs::write(root.join("bin").join(name), name).expect("stub helper");
+        }
+        std::fs::write(root.join("lib/libplacebo.so.374"), b"fixture placebo")
+            .expect("write stub placebo library");
+        std::fs::write(root.join("sources/libdovi.a"), b"fixture parser")
+            .expect("write stub parser library");
+        std::fs::write(
+            root.join("sources/abi.json"),
+            br#"{"libplacebo":374,"avcodec":62,"avformat":62,"avutil":60}"#,
+        )
+        .expect("write fixture ABI");
+        let source = fixture.path().join("source");
+        std::fs::create_dir(&source).expect("create copied-source directory");
+        let actual_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/dv_processing");
+        for entry in std::fs::read_dir(&actual_source).expect("enumerate actual helper sources") {
+            let entry = entry.expect("read source entry");
+            if entry
+                .file_type()
+                .expect("inspect source entry type")
+                .is_file()
+            {
+                std::fs::copy(entry.path(), source.join(entry.file_name()))
+                    .expect("copy manifest source input");
+            }
+        }
+        let installer = include_str!("../../../tools/dv_processing/bundle-manifest.py");
+        let generate = |script: &str| {
+            let result = std::process::Command::new("python3")
+                .args(["-c", script])
+                .arg(&source)
+                .arg(&root)
+                .output()
+                .expect("run installed manifest generator");
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        generate(installer);
+        let tools = ToolSet::capture_at(root.clone())
+            .await
+            .expect("validate current installer bundle")
+            .expect("current bundle accepted");
+        assert!(tools.is_current().await);
+        assert_eq!(
+            tools.renderer,
+            root.join("bin/segment_decode_render")
+                .canonicalize()
+                .expect("canonical fixture renderer")
+        );
+        for missing in ["author_p81.c", "movie_source_io.h", "source_reader.h"] {
+            // Exercise the producer's actual INPUTS, independently of source
+            // formatting or quote style. The final generated manifest is
+            // internally consistent but incomplete for this daemon.
+            let incomplete = format!(
+                "{installer}\nimport sys\nomitted = {missing:?}\nassert omitted in INPUTS\n\
+                 INPUTS = tuple(name for name in INPUTS if name != omitted)\n\
+                 build(Path(sys.argv[1]), Path(sys.argv[2]))\n"
+            );
+            generate(&incomplete);
+            assert!(
+                matches!(ToolSet::capture_at(root.clone()).await, Err(error) if error == "unsupported DV build identity"),
+                "capture rejects a manifest missing {missing}"
+            );
+        }
+        // Self-consistent stale source bytes still cannot authorize this daemon.
+        for stale in ["author_p81.c", "movie_source_io.h", "source_reader.h"] {
+            let path = source.join(stale);
+            let original = std::fs::read(&path).expect("read current fixture source");
+            std::fs::write(&path, b"deliberately stale fixture source")
+                .expect("write stale fixture source");
+            generate(installer);
+            assert!(
+                matches!(ToolSet::capture_at(root.clone()).await, Err(error) if error == "unsupported DV build identity"),
+                "capture rejects stale {stale}"
+            );
+            std::fs::write(path, original).expect("restore current fixture source");
+        }
+        generate(installer);
+        assert!(ToolSet::capture_at(root)
+            .await
+            .expect("validate restored current bundle")
+            .is_some());
     }
 }
