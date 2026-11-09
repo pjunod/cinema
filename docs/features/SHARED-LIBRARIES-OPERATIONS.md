@@ -182,6 +182,20 @@ downloaded subtitle burns, native subtitles beside HDR and Shared progressive
 from the player's actual capabilities. A compiler pass does not establish
 subtitle fidelity, HDR rendering or physical-device playback.
 
+Clocked shared starts may answer 503 `startup_timeout` or
+`media_session_overloaded` with `Retry-After` while their owner keeps working.
+Retry the same complete request and request ID. The receiver forwards the
+remaining budget only to Sources advertising `start_budget_v1`; older peers
+keep their prior bounds. Discovery and local/remote answer waits share one
+clock; owned preparation retains its own budget.
+
+A ready result that no accepted Start response claimed still belongs to the
+attempt. When its fixed rejoin window ends with no waiter, the existing owner
+sends ordinary End and waits for physical settlement. A delivered session
+continues under its normal lifetime; finishing its Start HTTP request alone
+does not retire it. The current repair and validation state is recorded in
+[the shared-playback status](../streaming/SHARED-LIBRARY-PLAYBACK-STATUS.md).
+
 The recipient retains a cleanup obligation until Source End is confirmed.
 `receiver_recovery` in `GET /api/v1/sharing/status` and the Sharing status UI
 identify stranded obligations. Preserve those rows and their wrapping keys;
