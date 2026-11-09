@@ -1113,14 +1113,16 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         .get::<crate::SharingConnectionCancellation>()
         .cloned()
         .ok_or_else(unavailable)?;
-    let route = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        async {
-            #[cfg(test)]
-            state.transcode.source_http_starts.discovery_pause.hold().await;
-            super::resolve_forward_route(&state, &headers, &path, &bytes, &connection, deadline).await
-        },
-    );
+    let route = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+        #[cfg(test)]
+        state
+            .transcode
+            .source_http_starts
+            .discovery_pause
+            .hold()
+            .await;
+        super::resolve_forward_route(&state, &headers, &path, &bytes, &connection, deadline).await
+    });
     // Discovery reads routing/locality only. Its filesystem inspections are
     // already owned by the accepted driver's monitors; dropping this waiter
     // cannot drop a Start dispatch, registration or physical cleanup debt.

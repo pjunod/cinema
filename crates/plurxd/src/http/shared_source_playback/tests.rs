@@ -3041,8 +3041,15 @@ async fn actual_source_budgeted_start() {
     // Route discovery itself is an answer wait, before any Start exists.
     // Keep its actual seam parked past the caller's allowance: a typed
     // answer must not wait for discovery or create a Source entry.
-    let pause = fixture.state.transcode.source_http_starts.discovery_pause.arm("source_route_discovery");
-    let request = client.post(&path).headers(fixture.headers.clone())
+    let pause = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .discovery_pause
+        .arm("source_route_discovery");
+    let request = client
+        .post(&path)
+        .headers(fixture.headers.clone())
         .header(super::super::hls::STARTUP_REMAINING_HEADER, "300")
         .body(body(Uuid::new_v4()));
     let discovery = tokio::spawn(async move {
@@ -3053,7 +3060,8 @@ async fn actual_source_budgeted_start() {
     });
     let held = pause.reached().await;
     let (status, bytes) = tokio::time::timeout(Duration::from_secs(1), discovery)
-        .await.expect("the caller clock bounds parked discovery")
+        .await
+        .expect("the caller clock bounds parked discovery")
         .expect("discovery caller joined");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(typed(&bytes), "startup_timeout");
@@ -3063,8 +3071,15 @@ async fn actual_source_budgeted_start() {
     // Discovery that finishes locally consumes the same answer allowance.
     // Hold it for 1.5 s of a 2 s clock, then keep actual preparation queued:
     // restarting the header clock in the local handler would answer at 3.5 s.
-    let pause = fixture.state.transcode.source_http_starts.discovery_pause.arm("source_local_discovery");
-    let request = client.post(&path).headers(fixture.headers.clone())
+    let pause = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .discovery_pause
+        .arm("source_local_discovery");
+    let request = client
+        .post(&path)
+        .headers(fixture.headers.clone())
         .header(super::super::hls::STARTUP_REMAINING_HEADER, "2000")
         .body(body(abandoned));
     let began = Instant::now();
@@ -3076,7 +3091,10 @@ async fn actual_source_budgeted_start() {
         (status, headers, bytes)
     });
     let held = pause.reached().await;
-    tokio::time::sleep_until(tokio::time::Instant::from_std(began + Duration::from_millis(1500))).await;
+    tokio::time::sleep_until(tokio::time::Instant::from_std(
+        began + Duration::from_millis(1500),
+    ))
+    .await;
     held.release();
     let (status, headers, bytes) = caller.await.expect("local caller joined");
     assert_eq!(

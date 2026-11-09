@@ -2878,7 +2878,13 @@ async fn actual_pinned_not_yet(
         loop {
             if ends.load(std::sync::atomic::Ordering::SeqCst) > 0
                 && fixture.source.active_source_sessions().await == 0
-                && fixture.source.state.transcode.source_http_starts.live_entries() == 0
+                && fixture
+                    .source
+                    .state
+                    .transcode
+                    .source_http_starts
+                    .live_entries()
+                    == 0
                 && fixture.source.state.transcode.source_worker_count() == 0
             {
                 break;

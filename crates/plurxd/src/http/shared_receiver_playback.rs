@@ -1438,10 +1438,7 @@ impl ReceiverStartActor {
     /// request and re-post the same `request_id` whenever it likes, so its
     /// attempt is never retired on a dropped waiter and keeps today's
     /// lifetime, ended by its owner.
-    fn abandoned_before_delivery(
-        entry: &ReceiverStartInner,
-        owned: &ReceiverStartState,
-    ) -> bool {
+    fn abandoned_before_delivery(entry: &ReceiverStartInner, owned: &ReceiverStartState) -> bool {
         let window_ended = entry
             .rejoin_window
             .get()
