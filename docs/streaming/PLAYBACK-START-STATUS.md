@@ -20,14 +20,19 @@ peer query; ordinary media retains learner capacity. Both repairs come from
 the [shared-library RCA](SHARED-LIBRARY-PLAYBACK-RCA.md). GPT 6.1 Sol built
 S12; Codex owns S4, integration and merge.
 
-Independent implementation review found no actionable findings. Final
-validation is running; no merge credit is claimed yet. Local macOS Clippy
+Independent implementation review found no actionable findings. Local
+Clippy, syntax checks and both focused regressions passed. PR #1475
+owns current CI and merge state; no merge credit is claimed here. The first
+preflight stopped on the intentionally pinned membership file hash. Tables
+31/32 were refreshed after confirming both mapped authority bodies are
+byte-identical to the base; only the media directory changed. Local macOS Clippy
 also exposed existing Linux-only processed-upgrade imports/test helpers;
 the batch aligns their declarations with their consuming platform.
 
-Mobile publication remains blocked: the registered signing runner is
-offline; its last export reported no account and no distribution identity
-with a private key. A later green workflow skipped publication. Native
+Mobile publication remains unverified: the last attempted export reported
+no account and no distribution identity/private key. The actual signing
+controller and its original setup receipts have now been located; its
+runner is running. A later green workflow skipped publication. Native
 prepared-switch measurements and matched cold TTFF remain outstanding.
 
 ## Current process — one final candidate review and validation
