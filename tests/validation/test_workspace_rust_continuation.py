@@ -87,3 +87,25 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
                         current.replace('RUST_TEST_THREADS: "2"','RUST_TEST_THREADS: "4"')):
             with self.assertRaises(receipts.ReceiptError):
                 proof.check_workflow_environment(changed,proof.CURRENT_JOB)
+
+    def test_reviewed_current_native_job_is_a_historical_source_with_no_adopted_inputs(self):
+        original = '7069cc0684b6c669023a901cfd0f767bcb3cf11e'
+        source = '5ca3abcb0259b401b7da3716c41f6026e2b95415'
+        original_workflow = proof.retention.git_bytes(original, '.github/workflows/ci.yml').decode()
+        workflow = proof.retention.git_bytes(source, '.github/workflows/ci.yml').decode()
+        proof.check_workflow_environment(original_workflow, (proof.ORIGINAL_JOB, proof.CURRENT_JOB))
+        proof.check_workflow_environment(workflow, (proof.ORIGINAL_JOB, proof.CURRENT_JOB))
+        with self.assertRaises(receipts.ReceiptError):
+            proof.check_workflow_environment(workflow, proof.ORIGINAL_JOB)
+        proof.require_native_inputs({})
+        for key in ('retained_units_sha256', 'retained_units_attachment_id',
+                    'retained_units_attachment_uuid', 'workspace_rust_evidence'):
+            with self.subTest(key=key), self.assertRaises(receipts.ReceiptError):
+                proof.require_native_inputs({key: 'previous'})
+        for changed in (workflow.replace('RUST_TEST_THREADS: "2"', 'RUST_TEST_THREADS: "4"'),
+                        workflow.replace('run: make ci-rust-gate', 'run: make rust-check'),
+                        workflow + '\ndefaults:\n  run:\n    shell: bash\n',
+                        workflow + '\nenv:\n  CARGO_TERM_COLOR: never\n',
+                        workflow + '\n"env":\n  CARGO_TERM_COLOR: never\n'):
+            with self.subTest(change=changed[-80:]), self.assertRaises(receipts.ReceiptError):
+                proof.check_workflow_environment(changed, (proof.ORIGINAL_JOB, proof.CURRENT_JOB))

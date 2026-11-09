@@ -56,10 +56,20 @@ def check_changes(record, candidate, targets):
 def check_workflow_environment(workflow, expected):
     job = re.search(r'(?s)\n  check:\n.*?(?=\n  cluster_store_legacy:)', workflow)
     global_env = re.findall(r'(?m)^env:\n((?:  [^\n]+\n)+)',workflow)
-    receipts.require(job and retention.digest(job[0].encode()) == expected
+    roots = re.findall(r'(?m)^[^\s#][^\n]*$', workflow)
+    accepted = expected if isinstance(expected, tuple) else (expected,)
+    receipts.require(job and retention.digest(job[0].encode()) in accepted
+                     and roots == ['name: ci', 'on:', 'env:', 'concurrency:', 'jobs:']
                      and global_env == ['  CARGO_TERM_COLOR: always\n']
                      and not re.search(r'(?m)^defaults:',workflow),
                      'Unrecognized workflow or native Rust job execution environment')
+
+
+def require_native_inputs(inputs):
+    receipts.require(all(not inputs.get(key) for key in (
+        'retained_units_sha256', 'retained_units_attachment_id',
+        'retained_units_attachment_uuid', 'workspace_rust_evidence')),
+        'Historical Rust job may not adopt earlier unit outcomes')
 
 
 def authenticate(api, descriptor, binding, candidate):
@@ -83,13 +93,14 @@ def authenticate(api, descriptor, binding, candidate):
                      and run['prettyref'] == record['branch'] and inputs['promotion_head_sha'] == prior
                      and str(record['pr']) == str(inputs['promotion_pr']),
                      'Historical Rust promotion identity differs')
+    require_native_inputs(inputs)
     jobs = [j for j in api.pages(f'/actions/runs/{run_id}/jobs')
             if j['name'] == 'Rust unit and SQLite contracts']
     receipts.require(len(jobs) == 1 and jobs[0]['id'] == job_id and jobs[0]['run_id'] == run_id
                      and jobs[0]['repo_id'] == repository and jobs[0]['attempt'] == 1
                      and jobs[0]['status'] in ('success','failure'), 'Original native Rust job differs')
     workflow = retention.git_bytes(prior, '.github/workflows/ci.yml').decode()
-    check_workflow_environment(workflow,ORIGINAL_JOB)
+    check_workflow_environment(workflow,(ORIGINAL_JOB,CURRENT_JOB))
     check_workflow_environment(retention.git_bytes(candidate,'.github/workflows/ci.yml').decode(),CURRENT_JOB)
     commands.authenticate_scope(api, run_id, run, workflow, record, prior, repository)
     source = api.bytes(f'/actions/jobs/{job_id}/logs')
