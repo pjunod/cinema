@@ -1202,9 +1202,10 @@ async fn cluster_vtt_into(
             "queued" if started.elapsed() >= Duration::from_secs(20) && !self_claimed => {
                 self_claimed = true;
                 let runtime_cache = access.root().parent().unwrap_or(access.root());
-                let claimed = jobs
-                    .self_claim_subtitle_source(&request.request_id, runtime_cache)
-                    .await;
+                // Keep the durable job future out of the VTT reader until a self-claim is due.
+                let claimed =
+                    Box::pin(jobs.self_claim_subtitle_source(&request.request_id, runtime_cache))
+                        .await;
                 if !claimed
                     && store
                         .analysis_request(&request.request_id)
@@ -3997,8 +3998,11 @@ where
     // extractor future (killing its child) while this frame still owns the
     // temp file and can delete it, so a wedge leaves the cache dir as clean as
     // an ordinary failure does.
-    let extraction =
-        tokio::time::timeout(limits.timeout, extract(tmp.to_owned(), file.clone(), index));
+    // Keep the extractor's state off the stack as the timeout moves into the cancellation race.
+    let extraction = tokio::time::timeout(
+        limits.timeout,
+        Box::pin(extract(tmp.to_owned(), file.clone(), index)),
+    );
     let extracted = match cancel {
         Some(cancel) => {
             // The cleanup deliberately happens *after* the select expression

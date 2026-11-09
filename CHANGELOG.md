@@ -10,6 +10,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Subtitle extraction and durable self-claim futures use heap storage at their
+  existing ownership boundaries, preventing debug-stack overflow without changing
+  extraction deadlines or cancellation cleanup.
+- The learner topology drill waits for locally applied schema before opening
+  a newly admitted learner, matching production startup readiness.
 - Apple CI startup cleanup now removes only valid simulators from an earlier
   attempt of the same run, preserving devices whose ownership is ambiguous or
   belongs to another active run.
