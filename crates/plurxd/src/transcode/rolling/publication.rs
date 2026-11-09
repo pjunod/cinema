@@ -134,13 +134,16 @@ pub(super) struct ServedPlaylistSnapshot {
     pub(super) available_at: Instant,
 }
 
-/// First publication is separate from steady reserve. Historical policies
-/// remain test controls; production replenishes complete cuts while banking lead.
+/// First publication is separate from steady reserve. Native HLS must admit
+/// its fixed advertised target before attachment; the audited hls.js path can
+/// replenish a shorter first reload window. This contract is frozen at create,
+/// so a retry or producer replacement cannot shorten native admission.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum RollingStartupPolicy {
     #[cfg(test)]
     Conservative,
     #[default]
+    NativePresentationWindow,
     FirstReloadWindow,
     #[cfg(test)]
     FirstCompleteSegment,
@@ -153,6 +156,7 @@ impl RollingStartupPolicy {
         match self {
             #[cfg(test)]
             Self::Conservative => false,
+            Self::NativePresentationWindow => false,
             Self::FirstReloadWindow => true,
             #[cfg(test)]
             Self::FirstCompleteSegment => true,
@@ -165,6 +169,7 @@ impl RollingStartupPolicy {
         match self {
             #[cfg(test)]
             Self::Conservative => rolling_initial_runway_ms(rate),
+            Self::NativePresentationWindow => rolling_initial_runway_ms(rate),
             Self::FirstReloadWindow => {
                 ((ROLLING_PUBLICATION_TARGET.as_millis() as f64 * rate).ceil() as i64).clamp(
                     ROLLING_PUBLICATION_TARGET.as_millis() as i64,
@@ -230,12 +235,18 @@ impl RollingPublicationClock {
         }
     }
 
-    pub(super) fn bind_startup_transport(&mut self, _transport: Option<&str>) {
-        // Bootstrap is a publication phase, not a transport capability or
-        // a change to the producer's paid steady reserve. Complete objects
-        // retain the existing init, attempt and random-access validation.
+    pub(super) fn bind_startup_transport(&mut self, transport: Option<&str>) {
+        // A ready playlist is not native decoder admission. Safari can fetch
+        // every object in a short target-16 window yet stay at HAVE_METADATA
+        // until startup expires. Only the audited hls.js path has evidence for
+        // the short reload window; native, omitted and future transports need
+        // a window derived from that same fixed presentation target. Keep the
+        // producer's paid steady reserve and all media validation unchanged.
         if !self.startup_policy_bound && self.served.is_none() {
-            self.startup_policy = RollingStartupPolicy::FirstReloadWindow;
+            self.startup_policy = match transport {
+                Some("hlsjs") => RollingStartupPolicy::FirstReloadWindow,
+                _ => RollingStartupPolicy::NativePresentationWindow,
+            };
             self.startup_policy_bound = true;
         }
     }
@@ -393,13 +404,25 @@ impl RollingPublicationClock {
             let fetched_end_ms = lease
                 .map_or(0, |lease| lease.delivery.fetched_end_ms.max(0))
                 .max(initial_consumed_ms);
+            // The create's frozen position authorizes native bootstrap even
+            // before any media can be fetched. Pay one bounded complete cut
+            // past the admission floor: rounding down would publish an unsafe
+            // short window (or wait forever at a non-segment boundary). Once
+            // published, the ordinary fetch frontier owns the allowance again.
+            let allowed_end_ms = if !published
+                && self.startup_policy == RollingStartupPolicy::NativePresentationWindow
+            {
+                desired_end_ms.saturating_add(ROLLING_SEGMENT_MAX_MS)
+            } else {
+                desired_end_ms
+                    .saturating_add(ROLLING_SEGMENT_MAX_MS)
+                    .min(fetched_end_ms.saturating_add(ROLLING_INITIAL_RUNWAY_MS))
+            };
             RollingPublicationBudget {
                 demand_sequence: None,
                 consumed_end_ms,
                 desired_end_ms,
-                allowed_end_ms: desired_end_ms
-                    .saturating_add(ROLLING_SEGMENT_MAX_MS)
-                    .min(fetched_end_ms.saturating_add(ROLLING_INITIAL_RUNWAY_MS)),
+                allowed_end_ms,
                 protected_position_ms: consumed_end_ms
                     .saturating_sub(ROLLING_PUBLICATION_GUARD_MS)
                     .saturating_sub(ROLLING_BACK_BUFFER_MS)

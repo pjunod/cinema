@@ -552,21 +552,31 @@
     }
 
     #[test]
-    fn rolling_short_bootstrap_is_transport_independent_and_keeps_steady_reserve() {
+    fn rolling_bootstrap_is_bound_to_the_native_presentation_contract() {
         for transport in [None, Some("native"), Some("hlsjs"), Some("unknown")] {
             let mut clock = RollingPublicationClock::default();
             clock.bind_startup_transport(transport);
-            assert_eq!(clock.startup_policy, RollingStartupPolicy::FirstReloadWindow);
-            assert!(clock.startup_policy.uses_small_bootstrap());
-            for (rate, expected) in [(0.25, 16_000), (1.0, 16_000), (4.0, 64_000)] {
+            let hlsjs = transport == Some("hlsjs");
+            let policy = if hlsjs {
+                RollingStartupPolicy::FirstReloadWindow
+            } else {
+                RollingStartupPolicy::NativePresentationWindow
+            };
+            assert_eq!(clock.startup_policy, policy);
+            assert_eq!(clock.startup_policy.uses_small_bootstrap(), hlsjs);
+            for rate in [0.25, 1.0, 4.0] {
+                let expected = if hlsjs {
+                    ((16_000.0_f64 * rate).ceil() as i64).clamp(16_000, ROLLING_RESERVE_MAX_MS)
+                } else {
+                    rolling_initial_runway_ms(rate)
+                };
                 assert_eq!(clock.startup_policy.bootstrap_ms(rate), expected);
-                assert!(rolling_initial_runway_ms(rate) >= 48_000);
             }
             clock.reset_for_attempt(1);
             clock.reset_for_attempt(2);
             clock.clear_attempt();
-            clock.bind_startup_candidate_for_test(RollingStartupPolicy::Conservative);
-            assert_eq!(clock.startup_policy, RollingStartupPolicy::FirstReloadWindow);
+            clock.bind_startup_transport(if hlsjs { Some("native") } else { Some("hlsjs") });
+            assert_eq!(clock.startup_policy, policy, "reattachment cannot change the admitted contract");
         }
     }
 
@@ -616,45 +626,84 @@
     }
 
     #[tokio::test]
-    async fn rolling_production_bootstrap_covers_the_advertised_native_reload_interval() {
-        let directory = crate::test_tempdir().expect("native reload bootstrap");
+    async fn gran_turismo_safari_startup_requires_a_native_playable_first_snapshot() {
+        let case: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/playback/fixtures/gran-turismo-safari-startup.json"
+        ))).expect("shared Safari acceptance case");
+        let durations: Vec<f64> = case["segment_durations_ms"].as_array().unwrap().iter()
+            .map(|ms| ms.as_i64().unwrap() as f64 / 1_000.0).collect();
+        let first_count = case["candidate_first_segment_count"].as_u64().unwrap() as usize;
+        for transport in [None, Some("native"), Some("future-native")] {
+            for explicit in [false, true] {
+                let directory = crate::test_tempdir().expect("Gran Turismo native start");
+                let session = test_session(directory.path().to_path_buf());
+                session.publication.lock().await.bind_startup_transport(transport);
+                if explicit {
+                    accept_rolling_publication_demand(&session, 1, 0, 1.0,
+                        crate::playback_control::PlaybackDemand::Active,
+                        crate::playback_control::RenderState::Starting).await;
+                }
+                for count in [3, 5, 6, first_count] {
+                    tokio::fs::write(directory.path().join("index.m3u8"),
+                        rolling_playlist(&durations[..count], false)
+                            .replace("#EXTM3U\n", "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"init.mp4\"\n")
+                            .replace(".ts\n", ".m4s\n")).await.unwrap();
+                    session.publication_cycle("gran-turismo-safari").await.unwrap();
+                    let clock = session.publication.lock().await;
+                    if count < first_count {
+                        assert!(clock.served.is_none(),
+                            "the 21.897 s Safari failure and intermediate windows must stay staged");
+                    } else {
+                        let served = clock.served.as_ref().expect("native admission");
+                        let text = String::from_utf8_lossy(&served.raw);
+                        assert_eq!(text, case["candidate_first_playlist"].as_str().unwrap(),
+                            "native replay consumes the exact production snapshot bytes");
+                        assert!(!text.contains("PLAYLIST-TYPE"));
+                        assert!(!text.contains("ENDLIST"));
+                        let advertised = parse_playlist(&text);
+                        assert_eq!(advertised.len(), first_count);
+                        assert_eq!(advertised.last().unwrap().end_ms, 53_220);
+                        assert!(served.duration_ms >= ROLLING_INITIAL_RUNWAY_MS);
+                        assert_eq!(served.first_segment, 0);
+                    }
+                }
+                if !explicit {
+                    let lease = session.control.snapshot().await;
+                    let attempt = session.control.current_producer_attempt();
+                    let mut clock = session.publication.lock().await;
+                    let budget = clock.publication_budget_at(Instant::now(), attempt,
+                        lease.as_ref(), 0, 0);
+                    assert_eq!(budget.allowed_end_ms, ROLLING_INITIAL_RUNWAY_MS,
+                        "after bootstrap the legacy fetch frontier owns the cap again");
+                }
+            }
+        }
+        // The qualified JS transport still owns its smaller reload bootstrap.
+        let directory = crate::test_tempdir().unwrap();
         let session = test_session(directory.path().to_path_buf());
-        session.publication.lock().await.bind_startup_transport(Some("native"));
-        accept_rolling_publication_demand(&session, 1, 0, 1.0,
-            crate::playback_control::PlaybackDemand::Active,
-            crate::playback_control::RenderState::Starting).await;
-        tokio::fs::write(
-            directory.path().join("index.m3u8"),
-            rolling_playlist(&[2.002], false),
-        )
-        .await
-        .expect("write first native reload playlist");
-        session
-            .publication_cycle("native-reload-bootstrap")
-            .await
-            .expect("publish native reload attempt with the first short object");
-        assert!(session.publication.lock().await.served.is_none(), "one short object cannot pay a sixteen-second reload gap");
-        tokio::fs::write(
-            directory.path().join("index.m3u8"),
-            rolling_playlist(&[2.002; 8], false),
-        )
-        .await
-        .expect("write complete native reload playlist");
-        session
-            .publication_cycle("native-reload-bootstrap")
-            .await
-            .expect("publish complete native reload bootstrap");
-        let clock = session.publication.lock().await;
-        assert_eq!(
-            clock
-                .served
-                .as_ref()
-                .expect("complete native reload bootstrap is served")
-                .end_ms,
-            16_016
-        );
-        assert_eq!(rolling_initial_runway_ms(1.0), 48_000);
-        assert_ne!(clock.reserve_phase, RollingReservePhase::Steady);
+        session.publication.lock().await.bind_startup_transport(Some("hlsjs"));
+        tokio::fs::write(directory.path().join("index.m3u8"),
+            rolling_playlist(&durations[..3], false)).await.unwrap();
+        session.publication_cycle("gran-turismo-hlsjs").await.unwrap();
+        assert_eq!(session.publication.lock().await.served.as_ref().unwrap().end_ms, 21_897);
+    }
+
+    #[tokio::test]
+    async fn native_bootstrap_finishes_short_titles_without_waiting_for_a_live_window() {
+        for durations in [&[1.25][..], &[4.380, 8.758, 8.759][..]] {
+            let directory = crate::test_tempdir().unwrap();
+            let session = test_session(directory.path().to_path_buf());
+            session.publication.lock().await.bind_startup_transport(Some("native"));
+            tokio::fs::write(directory.path().join("index.m3u8"),
+                rolling_playlist(durations, true)).await.unwrap();
+            session.publication_cycle("native-short-endlist").await.unwrap();
+            let clock = session.publication.lock().await;
+            let served = clock.served.as_ref().expect("completed title is immediately playable");
+            assert!(served.end_list);
+            assert!(String::from_utf8_lossy(&served.raw).contains("#EXT-X-ENDLIST"));
+            assert_eq!(parse_playlist(&String::from_utf8_lossy(&served.raw)).len(), durations.len());
+        }
     }
 
     #[tokio::test]
@@ -683,10 +732,10 @@
             let started = Instant::now();
             tokio::fs::write(
                 directory.path().join("index.m3u8"),
-                rolling_playlist(&[2.002; 8], false),
+                rolling_playlist(&[2.002; 24], false),
             )
             .await
-            .expect("sixteen seconds before requested position");
+            .expect("forty-eight seconds before requested position");
             session
                 .publication_cycle_at("fixed-first-frontier", started)
                 .await
@@ -697,7 +746,7 @@
             );
             tokio::fs::write(
                 directory.path().join("index.m3u8"),
-                rolling_playlist(&[2.002; 9], false),
+                rolling_playlist(&[2.002; 25], false),
             )
             .await
             .expect("complete post-position reload coverage");
@@ -710,8 +759,8 @@
                 .served
                 .as_ref()
                 .expect("unpublished elapsed time cannot move the first frontier");
-            assert_eq!(served.end_ms, 18_018);
-            assert!(served.end_ms - 742 >= 16_000);
+            assert_eq!(served.end_ms, 50_050);
+            assert!(served.end_ms - 742 >= ROLLING_INITIAL_RUNWAY_MS);
             assert!(String::from_utf8_lossy(&served.raw).contains("#EXT-X-TARGETDURATION:16"));
             assert_eq!(
                 clock.reserve_phase,
@@ -755,7 +804,7 @@
         }
         tokio::fs::write(
             directory.path().join("index.m3u8"),
-            rolling_playlist(&[2.002; 9], false),
+            rolling_playlist(&[2.002; 25], false),
         )
         .await
         .expect("first prefix");
@@ -795,7 +844,7 @@
         assert_eq!(clock.startup_policy, RollingStartupPolicy::WebFixedHlsV1);
         let mut unknown = RollingPublicationClock::default();
         unknown.bind_startup_transport(Some("other"));
-        assert_eq!(unknown.startup_policy.bootstrap_ms(1.0), 16_000);
+        assert_eq!(unknown.startup_policy.bootstrap_ms(1.0), ROLLING_INITIAL_RUNWAY_MS);
     }
 
     #[tokio::test]
