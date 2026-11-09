@@ -2973,7 +2973,10 @@ async fn build_real_source_start_fixture(
             plurx_core::transcode::EncoderCaps::default(),
             plurx_core::transcode::Pipeline::Cpu,
         )
-        .with_source_identity(state.node_id.clone(), state.sharing.accepted_drivers.boot_id())
+        .with_source_identity(
+            state.node_id.clone(),
+            state.sharing.accepted_drivers.boot_id(),
+        )
         .with_subtitle_jobs(Arc::clone(&state.jobs))
         // The boot proof the HDR10 rung needs; the planner still decides the
         // grade from the player's caps.
