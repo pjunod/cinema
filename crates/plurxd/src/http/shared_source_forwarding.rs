@@ -1092,7 +1092,10 @@ pub(super) async fn route_to_owner(
 }
 async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Response, ApiError> {
     let began = Instant::now();
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
+    // Mint one absolute answer clock before body reads or discovery. Local
+    // fall-through receives this same clock, never a fresh header allowance.
+    let clock = super::SourceStartClock::new(&parts.headers);
     if parts.method != axum::http::Method::POST || parts.uri.query().is_some() {
         return Err(invalid());
     }
@@ -1101,6 +1104,7 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         .await
         .map_err(|_| invalid())?;
     let op = operation(&path, &bytes)?;
+    let clocked = op == Operation::Start && clock.clocked();
     let permit = credit(op)?;
     let deadline = began + op.budget();
     let headers = SourceHeaders::from(parts.headers.clone());
@@ -1111,9 +1115,20 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         .ok_or_else(unavailable)?;
     let route = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        super::resolve_forward_route(&state, &headers, &path, &bytes, &connection, deadline),
-    )
-    .await
+        async {
+            #[cfg(test)]
+            state.transcode.source_http_starts.discovery_pause.hold().await;
+            super::resolve_forward_route(&state, &headers, &path, &bytes, &connection, deadline).await
+        },
+    );
+    // Discovery reads routing/locality only. Its filesystem inspections are
+    // already owned by the accepted driver's monitors; dropping this waiter
+    // cannot drop a Start dispatch, registration or physical cleanup debt.
+    let route = if clocked {
+        clock.answer(route).await?
+    } else {
+        route.await
+    }
     .map_err(|_| {
         #[cfg(test)]
         eprintln!("Source forwarding route resolution timed out");
@@ -1126,6 +1141,7 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
     #[cfg(test)]
     eprintln!("Source forwarding route resolution succeeded");
     if matches!(route, ForwardRoute::Local) {
+        parts.extensions.insert(clock);
         return Ok(next
             .run(Request::from_parts(parts, Body::from(bytes)))
             .await);
@@ -1133,15 +1149,8 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
     // A member envelope never carries the sharing bearer credential or public
     // headers. The untouched complete recipe remains in the original body.
     let canonical_body = String::from_utf8(bytes.to_vec()).map_err(|_| invalid())?;
-    // A forwarded Start honours the viewer's clock here, at the ingress the
-    // receiver spoke to: since the clock bounds answers only (never the
-    // owner's preparation), answering by it needs nothing from the owner.
-    // The owner keeps its Start entry and owned work when this waiter's
-    // answer comes, and the same request rejoins it through the pinned or
-    // retained route. Owner refusals, including a full owner credit pool,
-    // come back typed in the signed reply and pass through unchanged.
-    let clock = super::SourceStartClock::new(&parts.headers);
-    let clocked = op == Operation::Start && clock.clocked();
+    // Forwarded preparation keeps its own work deadline; all answer waits
+    // below use the original ingress clock minted before discovery.
     if !remote_operation_allowed(&route, op) {
         return Err(unavailable());
     }

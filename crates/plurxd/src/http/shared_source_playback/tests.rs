@@ -3038,9 +3038,47 @@ async fn actual_source_budgeted_start() {
         }
     };
     assert!(!indexed().await, "the fixture title starts cold");
-    // Answered on the viewer's 300 ms clock.
+    // Route discovery itself is an answer wait, before any Start exists.
+    // Keep its actual seam parked past the caller's allowance: a typed
+    // answer must not wait for discovery or create a Source entry.
+    let pause = fixture.state.transcode.source_http_starts.discovery_pause.arm("source_route_discovery");
+    let request = client.post(&path).headers(fixture.headers.clone())
+        .header(super::super::hls::STARTUP_REMAINING_HEADER, "300")
+        .body(body(Uuid::new_v4()));
+    let discovery = tokio::spawn(async move {
+        let response = request.send().await.expect("discovery answer");
+        let status = response.status();
+        let bytes = response.bytes().await.expect("discovery body");
+        (status, bytes)
+    });
+    let held = pause.reached().await;
+    let (status, bytes) = tokio::time::timeout(Duration::from_secs(1), discovery)
+        .await.expect("the caller clock bounds parked discovery")
+        .expect("discovery caller joined");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(typed(&bytes), "startup_timeout");
+    assert_eq!(fixture.state.transcode.source_http_starts.live_entries(), 0);
+    held.release();
+
+    // Discovery that finishes locally consumes the same answer allowance.
+    // Hold it for 1.5 s of a 2 s clock, then keep actual preparation queued:
+    // restarting the header clock in the local handler would answer at 3.5 s.
+    let pause = fixture.state.transcode.source_http_starts.discovery_pause.arm("source_local_discovery");
+    let request = client.post(&path).headers(fixture.headers.clone())
+        .header(super::super::hls::STARTUP_REMAINING_HEADER, "2000")
+        .body(body(abandoned));
     let began = Instant::now();
-    let (status, headers, bytes) = post(body(abandoned), Some(300)).await;
+    let caller = tokio::spawn(async move {
+        let response = request.send().await.expect("local Source answer");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.bytes().await.expect("local Source body");
+        (status, headers, bytes)
+    });
+    let held = pause.reached().await;
+    tokio::time::sleep_until(tokio::time::Instant::from_std(began + Duration::from_millis(1500))).await;
+    held.release();
+    let (status, headers, bytes) = caller.await.expect("local caller joined");
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -3053,14 +3091,14 @@ async fn actual_source_budgeted_start() {
         Some("1")
     );
     assert!(
-        began.elapsed() < Duration::from_secs(2),
-        "answered on the viewer's clock"
+        began.elapsed() < Duration::from_millis(2600),
+        "local fall-through preserves the ingress clock"
     );
-    // Past the viewer's whole window (300 ms plus the re-post grace) the
+    // Past the viewer's whole window (2 s plus the re-post grace) the
     // entry is still working on its own budget: the clock bounded the
     // answer, not the work.
     tokio::time::sleep_until(tokio::time::Instant::from_std(
-        began + Duration::from_millis(2_600),
+        began + Duration::from_millis(4_600),
     ))
     .await;
     let (status, _, bytes) = post(body(abandoned), Some(300)).await;

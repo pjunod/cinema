@@ -33,6 +33,8 @@ pub(crate) struct SourceStartRegistry {
     forwarding: forwarding::ForwardingRegistry,
     entries: std::sync::Mutex<Vec<std::sync::Arc<SourceStartEntry>>>,
     settled: std::sync::Mutex<std::collections::VecDeque<std::sync::Arc<SourceStartEntry>>>,
+    #[cfg(test)]
+    discovery_pause: crate::seam_hooks::PauseSlot,
 }
 struct SourceStartEntry {
     identity: SourceStartIdentity,
@@ -1721,9 +1723,12 @@ async fn start(
     headers: SourceHeaders,
     axum::extract::Path((item, file)): axum::extract::Path<(String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
+    clock: Option<axum::Extension<SourceStartClock>>,
     body: axum::body::Body,
 ) -> Result<axum::response::Response, ApiError> {
-    let clock = SourceStartClock::new(&headers);
+    let clock = clock
+        .map(|clock| clock.0)
+        .unwrap_or_else(|| SourceStartClock::new(&headers));
     let deadline = clock.work_deadline();
     let bytes = axum::body::to_bytes(body, 128 * 1024)
         .await
@@ -1792,6 +1797,7 @@ async fn start(
 /// a cold index outlives the viewer that asked for it and persists for the
 /// next play. A Start without the header (an older receiver) keeps today's
 /// refusals as well.
+#[derive(Clone)]
 pub(super) struct SourceStartClock {
     budget: Option<crate::media_pool::CreateStartupBudget>,
     fixed: std::time::Instant,
