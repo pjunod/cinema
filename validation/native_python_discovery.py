@@ -48,6 +48,9 @@ def preflight_execution_digest(workflow):
 
 
 def environment(source, workflow, *, historical):
+    from validation.qualification_unit_continuation import canonical_job_keys
+
+    canonical_job_keys(workflow)
     # This workflow has exactly five plain root entries. Checking the whole
     # source refuses a trailing defaults/env override, duplicate key, alias,
     # or alternate key spelling outside the pinned preflight job.

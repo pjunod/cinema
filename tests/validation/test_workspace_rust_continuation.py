@@ -106,6 +106,9 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
                         workflow.replace('run: make ci-rust-gate', 'run: make rust-check'),
                         workflow + '\ndefaults:\n  run:\n    shell: bash\n',
                         workflow + '\nenv:\n  CARGO_TERM_COLOR: never\n',
-                        workflow + '\n"env":\n  CARGO_TERM_COLOR: never\n'):
+                        workflow + '\n"env":\n  CARGO_TERM_COLOR: never\n',
+                        workflow + '\n  check:\n    runs-on: [self-hosted, Linux, X64]\n',
+                        workflow + '\n  "check":\n    runs-on: [self-hosted, Linux, X64]\n',
+                        workflow + '\n  <<: *other_jobs\n'):
             with self.subTest(change=changed[-80:]), self.assertRaises(receipts.ReceiptError):
                 proof.check_workflow_environment(changed, (proof.ORIGINAL_JOB, proof.CURRENT_JOB))

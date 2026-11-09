@@ -54,6 +54,7 @@ def check_changes(record, candidate, targets):
 
 
 def check_workflow_environment(workflow, expected):
+    commands.canonical_job_keys(workflow)
     job = re.search(r'(?s)\n  check:\n.*?(?=\n  cluster_store_legacy:)', workflow)
     global_env = re.findall(r'(?m)^env:\n((?:  [^\n]+\n)+)',workflow)
     roots = re.findall(r'(?m)^[^\s#][^\n]*$', workflow)

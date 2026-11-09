@@ -139,6 +139,22 @@ def changed_inputs(record, candidate, shared_logs=None):
     return affected
 
 
+def canonical_job_keys(workflow):
+    """Refuse YAML job aliases, alternate key spellings, and duplicate IDs."""
+    receipts.require(workflow.count('\njobs:\n') == 1, 'Ambiguous workflow jobs mapping')
+    jobs = workflow.split('\njobs:\n', 1)[1]
+    names = set()
+    for line in jobs.splitlines():
+        if not re.match(r'^  [^ ]', line) or line.startswith('  #'):
+            continue
+        key = re.fullmatch(r'  ([A-Za-z_][A-Za-z0-9_-]*):', line)
+        receipts.require(key is not None and key[1] not in names,
+                         'Noncanonical or repeated workflow job key')
+        names.add(key[1])
+    receipts.require(names, 'Empty workflow jobs mapping')
+    return names
+
+
 def job_steps(workflow, job):
     """Retain step boundaries so pipefail in another step is not authority."""
     jobs = list(re.finditer(r"(?m)^  ([A-Za-z0-9_]+):\s*$", workflow))

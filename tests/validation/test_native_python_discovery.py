@@ -94,6 +94,11 @@ class NativeDiscoveryCase(unittest.TestCase):
                        '\n<<: *other_globals\n'):
             with self.subTest(root_override=suffix), self.assertRaises(ReceiptError):
                 native.environment(current, workflow + suffix, historical=True)
+        for suffix in ('\n  preflight:\n    runs-on: [self-hosted, Linux, X64]\n',
+                       '\n  "preflight":\n    runs-on: [self-hosted, Linux, X64]\n',
+                       '\n  <<: *other_jobs\n'):
+            with self.subTest(job_override=suffix), self.assertRaises(ReceiptError):
+                native.environment(current, workflow + suffix, historical=True)
         with patch.object(native.retention, 'git_bytes', return_value=b'unreviewed Makefile'):
             with self.assertRaises(ReceiptError):
                 native.environment(current, workflow, historical=True)
