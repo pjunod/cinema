@@ -1082,10 +1082,10 @@ function preparePlayOutgoing(attempt,decision){
   // A pre-play subtitle is resolved BEFORE the player object exists, because a
   // burn has to ride the first session open — `transcodeOpts()` reads
   // `PLAYER.burnedSub`.
-  const applied=prePlayApplication(decision, selection);
-  const wantSub=applied.subtitle, preBurn=applied.burnedSub;
+  const applied=prePlayApplication(decision, selection, {skipDefaultSub:attempt.skipDefaultSub});
+  const preBurn=applied.burnedSub;
   return {startSec,ladder,priorKbps,autoStartHeight,retireOutgoing,src,book,
-    applied,wantSub,preBurn,outgoing};
+    applied,preBurn,outgoing};
 }
 /** @returns {Player} every field named in the typedef (player/player.js) */
 function buildPlayer(attempt,decided,prepared){
@@ -1111,7 +1111,8 @@ function buildPlayer(attempt,decided,prepared){
     curAudio:(decision.audio||[]).findIndex(a=>a.default), curSub:preBurn!=null?preBurn:-1,
     // This playback's track choice, carried across an internal reopen and kept
     // current by the in-player Audio and Subtitles menus.
-    preplay:selection||null,
+    preplay:prepared.applied.subtitle!=null
+      ? {...selection,subtitle:prepared.applied.subtitle} : selection||null,
     markers:(decision.markers||[]).map(m=>({...m})), source:src, started:false,
     _markerOffers:new Set(),
     _seekPreview:null, _seekPending:null, _lastFocusedControl:playerLastFocused,
@@ -1181,9 +1182,9 @@ function buildPlayer(attempt,decided,prepared){
 }
 function presentPlayerChrome(attempt,decided,prepared,openIsAttached){
   const {decision}=decided;
-  const {requestedAttemptReason,skipDefaultSub,video,meta,libraryChannel,
+  const {requestedAttemptReason,video,meta,libraryChannel,
     playerWasOpen,openAttempt}=attempt;
-  const {startSec,applied,wantSub,book}=prepared;
+  const {startSec,applied,book}=prepared;
   newAttempt(requestedAttemptReason || (startSec>0?"resume":"cold-start"));
   // §3.3 row 17: the picture the viewer is getting is not quite the one they
   // asked for, and that is a notice beside it. Raised here rather than where
@@ -1205,20 +1206,6 @@ function presentPlayerChrome(attempt,decided,prepared,openIsAttached){
   renderSkip(null);
   const sb=document.getElementById("skipbtn"); if(sb){ sb.classList.toggle("on", PLAYER.autoskip); sb.style.display=book?"none":""; }
   const ab=document.getElementById("autonextbtn"); if(ab){ ab.classList.toggle("on", autoNextOn()); ab.style.display=book?"none":""; }
-  // Server-chosen default subtitle (Settings → Playback defaults / anime rule).
-  // Native <track> subs ride direct/remux only; transcode burns them instead.
-  //
-  // A pre-play choice owns this instead. Off (`-1`) means leave it off; a burn
-  // is already in `burnedSub` above and rides the first session open; a text
-  // track is applied below, after the route knows its offset, so it lands
-  // without the 400 ms guess and in every delivery method rather than only the
-  // two the cold-start default is limited to.
-  const defSub=PLAYER.subs.find(s=>s.default);
-  if(defSub && !skipDefaultSub && wantSub==null && decision.method!=='transcode'){
-    setTimeout(()=>{
-      if(openIsAttached()&&PLAYER.curSub<0&&PLAYER.preplay?.subtitle==null&&!(typeof translationSelected==="function"&&translationSelected(PLAYER))) setSub(defSub.index);
-    }, 400);
-  }
   return initialAudio;
 }
 function choosePlayRoute(attempt,decided,prepared,initialAudio){
@@ -1410,7 +1397,7 @@ function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
   preparation.finish();
   if(play.pendingIntent===fullIntent)play.pendingIntent=null;
 
-  // A pre-play TEXT subtitle, applied to the stream that just attached. Here
+  // The initial TEXT subtitle, applied to the stream that just attached. Here
   // rather than before the route, because subtitle attachment shifts cues by
   // `PLAYER.offset` and the route is what sets it. A <track> is not a stream
   // restart, so the choice arrives with the first frames.

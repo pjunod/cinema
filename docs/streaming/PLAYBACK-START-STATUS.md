@@ -6,11 +6,12 @@
 Companion to the [implementation plan](PLAYBACK-START-PLAN.md) and
 [Phase 1 build contract](PLAYBACK-START-BUILD.md). Phase 1 merged in
 #1454 (`b08b5b8ec`); Apple build 294 landed in #1466 (`09097650f`).
-The 2026-11-09 20:23 UTC snapshot has media1, lab3 and lab6 on
-`2ad533907`; lab4 remains on `8ab61a779`. This rollout occurred outside
-this continuation. Queue recovery and physical-device acceptance remain
-open: media1 reports degraded, 3,841 eligible requests and 0 ready in
-24 hours. Persisted failure counts are not new failures in that interval.
+The 2026-11-09 21:16 UTC fleet verification has all four nodes on
+`49c4ec103` (includes #1475/#1476), healthy and ready. This supersedes the
+20:23 UTC mixed-build snapshot. Queue and physical-device acceptance remain
+open: media1's 20:23 snapshot reported degraded, 3,841 eligible requests and
+0 ready in 24 hours; no newer queue measurement is claimed here. Persisted
+failure counts are not new failures in that interval.
 
 ## Merged batch — index timestamp repair and Source locate eligibility
 
@@ -23,8 +24,7 @@ S12; Codex owns S4, integration and merge.
 
 Independent implementation review found no actionable findings. Local
 Clippy, syntax checks and both focused regressions passed. PR #1475 merged
-as `2ad533907` after exact-candidate promotion run 7052 passed. Deployment
-of this batch remains separate from the observed `8ab61a779` fleet. The first
+as `2ad533907` after exact-candidate promotion run 7052 passed. Deployment is included in the later verified `49c4ec103` fleet. The first
 preflight stopped on the intentionally pinned membership file hash. Tables
 31/32 were refreshed after confirming both mapped authority bodies are
 byte-identical to the base; only the media directory changed. Local macOS Clippy
@@ -89,6 +89,32 @@ native WebKit off/cold/warm cases reached playing at 759/745/713 ms; the
 remain non-playing, and the completed short title starts. Successful cases
 were retained while failed observer checks alone were rerun. These are local
 matched-source receipts; full daemon/fleet acceptance remains open.
+
+## Initial subtitle intent — F1-N, current corrective batch
+
+**Owner:** Codex, chat `01a1c172-ef6a-77e3-8422-95798308bc5c`.
+A1-N is deployed to all four servers. Real Safari 27.2 foreground Gran Turismo
+started at 3,094 ms to native frame and 3,679 ms to `playing`, with progress.
+Subsequent single-click trials exposed a separate automatic reopen: the
+400 ms default-subtitle timer fires during create and routes through the
+viewer-change owner. A captured stack pins `presentPlayerChrome → setSub →
+restartPendingPlaybackOpen → play`; there was no subtitle change event.
+Two foreground trials reached frames in 2,337/3,789 ms but each cancelled its
+first create and opened another, so neither receives clean-start credit.
+An earlier hidden-tab trial produced no frame and is retained as a control.
+
+The current independent repair removes that timer and binds the server's
+chosen default into the initial recipe, applying text captions at attachment.
+Native track registration is attachment-owned and cleaned up on replacement or
+Close; adversarial review identified this edge before validation. A Linux-only
+qualification test helper now uses the same platform guard as its callers,
+repairing the macOS lint failure found by the required hook.
+Explicit viewer changes keep their existing owner. Regressions and plan
+acceptance include the exact slow-create/default-forced-subtitle case.
+Current landing and fleet acceptance authority: [PR #1480](http://forge.lan:3000/noirr/plurx/pulls/1480). Its source diff, review, current checks and later deployment/measurement receipts supersede this initial qualification snapshot; no ten-start acceptance was claimed at that snapshot.
+The temporary non-admin Safari account protects the user's actively advancing
+resume position and will be removed after qualification. Private runtime
+receipts are retained outside the repository in the owning task's status page.
 
 ## Current process — one final candidate review and validation
 
