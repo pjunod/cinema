@@ -34,12 +34,9 @@ NATIVE_TARGET = re.compile(
     rf"automatic DV physical target {_DV_NUMBER}\.\.(?P<peak>{_DV_NUMBER}) nits; "
     rf"encoding {_DV_NUMBER}\.\.{_DV_NUMBER}; reference {_DV_NUMBER}; "
     rf"PQ transport gain {_DV_NUMBER} -> signal {_DV_NUMBER}\.\.{_DV_NUMBER}; "
-    r"generation \d{1,20}")
+    r"generation (?P<generation>\d{1,20})")
 NATIVE_MAPPER = "shared native Dolby renderer"
-TARGET_POLICY_PROPERTIES = tuple("options/" + name for name in (
-    "target-colorspace-hint", "target-colorspace-hint-mode", "target-prim",
-    "target-trc", "target-peak", "target-gamut", "target-contrast",
-    "hdr-reference-white", "icc-profile", "icc-profile-auto", "target-lut"))
+NATIVE_TARGET_STATE = "native-dovi-target-state"
 
 
 @dataclass
@@ -118,7 +115,7 @@ class Playback:
         self.last_position_ms = None
         self.mapper = None
         self.physical_target_nits = None
-        self._target_policy = {}
+        self.physical_target_generation = None
         self.mapper_logged = False
         # mpv's fatal "Error opening/initializing the ... (--vo) device" line.
         self.vo_failed = False
@@ -256,6 +253,20 @@ class Playback:
 
     def reset_renderer_facts(self):
         self.mapper = self.physical_target_nits = self.facts = None
+        self.physical_target_generation = None
+
+    def read_native_target_state(self):
+        state = self.mpv.get(NATIVE_TARGET_STATE)
+        if not isinstance(state, dict) or type(state.get("active")) is not bool \
+                or type(state.get("generation")) is not int \
+                or not 0 <= state["generation"] < 2**63:
+            return None
+        return state["active"], state["generation"]
+
+    def invalidate_native_target(self, state):
+        if self.physical_target_generation is not None \
+                and state != (True, self.physical_target_generation):
+            self.reset_renderer_facts()
 
     def load(self, url, start_local_s):
         self.reset_renderer_facts()
@@ -277,11 +288,10 @@ class Playback:
         self.mpv.command("observe_property", 1, "pause")
         self.mpv.command("observe_property", 2, "eof-reached")
         self.mpv.command("request_log_messages", "info")
-        for observer, name in enumerate(TARGET_POLICY_PROPERTIES, 3):
-            try:
-                self.mpv.command("observe_property", observer, name)
-            except MpvError:
-                pass  # Older/custom renderers may not expose every option.
+        try:
+            self.mpv.command("observe_property", 3, NATIVE_TARGET_STATE)
+        except MpvError:
+            pass  # Older/custom renderers retain their existing diagnostic fallback.
         if self.mode == "direct":
             self.origin_ms = 0
             url, start_local = self.http.url(self.delivery.get("url")), self.start_ms / 1000
@@ -688,7 +698,12 @@ class Playback:
             native = NATIVE_TARGET.fullmatch(text.rstrip("\r\n"))
             peak = _float(native["peak"]) if native else None
             if peak is not None and 0 < peak <= 10000:
-                self.mapper, self.physical_target_nits = NATIVE_MAPPER, peak
+                generation = int(native["generation"])
+                state = self.read_native_target_state()
+                self.invalidate_native_target(state)
+                if state == (True, generation):
+                    self.mapper, self.physical_target_nits = NATIVE_MAPPER, peak
+                    self.physical_target_generation = generation
                 return
         if prefix == "cplayer" and event.get("level") in ("fatal", "error") \
                 and text.startswith("Error opening/initializing the"):
@@ -763,12 +778,10 @@ class Playback:
             return True  # An already queued incumbent seek cannot commit its successor.
         if name == "start-file":
             self.reset_renderer_facts()
-        elif name == "property-change" and event.get("name") in TARGET_POLICY_PROPERTIES:
-            policy = event["name"]
-            value = event.get("data")
-            if policy in self._target_policy and self._target_policy[policy] != value:
-                self.reset_renderer_facts()
-            self._target_policy[policy] = value
+        elif name == "property-change" and event.get("name") == NATIVE_TARGET_STATE:
+            # A queued notification can predate a newer successful frame. Read
+            # current authoritative state once, instead of trusting its old data.
+            self.invalidate_native_target(self.read_native_target_state())
         elif name == "file-loaded":
             self.on_file_loaded()
         elif name == "playback-restart":

@@ -40,7 +40,11 @@ The existing mapper/client-log/OSD fact fields recognize only the shared
 renderer’s exact successful physical-target message from `vo/gpu-next` at
 Info level. Its finite physical peak overrides the signal-envelope property;
 the label is `shared native Dolby renderer`, without inventing a CM version.
-Facts reset on each load/start-file and observed target-policy changes. A new
+Facts reset on each load/start-file and authoritative target-state changes.
+The read-only `native-dovi-target-state` property reports eligibility and render
+generation; a success must match its active current generation. One read on a
+success or state notification prevents stale compositor/lease facts without
+polling. Eligibility alone does not establish an active grade. A new
 file with no new success stays unknown; a compiled marker alone never proves
 an active grade. Cinema Info’s VO-target rows retain their existing signal
 encoding observations. This diagnostic adaptation awaits focused review/tests.

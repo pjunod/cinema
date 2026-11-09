@@ -518,7 +518,9 @@ class SharedNativeMapper(unittest.TestCase):
     def player(self):
         mpv = mock.Mock(closed=False)
         values = {"video-target-params": {"max-luma": 10000, "gamma": "pq", "primaries": "bt.2020"},
-                  "track-list": [{"type": "video", "selected": True, "dolby-vision-profile": 7}]}
+                  "track-list": [{"type": "video", "selected": True, "dolby-vision-profile": 7}],
+                  "native-dovi-target-state": {"active": True, "generation": 3}}
+        self.values = values
         mpv.get.side_effect = lambda name, *args: values.get(name)
         return playback_module.Playback(mock.Mock(), mpv, {"file_id": 7}, {}, lambda: 0, lambda _: None)
 
@@ -554,6 +556,17 @@ class SharedNativeMapper(unittest.TestCase):
                 self.assertEqual(player.facts["mapper"], "unknown")
                 self.assertEqual(player.facts["target_nits"], 10000)
 
+    def test_success_requires_current_active_matching_backend_generation(self):
+        for state in (None, {}, {"active": False, "generation": 3},
+                      {"active": True, "generation": 4}, {"active": True, "generation": True},
+                      {"active": 1, "generation": 3}, {"active": True, "generation": -1}):
+            with self.subTest(state=state):
+                player = self.player()
+                self.values["native-dovi-target-state"] = state
+                player.on_log(self.event())
+                player.capture_facts()
+                self.assertEqual((player.facts["mapper"], player.facts["target_nits"]), ("unknown", 10000))
+
     def test_load_source_and_changed_target_policy_require_a_fresh_success(self):
         player = self.player()
         player.on_log(self.event())
@@ -561,17 +574,26 @@ class SharedNativeMapper(unittest.TestCase):
         player.capture_facts()
         self.assertEqual((player.facts["mapper"], player.facts["target_nits"]), ("unknown", 10000))
         player.on_log(self.event())
-        player.on_event({"event": "property-change", "name": "options/target-peak", "data": "auto"})
-        self.assertEqual(player.physical_target_nits, 616)  # Initial observer value is not a policy change.
-        player.on_event({"event": "property-change", "name": "options/target-peak", "data": 1000})
+        # Compositor HDR/physical lease loss needs no option change or new success log.
+        self.values["native-dovi-target-state"] = {"active": False, "generation": 4}
+        player.on_event({"event": "property-change", "name": "native-dovi-target-state",
+                         "data": {"active": True, "generation": 3}})
         self.assertIsNone(player.physical_target_nits)
-        player.on_log(self.event(text=self.message("850", generation=4)))
+        self.values["native-dovi-target-state"] = {"active": True, "generation": 5}
+        player.on_log(self.event(text=self.message("850", generation=5)))
+        # A queued old state cannot erase the newer generation's valid success.
+        player.on_event({"event": "property-change", "name": "native-dovi-target-state",
+                         "data": {"active": False, "generation": 4}})
         player.capture_facts()
         self.assertEqual(player.facts["target_nits"], 850)
+        self.values["native-dovi-target-state"] = {"active": True, "generation": 6}
+        player.on_event({"event": "property-change", "name": "native-dovi-target-state",
+                         "data": {"active": True, "generation": 6}})
+        self.assertIsNone(player.physical_target_nits)  # Eligibility alone is not grade proof.
         player.on_event({"event": "start-file"})
         player.capture_facts()
         self.assertEqual(player.facts["mapper"], "unknown")
-        self.assertEqual(self.player().mapper, None)
+        self.assertIsNone(self.player().mapper)
 
 
 class NoTokenOnDisk(LauncherCase):
