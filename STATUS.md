@@ -1,14 +1,13 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-08 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
 - **2026-11-09 · HDR enhancement source budget:** [scope and validation](docs/streaming/HDR-ENHANCEMENT-SOURCE-BUDGET.md). Owner Codex. Independent current-main port preserves measured Original video budgets and exact backend-bound FEL recipes while retaining current source custody and post-first-frame upgrades. Fresh compiler checks and all 39 focused Rust regressions pass; current-head CI remains pending. Picture fidelity and deployment remain open.
 
 ## 2026-11-07 · Pipeline contract v2 (cinema slice)
 
-Owner Claude (claude-opus-5-5, session 01BCWL9z). Curator→plurx scan seam per [the contract](docs/features/PIPELINE-CONTRACT.md) §4–§6. M0 (this entry, the contract copy, index and backlog rows, the `INTEGRATION.md` banner and its two corrections) goes to `main` as a docs-only task PR. M5 builds on `effort/pipeline-v2` as six task PRs `claude/pipeline-v2-m5-<task>`: T1 request sidecar store, T2 targeted job (`library_scan` kind, generation `library-targeted-v1`, dedupe `library:targeted:{id}`), T3 handler (`request_key`, `wait_ms`, `expected_files`, typed outcomes), T4 creating-key status read, T5 `probe_paths` and scan-interval default, T6 Jobs panel and docs. Not deployed.
-- **Decision for Paul:** existing libraries at `scan_interval_mins = 0` are preserved; Settings offers a one-click opt-in to six-hourly and states what "Never" costs. New libraries default to 360 minutes.
+Owner Claude (claude-opus-5-5, session 01BCWL9z). Built on `effort/pipeline-v2` as task PRs T1–T7 ([#1404](http://forge.lan:3000/noirr/plurx/pulls/1404)–[#1409](http://forge.lan:3000/noirr/plurx/pulls/1409) and T7 [#1463](http://forge.lan:3000/noirr/plurx/pulls/1463), the INTEGRATION.md rewrite); M0 merged to `main` as 29d61b824. The ledger is archived at [docs/archive/PIPELINE-V2-CINEMA-STATUS.md](docs/archive/PIPELINE-V2-CINEMA-STATUS.md); T1 is merged into the effort; what is left is review of T2–T7, the Main promotion gate and the qualification receipt.
 
 ## 2026-11-07 · Playback start: one engine, index by first play, one clock
 

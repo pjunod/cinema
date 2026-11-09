@@ -1138,9 +1138,14 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
         (122, 3),
         (123, 4),
         (124, 4),
+        (125, 4),
+        (126, 5),
         (122, 4),
+        (125, 5),
+        (126, 4),
         (123, 3),
         (124, 3),
+        (125, 3),
         (119, 2),
         (119, 3),
         (120, 1),
@@ -1152,6 +1157,12 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
         let path = directory.path().join("current.db");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
         let connection = rusqlite::Connection::open(path).expect("owned fixture");
+        if schema_version < 126 {
+            source_extensions_fixture::rewind_empty_targeted_managed_to_v125(&connection);
+        }
+        if schema_version < 125 {
+            source_extensions_fixture::rewind_empty_scan_request_to_v124(&connection);
+        }
         if schema_version < 124 {
             rewind_empty_source_extensions_to_v121(&connection);
             if schema_version >= 122 {
@@ -1209,7 +1220,7 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
         };
         if !matches!(
             (schema_version, managed_version),
-            (119, 1) | (120, 2) | (121..=122, 3) | (123..=124, 4)
+            (119, 1) | (120, 2) | (121..=122, 3) | (123..=125, 4) | (126, 5)
         ) {
             let before = snapshot();
             assert!(
@@ -1471,7 +1482,7 @@ pub(crate) fn validated_empty_current_tail_rewind(
         .collect()
 }
 
-/// Read-only plan for the exact empty v119–v124 published fixture tails.
+/// Read-only plan for the exact empty v119–v125 published fixture tails.
 /// This recognizes published layouts, not arbitrary later schema versions.
 fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, i64) {
     let version: i64 = connection
@@ -1505,7 +1516,8 @@ fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, 
         119 => 1,
         120 => 2,
         121 | 122 => 3,
-        123 | 124 => 4,
+        123..=125 => 4,
+        126 => 5,
         _ => panic!("only exact published fixture tails may be rewound"),
     };
     // Validate DDL before using any table identity in the read-only inventory.
@@ -1615,7 +1627,7 @@ fn validated_empty_managed_subtitle_rewind(connection: &rusqlite::Connection) ->
     assert!(
         matches!(
             (schema_version, marker),
-            (111..=119, 1) | (120, 2) | (121..=122, 3) | (123..=124, 4)
+            (111..=119, 1) | (120, 2) | (121..=122, 3) | (123..=125, 4) | (126, 5)
         ),
         "managed marker must match its published SQLite schema version"
     );
@@ -1683,11 +1695,17 @@ fn complete_fixture_snapshot(connection: &rusqlite::Connection) -> String {
 
 #[test]
 fn current_fixture_rewind_accepts_exact_empty_v120_with_foreign_keys() {
-    for version in [120, 121, 122, 123, 124] {
+    for version in [120, 121, 122, 123, 124, 125, 126] {
         let dir = tempfile::tempdir().expect("current fixture");
         let path = dir.path().join("store.sqlite");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture schema"));
         let connection = rusqlite::Connection::open(path).expect("fixture connection");
+        if version < 126 {
+            source_extensions_fixture::rewind_empty_targeted_managed_to_v125(&connection);
+        }
+        if version < 125 {
+            source_extensions_fixture::rewind_empty_scan_request_to_v124(&connection);
+        }
         if version < 124 {
             rewind_empty_source_extensions_to_v121(&connection);
             if version >= 122 {
@@ -1781,6 +1799,11 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
         "unowned-text-index",
         "unowned-managed-index",
         "legacy-with-current-translation",
+        "retained-scan-request",
+        "scan-request-marker",
+        "scan-request-trigger",
+        "v124-with-scan-request",
+        "v125-with-managed-v5",
     ] {
         let dir = tempfile::tempdir().expect("refusal fixture");
         let path = dir.path().join("store.sqlite");
@@ -1790,7 +1813,7 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
             .execute_batch("PRAGMA foreign_keys=OFF;")
             .expect("prepare hostile retained fixture rows");
         let sql = match damage {
-            "future-version" => "PRAGMA user_version=125;",
+            "future-version" => "PRAGMA user_version=127;",
             "v120-managed-v3" => "PRAGMA user_version=120;",
             "v121-managed-v2" => include_str!("../../src/store/subtitle_managed_resources_v2.sql"),
             "unsupported-tail-version" => "PRAGMA user_version=119;",
@@ -1829,6 +1852,16 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
             "unowned-text-index" => "CREATE INDEX unexpected_text_index ON subtitle_text_translation_cues(cue_index);",
             "unowned-managed-index" => "CREATE INDEX unexpected_receipt_index ON subtitle_model_receipts(model_id);",
             "legacy-with-current-translation" => "DROP TABLE shared_caption_read_leases; DROP TABLE shared_caption_schema; DROP TABLE subtitle_text_translation_cues; DROP TABLE subtitle_text_translation_schema; PRAGMA user_version=115;",
+            "retained-scan-request" => "INSERT INTO background_scan_request_v2(request_id,key_id,key_hash,created_at_ms,updated_at_ms) VALUES('retained',1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0,0);",
+            "scan-request-marker" => "DELETE FROM background_scan_request_v2_schema;",
+            "scan-request-trigger" => "DROP TRIGGER background_scan_request_v2_retired;",
+            // Published managed v4 beside the sidecar, so only the sidecar is
+            // out of place at v124.
+            "v124-with-scan-request" => concat!(
+                include_str!("../../src/store/subtitle_managed_resources_v4.sql"),
+                "\nPRAGMA user_version=124;"
+            ),
+            "v125-with-managed-v5" => "PRAGMA user_version=125;",
             _ => unreachable!(),
         };
         connection.execute_batch(sql).expect("damage owned fixture");
