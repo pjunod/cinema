@@ -110,17 +110,6 @@ impl TranscodeManager {
         .expect("Source fixture body budget stays open")
     }
 
-    /// Park the next Source Start at its cold index, before the scan spawns.
-    #[cfg(test)]
-    pub(crate) fn test_pause_source_index_before_spawn(
-        &self,
-        bound: Duration,
-    ) -> Arc<crate::seam_hooks::AsyncPause> {
-        self.source_workers
-            .index_hooks
-            .pause_before_spawn_for(bound)
-    }
-
     async fn source_start_budget_for_request(
         &self,
         request: &SessionRequest,
@@ -397,8 +386,11 @@ impl SourceResponseGuard {
 impl TranscodeManager {
     /// Hold the Source's cold-index scan after its child spawns, so a test can
     /// act while a start is mid-preparation.
-    pub(crate) fn pause_source_index_after_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
-        self.source_workers.index_hooks.pause_after_spawn()
+    pub(crate) fn pause_source_index_after_spawn(
+        &self,
+        bound: Duration,
+    ) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.source_workers.index_hooks.pause_after_spawn_for(bound)
     }
     /// Source owners still holding a worker registry slot.
     pub(crate) fn source_worker_count(&self) -> usize {

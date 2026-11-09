@@ -730,7 +730,12 @@ async fn actual_pinned_playback(
             Vec::new(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "actual pre-session WebVTT; H2={h2}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "actual pre-session WebVTT; H2={h2}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
         assert_eq!(headers["content-type"], "text/vtt; charset=utf-8");
         assert_eq!(headers["cache-control"], "no-store");
         assert!(String::from_utf8_lossy(&bytes).contains("Actual HTTP Source caption"));
@@ -1181,7 +1186,6 @@ async fn actual_pinned_playback(
 async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_and_logs_one_stage()
 {
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
-    use tokio::io::AsyncWriteExt as _;
     let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
         .expect("explicit disposable CGNAT namespace")
         .parse()
@@ -1298,20 +1302,29 @@ async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_a
         }
     };
     assert!(!indexed().await, "the fixture title starts cold");
-    let pause = transcode.pause_source_index_after_spawn();
-    // The client: a raw socket with a 1 s start clock. Its rejoin window is
-    // that second plus one re-post's grace.
-    let mut client = tokio::net::TcpStream::connect(b_address)
-        .await
-        .expect("client socket");
-    let mut request = format!(
-        "POST {base}/hls/sessions HTTP/1.1\r\nhost: {b_address}\r\nauthorization: Bearer {}\r\ncontent-type: application/json\r\nx-plurx-startup-remaining-ms: 1000\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-        fixture.original_login,
-        session.len()
-    )
-    .into_bytes();
-    request.extend_from_slice(&session);
-    client.write_all(&request).await.expect("client Start");
+    // Keep a running scan held beyond the normal 20 s viewer window and
+    // re-post grace. Observe its spawn before awaiting the caller's answer;
+    // a 1 s clock could retire the attempt before this precondition existed.
+    let pause = transcode.pause_source_index_after_spawn(std::time::Duration::from_secs(40));
+    let client = tokio::spawn({
+        let path = format!("{base}/hls/sessions");
+        let login = fixture.original_login.clone();
+        async move {
+            b_raw_request(
+                b_address,
+                false,
+                "POST",
+                &path,
+                &[
+                    ("authorization", format!("Bearer {login}")),
+                    ("content-type", "application/json".to_owned()),
+                    (super::hls::STARTUP_REMAINING_HEADER, "20000".to_owned()),
+                ],
+                session,
+            )
+            .await
+        }
+    });
     let held = pause.reached().await;
     assert_eq!(
         transcode.source_http_starts.live_entries(),
@@ -1319,8 +1332,16 @@ async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_a
         "the Source start holds a registry slot while it prepares"
     );
     assert_eq!(transcode.source_worker_count(), 1);
-    // The typed not-yet came; the viewer leaves without retrying.
-    drop(client);
+    let (status, headers, bytes) = client.await.expect("actual caller joined");
+    assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).expect("not-yet JSON")["code"],
+        "startup_timeout",
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(headers["retry-after"], "1");
+    // The typed not-yet came and its actual driver closed; no retry follows.
 
     let terminal = || {
         logs.tail("trace", 4096)
@@ -2708,14 +2729,16 @@ async fn actual_pinned_not_yet(
             .and_then(|value| value["code"].as_str().map(str::to_owned))
             .unwrap_or_default()
     };
-    // The Source cannot publish while its cold index is parked. The web
-    // client's preparation owner has 20 s; the first answer comes at the
-    // local create's 10 s cap.
+    // Park a running scan, after its fresh pre-spawn authority was checked.
+    // Holding before spawn across the 10 s answer would expire the 5 s
+    // membership proof and test an authority refusal instead of a rejoin.
+    // The web client's preparation owner has 20 s; the first answer comes
+    // at the local create's 10 s cap.
     let pause = fixture
         .source
         .state
         .transcode
-        .test_pause_source_index_before_spawn(Duration::from_secs(40));
+        .pause_source_index_after_spawn(Duration::from_secs(40));
     let began = Instant::now();
     let (status, headers, bytes) = start(20_000).await;
     assert_eq!(

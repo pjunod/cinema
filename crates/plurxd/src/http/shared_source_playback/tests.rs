@@ -3086,20 +3086,29 @@ async fn actual_source_budgeted_start() {
     // index runs to completion and persists, and only then does the start
     // end at its next stage boundary and settle.
     let end_url = format!("{path}/{abandoned}/end");
+    // End must arrive on a fresh driver: the Start driver's retained
+    // ingress custody cannot be settled while that same driver awaits End.
+    let end_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("independent End client");
     let end = tokio::spawn({
-        let request = client
+        let request = end_client
             .post(end_url)
             .headers(fixture.headers.clone())
             .header("connection", "close")
             .body(body(abandoned));
         async move {
-            request
-                .send()
-                .await
-                .expect("End")
-                .bytes()
-                .await
-                .expect("End receipt")
+            let response = request.send().await.expect("End");
+            let status = response.status();
+            let bytes = response.bytes().await.expect("End receipt");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "actual End settlement: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            bytes
         }
     });
     tokio::time::timeout(Duration::from_secs(5), async {

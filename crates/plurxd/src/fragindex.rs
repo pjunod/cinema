@@ -1961,16 +1961,16 @@ impl SourceIndexHookOwner {
     pub(crate) fn pause_before_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks().before.arm("source_index_before_spawn")
     }
-    pub(crate) fn pause_before_spawn_for(
+    pub(crate) fn pause_after_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.test_hooks().after.arm("source_index_after_spawn")
+    }
+    pub(crate) fn pause_after_spawn_for(
         &self,
         bound: std::time::Duration,
     ) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks()
-            .before
-            .arm_for("source_index_before_spawn", bound)
-    }
-    pub(crate) fn pause_after_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
-        self.test_hooks().after.arm("source_index_after_spawn")
+            .after
+            .arm_for("source_index_after_spawn", bound)
     }
     pub(crate) fn pause_after_wait_failure(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks()
