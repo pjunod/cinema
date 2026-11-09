@@ -1696,8 +1696,12 @@ async fn run_owner(
         &state,
         intent,
         &dispatch_owner,
-        &source_wrapper,
-        connection_lifetime.clone(),
+        crate::sharing::ReceiverSourceStartRequest {
+            request_json: &source_wrapper,
+            connection_lifetime: connection_lifetime.clone(),
+            clock: entry.clock.get(),
+            rejoin_window: entry.rejoin_window.get().copied(),
+        },
         move |credential, viewer, endpoint| {
             dispatch_entry.retain_dispatch(DispatchedSource {
                 credential: plurx_core::secrets::Secret::from_cleartext(credential.expose()),
@@ -1705,8 +1709,6 @@ async fn run_owner(
                 endpoint: endpoint.clone(),
             })
         },
-        entry.clock.get(),
-        entry.rejoin_window.get().copied(),
         move |retry| {
             // The Source keeps its entry for this request alive; so does B.
             // The waiters present now take this answer, typed, and the owner

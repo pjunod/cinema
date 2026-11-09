@@ -120,6 +120,15 @@ pub(crate) struct ReceiverSourceStartResult {
     pub endpoint: plurx_core::sharing::Endpoint,
     pub source: crate::http::sharing_direct_wire::DecodedSourceStart,
 }
+/// Transport inputs for one exact Source Start. The caller's clock stays
+/// outside the canonical request bytes; connection custody survives every
+/// re-post of that request.
+pub(crate) struct ReceiverSourceStartRequest<'a> {
+    pub request_json: &'a str,
+    pub connection_lifetime: std::sync::Arc<dyn Send + Sync>,
+    pub clock: Option<&'a crate::media_pool::CreateStartupBudget>,
+    pub rejoin_window: Option<tokio::time::Instant>,
+}
 pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
     let result = tokio::time::timeout(
         Duration::from_secs(1),
@@ -133,25 +142,27 @@ impl SharingManager {
     /// Dispatch only after B has committed its blocked owner and retained the
     /// Source request identity. A received Source handle must survive a later
     /// B revocation so the owning task can settle its physical obligation.
-    #[allow(dead_code)] // Wired by the receiver owner, never by a catalogue read.
     pub(crate) async fn start_file_source(
         &self,
         state: &AppState,
         intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
         owner: &plurx_core::sharing_receiver_sessions::ReceiverPendingRenewal,
-        request_json: &str,
-        connection_lifetime: std::sync::Arc<dyn Send + Sync>,
+        request: ReceiverSourceStartRequest<'_>,
         retain_dispatch: impl FnOnce(
                 &plurx_core::secrets::Secret,
                 &str,
                 &plurx_core::sharing::Endpoint,
             ) -> Result<(), crate::sharing_client::PeerError>
             + Send,
-        clock: Option<&crate::media_pool::CreateStartupBudget>,
-        rejoin_window: Option<tokio::time::Instant>,
         mut retrying: impl FnMut(crate::sharing_client::StartRetry) -> bool + Send,
     ) -> Result<ReceiverSourceStartResult, crate::sharing_client::PeerError> {
         use crate::sharing_client::{PeerConnection, PeerError, StartRetry};
+        let ReceiverSourceStartRequest {
+            request_json,
+            connection_lifetime,
+            clock,
+            rejoin_window,
+        } = request;
         let expected = receiver_source_request(intent, request_json)?;
         if owner.incarnation_id != intent.recipe.source_request_id.to_string()
             || owner.owner_node_id != state.node_id
