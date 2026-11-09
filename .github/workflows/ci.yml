@@ -545,6 +545,10 @@ jobs:
         with:
           major: "8"
           binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - name: Validate HDR measurement colour conversion
+        env:
+          PLURX_FFMPEG: /usr/lib/jellyfin-ffmpeg/ffmpeg
+        run: make dv-rgb-conversion-check
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:

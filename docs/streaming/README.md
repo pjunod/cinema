@@ -171,7 +171,8 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [DV_HDR_PROCESSING_REVIEW.md](DV_HDR_PROCESSING_REVIEW.md) | Adversarial findings and dispositions for the DV processing proposal and build handoff; cleared for M0 feasibility only. | done |
 | [DV_HDR_PROCESSING_FEASIBILITY.md](DV_HDR_PROCESSING_FEASIBILITY.md) | Sol 6.1 M0 reuse findings: existing DV/FEL renderers, P8.1 recipe, metric checks and unproven boundaries. | open |
 | [DV_HDR_M1_CONTRACTS.md](DV_HDR_M1_CONTRACTS.md) | Approved additive M1 type, frame-coverage, graph and recovery-episode contracts; the initial slice kept the production registry empty. | open |
-| [DV_HDR_PROCESSING_STATUS.md](DV_HDR_PROCESSING_STATUS.md) | Implementation ledger: backend and serving integration, HDR10-E, resource measurements, reproducible acceptance fixtures, packaging and remaining qualification. | open |
+| [DV_HDR_PROCESSING_STATUS.md](DV_HDR_PROCESSING_STATUS.md) | Processing and acceptance ledger. | open |
+| [HDR-ENHANCEMENT-SOURCE-BUDGET.md](HDR-ENHANCEMENT-SOURCE-BUDGET.md) | Source budgets and coded limits. | open |
 | [DV-FOLLOWUPS-HANDOFF.md](DV-FOLLOWUPS-HANDOFF.md) | What is left after the HDR10-E work, for any agent: the Pixel HLS/Animals branch, FEL→8.1 for DV displays, display-targeted PR A, and small open items, with branches, files, tests and merge lines. | open |
 | [DM-PRECISION-STATUS.md](DM-PRECISION-STATUS.md) | Shader PQ precision repair, rejected CM v2.9 affine experiment, ownership and merge evidence. | done |
 | [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md) | Current A–F implementation and source-pinned qualification matrix, retained checkpoint history, remaining effort promotion, and physical accuracy acceptance. | in progress |

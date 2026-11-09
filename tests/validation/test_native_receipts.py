@@ -314,7 +314,15 @@ class NativeCaseReceiptTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         specs = native.FAMILY_SPECS['tv_navigation']
         source = {path: (root / path).read_bytes() for path in specs}
-        prior_makefile = source['Makefile'].replace(
+        hdr_rule = ('.PHONY: dv-rgb-conversion-check\n'
+                    'dv-rgb-conversion-check: ## Check HDR measurement colour conversion with an explicitly selected FFmpeg\n'
+                    '\t@test -n "$(PLURX_FFMPEG)" || { echo >&2 "Set PLURX_FFMPEG to the supported media executable"; exit 1; }\n'
+                    '\tPLURX_FFMPEG="$(PLURX_FFMPEG)" python3 -m unittest discover -s tests/media -p test_dv_rgb_conversion.py -v\n\n').encode()
+        self.assertEqual(source['Makefile'].count(hdr_rule), 1)
+        pre_hdr_makefile = source['Makefile'].replace(hdr_rule, b'')
+        self.assertEqual(hashlib.sha256(pre_hdr_makefile).hexdigest(),
+                         '95f08f6c6f7f4ee747e9909e16b3aad25ff1ffe66d4eea69842b02c35f529f8d')
+        prior_makefile = pre_hdr_makefile.replace(
             b'-p plurxd --features cluster --bin plurxd \\\n',
             b'-p plurxd --bin plurxd \\\n')
         # Reconstruct the original immutable boundary before main added this
@@ -326,10 +334,12 @@ class NativeCaseReceiptTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(prior_makefile).hexdigest(),
                          '7e12d06f8372e36a851f58ad5846f303b00cf87bca13717193dafd2a23068443')
         tree = ''.join('100644 blob ' + 'a' * 40 + '\t' + path + '\0' for path in specs)
-        for previous_sources in [('original',), ('original', 'current')]:
+        for previous_makefile, previous_sources in [
+                (prior_makefile, ('original',)), (prior_makefile, ('original', 'current')),
+                (pre_hdr_makefile, ('original',)), (pre_hdr_makefile, ('original', 'current'))]:
             def show(command, timeout):
                 commit, path = command[2].split(':', 1)
-                return prior_makefile if path == 'Makefile' and commit in previous_sources else source[path]
+                return previous_makefile if path == 'Makefile' and commit in previous_sources else source[path]
 
             with self.subTest(previous_sources=previous_sources), \
                     patch.object(native, 'regular_inputs'), \

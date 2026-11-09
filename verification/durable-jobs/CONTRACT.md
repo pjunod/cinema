@@ -14,6 +14,23 @@ source mapping**, not an automatic refinement proof. Source hashes in
 that set complete or that the abstractions are correct.
 
 
+## Source-budget recipe requests — source review on 2026-11-09
+
+Compared with main `8ab61a779`, the shared queue adds only the
+`request_dv_fel_variant` trait method and its title-store delegation. The
+conformance parent adds that method to its inventory. Current source custody,
+claim, renewal, settlement, publication and authority bodies remain unchanged.
+The title store reopens its demand outbox for source-bound recipe requests,
+reuses queued work, and retains bounded peer receipts. These title-specific
+operations remain outside the modeled library publication path. The new
+runtime regression exercises them separately; defining it is not execution
+or formal qualification evidence.
+
+Only live whole-file fingerprints for the changed sources are refreshed.
+Current mappings, unique anchors, model/configuration bytes and historical
+qualification identities are preserved. This source review adds no fairness
+premise, model transition, TLC execution or refinement claim.
+
 This imported review records immutable main `ce11e8fd2` as published in
 `aa68c00ee`. Its source locations and fingerprints describe that historical
 tree; the native integration reviews and live mappings retain their separate

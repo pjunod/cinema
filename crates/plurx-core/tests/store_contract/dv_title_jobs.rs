@@ -1018,3 +1018,229 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn fel_recipe_variants_preserve_peers_and_late_requests_reopen_the_title_outbox() {
+    use plurx_core::transcode::{
+        dv_fel_qualification as q, EnhancementRateEnvelope, EnhancementRateLimits,
+        EnhancementRateProvenance,
+    };
+    for_each_backend(|store, backend| async move {
+        eprintln!("exact FEL variant backend entered: {backend}");
+        let scanner = "a".repeat(64);
+        let (_, id) = seed_file(&store, "fel-exact-variants").await;
+        let file = store.get_file(id).await.expect("file").expect("file");
+        let mut p = probe();
+        p.dolby_vision.el_present = Some(true);
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("path"),
+                file.size,
+                file.mtime,
+                &p,
+            )
+            .await
+            .expect("FEL probe");
+        let file = store.get_file(id).await.expect("file").expect("file");
+        let envelope = |peak| {
+            EnhancementRateEnvelope::resolve(
+                90_000,
+                EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+                3840,
+                2160,
+                (24, 1),
+                true,
+                EnhancementRateLimits {
+                    video_peak_bps: Some(peak),
+                    ..Default::default()
+                },
+            )
+            .expect("checked envelope")
+        };
+        let first =
+            q::FelRecipeRequest::new("b".repeat(64), file.size, file.mtime, envelope(135_000_000), q::FelRecipeOutput::new(0,(3840,2160),(24,1)));
+        let second =
+            q::FelRecipeRequest::new("b".repeat(64), file.size, file.mtime, envelope(130_000_000), q::FelRecipeOutput::new(0,(3840,2160),(24,1)));
+        assert_ne!(
+            first.identity, second.identity,
+            "same target with a different peak is different evidence"
+        );
+        assert!(
+            store
+                .request_dv_fel_variant(id, &first)
+                .await
+                .expect("first request"),
+            "{backend}"
+        );
+        let (scanned, mut job) = active(&store, id, &scanner, 1000).await;
+        // Arrives after the worker's snapshot/claim and must survive completion.
+        assert!(store
+            .request_dv_fel_variant(id, &second)
+            .await
+            .expect("late request"));
+        assert!(store.dv_title_demands(&scanner,0).await.expect("running demand").iter().all(|d|d.file_id!=id));
+        // Qualification Busy/preempted does not complete its request. The same
+        // durable title job must be discoverable and reclaimable after Yield,
+        // including the recipe which arrived after its original snapshot.
+        for (now,reason) in [(1001,"fel_busy"),(1004,"fel_preempted")] {
+            assert!(store.settle_job(SettleJob {
+                token:job.token.clone().expect("owner"), now_ms:now,
+                settlement:JobSettlement::Yield { error_code:Some(reason.into()),
+                    not_before_ms:now+1,checkpoint:Some(serde_json::json!({"fel_title_aggregate":publication(&scanned,&job,&scanner,now).output})) },
+            }).await.expect("yield pending measurement"));
+            let resumed=demand(&store,id,&scanner).await;
+            assert_eq!(resumed.queued_job_id.as_deref(),Some(job.id.as_str()));
+            assert_eq!(q::pending_recipes(&resumed.probe_json,file.size,file.mtime).len(),2);
+            job=claim(&store,resumed.queued_job_id.as_deref().expect("queued resume"),now+2).await;
+            assert!(job.checkpoint.is_some(),"resume retains scanned title aggregate");
+        }
+        let receipt = |request: q::FelRecipeRequest, at| q::FelRecipeVerdict {
+            verdict: q::FelVerdict::unmeasurable(
+                request.identity.clone(),
+                request.source_size,
+                request.source_mtime,
+                at,
+            ),
+            request,
+        };
+        assert!(store
+            .put_dv_fel_verdict(
+                id,
+                file.size,
+                file.mtime,
+                &serde_json::to_value(receipt(first.clone(), 1001)).expect("receipt")
+            )
+            .await
+            .expect("publish first"));
+        let document = store
+            .get_file_probe_json(id)
+            .await
+            .expect("probe")
+            .expect("probe");
+        assert_eq!(
+            q::pending_recipes(&document, file.size, file.mtime),
+            vec![second.clone()]
+        );
+        assert!(matches!(
+            q::verdict_state(Some(&document), file.size, file.mtime, &first.identity),
+            q::VerdictState::Current(_)
+        ));
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&scanned, &job, &scanner, 1008))
+                .await
+                .expect("complete"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert!(store
+            .dv_title_demands(&scanner, 0)
+            .await
+            .expect("pending wakes after completion")
+            .iter()
+            .any(|d| d.file_id == id));
+        assert!(store
+            .put_dv_fel_verdict(
+                id,
+                file.size,
+                file.mtime,
+                &serde_json::to_value(receipt(second.clone(), 1003)).expect("second receipt")
+            )
+            .await
+            .expect("publish second"));
+        let document = store
+            .get_file_probe_json(id)
+            .await
+            .expect("probe")
+            .expect("probe");
+        assert!(q::pending_recipes(&document, file.size, file.mtime).is_empty());
+        for request in [&first, &second] {
+            assert!(matches!(
+                q::verdict_state(Some(&document), file.size, file.mtime, &request.identity),
+                q::VerdictState::Current(_)
+            ));
+        }
+        assert_eq!(
+            store.dv_fel_verdict_counts(&"b".repeat(64)).await.expect("variant readiness counts"),
+            (1, 0), "multiple completed variants count this title only once"
+        );
+        assert_eq!(
+            store.dv_fel_verdict_counts(&"f".repeat(64)).await.expect("other backend counts"),
+            (0, 0)
+        );
+        assert!(store
+            .put_dv_fel_verdict(
+                id, file.size + 1, file.mtime,
+                &serde_json::to_value(receipt(first.clone(), 1004)).expect("inconsistent receipt")
+            ).await.is_err(), "mismatched API/request/verdict source facts are malformed");
+        let mut stale = first.clone();
+        stale.source_size += 1;
+        assert!(!store
+            .put_dv_fel_verdict(
+                id,
+                file.size + 1,
+                file.mtime,
+                &serde_json::to_value(receipt(stale, 1004)).expect("coherent stale source receipt")
+            )
+            .await
+            .expect("source fence"));
+        for i in 0..8 {
+            let request = q::FelRecipeRequest::new(
+                format!("{i:064x}"),
+                file.size,
+                file.mtime,
+                envelope(130_000_000),
+                q::FelRecipeOutput::new(0,(3840,2160),(24,1)),
+            );
+            assert!(store
+                .request_dv_fel_variant(id, &request)
+                .await
+                .expect("bounded request"));
+        }
+        let ninth =
+            q::FelRecipeRequest::new("f".repeat(64), file.size, file.mtime, envelope(130_000_000), q::FelRecipeOutput::new(0,(3840,2160),(24,1)));
+        assert!(!store
+            .request_dv_fel_variant(id, &ninth)
+            .await
+            .expect("pending bound"));
+        let pending_doc = store
+            .get_file_probe_json(id)
+            .await
+            .expect("pending")
+            .expect("pending");
+        for (i, request) in q::pending_recipes(&pending_doc, file.size, file.mtime)
+            .into_iter()
+            .enumerate()
+        {
+            assert!(store
+                .put_dv_fel_verdict(
+                    id,
+                    file.size,
+                    file.mtime,
+                    &serde_json::to_value(receipt(request, 2000 + i as i64)).expect("receipt")
+                )
+                .await
+                .expect("publish bounded variants"));
+        }
+        let final_doc = store
+            .get_file_probe_json(id)
+            .await
+            .expect("final")
+            .expect("final");
+        let parsed: serde_json::Value = serde_json::from_str(&final_doc).expect("JSON");
+        assert_eq!(
+            parsed[q::VARIANTS_KEY].as_object().expect("variants").len(),
+            8
+        );
+        assert!(q::pending_recipes(&final_doc, file.size, file.mtime).is_empty());
+        assert!(
+            matches!(
+                q::verdict_state(Some(&final_doc), file.size, file.mtime, &first.identity),
+                q::VerdictState::Missing
+            ),
+            "oldest complete variant evicts only under bounded pressure"
+        );
+        eprintln!("exact FEL variant backend completed: {backend}");
+    })
+    .await;
+}

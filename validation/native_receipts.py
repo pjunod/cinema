@@ -73,12 +73,12 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed combined boundary: the cluster-only WAL commands remain explicit;
-    # main adds only the two-line Activity Starts Node suite to web-unit-check.
-    # Removing those two lines reproduces the prior reviewed Makefile exactly;
-    # native desktop/Apple recipes and resource closures remain byte-identical.
-    # Keep one exact current pin: prior receipts need fresh native evidence.
-    'Makefile': '95f08f6c6f7f4ee747e9909e16b3aad25ff1ffe66d4eea69842b02c35f529f8d',
+    # Reviewed combined boundary: removing only the exact five-line HDR media
+    # target reproduces prior reviewed Makefile 95f08f6c; removing the earlier
+    # Activity Starts pair then reproduces 669a366f. Native/Apple recipes,
+    # flags and resource closures are unchanged. Keep one exact current pin;
+    # neither historical boundary authorizes old-to-new receipt adoption.
+    'Makefile': 'ccb87f1b826c5d0f96ecc20c4613760cc5fd0c4c26a961fd612b3b47d8a204ef',
     # Reviewed build 294 differs from the prior reviewed build 289 spec only in
     # CURRENT_PROJECT_VERSION. Old case receipts do not transfer; resource or
     # script changes still change this exact digest and refuse reuse.
