@@ -1,7 +1,7 @@
 # Linux player Cinema UI — release and installation ledger
 
-**Status:** open: 0.5.0 system-renderer consolidation source prepared;
-review, regression execution, package qualification and installation pending.
+**Status:** open: 0.5.0 frontend source, package and system-renderer interfaces
+qualified; merge, coordinated installation and physical acceptance pending.
 The 0.4.0 installation and owner acceptance below remain earlier evidence. ·
 **Updated:** 2026-11-09 · **Written:** 2026-10-28
 
@@ -47,13 +47,29 @@ success or state notification prevents stale compositor/lease facts without
 polling. Eligibility alone does not establish an active grade. A new
 file with no new success stays unknown; a compiled marker alone never proves
 an active grade. Cinema Info’s VO-target rows retain their existing signal
-encoding observations. This diagnostic adaptation awaits focused review/tests.
+encoding observations. Independent source review and six focused new/legacy mapper regressions pass.
 
-These are source changes pending review and execution. The selected system
-renderer owns HDR/DV/FEL support; historical private-renderer CPU controls and
-0.4.x receipts do not qualify it. Package/device qualification must record the
-actual selected executable and renderer dependencies. This change makes no
-claim about unrelated desktop notification behavior.
+Qualification is scoped to the recorded frontend source and interfaces:
+
+| Evidence | Result |
+|---|---|
+| Focused binary/capability/package/control regressions | 26 passed |
+| Physical-target facts, spoof/nonfinite input, source/lease/generation lifecycle and legacy mapper regressions | 6 passed |
+| Fresh package verification client suite | 113 passed; no skips |
+| Installed Cinema Lua | 32 control scenarios and 3 live Info regressions passed |
+| Normal Debian package and fresh verification | Passed; lintian zero errors/warnings, checksum negative control, ownership, system default, PQ gpu-next/Vulkan, config/ytdl controls and clean removal |
+| Reproducibility | Second build byte-identical across all four binary/source artifacts |
+| Frontend package payload | 41,652 bytes; no bundled renderer or library |
+| Qualified mpv 5.2 plus exact frontend package | Marker/native capabilities and real generated-video Lua/IPC passed with null outputs; configured unsupported VO reports native target state unavailable |
+
+The frontend payload was built from `3024053`; current-main integration
+preserves all 61 transferred source/test-input blobs and executable modes.
+The shared renderer's active/inactive generations, read-only setter and
+teardown notification have separate native qualification. Interface and
+software-Vulkan checks do not establish optical HDR calibration or Dolby
+conformance. Installation remains pending. Earlier private-renderer CPU
+controls and 0.4.x receipts retain only their original scopes. This change
+makes no claim about unrelated desktop notification behavior.
 
 ## 1. Delivered source
 
