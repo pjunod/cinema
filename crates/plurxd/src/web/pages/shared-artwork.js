@@ -114,7 +114,9 @@ const SHARED_ARTWORK=(()=>{
     let credit=null;
     try{
       if(!live(job.ctx)||typeof createImageBitmap!=="function")throw new Error("Shared artwork decoder unavailable");credit=compressed.take(ASSET*2);job.canvas.dataset.sharedArtAttempted="true";
-      const target=origin(job.ctx.capture)+job.ctx.row.url,init={headers:{authorization:"Bearer "+job.ctx.capture.token},signal:job.controller.signal,credentials:"omit",redirect:"error",cache:"no-store"};
+      const target=origin(job.ctx.capture)+job.ctx.row.url;
+      /** @type {RequestInit} */
+      const init={headers:{authorization:"Bearer "+job.ctx.capture.token},signal:job.controller.signal,credentials:"omit",redirect:"error",cache:"no-store"};
       let response=await fetch(target,init);job.response=response;
       // A 429 is the Source saying "rendering, ask again", not a failure: wait as told, once.
       if(response.status===429&&live(job.ctx)){
