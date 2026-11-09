@@ -10207,3 +10207,44 @@ fn lifecycle_projection_agrees() {
         "every verdict has to be reached both ways, or the agreement is vacuous"
     );
 }
+
+#[test]
+fn media_route_directory_excludes_learners_when_the_route_requires_a_voter() {
+    let now = 1_000_000;
+    let members = BTreeSet::from([2, 3, 4]);
+    let rows = || {
+        [
+            (2, Some("learner")),
+            (3, Some("voter")),
+            (4, None),          // Voter admitted before the additive role column.
+            (5, Some("voter")), // SQL row whose membership is not committed.
+        ]
+        .into_iter()
+        .map(|(raft_id, role)| MediaPeerRow {
+            node_id: format!("node-{raft_id}"),
+            admitted_role: role.map(str::to_owned),
+            raft_id,
+            last_seen_at: now,
+            http_base: Some(format!("http://node-{raft_id}:32400")),
+            bounded_read_ready: true,
+            observed_at: Some(now),
+        })
+        .collect()
+    };
+    let restricted = MembershipManager::media_peer_directory(now, &members, rows(), false)
+        .expect("valid committed roles");
+    assert_eq!(
+        restricted
+            .iter()
+            .map(|peer| peer.raft_id)
+            .collect::<Vec<_>>(),
+        vec![3, 4],
+        "Source locate must not contact the learner even when it is ready"
+    );
+    let media = MembershipManager::media_peer_directory(now, &members, rows(), true)
+        .expect("ordinary media routes retain learner capacity");
+    assert_eq!(
+        media.iter().map(|peer| peer.raft_id).collect::<Vec<_>>(),
+        vec![2, 3, 4]
+    );
+}

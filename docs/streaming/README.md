@@ -8,6 +8,7 @@ Start-path owner: the lane owner recorded in PLAYBACK-START-PLAN.md §6 until th
 
 | File | Answers | |
 |---|---|---|
+| [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Continuation owner, Phase 1 merge/deployment evidence, repair batch and remaining acceptance. | open |
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract for Opus: all nine lanes. | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Playback-start effort: rulings, lanes, reviews, lane status. | open |

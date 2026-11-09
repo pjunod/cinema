@@ -642,7 +642,7 @@ pub(crate) struct ProcessedUpgradeRootLease {
 }
 
 impl HeldProcessedUpgradeRoot {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn into_root(self) -> crate::vodserve::PreparedRootAdmission {
         self.root
     }

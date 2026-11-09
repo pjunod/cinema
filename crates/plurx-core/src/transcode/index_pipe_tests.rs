@@ -707,7 +707,6 @@ fn frozen_copy_index_pipe_args_with_input(
     );
     if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         args[2] = "info".to_owned();
-        args.insert(3, "-xerror".to_owned());
         if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
             args[index + 1] = format!("trace_headers,{}", args[index + 1]);
         } else {
@@ -806,6 +805,28 @@ fn a_shared_index_pass_is_one_input_then_each_identitys_own_block() {
                 "one trace, on the lead"
             );
             assert_eq!(shared.iter().filter(|arg| *arg == "-i").count(), 1);
+        }
+    }
+}
+
+#[test]
+fn index_pipe_allows_timestamp_repair_and_keeps_the_hevc_header_proof() {
+    for codec in ["hevc", "h265"] {
+        let mut file = hevc_dv();
+        file.video_codec = Some(codec.to_owned());
+        for video in every_copy_option() {
+            let args = copy_index_pipe_args(&file, video);
+            assert!(
+                !args.iter().any(|arg| arg == "-xerror"),
+                "the muxer must be able to correct a reordered DTS head: {args:?}"
+            );
+            assert!(
+                args.windows(2).any(|pair| {
+                    pair[0] == "-bsf:v"
+                        && pair[1].split(',').any(|filter| filter == "trace_headers")
+                }),
+                "timestamp repair must not remove the HEVC proof: {args:?}"
+            );
         }
     }
 }
