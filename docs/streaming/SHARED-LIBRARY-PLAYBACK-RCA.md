@@ -514,16 +514,17 @@ so every grid render refetches every poster across the tailnet.
 The standalone PRs touch disjoint files, so they can stack into one
 fast-lane run. The PLAYBACK-START-PLAN A1 row links §3.
 
-## 11. Decisions for the owner
+## 11. Owner decisions — accepted 2026-11-08
 
-1. **Fallback for a title that still cannot be cut after S4.** A transcode
-   uses hardware, so it is your call. Recommended: none until one exists.
-   S4 removes the whole measured class.
-2. **Serve the original poster while a smaller size renders (§9)?** It
-   shows the image sooner but sends more bytes over the tailnet.
-   Recommended: no, keep the typed retry.
-3. **Learners as Source owners (§8).** Recommended: not now. Raise it in
-   A1's design review if learner media serving widens.
+1. **Fallback after S4:** no transcode fallback. A1 owns the remaining copy-engine limitations; hardware use is not silently introduced.
+2. **Poster variant still rendering:** keep the typed retry; do not serve the original as an interim image.
+3. **Learners as Source owners:** excluded from Source start. Any wider serving role belongs in A1's design review.
+
+The owner accepted all three recommendations in the handoff. On resumption,
+Codex also retained the live scope check for cached posters: tight revocation
+wins over a TTL proof cache. A snapshot avoids fetching the image body again;
+it does not remove the authorization round trip. This qualifies §9's original
+zero-peer-call target.
 
 ## 12. Evidence ledger
 
