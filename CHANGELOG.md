@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Linux Cinema now defaults to the system mpv and no longer ships a duplicate
+  renderer, so qualified system HDR/DV updates reach Cinema. Explicit binary
+  overrides, isolated configuration and Cinema controls remain available.
+
 - Digest-keyed analysis requests can register their source custody,
   allowing the index queue to progress instead of renewing a rejected request
   indefinitely while holding its shared source-I/O slot.

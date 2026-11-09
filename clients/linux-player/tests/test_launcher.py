@@ -83,6 +83,22 @@ class CallSequence(LauncherCase):
         self.assertNotIn("supported_actions", control, "passive: the server may only answer none")
 
 
+class RendererNegotiation(LauncherCase):
+    def test_unmarked_explicit_renderer_keeps_playback_and_negotiates_conversion(self):
+        self.mpv.state["native_dovi"] = False
+        self.mpv._write_state()
+        self.close_at(8)
+        self.assertEqual(self.run_launcher(), 0)
+        caps = self.server.calls("POST", pattern=r"/decision$")[0]["body"]["caps"]
+        self.assertFalse(caps["display"]["dolby_vision"])
+        hevc = next(video for video in caps["video"] if video["codec"] == "hevc")
+        self.assertEqual(hevc["dv_profiles"], [])
+        controls = self.server.calls("POST", pattern=r"/control$")
+        self.assertTrue(controls)
+        self.assertNotIn("dolby_vision", controls[0]["body"]["capabilities"]["dynamic_ranges"])
+        self.assertTrue(any(command[0] == "loadfile" for command in self.mpv.commands()))
+
+
 class Cadence(LauncherCase):
     def test_heartbeat_every_5_s_and_progress_every_10_s(self):
         self.close_at(31)

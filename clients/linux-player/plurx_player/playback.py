@@ -271,13 +271,13 @@ class Playback:
             self.mpv.osd(self.notice, 4000)
 
     def show_film_timeline(self):
-        """Tell mpv's OSC the whole film's timeline when the stream holds only part of it.
+        """Tell Cinema the whole film's timeline when the stream holds only part of it.
 
         A live session (the server's fallback while a title's VOD index is
         not ready) starts at the session origin and grows, so mpv's own
-        duration is only what has been produced. The OSC patch (mpv patch
-        0005) draws user-data/osc/film instead, and hands a seek outside the
-        stream back as an "osc-film-seek" script message (on_event).
+        duration is only what has been produced. Cinema's Lua overlay reads
+        user-data/osc/film and hands a seek outside the stream back as an
+        "osc-film-seek" script message (on_event), using standard mpv APIs.
         """
         duration = self.duration_ms()
         live = self.session is not None and not self.session.get("vod")
@@ -613,7 +613,9 @@ class Playback:
                                       else {"mode": "auto"}),
                           "audio_track": self.audio, "subtitle": subtitle, "audio_offset_ms": 0,
                           "codec": "auto", "dynamic_range": "auto"},
-            "capabilities": control_capabilities(), "observation": None, "acknowledgement": None,
+            "capabilities": control_capabilities(
+                native_dovi=self.caps.get("display", {}).get("dolby_vision") is True),
+            "observation": None, "acknowledgement": None,
         }
 
     def heartbeat(self):

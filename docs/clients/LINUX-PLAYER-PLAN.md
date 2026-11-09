@@ -7,6 +7,12 @@ and package 0.4.0 is installed (2026-10-28). See the
 and remaining acceptance · **Owner:** Claude
 (Opus 5.5, Linux Dolby Vision session) · **Written:** 2026-10-25
 
+> **2026-11-09 source update:** the 0.5.0 candidate moves Cinema to the
+> separately maintained system mpv and removes the bundled renderer. The
+> [release ledger](LINUX-PLAYER-CINEMA-UI.md#system-renderer-consolidation-050)
+> owns that change and its pending qualification. Private-build requirements
+> below describe the earlier 0.4.x implementation, not the new package.
+
 Companion to [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) (the browser half) and
 [the display-targeted HDR10-E build](../streaming/DISPLAY-TARGETED-DV-BUILD.md)
 (the server mapping). This is the plan for a native player on Linux. Read §2

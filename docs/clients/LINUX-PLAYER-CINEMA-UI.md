@@ -1,16 +1,46 @@
 # Linux player Cinema UI — release and installation ledger
 
-**Status:** open: 0.4.0 installed; owner confirms UI and quality switching;
-0.4.1 playback Info correction in progress; live TV Next acceptance pending ·
-**Written:** 2026-10-28 · **Executes:** the owner's approved
-Cinema playback renders and request to complete metadata, next episode and
-quality controls, package them and install on the ROG.
+**Status:** open: 0.5.0 system-renderer consolidation source prepared;
+review, regression execution, package qualification and installation pending.
+The 0.4.0 installation and owner acceptance below remain earlier evidence. ·
+**Updated:** 2026-11-09 · **Written:** 2026-10-28
 
 Companion to [the Linux player plan](LINUX-PLAYER-PLAN.md) (the playback/render
 contract) and [the launcher README](../../clients/linux-player/README.md)
 (controls and package commands). This ledger separates source evidence,
 package qualification, installation and physical acceptance. It does not
 qualify a different Dolby Vision processor or change the display stack.
+
+## System renderer consolidation (0.5.0)
+
+The launcher now selects an explicit `--mpv` override, then
+`PLURX_PLAYER_MPV`, then executable `/usr/bin/mpv`, then `mpv` on PATH.
+The former `/usr/lib/plurx-player/bin/mpv` never wins implicitly. The Debian
+package depends on system mpv and installs only the frontend; it no longer
+builds or ships a private mpv/libplacebo or upstream source components.
+
+Cinema keeps its Lua controls, full-film timeline, scoped credentials,
+server/session ownership, isolated configuration, renderer arguments and
+loader-environment cleanup. The installed-interface smoke check uses real mpv
+`loadfile`, properties, user-data and Cinema's Lua pause binding. Binary
+selection and the exact frontend file manifest have focused regressions.
+
+Native Dolby Vision is negotiated from the selected binary's compiled
+`native-dovi-api-1` marker on its `List of enabled features:` version line.
+The probe runs with `--no-config --version`, a three-second timeout and the
+same loader-variable cleanup as playback. Marked builds retain P5/P7/P8;
+unmarked, failed or timed-out probes request server conversion to the existing
+HDR10 route and omit Dolby Vision in playback-control capabilities. The
+selected renderer still opens; user overrides and saved choices are retained.
+This is format negotiation, not a runtime feature switch or a version gate.
+The marker's provider boundary requires SDK 2. ROG's unmarked 5.1 renderer must
+be updated to its marked 5.2 successor before frontend installation.
+
+These are source changes pending review and execution. The selected system
+renderer owns HDR/DV/FEL support; historical private-renderer CPU controls and
+0.4.x receipts do not qualify it. Package/device qualification must record the
+actual selected executable and renderer dependencies. This change makes no
+claim about unrelated desktop notification behavior.
 
 ## 1. Delivered source
 
