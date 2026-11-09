@@ -2185,6 +2185,11 @@ pub trait BackgroundJobStore: Send + Sync {
         source_mtime: i64,
         verdict: &serde_json::Value,
     ) -> Result<bool, StoreError>;
+    async fn request_dv_fel_variant(
+        &self,
+        file_id: i64,
+        request: &crate::transcode::dv_fel_qualification::FelRecipeRequest,
+    ) -> Result<bool, StoreError>;
     async fn request_dv_fel_requalification(
         &self,
         file_id: i64,
@@ -2983,6 +2988,13 @@ LIMIT 1
     ) -> Result<bool, StoreError> {
         super::dv_title_jobs::put_fel_verdict(self, file_id, source_size, source_mtime, verdict)
             .await
+    }
+    async fn request_dv_fel_variant(
+        &self,
+        file_id: i64,
+        request: &crate::transcode::dv_fel_qualification::FelRecipeRequest,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::request_fel_variant(self, file_id, request).await
     }
     async fn request_dv_fel_requalification(
         &self,

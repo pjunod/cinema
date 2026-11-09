@@ -2695,6 +2695,12 @@ expected_occurrences = 14
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# Source-budget audit (8ab61a779 -> bbc5c1664): +3 owned spawns. The existing
+# capture blocking owner moves to capture_at (zero net). QualificationStage
+# retains group_close's JoinHandle; Drop joins it before closing the broker.
+# Group::drop moves children/jobs/pause guard into its physical-reap task.
+# The new broker fixture task owns its stage and is joined on normal completion;
+# a fixture timeout is failure, not settlement (stage supervision still owns it).
 # Live TV ledger fixtures replace detached shell publishers with one owned
 # Rust publisher task, joined after child reap or aborted on setup/panic.
 # PR1045 review fix: +1 joined test-only releaser task in
@@ -3754,7 +3760,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # child, session or source owner is created.
 # Pipeline-v2 final containment fix adds one awaited no-follow lstat worker;
 # it owns no producer, timer or process, and completes before canonicalization.
-expected_occurrences = 1100
+expected_occurrences = 1103
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4032,6 +4038,11 @@ expected_occurrences = 19
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Source-budget audit (8ab61a779 -> bbc5c1664): +11 timer shapes. Group's
+# 100 ms failed-wait retry and 25 ms quiescence poll retain the owned children,
+# registrations and pause guard until positive reap; neither is settlement.
+# Nine fixture waits bound readiness/pause/cleanup or expose pause/early-exit
+# races; elapsed bounds fail the test and never certify physical closure.
 # Live TV ledger fixtures add five test-only declaration/publication/cleanup
 # waits; actual child reap and publisher join remain required for success.
 # PR1045 review fix: +1 test-only sleep in the same releaser task
@@ -5565,7 +5576,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # one production `sleep` that wakes a waiting targeted claim at most every 500 ms until its
 # deadline (a bounded, cancel-on-drop wait with no task of its own), and three test-only
 # `timeout`/`sleep` bounds. No production producer, child or detached owner is added.
-expected_occurrences = 2117
+expected_occurrences = 2128
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5615,6 +5626,10 @@ expected_occurrences = 7
 
 [[module_structures]]
 id = "process-command-construction"
+# Source-budget audit (8ab61a779 -> bbc5c1664): +4 test-only commands. The
+# manifest generator's synchronous output() joins its Python child. Two shell
+# fixtures are owned by Group/QualificationStage and explicitly reaped; the
+# deliberately missing consumer cannot spawn and exercises partial cleanup.
 # PR947 unit follow-up: one finite synchronous test-only FFmpeg remux of
 # existing CC0 Main10 HDR10/P5 controls makes the declared DV fixture truthful;
 # testfixtures::run waits and reaps it before exact box/profile/RPU assertions.
@@ -6058,11 +6073,15 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # normal exit under a 20-second timeout with kill_on_drop as cancellation's
 # backstop. They run only after the session and reconstruction slot settle;
 # neither launches a production producer or turns timeout into valid evidence.
-expected_occurrences = 331
+expected_occurrences = 335
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "process-capable-launch-method"
+# Source-budget audit (8ab61a779 -> bbc5c1664): +3 broad lexical matches.
+# One output() synchronously joins the manifest-generator fixture child.
+# Two status() matches inspect reqwest HTTP responses; they launch no process.
+# The broad matcher stays unchanged so future process-capable shapes still fail.
 # Main PR915: +2 spawn calls for the same registered/reaped VOD fixture children.
 # Shared H2 drain: JoinSet.spawn starts the accepted HTTP task described above,
 # not an operating-system process.
@@ -6747,7 +6766,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Gate fixes (2026-11-08): +1 in `http/browse.rs`, the replicated browse K04 fixture's
 # 8 MiB test thread (a thread-builder call), joined before the test returns; it
 # launches no process.
-expected_occurrences = 894
+expected_occurrences = 897
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6761,6 +6780,11 @@ expected_occurrences = 0
 
 [[module_structures]]
 id = "process-lifecycle-method"
+# Source-budget audit (8ab61a779 -> bbc5c1664): +1 net lifecycle shape.
+# Two direct render/finish waits are replaced by Group's positive wait loop,
+# failed-wait start_kill retry and per-child start_kill fallback. Group owns
+# children/jobs/pause guard through quiescence and confirmed reaping; Stage
+# retains its broker until that cleanup completes, including cancellation.
 # Common ingress adds three waits on the actual accepted-driver closure signal
 # and one real HTTP fixture closure wait. These are not process lifecycle calls;
 # the server JoinSet owns the driver and joins its finite closure monitors.
@@ -7046,7 +7070,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Playback start Phase 1: the create-time processed credit D1 left unreachable is
 # removed (PreparedCandidateOnce, session_request.rs). -2: barrier waits and the
 # thread join in its removed consume-once test.
-expected_occurrences = 382
+expected_occurrences = 383
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7055,6 +7079,10 @@ expected_occurrences = 382
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
+# Source-budget audit (8ab61a779 -> bbc5c1664): +4 lexical matches: the
+# close/drop calls to owned-group kill, kill's declaration, and libc::kill.
+# Only the unreaped owned leader pins the PGID generation for SIGKILL; no
+# signal or group lookup follows reap. The declaration is not another action.
 # Durable queue adds two test-only libc::kill(pid, 0) observations, one in
 # background_jobs.rs and one in ffmpeg.rs. They send no signal; ESRCH proves
 # the production collector reaped the child before returning capacity.
@@ -7125,11 +7153,14 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Browser restart cancellation: +1 is the async HelperCompletion::wait method
 # declaration in dv_segment. It observes one retained watch-channel result;
 # it neither signals an OS child nor creates another process/reap owner.
-expected_occurrences = 83
+expected_occurrences = 87
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "kill-on-drop-construction"
+# Source-budget audit (8ab61a779 -> bbc5c1664): +2 shell-fixture backstops.
+# Group/QualificationStage owns explicit kill/quiescence/reap and broker close;
+# kill_on_drop does not replace physical confirmation or permit early release.
 # Main PR915: +2 cancellation-safe VOD fixture children, additionally confirmed
 # reaped through the registration; kill-on-drop alone is not settlement proof.
 pattern = "kill_on_drop\\s*\\("
@@ -7275,7 +7306,7 @@ pattern = "kill_on_drop\\s*\\("
 # PR1369: +2 cancellation backstops on those same physical-control diagnostics.
 # Successful evidence requires collected exit status and decoded/probed media;
 # a timeout drops the guarded child and fails the control.
-expected_occurrences = 124
+expected_occurrences = 126
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7571,3 +7602,8 @@ id = "retention-handoff"
 anchor = "async fn gc_expired_segments("
 owns = ["attempt/path sampling", "retention rename"]
 replacement = "attempt and catalog-revision validation around a resource-scoped retention transaction"
+
+# Pipeline-v2 / HDR promotion union (2026-11-09): preserve both reviewed
+# sets of joined task owners, bounded qualification timers, and reap/cancel
+# process shapes. The exact merged counts are 1103 / 2128 / 897; neither
+# parent inventory alone includes the other branch's already-reviewed sites.

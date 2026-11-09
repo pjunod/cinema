@@ -42,6 +42,10 @@ bump may break compatibility and a **patch** bump never does.
   operator log channels. Verified fleet publication checks the exact reviewed
   image configuration before advancing the main tag.
 
+- Original HDR enhancements preserve their measured video bitrate budget, select
+  legal HEVC/Dolby Vision levels and bind quality receipts to the actual
+  encoder recipe instead of lowering the source budget.
+
 - Linux Dolby Vision reconstruction avoids inherited display adjustments and
   preserves software planar 10-bit samples. Its final Vulkan RGB cache rounds
   to the exact nearest 16-bit value. Shared PQ mapping retains small

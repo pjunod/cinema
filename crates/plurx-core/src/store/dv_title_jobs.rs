@@ -16,6 +16,8 @@ pub struct TitleDemand {
     pub source_size: i64,
     pub source_mtime: i64,
     pub probe_json: String,
+    /// Resume the same yielded job even when its pending recipe set changed.
+    pub queued_job_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleOutput {
@@ -67,11 +69,31 @@ pub(super) async fn demands<T: QueueSql>(
     if !digest(scanner) || after < 0 {
         return Err(StoreError::Task("invalid title demand query".into()));
     }
+    store.queue_sql(r#"
+UPDATE dv_title_jobs_demand SET terminal=0 WHERE terminal=1 AND json_type($1)='object'
+ AND EXISTS(SELECT 1 FROM files f WHERE f.id=dv_title_jobs_demand.file_id AND json_valid(f.probe_json)
+  AND EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(f.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+   THEN json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END) r
+   WHERE json_extract(r.value,'$.source_size')=f.size AND json_extract(r.value,'$.source_mtime')=f.mtime))
+ AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('queued','running','cancelling')
+  AND json_extract(j.payload_json,'$.file_id')=dv_title_jobs_demand.file_id)
+RETURNING 'true' AS result_json
+"#.into(),"{}".into(),true,true).await?;
     let rows = store.queue_sql(r#"
 SELECT json_object('file_id',file.id,'probe_revision',d.revision,
- 'source_size',file.size,'source_mtime',file.mtime,'probe_json',file.probe_json) AS result_json
+ 'source_size',file.size,'source_mtime',file.mtime,'probe_json',file.probe_json,
+ 'queued_job_id',(SELECT j.id FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state='queued'
+  AND json_extract(j.payload_json,'$.file_id')=file.id
+  AND json_extract(j.payload_json,'$.source_size')=file.size AND json_extract(j.payload_json,'$.source_mtime')=file.mtime
+  AND json_extract(j.payload_json,'$.probe_revision')=d.revision
+  AND json_extract(j.payload_json,'$.scanner_digest')=json_extract($1,'$.scanner')
+  ORDER BY j.created_at_ms,j.id LIMIT 1)) AS result_json
 FROM dv_title_jobs_demand d JOIN files file ON file.id=d.file_id
 WHERE d.revision>json_extract($1,'$.after') AND (d.terminal=0 OR d.scanner_digest IS NOT json_extract($1,'$.scanner'))
+ AND (NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+ THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END))
+ OR NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('running','cancelling')
+  AND json_extract(j.payload_json,'$.file_id')=file.id))
 ORDER BY d.revision LIMIT 128
 "#.into(), encode(&serde_json::json!({"scanner":scanner,"after":after}))?, false, true).await?;
     rows.iter().map(|row| decode(row)).collect()
@@ -365,6 +387,38 @@ pub(super) async fn put_fel_verdict<T: QueueSql>(
     if file_id <= 0 || source_size < 0 || source_mtime < 0 || !verdict.is_object() {
         return Err(StoreError::Task("invalid FEL verdict".into()));
     }
+    if verdict.get("request").is_some() {
+        let row: crate::transcode::dv_fel_qualification::FelRecipeVerdict =
+            serde_json::from_value(verdict.clone()).map_err(|e| StoreError::Task(e.to_string()))?;
+        if row.verdict.schema != crate::transcode::dv_fel_qualification::SCHEMA
+            || !row.request.valid()
+            || row.request.source_size != source_size
+            || row.request.source_mtime != source_mtime
+            || row.verdict.identity != row.request.identity
+            || row.verdict.source_size != source_size
+            || row.verdict.source_mtime != source_mtime
+        {
+            return Err(StoreError::Task("invalid exact FEL recipe verdict".into()));
+        }
+        let body = serde_json::json!({"file":file_id,"size":source_size,"mtime":source_mtime,"identity":row.request.identity,"row":row});
+        if encode(&body)?.len() > 64 * 1024 {
+            return Err(StoreError::Task("FEL variant receipt exceeds bound".into()));
+        }
+        let rows=store.queue_sql(r#"
+UPDATE files SET probe_json=json_set(
+ json_remove(probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.identity')),
+ '$.plurx_dv_fel_variants_v3',json_set(
+  COALESCE((SELECT json_group_object(key,json(value)) FROM (
+   SELECT key,value FROM json_each(CASE WHEN json_type(files.probe_json,'$.plurx_dv_fel_variants_v3')='object'
+    THEN json_extract(files.probe_json,'$.plurx_dv_fel_variants_v3') ELSE '{}' END)
+   WHERE key!=json_extract($1,'$.identity') ORDER BY json_extract(value,'$.verdict.measured_at_ms') DESC,key LIMIT 7)), '{}'),
+  '$.'||json_extract($1,'$.identity'),json(json_extract($1,'$.row'))))
+WHERE id=json_extract($1,'$.file') AND size=json_extract($1,'$.size') AND mtime=json_extract($1,'$.mtime')
+ AND dv_profile=7 AND dv_el_present=1 AND json_valid(probe_json)
+RETURNING 'true' AS result_json
+"#.into(),encode(&body)?,true,true).await?;
+        return Ok(!rows.is_empty());
+    }
     let body = serde_json::json!({"file_id":file_id,"size":source_size,"mtime":source_mtime,"verdict":verdict});
     if encode(&body)?.len() > 64 * 1024 {
         return Err(StoreError::Task("FEL verdict exceeds its bound".into()));
@@ -448,8 +502,12 @@ pub(super) async fn stale_fel_titles<T: QueueSql>(
                 "SELECT json_object('file_id',f.id) AS result_json
 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
 WHERE d.terminal=1 AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
- AND json_type(f.probe_json,'$.{key}')='object'
+ AND (json_type(f.probe_json,'$.{key}')='object' OR json_type(f.probe_json,'$.plurx_dv_fel_variants_v3')='object')
  AND json_extract(f.probe_json,'$.{key}.identity') IS NOT json_extract($1,'$.identity')
+ AND NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(f.probe_json,'$.plurx_dv_fel_variants_v3')='object'
+ THEN json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3') ELSE '{{}}' END) variant
+ WHERE json_extract(variant.value,'$.request.backend_identity')=json_extract($1,'$.identity')
+ AND json_extract(variant.value,'$.verdict.source_size')=f.size AND json_extract(variant.value,'$.verdict.source_mtime')=f.mtime)
  AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
   AND job.state IN ('queued','running','cancelling')
   AND json_extract(job.payload_json,'$.file_id')=f.id)
@@ -474,27 +532,82 @@ pub(super) async fn fel_verdict_counts<T: QueueSql>(
     store: &T,
     identity: &str,
 ) -> Result<(u64, u64), StoreError> {
-    let rows = store
-        .queue_sql(
-            format!(
-                "SELECT json_extract(f.probe_json,'$.{key}') AS result_json
+    let rows=store.queue_sql(r#"
+SELECT json_object('size',f.size,'mtime',f.mtime,
+ 'legacy',json_extract(f.probe_json,'$.plurx_dv_fel_v1'),
+ 'variants',json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3')) AS result_json
 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
-WHERE f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
- AND json_type(f.probe_json,'$.{key}')='object'
- AND json_extract(f.probe_json,'$.{key}.identity')=json_extract($1,'$.identity')",
-                key = crate::transcode::dv_fel_qualification::PROBE_KEY
-            ),
-            encode(&serde_json::json!({"identity": identity}))?,
-            false,
-            false,
-        )
-        .await?;
+WHERE f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json) AND json_type($1)='object'
+ AND (json_type(f.probe_json,'$.plurx_dv_fel_v1')='object' OR json_type(f.probe_json,'$.plurx_dv_fel_variants_v3')='object')
+"#.into(),"{}".into(),false,false).await?;
     let mut counts = (0, 0);
     for row in rows {
-        if let Ok(verdict) = decode::<crate::transcode::dv_fel_qualification::FelVerdict>(&row) {
+        let row: serde_json::Value = decode(&row)?;
+        let size = row["size"].as_i64();
+        let mtime = row["mtime"].as_i64();
+        let mut answers = Vec::new();
+        if let Ok(verdict) = serde_json::from_value::<
+            crate::transcode::dv_fel_qualification::FelVerdict,
+        >(row["legacy"].clone())
+        {
+            if verdict.identity == identity
+                && Some(verdict.source_size) == size
+                && Some(verdict.source_mtime) == mtime
+            {
+                answers.push(verdict.admitted);
+            }
+        }
+        if let Some(variants) = row["variants"].as_object() {
+            for value in variants.values().take(8) {
+                if let Ok(receipt) = serde_json::from_value::<
+                    crate::transcode::dv_fel_qualification::FelRecipeVerdict,
+                >(value.clone())
+                {
+                    if receipt.request.valid()
+                        && (receipt.request.backend_identity == identity
+                            || receipt.request.identity == identity)
+                        && Some(receipt.verdict.source_size) == size
+                        && Some(receipt.verdict.source_mtime) == mtime
+                    {
+                        answers.push(receipt.verdict.admitted);
+                    }
+                }
+            }
+        }
+        if !answers.is_empty() {
             counts.0 += 1;
-            counts.1 += u64::from(verdict.admitted);
+            counts.1 += u64::from(answers.into_iter().any(|v| v));
         }
     }
     Ok(counts)
+}
+
+/// Persist one private, source-bound recipe request; the existing title outbox
+/// reopens it after any current owner completes. No publication consumes peers.
+pub(super) async fn request_fel_variant<T: QueueSql>(
+    store: &T,
+    file_id: i64,
+    request: &crate::transcode::dv_fel_qualification::FelRecipeRequest,
+) -> Result<bool, StoreError> {
+    if file_id <= 0 || !request.valid() {
+        return Err(StoreError::Task("invalid FEL recipe request".into()));
+    }
+    let body = serde_json::json!({"file":file_id,"request":request,"identity":request.identity,"size":request.source_size,"mtime":request.source_mtime});
+    let rows=store.queue_sql(r#"
+UPDATE files SET probe_json=json_set(probe_json,
+ '$.plurx_dv_fel_requests_v3',json_set(COALESCE((SELECT json_group_object(key,json(value))
+ FROM json_each(CASE WHEN json_type(files.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+ THEN json_extract(files.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END)
+ WHERE json_extract(value,'$.source_size')=files.size AND json_extract(value,'$.source_mtime')=files.mtime),'{}'),
+ '$.'||json_extract($1,'$.identity'),json(json_extract($1,'$.request'))))
+WHERE id=json_extract($1,'$.file') AND size=json_extract($1,'$.size') AND mtime=json_extract($1,'$.mtime')
+ AND dv_profile=7 AND dv_el_present=1 AND json_valid(probe_json)
+ AND EXISTS(SELECT 1 FROM dv_title_jobs_demand d WHERE d.file_id=files.id)
+ AND (json_type(probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.identity')) IS NOT NULL
+ OR (SELECT count(*) FROM json_each(CASE WHEN json_type(files.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+ THEN json_extract(files.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END)
+ WHERE json_extract(value,'$.source_size')=files.size AND json_extract(value,'$.source_mtime')=files.mtime)<8)
+RETURNING 'true' AS result_json
+"#.into(),encode(&body)?,true,true).await?;
+    Ok(!rows.is_empty())
 }

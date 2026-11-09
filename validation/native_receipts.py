@@ -73,10 +73,11 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed Makefile change adds only the Node Activity → Starts suite
-    # (playback start G1) to web-unit-check; native targets, build scripts and
-    # bundled-resource boundaries are unchanged.
-    'Makefile': '96e975a246267c49bd836c175bcda84b8457f5b78ff4470dff0f5d9b3d40fcc0',
+    # Reviewed source-budget addition is only the dv-rgb-conversion-check
+    # media target. Apple/native targets, flags and bundled-resource inputs
+    # are unchanged. Only this exact current spec is accepted; this does not
+    # authorize old-to-new Makefile receipt adoption.
+    'Makefile': 'df9c99f78aab7649439e60cc376cf0796ee744ff19b39396ef78aad5a079a112',
     # Reviewed 0.8.0 build 294: only CURRENT_PROJECT_VERSION differs from the
     # reviewed build 293 bytes (d686e9d8b changed the Apple client after 293
     # was claimed). Pin this exact spec; build-293 case receipts do not
