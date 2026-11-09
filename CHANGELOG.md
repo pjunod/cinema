@@ -16,6 +16,9 @@ bump may break compatibility and a **patch** bump never does.
 - Scan request status and replay stay bound to the creating credential after an
   API key is deleted and its numeric ID is reused. Expected-file reports skip
   paths outside their requested scope without probing their filesystem targets.
+- Digest-keyed analysis requests can register their source custody,
+  allowing the index queue to progress instead of renewing a rejected request
+  indefinitely while holding its shared source-I/O slot.
 
 - A client releasing a rolling stream, or an operator stopping it from
   Activity, now retires it as `released` / `stopped` instead of an authority

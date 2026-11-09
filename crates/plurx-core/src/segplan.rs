@@ -593,6 +593,29 @@ pub struct IndexRow {
 }
 
 impl IndexRow {
+    /// Observe a fragment after any video sample conversion.
+    ///
+    /// Canonical index rows require the video-only copy pipe: `bytes` counts
+    /// the entire fragment's wire length, while `video_bytes` counts only the
+    /// video payload. A multiplexed fragment's wire length cannot substitute
+    /// for the canonical video-only measurement.
+    pub fn from_fragment(
+        fragment: &crate::fmp4::Fragment,
+        init: &crate::fmp4::Init,
+    ) -> Result<Self, &'static str> {
+        let video = init.video().ok_or("the moov lost its video track")?;
+        let track = fragment
+            .track(video.id)
+            .ok_or("a fragment carried no video track")?;
+        Ok(Self {
+            dts: track.base_decode_time,
+            duration: fragment.video_duration(init),
+            bytes: u32::try_from(fragment.len()).unwrap_or(u32::MAX),
+            video_bytes: u32::try_from(track.byte_len()).unwrap_or(u32::MAX),
+            class: crate::fmp4::classify(fragment, init),
+        })
+    }
+
     pub fn clean(&self) -> bool {
         self.class.is_clean()
     }

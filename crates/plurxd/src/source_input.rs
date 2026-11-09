@@ -441,7 +441,7 @@ impl SourceInput {
         )
         .await
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) async fn qualification_fixture(bytes: &[u8]) -> (Self, std::fs::File) {
         let (input, file, _) = tests::input(bytes, SOURCE_HTTP_CHUNK, None).await;
         (input, file)
