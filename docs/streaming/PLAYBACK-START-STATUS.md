@@ -6,7 +6,7 @@
 Companion to the [implementation plan](PLAYBACK-START-PLAN.md) and
 [Phase 1 build contract](PLAYBACK-START-BUILD.md). Phase 1 merged in
 #1454 (`b08b5b8ec`); Apple build 294 landed in #1466 (`09097650f`).
-All four fleet nodes report main `8ab61a779`. Build deployment is established;
+All four fleet nodes report main `49c4ec103` (includes #1475 and #1476); all were healthy and ready after the 2026-11-09 serial rollout. Build deployment is established;
 queue recovery and physical-device acceptance remain open. Media1 still
 reports degraded, 3,840 eligible index requests and 0 ready in 24 hours.
 Persisted failed-row counts are not new failures over that interval.
@@ -56,6 +56,32 @@ native WebKit off/cold/warm cases reached playing at 759/745/713 ms; the
 remain non-playing, and the completed short title starts. Successful cases
 were retained while failed observer checks alone were rerun. These are local
 matched-source receipts; full daemon/fleet acceptance remains open.
+
+## Initial subtitle intent — F1-N, current corrective batch
+
+**Owner:** Codex, chat `01a1c172-ef6a-77e3-8422-95798308bc5c`.
+A1-N is deployed to all four servers. Real Safari 27.2 foreground Gran Turismo
+started at 3,094 ms to native frame and 3,679 ms to `playing`, with progress.
+Subsequent single-click trials exposed a separate automatic reopen: the
+400 ms default-subtitle timer fires during create and routes through the
+viewer-change owner. A captured stack pins `presentPlayerChrome → setSub →
+restartPendingPlaybackOpen → play`; there was no subtitle change event.
+Two foreground trials reached frames in 2,337/3,789 ms but each cancelled its
+first create and opened another, so neither receives clean-start credit.
+An earlier hidden-tab trial produced no frame and is retained as a control.
+
+The current independent repair removes that timer and binds the server's
+chosen default into the initial recipe, applying text captions at attachment.
+Native track registration is attachment-owned and cleaned up on replacement or
+Close; adversarial review identified this edge before validation. A Linux-only
+qualification test helper now uses the same platform guard as its callers,
+repairing the macOS lint failure found by the required hook.
+Explicit viewer changes keep their existing owner. Regressions and plan
+acceptance include the exact slow-create/default-forced-subtitle case.
+No new main landing, image deployment or ten-start acceptance is claimed yet.
+The temporary non-admin Safari account protects the user's actively advancing
+resume position and will be removed after qualification. Private runtime
+receipts are retained outside the repository in the owning task's status page.
 
 ## Current process — one final candidate review and validation
 
