@@ -61,7 +61,7 @@ authorized a task-specific 12 GiB, four-CPU, no-swap container on the existing
 build host. This is retained in the task receipt, not a repository policy change.
 A subsequent production lint failure is corrected by grouping the canonical
 request, clock, rejoin window and connection custody in one transport input.
-Focused Rust tests have not executed yet.
+The initial focused run completed with nine passes and one failure, recorded below.
 
 Paperwork initially passed 15 of 16 rules. The new index row crossed the 40 KiB
 streaming-index budget; shortening an existing summary fixed it, and all five
@@ -75,3 +75,22 @@ unchanged. The failed executable build is being retried with four-CPU affinity,
 retaining all passing compiler/lint checks. Kernel records identify cgroup
 memory-limit kills, not Rust diagnostics. The four HEVC fixture `unwrap()`
 lints were corrected with descriptive `expect()` messages in `dc38044c4`.
+
+## Focused correction — pre-session text subtitles
+
+The isolated final run on `dc38044c4` completed **9 passed, 1 failed**. Both
+abandonment orderings, the accepted-response lifetime, relay/rejoin clocks and
+artwork scope classification passed. The failed native-lane fixture returned 503
+for pre-session WebVTT; captured Source warnings identified
+`subtitle sparse read cancelled`.
+
+The sparse range reader cancels its helper child after a read failure. That
+is distinct from stopping the extraction. The correction restores the existing
+whole-source demux only while both the bounded operation and its Source-read
+budget remain active. The budget has a separate cancellation token, so it is
+checked explicitly rather than relying on delayed supervisor propagation.
+S5's asynchronous extraction remains deferred; no work is detached here.
+
+Candidate `537b4cf2d` is in affected daemon lint and a failed-only run: the
+native fixture plus the genuine operation- and budget-cancellation controls.
+The nine unaffected passes and passing core/vendor lint are retained.

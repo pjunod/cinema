@@ -189,8 +189,8 @@ remaining budget only to Sources advertising `start_budget_v1`; older peers
 keep their prior bounds. Discovery and local/remote answer waits share one
 clock; owned preparation retains its own budget.
 
-A ready result that no accepted Start response claimed still belongs to the
-attempt. When its fixed rejoin window ends with no waiter, the existing owner
+A clocked Start whose ready result has no accepted response still belongs to
+the attempt. When its fixed rejoin window ends with no waiter, the existing owner
 sends ordinary End and waits for physical settlement. A delivered session
 continues under its normal lifetime; finishing its Start HTTP request alone
 does not retire it. The current repair and validation state is recorded in
