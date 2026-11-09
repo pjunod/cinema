@@ -43,6 +43,12 @@ Source identity and the same jobs. Production custody predicates remain intact.
 | Counterfactuals | Retained role/capacity reversals and HEVC strict-child control are executed evidence. Five nonshipping reversals failed at the intended SQL, dump, bootstrap, retirement and discovery assertions. The strengthened snapshot regression executes the production cache/fetch decision and verifies that the old always-fetch operation fails; its final positive run passed. |
 | Promotion | Require the current-head fast lane to pass; its receipt and landing commit are recorded on PR #1472. |
 
+The first ready-PR preflight stopped on whole-file Hiqlite authority pins.
+All five mapped authority bodies are byte-identical to main; reversing only
+the four nullable dump-row declarations reconstructs the entire base file.
+Five reviewed source hashes were refreshed. Guards, model pins and counts
+remain unchanged; both failed mapping checks then passed.
+
 One combined-run encoded/native Start returned 503 after successful
 pre-session WebVTT. It did not recur in six subsequent runs, including standalone, original-order
 and current-base qualification. Its cause remains unattributed; the failed receipt
