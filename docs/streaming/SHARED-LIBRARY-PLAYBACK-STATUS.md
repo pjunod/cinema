@@ -10,7 +10,8 @@ state. The larger [playback-start effort](PLAYBACK-START-PLAN.md) owns A1.
 
 PR **#1472**, branch `claude/shared-library-standalone-fixes`, remains draft.
 The resumed source was `0b3c0dfc3`; the relay work and prior Opus fixes are
-integrated. Final review corrections are in validation source `f4ec9aac5`.
+integrated. Final review corrections are in code candidate `dc38044c4`, with later
+documentation-only commits.
 No passing final fast-lane result is claimed.
 
 The implementation covers NULL-principal consumers (§4), committed membership
@@ -26,7 +27,7 @@ a client release. The RX ring and deployment remain separate operations work.
 
 | Stage | State |
 |---|---|
-| Compiler | Pinned Rust 1.97.1 verified on the existing build host and in a resource-capped build container; warm target retained. |
+| Compiler | Pinned Rust 1.97.1 formatting, daemon/core all-target Clippy and canonical production Hiqlite Clippy passed. Building the focused executable remains pending; no focused Rust results claimed. |
 | Final review | Independent Codex review of `28bc0aacc`: one P1 and one P2; both addressed below. Prior Opus review remains attributed to the earlier owner because no report was retained. |
 | Existing focused tests | Latest historical run: 143 passed, two failed; pinned fixtures: four passed, three failed. These are not final-source passes. The native Source HTTP cases pass after the S5 revert; the older caption failures predate it. |
 | Core | Retained focused run: 27 passed; separate replicated-store run: five passed. Applicability remains bounded to the source and features actually exercised. |
@@ -60,9 +61,17 @@ authorized a task-specific 12 GiB, four-CPU, no-swap container on the existing
 build host. This is retained in the task receipt, not a repository policy change.
 A subsequent production lint failure is corrected by grouping the canonical
 request, clock, rejoin window and connection custody in one transport input.
-No unit tests have been repeated.
+Focused Rust tests have not executed yet.
 
 Paperwork initially passed 15 of 16 rules. The new index row crossed the 40 KiB
 streaming-index budget; shortening an existing summary fixed it, and all five
 checks in that failed module passed on the rerun. The other rules were not rerun.
 
+
+The test executable also exceeded 12 GiB after limiting compiler affinity to
+one CPU. The owner then authorized **up to 24 GiB, four CPUs, no swap** for this
+task only. The existing host has 60 GiB total; its repository build policy is
+unchanged. The failed executable build is being retried with four-CPU affinity,
+retaining all passing compiler/lint checks. Kernel records identify cgroup
+memory-limit kills, not Rust diagnostics. The four HEVC fixture `unwrap()`
+lints were corrected with descriptive `expect()` messages in `dc38044c4`.
