@@ -3834,20 +3834,20 @@ async fn extract_vtt_without_demux(
     .await
     {
         Ok(sparse) => sparse,
-        // A failed foreground range read cancels its own helper threads
-        // (see `SparseReadSource::read_at`), so `Cancelled` also reports
-        // "the cue-index read did not work". Only a cancellation of this
-        // operation itself ends the extraction; otherwise the cue index
-        // is an optimisation that failed, and the whole-source demux
-        // below is the route that still has an answer (or a real error).
+        // A failed range read cancels its helper child, not the extraction.
+        // Genuine operation or Source-budget cancellation still ends work.
+        // While both remain active, the cue index is an optional fast path;
+        // its failed read falls back to the ordinary whole-source demux.
         Err(crate::mkv_sparse::SparseError::Cancelled)
-            if plurx_core::process::bounded::check_cancellation().is_ok() =>
+            if plurx_core::process::bounded::check_cancellation().is_ok()
+                && !crate::background_jobs::source_budget()
+                    .is_some_and(|budget| budget.cancellation().is_cancelled()) =>
         {
             tracing::warn!(
-                    file_id = file.id,
-                    index,
-                    "the cue-index read failed without the extraction being cancelled; demuxing the whole source"
-                );
+                file_id = file.id,
+                index,
+                "the cue-index read failed without the extraction being cancelled; demuxing the whole source"
+            );
             return Ok(false);
         }
         Err(error) => return Err(error.to_string()),
