@@ -1643,12 +1643,12 @@ jobs:
       - name: Create isolated iPhone, iPad, and Apple TV simulators
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
-          # A job-level timeout cancels its `always()` cleanup along with the
-          # test step. Remove only simulators owned by this workflow before
-          # creating the next isolated set, so a wedged prior boot cannot
-          # consume CoreSimulator capacity indefinitely.
-          stale_ids="$(xcrun simctl list devices | sed -n \
-            's/.*plurx CI .* (\([0-9A-F-][0-9A-F-]*\)) .*/\1/p')"
+          # A job-level timeout can leave simulators from an earlier attempt
+          # of this run. Keep devices with ambiguous or foreign ownership.
+          set -euo pipefail
+          stale_ids="$(xcrun simctl list devices --json | \
+            python3 -m validation.apple_simulator_ownership \
+              --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT")"
           for stale_id in $stale_ids; do
             xcrun simctl shutdown "$stale_id" || true
             xcrun simctl delete "$stale_id" || true

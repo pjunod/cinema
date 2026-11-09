@@ -10,6 +10,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Apple CI startup cleanup now removes only valid simulators from an earlier
+  attempt of the same run, preserving devices whose ownership is ambiguous or
+  belongs to another active run.
 - A client releasing a rolling stream, or an operator stopping it from
   Activity, now retires it as `released` / `stopped` instead of an authority
   fence. Metrics and session-end events no longer report every ordinary
