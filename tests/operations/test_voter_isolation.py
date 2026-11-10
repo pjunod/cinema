@@ -243,6 +243,8 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
         jobs.append((self.WORKFLOWS[0], "publish_main", self.job(self.WORKFLOWS[0], "publish_main")))
         jobs.append((".github/workflows/media-runtime.yml", "platform",
                      self.job(".github/workflows/media-runtime.yml", "platform")))
+        jobs.append((self.WORKFLOWS[2], "worker_control_proof",
+                     self.job(self.WORKFLOWS[2], "worker_control_proof")))
         return jobs
 
     def verifier(self, job, package=False):
@@ -293,12 +295,12 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                         self.assertEqual(len(set(argv[::2])), len(self.CAPS))
                         self.assertEqual(dict(zip(argv[::2], argv[1::2])), self.CAPS)
                     else:
-                        self.assertIn(name, {"cluster_wal", "deep-validation", "mutation", "publish_main"})
-                    if name != "publish_main":
+                        self.assertIn(name, {"cluster_wal", "deep-validation", "mutation", "publish_main", "worker_control_proof"})
+                    if name not in {"publish_main", "worker_control_proof"}:
                         self.assertIn('      CARGO_BUILD_JOBS: "1"\n', header)
                 scripts.append(self.verifier(job, name in {"package_smoke", "image", "platform"}))
-        self.assertEqual(len(scripts), 14)
-        self.assertEqual(len(set(scripts)), 1, "all fourteen routes must execute the same actual cgroup checks")
+        self.assertEqual(len(scripts), 15)
+        self.assertEqual(len(set(scripts)), 1, "all fifteen routes must execute the same actual cgroup checks")
 
     def test_actual_posix_verifier_accepts_private_and_host_service_cgroups(self):
         for path, name, job in self.guarded_jobs():
