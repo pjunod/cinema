@@ -971,17 +971,14 @@ pub(crate) async fn qualify_with(
     }
     let settings = state
         .store
-        .get_settings(&[
-            plurx_core::store::keys::DV_HDR_PROCESSING,
-            plurx_core::store::keys::DV_FEL_REENCODE,
-        ])
+        .get_settings(&[plurx_core::store::keys::DV_FEL_REENCODE])
         .await
         .map_err(|e| e.to_string())?;
     let on =
         |key: &str| plurx_core::store::stored_switch(settings.get(key).map(String::as_str), false);
-    if !on(plurx_core::store::keys::DV_HDR_PROCESSING)
-        || !on(plurx_core::store::keys::DV_FEL_REENCODE)
-    {
+    // FEL re-encode targets a Dolby Vision display. HDR10 processing is an
+    // independent preference and must not leave its qualification pending.
+    if !on(plurx_core::store::keys::DV_FEL_REENCODE) {
         return Ok(Qualification::NotDue);
     }
     let encoder = match state.transcode.fel_qualification_encoder().await {
@@ -2087,6 +2084,13 @@ mod tests {
     ) {
         let dir = crate::test_tempdir().expect("scratch");
         let (state, file, document) = qualification_fixture(dir.path()).await;
+        // A DV display's FEL path remains independent of HDR10 processing.
+        // Previously this left the request pending without invoking measurement.
+        state
+            .store
+            .put_setting(plurx_core::store::keys::DV_HDR_PROCESSING, "0")
+            .await
+            .expect("HDR10 processing disabled independently");
         let admission = state
             .transcode
             .admit_dv_title()

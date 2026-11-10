@@ -284,10 +284,12 @@ metadata there, like the title aggregate).
   also measured on the GPU …"; its children appear under Processes as `Dolby
   Vision FEL qualification render / encode / sample`, each stoppable. No new
   job type, thread or schedule.
-- **When.** For a Profile 7 FEL title, with HDR processing and FEL re-encode
-  on, on a node whose encoder is radeonsi VA-API with its Main10 graph
-  proved and whose renderer decodes on the GPU, when the title has no
-  verdict for this renderer, recipe and encoder.
+- **When.** For a Profile 7 FEL title with FEL re-encode enabled, when its
+  actual supported hardware encoder has no current source/backend/output
+  verdict. HDR10 processing is independent and may remain off. The current
+  vendor paths and decoder/resource limits are tracked in the
+  [GPU qualification repair](DV-GPU-QUALIFICATION-AND-PLAYBACK-INFO.md);
+  the measurements below remain the historical AMD controls.
 - **Admission.** The title job's own admission is extended
   (`extend_fragment_admission`) with a background GPU bundle: the renderer's
   debit plus `CONSUMER_THREADS` (3). It is a claim on that admission, so

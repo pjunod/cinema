@@ -17,6 +17,8 @@ bump may break compatibility and a **patch** bump never does.
   NVENC using each actual encoder/device recipe. Deferred enhancement failures
   and pending measurements reach Playback Info on web, Apple and Android;
   playback starts on the compatible stream while verified enhancements prepare.
+  Disabling the independent HDR10-processing preference no longer prevents
+  a Dolby Vision display's enabled FEL recipe from being measured.
 
 - Digest-keyed analysis requests can register their source custody,
   allowing the index queue to progress instead of renewing a rejected request

@@ -50,6 +50,8 @@ the sample. This change does not claim NVDEC implementation.
 Keep the existing quality rule: served mean error must improve by at least
 10%, and served p99 error must not exceed the EL-dropped reference's p99.
 A supported GPU permits measurement; it does not prove a better picture.
+FEL qualification follows its own saved re-encode preference. Turning off the
+independent HDR10-processing preference must not strand a DV display's request.
 No stored admitted verdict may be manufactured for hardware qualification.
 The separate color reproduction effort owns renderer arithmetic and independent
 reference comparisons. Its unqualified equation candidate is excluded here;
