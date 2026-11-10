@@ -4,6 +4,14 @@ on:
   workflow_dispatch:
   push:
     branches: [codex/dv-gpu-qualification]
+    paths:
+      - .github/workflows/dv-gpu-qualification.yml
+      - scripts/dv-qualification-unit
+      - crates/**
+      - tools/dv_processing/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
 permissions:
   contents: read
 concurrency:

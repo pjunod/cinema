@@ -72,7 +72,8 @@ refusal, replacement/retirement, and preserved active enhancement badges.
 
 ## Validation and delivery
 
-The owned source workspace is based on main `3b64433bd`. The Linux compiler
+The repair started on main `3b64433bd` and is now ported to `0eb7cf6fc`,
+preserving the landed shared-library and media-runtime changes. The Linux compiler
 loop uses Rust 1.97.1, at most four CPUs and 8 GiB; compile the large daemon
 serially because simultaneous normal/test metadata builds exceeded that cap.
 
@@ -83,8 +84,19 @@ suite passes 10 tests, and lint passes. Documentation/release-counter checks
 pass (38 tests); paperwork passes all 16 checks against the current base.
 Native receipts and logs are retained outside compiler/cache directories.
 
-The Rust daemon compiles, but its complete test binary exceeded the 8 GiB
-voter compiler cap even with serial/nonincremental compilation. Test codegen
-is moving to an isolated capped learner slot; the voter limit is unchanged.
+The Rust daemon compiles with Clippy warnings denied, and every daemon test
+target type-checks. Eleven focused Core enhancement regressions pass with
+`hiqlite-store`. Full daemon test codegen exceeded both the 8 GiB voter cap
+and a 10 GiB learner cap, including allocator-retention tuning. The capacity
+owner independently measured a 15.74 GiB peak and activated an approved
+non-voting 24 GiB VM with one shared 20 GiB/four-CPU/no-swap job slot.
+
+The task-only source-archive job queues there, verifies the common physical
+20 GiB ancestor, transfers no Git state or credentials to its compiler child,
+runs eleven fixed daemon regressions and retains the actual ELF/source hashes.
+Its independent heartbeat supervisor passed benign EOF, SIGTERM and lease
+expiry cleanup controls. These controls do not establish worker qualification;
+the real queue/job and GPU measurements remain pending. The temporary workflow,
+helper and catalog entry are removed before final integration.
 Exact hardware measurements and the affected main gate remain pending. No
 service has been deployed or settings changed by this task.

@@ -1610,6 +1610,7 @@ paths = [
   "scripts/paperwork",
   "scripts/outline",
   "scripts/quiet",
+  "scripts/dv-qualification-unit",
   "scripts/ci-failures",
   "scripts/ci-failures.fleet.example.json",
   "swarm/*.txt",
