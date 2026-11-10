@@ -1886,7 +1886,7 @@ impl TranscodeManager {
         "this server has no proved VA-API or NVIDIA completed-picture encoder for FEL qualification"
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) const fn fel_being_measured() -> &'static str {
         "waiting for this title and reconstruction recipe's quality measurement (queued or running)"
     }
