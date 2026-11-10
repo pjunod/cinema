@@ -14,6 +14,7 @@ OTHER = "sha256:" + "c" * 64
 DOCKER = """#!/usr/bin/env bash
 set -eu
 echo "$*" >> "$TRANSCRIPT"
+if [[ "$1" == build ]]; then echo "builder ${BUILDX_BUILDER-}" >> "$TRANSCRIPT"; fi
 case "$1 $2" in
   'buildx imagetools')
     if [[ "$SCENARIO" == missing || ( "$SCENARIO" == build && ! -f "$BUILT" ) ]]; then echo 'manifest unknown' >&2; exit 1; fi
@@ -105,6 +106,7 @@ class RegistryPushCase(unittest.TestCase):
                     transcript = root / (suffix + ".log")
                     env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
                                PLURX_REGISTRY="registry.invalid:3000", PLURX_BUILD_SHA=sha,
+                               BUILDX_BUILDER="plurx-main-fixture",
                                PLURX_BUILD_REF=sha, PLURX_SOURCE_URL="https://forge.invalid/repo",
                                DIGEST=DIGEST, EXPECTED=IMAGE_ID, OTHER=OTHER, SCENARIO="build",
                                BUILT=str(root / (suffix + ".built")),
@@ -119,6 +121,7 @@ class RegistryPushCase(unittest.TestCase):
                     calls = transcript.read_text().splitlines()
                     builds = [call for call in calls if call.startswith("build ")]
                     self.assertEqual(len(builds), 1, calls)
+                    self.assertEqual(calls.count("builder plurx-main-fixture"), 1, calls)
                     self.assertIn("--build-arg PLURX_MEDIA_RUNTIME_REPOSITORY=" + (override or "ghcr.io/pjunod/cinema-media-runtime"), builds[0])
                     self.assertIn("--build-arg PLURX_BUILD_SHA=" + sha, builds[0])
                     self.assertNotIn("PLURX_MEDIA_RUNTIME_DIGEST=", builds[0])

@@ -65,6 +65,13 @@ class WorkerControlCiTests(unittest.TestCase):
         self.assertIn("731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91", python)
         self.assertIn("sys.version_info[:3] == (3, 12, 15)", python)
 
+        rust = step_block(self.proof, "Install the pinned Rust controller prerequisite")
+        self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", rust)
+        self.assertIn("dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5", rust)
+        self.assertIn('toolchain: "1.97.1"', rust)
+        self.assertLess(self.proof.index("Install the pinned Rust controller prerequisite"),
+                        self.proof.index("Run the pinned production worker controller proof"))
+
         resume = step_block(self.proof, "Prepare same-PR worker proof resumption")
         self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", resume)
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", resume)

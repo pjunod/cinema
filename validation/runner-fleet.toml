@@ -65,11 +65,12 @@ voter_hosts = ["lab6", "lab3", "lab4", "media1"]
 # `ci-store` slots rather than chosen freely: a surplus shard cannot be given a
 # second runner on a host that already holds one, so it serialises behind a
 # busy runner and buys a more complicated failure instead of wall time. The
-# fleet carries three slots today, on `lab1`, `lab5` and `lab2` — one per
-# physical non-voter host. That number is an eligibility fact rather than a
-# capacity decision: a runner counts as a slot only once the Store lane has
-# passed on it. See `gha-lab2-android-01` below for what that cost to learn.
-host_exclusive_labels = ["ci-store", "ci-topology"]
+# legacy `ci-store` rows below record the previously advertised labels on
+# `lab1`, `lab5` and `lab2`. Store workflows now request `ci-nonvoter-store`;
+# legacy labels grant no eligibility for that alias. Record its two physical
+# nonvoter carriers only after actual registration and Store qualification.
+# See `gha-lab2-android-01` below for what a false eligibility claim cost.
+host_exclusive_labels = ["ci-nonvoter-store", "ci-topology"]
 
 # --- lab1: Incus guest host, non-voter -------------------------------------
 [[runners]]
@@ -77,7 +78,16 @@ name = "gha-lab1-general-01"
 host = "lab1"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "ci-store"]
+implicit_labels = false
+labels = ["maintenance-lab1-exclusive"]
+
+[[runners]]
+name = "gha-lab1-plurx-heavy-01"
+host = "lab1"
+os = "Linux"
+arch = "X64"
+implicit_labels = false
+labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-store", "incus"]
 
 # --- lab2: Incus guest host, non-voter --------------------------------------
 # A `ci-store` slot, and the entry to read before adding or removing one.
@@ -114,7 +124,7 @@ name = "gha-lab2-android-01"
 host = "lab2"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "android-kvm", "ci-store"]
+labels = ["lab", "incus", "ubuntu-24.04", "android-kvm", "ci-store", "ci-nonvoter-store"]
 
 [[runners]]
 name = "gha-lab2-android-02"
