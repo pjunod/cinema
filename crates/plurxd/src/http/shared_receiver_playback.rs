@@ -1297,6 +1297,16 @@ impl ReceiverStartActor {
             crate::sharing_client::PeerError::Busy { retry_after_secs } => {
                 ReceiverStartError::ResourceBusy { retry_after_secs }
             }
+            crate::sharing_client::PeerError::Rejected(
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            ) if matches!(
+                resource.kind(),
+                plurx_core::sharing_resources::SharingHlsResourceKind::SubtitlePlaylist { .. }
+                    | plurx_core::sharing_resources::SharingHlsResourceKind::SubtitleSegment { .. }
+            ) =>
+            {
+                ReceiverStartError::Unsupported
+            }
             _ => ReceiverStartError::Unresolved,
         })
     }
@@ -2317,6 +2327,15 @@ pub(super) async fn receiver_media_actor(
         Err(ReceiverStartError::Capacity) => return resource_busy_response(1).into_response(),
         Err(ReceiverStartError::ResourceBusy { retry_after_secs }) => {
             return resource_busy_response(retry_after_secs).into_response();
+        }
+        Err(ReceiverStartError::Unsupported)
+            if matches!(
+                resource.kind(),
+                plurx_core::sharing_resources::SharingHlsResourceKind::SubtitlePlaylist { .. }
+                    | plurx_core::sharing_resources::SharingHlsResourceKind::SubtitleSegment { .. }
+            ) =>
+        {
+            return StatusCode::UNPROCESSABLE_ENTITY.into_response();
         }
         Err(_) => {
             actor.begin_retirement(

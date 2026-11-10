@@ -925,8 +925,52 @@ async fn actual_pinned_playback(
     if exercise_caption_busy {
         use plurx_core::store::keys::SW_POOL_THREADS;
         use std::sync::atomic::Ordering;
-        // Start has published. Ordinary policy now refuses the first actual
-        // caption window's CPU admission; no status/control request warms it.
+        // A permanent caption-only refusal must leave the movie live too.
+        // Track two is beyond this fixture's two actual native tracks.
+        let (unsupported, _, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &format!("{prefix}subs/2/seg00000.vtt"),
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            unsupported,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "actual caption track refusal remains resource-local through B: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(
+            source_resource_status.load(Ordering::Relaxed),
+            422,
+            "the actual pinned Source rejected the unsupported caption track"
+        );
+        assert_eq!(source_starts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            source_ends.load(Ordering::Relaxed),
+            0,
+            "a permanently unsupported caption track must not retire the movie"
+        );
+        assert_eq!(fixture.source.active_source_sessions().await, 1);
+        let (video, _, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &format!("{prefix}init.mp4"),
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            video,
+            StatusCode::OK,
+            "video remains live after caption track refusal"
+        );
+        assert!(bytes.windows(4).any(|part| part == b"ftyp"));
+        // Ordinary policy now refuses the first actual caption window's CPU
+        // admission; no status/control request has warmed that window.
         let previous = fixture
             .source
             .state
