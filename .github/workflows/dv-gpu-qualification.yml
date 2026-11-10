@@ -64,7 +64,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Compile full daemon unit binary and execute eleven fixed regressions
+      - name: Compile full daemon unit binary and execute focused regressions
         run: python3 scripts/dv-qualification-unit parent
       - name: Stop owned compiler and collect immutable output before upload
         if: always()

@@ -24,10 +24,29 @@ had rejected an older recipe; that result cannot admit or reject a different
 current recipe. A pending request is not evidence that a measurement is
 running or that the title will pass. Read-only checks confirmed that the queued
 job matches its demand/scanner, the source is readable and current, and no
-failed attempt was recorded. A preparation job was marked running at the
-observation, and physical foreground admissions deliberately defer background
-title measurement. That durable job status alone does not prove which worker
-held capacity or explain the complete queue delay.
+failed attempt was recorded. Follow-up identified the actual source-domain
+blocker: a cancelled SDR preparation job for another file on a learner
+retained expired active reader custody in the shared storage domain. The
+fence therefore blocked Avatar background work without being Avatar
+reader ownership. Its journal records an unmediated handoff, invalidating the
+normal replay witness. An absent current reader lock is insufficient proof
+that every recipient stopped. Neither journal version records an original
+container or PID namespace, so a later container restart cannot retroactively
+prove that lifetime closed. The unrelated durable running title job was not
+the cause. Retain this fence until a validated physical-stop proof for that
+exact owner is established; never release it by expiry. This repair must
+recover in software without rebooting the host or restarting its services.
+Retrospective settlement remains open until that proof is implemented and
+verified.
+
+The normal preparation path already brokers source input and scratch output
+through HTTP, but unnecessarily passes raw descriptors as well. Removing
+those descriptors and mediating only the fully brokered launch prevents that
+specific invalidation. Raw descriptor, all subtitle-burn and optional content-analysis
+fallbacks retain their conservative treatment. The witness does not record a
+callsite, so this source-proved path cannot be claimed as the first handoff
+that invalidated the historical record. This change cannot repair that record
+or establish complete mediated-reader coverage by itself.
 
 The November 8 deferred-upgrade path logged its later refusal and retained
 the ordinary session, but did not carry that refusal into Playback Info.
@@ -70,6 +89,24 @@ later control response cannot retain stale fallback text.
 Cover local and peer-owned playback, web, Apple and Android, stale generation
 refusal, replacement/retirement, and preserved active enhancement badges.
 
+## Qualification may finish after playback starts
+
+Already-qualified recipes use the existing upgrade after first presentation.
+The one-shot implementation loses its executable intent when qualification is
+pending. The follow-up retains a bounded, typed waiter for that exact request
+and checks persisted verdict readiness on accepted control exchanges. It does
+not repeat measurement. A rejected verdict remains a terminal explanation.
+
+An admitted verdict requires fresh authoritative planning from the accepted
+client selection, capabilities and delivered representation. Storing the
+verdict changes probe metadata and therefore the planning binding; replaying
+the old intent or rewriting its digest would be incorrect. Keep source,
+settings, owner/incarnation and predecessor-generation fences, preserve the
+selected audio/subtitles and current playhead, and retain the pending
+explanation until replacement becomes current. Release measurement resources
+before publishing readiness. A process restart discards old executable
+authority; this work does not promise durable waiter recovery.
+
 ## Validation and delivery
 
 The repair started on main `3b64433bd` and is now ported to `0eb7cf6fc`,
@@ -77,15 +114,19 @@ preserving the landed shared-library and media-runtime changes. The Linux compil
 loop uses Rust 1.97.1, at most four CPUs and 8 GiB; compile the large daemon
 serially because simultaneous normal/test metadata builds exceeded that cap.
 
-Source review found no actionable defects. The web enhancement suite passes
+The initial hardware/reporting implementation and the brokered-reader and
+late-verdict follow-ups passed independent source review. The brokered-reader
+checkpoint passes production Rust check and Clippy; its expanded test metadata
+hit the unchanged 8 GiB cap. Fresh late-verdict checks and native execution
+remain pending. The unchanged web enhancement suite passes
 21 tests. Apple build 295 compiles for iOS/tvOS and its focused presentation
 suite passes 15 tests. Android build 194 compiles/assembles, its enhancement
 suite passes 10 tests, and lint passes. Documentation/release-counter checks
 pass (38 tests); paperwork passes all 16 checks against the current base.
 Native receipts and logs are retained outside compiler/cache directories.
 
-The Rust daemon compiles with Clippy warnings denied, and every daemon test
-target type-checks. Eleven focused Core enhancement regressions pass with
+Before those follow-ups, the Rust daemon compiled with Clippy warnings
+denied, and every daemon test target type-checked. Eleven focused Core enhancement regressions pass with
 `hiqlite-store`. Full daemon test codegen exceeded both the 8 GiB voter cap
 and a 10 GiB learner cap, including allocator-retention tuning. The capacity
 owner independently measured a 15.74 GiB peak and activated an approved
@@ -93,7 +134,7 @@ non-voting 24 GiB VM with one shared 20 GiB/four-CPU/no-swap job slot.
 
 The task-only source-archive job queues there, verifies the common physical
 20 GiB ancestor, transfers no Git state or credentials to its compiler child,
-runs eleven fixed daemon regressions and retains the actual ELF/source hashes.
+runs the focused daemon regressions and retains the actual ELF/source hashes.
 Its independent heartbeat supervisor passed benign EOF, SIGTERM and lease
 expiry cleanup controls. These controls do not establish worker qualification;
 the real queue/job and GPU measurements remain pending. The temporary workflow,
