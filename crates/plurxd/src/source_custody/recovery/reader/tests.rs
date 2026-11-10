@@ -209,6 +209,64 @@ async fn mediated_reader_crash_recovers_same_kernel_on_native_mac_and_linux() {
 }
 
 #[tokio::test]
+async fn brokered_cache_parts_keep_reader_recovery_but_raw_fallbacks_remain_fenced() {
+    for mode in [
+        "brokered_cache",
+        "cache_input_only",
+        "cache_output_only",
+        "cache_raw_subtitle",
+        "cache_embedded_subtitle",
+    ] {
+        let fixture = Fixture::new();
+        configure_backend(&fixture.store, fixture.root.path(), true)
+            .expect("authoritative context");
+        let record = fixture.background("job");
+        preread(&fixture, &record);
+        write_active_at(&fixture.dir, record.clone(), None).expect("legacy receipt");
+        let (path, config) = configuration(&fixture, &record, mode);
+        let mut child = OwnedChild::start(&path);
+        child.wait_for("READER_PREPARED");
+        assert!(activate(&fixture, &record, &config.activation_id).await);
+        child.send("arm");
+        child.wait_for("READER_ARMED");
+        replay(&fixture.store, NODE)
+            .await
+            .expect("live reader remains owned");
+        assert_eq!(
+            count(&fixture, &record),
+            1,
+            "{mode}: live daemon lock is required"
+        );
+        child.send("cancel");
+        child.wait_for("REQUEST_CANCELLED");
+        replay(&fixture.store, NODE)
+            .await
+            .expect("cancellation is not a join");
+        assert_eq!(
+            count(&fixture, &record),
+            1,
+            "{mode}: cancellation cannot erase custody"
+        );
+        child.exit();
+        replay(&fixture.store, NODE)
+            .await
+            .expect("replay exact lifetime witness");
+        assert_eq!(
+            count(&fixture, &record),
+            if mode == "brokered_cache" { 0 } else { 1 },
+            "{mode}: only the real HTTP input/output child retains mediated proof"
+        );
+        assert_eq!(
+            config
+                .directory
+                .join(record.name().expect("record name"))
+                .exists(),
+            mode != "brokered_cache"
+        );
+    }
+}
+
+#[tokio::test]
 async fn reader_recovery_refuses_unarmed_unmediated_foreign_kernel_and_replaced_inode() {
     for mode in [
         "unarmed",
@@ -490,6 +548,28 @@ fn reader_process_fixture() {
         let mut bytes = Vec::new();
         stream.read_to_end(&mut bytes).expect("source response");
         assert!(bytes.ends_with(&vec![42; 4096]));
+        if let Ok(address) = std::env::var("PLURX_TEST_READER_OUTPUT_ADDRESS") {
+            assert!(
+                std::env::var(CONFIG).unwrap_or_default().is_empty(),
+                "private original-source configuration cannot escape to the brokered child"
+            );
+            let mut stream =
+                std::net::TcpStream::connect(address).expect("mediated output connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("bounded PUT response");
+            stream
+                .write_all(b"PUT /output HTTP/1.0\r\nContent-Length: 4096\r\n\r\n")
+                .expect("output headers");
+            stream
+                .write_all(&vec![42u8; 4096])
+                .expect("brokered output bytes");
+            let mut response = Vec::new();
+            stream
+                .read_to_end(&mut response)
+                .expect("output acknowledged");
+            assert!(response.starts_with(b"HTTP/1.0 200 OK"));
+        }
         return;
     }
     let Ok(path) = std::env::var(CONFIG) else {
@@ -575,6 +655,12 @@ fn reader_process_fixture() {
                 }
                 if config.mode == "packet" {
                     run_packet_probe(&config);
+                }
+                if config.mode == "brokered_cache" {
+                    run_mediated_child_inner(&config.source, true);
+                }
+                if config.mode.starts_with("cache_") {
+                    run_raw_cache_child(&config.source, &config.mode);
                 }
                 if config.mode == "mediated" {
                     // A cancelled request can leave a detached read actor with
@@ -664,10 +750,47 @@ fn reader_process_fixture() {
 }
 
 fn run_mediated_child(source: &Path) {
+    run_mediated_child_inner(source, false);
+}
+
+fn run_mediated_child_inner(source: &Path, cache_part: bool) {
     let mut file = std::fs::File::open(source).expect("daemon original descriptor");
     let metadata = file.metadata().expect("physical identity");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("daemon source bridge");
     let address = listener.local_addr().expect("bridge address");
+    let output_listener =
+        cache_part.then(|| std::net::TcpListener::bind("127.0.0.1:0").expect("output broker"));
+    let output_address = output_listener
+        .as_ref()
+        .map(|listener| listener.local_addr().expect("output address"));
+    let sink = output_listener.map(|listener| {
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("output consumer");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("bounded output request");
+            let mut bytes = Vec::new();
+            let mut block = [0u8; 8192];
+            let header_end = loop {
+                let n = stream.read(&mut block).expect("output request");
+                assert!(n > 0 && bytes.len() + n <= 16384, "bounded PUT request");
+                bytes.extend_from_slice(&block[..n]);
+                if let Some(at) = bytes.windows(4).position(|value| value == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            while bytes.len() < header_end + 4096 {
+                let n = stream.read(&mut block).expect("output body");
+                assert!(n > 0 && bytes.len() + n <= header_end + 4096);
+                bytes.extend_from_slice(&block[..n]);
+            }
+            assert!(bytes.starts_with(b"PUT /output HTTP/1.0\r\n"));
+            assert_eq!(&bytes[header_end..], vec![42u8; 4096].as_slice());
+            stream
+                .write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .expect("output response");
+        })
+    });
     let bridge = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("source consumer");
         stream
@@ -690,36 +813,167 @@ fn run_mediated_child(source: &Path) {
         .enable_all()
         .build()
         .expect("fixture runtime");
-    let output = runtime.block_on(plurx_core::process::source_lifetime::mediated(async {
-        let mut command =
-            tokio::process::Command::new(std::env::current_exe().expect("test binary"));
-        command
-            .args(["--exact", FIXTURE, "--nocapture"])
-            .env_clear()
-            .env("PLURX_TEST_READER_CONSUMER", "1")
-            .env("PLURX_TEST_SOURCE_DEVICE", metadata.dev().to_string())
-            .env("PLURX_TEST_SOURCE_INODE", metadata.ino().to_string())
-            .env("PLURX_TEST_READER_ADDRESS", address.to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let (child, _owner) = plurx_core::process::spawn_job_owned(
-            &mut command,
-            plurx_core::process::ChildWork::background("mediated source fixture"),
-        )
-        .expect("audited HTTP-only child");
-        child
-            .wait_with_output()
-            .await
-            .expect("join HTTP-only child")
-    }));
+    let output = if cache_part {
+        use std::os::fd::AsRawFd;
+        let original = std::fs::File::open(source).expect("held source capability");
+        let directory = std::fs::File::open(source.parent().expect("source parent"))
+            .expect("held output capability");
+        let executable = std::env::current_exe().expect("consumer executable");
+        let source_device = metadata.dev().to_string();
+        let source_inode = metadata.ino().to_string();
+        let address_string = address.to_string();
+        let output_string = output_address.expect("real output broker").to_string();
+        let input_url = format!("http://{address}/source");
+        let output_url = format!("http://{output_string}/output");
+        let env = [
+            ("PLURX_TEST_READER_CONSUMER", std::ffi::OsStr::new("1")),
+            (CONFIG, std::ffi::OsStr::new("")),
+            (
+                "PLURX_TEST_SOURCE_DEVICE",
+                std::ffi::OsStr::new(&source_device),
+            ),
+            (
+                "PLURX_TEST_SOURCE_INODE",
+                std::ffi::OsStr::new(&source_inode),
+            ),
+            (
+                "PLURX_TEST_READER_ADDRESS",
+                std::ffi::OsStr::new(&address_string),
+            ),
+            (
+                "PLURX_TEST_READER_OUTPUT_ADDRESS",
+                std::ffi::OsStr::new(&output_string),
+            ),
+        ];
+        runtime.block_on(async {
+            let spawned = crate::producer_spawn::brokered_cache_part(
+                Some(&input_url),
+                Some(&output_url),
+                false,
+                crate::producer_spawn::Descriptors::from_raw_fds(
+                    Some(original.as_raw_fd()),
+                    Some(directory.as_raw_fd()),
+                    None,
+                    true,
+                ),
+                |descriptors| {
+                    crate::producer_spawn::spawn(
+                        &executable,
+                        &["--exact".into(), FIXTURE.into(), "--nocapture".into()],
+                        crate::producer_spawn::SpawnOptions {
+                            runtime_cache: source.parent().expect("scratch root"),
+                            progress: crate::producer_spawn::Progress::None,
+                            descriptors,
+                            env: &env,
+                            work: plurx_core::process::ChildWork::background(
+                                "brokered cache producer fixture",
+                            ),
+                        },
+                    )
+                },
+            )
+            .expect("same production brokered cache spawn");
+            joined_producer_output(spawned).await
+        })
+    } else {
+        runtime.block_on(plurx_core::process::source_lifetime::mediated(async {
+            let mut command =
+                tokio::process::Command::new(std::env::current_exe().expect("test binary"));
+            command
+                .args(["--exact", FIXTURE, "--nocapture"])
+                .env_clear()
+                .env("PLURX_TEST_READER_CONSUMER", "1")
+                .env("PLURX_TEST_SOURCE_DEVICE", metadata.dev().to_string())
+                .env("PLURX_TEST_SOURCE_INODE", metadata.ino().to_string())
+                .env("PLURX_TEST_READER_ADDRESS", address.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let (child, _owner) = plurx_core::process::spawn_job_owned(
+                &mut command,
+                plurx_core::process::ChildWork::background("mediated source fixture"),
+            )
+            .expect("audited HTTP-only child");
+            child
+                .wait_with_output()
+                .await
+                .expect("join HTTP-only child")
+        }))
+    };
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     bridge.join().expect("physical source bridge joined");
+    if let Some(sink) = sink {
+        sink.join().expect("physical output broker joined");
+    }
+}
+
+async fn joined_producer_output(
+    mut spawned: crate::producer_spawn::Spawned,
+) -> std::process::Output {
+    use tokio::io::AsyncReadExt;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let (status, out, err) = tokio::join!(
+        spawned.child.wait(),
+        spawned.stdout.read_to_end(&mut stdout),
+        spawned.stderr.read_to_end(&mut stderr)
+    );
+    out.expect("producer stdout");
+    err.expect("producer stderr");
+    std::process::Output {
+        status: status.expect("join real cache producer"),
+        stdout,
+        stderr,
+    }
+}
+
+fn run_raw_cache_child(source: &Path, mode: &str) {
+    use std::os::fd::AsRawFd;
+    let original = std::fs::File::open(source).expect("raw source");
+    let directory =
+        std::fs::File::open(source.parent().expect("parent")).expect("raw output directory");
+    let descriptors = crate::producer_spawn::Descriptors::from_raw_fds(
+        Some(original.as_raw_fd()),
+        Some(directory.as_raw_fd()),
+        (mode == "cache_raw_subtitle").then_some(original.as_raw_fd()),
+        true,
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("raw cache runtime");
+    let output = runtime.block_on(async {
+        let child = crate::producer_spawn::brokered_cache_part(
+            (mode != "cache_output_only").then_some("http://127.0.0.1:1/source"),
+            (mode != "cache_input_only").then_some("http://127.0.0.1:1/output"),
+            mode == "cache_embedded_subtitle",
+            descriptors,
+            |descriptors| {
+                crate::producer_spawn::spawn(
+                    Path::new("/bin/cat"),
+                    &["/dev/fd/3".into()],
+                    crate::producer_spawn::SpawnOptions {
+                        runtime_cache: source.parent().expect("scratch root"),
+                        progress: crate::producer_spawn::Progress::None,
+                        descriptors,
+                        env: &[],
+                        work: plurx_core::process::ChildWork::background(
+                            "raw cache producer fixture",
+                        ),
+                    },
+                )
+            },
+        )
+        .expect("raw cache producer");
+        joined_producer_output(child).await
+    });
+    assert!(output.status.success());
+    assert_eq!(output.stdout, vec![42u8; 4096]);
 }
 
 fn run_packet_probe(config: &Configuration) {
