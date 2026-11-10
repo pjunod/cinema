@@ -37,49 +37,52 @@ esac
 
 class RegistryPushCase(unittest.TestCase):
     def test_docker_up_resolves_ssh_and_scp_origins_to_the_registry_port(self):
+        # Preserve the landed regression ID: explicit public defaults supersede
+        # the former attempt to infer a registry from SSH/scp Git transports.
         source = SCRIPT.parents[1]
-        cases = [
-            ("ssh://git@registry.invalid:222/noirr/plurx.git", "registry.invalid:3000"),
-            ("git@registry.invalid:noirr/plurx.git", "registry.invalid:3000"),
-            ("ssh://git@[2001:db8::7]:222/noirr/plurx.git", "[2001:db8::7]:3000"),
-            ("git@[2001:db8::7]:noirr/plurx.git", "[2001:db8::7]:3000"),
-            ("https://user:secret@registry.invalid:3000/noirr/plurx.git", "registry.invalid:3000"),
-            ("https://registry.invalid/noirr/plurx.git", "registry.invalid"),
-        ]
+        public = "ghcr.io/pjunod/cinema-media-runtime"
+        origins = [None, "https://github.com/pjunod/cinema.git",
+                   "ssh://git@forge.example:222/noirr/plurx.git",
+                   "git@forge.example:noirr/plurx.git"]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "scripts").mkdir()
             (root / "deploy").mkdir()
             shutil.copy2(source / "Makefile", root / "Makefile")
-            shutil.copy2(source / "scripts/media-registry-default", root / "scripts/media-registry-default")
             (root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.0.0"\n')
             (root / "scripts/validate-docker-startup-budget").write_text('print("1500s")\n')
             (root / "scripts/docker-hardware").write_text('print("docker-compose.yml")\n')
             docker = root / "docker"
-            docker.write_text('#!/bin/sh\nprintf "%s\\n" "$PLURX_MEDIA_REGISTRY_DEFAULT" "$*"\n')
+            docker.write_text('#!/bin/sh\nprintf "%s\\n" "$PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT" "$*"\n')
             docker.chmod(0o755)
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-            subprocess.run(["git", "remote", "add", "origin", cases[0][0]], cwd=root, check=True)
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}")
-            for key in ("PLURX_MEDIA_REGISTRY", "PLURX_MEDIA_REGISTRY_DEFAULT", "MAKEFLAGS", "MFLAGS"):
+            for key in ("PLURX_MEDIA_RUNTIME_REPOSITORY", "PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT",
+                        "PLURX_MEDIA_REGISTRY", "MAKEFLAGS", "MFLAGS"):
                 env.pop(key, None)
-            for origin, expected in cases:
+            for origin in origins:
                 with self.subTest(origin=origin):
-                    subprocess.run(["git", "remote", "set-url", "origin", origin], cwd=root, check=True)
+                    if origin:
+                        subprocess.run(["git", "config", "remote.origin.url", origin], cwd=root, check=True)
                     result = subprocess.run(["make", "--no-print-directory", "docker-up"],
                                             cwd=root, env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn(expected + "\ncompose up -d --build", result.stdout)
-                    self.assertNotIn("secret", result.stdout)
+                    self.assertIn(public + "\ncompose up -d --build", result.stdout)
                     build = subprocess.run(["make", "--no-print-directory", "-n", "docker"],
                                            cwd=root, env=env, capture_output=True, text=True)
                     self.assertEqual(build.returncode, 0, build.stderr)
-                    self.assertIn('--build-arg PLURX_MEDIA_REGISTRY="' + expected + '"', build.stdout)
+                    self.assertIn('--build-arg PLURX_MEDIA_RUNTIME_REPOSITORY="' + public + '"', build.stdout)
+            mirror = "mirror.invalid:5000/custom/media-runtime"
             result = subprocess.run(["make", "--no-print-directory", "docker-up",
-                                     "PLURX_MEDIA_REGISTRY=mirror.invalid:5000"],
+                                     "PLURX_MEDIA_RUNTIME_REPOSITORY=" + mirror],
                                     cwd=root, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("mirror.invalid:5000\ncompose up -d --build", result.stdout)
+            self.assertIn(mirror + "\ncompose up -d --build", result.stdout)
+            compose = (source / "deploy/docker-compose.yml").read_text()
+            self.assertIn("PLURX_MEDIA_RUNTIME_REPOSITORY: ${PLURX_MEDIA_RUNTIME_REPOSITORY:-"
+                          "${PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT:-" + public + "}}", compose)
+            self.assertNotIn("PLURX_MEDIA_REGISTRY", compose)
+
 
     def test_source_publication_build_forwards_registry_without_changing_the_media_pin(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -96,7 +99,7 @@ class RegistryPushCase(unittest.TestCase):
             smoke = root / "scripts/container-smoke"
             smoke.write_text('#!/bin/sh\necho "smoke $1" >> "$TRANSCRIPT"\n')
             smoke.chmod(0o755)
-            for override in (None, "mirror.invalid:5000"):
+            for override in (None, "mirror.invalid:5000/custom/media-runtime"):
                 with self.subTest(media_registry=override):
                     suffix = "default" if override is None else "mirror"
                     transcript = root / (suffix + ".log")
@@ -107,16 +110,16 @@ class RegistryPushCase(unittest.TestCase):
                                BUILT=str(root / (suffix + ".built")),
                                PULLED=str(root / (suffix + ".pulled")), TRANSCRIPT=str(transcript))
                     env.pop("PLURX_EXPECTED_IMAGE_ID", None)
-                    env.pop("PLURX_MEDIA_REGISTRY", None)
+                    env.pop("PLURX_MEDIA_RUNTIME_REPOSITORY", None)
                     if override is not None:
-                        env["PLURX_MEDIA_REGISTRY"] = override
+                        env["PLURX_MEDIA_RUNTIME_REPOSITORY"] = override
                     result = subprocess.run([str(SCRIPT)], cwd=root, env=env,
                                             text=True, capture_output=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     calls = transcript.read_text().splitlines()
                     builds = [call for call in calls if call.startswith("build ")]
                     self.assertEqual(len(builds), 1, calls)
-                    self.assertIn("--build-arg PLURX_MEDIA_REGISTRY=" + (override or "registry.invalid:3000"), builds[0])
+                    self.assertIn("--build-arg PLURX_MEDIA_RUNTIME_REPOSITORY=" + (override or "ghcr.io/pjunod/cinema-media-runtime"), builds[0])
                     self.assertIn("--build-arg PLURX_BUILD_SHA=" + sha, builds[0])
                     self.assertNotIn("PLURX_MEDIA_RUNTIME_DIGEST=", builds[0])
                     self.assertFalse(any("Dockerfile.media-runtime" in call for call in calls))

@@ -25,17 +25,31 @@ _DAEMON_SOURCES = ("Cargo.toml", "Cargo.lock", "crates")
 IMMUTABLE_IMAGE = re.compile(
     r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}$"
 )
+MEDIA_REPOSITORY_ARG = "PLURX_MEDIA_RUNTIME_REPOSITORY"
+MEDIA_REPOSITORY_DEFAULT = "ghcr.io/pjunod/cinema-media-runtime"
+MEDIA_REPOSITORY_DECLARATION = f"ARG {MEDIA_REPOSITORY_ARG}={MEDIA_REPOSITORY_DEFAULT}\n"
 MEDIA_REGISTRY_ARG = "PLURX_MEDIA_REGISTRY"
 MEDIA_REGISTRY_DEFAULT = "forge.lan:3000"
 MEDIA_REGISTRY_DECLARATION = f"ARG {MEDIA_REGISTRY_ARG}={MEDIA_REGISTRY_DEFAULT}\n"
 
 
-def pinned_runtime_image(source: str, registry: str | None = None) -> str | None:
-    """Resolve a committed media digest; only the registry address may vary."""
+def pinned_runtime_image(source: str, registry: str | None = None, *, repository: str | None = None) -> str | None:
+    """Resolve committed media bytes; an explicit mirror may change the repository."""
     stages = [stage for stage in _stages(source) if stage.name == RUNTIME_ASSETS]
     if len(stages) != 1:
         return None
     base = stages[0].base
+    repository_variable = "${" + MEDIA_REPOSITORY_ARG + "}"
+    if repository_variable in base:
+        preamble = source[:_stages(source)[0].start]
+        if preamble.count(MEDIA_REPOSITORY_DECLARATION) != 1:
+            raise ValueError("media repository requires its explicit global default")
+        address = repository if repository is not None else (
+            registry + "/noirr/plurx-media-runtime" if registry is not None else MEDIA_REPOSITORY_DEFAULT
+        )
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.:-]*/[a-z0-9][a-z0-9._/-]*", address):
+            raise ValueError("media repository must be REGISTRY/REPOSITORY without a tag or digest")
+        base = base.replace(repository_variable, address)
     variable = "${" + MEDIA_REGISTRY_ARG + "}"
     if variable in base:
         preamble = source[:_stages(source)[0].start]
@@ -368,6 +382,7 @@ def render(source: str, runtime_image: str | None = None, linux_dolby_package: b
     )
     generated = (
         "# syntax=docker/dockerfile:1\n\n"
+        + (MEDIA_REPOSITORY_DECLARATION + "\n" if "${PLURX_MEDIA_RUNTIME_REPOSITORY}" in runtime else "")
         + (MEDIA_REGISTRY_DECLARATION + "\n" if "${PLURX_MEDIA_REGISTRY}" in runtime else "")
         + "# Generated from the tagged runtime stage by "
         "validation.release_dockerfile.\n"
@@ -428,7 +443,8 @@ def main() -> int:
     mode.add_argument("--list-debug-binaries", action="store_true")
     mode.add_argument("--binary-export", action="store_true")
     mode.add_argument("--print-runtime-image", action="store_true")
-    parser.add_argument("--media-registry")
+    parser.add_argument("--media-registry", help="legacy registry-only mirror override")
+    parser.add_argument("--media-repository", help="explicit full mirror repository")
     parser.add_argument("--runtime-image")
     parser.add_argument("--linux-dolby-package", action="store_true")
     parser.add_argument("source", type=Path)
@@ -438,10 +454,12 @@ def main() -> int:
     if args.print_runtime_image:
         if args.output or args.runtime_image or args.linux_dolby_package:
             parser.error("--print-runtime-image only accepts the source and registry")
-        print(pinned_runtime_image(source, args.media_registry) or "")
+        if args.media_registry and args.media_repository:
+            parser.error("choose --media-repository or the legacy --media-registry override")
+        print(pinned_runtime_image(source, args.media_registry, repository=args.media_repository) or "")
         return 0
-    if args.media_registry:
-        parser.error("--media-registry requires --print-runtime-image")
+    if args.media_registry or args.media_repository:
+        parser.error("media mirror overrides require --print-runtime-image")
     if args.linux_dolby_package and (args.binary_export or args.list_binaries or args.list_debug_binaries):
         parser.error("--linux-dolby-package is only valid when rendering packaging")
     if args.runtime_image and (args.binary_export or args.list_binaries or args.list_debug_binaries):

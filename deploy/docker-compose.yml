@@ -47,9 +47,9 @@ services:
       context: ..            # repo root (where the Dockerfile + workspace live)
       dockerfile: Dockerfile
       args:
-        # Only the registry address varies; Dockerfile fixes the media digest.
-        # make docker-up infers a default from origin; .env can override it.
-        PLURX_MEDIA_REGISTRY: ${PLURX_MEDIA_REGISTRY:-${PLURX_MEDIA_REGISTRY_DEFAULT:-forge.lan:3000}}
+        # Public by default; Dockerfile fixes the digest independently of the repository.
+        # Explicit mirror overrides also work in .env when Compose is run directly.
+        PLURX_MEDIA_RUNTIME_REPOSITORY: ${PLURX_MEDIA_RUNTIME_REPOSITORY:-${PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT:-ghcr.io/pjunod/cinema-media-runtime}}
         # Which commit this image is. `.git` is deliberately outside the build
         # context, so the build script cannot work it out for itself and a
         # bare `docker compose up -d --build` produces an image stamped
