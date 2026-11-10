@@ -13,9 +13,10 @@ OTHER = "sha256:" + "c" * 64
 DOCKER = """#!/usr/bin/env bash
 set -eu
 echo "$*" >> "$TRANSCRIPT"
+if [[ "$1" == build ]]; then echo "builder ${BUILDX_BUILDER-}" >> "$TRANSCRIPT"; fi
 case "$1 $2" in
   'buildx imagetools')
-    if [[ "$SCENARIO" == missing ]]; then echo 'manifest unknown' >&2; exit 1; fi
+    if [[ "$SCENARIO" == missing || ( "$SCENARIO" == build && ! -f "$BUILT" ) ]]; then echo 'manifest unknown' >&2; exit 1; fi
     if [[ "$SCENARIO" == moved && -f "$PULLED" ]]; then echo "Digest: $OTHER"; else echo "Digest: $DIGEST"; fi ;;
   'pull --platform') touch "$PULLED" ;;
   'image inspect')
@@ -27,6 +28,7 @@ case "$1 $2" in
       *) exit 2 ;;
     esac ;;
   'run --rm') if [[ "${!#}" == --version ]]; then echo "plurxd ($PLURX_BUILD_REF)"; else echo "$PLURX_BUILD_SHA"; fi ;;
+  'build '*) touch "$BUILT" ;;
   'tag '*|'push '*) ;;
   *) exit 2 ;;
 esac
@@ -34,6 +36,51 @@ esac
 
 
 class RegistryPushCase(unittest.TestCase):
+    def test_source_publication_build_forwards_registry_without_changing_the_media_pin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                            "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty",
+                            "-qm", "fixture"], cwd=root, check=True)
+            sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            (root / "scripts").mkdir()
+            docker = root / "docker"
+            docker.write_text(DOCKER)
+            docker.chmod(0o755)
+            smoke = root / "scripts/container-smoke"
+            smoke.write_text('#!/bin/sh\necho "smoke $1" >> "$TRANSCRIPT"\n')
+            smoke.chmod(0o755)
+            for override in (None, "mirror.invalid:5000"):
+                with self.subTest(media_registry=override):
+                    suffix = "default" if override is None else "mirror"
+                    transcript = root / (suffix + ".log")
+                    env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
+                               PLURX_REGISTRY="registry.invalid:3000", PLURX_BUILD_SHA=sha,
+                               BUILDX_BUILDER="plurx-main-fixture",
+                               PLURX_BUILD_REF=sha, PLURX_SOURCE_URL="https://forge.invalid/repo",
+                               DIGEST=DIGEST, EXPECTED=IMAGE_ID, OTHER=OTHER, SCENARIO="build",
+                               BUILT=str(root / (suffix + ".built")),
+                               PULLED=str(root / (suffix + ".pulled")), TRANSCRIPT=str(transcript))
+                    env.pop("PLURX_EXPECTED_IMAGE_ID", None)
+                    env.pop("PLURX_MEDIA_REGISTRY", None)
+                    if override is not None:
+                        env["PLURX_MEDIA_REGISTRY"] = override
+                    result = subprocess.run([str(SCRIPT)], cwd=root, env=env,
+                                            text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    calls = transcript.read_text().splitlines()
+                    builds = [call for call in calls if call.startswith("build ")]
+                    self.assertEqual(len(builds), 1, calls)
+                    self.assertEqual(calls.count("builder plurx-main-fixture"), 1, calls)
+                    self.assertIn("--build-arg PLURX_MEDIA_REGISTRY=" + (override or "registry.invalid:3000"), builds[0])
+                    self.assertIn("--build-arg PLURX_BUILD_SHA=" + sha, builds[0])
+                    self.assertNotIn("PLURX_MEDIA_RUNTIME_DIGEST=", builds[0])
+                    self.assertFalse(any("Dockerfile.media-runtime" in call for call in calls))
+                    self.assertFalse(any("linux-dolby-package" in call for call in calls))
+                    smoke_index = calls.index("smoke registry.invalid:3000/noirr/plurxd:sha-" + sha[:12])
+                    self.assertGreater(calls.index("tag registry.invalid:3000/noirr/plurxd:sha-" + sha[:12] + " registry.invalid:3000/noirr/plurxd:main"), smoke_index)
+
     def test_verified_publication_requires_the_reviewed_manifest_and_configuration(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

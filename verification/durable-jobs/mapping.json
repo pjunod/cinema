@@ -241,13 +241,13 @@
       },
       {
         "anchor": "pub(super) const REPLICATED_STORE_TIMEOUT: &str = \"replicated store operation timed out\";",
-        "sha256": "c1e3305a0c7d3842fad74960087c4c844ea725f7f36cf5460ecc0b9c5048bf3b",
+        "sha256": "54142a67207f608f343e54cd761417a8000c93d491b5739048586f1120f6554c",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "M2 Hiqlite replicated timeout classification"
       },
       {
         "anchor": "                        super::background_jobs::RETENTION_SCHEMA",
-        "sha256": "c1e3305a0c7d3842fad74960087c4c844ea725f7f36cf5460ecc0b9c5048bf3b",
+        "sha256": "54142a67207f608f343e54cd761417a8000c93d491b5739048586f1120f6554c",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585"
       },

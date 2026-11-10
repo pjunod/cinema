@@ -526,6 +526,31 @@ def shipping_system_objects(package):
     return objects
 
 
+def verify_shipping_runtime(package):
+    """Recheck installed audited bytes and complete system-provider manifests.
+
+    The caller separately runs the shipping manifest's checksum verification
+    inside the immutable runtime. This check binds both manifests to the exact
+    audited path inventory while allowing the recorded shipping-base revisions.
+    """
+    facts = validate_shipping_package(package)
+    expected = shipping_system_objects(package)
+    manifests = {}
+    for name in ["system-elf-sha256.txt", "shipping-system-elf-sha256.txt"]:
+        rows = {}
+        for line in (package / "provenance" / name).read_text().splitlines():
+            match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+            if match is None or match[2] not in expected or match[2] in rows:
+                raise ValueError("shipping system ELF manifest has invalid or duplicate audited paths")
+            rows[match[2]] = match[1]
+        if set(rows) != set(expected):
+            raise ValueError("shipping system ELF manifest omits audited providers")
+        manifests[name] = rows
+    if manifests["system-elf-sha256.txt"] != expected:
+        raise ValueError("installed system ELF inventory differs from the audited capsule")
+    return facts
+
+
 def verify_source_download(path, expected):
     """Report a mismatch by public input name and hashes only, never by local directory."""
     actual = sha(path)
@@ -778,7 +803,7 @@ def package_pipeline(root, jobs, seconds):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--step", required=True, choices=["prepare", "configure", "compile", "install", "assemble", "verify-closure", "docker-build", "install-shipping", "pipeline"])
+    parser.add_argument("--step", required=True, choices=["prepare", "configure", "compile", "install", "assemble", "verify-closure", "docker-build", "install-shipping", "verify-shipping", "pipeline"])
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--sdk", type=Path)
     parser.add_argument("--source-archive", type=Path)
@@ -794,26 +819,28 @@ def main():
     args = parser.parse_args()
     if args.recorded_build_recipe is not None and args.step != "assemble":
         parser.error("recorded compilation authority is assembly-only")
+    if args.step == "docker-build":
+        parser.error(
+            "application builds now consume a pinned media image; publish the audited base with "
+            "scripts/media-runtime build --target runtime-assets-dolby-amd64 --platforms linux/amd64 "
+            "--package DIRECTORY --image REGISTRY/noirr/plurx-media-runtime:TAG --metadata FILE; "
+            "combine that image with the reviewed arm64 image using docker buildx imagetools create, "
+            "then use scripts/media-runtime pin REGISTRY/noirr/plurx-media-runtime@sha256:INDEX "
+            "to promote the complete multi-platform index"
+        )
     if args.step == "pipeline":
         facts = package_pipeline(args.root, args.jobs, args.deadline_seconds)
-    elif args.step in ["docker-build", "install-shipping"]:
+    elif args.step == "install-shipping":
         if args.output is None:
             parser.error("shipping requires --output actual audited package")
         facts = validate_shipping_package(args.output)
-        if args.step == "install-shipping":
-            if platform.machine() != "x86_64":
-                raise ValueError("Bookworm SDK shipping is amd64 only")
-            install_shipping_package(args.output, args.root)
-        else:
-            import subprocess
-            build_arguments = []
-            for argument in ["PLURX_BUILD_REF", "PLURX_BUILD_SHA", "SOURCE_DATE_EPOCH"]:
-                build_arguments.extend(["--build-arg", argument + "=" + getattr(args, argument.lower())])
-            subprocess.run(["docker", "buildx", "build", "--load", *build_arguments, "--platform", "linux/amd64",
-                "--build-context", "linux-dolby-package=" + str(args.output.resolve(strict=True)),
-                "--target", "runtime-dolby-amd64", "-t", args.image, str(args.root)], check=True)
-            # No deadline: this compiles plurxd, which a cold cache cannot do
-            # in a package phase's 600 s. The bounded phases are the package's.
+        if platform.machine() != "x86_64":
+            raise ValueError("Bookworm SDK shipping is amd64 only")
+        install_shipping_package(args.output, args.root)
+    elif args.step == "verify-shipping":
+        if args.output is None:
+            parser.error("verify-shipping requires --output pointing to installed runtime bytes")
+        facts = verify_shipping_runtime(args.output)
     elif args.step == "prepare":
         if args.sdk is None or args.source_archive is None:
             parser.error("prepare requires --sdk and --source-archive")

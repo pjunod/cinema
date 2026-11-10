@@ -229,7 +229,7 @@ jobs:
           '
           container="buildx_buildkit_${BUILDER}0"
           test "$(docker inspect --format '{{.Name}}' "$container")" = "/$container"
-          # This dedicated nonvoter builder shares the verified 12-GiB budget.
+          # This dedicated nonvoter builder shares the verified 20-GiB budget.
           # Bound its sibling container independently of the runner service.
           docker update --memory 20g --memory-swap 20g --pids-limit 4096 --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"
           test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}} {{.HostConfig.PidsLimit}}' "$container")" = '21474836480 21474836480 400000 100000 0-3 4096'
@@ -242,10 +242,15 @@ jobs:
         id: media-contract
         env:
           ARCH: ${{ matrix.arch }}
+          MEDIA_REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
         run: |
           set -euo pipefail
+          pinned_runtime=$(PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging" \
+            python3 -m validation.release_dockerfile --print-runtime-image --media-registry "$MEDIA_REGISTRY" release-source/Dockerfile)
+          echo "pinned_runtime=$pinned_runtime" >> "$GITHUB_OUTPUT"
           required=false
-          if test "$ARCH" = amd64 && grep -qx 'FROM scratch AS linux-dolby-package-export' release-source/Dockerfile; then
+          # Historical tags keep their original inline runtime build contract.
+          if test -z "$pinned_runtime" && test "$ARCH" = amd64 && grep -qx 'FROM scratch AS linux-dolby-package-export' release-source/Dockerfile; then
             required=true
           fi
           echo "dolby_required=$required" >> "$GITHUB_OUTPUT"
@@ -261,8 +266,9 @@ jobs:
           outputs: type=local,dest=linux-dolby-export
           provenance: false
           sbom: false
-      - name: Publish the reviewed platform runtime by immutable digest
-        id: runtime
+      - name: Publish the historical inline platform runtime by immutable digest
+        id: legacy-runtime
+        if: steps.media-contract.outputs.pinned_runtime == ''
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           builder: ${{ steps.release-builder.outputs.name }}
@@ -274,19 +280,64 @@ jobs:
           provenance: false
           sbom: false
           outputs: type=image,name=${{ env.REGISTRY_RUNTIME_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-      - name: Check the published runtime and record its packages
+      - name: Select the immutable runtime without rebuilding current dependencies
+        id: runtime
         env:
-          ARCH: ${{ matrix.arch }}
-          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+          PINNED_RUNTIME: ${{ steps.media-contract.outputs.pinned_runtime }}
+          LEGACY_RUNTIME_DIGEST: ${{ steps.legacy-runtime.outputs.digest }}
         run: |
           set -euo pipefail
-          runtime_ref="$REGISTRY_RUNTIME_IMAGE@$RUNTIME_DIGEST"
+          runtime_ref="$PINNED_RUNTIME"
+          if test -z "$runtime_ref"; then
+            test -n "$LEGACY_RUNTIME_DIGEST"
+            runtime_ref="$REGISTRY_RUNTIME_IMAGE@$LEGACY_RUNTIME_DIGEST"
+          fi
+          echo "ref=$runtime_ref" >> "$GITHUB_OUTPUT"
+          echo "digest=${runtime_ref##*@}" >> "$GITHUB_OUTPUT"
+      - name: Check the selected runtime and record its packages
+        env:
+          ARCH: ${{ matrix.arch }}
+          RUNTIME_REF: ${{ steps.runtime.outputs.ref }}
+        run: |
+          set -euo pipefail
+          runtime_ref="$RUNTIME_REF"
           docker pull --platform "linux/$ARCH" "$runtime_ref"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$runtime_ref")" = "linux/$ARCH"
           docker run --rm --platform "linux/$ARCH" --entrypoint cat "$runtime_ref" \
             /usr/share/doc/plurx/media-runtime-packages.txt > runtime-packages.txt
           grep -q '^jellyfin-ffmpeg8=8.1.3-1-bookworm$' runtime-packages.txt
           grep -q '^mkvtoolnix=74.0.0-1$' runtime-packages.txt
+      - name: Require audited amd64 provenance for the pinned release runtime
+        if: matrix.arch == 'amd64' && steps.media-contract.outputs.pinned_runtime != ''
+        env:
+          RUNTIME_REF: ${{ steps.runtime.outputs.ref }}
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 --entrypoint sh "$RUNTIME_REF" -eu -c '
+            provenance=/usr/lib/jellyfin-ffmpeg/provenance
+            if ! test -s "$provenance/linux-dolby-package.json" || ! test -s "$provenance/shipping-system-elf-sha256.txt"; then
+              echo "::error::Pinned amd64 runtime lacks audited Dolby shipping provenance. Publish and promote an audited media base before releasing." >&2
+              exit 1
+            fi
+            sha256sum -c "$provenance/shipping-system-elf-sha256.txt"
+            if dpkg-query -W -f="\${db:Status-Status}" libmfx1 2>/dev/null | grep -qx installed; then
+              echo "::error::Pinned amd64 runtime still contains the competing Debian Media SDK." >&2
+              exit 1
+            fi
+          '
+          audit_dir=$(mktemp -d "$RUNNER_TEMP/pinned-media-audit.XXXXXX")
+          audit_container=$(docker create --platform linux/amd64 "$RUNTIME_REF" /unused)
+          trap 'docker rm -f "$audit_container" >/dev/null; rm -rf "$audit_dir"' EXIT HUP INT TERM
+          mkdir -p "$audit_dir/provenance"
+          for name in ffmpeg ffprobe lib; do
+            docker cp "$audit_container:/usr/lib/jellyfin-ffmpeg/$name" "$audit_dir/$name"
+          done
+          docker cp "$audit_container:/usr/local/lib/plurx/ffprobe" "$audit_dir/sealed-ffprobe"
+          for name in linux-dolby-package.json system-elf-sha256.txt shipping-system-elf-sha256.txt; do
+            docker cp "$audit_container:/usr/lib/jellyfin-ffmpeg/provenance/$name" "$audit_dir/provenance/$name"
+          done
+          python3 trusted-packaging/scripts/build-linux-dolby-ffmpeg --step verify-shipping \
+            --root "$audit_dir" --output "$audit_dir"
       - name: Compile and export the exact tagged binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -328,16 +379,16 @@ jobs:
               python3 -m validation.release_dockerfile --list-binaries \
               release-source/Dockerfile
           )
-      - name: Bind release packaging to the published runtime digest
+      - name: Bind release packaging to the selected runtime digest
         env:
-          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+          RUNTIME_REF: ${{ steps.runtime.outputs.ref }}
         run: |
           set -euo pipefail
           PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging" \
             python3 -m validation.release_dockerfile \
-            --runtime-image "$REGISTRY_RUNTIME_IMAGE@$RUNTIME_DIGEST" \
+            --runtime-image "$RUNTIME_REF" \
             release-source/Dockerfile release-source/Dockerfile.release
-          grep -Fq "FROM $REGISTRY_RUNTIME_IMAGE@$RUNTIME_DIGEST AS runtime-assets" \
+          grep -Fq "FROM $RUNTIME_REF AS runtime-assets" \
             release-source/Dockerfile.release
       - name: Build and push the untagged platform manifest
         id: build

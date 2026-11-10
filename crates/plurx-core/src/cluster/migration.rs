@@ -2935,6 +2935,10 @@ async fn open_active_store_with_key(
         }
         identity.raft_id = membership.raft_id;
     }
+    // Before hiqlite starts: its static `nodes` come from this list.
+    if let Some(membership) = local_membership.as_mut() {
+        refresh_bootstrap_from_committed(&config.storage.data_dir, &active, membership)?;
+    }
     let secrets = read_existing_secrets(&config.storage.data_dir)?;
     let force_loopback = should_force_loopback(config, local_membership.as_ref());
     let cleanup_lock = daemon_lock
@@ -3754,14 +3758,10 @@ async fn start_voter(
         },
         None => configured_local_peer(config, identity.raft_id)?,
     };
-    let mut nodes = local_membership
-        .map(|membership| membership.bootstrap.clone())
-        .unwrap_or_default();
-    nodes.retain(|peer| peer.raft_id != local.raft_id);
-    nodes.push(local.clone());
-    nodes.sort_by_key(|peer| peer.raft_id);
-    nodes.dedup_by_key(|peer| peer.raft_id);
-    let nodes = hiqlite_nodes_for_voter(&nodes, local.raft_id)?;
+    let nodes = hiqlite_roster(
+        local_membership.map_or(&[][..], |membership| membership.bootstrap.as_slice()),
+        &local,
+    )?;
 
     // The daemon lock guards one data directory, but these ports are host-wide
     // and default to fixed values, so two data directories on one host collide.
@@ -4175,6 +4175,116 @@ fn production_hiqlite_defaults(config: &Config) -> NodeConfig {
     defaults.snapshot_transfer_timeout =
         snapshot_timeout_duration(config.cluster.snapshot_transfer_timeout_secs);
     defaults
+}
+
+/// Hiqlite's static `nodes` for this boot: the recorded bootstrap list with the
+/// local peer replaced by its current address.
+#[cfg(feature = "hiqlite-store")]
+fn hiqlite_roster(bootstrap: &[ClusterPeer], local: &ClusterPeer) -> Result<Vec<Node>, StoreError> {
+    let mut nodes = bootstrap.to_vec();
+    nodes.retain(|peer| peer.raft_id != local.raft_id);
+    nodes.push(local.clone());
+    nodes.sort_by_key(|peer| peer.raft_id);
+    nodes.dedup_by_key(|peer| peer.raft_id);
+    hiqlite_nodes_for_voter(&nodes, local.raft_id)
+}
+
+/// Live peers (voters and learners) in the closed state machine's
+/// `cluster_nodes`, read the way [`admitted_peer_count`] reads it: read-only,
+/// before hiqlite starts. `None` means the committed membership cannot be
+/// consulted (no state machine, no table, unreadable, or it does not list
+/// `raft_id` as live), and the caller keeps the recorded bootstrap list.
+#[cfg(feature = "hiqlite-store")]
+fn committed_live_peers(active: &Path, raft_id: u64) -> Option<Vec<ClusterPeer>> {
+    let database = active
+        .join("state_machine")
+        .join("db")
+        .join(HIQLITE_DATABASE_FILENAME);
+    if !database.is_file() {
+        return None;
+    }
+    let read = || -> Result<Vec<ClusterPeer>, rusqlite::Error> {
+        let connection = Connection::open_with_flags(
+            &database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let table_exists = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cluster_nodes'",
+            (),
+            |row| row.get::<_, i64>(0),
+        )?;
+        if table_exists == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = connection.prepare(
+            "SELECT raft_id, raft_address, api_address FROM cluster_nodes \
+             WHERE removed_at IS NULL ORDER BY raft_id",
+        )?;
+        let rows = statement.query_map((), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut peers = Vec::new();
+        for row in rows {
+            let (id, raft_address, api_address) = row?;
+            if id > 0 {
+                peers.push(ClusterPeer {
+                    raft_id: id as u64,
+                    raft_address,
+                    api_address,
+                });
+            }
+        }
+        Ok(peers)
+    };
+    match read() {
+        Ok(peers) if peers.iter().any(|peer| peer.raft_id == raft_id) => Some(peers),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "cannot read committed membership before start; keeping recorded bootstrap peers"
+            );
+            None
+        }
+    }
+}
+
+/// Replace `membership.bootstrap` with the committed live peer set and
+/// persist it when it changed. Hiqlite copies `nodes` into its split-brain
+/// check at start, so this must run before the node starts; `membership.json`
+/// records the join-time list and is never otherwise refreshed, so ids removed
+/// since then would warn forever. Returns whether the file was rewritten.
+#[cfg(feature = "hiqlite-store")]
+fn refresh_bootstrap_from_committed(
+    data_dir: &Path,
+    active: &Path,
+    membership: &mut LocalMembership,
+) -> Result<bool, StoreError> {
+    let Some(committed) = committed_live_peers(active, membership.raft_id) else {
+        return Ok(false);
+    };
+    let own = membership
+        .bootstrap
+        .iter()
+        .find(|peer| peer.raft_id == membership.raft_id)
+        .cloned()
+        .unwrap_or_else(|| membership.local.clone());
+    let mut bootstrap: Vec<ClusterPeer> = committed
+        .into_iter()
+        .filter(|peer| peer.raft_id != membership.raft_id)
+        .collect();
+    bootstrap.push(own);
+    bootstrap.sort_by_key(|peer| peer.raft_id);
+    if bootstrap == membership.bootstrap {
+        return Ok(false);
+    }
+    membership.bootstrap = bootstrap;
+    write_local_membership(data_dir, membership)?;
+    Ok(true)
 }
 
 /// Build Hiqlite's connection roster without treating durable Raft ids as

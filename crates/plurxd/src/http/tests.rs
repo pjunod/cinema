@@ -2852,12 +2852,19 @@ pub(super) fn test_app_with_state() -> (Router, AppState) {
 
 pub(super) fn test_state_without_router() -> AppState {
     let store = SqliteStore::open_in_memory().expect("store");
+    test_state_with_store(Arc::new(store), "test-node".into())
+}
+
+pub(super) fn test_state_with_store(
+    store: Arc<dyn plurx_core::store::Store>,
+    node_id: String,
+) -> AppState {
     let base = crate::test_temp_path(format!("plurx-test-{}", uuid::Uuid::new_v4()));
     AppState::new(
         "test".into(),
-        Arc::new(store),
+        store,
         test_dirs(&base),
-        "test-node".into(),
+        node_id,
         Default::default(),
         Default::default(),
         Arc::new(crate::logbuf::LogBuffer::new(64)),

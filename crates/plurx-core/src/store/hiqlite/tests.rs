@@ -165,7 +165,7 @@ fn media_session_dump_retains_terminal_and_publication_fence_fields() {
     let row = MediaSessionDumpRow {
         incarnation_id: "incarnation".to_owned(),
         session_id: "session".to_owned(),
-        user_id: 1,
+        user_id: Some(1),
         playback_id: "playback".to_owned(),
         request_fingerprint: "fingerprint".to_owned(),
         owner_node_id: "node".to_owned(),
@@ -187,6 +187,39 @@ fn media_session_dump_retains_terminal_and_publication_fence_fields() {
     let encoded = serde_json::to_value(row).expect("serialize media session dump row");
     assert_eq!(encoded["terminal_reason"], "deleted");
     assert_eq!(encoded["publication_ready_at_ms"], 4);
+}
+
+/// A sharing session is principal-less: its owner is a grant and viewer key,
+/// and `user_id` is NULL. The replica-equality dump covers every principal row
+/// regardless of kind, so each of the four principal-keyed rows must decode it.
+#[test]
+fn principal_keyed_dump_rows_decode_a_sharing_row_with_no_user() {
+    fn decodes<T: serde::de::DeserializeOwned>(mut row: serde_json::Value) {
+        row["user_id"] = serde_json::Value::Null;
+        serde_json::from_value::<T>(row).expect("a sharing row has no local user");
+    }
+    decodes::<MediaSessionRequestDumpRow>(serde_json::json!({
+        "request_id": "r", "request_fingerprint": "f", "playback_id": "p",
+        "state": "starting", "claim_expires_at_ms": 1, "incarnation_id": "i",
+        "owner_node_id": null, "response_json": null, "updated_at_ms": 2
+    }));
+    decodes::<MediaPlaybackPointerDumpRow>(serde_json::json!({
+        "playback_id": "p", "current_incarnation_id": "i", "updated_at_ms": 2
+    }));
+    decodes::<MediaSessionPreparationDumpRow>(serde_json::json!({
+        "playback_id": "p", "staged_incarnation_id": "s",
+        "expected_predecessor_incarnation_id": "e", "deadline_ms": 1,
+        "created_at_ms": 2, "updated_at_ms": 3
+    }));
+    decodes::<MediaSessionDumpRow>(serde_json::json!({
+        "incarnation_id": "i", "session_id": "s", "playback_id": "p",
+        "request_fingerprint": "f", "owner_node_id": "n", "owner_epoch": 1,
+        "lease_expires_at_ms": 1, "state": "active", "terminal_reason": null,
+        "publication_ready_at_ms": 0, "recipe_json": "{}", "response_json": "{}",
+        "produced_playable_through_ms": 0, "fetched_through_ms": 0,
+        "media_origin_ms": 0, "media_sequence": 0, "discontinuity_sequence": 0,
+        "updated_at_ms": 2
+    }));
 }
 
 #[tokio::test(start_paused = true)]

@@ -87,7 +87,9 @@ leaf and default job containers carry the same explicit limits. Both default
 and named BuildKit RUN executors were observed inside the aggregate; declared
 workflow options alone did not establish containment on the deployed runner.
 Every heavy job verifies effective cgroup files before installing tools.
-AMD package and automatic-publisher actions use the inspected named builder.
+AMD package, automatic-publisher and explicit media-runtime actions use the
+inspected named builder. Manual main publication selects its inspected builder
+through `BUILDX_BUILDER` and loads the result before its existing push and smoke.
 
 The 31.22 GiB physical host leaves 7.22 GiB outside the VM. The other owner's
 source-only compiler container stays stopped, with autostart disabled and

@@ -240,6 +240,9 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                     for name in ("deep-validation", "mutation"))
         jobs.append((".github/workflows/publish-release.yml", "image",
                      self.job(".github/workflows/publish-release.yml", "image")))
+        jobs.append((self.WORKFLOWS[0], "publish_main", self.job(self.WORKFLOWS[0], "publish_main")))
+        jobs.append((".github/workflows/media-runtime.yml", "platform",
+                     self.job(".github/workflows/media-runtime.yml", "platform")))
         return jobs
 
     def verifier(self, job, package=False):
@@ -277,7 +280,7 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
         for path, name, job in self.guarded_jobs():
             with self.subTest(workflow=path, job=name):
                 header = job.split("    steps:\n", 1)[0]
-                if name in {"package_smoke", "image"}:
+                if name in {"package_smoke", "image", "platform"}:
                     self.assertIn("runs_on: '[\"ci-nonvoter-heavy-amd64\"]'", header)
                 else:
                     expected_route = "[incus, ci-nonvoter-heavy-amd64]" if name in {"deep-validation", "mutation"} else self.ROUTE
@@ -290,15 +293,16 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                         self.assertEqual(len(set(argv[::2])), len(self.CAPS))
                         self.assertEqual(dict(zip(argv[::2], argv[1::2])), self.CAPS)
                     else:
-                        self.assertIn(name, {"cluster_wal", "deep-validation", "mutation"})
-                    self.assertIn('      CARGO_BUILD_JOBS: "1"\n', header)
-                scripts.append(self.verifier(job, name in {"package_smoke", "image"}))
-        self.assertEqual(len(scripts), 12)
-        self.assertEqual(len(set(scripts)), 1, "all twelve routes must execute the same actual cgroup checks")
+                        self.assertIn(name, {"cluster_wal", "deep-validation", "mutation", "publish_main"})
+                    if name != "publish_main":
+                        self.assertIn('      CARGO_BUILD_JOBS: "1"\n', header)
+                scripts.append(self.verifier(job, name in {"package_smoke", "image", "platform"}))
+        self.assertEqual(len(scripts), 14)
+        self.assertEqual(len(set(scripts)), 1, "all fourteen routes must execute the same actual cgroup checks")
 
     def test_actual_posix_verifier_accepts_private_and_host_service_cgroups(self):
         for path, name, job in self.guarded_jobs():
-            script = self.verifier(job, name in {"package_smoke", "image"})
+            script = self.verifier(job, name in {"package_smoke", "image", "platform"})
             for relative in ("/", "/system.slice/plurx-heavy-runner.service"):
                 with self.subTest(workflow=path, job=name, cgroup=relative):
                     result, started = self.run_verifier(script, relative=relative)
@@ -316,7 +320,7 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
         variants.append({**self.EFFECTIVE, "memory.max": "17179869184",
                          "memory.swap.max": "17179869184", "cpu.max": "max 100000"})
         for path, name, job in self.guarded_jobs():
-            script = self.verifier(job, name in {"package_smoke", "image"})
+            script = self.verifier(job, name in {"package_smoke", "image", "platform"})
             for values in variants:
                 with self.subTest(workflow=path, job=name, effective=values):
                     result, started = self.run_verifier(script, values=values)
@@ -525,6 +529,16 @@ class AmdPackageBuilderGuardTests(unittest.TestCase):
 class AmdPublisherBuilderGuardTests(AmdPackageBuilderGuardTests):
     WORKFLOW = ".github/workflows/publish-release.yml"
     GUARD_NAME = "Bound the AMD publisher builder before compilation"
+
+
+class AmdMediaRuntimeBuilderGuardTests(AmdPackageBuilderGuardTests):
+    WORKFLOW = ".github/workflows/media-runtime.yml"
+    GUARD_NAME = "Bound the AMD media builder before compilation"
+
+
+class MainPublisherBuilderGuardTests(AmdPackageBuilderGuardTests):
+    WORKFLOW = ".github/workflows/ci.yml"
+    GUARD_NAME = "Bound the main publisher builder before compilation"
 
 
 class VoterSliceAndComposeTests(unittest.TestCase):
