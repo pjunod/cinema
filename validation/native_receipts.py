@@ -73,11 +73,11 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed source-budget addition is only the dv-rgb-conversion-check
-    # media target. Apple/native targets, flags and bundled-resource inputs
-    # are unchanged. Only this exact current spec is accepted; this does not
-    # authorize old-to-new Makefile receipt adoption.
-    'Makefile': 'df9c99f78aab7649439e60cc376cf0796ee744ff19b39396ef78aad5a079a112',
+    # Reviewed Cinema consolidation changes only Linux Debian frontend
+    # comments/help; Apple/macOS recipes, flags and external inputs are unchanged.
+    # Pin these exact current bytes. This does not authorize old-to-new receipt
+    # adoption, and added resources/scripts still change the strict boundary.
+    'Makefile': 'b86796a6b626deebb196632fe5a6396a537d48dc292f9b97e670bafaec5fa925',
     # Reviewed 0.8.0 build 294: only CURRENT_PROJECT_VERSION differs from the
     # reviewed build 293 bytes (d686e9d8b changed the Apple client after 293
     # was claimed). Pin this exact spec; build-293 case receipts do not
