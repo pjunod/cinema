@@ -184,6 +184,7 @@ impl PendingFelQualification {
             && self.source_object_version.len() <= 1024
             && !self.source_object_version.chars().any(char::is_control)
     }
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
     pub(crate) fn matches(
         &self,
         file_id: i64,
@@ -202,6 +203,7 @@ impl PendingFelQualification {
     }
 }
 
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 pub(crate) fn pending_fel_qualification_error(wait: PendingFelQualification) -> String {
     debug_assert!(wait.valid());
     vod_refusal_error(
@@ -220,6 +222,15 @@ pub(crate) fn pending_fel_qualification(error: &str) -> Option<PendingFelQualifi
     }
     let wait: PendingFelQualification = serde_json::from_str(body).ok()?;
     wait.valid().then_some(wait)
+}
+
+/// Ordinary delivery reports an explanation, never the private continuation
+/// data that a deferred upgrade alone is allowed to consume.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub(crate) fn ordinary_processing_decline(reason: String) -> String {
+    pending_fel_qualification(&reason)
+        .map(|wait| wait.reason().to_owned())
+        .unwrap_or(reason)
 }
 
 /// Catalog evidence became unavailable before dispatch; the existing create

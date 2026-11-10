@@ -3729,8 +3729,7 @@ impl TranscodeManager {
                         // Process-private continuation data is consumed only
                         // by a deferred trial. Legacy/direct preparations keep
                         // the explanatory sentence, never its source/recipe token.
-                        let reason = pending_fel_qualification(&reason)
-                            .map(|wait| wait.reason().to_owned()).unwrap_or(reason);
+                        let reason = ordinary_processing_decline(reason);
                         retained.3 = plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
                             plurx_core::transcode::dv_processing::DvFallbackReason::BackendFailure);
                         tracing::warn!(target: "plurxd::transcode", %reason,

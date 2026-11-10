@@ -306,3 +306,27 @@ async fn a_viewer_change_cancels_a_pending_receipt_check_before_it_can_resume() 
         "cancellation never clears the truthful ordinary-delivery explanation");
     drop(viewer);super::processed_upgrade::cancel_for_session(&session);
 }
+
+
+#[tokio::test]
+async fn an_ordinary_fallback_reports_the_reason_without_private_qualification_data() {
+    let dir=crate::test_tempdir().expect("state dir");
+    let playback=unique_playback_id("private-fel-token");
+    let (fixture,_,_)=staging_fixture_for_playback(dir.path(),&playback).await;
+    let mut file=fixture.store.get_file(fixture.file_id()).await.expect("file read").expect("source");
+    file.hdr=Some("dolby_vision".into());
+    file.dolby_vision.profile=Some(7);file.dolby_vision.el_present=Some(true);
+    let wait=super::processed_upgrade::pending_qualification_fixture(file.id,file.size,file.mtime,0,"private-held-object");
+    let private=crate::transcode::pending_fel_qualification_error(wait);
+    let public=crate::transcode::ordinary_processing_decline(private);
+    let kind=crate::transcode::SessionKind::Copy {aac:false,preserve_dolby_vision:true,
+        convert_dolby_vision:true,dual_layer_as_copied:false};
+    let enhancement=session_enhancement(Some(&file),&kind,plurx_core::transcode::OutputGrade::Hdr10,
+        None,None,None,None,Some(&public)).expect("DV explanation");
+    let wire=serde_json::to_string(&enhancement).expect("public enhancement");
+    assert!(wire.contains("quality measurement (queued or running)"));
+    for private in ["private-held-object","source_object_version","settings_generation","backend_identity","fel_qualification_pending"] {
+        assert!(!wire.contains(private),"private continuation data must not enter Playback Info: {wire}");
+    }
+    assert_eq!(crate::transcode::ordinary_processing_decline("the decoder refused the window".into()),"the decoder refused the window");
+}
