@@ -10,6 +10,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Preparation demand reads Local viewers on both admitted session layouts,
+  without requiring the optional principal-rebuild column or admitting Shared viewers.
 - Subtitle extraction and durable self-claim futures use heap storage at their
   existing ownership boundaries, preventing debug-stack overflow without changing
   extraction deadlines or cancellation cleanup.

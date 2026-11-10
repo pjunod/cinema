@@ -143,6 +143,20 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
             owned[0].principal,
             PlaybackPrincipal::LocalUser { user_id: 1 }
         );
+        let viewers = store
+            .preparation_demands(100)
+            .await
+            .expect("preparation demand on either admitted session layout")
+            .into_iter()
+            .filter_map(|demand| match demand {
+                plurx_core::store::background_jobs_preparation::PreparationDemand::Viewer {
+                    user_id,
+                    ..
+                } => Some(user_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(viewers, [1], "Shared principals never become Local viewers");
         client
             .execute(
                 "UPDATE media_sessions SET recipe_json=$1 WHERE incarnation_id='live'",
