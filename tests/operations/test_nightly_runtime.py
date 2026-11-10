@@ -18,7 +18,7 @@ class NightlyRuntimeCase(unittest.TestCase):
         ):
             with self.subTest(job=name):
                 block = re.split(r'(?m)^  [\w-]+:\n', source.split('\n  '+name+':\n', 1)[1], maxsplit=1)[0]
-                self.assertIn('runs-on: [self-hosted, Linux, X64, lab, incus, ci-store]', block)
+                self.assertIn('runs-on: [incus, ci-nonvoter-heavy-amd64]', block)
                 self.assertIn(command, block)
                 self.assertNotIn('uses: ./.github/actions/ffmpeg', block)
                 self.assertIn("if: ${{ !inputs.fuzz_only }}", block)

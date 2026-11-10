@@ -378,11 +378,13 @@ jobs:
     name: fast Rust gate
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, lab, high-cpu]
+    runs-on: [ci-nonvoter-heavy-amd64]
     # The online generic runners currently carry ffmpeg 8. Ubuntu 24.04 is the
     # pinned ffmpeg 6 environment used by this lane, while the host label keeps
     # the job on the high-CPU pool.
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
     # Compile all targets and enforce workspace/vendor Clippy here. The full
     # Rust unit and SQLite suites belong to manual full CI, while each change
     # carries its named, locally run focused regression through preflight.
@@ -394,6 +396,26 @@ jobs:
       # Keep compilation within the shared guest's memory budget.
       CARGO_BUILD_JOBS: "1"
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Install Rust gate prerequisites
         run: |
           set -euo pipefail

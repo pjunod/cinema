@@ -1895,7 +1895,7 @@ assert.equal(context.ACT_TIMER, null);
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
         self.assertIn("timeout-minutes: 60", fast_rust)
-        compiler_pool = "runs-on: [self-hosted, Linux, lab, high-cpu]"
+        compiler_pool = "runs-on: [ci-nonvoter-heavy-amd64]"
         for compiler_job in (
             metadata_jobs["rust_compile"],
             workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
@@ -2668,6 +2668,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(
             list(effort_rust_steps),
             [
+                "Verify effective nonvoter resource bounds",
                 "Install Rust gate prerequisites",
                 "Check out the candidate",
                 "Install the pinned Rust toolchain",
@@ -2695,6 +2696,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(
             list(fast_rust_steps),
             [
+                "Verify effective nonvoter resource bounds",
                 "Install Rust gate prerequisites",
                 "Check out the candidate",
                 "Install the pinned Rust toolchain",
@@ -2706,7 +2708,7 @@ assert.equal(context.ACT_TIMER, null);
                 "Restore persistent runner workspace ownership",
             ],
         )
-        self.assertIn("container: ubuntu:24.04", fast_jobs["rust_compile"])
+        self.assertIn("      image: ubuntu:24.04", fast_jobs["rust_compile"])
         prerequisites = workflow_step_literal(
             fast_rust_steps["Install Rust gate prerequisites"], "run"
         )
@@ -3343,11 +3345,11 @@ assert.equal(context.ACT_TIMER, null);
         job = workflow_job_blocks(".github/workflows/ci.yml")["check"]
         header = job.split("    steps:\n", 1)[0]
         self.assertIn(
-            "    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]\n",
+            "    runs-on: [ci-nonvoter-heavy-amd64]\n",
             header,
         )
         self.assertIn(
-            "      options: --cpus 3 --memory 16g --memory-swap 18g --pids-limit 4096\n",
+            "      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096\n",
             header,
         )
         self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"\n      RUST_TEST_THREADS: "2"\n', header)
@@ -3366,10 +3368,42 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("CARGO_PROFILE_", job)
         self.assertNotIn("continue-on-error", job)
         fleet = runner_fleet()
-        carriers = [row for row in fleet["runners"] if "ci-topology" in row["labels"]]
+        carriers = [row for row in fleet["runners"] if "ci-nonvoter-heavy-amd64" in row["labels"]]
         self.assertEqual(len(carriers), 1, "the complete suite has one native build slot")
-        self.assertIn("baremetal", carriers[0]["labels"])
         self.assertNotIn(carriers[0]["host"], fleet["voter_hosts"])
+        store = [row for row in fleet["runners"] if "ci-nonvoter-store" in row["labels"]]
+        self.assertEqual(len(store), 2, "two actual nonvoter Store carriers are required")
+        self.assertIn(carriers[0], store, "one capacity-one worker must share heavy and Store roles")
+        self.assertEqual(carriers[0]["host"], "lab1", "the heavy alias is bound to its verified physical nonvoter")
+        self.assertEqual({row["host"] for row in store}, {"lab1", "lab2"})
+        self.assertEqual(len({row["host"] for row in store}), 2)
+        self.assertTrue(all(row["host"] not in fleet["voter_hosts"] for row in store))
+        self.assertEqual({label for label in carriers[0]["labels"] if label.startswith("ci-")},
+                         {"ci-nonvoter-heavy-amd64", "ci-nonvoter-store"})
+        self.assertIs(carriers[0].get("implicit_labels"), False)
+        self.assertEqual(set(carriers[0]["labels"]), {"ci-nonvoter-heavy-amd64", "ci-nonvoter-store", "incus"})
+        self.assertTrue(all((row["os"], row["arch"]) == ("Linux", "X64") for row in store))
+
+    def test_new_role_carriers_reject_singleton_voter_and_swapped_physical_owners(self):
+        # Unit fixtures exercise the new aliases' affirmative host boundary;
+        # they are not enrollment evidence for an actually registered worker.
+        heavy = {"name": "fixture-heavy", "host": "lab1", "os": "Linux", "arch": "X64",
+                 "labels": ["ci-nonvoter-heavy-amd64", "ci-nonvoter-store", "incus"],
+                 "implicit_labels": False}
+        store = {"name": "fixture-store", "host": "lab2", "os": "Linux", "arch": "X64",
+                 "labels": ["ci-nonvoter-store"]}
+        protected = ["media1", "lab3", "lab4", "lab6"]
+        def check_carriers(first, second):
+            fixture = {"voter_hosts": protected, "runners": [first, second]}
+            with mock.patch(__name__ + ".runner_fleet", return_value=fixture):
+                self.test_full_unit_suite_has_dedicated_bounded_resident_capacity()
+        check_carriers(heavy, store)
+        for first, second in (({**heavy, "host": "lab5"}, store),
+                              (heavy, {**store, "host": "lab5"}),
+                              ({**heavy, "host": "lab2"}, {**store, "host": "lab1"}),
+                              (heavy, {**store, "host": "lab1"})):
+            with self.subTest(heavy=first["host"], store=second["host"]), self.assertRaises(AssertionError):
+                check_carriers(first, second)
 
     def test_web_layout_budget_covers_cold_build_and_all_browser_stages(self):
         job = workflow_job_blocks(".github/workflows/ci.yml")["web_layout"]
@@ -3472,7 +3506,7 @@ assert.equal(context.ACT_TIMER, null);
         # would have queued every pull request forever the moment this path
         # became required.
         self.assertEqual(
-            [("self-hosted", "Linux", "X64", "lab", "ci-store")],
+            [("ci-nonvoter-store",)],
             self_hosted_label_sets(shard),
         )
         self.assertIn("fail-fast: false", shard)
@@ -3596,7 +3630,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertNotIn("schedule:", workflow)
         self.assertIn("workflow_dispatch:", workflow)
-        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-store]", job)
+        self.assertIn("runs-on: [ci-nonvoter-store]", job)
         self.assertIn(
             "uses: https://github.com/dtolnay/rust-toolchain@"
             "4716b85f2fac3e324e64fa2810f6b5c3905760a5",
@@ -3614,6 +3648,63 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn(
             "if: always() && steps.store_backstop.outcome != 'success'", job
         )
+
+    def test_amd_publisher_bounds_and_binds_all_four_actual_builds(self):
+        publisher = workflow_job_blocks(".github/workflows/publish-release.yml")["image"]
+        header, steps = publisher.split("    steps:\n", 1)
+        self.assertIn('runs_on: \'["ci-nonvoter-heavy-amd64"]\'', header)
+        self.assertIn('runs_on: \'["self-hosted", "Linux", "ARM64", "lab", "release-arm64"]\'', header)
+        self.assertTrue(steps.startswith("      - name: Verify effective nonvoter resource bounds\n"))
+        guard = workflow_step_blocks(publisher)["Bound the AMD publisher builder before compilation"]
+        self.assertEqual(workflow_step_scalar(guard, "if"), "matrix.arch == 'amd64'")
+        self.assertNotIn("continue-on-error:", guard)
+        self.assertIn("BUILDER: ${{ steps.release-builder.outputs.name }}", guard)
+        self.assertIn("      - id: release-builder\n        uses: https://github.com/docker/setup-buildx-action@", publisher)
+        self.assertIn("          name: plurx-publish-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}\n", publisher)
+        self.assertLess(publisher.index("- id: release-builder"), publisher.index(guard))
+        builds = [step for step in workflow_step_blocks(publisher).values()
+                  if "uses: https://github.com/docker/build-push-action@" in step]
+        self.assertEqual(len(builds), 4)
+        for build in builds:
+            self.assertLess(publisher.index(guard), publisher.index(build))
+            self.assertEqual(re.findall(r"(?m)^          builder: ([^\n]+)$", build),
+                             ["${{ steps.release-builder.outputs.name }}"])
+        package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        package_guard = workflow_step_blocks(package)["Bound the AMD package builder before compilation"]
+        self.assertEqual(re.split(r"(?m)^      - ", guard.split("        run: |\n", 1)[1], maxsplit=1)[0],
+                         package_guard.split("        run: |\n", 1)[1])
+
+    def test_amd_package_bounds_its_active_builder_before_building(self):
+        package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        guard = workflow_step_blocks(package)["Bound the AMD package builder before compilation"]
+        self.assertLess(package.index("uses: ./.github/actions/buildx-cache"), package.index(guard))
+        self.assertLess(package.index(guard), package.index("uses: https://github.com/docker/build-push-action@"))
+        self.assertEqual(workflow_step_scalar(guard, "if"), "matrix.arch == 'amd64'")
+        self.assertNotIn("continue-on-error:", guard)
+        for required in (
+            "BUILDER: ${{ steps.buildx-cache.outputs.builder-name }}",
+            "set -euo pipefail",
+            '[[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]]',
+            'docker buildx inspect "$BUILDER"',
+            'data = sys.stdin.buffer.read(65537)',
+            'len(data) <= 65536 or sys.exit("Buildx inspection exceeds 64 KiB")',
+            'names != 1 || drivers != 1 || !nodes || invalid',
+            'if (value != expected) invalid = 1',
+            'if (value != "docker-container") invalid = 1',
+            'container="buildx_buildkit_${BUILDER}0"',
+            'test "$(docker inspect --format \'{{.Name}}\' "$container")" = "/$container"',
+            'docker update --memory 20g --memory-swap 20g --pids-limit 4096 --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"',
+            "{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}} {{.HostConfig.PidsLimit}}",
+            "= '21474836480 21474836480 400000 100000 0-3 4096'",
+        ):
+            self.assertIn(required, guard)
+        self.assertNotIn("docker buildx inspect --format", guard)
+        build_steps = [step for step in workflow_step_blocks(package).values()
+                       if "uses: https://github.com/docker/build-push-action@" in step]
+        self.assertEqual(len(build_steps), 3)
+        for step in build_steps:
+            self.assertEqual(re.findall(r"(?m)^          builder: ([^\n]+)$", step),
+                             ["${{ steps.buildx-cache.outputs.builder-name }}"])
 
     def test_required_arm_package_is_native_and_serialized_with_apple(self):
         workflow = read(".github/workflows/ci.yml")
@@ -3639,7 +3730,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("docker_machine: x86_64", amd64)
         self.assertIn(
             "runs_on: "
-            "'[\"self-hosted\",\"Linux\",\"X64\",\"lab\",\"general\",\"high-cpu\"]'",
+            "'[\"ci-nonvoter-heavy-amd64\"]'",
             amd64,
         )
         self.assertIn("target: aarch64-unknown-linux-gnu", arm64)
@@ -3995,7 +4086,7 @@ assert.equal(context.ACT_TIMER, null);
         for job in (contracts, voter, learner, recovery):
             self.assertIn("needs.scope.outputs.cluster_auth == 'true'", job)
             self.assertIn(
-                "runs-on: [self-hosted, Linux, X64, lab, ci-topology]", job
+                "runs-on: [ci-nonvoter-store]", job
             )
             self.assertIn("rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5", job)
             self.assertNotIn("persistent-eligible", job)
@@ -4488,7 +4579,7 @@ assert.equal(context.ACT_TIMER, null);
         )
         android = local("Linux", "X64", "lab", "android-kvm")
         apple = local("macOS", "ARM64", "lab", "apple", "xcode-27.2")
-        ci_store = local("Linux", "X64", "lab", "ci-store")
+        ci_store = "    runs-on: [ci-nonvoter-store]"
         ci_topology = local("Linux", "X64", "lab", "ci-topology")
         release_general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
         release_high_cpu = (
@@ -4523,16 +4614,15 @@ assert.equal(context.ACT_TIMER, null);
                 elif path == ".github/workflows/release-readiness.yml" and name == "release-check":
                     expected = local("Linux", "X64", "lab", "unit-memory-16g")
                 elif path == ".github/workflows/ci.yml" and name == "check":
-                    expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
-                    # The pinned private CI image supplies shipped FFmpeg 8;
-                    # host trust labels remain unchanged, without a FFmpeg-6
-                    # installation requirement on these image-owned jobs.
-                    expected = high_cpu
+                    # The pinned image retains shipped FFmpeg 8; placement is
+                    # the same bounded nonvoter daemon compiler slot.
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name in {
                     "web_layout", "vod_web"
                 }:
-                    expected = general
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/coverage.yml" and name == "coverage":
                     expected = local("Linux", "X64", "lab", "unit-memory-16g")
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
@@ -4565,9 +4655,9 @@ assert.equal(context.ACT_TIMER, null);
                     "cluster_transport_recovery_learner",
                     "cluster_transport_recovery",
                 }:
-                    expected = ci_topology
+                    expected = ci_store
                 elif path == ".github/workflows/ci.yml" and name == "cluster_wal":
-                    expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif (
                     path in {
                         ".github/workflows/ci.yml",
@@ -4575,7 +4665,7 @@ assert.equal(context.ACT_TIMER, null);
                     }
                     and name == "rust_compile"
                 ):
-                    expected = local("Linux", "lab", "high-cpu")
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
                     "android_device",
@@ -4590,7 +4680,7 @@ assert.equal(context.ACT_TIMER, null);
                     path == ".github/workflows/validation-nightly.yml"
                     and name in {"deep-validation", "mutation"}
                 ):
-                    expected = local("Linux", "X64", "lab", "incus", "ci-store")
+                    expected = "    runs-on: [incus, ci-nonvoter-heavy-amd64]"
                 elif (
                     path == ".github/workflows/validation-nightly.yml"
                     and name == "ffmpeg8-pacing"
@@ -4620,7 +4710,7 @@ assert.equal(context.ACT_TIMER, null);
                     )
                     self.assertEqual(
                         {
-                            ("self-hosted", "Linux", "X64", "lab", "general", "high-cpu"),
+                            ("ci-nonvoter-heavy-amd64",),
                             ("self-hosted", "Linux", "ARM64", "lab", "release-arm64"),
                         },
                         set(self_hosted_label_sets(block)),
@@ -4647,7 +4737,7 @@ assert.equal(context.ACT_TIMER, null);
         }
         for workflow in ("ci", "effort-ci", "main-fast-lane"):
             job = workflow_job_blocks(f".github/workflows/{workflow}.yml")["rust_compile"]
-            self.assertEqual(self_hosted_label_sets(job), [("self-hosted", "Linux", "lab", "high-cpu")])
+            self.assertEqual(self_hosted_label_sets(job), [("ci-nonvoter-heavy-amd64",)])
             bootstrap = workflow_step_blocks(job)["Install Rust gate prerequisites"]
             selector = re.search(r'(?ms)^          case "\$\(dpkg --print-architecture\)" in.*?^          esac$', bootstrap)
             self.assertIsNotNone(selector)
@@ -4739,7 +4829,8 @@ assert.equal(context.ACT_TIMER, null);
             for declaration in re.findall(r"(?m)^ +runs-on: (.+)$", read(path)):
                 self.assertTrue(
                     declaration.startswith("[self-hosted, ")
-                    or declaration == "${{ fromJSON(matrix.runs_on) }}",
+                    or declaration == "${{ fromJSON(matrix.runs_on) }}"
+                    or bool(self_hosted_label_sets("    runs-on: " + declaration + "\n")),
                     f"{path} has a non-local runner declaration: {declaration}",
                 )
         # Guard against the parser silently matching nothing at all and the
@@ -4800,9 +4891,9 @@ assert.equal(context.ACT_TIMER, null);
         # matrix on 2026-09-02 after `gha-lab2-android-01` lost `ci-store` for
         # failing the lane on an unwritable Cargo home.
         self.assertGreaterEqual(
-            len([r for r in runners if "ci-store" in r["labels"]]),
+            len([r for r in runners if "ci-nonvoter-store" in r["labels"]]),
             store_shard_count(),
-            "the Store shard count exceeds the number of ci-store slots",
+            "the Store shard count exceeds the number of ci-nonvoter-store slots",
         )
 
     def test_root_job_containers_restore_persistent_workspace_ownership(self):
@@ -4814,7 +4905,7 @@ assert.equal(context.ACT_TIMER, null);
                     continue
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{relative}:{name} has no runner")
-                self.assertIn("self-hosted", runs_on.group(0))
+                self.assertTrue(self_hosted_label_sets(runs_on.group(0) + "\n"))
                 self.assertIn(
                     "Restore persistent runner workspace ownership",
                     block,
@@ -5040,7 +5131,7 @@ assert.equal(context.ACT_TIMER, null);
                      ".github/workflows/main-fast-lane.yml"):
             with self.subTest(workflow=path):
                 job = workflow_job_blocks(path)["rust_compile"]
-                self.assertIn("container: ubuntu:24.04", job)
+                self.assertIn("      image: ubuntu:24.04", job)
                 steps = workflow_step_blocks(job)
                 setup = steps["Install Rust gate prerequisites"]
                 self.assertIn("libgtk-4-dev libdbus-1-dev", setup)
@@ -5143,7 +5234,7 @@ assert.equal(context.ACT_TIMER, null);
         fast = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
             "rust_compile"
         ]
-        self.assertIn("container: ubuntu:24.04", fast)
+        self.assertIn("      image: ubuntu:24.04", fast)
         self.assertIn('major: "6"', fast)
         self.assertIn("make effort-rust-check", fast)
         self.assertNotIn("make unit", fast)

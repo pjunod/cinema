@@ -1,6 +1,6 @@
 # Runner disk — what fills a CI runner, and what is bounded
 
-**Status:** live · **Reconciled:** 2026-11-07
+**Status:** live · **Reconciled:** 2026-11-09
 
 Companion to [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md)
 (how the lanes are meant to get faster) — this is *where the bytes go, who
@@ -70,50 +70,49 @@ The final repair check found a later compiler exhausting the initial 10 GiB
 combined limit; the additional swap raises that limit to 14 GiB without
 increasing host resident allocations.
 
-### Dedicated full-unit resident capacity
+### Dedicated nonvoter compiler capacity
 
-The full Rust unit job uses the dedicated `unit-memory-16g` label and the
-same pinned CI image, `make ci-rust-gate`, test profile and 120-minute job
-limit. Its Docker options are
-`--cpus 3 --memory 16g --memory-swap 18g --pids-limit 4096`: 16 GiB resident
-and 18 GiB combined, one Cargo job and two Rust test threads.
+Heavy Rust jobs and AMD package and release builds use the repository-only
+`gha-lab1-plurx-heavy-01` worker with `ci-nonvoter-heavy-amd64`. The same
+capacity-one worker and the existing `lab2` Store worker advertise
+`ci-nonvoter-store`; the Store fan-out has two physical nonvoter carriers.
+The older `lab1` organization registration stays under maintenance labels,
+and its three previous GitHub/Forgejo schedulers remain stopped. Preserve
+those registrations and their private rollback backups.
 
-Full run 5991 (internal 6020) exhausted the former 12 GiB child cgroup during
-daemon test code generation: the kernel recorded a memory-cgroup OOM and
-killed `rustc`, without a Rust diagnostic or test assertion. A source-only
-build of that exact candidate with Rust 1.97.1 and unchanged workspace test
-features/profile passed under 16/18 GiB in 12m37s. Maximum child RSS was
-12.54 GiB; cgroup peak was 15.74 GiB, including file cache, with no cap-hit,
-OOM or swap event. This isolated compile establishes neither actual workflow
-limits nor a passing full unit run. Fresh qualification remains required.
+The compiler VM has 24 GiB. Its `plurx-heavy.slice` enforces a **shared**
+20 GiB resident limit, zero swap, four CPUs (0–3) and 4096 PIDs. The runner
+service, Docker and external containerd belong to that aggregate. The runner
+leaf and default job containers carry the same explicit limits. Both default
+and named BuildKit RUN executors were observed inside the aggregate; declared
+workflow options alone did not establish containment on the deployed runner.
+Every heavy job verifies effective cgroup files before installing tools.
+AMD package and automatic-publisher actions use the inspected named builder.
 
-Earlier run 5274 measured about 6.5 GiB resident plus 3.5 GiB swapped under
-a 7 GiB resident cap. Two 6 GiB source-only experiments failed before producing
-a binary; their VM had only 1 GiB actual swap. No compiler-profile change from
-those experiments is retained.
+The 31.22 GiB physical host leaves 7.22 GiB outside the VM. The other owner's
+source-only compiler container stays stopped, with autostart disabled and
+Incus start protection enabled. Its source, cache and configuration are
+preserved. Reusing it requires coordinated CI drain and VM downsizing first;
+never start it alongside this allocation. Nominal container limits alone do
+not reserve memory or prevent accidental overcommit.
 
-Keep this label on a single existing repository runner with capacity one,
-without `general`, `high-cpu`, `ci-store` or `ci-topology` labels. Retain the
-former `unit-memory-12g` capability for existing consumers. Its existing service has a 12 GiB
-high watermark and 16 GiB maximum; the explicit Docker bound is required
-because Docker children need not belong to that service's cgroup. The
-runner configuration also retains the same child-container options and
-compiler/test concurrency, so a missing workflow option cannot silently
-create an unbounded job. Keep this dedicated service available after
-qualification: the merged workflow must remain schedulable. Do not
-activate another registration, change unrelated services or use an offline
-registration as evidence of permission to restart it.
+Keep the pinned CI image, `make ci-rust-gate`, test profile, two Rust test
+threads and 120-minute full-unit timeout unchanged. Compilation uses one
+Cargo job. Full run 5991 exhausted a 12 GiB cgroup during daemon test code
+generation; an unchanged source-only control peaked at 15.74 GiB under the
+former 16/18 GiB envelope. A later native test compile also exceeded 12 GiB
+and passed with a 13.09 GiB peak under a 24 GiB diagnostic cap. Neither
+isolated compile establishes a passing full workflow. The new 20 GiB worker
+requires actual current-source unit and Store qualification; focused Store
+smokes and BuildKit probes prove only their stated runtime boundaries.
 
-Before activation, verify the existing registration identity and idle state,
-back up only its persistent Forgejo configuration with mode 0600, apply the
-dedicated labels and child bounds, then restart that same idle registration
-only if required. The older GitHub Ansible registration is not its provisioning
-authority. Check aggregate host headroom; nominal idle service caps do not
-reserve RAM. Verify the effective server
-labels and actual Docker limits before accepting a qualification result.
-Revert the dedicated configuration only together with a reviewed replacement
-for the workflow selector; stopping its sole service would strand the lane.
-The source contract is
+Before maintenance, drain actual assignments and descendants, preserve the
+exact registration and private configuration backups, and verify physical
+headroom. Restore the same repository-only three labels at capacity one
+only after kernel and executor checks pass. Keep the worker available after
+qualification: removing its only registration strands the workflows.
+Rollback must restore VM, slice, service and child limits together before
+removing the other owner's start protection. The source contract is
 [`test_full_unit_suite_has_dedicated_bounded_resident_capacity`](../../tests/operations/test_contracts.py).
 
 The separate host image builder on `lab4` must also be bounded: its Docker
