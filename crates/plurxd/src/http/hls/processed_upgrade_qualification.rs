@@ -236,7 +236,7 @@ impl Drop for Check {
 /// Called only after this exchange was accepted. A changed ask cancels a
 /// pending continuation even when that exchange is not eligible for an upgrade.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn note_accepted_control(
+pub(in crate::http::hls) fn note_accepted_control(
     state: &AppState,
     route: &MediaSessionRoute,
     recipe: &RemoteStartRequest,
