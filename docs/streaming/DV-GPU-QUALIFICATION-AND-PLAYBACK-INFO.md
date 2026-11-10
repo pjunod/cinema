@@ -24,8 +24,10 @@ had rejected an older recipe; that result cannot admit or reject a different
 current recipe. A pending request is not evidence that a measurement is
 running or that the title will pass. Read-only checks confirmed that the queued
 job matches its demand/scanner, the source is readable and current, and no
-failed attempt was recorded. Foreground preparation held capacity at the
-observation; background title admission waits for that capacity to be idle.
+failed attempt was recorded. A preparation job was marked running at the
+observation, and physical foreground admissions deliberately defer background
+title measurement. That durable job status alone does not prove which worker
+held capacity or explain the complete queue delay.
 
 The November 8 deferred-upgrade path logged its later refusal and retained
 the ordinary session, but did not carry that refusal into Playback Info.

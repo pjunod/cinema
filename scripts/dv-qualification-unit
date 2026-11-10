@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Task-only exact-source native qualification; remove before the final PR."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import uuid
+
+IMAGE = "rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97"
+IMAGE_ID = "sha256:897e260d0a1a5a5146433bdb73f62bd84f5f47e846d3485e5f70f63912b5917d"
+OWNER = "codex-dv-gpu-qualification"
+LIMITS = {"memory.max": "21474836480", "memory.swap.max": "0", "cpu.max": "400000 100000", "cpuset.cpus.effective": "0-3", "pids.max": "4096"}
+FILTERS = [
+    "intel_and_nvidia_windows_use_the_actual_production_encoder_without_amd_flags",
+    "intel_and_nvidia_qualification_resolve_the_same_saved_completed_encoder",
+    "a_skipped_upgrade_explains_only_its_own_generation_until_release_or_replacement",
+    "public_skip_report_requires_current_generation_and_bounded_owner_text",
+    "skipped_processing_owner_reason_survives_relay_only_for_its_generation",
+    "the_window_encode_is_the_routes_recipe",
+    "a_busy_reduced_recipe_remains_pending_then_executes_its_exact_output",
+    "a_foreign_backend_recipe_request_stays_pending_without_measurement",
+    "qualification_source_reader_graph_is_busy_at_eight_threads_and_admitted_at_nine",
+    "a_failed_trial_leaves_the_predecessors_route_and_actor_untouched",
+]
+CAPS = ["--memory", "20g", "--memory-swap", "20g", "--cpus", "4", "--cpuset-cpus", "0-3", "--pids-limit", "4096"]
+
+
+def call(argv, **kwargs):
+    return subprocess.run(argv, check=True, **kwargs)
+
+
+def sha(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def bounds():
+    hierarchy, controllers, relative = Path("/proc/self/cgroup").read_text().strip().split(":", 2)
+    assert hierarchy == "0" and not controllers and relative.startswith("/")
+    assert ".." not in Path(relative).parts and "." not in relative.split("/")
+    root = Path("/sys/fs/cgroup") / relative.lstrip("/")
+    actual = {key: (root / key).read_text().strip() for key in LIMITS}
+    assert actual == LIMITS, actual
+    return {"membership": relative, "limits": actual}
+
+
+def logged(argv, out, name):
+    with (out / (name + ".log")).open("wb") as log:
+        result = subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT)
+    return {"command": argv, "exit_code": result.returncode}
+
+
+def child():
+    out = Path("/out")
+    receipt = json.loads((out / "source.json").read_text())
+    receipt.update(status="failed", cgroup=bounds(), commands=[])
+    try:
+        assert not Path("/src/.git").exists(), "source archive must exclude repository credentials"
+        compiler = subprocess.check_output(["rustc", "--version"], text=True).strip()
+        assert compiler.startswith("rustc 1.97.1 "), compiler
+        receipt["compiler"] = compiler
+        receipt["build_environment"] = {key: os.environ.get(key) for key in ("CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG", "RUSTUP_TOOLCHAIN", "RUST_TEST_THREADS", "PLURX_BUILD_SHA")}
+        receipt["unit_ffmpeg"] = subprocess.check_output(["ffmpeg", "-version"], text=True).splitlines()[0]
+        assert receipt["unit_ffmpeg"].startswith("ffmpeg version 5.1"), receipt["unit_ffmpeg"]
+        command = ["cargo", "test", "--locked", "-j1", "-p", "plurxd", "--bin", "plurxd", "--no-run", "--message-format=json-render-diagnostics"]
+        built = logged(command, out, "compile")
+        receipt["commands"].append(built)
+        assert built["exit_code"] == 0, "full unmodified daemon test code generation failed"
+        executables = set()
+        for line in (out / "compile.log").read_text(errors="replace").splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("reason") == "compiler-artifact" and row.get("target", {}).get("name") == "plurxd" and row.get("profile", {}).get("test") and row.get("executable"):
+                executables.add(row["executable"])
+        assert len(executables) == 1, executables
+        executable = Path(executables.pop())
+        with executable.open("rb") as stream:
+            assert stream.read(4) == b"\x7fELF", "native test artifact must be ELF"
+        shutil.copy2(executable, out / "plurxd-tests")
+        receipt["binary_sha256"] = sha(out / "plurxd-tests")
+        for index, name in enumerate(FILTERS):
+            listed = subprocess.check_output([str(executable), name, "--list"], text=True)
+            assert sum(line.endswith(": test") for line in listed.splitlines()) == 1, listed
+            result = logged([str(executable), name, "--test-threads=1", "--nocapture"], out, f"test-{index:02d}")
+            text = (out / f"test-{index:02d}.log").read_text(errors="replace")
+            result["passed"] = result["exit_code"] == 0 and bool(re.search(r"test result: ok\. 1 passed; 0 failed;", text))
+            receipt["commands"].append(result)
+        assert all(row.get("passed", True) for row in receipt["commands"]), "one or more focused units failed"
+        receipt["status"] = "passed"
+    finally:
+        (out / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+
+
+def parent():
+    evidence = Path(os.environ["RUNNER_TEMP"]) / "dv-gpu-qualification"
+    evidence.mkdir(parents=True, exist_ok=True)
+    call(["git", "diff", "--quiet", "HEAD", "--"])
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    assert re.fullmatch(r"[0-9a-f]{40}", revision)
+    run = os.environ.get("GITHUB_RUN_ID", os.environ.get("FORGEJO_RUN_ID", ""))
+    assert re.fullmatch(r"[0-9]+", run), "runner run identity unavailable"
+    prefix = f"dv-qual-{run}-{revision[:12]}-{uuid.uuid4().hex[:8]}"
+    names = {"source": prefix + "-source", "out": prefix + "-out", "cargo": OWNER + "-cargo", "target": OWNER + "-target"}
+    (evidence / "volumes.json").write_text(json.dumps(names))
+    archive = evidence / "source.tar"
+    with archive.open("wb") as stream:
+        call(["git", "archive", "--format=tar", "HEAD"], stdout=stream)
+    source = {"source_git": revision, "source_archive_sha256": sha(archive), "outer_cgroup": bounds(), "image": IMAGE, "image_id": IMAGE_ID}
+    call(["docker", "pull", "--platform", "linux/amd64", IMAGE])
+    source["resolved_image_id"] = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", IMAGE], text=True).strip()
+    assert source["resolved_image_id"] == IMAGE_ID
+    for volume in names.values():
+        call(["docker", "volume", "create", "--label", "owner=" + OWNER, volume], stdout=subprocess.DEVNULL)
+        label = subprocess.check_output(["docker", "volume", "inspect", "--format", '{{index .Labels "owner"}}', volume], text=True).strip()
+        assert label == OWNER, "refusing unrelated volume"
+    mounts = ["--mount", f"type=volume,src={names['source']},dst=/src", "--mount", f"type=volume,src={names['out']},dst=/out"]
+    base = ["docker", "run", "--rm", "--label", "owner=" + OWNER, *CAPS, *mounts]
+    with archive.open("rb") as stream:
+        call([*base, "-i", "--entrypoint", "sh", IMAGE, "-c", "cat > /out/source.tar && tar -xf /out/source.tar -C /src && find /src/crates /src/vendor -type f -exec touch {} +"], stdin=stream)
+    call([*base, "-i", "--entrypoint", "sh", IMAGE, "-c", "cat > /out/source.json"], input=json.dumps(source).encode())
+    guard = 'set -eu; IFS=: read -r h c p < /proc/self/cgroup; test "$h" = 0; test -z "$c"; case "$p" in /*) ;; *) exit 1 ;; esac; case "/$p/" in */../*|*/./*) exit 1 ;; esac; '
+    guard += "; ".join("test \"$(cat /sys/fs/cgroup\"$p\"/" + key + ")\" = " + repr(value) for key, value in LIMITS.items()) + "; "
+    bootstrap = guard + "apt-get -o Acquire::Retries=3 update > /out/bootstrap.log 2>&1 && apt-get -o Acquire::Retries=3 install -y --no-install-recommends python3 ffmpeg pkg-config libssl-dev clang cmake lld >> /out/bootstrap.log 2>&1 && python3 scripts/dv-qualification-unit child"
+    env = ["CARGO_HOME=/cargo", "CARGO_TARGET_DIR=/target", "CARGO_BUILD_JOBS=1", "CARGO_INCREMENTAL=0", "CARGO_PROFILE_DEV_DEBUG=0", "CARGO_PROFILE_TEST_DEBUG=0", "RUSTUP_TOOLCHAIN=1.97.1", "RUST_TEST_THREADS=1", "PLURX_BUILD_SHA=" + revision]
+    args = [*base, "--name", prefix, "--workdir", "/src", "--mount", f"type=volume,src={names['cargo']},dst=/cargo", "--mount", f"type=volume,src={names['target']},dst=/target"]
+    for value in env:
+        args += ["--env", value]
+    try:
+        with (evidence / "container.log").open("wb") as log:
+            result = subprocess.run([*args, "--entrypoint", "sh", IMAGE, "-c", bootstrap], stdout=log, stderr=subprocess.STDOUT)
+    finally:
+        with (evidence / "qualification.tar").open("wb") as stream:
+            call([*base, "--entrypoint", "tar", IMAGE, "-C", "/out", "-cf", "-", "."], stdout=stream)
+    assert result.returncode == 0, "qualification failed; retained logs are in qualification.tar"
+
+
+def cleanup():
+    names = json.loads((Path(os.environ["RUNNER_TEMP"]) / "dv-gpu-qualification/volumes.json").read_text())
+    source = names["source"]
+    found = subprocess.run(["docker", "volume", "inspect", "--format", '{{index .Labels "owner"}}', source], capture_output=True, text=True)
+    if found.returncode != 0:
+        return
+    label = found.stdout.strip()
+    assert label == OWNER and re.fullmatch(r"dv-qual-[0-9]+-[0-9a-f]{12}-[0-9a-f]{8}-source", source)
+    call(["docker", "volume", "rm", source])
+
+
+if __name__ == "__main__":
+    {"parent": parent, "child": child, "cleanup-source": cleanup}[sys.argv[1]]()

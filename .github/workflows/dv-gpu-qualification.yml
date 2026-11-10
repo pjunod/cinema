@@ -1,0 +1,68 @@
+name: Task-only DV GPU qualification
+# Temporary source-archive proof; remove this workflow and helper before final PR.
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/dv-gpu-qualification]
+permissions:
+  contents: read
+concurrency:
+  group: dv-gpu-qualification
+  cancel-in-progress: false
+jobs:
+  native:
+    if: github.ref == 'refs/heads/codex/dv-gpu-qualification'
+    runs-on: [ci-nonvoter-heavy-amd64]
+    timeout-minutes: 120
+    container:
+      image: ubuntu:24.04
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - name: Verify effective capacity-one nonvoter bounds
+        shell: sh
+        run: |
+          set -eu
+          IFS=: read -r hierarchy controllers relative < /proc/self/cgroup
+          test "$hierarchy" = 0 && test -z "$controllers"
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="/sys/fs/cgroup$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            test "$actual" = "$expected" || { printf '%s\n' "Unexpected $name: $actual (required $expected)" >&2; exit 1; }
+          done
+      - name: Install parent client and pinned checkout runtime
+        shell: sh
+        run: |
+          set -eu
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get -o Acquire::Retries=3 update
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates curl docker.io git python3 xz-utils
+          node_dir="$(mktemp -d)"
+          trap 'rm -rf "$node_dir"' EXIT
+          curl --fail --silent --show-error --location --retry 3 https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz -o "$node_dir/node.tar.xz"
+          echo "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce  $node_dir/node.tar.xz" | sha256sum --check --strict
+          tar -xJf "$node_dir/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
+          node --version | grep -Fx v22.23.4
+          docker version
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Compile full daemon unit binary and execute ten fixed regressions
+        run: python3 scripts/dv-qualification-unit parent
+      - name: Retain exact source, native ELF, receipts and failure logs
+        id: retained
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: dv-gpu-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/dv-gpu-qualification/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Release only this run's source extraction after retention
+        if: steps.retained.outcome == 'success'
+        run: python3 scripts/dv-qualification-unit cleanup-source
