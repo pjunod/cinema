@@ -1085,7 +1085,7 @@ pub(crate) async fn qualify_with(
     // The slot is preemptible by a live reconstructed 8.1 (it cancels
     // `cancel`); the GPU graph is a claim on this job's own admission, so the
     // job's idle check does not read its own step as foreground pressure.
-    let (_slot, decode) = match state
+    let (slot, decode) = match state
         .transcode
         .admit_fel_qualification(admission, cancel.clone(), renderer.decode)
         .await
@@ -1097,7 +1097,7 @@ pub(crate) async fn qualify_with(
             return Ok(Qualification::Busy);
         }
     };
-    let _extension = Extension(admission);
+    let extension = Extension(admission);
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let mut environment = renderer.env.clone();
     if decode == RendererDecode::Gpu {
@@ -1160,6 +1160,13 @@ pub(crate) async fn qualify_with(
         )
         .ok_or("FEL qualification produced no samples")?
     };
+    // A persisted verdict is readiness for a foreground continuation. No
+    // measurement child remains, and its GPU/CPU claim must be gone before
+    // another task can read that readiness from the replicated store.
+    drop(sample);
+    drop(source);
+    drop(extension);
+    drop(slot);
     let stored = state
         .store
         .put_dv_fel_verdict(

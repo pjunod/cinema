@@ -1600,6 +1600,7 @@ impl TranscodeManager {
     /// play keeps the plain conversion. A missing verdict asks for the title
     /// to be measured.
     #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
     async fn reconstruction_qualified(
         &self,
         planning: &plurx_core::store::PlaybackPlanningSnapshot,
@@ -1607,6 +1608,8 @@ impl TranscodeManager {
         plan: &plurx_core::transcode::ResolvedTranscode,
         grid: plurx_core::transcode::VodFrameGrid,
         encoder: Encoder,
+        source_object_version: &str,
+        required: Option<&PendingFelQualification>,
     ) -> Result<(), String> {
         Self::require_fel_qualification_backend(encoder)?;
         if !self.fel_qualification_capable() {
@@ -1633,6 +1636,19 @@ impl TranscodeManager {
                 (grid.numerator, grid.denominator),
             ),
         );
+        if required.is_some_and(|required| {
+            !required.matches(
+                planning.file.id,
+                planning.generation,
+                source_object_version,
+                &request,
+            )
+        }) {
+            return Err(
+                "the reconstruction source, settings or exact recipe changed after qualification"
+                    .into(),
+            );
+        }
         match Self::fel_gate(
             true,
             q::verdict_state(
@@ -1645,6 +1661,12 @@ impl TranscodeManager {
             FelGate::Serve => Ok(()),
             FelGate::Decline(reason) => Err(reason),
             FelGate::Measure => {
+                if required.is_some() {
+                    return Err(
+                        "the exact completed reconstruction qualification is no longer available"
+                            .into(),
+                    );
+                }
                 if !self
                     .store
                     .request_dv_fel_variant(planning.file.id, &request)
@@ -1653,8 +1675,32 @@ impl TranscodeManager {
                 {
                     return Err("the enhancement recipe qualification request is full or its source changed".into());
                 }
-                Err(Self::fel_being_measured().into())
+                Err(pending_fel_qualification_error(PendingFelQualification {
+                    file_id: planning.file.id,
+                    settings_generation: planning.generation,
+                    source_object_version: source_object_version.to_owned(),
+                    request,
+                }))
             }
+        }
+    }
+
+    /// Recheck the actual helper/encoder identity before a pending receipt is
+    /// consumed. A receipt for an old deployment never arms a new measurement.
+    pub(crate) async fn pending_fel_backend_current(&self, wait: &PendingFelQualification) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(Some(tools)) = crate::vodencode::dv_runtime::ToolSet::capture().await else {
+                return false;
+            };
+            self.fel_identity(&tools.backend_digest())
+                .await
+                .is_ok_and(|identity| identity == wait.request.backend_identity)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = wait;
+            false
         }
     }
 
@@ -2299,6 +2345,7 @@ impl TranscodeManager {
                 .candidate_context
                 .as_mut()
                 .ok_or("processed trial context missing")?;
+            context.required_fel_qualification = original.required_fel_qualification.clone();
             context.display_target = display_target;
             context.display_target_note = display_target_note.clone();
             context.retained_output = None;
@@ -2349,6 +2396,10 @@ impl TranscodeManager {
                                     .as_ref()
                                     .ok_or("reused FEL root lost its runtime recipe")?
                                     .encoder,
+                                &root.encoding.source_object_version,
+                                request.candidate_context.as_ref().and_then(|context| {
+                                    context.required_fel_qualification.as_ref()
+                                }),
                             )
                             .await?;
                         }
@@ -3555,7 +3606,8 @@ impl TranscodeManager {
                     if destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
                         self.reconstruction_qualified(&planning,
                             enhancement_envelope.ok_or("FEL recipe lost its frozen envelope")?,
-                            &processed_plan,grid,processed_encoder).await?;
+                            &processed_plan,grid,processed_encoder,&source_object_version,
+                            req.candidate_context.as_ref().and_then(|context| context.required_fel_qualification.as_ref())).await?;
                     }
                     if source_frame_probe.as_ref().is_some_and(|probe| probe.absolute_stream() != retained.0.decode().input_video_stream()) {
                         return Err("source frame metadata selected stream differs from the held decoder plan".into());
@@ -3670,9 +3722,15 @@ impl TranscodeManager {
                     // is the qualification's answer, reported with the
                     // ordinary start, not an ordinary recipe nobody asked for.
                     Err(reason) if processed_trial => {
+                        if pending_fel_qualification(&reason).is_some() { return Err(reason); }
                         return Err(format!("processed window refused: {reason}"));
                     }
                     Err(reason) => {
+                        // Process-private continuation data is consumed only
+                        // by a deferred trial. Legacy/direct preparations keep
+                        // the explanatory sentence, never its source/recipe token.
+                        let reason = pending_fel_qualification(&reason)
+                            .map(|wait| wait.reason().to_owned()).unwrap_or(reason);
                         retained.3 = plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
                             plurx_core::transcode::dv_processing::DvFallbackReason::BackendFailure);
                         tracing::warn!(target: "plurxd::transcode", %reason,

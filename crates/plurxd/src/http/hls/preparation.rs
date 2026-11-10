@@ -1316,6 +1316,109 @@ pub(super) fn preserve_prepared_audio(
     Ok(())
 }
 
+/// Preserve the actual user quality mode. A delayed enhancement can pin an
+/// Auto representation, but cannot manufacture Manual or Original intent.
+pub(super) fn qualified_upgrade_selection(
+    selection: &crate::playback_control::ClientSelection,
+    height: u32,
+) -> crate::playback_control::ClientSelection {
+    let mut selection = selection.clone();
+    if matches!(
+        selection.quality,
+        crate::playback_control::QualitySelection::Auto { .. }
+    ) {
+        selection.quality = crate::playback_control::QualitySelection::Auto {
+            height: Some(i64::from(height)),
+            candidate_id: None,
+        };
+    }
+    selection
+}
+
+/// Re-resolve a completed FEL qualification against the current authority and
+/// this exchange's actual user selection. The old binding is never patched:
+/// qualification changes probe_json, so every candidate/recipe identity must
+/// come from the normal planner again.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn replan_qualified_upgrade(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    predecessor: &RemoteStartRequest,
+    selection: &crate::playback_control::ClientSelection,
+    delivered: &crate::playback_control::EffectiveSelection,
+    capabilities: Option<&crate::playback_control::DynamicCapabilities>,
+    source: &MediaFile,
+    previous_target_height: u32,
+) -> Result<crate::transcode::SessionRequest, String> {
+    let mut recipe = predecessor.clone();
+    if let Ok(start) = serde_json::from_str::<StartResponse>(&route.response_json) {
+        if let Some(audio) = start.delivered_audio {
+            recipe.request.audio_delivery = Some(audio);
+        }
+    }
+    let selection = qualified_upgrade_selection(selection, previous_target_height);
+    let mut caps = recipe
+        .request
+        .candidate_context
+        .as_ref()
+        .and_then(|context| context.canonical_caps.clone());
+    // The durable route retained the full audio/sink claims. Runtime decoder
+    // snapshots update video/display only, exactly as ordinary preparation.
+    if caps.is_none() {
+        caps = retained_planning_caps(&route.response_json);
+    }
+    if let Some(runtime) = capabilities {
+        recipe.presentation_target = runtime.presentation_target;
+        if let Some(snapshot) = runtime.decoder_caps.as_ref() {
+            if !snapshot.video.iter().any(|entry| entry.available) {
+                return Err("this display no longer reports an available decoder".into());
+            }
+            recipe.decoder_caps = Some(snapshot.clone());
+            if let Some(caps) = caps.as_mut() {
+                caps.video = snapshot.device_caps().video;
+            }
+        }
+        if let Some(display) = caps.as_mut().and_then(|caps| caps.display.as_mut()) {
+            display.presentation_target = runtime.presentation_target;
+        }
+    }
+    if caps.is_none() {
+        return Err("the accepted playback capabilities cannot be reconstructed".into());
+    }
+    let overrides = retained_planning_overrides(&route.response_json);
+    let (fresh, _) = plan_preparation_with_candidate(
+        state,
+        &recipe,
+        caps.as_ref(),
+        overrides.as_ref(),
+        &selection,
+        source,
+        delivered.height,
+    )
+    .await
+    .map_err(|_| "the current playback representation could not be freshly planned")?;
+    let target = fresh
+        .candidate_context
+        .as_ref()
+        .map(|context| context.selected_candidate.target_height);
+    if fresh.file_id != recipe.request.file_id
+        || fresh.playback_id != recipe.request.playback_id
+        || fresh.presentation != recipe.request.presentation
+        || fresh.kind.copy_contract() != recipe.request.kind.copy_contract()
+        || fresh.audio_index != recipe.request.audio_index
+        || fresh.audio_offset_ms != recipe.request.audio_offset_ms
+        || fresh.audio_delivery != recipe.request.audio_delivery
+        || fresh.subtitle_burn != recipe.request.subtitle_burn
+        || fresh.hdr10 != recipe.request.hdr10
+        || target != Some(previous_target_height)
+    {
+        return Err(
+            "fresh planning would change the current representation or selected tracks".into(),
+        );
+    }
+    Ok(fresh)
+}
+
 #[cfg(test)]
 pub(super) async fn plan_preparation_candidate(
     state: &AppState,

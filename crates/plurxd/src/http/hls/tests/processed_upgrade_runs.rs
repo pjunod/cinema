@@ -211,3 +211,98 @@ async fn a_failed_trial_leaves_the_predecessors_route_and_actor_untouched() {
         "the renderer refused the window"
     );
 }
+
+/// A pending first-frame trial leaves only a bounded continuation. A later
+/// accepted exchange may resume it with a newly planned full binding, not the
+/// startup context whose probe metadata the completed receipt changed.
+#[tokio::test]
+async fn a_late_qualification_resumes_once_with_fresh_authority_and_keeps_its_reason() {
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("late-fel-receipt");
+    let (fixture, session, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let (mut intent, run, control) = upgrade_after_playing_to(&fixture, &session, &route, 40_000).await;
+    let snapshot = fixture.state.store.playback_planning_snapshot(intent.request.file_id,
+        &crate::transcode::QUALITY_PLANNING_KEYS).await.expect("snapshot").expect("source");
+    let mut before_receipt = snapshot.clone();
+    before_receipt.probe_json = Some("{\"qualification_fixture\":\"before\"}".into());
+    let old_binding = crate::media_pool::PlanningBinding::from_snapshot(&before_receipt);
+    let fresh_binding = crate::media_pool::PlanningBinding::from_snapshot(&snapshot);
+    assert_ne!(old_binding, fresh_binding, "metadata changes invalidate the full startup binding");
+    let mut context = crate::transcode::continuous_test_candidate_context(
+        plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x74;32]),[0x74;32],1080);
+    context.planning_binding=Some(old_binding);
+    intent.request.candidate_context=Some(Box::new(context));
+    let pending = super::processed_upgrade::pending_qualification_fixture(intent.request.file_id,
+        snapshot.file.size,snapshot.file.mtime,snapshot.generation,"metadata:fixture");
+    let encoded = crate::transcode::pending_fel_qualification_error(pending);
+    assert_eq!(super::processed_upgrade::run_upgrade_with(&fixture.state,&intent,&run,
+        |_,_| std::future::ready(Err(encoded))).await,"qualification_pending");
+    drop(run);
+    assert!(fixture.state.transcode.validate_candidate_planning_binding(&intent.request,None).await.is_err(),
+        "reusing the old intent would fail normal binding validation");
+    let recipe: RemoteStartRequest=serde_json::from_str(&route.recipe_json).expect("recipe");
+    let delivered=crate::playback_control::EffectiveSelection::from_recipe(&recipe,1080,Some("dolby_vision".into()));
+    let observed=std::sync::Arc::new(std::sync::Mutex::new(None));
+    let resumed=observed.clone();
+    let base=recipe.request.clone();
+    let expected=fresh_binding.clone();
+    super::processed_upgrade::exercise_check(&fixture.state,&route,&recipe,&control.selection,&delivered,
+        move |state,wait| async move {
+            let current=state.store.playback_planning_snapshot(wait.file_id,&crate::transcode::QUALITY_PLANNING_KEYS)
+                .await.expect("fresh authority").expect("source");
+            let mut fresh=base;
+            let mut context=crate::transcode::continuous_test_candidate_context(
+                plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x75;32]),[0x75;32],1080);
+            context.planning_binding=Some(crate::media_pool::PlanningBinding::from_snapshot(&current));
+            fresh.candidate_context=Some(Box::new(context));
+            assert!(state.transcode.validate_candidate_planning_binding(&fresh,None).await.is_ok());
+            Ok(Some(fresh))
+        },
+        move |intent,run,pending| {
+            let context=intent.request.candidate_context.as_ref().expect("fresh context");
+            assert_eq!(context.planning_binding,Some(expected));
+            assert!(context.required_fel_qualification.is_some(),"the resumed trial is restricted to its exact receipt");
+            assert!(super::processed_upgrade::processing_skip(&intent.session_id,&intent.incarnation_id)
+                .expect("explanation until replacement").reason.contains("until replacement"));
+            *resumed.lock().expect("resumed")=Some(intent.request);
+            drop(pending);drop(run);
+        }).await;
+    assert!(observed.lock().expect("observed").is_some());
+    // Another accepted exchange cannot run the same completed continuation.
+    super::processed_upgrade::exercise_check(&fixture.state,&route,&recipe,&control.selection,&delivered,
+        |_,_| async { panic!("duplicate control must not resolve or measure again") },
+        |_,_,_| panic!("duplicate continuation")).await;
+    super::processed_upgrade::cancel_for_session(&session);
+}
+
+#[tokio::test]
+async fn a_viewer_change_cancels_a_pending_receipt_check_before_it_can_resume() {
+    let dir=crate::test_tempdir().expect("state dir");
+    let playback=unique_playback_id("late-fel-cancel");
+    let (fixture,session,route)=staging_fixture_for_playback(dir.path(),&playback).await;
+    let (intent,run,control)=upgrade_after_playing_to(&fixture,&session,&route,10_000).await;
+    let snapshot=fixture.state.store.playback_planning_snapshot(intent.request.file_id,&crate::transcode::QUALITY_PLANNING_KEYS)
+        .await.expect("snapshot").expect("source");
+    let encoded=crate::transcode::pending_fel_qualification_error(super::processed_upgrade::pending_qualification_fixture(
+        intent.request.file_id,snapshot.file.size,snapshot.file.mtime,snapshot.generation,"metadata:fixture"));
+    assert_eq!(super::processed_upgrade::run_upgrade_with(&fixture.state,&intent,&run,
+        |_,_|std::future::ready(Err(encoded))).await,"qualification_pending");drop(run);
+    let recipe:RemoteStartRequest=serde_json::from_str(&route.recipe_json).expect("recipe");
+    let delivered=crate::playback_control::EffectiveSelection::from_recipe(&recipe,1080,Some("dolby_vision".into()));
+    let (started_tx,started_rx)=tokio::sync::oneshot::channel();
+    let state=fixture.state.clone();let route_for_check=route.clone();let selection=control.selection.clone();
+    let check=tokio::spawn(async move {
+        super::processed_upgrade::exercise_check(&state,&route_for_check,&recipe,&selection,&delivered,
+            |_,_| async move {
+                let _=started_tx.send(());
+                std::future::pending::<Result<Option<crate::transcode::SessionRequest>,String>>().await
+            },|_,_,_|panic!("a viewer-cancelled check cannot stage an enhancement")).await;
+    });
+    started_rx.await.expect("check claimed its preparation slot");
+    let viewer=super::preparation::PendingCandidateGuard::begin(&playback,"new-viewer-selection");
+    tokio::time::timeout(std::time::Duration::from_secs(2),check).await.expect("bounded cancellation").expect("check task");
+    assert!(!viewer.cancelled(),"the upgrade never cancels the viewer's request");
+    assert!(super::processed_upgrade::processing_skip(&session,&route.incarnation_id).is_some(),
+        "cancellation never clears the truthful ordinary-delivery explanation");
+    drop(viewer);super::processed_upgrade::cancel_for_session(&session);
+}

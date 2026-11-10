@@ -3202,6 +3202,23 @@ async fn control_local_with_observation(
                 })
         })
         .flatten();
+    if result.disposition == crate::playback_control::ControlDisposition::Accepted
+        && !durable_receipt_response
+    {
+        super::processed_upgrade::note_accepted_control(
+            state,
+            route,
+            &recipe,
+            &request,
+            &response.effective_selection,
+            result.selection.capabilities.as_ref(),
+            preparation_purpose.is_none()
+                && !incumbent_waiting
+                && !quality_intent_cancelled
+                && request.demand == crate::playback_control::PlaybackDemand::Active
+                && request.render_state == crate::playback_control::RenderState::Rendering,
+        );
+    }
     // Not on an exchange answering from a durable receipt. That body says
     // `none` and cannot say anything else — it is the stored answer, and its
     // replay has to be the same bytes — so dispatching here would tell a client

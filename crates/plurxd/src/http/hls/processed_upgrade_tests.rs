@@ -36,7 +36,7 @@ pub(in crate::http) fn ordinary_request(playback_id: &str) -> crate::transcode::
 }
 
 /// A waiting upgrade for a fresh session of a fresh playback, by `user_id`.
-fn waiting(user_id: i64) -> (String, String, String) {
+pub(super) fn waiting(user_id: i64) -> (String, String, String) {
     let playback = uuid::Uuid::new_v4().to_string();
     let session = uuid::Uuid::new_v4().to_string();
     let incarnation = uuid::Uuid::new_v4().to_string();

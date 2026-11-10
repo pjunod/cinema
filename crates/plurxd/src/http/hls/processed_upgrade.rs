@@ -22,6 +22,14 @@
 
 use super::*;
 
+#[path = "processed_upgrade_qualification.rs"]
+mod qualification;
+#[cfg(test)]
+pub(super) use qualification::exercise_check;
+pub(super) use qualification::note_accepted_control;
+#[cfg(test)]
+pub(super) use qualification::tests::fixture_wait as pending_qualification_fixture;
+
 /// How long an intent waits for its first frame. A start whose picture has
 /// not appeared by then is not one an upgrade should be spent on; the entry is
 /// dropped at the next registration, not by a timer.
@@ -31,6 +39,7 @@ const FIRST_FRAME_WINDOW: std::time::Duration = std::time::Duration::from_secs(1
 const MAX_INTENTS: usize = 512;
 
 /// What the create knew that the upgrade needs, captured once, on the owner.
+#[derive(Clone)]
 pub(in crate::http) struct UpgradeIntent {
     pub(in crate::http) user_id: i64,
     pub(in crate::http) playback_id: String,
@@ -52,6 +61,7 @@ enum Entry {
         intent: Box<UpgradeIntent>,
         registered: std::time::Instant,
     },
+    AwaitingQualification(Box<qualification::AwaitingQualification>),
     Skipped {
         playback_id: String,
         report: ProcessingSkip,
@@ -62,6 +72,7 @@ enum Entry {
         incarnation_id: String,
         claim: u64,
         cancelled: tokio_util::sync::CancellationToken,
+        report: Option<ProcessingSkip>,
     },
 }
 
@@ -69,6 +80,9 @@ impl Entry {
     fn playback_and_incarnation(&self) -> (&str, &str) {
         match self {
             Self::Waiting { intent, .. } => (&intent.playback_id, &intent.incarnation_id),
+            Self::AwaitingQualification(wait) => {
+                (&wait.intent.playback_id, &wait.intent.incarnation_id)
+            }
             Self::Skipped {
                 playback_id,
                 report,
@@ -135,8 +149,15 @@ impl ProcessingSkip {
 
 pub(in crate::http) fn processing_skip(session: &str, generation: &str) -> Option<ProcessingSkip> {
     match lock().get(session) {
-        Some(Entry::Skipped { report, .. }) if report.generation == generation => {
-            Some(report.clone())
+        Some(
+            Entry::Skipped { report, .. }
+            | Entry::Running {
+                report: Some(report),
+                ..
+            },
+        ) if report.generation == generation => Some(report.clone()),
+        Some(Entry::AwaitingQualification(wait)) if wait.report.generation == generation => {
+            Some(wait.report.clone())
         }
         _ => None,
     }
@@ -150,6 +171,7 @@ pub(in crate::http) fn register(intent: UpgradeIntent) {
     let mut entries = lock();
     entries.retain(|_, entry| match entry {
         Entry::Waiting { registered, .. } => now.duration_since(*registered) < FIRST_FRAME_WINDOW,
+        Entry::AwaitingQualification(wait) => wait.recorded.elapsed() < qualification::RETENTION,
         Entry::Skipped { recorded, .. } => {
             now.duration_since(*recorded) < std::time::Duration::from_secs(86_400)
         }
@@ -197,6 +219,7 @@ pub(in crate::http) fn take_on_first_frame(
             incarnation_id: intent.incarnation_id.clone(),
             claim,
             cancelled: cancelled.clone(),
+            report: None,
         },
     );
     Some((
@@ -206,6 +229,7 @@ pub(in crate::http) fn take_on_first_frame(
             claim,
             cancelled,
             presented_at: std::time::Instant::now(),
+            expected_owner_epoch: None,
         },
     ))
 }
@@ -220,6 +244,7 @@ pub(in crate::http) struct UpgradeRun {
     /// control exchange is accepted, the film has played from the session's
     /// start for this long; see [`viewer_film_time_ms`].
     presented_at: std::time::Instant,
+    expected_owner_epoch: Option<i64>,
 }
 
 impl UpgradeRun {
@@ -267,14 +292,30 @@ impl Drop for UpgradeRun {
         if matches!(entries.get(&self.session_id),
             Some(Entry::Running { claim, .. }) if *claim == self.claim)
         {
-            entries.remove(&self.session_id);
+            if let Some(Entry::Running {
+                playback_id,
+                report: Some(report),
+                ..
+            }) = entries.remove(&self.session_id)
+            {
+                entries.insert(
+                    self.session_id.clone(),
+                    Entry::Skipped {
+                        playback_id,
+                        report,
+                        recorded: std::time::Instant::now(),
+                    },
+                );
+            }
         }
     }
 }
 
 fn cancel_entry(entry: Entry) {
-    if let Entry::Running { cancelled, .. } = entry {
-        cancelled.cancel();
+    match entry {
+        Entry::Running { cancelled, .. } => cancelled.cancel(),
+        Entry::AwaitingQualification(wait) => wait.cancelled.cancel(),
+        _ => {}
     }
 }
 
@@ -347,10 +388,19 @@ pub(in crate::http) fn note_presented(state: &AppState, user_id: i64, session_id
 /// the staged successor registers under it and exits on it by the same
 /// cleanup an ordinary preparation's cancellation takes.
 fn start_upgrade(state: &AppState, intent: Box<UpgradeIntent>, run: UpgradeRun) {
+    start_upgrade_claim(state, intent, run, None);
+}
+
+fn start_upgrade_claim(
+    state: &AppState,
+    intent: Box<UpgradeIntent>,
+    run: UpgradeRun,
+    pending: Option<super::preparation::PendingCandidateGuard>,
+) {
     crate::playback_control::record_processed_upgrade("scheduled");
     let state = state.clone();
     tokio::spawn(async move {
-        let outcome = run_upgrade(&state, &intent, &run).await;
+        let outcome = run_upgrade(&state, &intent, &run, pending).await;
         crate::playback_control::record_processed_upgrade(outcome);
         drop(run);
     });
@@ -361,13 +411,29 @@ pub(in crate::http) type TrialOutcome =
     Result<Option<crate::transcode::ProcessedUpgradeTrial>, String>;
 
 /// One upgrade, start to staged. Returns its outcome label.
-async fn run_upgrade(state: &AppState, intent: &UpgradeIntent, run: &UpgradeRun) -> &'static str {
-    run_upgrade_with(state, intent, run, |request, recovery| async move {
-        state
-            .transcode
-            .prepare_processed_upgrade(&intent.session_id, &request, &recovery, intent.hdr10_intent)
-            .await
-    })
+async fn run_upgrade(
+    state: &AppState,
+    intent: &UpgradeIntent,
+    run: &UpgradeRun,
+    pending: Option<super::preparation::PendingCandidateGuard>,
+) -> &'static str {
+    run_upgrade_with_claim(
+        state,
+        intent,
+        run,
+        pending,
+        |request, recovery| async move {
+            state
+                .transcode
+                .prepare_processed_upgrade(
+                    &intent.session_id,
+                    &request,
+                    &recovery,
+                    intent.hdr10_intent,
+                )
+                .await
+        },
+    )
     .await
 }
 
@@ -440,6 +506,7 @@ fn projected_processed_candidate(
 /// upgrade's decisions around the trial are exercised without a renderer.
 /// The trial is given the request to verify (positioned at the viewer) and
 /// the identity of the successor it is verified for.
+#[cfg(test)]
 pub(in crate::http) async fn run_upgrade_with<F, Fut>(
     state: &AppState,
     intent: &UpgradeIntent,
@@ -450,12 +517,26 @@ where
     F: FnOnce(crate::transcode::SessionRequest, crate::transcode::SessionRecoveryIdentity) -> Fut,
     Fut: std::future::Future<Output = TrialOutcome>,
 {
+    run_upgrade_with_claim(state, intent, run, None, run_trial).await
+}
+
+async fn run_upgrade_with_claim<F, Fut>(
+    state: &AppState,
+    intent: &UpgradeIntent,
+    run: &UpgradeRun,
+    pending: Option<super::preparation::PendingCandidateGuard>,
+    run_trial: F,
+) -> &'static str
+where
+    F: FnOnce(crate::transcode::SessionRequest, crate::transcode::SessionRecoveryIdentity) -> Fut,
+    Fut: std::future::Future<Output = TrialOutcome>,
+{
     let session = crate::transcode::session_log_id(&intent.session_id);
     // One preparation slot per playback: a viewer's own change in flight wins,
     // and a viewer's change arriving during the trial cancels this one.
-    let Some(pending) =
+    let Some(pending) = pending.or_else(|| {
         super::preparation::begin_processed_upgrade(&intent.playback_id, run.cancelled())
-    else {
+    }) else {
         if run.cancelled().is_cancelled() {
             return "cancelled";
         }
@@ -463,6 +544,9 @@ where
             "processed upgrade skipped: a viewer-directed preparation holds the playback's slot");
         return "not_applicable";
     };
+    if pending.cancelled() {
+        return "cancelled";
+    }
     let route = match state
         .store
         .media_session_route_by_incarnation(&intent.incarnation_id)
@@ -471,7 +555,10 @@ where
         Ok(Some(route))
             if route.session_id == intent.session_id
                 && route.owner_node_id == state.node_id
-                && route.state == "active" =>
+                && route.state == "active"
+                && run
+                    .expected_owner_epoch
+                    .is_none_or(|epoch| route.owner_epoch == epoch) =>
         {
             route
         }
@@ -539,6 +626,16 @@ where
         Ok(Some(trial)) => trial,
         Ok(None) => return "not_applicable",
         Err(reason) => {
+            if let Some(wait) = crate::transcode::pending_fel_qualification(&reason) {
+                if qualification::retain(intent, run, wait) {
+                    return "qualification_pending";
+                }
+                if run.cancelled().is_cancelled() {
+                    return "cancelled";
+                }
+                run.skipped("the current reconstruction recipe no longer matches its completed qualification");
+                return "declined";
+            }
             tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
                 "processed upgrade declined; the ordinary session keeps playing");
             run.skipped(&reason);
