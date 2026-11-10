@@ -85,9 +85,29 @@ jobs:
     name: production worker controller proof
     needs: scope
     if: github.event.pull_request.draft == false
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: [ci-nonvoter-heavy-amd64]
     timeout-minutes: 45
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -141,6 +161,11 @@ jobs:
             'import platform, sys; assert sys.version_info[:3] == (3, 12, 15) and sys.platform == "linux" and platform.machine() == "x86_64"'
           rm -- "$runtime_archive"
           printf '%s\n' "$python_dir/python/bin" >> "$GITHUB_PATH"
+      - name: Install the pinned Rust controller prerequisite
+        if: steps.worker-control-inputs.outputs.affected == 'true'
+        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+        with:
+          toolchain: "1.97.1"
       - name: Prepare same-PR worker proof resumption
         id: worker-control-resume
         if: steps.worker-control-inputs.outputs.affected == 'true'
@@ -378,11 +403,13 @@ jobs:
     name: fast Rust gate
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, lab, high-cpu]
+    runs-on: [ci-nonvoter-heavy-amd64]
     # The online generic runners currently carry ffmpeg 8. Ubuntu 24.04 is the
     # pinned ffmpeg 6 environment used by this lane, while the host label keeps
     # the job on the high-CPU pool.
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
     # Compile all targets and enforce workspace/vendor Clippy here. The full
     # Rust unit and SQLite suites belong to manual full CI, while each change
     # carries its named, locally run focused regression through preflight.
@@ -394,6 +421,26 @@ jobs:
       # Keep compilation within the shared guest's memory budget.
       CARGO_BUILD_JOBS: "1"
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Install Rust gate prerequisites
         run: |
           set -euo pipefail

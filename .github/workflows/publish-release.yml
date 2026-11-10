@@ -143,11 +143,32 @@ jobs:
         include:
           - arch: amd64
             target: x86_64-unknown-linux-gnu
-            runs_on: '["self-hosted", "Linux", "X64", "lab", "general", "high-cpu"]'
+            runs_on: '["ci-nonvoter-heavy-amd64"]'
           - arch: arm64
             target: aarch64-unknown-linux-gnu
             runs_on: '["self-hosted", "Linux", "ARM64", "lab", "release-arm64"]'
     steps:
+      - name: Verify effective nonvoter resource bounds
+        if: matrix.arch == 'amd64'
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Check out the trusted packaging tool
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -167,8 +188,10 @@ jobs:
           python3 -m validation.release_dockerfile --binary-export
           release-source/Dockerfile release-source/Dockerfile.binaries
       - uses: https://github.com/docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-      - uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - id: release-builder
+        uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
+          name: plurx-publish-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
           buildkitd-config-inline: |
             # The fleet registry is deliberately plain HTTP on the private LAN. A
             # BuildKit container does not inherit Docker daemon insecure-registry
@@ -176,6 +199,40 @@ jobs:
             # Only requests to this exact address are affected.
             [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
               http = true
+      - name: Bound the AMD publisher builder before compilation
+        if: matrix.arch == 'amd64'
+        env:
+          BUILDER: ${{ steps.release-builder.outputs.name }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]] || exit 1
+          builder_info="$(docker buildx inspect "$BUILDER" | python3 -c 'import sys; data = sys.stdin.buffer.read(65537); len(data) <= 65536 or sys.exit("Buildx inspection exceeds 64 KiB"); sys.stdout.buffer.write(data)')"
+          printf '%s\n' "$builder_info" | awk -v expected="$BUILDER" '
+            /^Nodes:[[:space:]]*$/ { nodes = 1 }
+            !nodes && /^[[:space:]]*Name[[:space:]]*:/ {
+              names++
+              if ($0 !~ /^Name:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Name:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != expected) invalid = 1
+            }
+            !nodes && /^[[:space:]]*Driver[[:space:]]*:/ {
+              drivers++
+              if ($0 !~ /^Driver:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Driver:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != "docker-container") invalid = 1
+            }
+            END { if (names != 1 || drivers != 1 || !nodes || invalid) exit 1 }
+          '
+          container="buildx_buildkit_${BUILDER}0"
+          test "$(docker inspect --format '{{.Name}}' "$container")" = "/$container"
+          # This dedicated nonvoter builder shares the verified 20-GiB budget.
+          # Bound its sibling container independently of the runner service.
+          docker update --memory 20g --memory-swap 20g --pids-limit 4096 --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"
+          test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}} {{.HostConfig.PidsLimit}}' "$container")" = '21474836480 21474836480 400000 100000 0-3 4096'
       - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
@@ -201,6 +258,7 @@ jobs:
         if: steps.media-contract.outputs.dolby_required == 'true'
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
+          builder: ${{ steps.release-builder.outputs.name }}
           context: release-source
           file: release-source/Dockerfile
           target: linux-dolby-package-export
@@ -213,6 +271,7 @@ jobs:
         if: steps.media-contract.outputs.pinned_runtime == ''
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
+          builder: ${{ steps.release-builder.outputs.name }}
           context: release-source
           file: release-source/Dockerfile
           target: ${{ steps.media-contract.outputs.dolby_required == 'true' && 'runtime-assets-dolby-amd64' || 'runtime-assets' }}
@@ -282,6 +341,7 @@ jobs:
       - name: Compile and export the exact tagged binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
+          builder: ${{ steps.release-builder.outputs.name }}
           context: release-source
           file: release-source/Dockerfile.binaries
           target: release-binaries
@@ -334,6 +394,7 @@ jobs:
         id: build
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
+          builder: ${{ steps.release-builder.outputs.name }}
           context: release-source
           file: release-source/Dockerfile.release
           platforms: linux/${{ matrix.arch }}
