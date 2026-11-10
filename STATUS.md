@@ -3,6 +3,15 @@
 **Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+## 2026-11-09 · Cinema uses the system renderer
+
+0.5.0 source selects system mpv and packages only Python/Lua Cinema controls.
+CLI/environment overrides, isolated config and scoped session ownership remain.
+Code, package and system-renderer interface qualification passed; coordinated
+installation and physical acceptance pending;
+[canonical ledger](docs/clients/LINUX-PLAYER-CINEMA-UI.md).
+
+
 - **2026-11-09 · HDR enhancement source budget:** [scope and validation](docs/streaming/HDR-ENHANCEMENT-SOURCE-BUDGET.md). Owner Codex. Independent current-main port preserves measured Original video budgets and exact backend-bound FEL recipes while retaining current source custody and post-first-frame upgrades. Fresh compiler checks and all 39 focused Rust regressions pass; current-head CI remains pending. Picture fidelity and deployment remain open.
 
 ## 2026-11-07 · Pipeline contract v2 (cinema slice)

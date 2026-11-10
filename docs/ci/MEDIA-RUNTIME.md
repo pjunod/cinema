@@ -20,12 +20,17 @@ static probe, VMAF scorer, DV helper bundle, subtitle recognizer and the service
 account. Changing application source never rebuilds these dependencies. Changes
 to those inputs take effect only after publishing and committing a new pin.
 
-The digest is fixed in source. `PLURX_MEDIA_REGISTRY` changes the registry address
-only, so a mirrored copy must serve exactly the same manifest bytes. Make derives
-the address from an HTTP(S) origin without copying credentials. For a different
-registry, set `PLURX_MEDIA_REGISTRY`; direct Compose users can set it in
-`deploy/.env`. The neutral fallback is `forge.lan:3000`. The registry must retain
-the manifest and all referenced layers; deleting them breaks cold builds.
+The default repository is public: `ghcr.io/pjunod/cinema-media-runtime`. Docker,
+Make and Compose use it without a login or host configuration, regardless of
+whether the source was cloned from GitHub, Forgejo, SSH or a local archive. The
+Git remote is never used to choose a registry.
+
+The digest is fixed in source. To use an explicit mirror, set the full repository
+in `PLURX_MEDIA_RUNTIME_REPOSITORY`, for example
+`forge.lan:3000/noirr/plurx-media-runtime`. Direct Compose users can set the same
+variable in `deploy/.env`. A mirror must serve exactly the same manifest bytes.
+The registry must retain the manifest and all referenced layers; deleting them
+breaks cold builds.
 
 ## Publish a dependency update explicitly
 
@@ -33,9 +38,13 @@ Run the manual **publish media runtime** workflow (`media-runtime.yml`) from
 the source revision whose media inputs you intend to ship. Its default audited amd64 option builds and verifies the Dolby package; disable
 that option only for an ordinary local-build base. It builds natively on amd64
 and arm64, publishes both platform images, assembles their index and
-uploads a candidate application Dockerfile and publication receipt. It does not
-advance the application pin automatically. Review and commit the candidate pin
-with its media input changes and evidence.
+uploads a private-candidate publication receipt. It does not prepare or modify
+an application Dockerfile. Copy that exact index to the public repository with
+the manual public-copy workflow, then run `scripts/media-runtime pin` against
+the public digest. The pin command obtains an anonymous GHCR token, verifies
+the raw index digest and both platform manifests without Docker credentials,
+and only then updates source. A private candidate alone cannot support external
+builders. Review and commit the pin with its media input changes and evidence.
 
 For an operator-managed builder, the equivalent maintenance commands are:
 
@@ -44,14 +53,16 @@ For an operator-managed builder, the equivalent maintenance commands are:
 scripts/media-runtime build \
   --image forge.lan:3000/noirr/plurx-media-runtime:reviewed-update \
   --metadata "$TMPDIR/media-runtime-metadata.json"
-# Use the immutable index digest reported by the builder, never the moving tag.
-scripts/media-runtime pin --insecure \
-  forge.lan:3000/noirr/plurx-media-runtime@sha256:<published-index-digest>
+# Copy that exact index to the public repository using the public-copy workflow.
+# Pin the public index digest after anonymous verification, never a moving tag.
+scripts/media-runtime pin \
+  ghcr.io/pjunod/cinema-media-runtime@sha256:<published-index-digest>
 ```
 
 For the fleet's plain HTTP registry, `--insecure` is explicit; omit it for a
-registry with trusted HTTPS. `pin` checks that the published index contains both Linux architectures before
-updating the runtime base and its reported digest. Publish first, then commit
+registry with trusted HTTPS. `pin` may inspect an explicit private mirror, but
+always requires the same digest to be available anonymously from the canonical
+public repository before updating source. Publish publicly first, then commit
 the source update. A missing base fails at image resolution; application builds
 never fall back to rebuilding it.
 

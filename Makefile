@@ -170,13 +170,11 @@ operations-check: ## Verify deploy, CI, container, and client shipping contracts
 linux-player-check: ## Test the plurx Player launcher against a fake server and a fake mpv (LINUX-PLAYER-PLAN M4); a skipped test fails
 	@python3 -B clients/linux-player/packaging/run-tests clients/linux-player/tests
 
-# Not in CI: it pulls ubuntu:26.10, installs from the pinned apt snapshot,
-# downloads the pinned upstream sources, compiles libplacebo and mpv twice
-# (the second build must be byte-identical) and verifies the package. Output
-# goes to target/linux-player-deb/, or to PLURX_DEB_OUT;
-# clients/linux-player/README.md explains what is bundled.
+# Not in CI: builds the Python/Lua frontend twice in disposable containers,
+# verifies the package against system mpv and checks byte-identical artifacts.
+# Output goes to target/linux-player-deb/, or to PLURX_DEB_OUT.
 .PHONY: linux-player-deb
-linux-player-deb: ## Build and verify the plurx Player .deb with its private mpv/libplacebo in disposable Ubuntu 26.10 containers (LINUX-PLAYER-PLAN M5)
+linux-player-deb: ## Build and verify the Cinema frontend .deb against system mpv
 	@clients/linux-player/packaging/build-deb.sh
 
 .PHONY: check
@@ -1685,10 +1683,8 @@ BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null)
 # `make docker SOURCE_DATE_EPOCH=<seconds>`, which Make lets win.
 SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git log -1 --format=%ct 2>/dev/null))
 HOST_SHORTNAME := $(shell hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)
-# Registry transport may differ between networks; the image digest stays fixed.
-# Infer HTTP(S), SSH and scp-style origins without copying Git credentials
-# or mistaking the SSH port for the registry port.
-PLURX_MEDIA_REGISTRY ?= $(shell python3 scripts/media-registry-default)
+# Public, independently published media assets; mirrors are explicit repository overrides.
+PLURX_MEDIA_RUNTIME_REPOSITORY ?= ghcr.io/pjunod/cinema-media-runtime
 
 .PHONY: version
 version: ## Print the version and git build stamp a build would report
@@ -1701,7 +1697,7 @@ docker: ## Build the application on its pinned media runtime
 	@set -eu; platform="$${DOCKER_DEFAULT_PLATFORM:-linux/$$(uname -m)}"; \
 	case "$$platform" in linux/amd64|linux/x86_64) arch=amd64 ;; linux/arm64|linux/aarch64) arch=arm64 ;; \
 	*) echo "Unsupported container platform $$platform" >&2; exit 1 ;; esac; \
-	docker build --target runtime --platform "linux/$$arch" --build-arg PLURX_MEDIA_REGISTRY="$(PLURX_MEDIA_REGISTRY)" --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .
+	docker build --target runtime --platform "linux/$$arch" --build-arg PLURX_MEDIA_RUNTIME_REPOSITORY="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .
 
 .PHONY: container-smoke
 container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
@@ -1780,7 +1776,7 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 	  && compose_files="$$(python3 ../scripts/docker-hardware --prepare-pi --output "$$hardware")" \
 	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
-	  && PLURX_MEDIA_REGISTRY_DEFAULT="$(PLURX_MEDIA_REGISTRY)" PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
+	  && PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe

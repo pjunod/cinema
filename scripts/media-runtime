@@ -3,23 +3,34 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 PIN = re.compile(
-    r"(?m)^(FROM \$\{PLURX_MEDIA_REGISTRY\}/noirr/plurx-media-runtime@)"
+    r"(?m)^(FROM \$\{PLURX_MEDIA_RUNTIME_REPOSITORY\}@)"
     r"(sha256:[0-9a-f]{64})( AS runtime-assets)$"
 )
 DIGEST_ARG = re.compile(r'(?m)^ARG PLURX_MEDIA_RUNTIME_DIGEST="(sha256:[0-9a-f]{64})"$')
 IMAGE = re.compile(
-    r"[A-Za-z0-9][A-Za-z0-9.:-]*/noirr/plurx-media-runtime@sha256:[0-9a-f]{64}"
+    r"[A-Za-z0-9][A-Za-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}"
 )
 REQUIRED_PLATFORMS = {("linux", "amd64"), ("linux", "arm64")}
+PUBLIC_REPOSITORY = "ghcr.io/pjunod/cinema-media-runtime"
+MANIFEST_ACCEPT = ", ".join((
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+))
 
 
 def run(command: list[str], *, capture: bool = False) -> str:
@@ -28,10 +39,58 @@ def run(command: list[str], *, capture: bool = False) -> str:
     return result.stdout if capture else ""
 
 
+def verify_public_image(digest: str) -> None:
+    """Prove the canonical index and both platform manifests work without login.
+
+    A fresh urllib opener never reads Docker's authentication configuration or
+    a credential helper. Only GHCR's anonymous pull token is sent to GHCR.
+    """
+    opener = urllib.request.build_opener()
+    token_url = "https://ghcr.io/token?" + urllib.parse.urlencode({
+        "service": "ghcr.io", "scope": "repository:pjunod/cinema-media-runtime:pull",
+    })
+    try:
+        with opener.open(token_url, timeout=30) as response:
+            grant = json.load(response)
+            token = grant.get("token") if isinstance(grant, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ValueError("canonical public media runtime returned no anonymous pull token")
+
+        def manifest(reference: str) -> dict:
+            request = urllib.request.Request(
+                "https://ghcr.io/v2/pjunod/cinema-media-runtime/manifests/" + reference,
+                headers={"Authorization": "Bearer " + token, "Accept": MANIFEST_ACCEPT},
+            )
+            with opener.open(request, timeout=30) as response:
+                payload = response.read()
+            if "sha256:" + hashlib.sha256(payload).hexdigest() != reference:
+                raise ValueError("canonical public media manifest bytes do not match their digest")
+            document = json.loads(payload)
+            if not isinstance(document, dict):
+                raise ValueError("canonical public media manifest must be a JSON object")
+            return document
+
+        index = manifest(digest)
+        platforms = {
+            (entry.get("platform", {}).get("os"), entry.get("platform", {}).get("architecture")): entry
+            for entry in index.get("manifests", [])
+        }
+        if not REQUIRED_PLATFORMS.issubset(platforms):
+            raise ValueError("canonical public media index must contain both linux/amd64 and linux/arm64")
+        for platform in sorted(REQUIRED_PLATFORMS):
+            child = platforms[platform].get("digest", "")
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", child):
+                raise ValueError("canonical public media index contains an invalid platform digest")
+            manifest(child)
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as error:
+        raise ValueError("canonical public media runtime is not anonymously available at "
+                         + PUBLIC_REPOSITORY + "@" + digest) from error
+
+
 def pin_image(image: str, dockerfile: Path, *, insecure: bool = False) -> None:
     """Require a published multi-platform image before changing application source."""
     if not IMAGE.fullmatch(image):
-        raise ValueError("image must be REGISTRY/noirr/plurx-media-runtime@sha256:<64 lowercase hex>")
+        raise ValueError("image must be REGISTRY/REPOSITORY@sha256:<64 lowercase hex>")
     source = dockerfile.read_text()
     if len(PIN.findall(source)) != 1:
         raise ValueError("Dockerfile must contain exactly one immutable media runtime pin")
@@ -49,9 +108,10 @@ def pin_image(image: str, dockerfile: Path, *, insecure: bool = False) -> None:
     if not REQUIRED_PLATFORMS.issubset(platforms):
         raise ValueError("media image index must contain both linux/amd64 and linux/arm64")
     digest = image.rsplit("@", 1)[1]
+    verify_public_image(digest)
     updated = PIN.sub(lambda match: match[1] + digest + match[3], source)
     updated = DIGEST_ARG.sub(f'ARG PLURX_MEDIA_RUNTIME_DIGEST="{digest}"', updated)
-    # Keep the registry configurable while making the selected bytes immutable.
+    # Keep the mirror repository configurable while making the selected bytes immutable.
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", dir=dockerfile.parent,
@@ -72,7 +132,7 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     show = commands.add_parser("show", help="print the committed immutable image reference")
     show.add_argument("--dockerfile", type=Path, default=ROOT / "Dockerfile")
-    show.add_argument("--registry", default=os.environ.get("PLURX_MEDIA_REGISTRY", "forge.lan:3000"))
+    show.add_argument("--repository", default=os.environ.get("PLURX_MEDIA_RUNTIME_REPOSITORY", "ghcr.io/pjunod/cinema-media-runtime"))
     pin = commands.add_parser("pin", help="verify a published multi-platform index and update its digest")
     pin.add_argument("image")
     pin.add_argument("--insecure", action="store_true", help="allow the configured private HTTP registry")
@@ -90,15 +150,15 @@ def main() -> int:
             matches = PIN.findall(source)
             if len(matches) != 1:
                 raise ValueError("Dockerfile must contain exactly one immutable media runtime pin")
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?", args.registry):
-                raise ValueError("registry must be a hostname with optional port")
+            if not IMAGE.fullmatch(args.repository + "@sha256:" + "0" * 64):
+                raise ValueError("repository must be REGISTRY/REPOSITORY without a tag or digest")
             reference = matches[0][0].removeprefix("FROM ") + matches[0][1]
-            print(reference.replace("${PLURX_MEDIA_REGISTRY}", args.registry))
+            print(reference.replace("${PLURX_MEDIA_RUNTIME_REPOSITORY}", args.repository))
         elif args.command == "pin":
             pin_image(args.image, args.dockerfile, insecure=args.insecure)
         else:
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:-]*/noirr/plurx-media-runtime:[A-Za-z0-9_.-]+", args.image):
-                raise ValueError("build image must be a tagged REGISTRY/noirr/plurx-media-runtime reference")
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9_.-]+", args.image):
+                raise ValueError("build image must be a tagged REGISTRY/REPOSITORY reference")
             if not set(args.platforms.split(",")).issubset({"linux/amd64", "linux/arm64"}):
                 raise ValueError("supported platforms are linux/amd64 and linux/arm64")
             extra: list[str] = []

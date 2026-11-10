@@ -19,7 +19,13 @@ ORIGINAL_JOB = '1a68af55093f2b325f2187fe79082a03f1c6bf8b13ea75545e99f3155783f304
 # Reviewed four-line HDR inverse check uses the already pinned FFmpeg 8
 # action. Checkout/toolchain/image/Cargo commands/flags/limits are unchanged;
 # ORIGINAL_JOB and protected-input refusal remain exact and unchanged.
-CURRENT_JOB = '8672bfc684e8900df352a108a13fe12946ca6bde0f451b8895482379f3072da8'
+PRE_NONVOTER_JOB = '8672bfc684e8900df352a108a13fe12946ca6bde0f451b8895482379f3072da8'
+# Reviewed nonvoter role and effective 20 GiB/no-swap/four-CPU guard only.
+# Checkout, pinned image/toolchain, Cargo flags, job/test threads and timeout
+# remain exact. Historical admission names each reviewed recipe explicitly;
+# current admission accepts only the new recipe, never arbitrary resource edits.
+CURRENT_JOB = '6bccb65add53e801408f5ff9143022c9ddf7dc68854cf2ff3eabb5a6f4214a49'
+HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, CURRENT_JOB)
 ROOT_SOURCES = {'tests/operations/test_source_custody_recovery.py', 'scripts/source-custody-recovery'}
 PROTECTED = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'Makefile'}
 NATIVE_ACTIONS = ('.cargo/', '.github/actions/rust-native-deps/', '.github/actions/ffmpeg/',
@@ -56,7 +62,8 @@ def check_changes(record, candidate, targets):
 def check_workflow_environment(workflow, expected):
     job = re.search(r'(?s)\n  check:\n.*?(?=\n  cluster_store_legacy:)', workflow)
     global_env = re.findall(r'(?m)^env:\n((?:  [^\n]+\n)+)',workflow)
-    receipts.require(job and retention.digest(job[0].encode()) == expected
+    allowed = (expected,) if isinstance(expected, str) else expected
+    receipts.require(job and retention.digest(job[0].encode()) in allowed
                      and global_env == ['  CARGO_TERM_COLOR: always\n']
                      and not re.search(r'(?m)^defaults:',workflow),
                      'Unrecognized workflow or native Rust job execution environment')
@@ -89,7 +96,7 @@ def authenticate(api, descriptor, binding, candidate):
                      and jobs[0]['repo_id'] == repository and jobs[0]['attempt'] == 1
                      and jobs[0]['status'] in ('success','failure'), 'Original native Rust job differs')
     workflow = retention.git_bytes(prior, '.github/workflows/ci.yml').decode()
-    check_workflow_environment(workflow,ORIGINAL_JOB)
+    check_workflow_environment(workflow,HISTORICAL_JOBS)
     check_workflow_environment(retention.git_bytes(candidate,'.github/workflows/ci.yml').decode(),CURRENT_JOB)
     commands.authenticate_scope(api, run_id, run, workflow, record, prior, repository)
     source = api.bytes(f'/actions/jobs/{job_id}/logs')
