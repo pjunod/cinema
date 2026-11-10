@@ -28,6 +28,11 @@ PROTOCOL_PATHS = {
     'validation/qualification_unit_continuation.py',
     'validation/incremental_binary_control.py',
     'tests/validation/test_incremental_binary_control.py',
+    'validation/native_makefile_compatibility.py',
+    'tests/validation/test_native_makefile_compatibility.py',
+    'tests/validation/test_qualification_unit_continuation.py',
+    'validation/native_makefile_compatibility.py',
+    'tests/validation/test_native_makefile_compatibility.py',
     # Receipt adoption machinery decides what runs, not what a unit proves.
     'validation/main_preflight_adoption.py', 'validation/main_unit_receipts.py',
 }
@@ -139,7 +144,8 @@ def android_device_inputs(source, commit):
         r'^ANDROID_\w+ \?=.*$', makefile, re.M)) + '\n').encode())
     # The full finite Make identity refuses shadow assignments and repeated
     # targets outside the Android section, including appended overrides.
-    values['make-complete'] = digest(makefile.encode())
+    from validation.native_makefile_compatibility import native_makefile_digest
+    values['make-complete'] = native_makefile_digest(makefile.encode())
     return values
 
 
