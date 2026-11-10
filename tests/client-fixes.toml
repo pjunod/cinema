@@ -8211,7 +8211,7 @@ test_anchor = "def test_cm29_evaluates_its_lattice_once_per_frame(self):"
 id = "claude.linux-player-control-capabilities"
 commits = ["484fbf97e51601a0d4dbfc309ec39cefdcbfc9e8"]
 source = "clients/linux-player/plurx_player/caps.py"
-source_anchor = "def control_capabilities():"
+source_anchor = "def control_capabilities(native_dovi=False):"
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_the_first_control_exchange_is_the_one_the_server_validates(self):"
 
