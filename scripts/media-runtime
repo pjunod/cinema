@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Explicitly publish and pin Cinema's independently built media runtime."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+PIN = re.compile(
+    r"(?m)^(FROM \$\{PLURX_MEDIA_REGISTRY\}/noirr/plurx-media-runtime@)"
+    r"(sha256:[0-9a-f]{64})( AS runtime-assets)$"
+)
+DIGEST_ARG = re.compile(r'(?m)^ARG PLURX_MEDIA_RUNTIME_DIGEST="(sha256:[0-9a-f]{64})"$')
+IMAGE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9.:-]*/noirr/plurx-media-runtime@sha256:[0-9a-f]{64}"
+)
+REQUIRED_PLATFORMS = {("linux", "amd64"), ("linux", "arm64")}
+
+
+def run(command: list[str], *, capture: bool = False) -> str:
+    result = subprocess.run(command, check=True, text=True,
+                            stdout=subprocess.PIPE if capture else None)
+    return result.stdout if capture else ""
+
+
+def pin_image(image: str, dockerfile: Path, *, insecure: bool = False) -> None:
+    """Require a published multi-platform image before changing application source."""
+    if not IMAGE.fullmatch(image):
+        raise ValueError("image must be REGISTRY/noirr/plurx-media-runtime@sha256:<64 lowercase hex>")
+    source = dockerfile.read_text()
+    if len(PIN.findall(source)) != 1:
+        raise ValueError("Dockerfile must contain exactly one immutable media runtime pin")
+    defaults = DIGEST_ARG.findall(source)
+    if len(defaults) != 1 or defaults[0] != PIN.findall(source)[0][1]:
+        raise ValueError("runtime digest identity default must match the committed media base")
+    inspect = ["docker", "manifest", "inspect"]
+    if insecure:
+        inspect.append("--insecure")
+    manifest = json.loads(run([*inspect, image], capture=True))
+    platforms = {
+        (entry.get("platform", {}).get("os"), entry.get("platform", {}).get("architecture"))
+        for entry in manifest.get("manifests", [])
+    }
+    if not REQUIRED_PLATFORMS.issubset(platforms):
+        raise ValueError("media image index must contain both linux/amd64 and linux/arm64")
+    digest = image.rsplit("@", 1)[1]
+    updated = PIN.sub(lambda match: match[1] + digest + match[3], source)
+    updated = DIGEST_ARG.sub(f'ARG PLURX_MEDIA_RUNTIME_DIGEST="{digest}"', updated)
+    # Keep the registry configurable while making the selected bytes immutable.
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=dockerfile.parent,
+                                         prefix=".media-runtime-pin-", delete=False) as output:
+            temporary = output.name
+            output.write(updated)
+        os.chmod(temporary, dockerfile.stat().st_mode & 0o777)
+        os.replace(temporary, dockerfile)
+        temporary = None
+    finally:
+        if temporary:
+            Path(temporary).unlink(missing_ok=True)
+    print(f"Pinned media runtime: {digest}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    show = commands.add_parser("show", help="print the committed immutable image reference")
+    show.add_argument("--dockerfile", type=Path, default=ROOT / "Dockerfile")
+    show.add_argument("--registry", default=os.environ.get("PLURX_MEDIA_REGISTRY", "forge.lan:3000"))
+    pin = commands.add_parser("pin", help="verify a published multi-platform index and update its digest")
+    pin.add_argument("image")
+    pin.add_argument("--insecure", action="store_true", help="allow the configured private HTTP registry")
+    pin.add_argument("--dockerfile", type=Path, default=ROOT / "Dockerfile")
+    build = commands.add_parser("build", help="explicitly build and push media dependencies")
+    build.add_argument("--image", required=True)
+    build.add_argument("--metadata", type=Path, required=True)
+    build.add_argument("--platforms", default="linux/amd64,linux/arm64")
+    build.add_argument("--target", choices=("media-runtime", "runtime-assets-dolby-amd64"), default="media-runtime")
+    build.add_argument("--package", type=Path)
+    args = parser.parse_args()
+    try:
+        if args.command == "show":
+            source = args.dockerfile.read_text()
+            matches = PIN.findall(source)
+            if len(matches) != 1:
+                raise ValueError("Dockerfile must contain exactly one immutable media runtime pin")
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?", args.registry):
+                raise ValueError("registry must be a hostname with optional port")
+            reference = matches[0][0].removeprefix("FROM ") + matches[0][1]
+            print(reference.replace("${PLURX_MEDIA_REGISTRY}", args.registry))
+        elif args.command == "pin":
+            pin_image(args.image, args.dockerfile, insecure=args.insecure)
+        else:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:-]*/noirr/plurx-media-runtime:[A-Za-z0-9_.-]+", args.image):
+                raise ValueError("build image must be a tagged REGISTRY/noirr/plurx-media-runtime reference")
+            if not set(args.platforms.split(",")).issubset({"linux/amd64", "linux/arm64"}):
+                raise ValueError("supported platforms are linux/amd64 and linux/arm64")
+            extra: list[str] = []
+            if args.target == "runtime-assets-dolby-amd64":
+                if args.platforms != "linux/amd64" or not args.package or not args.package.is_dir():
+                    raise ValueError("audited Dolby target requires --platforms linux/amd64 and --package DIRECTORY")
+                extra = ["--build-context", f"linux-dolby-package={args.package.resolve()}"]
+            elif args.package:
+                raise ValueError("--package requires the audited Dolby target")
+            revision = run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture=True).strip()
+            if run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"], capture=True):
+                raise ValueError("commit tracked changes before publishing an image labelled with its source revision")
+            args.metadata.parent.mkdir(parents=True, exist_ok=True)
+            run(["docker", "buildx", "build", "--file", str(ROOT / "Dockerfile.media-runtime"),
+                 "--target", args.target, "--platform", args.platforms, "--push",
+                 "--tag", args.image, "--metadata-file", str(args.metadata.resolve()),
+                 "--label", f"org.opencontainers.image.revision={revision}",
+                 "--provenance=false", "--sbom=false", *extra, str(ROOT)])
+    except (ValueError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+        parser.exit(1, f"media-runtime: {error}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

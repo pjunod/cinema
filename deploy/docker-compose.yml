@@ -47,6 +47,9 @@ services:
       context: ..            # repo root (where the Dockerfile + workspace live)
       dockerfile: Dockerfile
       args:
+        # Only the registry address varies; Dockerfile fixes the media digest.
+        # make docker-up infers a default from origin; .env can override it.
+        PLURX_MEDIA_REGISTRY: ${PLURX_MEDIA_REGISTRY:-${PLURX_MEDIA_REGISTRY_DEFAULT:-forge.lan:3000}}
         # Which commit this image is. `.git` is deliberately outside the build
         # context, so the build script cannot work it out for itself and a
         # bare `docker compose up -d --build` produces an image stamped

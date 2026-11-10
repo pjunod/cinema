@@ -63,6 +63,7 @@ ensure_immutable() {
     echo "reusing existing immutable image $IMMUTABLE_REF"
   elif is_missing_ref "$IMMUTABLE_REF" inspect.err; then
     docker build \
+      --build-arg PLURX_MEDIA_REGISTRY="${PLURX_MEDIA_REGISTRY:-$REGISTRY}" \
       --build-arg PLURX_BUILD_REF="$REF" \
       --build-arg PLURX_BUILD_SHA="$FULL_SHA" \
       --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
