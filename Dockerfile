@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG PLURX_MEDIA_REGISTRY=forge.lan:3000
+ARG PLURX_MEDIA_RUNTIME_REPOSITORY=ghcr.io/pjunod/cinema-media-runtime
 
 # Pinned by digest: `1-bookworm` floats, and what floats with it is this
 # image's Debian system libraries and its own rustup. The compiler is not
@@ -49,7 +49,7 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
     && cp target-cluster-check/release/plurx-cluster-check.dwp /plurx-cluster-check.dwp
 
 # Published media dependencies are independent of application source.
-FROM ${PLURX_MEDIA_REGISTRY}/noirr/plurx-media-runtime@sha256:17b3bf9f0d3ed5dd167540a3c805e30a7624fbd93dad250e9e866799ecb22cae AS runtime-assets
+FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:17b3bf9f0d3ed5dd167540a3c805e30a7624fbd93dad250e9e866799ecb22cae AS runtime-assets
 
 # M5's CI image uses the shipped runtime's media assets, not a second ffmpeg
 # install on a persistent runner. These two tool images are pinned by index

@@ -365,6 +365,24 @@ class ReleasePublicationContractCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "explicit global default"):
             render(source.replace(declaration, ""))
 
+    def test_public_media_repository_preserves_digest_with_explicit_mirror(self):
+        source = (ROOT / "Dockerfile").read_text()
+        default = pinned_runtime_image(source)
+        self.assertTrue(default.startswith("ghcr.io/pjunod/cinema-media-runtime@sha256:"))
+        mirror = pinned_runtime_image(source, repository="mirror.example:5000/custom/media-runtime")
+        self.assertEqual(mirror.rsplit("@", 1)[1], default.rsplit("@", 1)[1])
+        self.assertTrue(mirror.startswith("mirror.example:5000/custom/media-runtime@"))
+        declaration = "ARG PLURX_MEDIA_RUNTIME_REPOSITORY=ghcr.io/pjunod/cinema-media-runtime\n"
+        generated = render(source)
+        self.assertEqual(generated.count(declaration), 1)
+        self.assertLess(generated.index(declaration), generated.index("FROM "))
+        with self.assertRaisesRegex(ValueError, "explicit global default"):
+            render(source.replace(declaration, ""))
+        for invalid in ("https://mirror.example/runtime", "mirror.example/runtime:latest",
+                        "mirror.example/runtime@sha256:" + "a" * 64):
+            with self.subTest(repository=invalid), self.assertRaises(ValueError):
+                pinned_runtime_image(source, repository=invalid)
+
     def test_external_media_pin_rejects_unpublished_runtime_modifications(self):
         image = "registry.example/noirr/plurx-media-runtime@sha256:" + "d" * 64
         source = f"FROM {image} AS runtime-assets\nRUN apt-get update\n"

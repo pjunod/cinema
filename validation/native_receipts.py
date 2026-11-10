@@ -73,11 +73,11 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed against main c8f8b5aa9: only the lazy, non-exported Docker
-    # registry resolver and its comment changed. Native targets, flags and
-    # bundled-resource inputs match that reviewed Makefile.
+    # Reviewed against main d17182dbf1: only the non-exported Docker media
+    # repository default, Docker build arguments and Compose forwarding changed.
+    # Native targets, flags and resources match that reviewed Makefile.
     # Pin these exact bytes; this does not authorize old-to-new receipt adoption.
-    'Makefile': 'dc8126fea135d56a80dc89ff841fddd57ce253c4b2db47654e6072b80fcc34ac',
+    'Makefile': 'c63779a7a7b97c301fc3cc6fcdc719265fd1d03445dbbbd5ea443c2287fd3fe2',
     # Reviewed 0.8.0 build 294: only CURRENT_PROJECT_VERSION differs from the
     # reviewed build 293 bytes (d686e9d8b changed the Apple client after 293
     # was claimed). Pin this exact spec; build-293 case receipts do not
