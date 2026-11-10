@@ -161,6 +161,11 @@ jobs:
             'import platform, sys; assert sys.version_info[:3] == (3, 12, 15) and sys.platform == "linux" and platform.machine() == "x86_64"'
           rm -- "$runtime_archive"
           printf '%s\n' "$python_dir/python/bin" >> "$GITHUB_PATH"
+      - name: Install the pinned Rust controller prerequisite
+        if: steps.worker-control-inputs.outputs.affected == 'true'
+        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+        with:
+          toolchain: "1.97.1"
       - name: Prepare same-PR worker proof resumption
         id: worker-control-resume
         if: steps.worker-control-inputs.outputs.affected == 'true'
