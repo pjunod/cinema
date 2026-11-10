@@ -1,10 +1,10 @@
 # S5 source custody / VOD Source-copy yield audit (2026-11-09), authored
-# structural comparison of origin/main c8f8b5aa9 with cda32a411 using the
+# structural comparison of origin/main c8f8b5aa9 with 3e17df55f using the
 # unchanged rust_structural_source extractor over module_roots. This is static
 # ownership evidence, not runtime or physical qualification. Exact count
-# changes: task shapes 1113->1120 (+7), time constructors 2152->2161 (+9),
+# changes: task shapes 1113->1121 (+8), time constructors 2152->2164 (+12),
 # Command constructors 335->336 (+1), process-capable method matches
-# 908->911 (+3), lifecycle method matches 383->384 (+1), and free/UFCS
+# 908->913 (+5), lifecycle method matches 383->384 (+1), and free/UFCS
 # process-lifecycle matches 87->88 (+1). The task delta is +3 production
 # blocking jobs and +4 fixture tasks:
 # source_resource.rs adds actual cache read/publication jobs whose closures
@@ -35,6 +35,13 @@
 # registered child and writer reaper. No production process-launch shape,
 # pattern, scope, exclusion, alias, fingerprint mapping, or forbidden-zero
 # contract changes.
+# The final source/relay fixture follow-up adds one joined HTTP `serving` task
+# with a five-second failing bound; it owns only the finite fixture response.
+# Typed subtitle bound cases add two awaited deadline constructors. Decoder and
+# relay assertions add two broad `.status()` matches (response/builder status,
+# not process launches). These cases fail on timeout and do not claim child,
+# writer, or Source settlement. Command-constructor and process-lifecycle
+# counts are unchanged in this follow-up.
 #
 # Shared-library playback ownership audit (2026-11-09): authored static
 # comparison of main 30f4343ba with candidate 2285907fc, using the unchanged
@@ -3819,7 +3826,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # `http::cluster_operations::worker_status_cache_loop`, a read-only refresh of local worker
 # capacity for Activity. It owns no child or source, and returns on `background_shutdown`, the
 # same cancellation as its sibling peer-status loop.
-expected_occurrences = 1120
+expected_occurrences = 1121
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5628,7 +5635,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # (`foreground_admission_tests`). Three are Jellyfin native-HLS test retries (d25a35ea3,
 # 9fde9d148, 55f84b0e8): 250 ms and 1 s sleeps while a fixture response is `503` pending.
 # No production producer, child or detached owner is added.
-expected_occurrences = 2161
+expected_occurrences = 2164
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6812,7 +6819,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +3 in `http/jellyfin/tests.rs` (d25a35ea3, 9fde9d148, 55f84b0e8): HTTP
 # `response.status()` reads in the pending-segment retry loops above. They match the
 # `.status(` shape but launch no process.
-expected_occurrences = 911
+expected_occurrences = 913
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
