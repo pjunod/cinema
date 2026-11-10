@@ -19,8 +19,8 @@ results are claimed yet for this follow-up.
 The pinned Rust 1.97.1 compiler loop is established in a source-only container.
 The owner explicitly approved at most 24 GiB, four CPUs and no swap for this
 follow-up. Compiler caches stay shared; source and receipts have separate
-owned paths. The live PR records gate and landing state once opened. Compilation and the
-final independent review are the current step; unit execution follows review.
+owned paths. The live PR records gate and landing state once opened. The single final independent review is complete. Its five findings are
+addressed; exact-source compilation and focused execution are next.
 
 ## The Start503 defect
 
@@ -119,3 +119,21 @@ after observation for a shared caption window is no generic foreground
 self-claim caused by Source delivery. This baseline is not performance or
 physical-playback acceptance. Final fixture receipts must additionally
 show caption work outside Start and counted settlement before release.
+
+## Final review dispositions
+
+Astra requested five corrections; `21493f2fe` and the shared control-body
+bridge address them. Managed-cache pressure retains typed capacity/deadline
+results. Sparse intermediates reserve bytes through converter reap and
+actual handle closure, using the established Windows named-file pattern.
+Controls share counted custody with bounded observation of caption work,
+report permanent unsupported data accurately and retain genuine failures.
+Raw UTF-8 and timestamp maps are checked before presentation. Optional
+timeline evidence no longer prevents an independently authorized demux fallback.
+
+The initializer counterfactual uses a request-scoped fixture-only release
+mode to execute the former accounting predicate against real Store SQL and
+real HTTP registration. It has no wire or product configuration entry;
+unarmed, cancelled and nonfixture execution retain the current authority
+predicate. Both the actual503 control and repaired200 flow can be proved in
+one compiled binary. Runtime and gate receipts remain pending.
