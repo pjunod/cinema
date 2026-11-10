@@ -56,6 +56,21 @@ pub(super) async fn actual_resource_request(
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_initialization_overlapping_real_h2_registration_starts_and_ends() {
+    actual_source_initialization_interleave(InitializationAssertionCase::CurrentAuthority).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_initialization_old_accounting_snapshot_returns_503() {
+    actual_source_initialization_interleave(
+        InitializationAssertionCase::AccountingSnapshotCounterfactual,
+    )
+    .await;
+}
+#[derive(Clone, Copy)]
+enum InitializationAssertionCase {
+    CurrentAuthority,
+    AccountingSnapshotCounterfactual,
+}
+async fn actual_source_initialization_interleave(assertion_case: InitializationAssertionCase) {
     use plurx_core::store::sharing_source_ingress_custody::pause_source_ingress_initialization_for_fixture;
     use std::time::{Duration, Instant};
 
@@ -133,7 +148,12 @@ async fn sharing_source_http_initialization_overlapping_real_h2_registration_sta
     })
     .await
     .expect("actual H2 Register committed inside initialization's read/assertion window");
-    pause.release();
+    match assertion_case {
+        InitializationAssertionCase::CurrentAuthority => pause.release(),
+        InitializationAssertionCase::AccountingSnapshotCounterfactual => {
+            pause.release_old_accounting_assertion()
+        }
+    }
     let response = tokio::time::timeout(Duration::from_secs(60), starting)
         .await
         .expect("bounded actual Source Start")
@@ -142,6 +162,83 @@ async fn sharing_source_http_initialization_overlapping_real_h2_registration_sta
     let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
         .await
         .expect("actual Start body");
+    if matches!(
+        assertion_case,
+        InitializationAssertionCase::AccountingSnapshotCounterfactual
+    ) {
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the actual old accounting assertion must reproduce the Source503: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).expect("actual Source refusal")["code"],
+            "sharing_start_unresolved"
+        );
+        assert!(
+            matches!(
+                *entry.task.stage.lock().expect("retained failing stage"),
+                SourceStartTaskStage::Assigned(_)
+            ),
+            "actual accounting assertion failed before factory invocation"
+        );
+        assert!(fixture
+            .state
+            .transcode
+            .lookup_source_worker(&assignment)
+            .is_none());
+        assert!(entry
+            .published
+            .lock()
+            .expect("actual publication")
+            .is_none());
+        // The H2 request helper joined its real client driver. Ask a fresh
+        // actual HTTP End to retire its registered ingress and exact claim;
+        // do not manufacture an absent-worker or physical-closure receipt.
+        let ended = actual_resource_request(
+            address,
+            true,
+            &format!("{base}/{request_id}/end"),
+            fixture.headers.clone(),
+            fixture.request.clone(),
+        )
+        .await;
+        let end_status = ended.status();
+        let bytes = axum::body::to_bytes(ended.into_body(), 128 * 1024)
+            .await
+            .expect("actual failed-start End body");
+        assert_eq!(
+            end_status,
+            StatusCode::OK,
+            "actual failed-start cleanup: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let receipt: Value =
+            serde_json::from_slice(&bytes).expect("actual failed-start End receipt");
+        assert_eq!(receipt["settled"], true);
+        assert_eq!(
+            receipt["incarnation_id"],
+            json!(assignment.binding().incarnation_id())
+        );
+        assert_eq!(receipt["request_id"], json!(request_id));
+        assert!(
+            receipt.get("session_id").is_none(),
+            "the failed initializer published no session"
+        );
+        assert!(
+            entry.actual_finished(),
+            "the actual retained failed-start owner settled"
+        );
+        assert_eq!(fixture.active_source_sessions().await, 0);
+        let _ = stop.send(());
+        server
+            .await
+            .expect("counterfactual Source server joined")
+            .expect("counterfactual Source server drained");
+        fixture.shutdown().await;
+        return;
+    }
     assert_eq!(
         status,
         StatusCode::OK,

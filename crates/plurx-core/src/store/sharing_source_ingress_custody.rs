@@ -141,9 +141,16 @@ async fn snapshot<T: Backend>(
 // The daemon's dev-dependency enables `fixtures`; release builds carry no
 // scheduling seam. Keying by the complete request UUID isolates concurrent tests.
 #[cfg(feature = "fixtures")]
+#[derive(Default)]
+enum InitializationAssertion {
+    #[default]
+    CurrentAuthority,
+    AccountingSnapshotCounterfactual,
+}
+#[cfg(feature = "fixtures")]
 struct InitializationPause {
     reached: tokio::sync::oneshot::Sender<(SourceDispatchAssignment, i64)>,
-    release: tokio::sync::oneshot::Receiver<()>,
+    release: tokio::sync::oneshot::Receiver<InitializationAssertion>,
     captured: tokio::sync::watch::Sender<bool>,
 }
 #[cfg(feature = "fixtures")]
@@ -155,7 +162,7 @@ static INITIALIZATION_PAUSES: std::sync::LazyLock<
 pub struct SourceIngressInitializationPause {
     request_id: String,
     reached: tokio::sync::oneshot::Receiver<(SourceDispatchAssignment, i64)>,
-    release: Option<tokio::sync::oneshot::Sender<()>>,
+    release: Option<tokio::sync::oneshot::Sender<InitializationAssertion>>,
 }
 #[cfg(feature = "fixtures")]
 impl SourceIngressInitializationPause {
@@ -166,7 +173,14 @@ impl SourceIngressInitializationPause {
     }
     pub fn release(mut self) {
         if let Some(release) = self.release.take() {
-            let _ = release.send(());
+            let _ = release.send(InitializationAssertion::CurrentAuthority);
+        }
+    }
+    /// Execute the original accounting predicate in this one armed fixture
+    /// request, so its actual SQL/HTTP failure can be compared in one binary.
+    pub fn release_old_accounting_assertion(mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(InitializationAssertion::AccountingSnapshotCounterfactual);
         }
     }
 }
@@ -222,6 +236,8 @@ async fn initialized<T: Backend>(
         return Ok(SourceCustodyWrite::Refused);
     };
     #[cfg(feature = "fixtures")]
+    let mut assertion_mode = InitializationAssertion::CurrentAuthority;
+    #[cfg(feature = "fixtures")]
     {
         let pause = INITIALIZATION_PAUSES
             .lock()
@@ -232,7 +248,7 @@ async fn initialized<T: Backend>(
             // its accounting mutation regardless of which task arrived first.
             pause.captured.send_replace(true);
             let _ = pause.reached.send((assignment.clone(), snapshot.revision));
-            let _ = pause.release.await;
+            assertion_mode = pause.release.await.unwrap_or_default();
         }
     }
     let Some(routing) = snapshot.state.source_routing() else {
@@ -241,13 +257,19 @@ async fn initialized<T: Backend>(
     if routing.owner_node_id != assignment.owner_node_id() {
         return Ok(SourceCustodyWrite::Refused);
     }
+    // This operation only asserts ownership. A registration or ACK can
+    // change accounting while retaining the same current owner.
+    let custody_guard = current_admission_guard(&snapshot, false)?;
+    #[cfg(feature = "fixtures")]
+    let custody_guard = match assertion_mode {
+        InitializationAssertion::CurrentAuthority => custody_guard,
+        InitializationAssertion::AccountingSnapshotCounterfactual => snapshot_guard(&snapshot)?,
+    };
     let counts = store
         .sharing_txn(vec![assertion(&format!(
             "{} AND {}",
             source_guard(assignment),
-            // This operation only asserts ownership. A registration or ACK
-            // can change accounting while retaining the same current owner.
-            current_admission_guard(&snapshot, false)?
+            custody_guard
         ))])
         .await?;
     if counts.as_slice() == [0] {
