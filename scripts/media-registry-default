@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Resolve the fleet registry transport from the checkout's Git origin.
+
+Forgejo serves its registry on port 3000; SSH's independent port is never a
+registry port. PLURX_MEDIA_REGISTRY remains the explicit Make/Compose override.
+"""
+import re
+import subprocess
+from urllib.parse import urlsplit
+
+
+def registry_for_origin(origin):
+    # Git's scp syntax has no URL scheme, including user@[IPv6]:repo forms.
+    if "://" not in origin:
+        match = re.fullmatch(r"(?:[^/@:]+@)?(\[[^]]+\]|[^/:]+):(.+)", origin)
+        if not match:
+            return "forge.lan:3000"
+        origin = "ssh://" + match[1] + "/" + match[2]
+    parsed = urlsplit(origin)
+    if parsed.scheme not in ("http", "https", "ssh") or not parsed.hostname:
+        return "forge.lan:3000"
+    host = parsed.hostname
+    if ":" in host:
+        host = "[" + host + "]"
+    if parsed.scheme == "ssh":
+        return host + ":3000"
+    return host + (":" + str(parsed.port) if parsed.port else "")
+
+
+if __name__ == "__main__":
+    try:
+        origin = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"], text=True,
+            stderr=subprocess.DEVNULL).strip()
+        print(registry_for_origin(origin))
+    except (subprocess.CalledProcessError, ValueError):
+        print("forge.lan:3000")

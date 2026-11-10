@@ -1686,8 +1686,9 @@ BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null)
 SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git log -1 --format=%ct 2>/dev/null))
 HOST_SHORTNAME := $(shell hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)
 # Registry transport may differ between networks; the image digest stays fixed.
-# Infer the forge address from this checkout without copying URL credentials.
-PLURX_MEDIA_REGISTRY ?= $(shell python3 -c 'import subprocess; from urllib.parse import urlsplit; p=urlsplit(subprocess.check_output(["git", "remote", "get-url", "origin"], text=True).strip()); print((p.hostname + ((":" + str(p.port)) if p.port else "")) if p.scheme in ("http", "https") and p.hostname else "forge.lan:3000")' 2>/dev/null || echo forge.lan:3000)
+# Infer HTTP(S), SSH and scp-style origins without copying Git credentials
+# or mistaking the SSH port for the registry port.
+PLURX_MEDIA_REGISTRY ?= $(shell python3 scripts/media-registry-default)
 
 .PHONY: version
 version: ## Print the version and git build stamp a build would report

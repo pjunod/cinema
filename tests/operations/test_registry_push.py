@@ -1,5 +1,6 @@
 """Exercise exact-image publication with a disposable, deterministic registry."""
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -35,6 +36,51 @@ esac
 
 
 class RegistryPushCase(unittest.TestCase):
+    def test_docker_up_resolves_ssh_and_scp_origins_to_the_registry_port(self):
+        source = SCRIPT.parents[1]
+        cases = [
+            ("ssh://git@registry.invalid:222/noirr/plurx.git", "registry.invalid:3000"),
+            ("git@registry.invalid:noirr/plurx.git", "registry.invalid:3000"),
+            ("ssh://git@[2001:db8::7]:222/noirr/plurx.git", "[2001:db8::7]:3000"),
+            ("git@[2001:db8::7]:noirr/plurx.git", "[2001:db8::7]:3000"),
+            ("https://user:secret@registry.invalid:3000/noirr/plurx.git", "registry.invalid:3000"),
+            ("https://registry.invalid/noirr/plurx.git", "registry.invalid"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            (root / "deploy").mkdir()
+            shutil.copy2(source / "Makefile", root / "Makefile")
+            shutil.copy2(source / "scripts/media-registry-default", root / "scripts/media-registry-default")
+            (root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.0.0"\n')
+            (root / "scripts/validate-docker-startup-budget").write_text('print("1500s")\n')
+            (root / "scripts/docker-hardware").write_text('print("docker-compose.yml")\n')
+            docker = root / "docker"
+            docker.write_text('#!/bin/sh\nprintf "%s\\n" "$PLURX_MEDIA_REGISTRY_DEFAULT" "$*"\n')
+            docker.chmod(0o755)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "remote", "add", "origin", cases[0][0]], cwd=root, check=True)
+            env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}")
+            for key in ("PLURX_MEDIA_REGISTRY", "PLURX_MEDIA_REGISTRY_DEFAULT", "MAKEFLAGS", "MFLAGS"):
+                env.pop(key, None)
+            for origin, expected in cases:
+                with self.subTest(origin=origin):
+                    subprocess.run(["git", "remote", "set-url", "origin", origin], cwd=root, check=True)
+                    result = subprocess.run(["make", "--no-print-directory", "docker-up"],
+                                            cwd=root, env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(expected + "\ncompose up -d --build", result.stdout)
+                    self.assertNotIn("secret", result.stdout)
+                    build = subprocess.run(["make", "--no-print-directory", "-n", "docker"],
+                                           cwd=root, env=env, capture_output=True, text=True)
+                    self.assertEqual(build.returncode, 0, build.stderr)
+                    self.assertIn('--build-arg PLURX_MEDIA_REGISTRY="' + expected + '"', build.stdout)
+            result = subprocess.run(["make", "--no-print-directory", "docker-up",
+                                     "PLURX_MEDIA_REGISTRY=mirror.invalid:5000"],
+                                    cwd=root, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("mirror.invalid:5000\ncompose up -d --build", result.stdout)
+
     def test_source_publication_build_forwards_registry_without_changing_the_media_pin(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
