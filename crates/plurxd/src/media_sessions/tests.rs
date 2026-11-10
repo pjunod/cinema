@@ -4433,7 +4433,6 @@ async fn a_worker_terminal_capacity_refusal_crosses_to_the_ingress_by_code() {
     }
 }
 
-
 #[tokio::test]
 async fn skipped_processing_owner_reason_survives_relay_only_for_its_generation() {
     let request = terminal_relay_request();

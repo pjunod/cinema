@@ -110,7 +110,7 @@ fn a_newer_session_for_the_playback_cancels_its_predecessors_upgrade() {
 
 #[test]
 fn a_viewer_change_owns_the_playback_slot_over_an_upgrade() {
-    use super::super::preparation::{PendingCandidateGuard, begin_processed_upgrade};
+    use super::super::preparation::{begin_processed_upgrade, PendingCandidateGuard};
     let playback = uuid::Uuid::new_v4().to_string();
     // A viewer's own change in flight: the upgrade does not take its slot.
     let viewer = PendingCandidateGuard::begin(&playback, "viewer-ask");
