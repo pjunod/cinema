@@ -73,11 +73,11 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed against main d17182dbf1: only the non-exported Docker media
-    # repository default, Docker build arguments and Compose forwarding changed.
-    # Native targets, flags and resources match that reviewed Makefile.
-    # Pin these exact bytes; this does not authorize old-to-new receipt adoption.
-    'Makefile': 'c63779a7a7b97c301fc3cc6fcdc719265fd1d03445dbbbd5ea443c2287fd3fe2',
+    # Reviewed against main de5928d05: the Docker media runtime changes are
+    # preserved; Cinema adds only Linux Debian frontend comments/help.
+    # Apple/macOS recipes, flags and external inputs are unchanged.
+    # Pin these exact bytes; no old-to-new receipt adoption is authorized.
+    'Makefile': '1d8ba9f31adfe9a8f557e41aecbdded4de4b5cd7b8de017381c04b9ad8956305',
     # Reviewed 0.8.0 build 294: only CURRENT_PROJECT_VERSION differs from the
     # reviewed build 293 bytes (d686e9d8b changed the Apple client after 293
     # was claimed). Pin this exact spec; build-293 case receipts do not

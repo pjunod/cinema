@@ -1,16 +1,9 @@
 #!/usr/bin/env bash
 # Inside a fresh Ubuntu 26.10 container (packaging/build-deb.sh starts it, with
 # the repository read-only at /repo and the build output read-only at /out):
-# install the .deb the way a user would and check it end to end, then remove
-# it. The checks, in order: checksums; lintian on the .deb and the source
-# package; dpkg -i + apt-get -f install; the private mpv runs its linked-in
-# libplacebo, exports none of its symbols and loads only the system one
-# (for libavfilter), also under LD_LIBRARY_PATH; the
-# scheme registration and desktop entry; the launcher; the system mpv beside
-# it; both mpvs rendering a 10-bit PQ clip through vo=gpu-next on Vulkan
-# (Mesa's software device under Xvfb); the launcher's own mpv command line
-# against a hostile ~/.config/mpv and with the ytdl hook, each with a
-# positive control; the launcher tests with no skip allowed; dpkg -r and -P.
+# install the source-only Cinema package, verify system-mpv ownership and its
+# IPC/Lua/config boundary, render a PQ clip, then remove the frontend while
+# leaving the system renderer installed. This is not HDR/DV hardware acceptance.
 #
 # Every check is written `command || fail "..."` and then `pass "..."`, never
 # `command && pass`, which under set -e lets a failing command fall through
@@ -23,7 +16,7 @@ export DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1
 private=/usr/lib/plurx-player
 packaging=/repo/clients/linux-player/packaging
 cache=/usr/share/applications/mimeinfo.cache
-system_lib=/usr/lib/x86_64-linux-gnu
+renderer=/usr/bin/mpv
 step() { printf '\n== %s\n' "$*"; }
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; exit 1; }
@@ -46,7 +39,7 @@ step "apt snapshot"
 bash "$packaging/apt-snapshot.sh" "$packaging/upstream.lock" > /tmp/apt.txt 2>&1 || { cat /tmp/apt.txt; fail "apt snapshot"; }
 tail -n1 /tmp/apt.txt
 # desktop-file-utils owns the update-desktop-database trigger, as on a desktop.
-apt-get install -y -q --no-install-recommends desktop-file-utils lintian binutils git lua5.2 >/dev/null || fail "install the tools"
+apt-get install -y -q --no-install-recommends build-essential desktop-file-utils lintian binutils git lua5.2 >/dev/null || fail "install the tools"
 pass "tools installed"
 
 step "lintian $deb $dsc"
@@ -64,38 +57,16 @@ status=$(dpkg-query -W -f='${Status} ${Version}' plurx-player) || fail "dpkg-que
 case $status in "install ok installed "*) ;; *) fail "status: $status" ;; esac
 pass "installed: $status"
 
-step "private mpv --version"
-"$private/bin/mpv" --no-config --version > /tmp/private-version.txt || fail "private mpv --version"
-cat /tmp/private-version.txt
-grep -E '^libplacebo version: v[0-9.]+ \(v[0-9.]+-plurx' /tmp/private-version.txt \
-  || fail "private mpv does not report the private libplacebo"
-pass "private mpv reports $(sed -n 's/^libplacebo version: //p' /tmp/private-version.txt)"
-
-step "private mpv has libplacebo linked in"
-dynamic=$(readelf -d "$private/bin/mpv") || fail "readelf"
-! grep -F '(NEEDED)' <<< "$dynamic" | grep -F '[libplacebo' || fail "mpv needs a shared libplacebo"
-! grep -E '\((RPATH|RUNPATH)\)' <<< "$dynamic" || fail "mpv has an rpath"
-exported=$(nm -D --defined-only "$private/bin/mpv" | awk '$3 ~ /^(plurx_)?pl_/') || fail "nm"
-[ -z "$exported" ] || fail "mpv exports libplacebo symbols: $(head -n 3 <<< "$exported")"
-imported=$(nm -D --undefined-only "$private/bin/mpv" | awk '$2 ~ /^pl_/') || fail "nm"
-[ -z "$imported" ] || fail "mpv would call the system libplacebo: $(head -n 3 <<< "$imported")"
-! ls "$private"/lib 2> /dev/null || fail "the package installs a private library directory"
-pass "mpv needs no shared libplacebo, has no rpath, and exports and imports no libplacebo symbol"
-
-# The only libplacebo mpv's process loads is the system one, for libavfilter.
-check_private_ldd() {
-  local label=$1; shift
-  env "$@" ldd "$private/bin/mpv" > /tmp/private-ldd.txt || fail "$label: ldd"
-  ! grep 'not found' /tmp/private-ldd.txt || fail "$label: unresolved libraries"
-  local lp
-  for lp in $(awk '$1 ~ /^libplacebo\.so/ { print $3 }' /tmp/private-ldd.txt); do
-    lp=$(realpath "$lp")
-    case $lp in "$system_lib"/libplacebo.so.*) ;; *) fail "$label: private mpv loads libplacebo from $lp" ;; esac
-  done
-  pass "$label: private mpv loads no libplacebo but the system one ($(awk '$1 ~ /^libplacebo\.so/ { print $1 }' /tmp/private-ldd.txt | paste -sd' ' -))"
-}
-step "ldd private mpv"
-check_private_ldd "alone"
+step "system renderer ownership and package contents"
+[ -x "$renderer" ] || fail "system mpv dependency is missing"
+"$renderer" --no-config --version || fail "system mpv --version"
+# The frontend may install Python, Lua, desktop integration and documentation.
+# Reject a duplicate executable or library even if a stale build produced it.
+dpkg-query -L plurx-player > /tmp/player-files.txt || fail "package file list"
+! grep -E '^/usr/lib/plurx-player/(bin|lib)(/|$)' /tmp/player-files.txt || fail "frontend ships a renderer or libraries"
+[ ! -e "$private/bin/mpv" ] || fail "legacy bundled mpv remains after upgrade"
+dpkg-query -S "$renderer" || fail "system renderer has no owning package"
+pass "Cinema package uses the separately owned system renderer"
 
 step "scheme registration and desktop entry"
 grep -x 'x-scheme-handler/plurx-player=plurx-player.desktop;' "$cache" || fail "the scheme is not in $cache"
@@ -112,26 +83,8 @@ plurx-player --help > /dev/null || fail "plurx-player --help"
 pass "plurx-player --help"
 resolved=$(python3 -I -c 'import sys; sys.path.insert(0, "/usr/lib/plurx-player"); from plurx_player import mpv; print(mpv.resolve_binary())') \
   || fail "import the installed launcher"
-[ "$resolved" = "$private/bin/mpv" ] || fail "launcher resolves mpv to $resolved"
+[ "$resolved" = "$renderer" ] || fail "launcher resolves mpv to $resolved"
 pass "launcher resolves mpv to $resolved"
-
-step "system mpv alongside"
-apt-get install -y -q mpv > /dev/null || fail "install the system mpv"
-mpv --no-config --version > /tmp/system-version.txt || fail "system mpv --version"
-cat /tmp/system-version.txt
-! grep -- '-plurx' /tmp/system-version.txt || fail "system mpv reports the private libplacebo"
-system_lp=$(ldd /usr/bin/mpv | awk '$1 ~ /^libplacebo\.so/ { print $3 }') || fail "ldd /usr/bin/mpv"
-system_lp=$(realpath "$system_lp")
-case $system_lp in "$system_lib"/libplacebo.so.*) ;; *) fail "system mpv loads $system_lp" ;; esac
-pass "system mpv loads $system_lp ($(dpkg-query -W -f='${Version}' 'libplacebo[0-9]*'))"
-check_private_ldd "beside the system mpv"
-
-step "LD_LIBRARY_PATH pointing at the system libplacebo"
-ls "$system_lib"/libplacebo.so.* || fail "no system libplacebo to point at"
-check_private_ldd "LD_LIBRARY_PATH=$system_lib" LD_LIBRARY_PATH="$system_lib"
-LD_LIBRARY_PATH="$system_lib" "$private/bin/mpv" --no-config --version > /tmp/ldpath-version.txt || fail "mpv --version under LD_LIBRARY_PATH"
-grep -E '^libplacebo version: .*-plurx' /tmp/ldpath-version.txt || fail "under LD_LIBRARY_PATH the private mpv runs the system libplacebo"
-pass "under LD_LIBRARY_PATH=$system_lib the private mpv still runs the private libplacebo"
 
 step "render a 10-bit PQ HEVC clip through vo=gpu-next on Vulkan (lavapipe, Xvfb)"
 apt-get install -y -q --no-install-recommends ffmpeg xvfb xauth mesa-vulkan-drivers vulkan-tools > /dev/null || fail "install the render tools"
@@ -143,7 +96,7 @@ ffmpeg -loglevel error -f lavfi -i testsrc2=size=1280x720:rate=24 -t 2 \
   -c:v libx265 -pix_fmt yuv420p10le -x265-params log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:master-display='G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,50)':max-cll=1000,400 \
   -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc /tmp/pq.mkv || fail "make the PQ clip"
 render() {
-  local bin=$1 want=$2
+  local bin=$1
   xvfb-run -a "$bin" --no-config --vo=gpu-next --gpu-api=vulkan --gpu-context=x11vk \
     --vulkan-device="$device" --hwdec=no --ao=null --frames=24 --msg-level=all=v /tmp/pq.mkv \
     > /tmp/render.txt 2>&1 || { tail -40 /tmp/render.txt; fail "$bin could not render"; }
@@ -151,14 +104,9 @@ render() {
   init=$(grep -m1 'vo/gpu-next/libplacebo\] Initialized libplacebo' /tmp/render.txt) || fail "$bin did not start libplacebo"
   echo "$init"
   grep -m1 -E '^VO: \[gpu-next\] 1280x720 yuv420p10' /tmp/render.txt || fail "$bin did not open vo=gpu-next for the 10-bit clip"
-  case $want in
-    private) case $init in *-plurx*) ;; *) fail "$bin rendered with a libplacebo that is not the private one" ;; esac ;;
-    system) case $init in *-plurx*) fail "$bin rendered with the private libplacebo" ;; esac ;;
-  esac
-  pass "$bin rendered PQ frames through gpu-next/Vulkan with the $want libplacebo"
+  pass "$bin rendered PQ frames through gpu-next/Vulkan"
 }
-render "$private/bin/mpv" private
-render /usr/bin/mpv system
+render "$renderer"
 
 step "the launcher's own mpv command line"
 mapfile -t argv < <(python3 -I -c 'import os, sys; sys.path.insert(0, "/usr/lib/plurx-player")
@@ -181,13 +129,13 @@ expect_log() {
 # reads it and names it in its log.
 mkdir -p /root/.config/mpv
 printf 'tone-mapping=clip\nytdl=yes\n' > /root/.config/mpv/mpv.conf
-expect_log /tmp/control "$private/bin/mpv" --vo=null --ao=null --frames=1 --log-file=/tmp/control.txt /tmp/pq.mkv
+expect_log /tmp/control "$renderer" --vo=null --ao=null --frames=1 --log-file=/tmp/control.txt /tmp/pq.mkv
 grep -m1 '/root/.config/mpv/mpv.conf' /tmp/control.txt || fail "control: mpv without --config-dir did not name ~/.config/mpv/mpv.conf"
 pass "control: without --config-dir, mpv reads ~/.config/mpv/mpv.conf"
 # --no-terminal (from the launcher) silences stdout, so these log to a file.
 # These standalone probes have no launcher to send quit. Override only their
 # lifetime so EOF/failure terminates instead of waiting for Next indefinitely;
-# all renderer, private config and Cinema script arguments remain in effect.
+# all renderer, isolated config and Cinema script arguments remain in effect.
 xvfb-run -a "${argv[@]}" --idle=no --keep-open=no --vulkan-device="$device" --ao=null --frames=24 \
   --log-file=/tmp/launcher-argv.txt /tmp/pq.mkv > /tmp/launcher-argv.out 2>&1 \
   || { cat /tmp/launcher-argv.out; tail -40 /tmp/launcher-argv.txt; fail "the launcher's argv did not play"; }
@@ -197,7 +145,7 @@ pass "the launcher's argv plays through gpu-next and reads no ~/.config/mpv"
 
 # ytdl. Control: with --ytdl=yes, a URL mpv cannot open reaches the hook.
 # Both runs are read from --log-file, the channel the launcher's argv uses.
-expect_log /tmp/ytdl-control "$private/bin/mpv" --no-config --ytdl=yes --msg-level=ytdl_hook=trace \
+expect_log /tmp/ytdl-control "$renderer" --no-config --ytdl=yes --msg-level=ytdl_hook=trace \
   --vo=null --ao=null --log-file=/tmp/ytdl-control.txt http://127.0.0.1:1/x.mkv
 grep -m1 '\[ytdl_hook\]' /tmp/ytdl-control.txt || fail "control: --ytdl=yes did not run the ytdl hook"
 pass "control: with --ytdl=yes the ytdl hook runs on an unopenable URL"
@@ -213,6 +161,10 @@ rm -rf /root/.config/mpv
 step "launcher tests ($(python3 --version)), no skip allowed"
 python3 -B "$packaging/run-tests" /repo/clients/linux-player/tests || fail "launcher tests (a failure, an error or a skip)"
 pass "launcher tests, none skipped"
+
+step "installed Cinema on standard mpv IPC/Lua interfaces"
+python3 -B "$packaging/check-mpv-interface.py" || fail "system mpv Cinema interface"
+pass "system mpv supports Cinema loadfile, properties, user-data and Lua bindings"
 
 step "installed Cinema overlay and Lua behavior"
 test -r "$private/plurx_player/scripts/cinema.lua" || fail "Cinema overlay missing from installed package"

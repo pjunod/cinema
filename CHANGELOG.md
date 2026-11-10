@@ -10,6 +10,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Linux Cinema now defaults to the system mpv and no longer ships a duplicate
+  renderer, so qualified system HDR/DV updates reach Cinema. Explicit binary
+  overrides, isolated configuration and Cinema controls remain available.
+  Mapper diagnostics validate the shared renderer’s physical-target success
+  against its current eligibility and generation.
+
 - Cinema application images reuse a separately published, digest-pinned media
   runtime instead of downloading Debian packages and recompiling bundled tools.
 

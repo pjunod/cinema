@@ -1,3 +1,14 @@
+plurx-player (0.5.0-1) stonking; urgency=medium
+
+  * Use the system mpv by default and stop shipping a second renderer.
+    Preserve explicit CLI/environment overrides and Cinema IPC/config isolation.
+  * Read the selected renderer's native-dovi-api-1 compiled capability for
+    native P5/P7/P8. Unmarked or failed probes negotiate server HDR10 conversion
+    without blocking playback, binary overrides or saved quality choices.
+  * Keep Dolby Vision/HDR qualification with the selected renderer and display.
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 09 Nov 2026 12:00:00 +0000
+
 plurx-player (0.4.3+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
 
   * Round final Dolby Vision RGB samples to the closest 16-bit normalized
