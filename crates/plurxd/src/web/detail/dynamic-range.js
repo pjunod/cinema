@@ -123,8 +123,9 @@ function effectiveProcessingDetail(report){
 }
 function clearEffectiveProcessing(p){
   if(!p) return;
-  const changed=!!p.effectiveProcessing;
+  const changed=!!p.effectiveProcessing||!!p.processingSkip;
   p.effectiveProcessing=null;
+  p.processingSkip=null;
   if(changed&&typeof PLAYER!=='undefined'&&p===PLAYER&&typeof renderPlayerInfo==='function') renderPlayerInfo();
 }
 // The Dolby Vision enhancement the server says this session's picture carries
@@ -144,6 +145,20 @@ function playbackEnhancementFromWire(raw){
     &&d.text.length>0&&d.text.length<=240).map(d=>({badge:d.badge,active:d.active===true,text:d.text}));
   return {active,details,requires_effective_processing:raw.requires_effective_processing===true};
 }
+// A late optional-upgrade refusal belongs only to the session generation
+// that attempted it; it changes explanation text, never enhancement badges.
+function processingSkipFromWire(raw,generation){
+  return raw&&raw.generation===generation&&typeof generation==='string'&&generation.length>0
+    &&typeof raw.reason==='string'&&raw.reason.trim().length>0&&[...raw.reason].length<=512
+    &&!/[\u0000-\u001f\u007f-\u009f]/.test(raw.reason)?raw:null;
+}
+function enhancementWithProcessingSkip(enhancement,raw,generation){
+  const skip=processingSkipFromWire(raw,generation);
+  if(!enhancement||!skip) return enhancement;
+  return {...enhancement,details:enhancement.details.map(d=>!d.active
+    &&['FEL','RPU'].includes(d.badge)&&d.text.startsWith(`${d.badge}: not used`)
+      ?{...d,text:`${d.badge}: not used for this play — ${skip.reason}`}:d)};
+}
 // The current, generation-matching HDR10-E report — the same reading
 // playerRangeBadge makes, for a caller that is not painting the range chip.
 function playerEffectiveProcessing(p){
@@ -156,7 +171,7 @@ function playerEffectiveProcessing(p){
 // only true while the report proving it is current: a seek, fallback or
 // replacement clears the report, and with it every pill and the details row.
 function playerEnhancement(p){
-  const enhancement=p&&p.enhancement;
+  const enhancement=p&&enhancementWithProcessingSkip(p.enhancement,p.processingSkip,p.controlReporter?.bootstrap?.generation);
   if(!enhancement) return null;
   if(!enhancement.requires_effective_processing) return enhancement;
   const report=playerEffectiveProcessing(p);

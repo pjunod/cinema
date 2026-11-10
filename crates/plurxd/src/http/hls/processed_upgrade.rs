@@ -52,6 +52,11 @@ enum Entry {
         intent: Box<UpgradeIntent>,
         registered: std::time::Instant,
     },
+    Skipped {
+        playback_id: String,
+        report: ProcessingSkip,
+        recorded: std::time::Instant,
+    },
     Running {
         playback_id: String,
         incarnation_id: String,
@@ -64,6 +69,11 @@ impl Entry {
     fn playback_and_incarnation(&self) -> (&str, &str) {
         match self {
             Self::Waiting { intent, .. } => (&intent.playback_id, &intent.incarnation_id),
+            Self::Skipped {
+                playback_id,
+                report,
+                ..
+            } => (playback_id, &report.generation),
             Self::Running {
                 playback_id,
                 incarnation_id,
@@ -86,6 +96,52 @@ fn lock() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, En
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// An explanation from the owner of this exact session generation. It is
+/// informational: a refused optional upgrade never changes its ordinary delivery.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ProcessingSkip {
+    pub(in crate::http) generation: String,
+    pub(in crate::http) reason: String,
+}
+
+impl ProcessingSkip {
+    pub(crate) fn owner_header(&self) -> Option<String> {
+        let json = serde_json::to_string(self).ok()?;
+        let mut ascii = String::new();
+        for ch in json.chars() {
+            if ch.is_ascii() {
+                ascii.push(ch);
+            } else {
+                for unit in ch.encode_utf16(&mut [0; 2]) {
+                    ascii.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+        }
+        (ascii.len() <= 4096).then_some(ascii)
+    }
+
+    pub(crate) fn from_owner_wire(bytes: &[u8], generation: &str) -> Option<Self> {
+        if bytes.len() > 4096 {
+            return None;
+        }
+        let report: Self = serde_json::from_slice(bytes).ok()?;
+        (report.generation == generation
+            && !report.reason.trim().is_empty()
+            && report.reason.chars().count() <= 512
+            && !report.reason.chars().any(char::is_control))
+        .then_some(report)
+    }
+}
+
+pub(in crate::http) fn processing_skip(session: &str, generation: &str) -> Option<ProcessingSkip> {
+    match lock().get(session) {
+        Some(Entry::Skipped { report, .. }) if report.generation == generation => {
+            Some(report.clone())
+        }
+        _ => None,
+    }
+}
+
 static NEXT_CLAIM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Leave an upgrade waiting for `intent.session_id`'s first frame.
@@ -94,6 +150,9 @@ pub(in crate::http) fn register(intent: UpgradeIntent) {
     let mut entries = lock();
     entries.retain(|_, entry| match entry {
         Entry::Waiting { registered, .. } => now.duration_since(*registered) < FIRST_FRAME_WINDOW,
+        Entry::Skipped { recorded, .. } => {
+            now.duration_since(*recorded) < std::time::Duration::from_secs(86_400)
+        }
         Entry::Running { .. } => true,
     });
     if entries.len() >= MAX_INTENTS {
@@ -166,6 +225,39 @@ pub(in crate::http) struct UpgradeRun {
 impl UpgradeRun {
     pub(in crate::http) fn cancelled(&self) -> &tokio_util::sync::CancellationToken {
         &self.cancelled
+    }
+
+    fn skipped(&self, reason: &str) {
+        let reason: String = reason
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(512)
+            .collect();
+        if reason.trim().is_empty() || self.cancelled.is_cancelled() {
+            return;
+        }
+        let mut entries = lock();
+        let Some(Entry::Running {
+            playback_id,
+            incarnation_id,
+            claim,
+            ..
+        }) = entries.get(&self.session_id)
+        else {
+            return;
+        };
+        if *claim != self.claim {
+            return;
+        }
+        let (playback_id, generation) = (playback_id.clone(), incarnation_id.clone());
+        entries.insert(
+            self.session_id.clone(),
+            Entry::Skipped {
+                playback_id,
+                report: ProcessingSkip { generation, reason },
+                recorded: std::time::Instant::now(),
+            },
+        );
     }
 }
 
@@ -413,6 +505,7 @@ where
         {
             tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
                 "processed upgrade not admitted before its trial; the ordinary session keeps playing");
+            run.skipped(&reason);
             return "admission_refused";
         }
     }
@@ -448,6 +541,7 @@ where
         Err(reason) => {
             tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
                 "processed upgrade declined; the ordinary session keeps playing");
+            run.skipped(&reason);
             return "declined";
         }
     };
@@ -482,6 +576,7 @@ where
         {
             tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
                 "processed upgrade not admitted; the ordinary session keeps playing");
+            run.skipped(&reason);
             return "admission_refused";
         }
     }
@@ -501,6 +596,7 @@ where
         ordinary.start_seconds = film_time_ms as f64 / 1_000.0;
     }
     let Some(context) = processed.candidate_context.as_deref().cloned() else {
+        run.skipped("the verified processing recipe has no current candidate context");
         return "declined";
     };
     if let Some(ordinary) = intent.request.quality_catalog.as_deref() {
@@ -518,6 +614,7 @@ where
         if let Err(reason) = upserted {
             tracing::warn!(target: "plurxd::http::hls", session = %session, reason,
                 "processed upgrade not admitted: the quality catalog refused the candidate");
+            run.skipped(&reason);
             return "admission_refused";
         }
         processed.quality_catalog = Some(Arc::new(catalog));
@@ -555,6 +652,7 @@ where
             "processed upgrade staged as a prepared successor");
         "staged"
     } else {
+        run.skipped("the verified reconstruction could not be staged for the current playback");
         "not_staged"
     }
 }

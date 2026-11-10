@@ -13,6 +13,11 @@ bump may break compatibility and a **patch** bump never does.
 - Cinema application images reuse a separately published, digest-pinned media
   runtime instead of downloading Debian packages and recompiling bundled tools.
 
+- Dolby Vision FEL quality measurement supports Intel VA-API and NVIDIA
+  NVENC using each actual encoder/device recipe. Deferred enhancement failures
+  and pending measurements reach Playback Info on web, Apple and Android;
+  playback starts on the compatible stream while verified enhancements prepare.
+
 - Digest-keyed analysis requests can register their source custody,
   allowing the index queue to progress instead of renewing a rejected request
   indefinitely while holding its shared source-I/O slot.

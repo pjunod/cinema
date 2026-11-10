@@ -6,6 +6,11 @@ deployed · served only for a title whose own measurement admits it (§7);
 on lab6 neither measured title is admitted · physical Dolby Vision display
 acceptance open · **Written:** 2026-10-25 · **Updated:** 2026-11-08 (America/New_York)
 
+**Current follow-up:** the [GPU qualification and Playback Info repair](DV-GPU-QUALIFICATION-AND-PLAYBACK-INFO.md)
+adds Intel/NVIDIA-specific measurement, receipt-based serving checks and
+current-generation deferred reasons. The measurements below are historical
+AMD evidence; they do not qualify another vendor or a changed exact recipe.
+
 Companion to [DV_PROCESSING_TOOLS.md](DV_PROCESSING_TOOLS.md) (the helpers)
 and [the authoring notes](../../tools/dv_processing/AUTHORING.md) (the P8.1
 record). This is what made the route serve, what proves the picture is the

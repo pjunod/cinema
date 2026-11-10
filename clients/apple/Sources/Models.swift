@@ -1031,6 +1031,29 @@ struct EffectiveProcessingReport: Equatable, Codable {
     }
 }
 
+/// A bounded owner-authored reason why this session's optional enhancement
+/// upgrade was skipped. Invalid or stale explanations are informationally absent.
+struct ProcessingSkip: Codable, Equatable {
+    var generation: String
+    var reason: String
+
+    private enum CodingKeys: String, CodingKey { case generation, reason }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        generation = (try? values?.decode(String.self, forKey: .generation)) ?? ""
+        reason = (try? values?.decode(String.self, forKey: .reason)) ?? ""
+    }
+    init(generation: String, reason: String) {
+        self.generation = generation
+        self.reason = reason
+    }
+
+    func matches(generation current: String?) -> Bool {
+        generation == current && !generation.isEmpty && !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && reason.unicodeScalars.count <= 512 && !reason.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+    }
+}
+
 /// What Dolby Vision enhancement the delivered picture carries, computed by
 /// the server (`plurx_core::playback::enhancement`) so every client shows the
 /// same thing: a pill per *active* enhancement (FEL, RPU, DYN) and one plain
@@ -1093,6 +1116,19 @@ struct PlaybackEnhancement: Equatable, Codable {
         self.active = active
         self.details = details
         self.requiresEffectiveProcessing = requiresEffectiveProcessing
+    }
+
+    func explainingSkip(_ skip: ProcessingSkip?, generation: String?) -> PlaybackEnhancement {
+        guard let skip, skip.matches(generation: generation) else { return self }
+        var result = self
+        result.details = details.map { detail in
+            guard !detail.active, ["FEL", "RPU"].contains(detail.badge),
+                  detail.text.hasPrefix("\(detail.badge): not used") else { return detail }
+            var explained = detail
+            explained.text = "\(detail.badge): not used for this play — \(skip.reason)"
+            return explained
+        }
+        return result
     }
 
     /// One neutral line per enhancement, blank server lines dropped.

@@ -189,4 +189,25 @@ async fn a_failed_trial_leaves_the_predecessors_route_and_actor_untouched() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "the session still serves its viewer: {body}");
+    let response = super::control::public_control_processing(
+        super::control::with_current_processing_header(
+            &fixture.state,
+            &route,
+            Json(body).into_response(),
+        )
+        .await,
+    )
+    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .expect("control body");
+    let public: serde_json::Value = serde_json::from_slice(&bytes).expect("public control");
+    assert_eq!(
+        public["processing_skip"]["generation"],
+        route.incarnation_id
+    );
+    assert_eq!(
+        public["processing_skip"]["reason"],
+        "the renderer refused the window"
+    );
 }

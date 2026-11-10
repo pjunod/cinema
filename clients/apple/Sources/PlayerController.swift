@@ -554,7 +554,12 @@ final class PlayerController: ObservableObject {
     /// `effectiveProcessing`, and `PlaybackEnhancement.presented` hides a
     /// report-gated answer until the next generation's report returns, while
     /// a native Dolby Vision answer stays true across the seek.
-    @Published private(set) var playbackEnhancement: PlaybackEnhancement?
+    @Published private var basePlaybackEnhancement: PlaybackEnhancement?
+    @Published private var processingSkip: ProcessingSkip?
+    private(set) var playbackEnhancement: PlaybackEnhancement? {
+        get { basePlaybackEnhancement?.explainingSkip(processingSkip, generation: effectiveProcessingGeneration) }
+        set { basePlaybackEnhancement = newValue; processingSkip = nil }
+    }
     @Published private(set) var deliveredRange: String?
     /// Take a delivery answer, both halves at once.
     ///
@@ -9267,12 +9272,13 @@ extension PlayerController {
                 guard let self, self.selectedSubtitle != nil else { return }
                 self.showPlaybackNotice("That subtitle could not be prepared. Playback was kept unchanged.")
             },
-            onProcessingGeneration: { [weak self] generation, report in
+            onProcessingGeneration: { [weak self] generation, report, skip in
                 guard let self else { return }
                 self.effectiveProcessing = report.flatMap {
                     $0.matches(generation: generation, delivered: self.deliveredRange) ? $0 : nil
                 }
                 self.effectiveProcessingGeneration = generation
+                self.processingSkip = skip.flatMap { $0.matches(generation: generation) ? $0 : nil }
             },
             // Deliberately ungated at this call site. Everything that could
             // refuse a staging — one already live, one already settled, a

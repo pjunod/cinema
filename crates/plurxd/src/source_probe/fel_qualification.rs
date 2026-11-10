@@ -7,7 +7,7 @@
 //!
 //! Each sample window is rendered by the deployed helper three ways: the FEL
 //! master (the reference) and the EL-dropped picture, both as 16-bit R'G'B',
-//! and the composed 10-bit picture through the route's own VA-API encode,
+//! and the composed 10-bit picture through the route's own actual encoder,
 //! decoded back. Every child is a background job-owned process (listed in
 //! Activity Processes, stopped with the job).
 
@@ -175,7 +175,7 @@ pub(crate) fn helper_args(
     ]
 }
 
-/// The route's encode of a composed window: VA-API upload of the helper's
+/// The route's actual encode of a composed window: the helper's
 /// 10-bit PQ picture on the title's picture grid (as the route's own pipe
 /// recipe reads it: `-r` on the input), and the reconstructed 8.1's encoder
 /// arguments. Without `-r` the NUT's millisecond timestamps reach the encoder
@@ -184,12 +184,16 @@ pub(crate) fn helper_args(
 pub(crate) fn encode_args(
     clock: &Clock,
     video_kbps: u32,
+    encoder: plurx_core::transcode::Encoder,
+    policy: Option<plurx_core::transcode::VaapiHdrPolicy>,
     output: &Path,
 ) -> Result<Vec<String>, String> {
     let mut args: Vec<String> = ["-hide_banner", "-nostdin", "-v", "error"]
         .map(str::to_owned)
         .into();
-    args.extend(plurx_core::transcode::Encoder::Vaapi.init_args());
+    if encoder == plurx_core::transcode::Encoder::Vaapi {
+        args.extend(encoder.init_args());
+    }
     // `CONSUMER_THREADS`: one decoder thread, one filter thread.
     args.extend(["-filter_threads".to_owned(), "1".to_owned()]);
     args.extend([
@@ -198,23 +202,19 @@ pub(crate) fn encode_args(
     ]);
     args.extend(
         [
-            "-threads",
-            "1",
-            "-f",
-            "nut",
-            "-i",
-            "pipe:0",
-            "-map",
-            "0:v:0",
-            "-vf",
-            "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,\
-             format=p010le,hwupload=extra_hw_frames=4",
+            "-threads", "1", "-f", "nut", "-i", "pipe:0", "-map", "0:v:0",
         ]
         .map(str::to_owned),
     );
+    let mut filter = "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=p010le".to_owned();
+    if encoder == plurx_core::transcode::Encoder::Vaapi {
+        filter.push_str(",hwupload=extra_hw_frames=4");
+    }
+    args.extend(["-vf".into(), filter]);
     args.extend(
         plurx_core::transcode::reconstructed_p81_window_encode_args(
-            plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq,
+            encoder,
+            policy,
             video_kbps,
             clock.raster.0,
             clock.raster.1,
@@ -242,6 +242,8 @@ pub(crate) struct Sample<'a> {
     pub(crate) clock: Clock,
     pub(crate) duration_ms: i64,
     pub(crate) envelope: plurx_core::transcode::EnhancementRateEnvelope,
+    pub(crate) encoder: plurx_core::transcode::Encoder,
+    pub(crate) vaapi_hdr_policy: Option<plurx_core::transcode::VaapiHdrPolicy>,
     pub(crate) renderer: &'a Path,
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
     pub(crate) ffmpeg: String,
@@ -611,10 +613,14 @@ async fn render_owned(
     let mut consumer = tokio::process::Command::new(&sample.ffmpeg);
     match encode_to {
         Some(output) => {
-            let mut args = encode_args(&sample.clock, sample.envelope.target_kbps(), output)?;
-            sample
-                .envelope
-                .apply_args(&mut args, plurx_core::transcode::Encoder::Vaapi);
+            let mut args = encode_args(
+                &sample.clock,
+                sample.envelope.target_kbps(),
+                sample.encoder,
+                sample.vaapi_hdr_policy,
+                output,
+            )?;
+            sample.envelope.apply_args(&mut args, sample.encoder);
             consumer.args(args);
             consumer.stdout(Stdio::null());
         }
@@ -978,7 +984,18 @@ pub(crate) async fn qualify_with(
     {
         return Ok(Qualification::NotDue);
     }
-    let backend_identity = match state.transcode.fel_identity(&renderer.scanner).await {
+    let encoder = match state.transcode.fel_qualification_encoder().await {
+        Ok(encoder) => encoder,
+        Err(reason) => {
+            tracing::info!(target:"plurxd::dv",file_id=file.id,%reason,"FEL qualification has no supported encoder");
+            return Ok(Qualification::NotDue);
+        }
+    };
+    let backend_identity = match state
+        .transcode
+        .fel_identity_for_encoder(&renderer.scanner, encoder)
+        .await
+    {
         Ok(identity) => identity,
         Err(reason) => {
             tracing::info!(target:"plurxd::dv",file_id=file.id,%reason,"FEL qualification has no encoder identity");
@@ -1102,6 +1119,10 @@ pub(crate) async fn qualify_with(
         clock,
         duration_ms: file.duration_ms.ok_or("title duration is unknown")?,
         envelope: request.envelope,
+        encoder,
+        vaapi_hdr_policy: (encoder == plurx_core::transcode::Encoder::Vaapi)
+            .then_some(state.transcode.fel_qualification_vaapi_policy())
+            .flatten(),
         renderer: renderer.path,
         renderer_env: environment,
         ffmpeg: crate::ffmpeg::ffmpeg_bin(),
@@ -1115,8 +1136,17 @@ pub(crate) async fn qualify_with(
         Some(tools) => tools.is_current().await,
         None => true,
     };
-    if !renderer_current || !source.unchanged() || source.reopen(file).await.is_err() {
-        return Err("the renderer or source changed during FEL qualification".into());
+    let encoder_current = state
+        .transcode
+        .fel_identity_for_encoder(&renderer.scanner, encoder)
+        .await?
+        == request.backend_identity;
+    if !renderer_current
+        || !encoder_current
+        || !source.unchanged()
+        || source.reopen(file).await.is_err()
+    {
+        return Err("the renderer, encoder or source changed during FEL qualification".into());
     }
     let now = super::now_ms();
     let verdict = if measured.windows.is_empty() {
@@ -1547,7 +1577,14 @@ mod tests {
     #[test]
     fn the_window_encode_is_the_routes_recipe() {
         let clock = Clock::from_document(&document()).expect("clock");
-        let args = encode_args(&clock, 60_000, Path::new("/x/served.mp4")).expect("args");
+        let args = encode_args(
+            &clock,
+            60_000,
+            plurx_core::transcode::Encoder::Vaapi,
+            Some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq),
+            Path::new("/x/served.mp4"),
+        )
+        .expect("args");
         let value = |flag: &str| {
             args.iter()
                 .position(|arg| arg == flag)
@@ -1565,6 +1602,35 @@ mod tests {
         assert_eq!(value("-g"), Some("48"));
         assert_eq!(value("-qmax"), None);
         assert_eq!(args.last().map(String::as_str), Some("/x/served.mp4"));
+    }
+
+    #[test]
+    fn intel_and_nvidia_windows_use_the_actual_production_encoder_without_amd_flags() {
+        use plurx_core::transcode::Encoder;
+        let clock = Clock::from_document(&document()).expect("clock");
+        for (encoder, codec, upload) in [
+            (Encoder::Vaapi, "hevc_vaapi", true),
+            (Encoder::Nvenc, "hevc_nvenc", false),
+        ] {
+            let args = encode_args(&clock, 60_000, encoder, None, Path::new("/x/served.mp4"))
+                .expect("vendor recipe");
+            let value = |flag: &str| {
+                args.iter()
+                    .position(|arg| arg == flag)
+                    .map(|at| args[at + 1].as_str())
+            };
+            assert_eq!(value("-c:v"), Some(codec));
+            assert_eq!(value("-compression_level"), None);
+            assert_eq!(value("-bf"), Some("0"));
+            assert_eq!(value("-maxrate"), Some("90000k"));
+            assert_eq!(value("-bufsize"), Some("120000k"));
+            assert_eq!(value("-vaapi_device").is_some(), upload);
+            assert_eq!(
+                value("-vf").expect("picture contract").contains("hwupload"),
+                upload
+            );
+            assert_eq!(value("-pix_fmt"), Some("p010le"));
+        }
     }
 
     #[test]
@@ -1587,7 +1653,14 @@ mod tests {
     #[test]
     fn every_stage_child_is_capped_to_the_threads_it_is_charged() {
         let clock = Clock::from_document(&document()).expect("clock");
-        let encode = encode_args(&clock, 60_000, Path::new("/x/served.mp4")).expect("args");
+        let encode = encode_args(
+            &clock,
+            60_000,
+            plurx_core::transcode::Encoder::Vaapi,
+            Some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq),
+            Path::new("/x/served.mp4"),
+        )
+        .expect("args");
         for args in [
             encode,
             rgb48_args("pipe:0", true),
@@ -1777,6 +1850,141 @@ mod tests {
         (state, file, document)
     }
 
+    /// Run the real title quality measurement on a task-owned in-memory store.
+    /// PLURX_DV_WINDOW_SOURCE names the mounted P7 FEL movie; optional
+    /// PLURX_DV_QUALIFY_ENCODER is vaapi/qsv/nvenc (the saved preference).
+    /// PLURX_DV_FEL_VERDICT_OUT preserves the real source-bound receipt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires an actual P7 FEL source, deployed renderer and actual GPU/driver"]
+    async fn actual_vendor_fel_qualification_measures_and_stores_its_own_recipe() {
+        use std::sync::Arc;
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter("warn,plurxd::dv=info")
+            .try_init();
+        let dir = crate::test_tempdir().expect("owned physical qualification scratch");
+        let (mut state, seed, _) = qualification_fixture_with_threads(dir.path(), 16).await;
+        let source = std::path::PathBuf::from(
+            std::env::var("PLURX_DV_WINDOW_SOURCE").expect("actual source"),
+        );
+        let probe = plurx_core::scan::probe::probe(&source)
+            .await
+            .expect("actual held source probe");
+        assert_eq!(probe.dolby_vision.profile, Some(7));
+        assert_eq!(probe.dolby_vision.el_present, Some(true));
+        let (size, mtime) = super::super::snapshot(&source)
+            .await
+            .expect("actual source identity");
+        let id = state
+            .store
+            .upsert_file(
+                seed.item_id,
+                source.to_str().expect("source path"),
+                size,
+                mtime,
+                &probe,
+            )
+            .await
+            .expect("actual title");
+        let file = state
+            .store
+            .get_file(id)
+            .await
+            .expect("source")
+            .expect("source row");
+        let document = state
+            .store
+            .get_file_probe_json(id)
+            .await
+            .expect("probe")
+            .expect("probe document");
+        let caps = plurx_core::transcode::detect_encoders(&crate::ffmpeg::ffmpeg_bin()).await;
+        let preference =
+            std::env::var("PLURX_DV_QUALIFY_ENCODER").unwrap_or_else(|_| "auto".into());
+        state
+            .store
+            .put_setting(plurx_core::store::keys::HWACCEL, &preference)
+            .await
+            .expect("actual preference");
+        let vaapi_proved =
+            caps.vaapi && crate::ffmpeg::has_hdr10_passthrough_vaapi(caps.vaapi_hdr_policy).await;
+        state.transcode = Arc::new(
+            crate::transcode::TranscodeManager::new(
+                Arc::clone(&state.store),
+                dir.path().join("runtime"),
+                caps,
+                plurx_core::transcode::Pipeline::Cpu,
+            )
+            .with_hdr10_passthrough_vaapi(vaapi_proved)
+            .with_source_identity("qualification-node".into(), uuid::Uuid::new_v4()),
+        );
+        let encoder = state
+            .transcode
+            .fel_qualification_encoder()
+            .await
+            .expect("actual hardware encoder");
+        let tools = crate::vodencode::dv_runtime::ToolSet::capture()
+            .await
+            .expect("renderer identity")
+            .expect("deployed helper bundle");
+        let backend = state
+            .transcode
+            .fel_identity_for_encoder(&tools.backend_digest(), encoder)
+            .await
+            .expect("physical encoder identity");
+        let admission = state
+            .transcode
+            .admit_dv_title()
+            .await
+            .expect("real graph resource admission");
+        let token = tokio_util::sync::CancellationToken::new();
+        let request = state.transcode.foreground_source_request(
+            &file,
+            "physical-fel-qualification",
+            uuid::Uuid::new_v4(),
+            plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+        );
+        assert!(request.is_some(), "physical source custody is mandatory");
+        let outcome = crate::source_custody::with_request(
+            request,
+            qualify_if_due(&state, &file, &document, &tools, &admission, &token),
+        )
+        .await
+        .expect("production quality measurement");
+        let Qualification::Stored(verdict) = outcome else {
+            panic!("the actual measurement did not finish: {outcome:?}");
+        };
+        assert!(
+            !verdict.windows.is_empty(),
+            "physical qualification must actually sample lit pictures"
+        );
+        let stored = state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("stored probe")
+            .expect("stored probe");
+        assert!(q::pending_recipes(&stored, file.size, file.mtime).is_empty());
+        let rows = serde_json::from_str::<serde_json::Value>(&stored).expect("stored JSON");
+        let row = &rows[q::VARIANTS_KEY][&verdict.identity];
+        let receipt: q::FelRecipeVerdict =
+            serde_json::from_value(row.clone()).expect("real exact-recipe receipt");
+        assert_eq!(receipt.request.backend_identity, backend);
+        assert!(receipt.request.valid());
+        assert!(matches!(
+            q::verdict_state(Some(&stored), file.size, file.mtime, &verdict.identity),
+            q::VerdictState::Current(_)
+        ));
+        if let Some(path) = std::env::var_os("PLURX_DV_FEL_VERDICT_OUT") {
+            std::fs::write(path, serde_json::to_vec_pretty(row).expect("receipt JSON"))
+                .expect("preserve real hardware receipt");
+        }
+        println!(
+            "{}",
+            serde_json::json!({"encoder":format!("{encoder:?}"),"backend_identity":backend,"receipt":row})
+        );
+    }
+
     /// Admission includes the real owned source-reader worker. A tight pool
     /// defers the exact request before measurement and releases its slot;
     /// nine threads admit the unchanged graph without downshifting its work.
@@ -1788,7 +1996,6 @@ mod tests {
             Box<dyn std::future::Future<Output = Result<Measurement, String>> + Send + 'a>,
         > {
             Box::pin(async move {
-                assert_eq!(sample.decode, RendererDecode::Gpu);
                 std::fs::write(
                     sample.runtime_cache.join("measurement-entered"),
                     b"admitted",
@@ -1801,7 +2008,12 @@ mod tests {
                 })
             })
         }
-        for threads in [8, 9] {
+        for (threads, decode) in [
+            (8, RendererDecode::Gpu),
+            (9, RendererDecode::Gpu),
+            (14, RendererDecode::Software),
+            (15, RendererDecode::Software),
+        ] {
             let dir = crate::test_tempdir().expect("thread admission scratch");
             let (state, file, document) =
                 qualification_fixture_with_threads(dir.path(), threads).await;
@@ -1816,7 +2028,7 @@ mod tests {
                 path: &renderer_path,
                 tools: None,
                 env: Vec::new(),
-                decode: RendererDecode::Gpu,
+                decode,
             };
             let result = qualify_with(
                 &state,
@@ -1837,7 +2049,7 @@ mod tests {
                 .expect("source probe document");
             let entered = state.runtime_cache_dir.join("measurement-entered").exists();
             let pending = q::pending_recipes(&stored, file.size, file.mtime);
-            if threads == 8 {
+            if threads == 8 || threads == 14 {
                 assert!(matches!(result, Qualification::Busy), "{result:?}");
                 assert!(
                     !entered,
@@ -2365,6 +2577,10 @@ while True:
                             Default::default(),
                         )
                         .expect("resolve fixture video envelope"),
+                        encoder: plurx_core::transcode::Encoder::Vaapi,
+                        vaapi_hdr_policy: Some(
+                            plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq,
+                        ),
                         renderer: &helper,
                         renderer_env: vec![
                             ("FIXTURE_ROOT".into(), root.clone().into_os_string()),

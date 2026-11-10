@@ -128,12 +128,23 @@ pub async fn control(
     }
 }
 
-async fn with_current_processing_header(
+pub(super) async fn with_current_processing_header(
     state: &AppState,
     route: &MediaSessionRoute,
     mut response: Response,
 ) -> Response {
     if response.status() == StatusCode::OK {
+        if let Some(report) =
+            super::processed_upgrade::processing_skip(&route.session_id, &route.incarnation_id)
+        {
+            if let Some(bytes) = report.owner_header() {
+                if let Ok(header) = axum::http::HeaderValue::from_str(&bytes) {
+                    response
+                        .headers_mut()
+                        .insert("x-plurx-processing-skip", header);
+                }
+            }
+        }
         if let Some(report) = state
             .transcode
             .dv_effective_report(&route.session_id, &route.incarnation_id)
@@ -155,10 +166,12 @@ async fn with_current_processing_header(
 
 /// The internal relay retains its exact legacy JSON body. Only public ingress
 /// projects the bounded current-owner header onto the additive client field.
-async fn public_control_processing(mut response: Response) -> Response {
-    let Some(header) = response.headers_mut().remove("x-plurx-dv-processing") else {
+pub(super) async fn public_control_processing(mut response: Response) -> Response {
+    let header = response.headers_mut().remove("x-plurx-dv-processing");
+    let skip = response.headers_mut().remove("x-plurx-processing-skip");
+    if header.is_none() && skip.is_none() {
         return response;
-    };
+    }
     if response.status() != StatusCode::OK {
         return response;
     }
@@ -172,22 +185,39 @@ async fn public_control_processing(mut response: Response) -> Response {
         Ok(value) => value,
         Err(_) => return Response::from_parts(parts, axum::body::Body::from(bytes)),
     };
-    let generation = value.get("generation").and_then(serde_json::Value::as_str);
+    let generation = value
+        .get("generation")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let delivered = value
         .get("effective_selection")
         .and_then(|value| value.get("dynamic_range"))
         .and_then(serde_json::Value::as_str);
-    if let Some(report) = generation.and_then(|generation| {
-        plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
-            header.as_bytes(),
-            generation,
-            delivered,
-        )
+    if let Some(report) = header.as_ref().and_then(|header| {
+        generation.as_deref().and_then(|generation| {
+            plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
+                header.as_bytes(),
+                generation,
+                delivered,
+            )
+        })
     }) {
         if let Some(object) = value.as_object_mut() {
             object.insert(
                 "effective_processing".into(),
                 serde_json::to_value(report).expect("validated processing report"),
+            );
+        }
+    }
+    if let Some(report) = skip.as_ref().and_then(|header| {
+        generation.as_deref().and_then(|generation| {
+            super::processed_upgrade::ProcessingSkip::from_owner_wire(header.as_bytes(), generation)
+        })
+    }) {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "processing_skip".into(),
+                serde_json::to_value(report).expect("bounded skip report"),
             );
         }
     }
@@ -243,6 +273,43 @@ mod dv_processing_wire_tests {
 pub(super) struct RetainedTerminalResponse {
     pub(super) platform: crate::playback_control::ClientPlatform,
     pub(super) response: crate::playback_control::ControlResponseV1,
+}
+
+#[cfg(test)]
+mod processing_skip_wire_tests {
+    use super::*;
+    #[tokio::test]
+    async fn public_skip_report_requires_current_generation_and_bounded_owner_text() {
+        let generation = "00000000-0000-0000-0000-000000000001";
+        let reason = "the title’s reconstruction is being measured on this server’s GPU";
+        for (owner_generation, text, accepted) in [
+            (generation, reason.to_owned(), true),
+            ("old-generation", reason.to_owned(), false),
+            (generation, "x".repeat(513), false),
+            (generation, "bad\nreason".to_owned(), false),
+        ] {
+            let report = super::super::processed_upgrade::ProcessingSkip {
+                generation: owner_generation.to_owned(),
+                reason: text,
+            };
+            let mut response = Json(serde_json::json!({"generation":generation})).into_response();
+            response.headers_mut().insert(
+                "x-plurx-processing-skip",
+                axum::http::HeaderValue::from_str(&report.owner_header().expect("bounded header"))
+                    .expect("ASCII header"),
+            );
+            let response = public_control_processing(response).await;
+            assert!(!response.headers().contains_key("x-plurx-processing-skip"));
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .expect("public body");
+            let value: serde_json::Value = serde_json::from_slice(&bytes).expect("public JSON");
+            assert_eq!(value.get("processing_skip").is_some(), accepted);
+            if accepted {
+                assert_eq!(value["processing_skip"]["reason"], reason);
+            }
+        }
+    }
 }
 
 /// Resolve the selected native text track's cache state for the control

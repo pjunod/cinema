@@ -188,6 +188,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [DV_HDR_TIMELINE_CONTROLS.md](DV_HDR_TIMELINE_CONTROLS.md) | Reproduce bounded VFR, real seek/preroll and timestamp-epoch controls with stored-duration, lifecycle and failure-status evidence. | open |
 | [DV_HDR_RPU_REUSE_CONTROLS.md](DV_HDR_RPU_REUSE_CONTROLS.md) | Reviewed explicit mapping reuse, cache/reset refusals, input-bound execution and retained-prerequisite replay. | open |
 | [DV_HDR_COMBINED_CONTROLS.md](DV_HDR_COMBINED_CONTROLS.md) | Reviewed finite P7/FEL source-to-HDR10 chain, actual output/timing, numerical limits and remaining movie integration. | open |
+| [DV-GPU-QUALIFICATION-AND-PLAYBACK-INFO.md](DV-GPU-QUALIFICATION-AND-PLAYBACK-INFO.md) | Intel/NVIDIA qualification, AMD waiting state and skipped reasons. | open |
 | [FEL-P81-RECONSTRUCTION.md](FEL-P81-RECONSTRUCTION.md) | Reconstructed Profile 8.1: admission, truthfulness, proofs, route recipe, per-title qualification. | open |
 | [DV_PROCESSING_TOOLS.md](DV_PROCESSING_TOOLS.md) | Build and run the bounded streaming FEL reconstruction and P8.1 authoring helpers; remaining serving limits. | open |
 | [DV_HDR_NONIDENTITY_CONTROLS.md](DV_HDR_NONIDENTITY_CONTROLS.md) | Reproduce reviewed affine FEL reconstruction and P8.1 repeated-reshape controls, separate HDR10-base checks and exact replay provenance. | open |

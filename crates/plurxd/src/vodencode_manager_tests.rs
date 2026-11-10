@@ -3,7 +3,7 @@
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-#[ignore = "requires an actual HDR source, reviewed helper bundle and proved VAAPI device"]
+#[ignore = "requires actual HDR source, deployed renderer, real GPU and measured FEL receipt for Profile81"]
 async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_seek() {
     let profile = std::env::var("PLURX_DV_WINDOW_PROFILE").is_ok_and(|value| value == "1");
     let _ = tracing_subscriber::fmt()
@@ -76,10 +76,13 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         )
         .await
         .expect("held source identity");
+    let encoder_preference =
+        std::env::var("PLURX_DV_QUALIFY_ENCODER").unwrap_or_else(|_| "vaapi".into());
     for (key, value) in [
         (keys::DV_HDR_PROCESSING, "1"),
         (keys::DV_FEL_REENCODE, "1"),
-        (keys::HWACCEL, "vaapi"),
+        (keys::HWACCEL, encoder_preference.as_str()),
+        (keys::SW_POOL_THREADS, "16"),
     ] {
         store
             .put_setting(key, value)
@@ -113,9 +116,10 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         "cache comparison requires its real inventory root"
     );
     let detected = plurx_core::transcode::detect_encoders(&crate::ffmpeg::ffmpeg_bin()).await;
+    let preferred = detected.choose(&encoder_preference);
     assert!(
-        detected.vaapi,
-        "physical control requires a proved VA-API encoder"
+        matches!(preferred, Encoder::Qsv | Encoder::Vaapi | Encoder::Nvenc),
+        "physical control requires the selected hardware encoder"
     );
     println!(
         "{}",
@@ -127,14 +131,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     let mut manager = TranscodeManager::new(
         Arc::clone(&store),
         base.path().join("runtime"),
-        EncoderCaps {
-            vaapi: true,
-            // Preserve the actual boot-proved driver policy for every HDR
-            // destination, including HDR10-E on radeonsi.
-            vaapi_hdr_policy: detected.vaapi_hdr_policy,
-            vaapi_driver: detected.vaapi_driver,
-            ..Default::default()
-        },
+        detected,
         Pipeline::Cpu,
     )
     .with_source_identity("node".into(), uuid::Uuid::new_v4())
@@ -167,10 +164,10 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     manager.hdr10_passthrough = crate::ffmpeg::has_hdr10_passthrough().await;
     manager.hdr10_passthrough_vaapi =
         crate::ffmpeg::has_hdr10_passthrough_vaapi(manager.caps.vaapi_hdr_policy).await;
-    assert!(
-        manager.hdr10_passthrough_vaapi,
-        "actual P010/Main10 upload proof"
-    );
+    let actual_encoder = manager
+        .fel_qualification_encoder()
+        .await
+        .expect("actual completed-picture hardware encoder");
     let display_target = if target_nits.is_some() || sdr {
         let stats = crate::source_probe::publish_title_for_control(&manager, &store, &file)
             .await
@@ -262,52 +259,93 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         request.audio_claim = Some(claim);
         request.audio_delivery = Some(audio);
     }
+    let mut measured_receipt = None;
     if profile81 {
-        // No verdict yet: the play keeps the plain conversion while the title
-        // is measured. Then an admitting verdict for this source, renderer and
-        // recipe (what the title job stores) lets the same start reconstruct.
-        let unmeasured = SessionRequest {
-            request_id: Some("actual-processed-hdr-window-unmeasured".into()),
-            ..request.clone()
+        // A current production trial with no receipt must retain conversion.
+        let missing =
+            admit_native_processed_window_control(&manager, &store, request.clone(), &file, true)
+                .await;
+        let reason = match missing {
+            Err(reason) => reason,
+            Ok(_) => panic!("unmeasured title reconstructed"),
         };
         assert!(
-            manager
-                .prepare_vod_encoding(&unmeasured, &file)
-                .await
-                .expect("plain conversion start")
-                .is_none(),
-            "an unmeasured FEL title is not reconstructed"
+            reason.contains("quality measurement"),
+            "missing measurement must be named: {reason}"
+        );
+        let path = std::env::var_os("PLURX_DV_FEL_VERDICT_IN").expect("Profile81 serving requires a real receipt from actual_vendor_fel_qualification_measures_and_stores_its_own_recipe");
+        let raw = std::fs::read(path).expect("real measured receipt file");
+        assert!(raw.len() <= 1 << 20, "bounded measured receipt");
+        let receipt: plurx_core::transcode::dv_fel_qualification::FelRecipeVerdict =
+            serde_json::from_slice(&raw).expect("real exact-recipe measurement");
+        assert!(receipt.request.valid());
+        assert_eq!(receipt.request.source_size, file.size);
+        assert_eq!(receipt.request.source_mtime, file.mtime);
+        assert_eq!(receipt.verdict.source_size, file.size);
+        assert_eq!(receipt.verdict.source_mtime, file.mtime);
+        assert_eq!(receipt.verdict.identity, receipt.request.identity);
+        assert!(
+            !receipt.verdict.windows.is_empty(),
+            "a manufactured admission is not physical evidence"
         );
         let tools = crate::vodencode::dv_runtime::ToolSet::capture()
             .await
             .expect("helper")
             .expect("helper");
-        let verdict = plurx_core::transcode::dv_fel_qualification::FelVerdict {
-            schema: plurx_core::transcode::dv_fel_qualification::SCHEMA,
-            identity: manager
-                .fel_identity(&tools.backend_digest())
+        assert_eq!(
+            receipt.request.backend_identity,
+            manager
+                .fel_identity_for_encoder(&tools.backend_digest(), actual_encoder)
                 .await
-                .expect("this node's FEL verdict identity"),
-            source_size: file.size,
-            source_mtime: file.mtime,
-            admitted: true,
-            served_mean: 1.0,
-            dropped_mean: 2.0,
-            served_p99: 1.0,
-            dropped_p99: 2.0,
-            p99_tolerance: 0.0,
-            measured_at_ms: 0,
-            windows: Vec::new(),
-        };
+                .expect("actual hardware identity"),
+            "another vendor/device/driver cannot supply the receipt"
+        );
+        assert_eq!(
+            i64::from(receipt.request.output.width),
+            file.width.expect("native width")
+        );
+        assert_eq!(
+            i64::from(receipt.request.output.height),
+            file.height.expect("native height")
+        );
         assert!(store
             .put_dv_fel_verdict(
                 file.id,
                 file.size,
                 file.mtime,
-                &serde_json::to_value(&verdict).expect("verdict"),
+                &serde_json::to_value(&receipt).expect("measured receipt")
             )
             .await
-            .expect("verdict stored"));
+            .expect("store measured receipt"));
+        if !receipt.verdict.admitted {
+            let refused = admit_native_processed_window_control(
+                &manager,
+                &store,
+                request.clone(),
+                &file,
+                true,
+            )
+            .await;
+            let reason = match refused {
+                Err(reason) => reason,
+                Ok(_) => panic!("a measured quality refusal reconstructed"),
+            };
+            assert!(
+                reason.contains(&receipt.verdict.refusal()),
+                "the current exact quality refusal must be the reason: {reason}"
+            );
+            println!(
+                "{}",
+                serde_json::json!({"serving_proved":false,"measured_quality_refused":true,"reason":receipt.verdict.refusal(),"encoder":format!("{actual_encoder:?}")})
+            );
+            return;
+        }
+        assert!(
+            receipt.verdict.windows.len()
+                >= plurx_core::transcode::dv_fel_qualification::MIN_WINDOWS,
+            "admitted physical evidence needs the full minimum of lit windows"
+        );
+        measured_receipt = Some(receipt);
     }
     let file = store
         .get_file(id)
@@ -315,10 +353,18 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         .expect("current file")
         .expect("stored verdict");
     let started = Instant::now();
-    let (encoding, prepared_root) = if sdr {
+    let (encoding, prepared_root) = if sdr || profile81 {
         // Fresh durable admission, canonical catalog restoration and normal
         // one-shot lease/source validation precede genuine SDR rendering.
-        let root = admit_native_sdr_window_control(&manager, &store, request.clone(), &file).await;
+        let root = admit_native_processed_window_control(
+            &manager,
+            &store,
+            request.clone(),
+            &file,
+            profile81,
+        )
+        .await
+        .expect("fresh actual processed owner qualification");
         (Arc::clone(&root.encoding), Some(root))
     } else {
         (
@@ -377,13 +423,33 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     } else {
         None
     };
-    assert_eq!(runtime.encoder, Encoder::Vaapi);
+    assert_eq!(runtime.encoder, actual_encoder);
     // The plan is resolved with the software source decoder; the windows
     // are encoded by the graph's admitted encoder, and every report says so.
     assert_eq!(encoding.plan.output_contract().output_encoder(), "libx265");
-    assert_eq!(encoding.processed_window_encoder(), Some(Encoder::Vaapi));
-    assert_eq!(encoding.delivered_output_encoder(), "hevc_vaapi");
-    assert_eq!(encoding.delivered_encoder_label(), Encoder::Vaapi.label());
+    assert_eq!(encoding.processed_window_encoder(), Some(actual_encoder));
+    assert_eq!(
+        encoding.delivered_output_encoder(),
+        if actual_encoder == Encoder::Nvenc {
+            "hevc_nvenc"
+        } else {
+            "hevc_vaapi"
+        }
+    );
+    assert_eq!(encoding.delivered_encoder_label(), actual_encoder.label());
+    if let Some(receipt) = measured_receipt.as_ref() {
+        assert_eq!(
+            encoding.plan.enhancement_rate_envelope(),
+            Some(receipt.request.envelope),
+            "the served bitrate/peak/CPB are the measured recipe"
+        );
+        assert_eq!(encoding.grid.numerator, receipt.request.output.rate.0);
+        assert_eq!(encoding.grid.denominator, receipt.request.output.rate.1);
+        println!(
+            "{}",
+            serde_json::json!({"serving_proved":true,"measured_recipe":receipt.request.identity,"encoder":format!("{actual_encoder:?}")})
+        );
+    }
     let (index, verified) = runtime
         .prepared
         .lock()
@@ -441,24 +507,26 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             manager.processed_reconstruction_slots.available_permits(),
             0
         );
-        let second = manager
-            .prepare_vod_encoding(
-                &SessionRequest {
-                    request_id: Some("second-live-reconstruction".into()),
-                    playback_id: "second-live-reconstruction".into(),
-                    ..request.clone()
-                },
-                &file,
-            )
-            .await
-            .expect("second play keeps an ordinary route");
+        let second = admit_native_processed_window_control(
+            &manager,
+            &store,
+            SessionRequest {
+                request_id: Some("second-live-reconstruction".into()),
+                playback_id: "second-live-reconstruction".into(),
+                ..request.clone()
+            },
+            &file,
+            true,
+        )
+        .await;
+        let reason = match second {
+            Err(reason) => reason,
+            Ok(_) => panic!("second live reconstruction admitted"),
+        };
         assert!(
-            second
-                .as_ref()
-                .is_none_or(|second| !matches!(second.dv_processing, DvSelection::Selected(_))),
-            "a second live reconstruction must not be admitted on this worker"
+            reason.contains("slot") || reason.contains("reconstruction"),
+            "capacity refusal must be explicit: {reason}"
         );
-        drop(second);
         assert_eq!(
             manager.processed_reconstruction_slots.available_permits(),
             0
@@ -1101,12 +1169,13 @@ async fn settle_publication_control(manager: &TranscodeManager) {
 /// Bounded physical coverage, not HTTP playback or full-app EOF: the shared
 /// processed-root regression separately verifies registry, HLS and replay facts.
 #[cfg(target_os = "linux")]
-async fn admit_native_sdr_window_control(
+async fn admit_native_processed_window_control(
     manager: &TranscodeManager,
     store: &Arc<dyn Store>,
     mut request: SessionRequest,
     file: &plurx_core::domain::MediaFile,
-) -> crate::vodserve::PreparedRootAdmission {
+    profile81: bool,
+) -> Result<crate::vodserve::PreparedRootAdmission, String> {
     use plurx_core::playback::{
         audio::{resolve_audio, AudioClaim, AudioRoute},
         candidate::CandidateRoute,
@@ -1116,14 +1185,19 @@ async fn admit_native_sdr_window_control(
         .await
         .expect("atomic planning snapshot")
         .expect("source");
-    let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+    let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(if profile81 { serde_json::json!({
+        "v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["pq"]}],
+        "display":{"hdr":true,"dolby_vision":true},
+        "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],
+        "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
+    }) } else { serde_json::json!({
         "v":2,"video":[
             {"codec":"h264","profiles":["high"],"present":["sdr"]},
             {"codec":"hevc","profiles":["main10"],"present":["sdr"]}],
         "display":{"hdr":false,"dolby_vision":false},
         "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],
         "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
-    }))
+    }) })
     .expect("explicit SDR display and Main10 decoder");
     request.hdr10 = false;
     request.previous_session_id = None;
@@ -1143,6 +1217,7 @@ async fn admit_native_sdr_window_control(
         AudioRoute::EncodedVod,
         request.audio_offset_ms,
     ));
+    let copy_contract = profile81.then_some((true, false, true));
     let query = crate::media_pool::QualityCatalogRequest {
         file_id: file.id,
         source_size: file.size,
@@ -1154,7 +1229,7 @@ async fn admit_native_sdr_window_control(
         audio_delivery: request.audio_delivery.clone(),
         subtitle_burn: None,
         presentation: Presentation::Vod,
-        copy_contract: None,
+        copy_contract,
     };
     let catalog = manager
         .quality_catalog_from_snapshot_progress(
@@ -1164,15 +1239,20 @@ async fn admit_native_sdr_window_control(
             request.audio_offset_ms,
             None,
             Presentation::Vod,
-            None,
+            copy_contract,
             request.audio_delivery.as_ref(),
             request.audio_claim.as_ref(),
             None,
             None,
         )
         .await;
-    let SessionKind::Transcode { height } = request.kind else {
-        panic!("SDR encoded height")
+    let height = if profile81 {
+        file.height.expect("native DV height")
+    } else {
+        let SessionKind::Transcode { height } = request.kind else {
+            panic!("SDR encoded height")
+        };
+        height
     };
     let candidate = catalog
         .candidates
@@ -1180,8 +1260,14 @@ async fn admit_native_sdr_window_control(
         .find(|candidate| {
             !candidate.processed_dv
                 && candidate.decoder_compatible
-                && candidate.route == CandidateRoute::Encode
-                && candidate.grade == OutputGrade::Sdr
+                && (if profile81 {
+                    matches!(
+                        candidate.route,
+                        CandidateRoute::Original | CandidateRoute::Remux
+                    )
+                } else {
+                    candidate.route == CandidateRoute::Encode && candidate.grade == OutputGrade::Sdr
+                })
                 && i64::from(candidate.target_height) == height
         })
         .unwrap_or_else(|| {
@@ -1211,7 +1297,11 @@ async fn admit_native_sdr_window_control(
     context.catalog_query = Some(query);
     request.candidate_context = Some(Box::new(context));
     let user = store
-        .create_user("native-sdr-control", "hash", false)
+        .create_user(
+            &format!("native-processed-control-{}", uuid::Uuid::new_v4()),
+            "hash",
+            false,
+        )
         .await
         .expect("real principal");
     let principal =
@@ -1247,12 +1337,21 @@ async fn admit_native_sdr_window_control(
     } = manager
         .prepare_processed_upgrade("native-sdr-control", &request, &recovery, false)
         .await
-        .map_err(|error| error.to_string())
-        .expect("fresh processed owner qualification")
-        .expect("SDR processed candidate");
+        .map_err(|error| error.to_string())?
+        .ok_or("no processed candidate for this actual source and destination")?;
     assert!(candidate.processed_dv);
-    assert_eq!(candidate.grade, OutputGrade::Sdr);
-    assert_eq!(processed.request_id.as_deref(), Some(recovery.incarnation_id.as_str()));
+    assert_eq!(
+        candidate.grade,
+        if profile81 {
+            OutputGrade::Hdr10
+        } else {
+            OutputGrade::Sdr
+        }
+    );
+    assert_eq!(
+        processed.request_id.as_deref(),
+        Some(recovery.incarnation_id.as_str())
+    );
     // The verified root is held for exactly one successor, once.
     let context = processed
         .candidate_context
@@ -1269,7 +1368,7 @@ async fn admit_native_sdr_window_control(
             .is_none(),
         "the same upgrade root cannot be taken twice"
     );
-    held.into_root()
+    Ok(held.into_root())
 }
 
 #[cfg(target_os = "linux")]
@@ -2196,7 +2295,8 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     file.hdr = Some("dolby_vision".into());
     file.hdr_format = Some("Dolby Vision · Profile 5".into());
     file.dolby_vision = plurx_core::domain::DolbyVisionFacts {
-        profile: Some(5), ..Default::default()
+        profile: Some(5),
+        ..Default::default()
     };
 
     let realtime = ChildWork::realtime("Dolby Vision pixel probe");
