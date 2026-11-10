@@ -847,18 +847,17 @@ async fn live_operation_owner(
     .await?;
     Ok((entry, owned))
 }
-async fn live_operation_response(
+async fn live_operation_response<G>(
     state: crate::state::AppState,
     headers: &SourceHeaders,
     input: SourceOperationInput,
     entry: &SourceStartEntry,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
-    content: (
-        &'static str,
-        Value,
-        crate::transcode::source_actor::SourceResponseGuard,
-    ),
-) -> Result<axum::response::Response, ApiError> {
+    content: (&'static str, Value, G),
+) -> Result<axum::response::Response, ApiError>
+where
+    G: Into<std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>>,
+{
     let (field, value, guard) = content;
     let assignment = ingress::actual_assignment(entry).ok_or_else(unavailable)?;
     ingress::publication_allowed(&state, &assignment).await?;
@@ -881,7 +880,7 @@ async fn live_operation_response(
     Ok(super::shared_library::guard_source_response(
         state,
         connection.map(|c| c.0),
-        hold_start_body(response, guard),
+        hold_source_body(response, guard.into()),
     )
     .await)
 }
