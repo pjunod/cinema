@@ -1743,6 +1743,172 @@ async fn source_actual_actor(
             .expect("actual retained DTO"),
         serde_json::to_value(&response).expect("actual complete DTO")
     );
+    if mode == 62 || mode == 65 {
+        std::fs::create_dir_all(&state.subs_dir).expect("managed subtitle root");
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(
+            Arc::clone(&state.store),
+            vec![state.subs_dir.clone()],
+        );
+        budget.configure_for_test(0);
+        if mode == 65 {
+            let (_, guard) = actor
+                .open_start_response(Instant::now() + Duration::from_secs(5))
+                .await
+                .expect("actual Source custody");
+            let guard = Arc::new(guard);
+            let custody = resource::SourceResourceReadCustody::new(
+                Arc::clone(&guard),
+                Arc::clone(&actor.0.resource_hooks),
+            );
+            let native = actor
+                .0
+                .state
+                .lock()
+                .expect("native group")
+                .native
+                .clone()
+                .expect("native group");
+            assert!(
+                matches!(
+                    native
+                        .stage_sparse_input(
+                            vec![0; 4096],
+                            &custody,
+                            Instant::now() + Duration::from_secs(5)
+                        )
+                        .await,
+                    Err(SourceWorkerError::Capacity)
+                ),
+                "zero disk ceiling refuses before the sparse write"
+            );
+            assert_eq!(
+                std::fs::read_dir(&state.subs_dir)
+                    .expect("subtitle root")
+                    .count(),
+                0
+            );
+            budget.configure_for_test(1024 * 1024);
+            let input = native
+                .stage_sparse_input(
+                    vec![0; 4096],
+                    &custody,
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .expect("admitted sparse input");
+            assert!(budget.used_bytes().await.expect("held reservation") >= 4096);
+            drop(input);
+            assert_eq!(
+                budget
+                    .used_bytes()
+                    .await
+                    .expect("closed input releases exact reservation"),
+                0
+            );
+            drop(custody);
+            drop(guard);
+        } else {
+            let caption = SharingHlsResource::parse("subs/0/seg00000.vtt").expect("caption demand");
+            assert!(
+                matches!(
+                    actor
+                        .open_resource(&caption, Instant::now() + Duration::from_secs(5))
+                        .await,
+                    Err(SourceWorkerError::Capacity)
+                ),
+                "managed zero cache ceiling is caption capacity"
+            );
+            let movie = actor
+                .open_resource(
+                    &SharingHlsResource::parse("index.m3u8").expect("movie playlist"),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .expect("same movie stays live");
+            drop(movie.into_parts());
+            budget.configure_for_test(64 * 1024 * 1024);
+            let opened = actor
+                .open_resource(&caption, Instant::now() + Duration::from_secs(5))
+                .await
+                .expect("same owner retries after cache pressure");
+            drop(opened.into_parts());
+            let native = actor
+                .0
+                .state
+                .lock()
+                .expect("native group")
+                .native
+                .clone()
+                .expect("native group");
+            let revision = native.take_held_revision_for_test();
+            let path = state.subs_dir.join(&revision);
+            let eviction = crate::playback_cache::begin_eviction(&path)
+                .expect("real managed eviction collision")
+                .expect("managed eviction owner");
+            let resource = SharingHlsResource::parse(&format!("subs/0/cached-{revision}"))
+                .expect("versioned source window");
+            assert!(matches!(
+                actor
+                    .open_resource(&resource, Instant::now() + Duration::from_secs(5))
+                    .await,
+                Err(SourceWorkerError::Capacity)
+            ));
+            drop(eviction);
+        }
+        actor
+            .retire()
+            .await
+            .expect("managed caption pressure retirement");
+        ingress_monitor.join().await;
+        return;
+    }
+    if mode == 63 {
+        let pause = manager.source_workers.native_hooks.pause_before_spawn();
+        let request = source_native_control_request(&response, 1);
+        let started = Instant::now();
+        let opened = actor
+            .control(request.clone(), Instant::now() + Duration::from_secs(4))
+            .await
+            .expect("control result has its own response budget");
+        let (answer, guard) = opened.into_response(&request);
+        assert_eq!(
+            answer
+                .expect("accepted control")
+                .delivery
+                .subtitle_readiness
+                .as_deref(),
+            Some("warming")
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "parked caption work cannot consume the control budget"
+        );
+        let held = pause.reached().await;
+        assert_eq!(
+            actor
+                .0
+                .state
+                .lock()
+                .expect("shared control work custody")
+                .bodies,
+            1,
+            "response and real work share one counted guard"
+        );
+        drop(guard);
+        actor.request_retirement();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            actor.settlement_status().is_none(),
+            "work retains the real control guard after its response"
+        );
+        drop(held);
+        actor
+            .retire()
+            .await
+            .expect("caption work really joins before Source settlement");
+        ingress_monitor.join().await;
+        return;
+    }
     if mode == 61 {
         let opened = actor
             .open_resource(
@@ -1776,6 +1942,31 @@ async fn source_actual_actor(
                 ),
                 "caption data bounds are not transient capacity"
             );
+        }
+        let stop = Instant::now() + Duration::from_secs(3);
+        let mut request = source_native_control_request(&response, 1);
+        loop {
+            let (answer, guard) = actor
+                .control(request.clone(), Instant::now() + Duration::from_secs(4))
+                .await
+                .expect("invalid caption does not hide accepted movie control")
+                .into_response(&request);
+            let unavailable = answer
+                .expect("accepted control")
+                .delivery
+                .subtitle_readiness
+                .as_deref()
+                == Some("unavailable");
+            drop(guard);
+            if unavailable {
+                break;
+            }
+            assert!(
+                Instant::now() < stop,
+                "unsupported caption cannot remain warming forever"
+            );
+            request.sequence += 1;
+            tokio::task::yield_now().await;
         }
         actor
             .retire()
@@ -2447,6 +2638,15 @@ async fn source_actual_actor(
             "capabilities":{"platform":"web","max_height":2160,"codecs":["h264"],"dynamic_ranges":["sdr"],"dual_player_preparation":false},
             "supported_actions":[],"intent":null
         })).expect("cached caption fixture");
+        let warmed = actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt")
+                    .expect("real control cache window"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("derive requested Source window");
+        drop(warmed.into_parts());
         let opened = actor
             .control(request.clone(), Instant::now() + Duration::from_secs(10))
             .await
@@ -3635,4 +3835,32 @@ async fn source_native_cached_revision_refuses_another_inode_with_same_file_id_s
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_native_oversized_and_non_utf8_cached_cues_are_unsupported_not_busy() {
     Box::pin(source_copy_preadmission_fixture(61)).await;
+}
+
+fn source_native_control_request(
+    response: &crate::http::hls::StartResponse,
+    sequence: u64,
+) -> crate::playback_control::ControlRequestV1 {
+    let bootstrap = response.control.as_ref().expect("Source control bootstrap");
+    serde_json::from_value(serde_json::json!({
+        "protocol":crate::playback_control::PROTOCOL_V1,"generation":bootstrap.generation,"control_epoch":bootstrap.control_epoch,
+        "client_instance_id":uuid::Uuid::new_v4().to_string(),"sequence":sequence,"demand":"active",
+        "position_ms":0,"buffered_from_ms":0,"buffered_through_ms":1000,"playback_rate":1.0,
+        "render_state":"playing","seek_target_ms":null,
+        "selection":{"quality":{"mode":"original"},"audio_track":null,"subtitle":{"mode":"native","track":0},"audio_offset_ms":0,"codec":"auto","dynamic_range":"auto"},
+        "capabilities":{"platform":"web","max_height":2160,"codecs":["h264"],"dynamic_ranges":["sdr"],"dual_player_preparation":false},
+        "supported_actions":[],"intent":null
+    })).expect("Source native control request")
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_managed_cache_pressure_preserves_movie_and_typed_retry() {
+    Box::pin(source_copy_preadmission_fixture(62)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_control_returns_while_parked_caption_work_retains_one_guard() {
+    Box::pin(source_copy_preadmission_fixture(63)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_sparse_input_reserves_before_write_and_releases_only_after_close() {
+    Box::pin(source_copy_preadmission_fixture(65)).await;
 }

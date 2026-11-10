@@ -28,6 +28,7 @@ pub(super) struct SourceNativeTracks {
     presentation_probe: Mutex<Option<String>>,
     directory: PathBuf,
     windows: Mutex<BTreeMap<String, Vec<u8>>>,
+    unsupported: Mutex<BTreeSet<String>>,
     flight: tokio::sync::Mutex<()>,
 }
 impl SourceNativeTracks {
@@ -46,6 +47,7 @@ impl SourceNativeTracks {
             directory,
             presentation_probe: Mutex::new(None),
             windows: Mutex::new(BTreeMap::new()),
+            unsupported: Mutex::new(BTreeSet::new()),
             flight: tokio::sync::Mutex::new(()),
         })
     }
@@ -136,6 +138,14 @@ impl SourceNativeTracks {
             Self::revision(&self.window_path(index, demand, span, source.object_version())).ok()
         });
         if revision.as_ref().is_some_and(|revision| {
+            self.unsupported
+                .lock()
+                .expect("Source caption refusals")
+                .contains(revision)
+        }) {
+            return (Cache::Unavailable, None);
+        }
+        if revision.as_ref().is_some_and(|revision| {
             self.windows
                 .lock()
                 .expect("Source caption cache")
@@ -205,7 +215,7 @@ impl SourceNativeTracks {
         let bytes = custody.read_subtitle(&path, TRACK_BYTES).await?;
         match bytes {
             Some(bytes) => {
-                validate_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
+                validate_window_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
                 Ok(Some((bytes, complete)))
             }
             None => Ok(None),
@@ -221,6 +231,45 @@ impl SourceNativeTracks {
         plurx_core::store::bounded_subtitle_window_seconds(value.as_deref())
     }
     pub(super) async fn window(
+        &self,
+        manager: &TranscodeManager,
+        index: u16,
+        demand: i64,
+        span: i64,
+        custody: &SourceResourceReadCustody,
+        deadline: Instant,
+    ) -> Result<Vec<u8>, SourceWorkerError> {
+        let path = self.window_path(
+            index,
+            demand,
+            span,
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?
+                .object_version(),
+        );
+        let revision = Self::revision(&path).map_err(|_| SourceWorkerError::Unsupported)?;
+        if self
+            .unsupported
+            .lock()
+            .expect("Source caption refusals")
+            .contains(&revision)
+        {
+            return Err(SourceWorkerError::Unsupported);
+        }
+        let result = self
+            .window_inner(manager, index, demand, span, custody, deadline)
+            .await;
+        if matches!(result, Err(SourceWorkerError::Unsupported)) {
+            let mut unsupported = self.unsupported.lock().expect("Source caption refusals");
+            if unsupported.len() >= HELD_WINDOWS {
+                unsupported.pop_first();
+            }
+            unsupported.insert(revision);
+        }
+        result
+    }
+    async fn window_inner(
         &self,
         manager: &TranscodeManager,
         index: u16,
@@ -289,7 +338,7 @@ impl SourceNativeTracks {
             )
             .await?
         };
-        validate_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
+        validate_window_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
         custody
             .source()
             .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -300,9 +349,8 @@ impl SourceNativeTracks {
             return Err(SourceWorkerError::Deadline);
         }
         custody
-            .publish_subtitle(&path, bytes.clone())
-            .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .publish_subtitle(&path, bytes.clone(), deadline)
+            .await?;
         self.remember(revision, bytes.clone());
         Ok(bytes)
     }
@@ -364,34 +412,38 @@ impl SourceNativeTracks {
                 self.file.container.as_deref(),
                 Some("mkv" | "matroska" | "webm")
             ) {
-                // A timeline query is real Source work too; never use the global
-                // reporter cache or Local's anonymous probe for a cold Source.
-                let mut probe = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin());
-                crate::ffmpeg::inherit_file_descriptors(&mut probe, &[(&source.handle, 3)]);
-                probe
-                    .args([
-                        "-v",
-                        "error",
-                        "-show_entries",
-                        "format=start_time",
-                        "-of",
-                        "default=noprint_wrappers=1:nokey=1",
-                    ])
-                    .arg(&input);
-                let output = super::source_preparation::run_resource_child(
-                    &self.file, custody, deadline, probe, 1024, hooks,
-                )
-                .await
-                .map_err(SourceResourceChildFailure::worker_error)?;
-                let start = std::str::from_utf8(&output.stdout)
-                    .ok()
-                    .and_then(crate::subtitles::parse_source_start_seconds)
-                    .ok_or(SourceWorkerError::Unsupported)?;
-                if let Some(bytes) = self
-                    .sparse_window(index, anchor, end, start, custody, deadline, hooks)
-                    .await?
-                {
-                    return Ok(bytes);
+                // Only a proven, requested cue index needs timeline evidence.
+                // An optional reporter/conversion refusal leaves demux usable;
+                // actual authority, deadline and output-bound failures do not.
+                if let Some(index_data) = self.sparse_index(index, custody, deadline).await? {
+                    let mut probe = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin());
+                    crate::ffmpeg::inherit_file_descriptors(&mut probe, &[(&source.handle, 3)]);
+                    probe
+                        .args([
+                            "-v",
+                            "error",
+                            "-show_entries",
+                            "format=start_time",
+                            "-of",
+                            "default=noprint_wrappers=1:nokey=1",
+                        ])
+                        .arg(&input);
+                    let start = optional_source_timeline(
+                        super::source_preparation::run_resource_child(
+                            &self.file, custody, deadline, probe, 1024, hooks,
+                        )
+                        .await,
+                    )?;
+                    if let Some(start) = start {
+                        if let Some(bytes) = self
+                            .sparse_window(
+                                index, index_data, anchor, end, start, custody, deadline, hooks,
+                            )
+                            .await?
+                        {
+                            return Ok(bytes);
+                        }
+                    }
                 }
             }
             let indexed = crate::subtitle_ranges::indexed_text(&self.file, i64::from(index));
@@ -416,13 +468,7 @@ impl SourceNativeTracks {
             if !output.stderr.is_empty() {
                 return Err(SourceWorkerError::Unsupported);
             }
-            let bytes = if indexed {
-                crate::subtitle_ranges::filter_absolute_window(&output.stdout, anchor, end)
-                    .map_err(|_| SourceWorkerError::Unsupported)?
-            } else {
-                crate::subtitles::normalize_window_cues(&output.stdout, anchor)
-            };
-            validate_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
+            let bytes = normalize_source_window(&output.stdout, anchor, end, indexed)?;
             Ok(bytes)
         }
         .await;
@@ -431,44 +477,23 @@ impl SourceNativeTracks {
         });
         result
     }
-    #[allow(clippy::too_many_arguments)]
-    async fn sparse_window(
+    async fn sparse_index(
         &self,
         index: u16,
-        anchor: i64,
-        end: i64,
-        start: f64,
         custody: &SourceResourceReadCustody,
         deadline: Instant,
-        hooks: &SourceProbeHookOwner,
-    ) -> Result<Option<Vec<u8>>, SourceWorkerError> {
-        let authority = custody
-            .authorize_work()
-            .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let owned_cancel = cancel.clone();
-        let owned_custody = custody.clone();
+    ) -> Result<Option<crate::mkv_sparse::CueIndex>, SourceWorkerError> {
         let codecs: Vec<String> = self
             .file
             .subtitle_streams
             .iter()
             .map(|track| track.codec.clone())
             .collect();
-        // The blocking parser and its scoped workers retain the exact Source
-        // guard. Cancellation is signalled, followed by actual job completion.
-        let mut job = tokio::task::spawn_blocking(move || {
-            authority
-                .validate_before_spawn()
-                .map_err(|_| SourceSparseFailure::Work(SourceWorkerError::Unavailable))?;
-            owned_custody
-                .source()
-                .map_err(|_| SourceSparseFailure::Work(SourceWorkerError::Unavailable))?;
-            let reader = SourceCaptionReader(&owned_custody);
-            let index_data =
-                crate::mkv_sparse::read_index_cancellable(&reader, &owned_cancel, deadline)
-                    .map_err(|error| SourceSparseFailure::from_read(error, deadline))?;
-            let Some(index_data) = index_data else {
+        source_cue_read(custody, deadline, move |reader, cancel| {
+            let Some(index_data) =
+                crate::mkv_sparse::read_index_cancellable(reader, cancel, deadline)
+                    .map_err(|error| SourceSparseFailure::from_read(error, deadline))?
+            else {
                 return Ok(None);
             };
             if index_data.tracks.len() != codecs.len()
@@ -477,71 +502,126 @@ impl SourceNativeTracks {
                     .iter()
                     .zip(&codecs)
                     .all(|(track, codec)| crate::mkv_sparse::same_codec(&track.codec, codec))
+                || !index_data
+                    .tracks
+                    .get(usize::from(index))
+                    .is_some_and(crate::mkv_sparse::SubtitleTrack::indexed)
             {
                 return Ok(None);
             }
+            Ok(Some(index_data))
+        })
+        .await
+    }
+    pub(super) async fn stage_sparse_input(
+        &self,
+        bytes: Vec<u8>,
+        custody: &SourceResourceReadCustody,
+        deadline: Instant,
+    ) -> Result<SourceSparseInput, SourceWorkerError> {
+        let reservation_path = self.directory.join(format!(
+            ".tmp-source-caption-subset-{}.mkv",
+            uuid::Uuid::new_v4()
+        ));
+        let reservation = custody
+            .reserve_subtitle(&reservation_path, bytes.len() as u64, deadline)
+            .await?;
+        let custody = custody.clone();
+        let directory = self.directory.clone();
+        tokio::task::spawn_blocking(move || {
+            use super::source_actor::resource::cache_io_error;
+            use std::io::{Seek, Write};
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+            std::fs::create_dir_all(&directory).map_err(cache_io_error)?;
+            #[cfg(unix)]
+            let mut input = tempfile::tempfile_in(&directory).map_err(cache_io_error)?;
+            #[cfg(windows)]
+            let mut named = tempfile::Builder::new()
+                .prefix(".tmp-source-caption-subset-")
+                .tempfile_in(&directory)
+                .map_err(cache_io_error)?;
+            #[cfg(windows)]
+            let pin = crate::playback_cache::pin(named.path()).map_err(cache_io_error)?;
+            #[cfg(windows)]
+            {
+                named.write_all(&bytes).map_err(cache_io_error)?;
+                named.flush().map_err(cache_io_error)?;
+            }
+            #[cfg(windows)]
+            let mut input = named.reopen().map_err(cache_io_error)?;
+            #[cfg(unix)]
+            input.write_all(&bytes).map_err(cache_io_error)?;
+            input.rewind().map_err(cache_io_error)?;
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+            Ok(SourceSparseInput {
+                handle: input,
+                #[cfg(windows)]
+                _named: named,
+                #[cfg(windows)]
+                _pin: pin,
+                _reservation: reservation,
+            })
+        })
+        .await
+        .map_err(|_| SourceWorkerError::Unavailable)?
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn sparse_window(
+        &self,
+        index: u16,
+        index_data: crate::mkv_sparse::CueIndex,
+        anchor: i64,
+        end: i64,
+        start: f64,
+        custody: &SourceResourceReadCustody,
+        deadline: Instant,
+        hooks: &SourceProbeHookOwner,
+    ) -> Result<Option<Vec<u8>>, SourceWorkerError> {
+        let subset = source_cue_read(custody, deadline, move |reader, cancel| {
             let offset = (start * 1e9).round() as i128;
             let span = Some((
                 i128::from(anchor.saturating_sub(60).max(0)) * 1_000_000_000 + offset,
                 i128::from(end) * 1_000_000_000 + offset,
             ));
-            let subset = crate::mkv_sparse::subset_cancellable(
-                &reader,
+            crate::mkv_sparse::subset_cancellable(
+                reader,
                 &index_data,
                 &[usize::from(index)],
                 span,
                 deadline,
-                &owned_cancel,
+                cancel,
             )
-            .map_err(|error| SourceSparseFailure::from_read(error, deadline))?;
-            owned_custody
-                .source()
-                .map_err(|_| SourceSparseFailure::Work(SourceWorkerError::Unavailable))?;
-            Ok::<_, SourceSparseFailure>(Some(subset))
-        });
-        let result = tokio::select! {
-            result = &mut job => result,
-            () = custody.cancelled() => { cancel.cancel(); job.await },
-            () = tokio::time::sleep_until(deadline.into()) => { cancel.cancel(); job.await },
-        }
-        .map_err(|_| SourceWorkerError::Unavailable)?;
-        if custody.is_cancelled() {
-            return Err(SourceWorkerError::Unavailable);
-        }
-        if cancel.is_cancelled() {
-            return Err(SourceWorkerError::Deadline);
-        }
-        let subset = match result {
-            Ok(Some(subset)) => subset,
-            Ok(None) | Err(SourceSparseFailure::Fallback) => return Ok(None),
-            Err(SourceSparseFailure::Work(error)) => return Err(error),
+            .map(Some)
+            .map_err(|error| SourceSparseFailure::from_read(error, deadline))
+        })
+        .await?;
+        let Some(subset) = subset else {
+            return Ok(None);
         };
         if subset.blocks == 0 {
             return Ok(Some(b"WEBVTT\n\n".to_vec()));
         }
-        let bytes = subset.bytes;
-        let owned_custody = custody.clone();
-        let directory = self.directory.clone();
-        let input = tokio::task::spawn_blocking(move || {
-            use std::io::{Seek, Write};
-            owned_custody.source()?;
-            std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-            let mut input = tempfile::tempfile_in(directory).map_err(|error| error.to_string())?;
-            input.write_all(&bytes).map_err(|error| error.to_string())?;
-            input.rewind().map_err(|error| error.to_string())?;
-            Ok::<_, String>(input)
-        })
-        .await
-        .map_err(|_| SourceWorkerError::Unavailable)?
-        .map_err(|_| SourceWorkerError::Unavailable)?;
-        let path = held_input(&input).map_err(|_| SourceWorkerError::Unavailable)?;
+        // Exact temporary bytes are reserved before write. Its reservation is
+        // the last field dropped, after both readable and Windows named handles.
+        let input = self
+            .stage_sparse_input(subset.bytes, custody, deadline)
+            .await?;
+        let path = held_input(&input.handle).map_err(|_| SourceWorkerError::Unavailable)?;
         let mut args = vec!["-copyts".to_owned()];
         if start != 0.0 {
             args.extend(["-itsoffset".to_owned(), format!("{:.6}", -start)]);
         }
-        let command =
-            crate::subtitles::held_sparse_window_command(&input, &path, &args, i64::from(index));
-        let output = match super::source_preparation::run_resource_child(
+        let command = crate::subtitles::held_sparse_window_command(
+            &input.handle,
+            &path,
+            &args,
+            i64::from(index),
+        );
+        let output = super::source_preparation::run_resource_child(
             &self.file,
             custody,
             deadline,
@@ -549,8 +629,11 @@ impl SourceNativeTracks {
             TRACK_BYTES,
             hooks,
         )
-        .await
-        {
+        .await;
+        // The child and pipes have actually settled before the file closes and
+        // its disk allowance returns, including cancellation and error paths.
+        drop(input);
+        let output = match output {
             Ok(output) if output.stderr.is_empty() => output,
             Ok(_) | Err(SourceResourceChildFailure::Conversion)
                 if !custody.is_cancelled() && Instant::now() < deadline =>
@@ -563,15 +646,88 @@ impl SourceNativeTracks {
                     SourceWorkerError::Unavailable
                 } else {
                     SourceWorkerError::Deadline
-                });
+                })
             }
         };
+        validate_window_text(&output.stdout).map_err(|_| SourceWorkerError::Unsupported)?;
         let bytes = crate::subtitle_ranges::filter_absolute_window(&output.stdout, anchor, end)
             .map_err(|_| SourceWorkerError::Unsupported)?;
-        validate_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
+        validate_window_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
         Ok(Some(bytes))
     }
 }
+pub(super) struct SourceSparseInput {
+    handle: std::fs::File,
+    #[cfg(windows)]
+    _named: tempfile::NamedTempFile,
+    #[cfg(windows)]
+    _pin: Option<crate::playback_cache::CachePin>,
+    _reservation: Option<crate::playback_cache::CacheReservation>,
+}
+fn optional_source_timeline(
+    result: Result<crate::ffmpeg::BoundedOutput, SourceResourceChildFailure>,
+) -> Result<Option<f64>, SourceWorkerError> {
+    match result {
+        Ok(output) if output.stderr.is_empty() => Ok(std::str::from_utf8(&output.stdout)
+            .ok()
+            .and_then(crate::subtitles::parse_source_start_seconds)),
+        Ok(_) | Err(SourceResourceChildFailure::Conversion) => Ok(None),
+        Err(SourceResourceChildFailure::Work(error)) => Err(error),
+    }
+}
+async fn source_cue_read<T, F>(
+    custody: &SourceResourceReadCustody,
+    deadline: Instant,
+    read: F,
+) -> Result<Option<T>, SourceWorkerError>
+where
+    T: Send + 'static,
+    F: FnOnce(
+            &dyn crate::mkv_sparse::ReadAt,
+            &tokio_util::sync::CancellationToken,
+        ) -> Result<Option<T>, SourceSparseFailure>
+        + Send
+        + 'static,
+{
+    let authority = custody
+        .authorize_work()
+        .await
+        .map_err(|_| SourceWorkerError::Unavailable)?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let owned_cancel = cancel.clone();
+    let owned = custody.clone();
+    let mut job = tokio::task::spawn_blocking(move || {
+        authority
+            .validate_before_spawn()
+            .map_err(|_| SourceSparseFailure::Work(SourceWorkerError::Unavailable))?;
+        owned
+            .source()
+            .map_err(|_| SourceSparseFailure::Work(SourceWorkerError::Unavailable))?;
+        let result = read(&SourceCaptionReader(&owned), &owned_cancel)?;
+        owned
+            .source()
+            .map_err(|_| SourceSparseFailure::Work(SourceWorkerError::Unavailable))?;
+        Ok::<_, SourceSparseFailure>(result)
+    });
+    let result = tokio::select! {
+        result = &mut job => result,
+        () = custody.cancelled() => { cancel.cancel(); job.await },
+        () = tokio::time::sleep_until(deadline.into()) => { cancel.cancel(); job.await },
+    }
+    .map_err(|_| SourceWorkerError::Unavailable)?;
+    if custody.is_cancelled() {
+        return Err(SourceWorkerError::Unavailable);
+    }
+    if cancel.is_cancelled() {
+        return Err(SourceWorkerError::Deadline);
+    }
+    match result {
+        Ok(value) => Ok(value),
+        Err(SourceSparseFailure::Fallback) => Ok(None),
+        Err(SourceSparseFailure::Work(error)) => Err(error),
+    }
+}
+
 enum SourceSparseFailure {
     Work(SourceWorkerError),
     Fallback,
@@ -660,10 +816,13 @@ fn validate_text(bytes: &[u8]) -> Result<(), String> {
         .next()
         .ok_or_else(|| "Source native header missing".to_owned())?;
     let mut header_lines = header.trim().lines();
-    if header_lines.next() != Some("WEBVTT")
-        || header_lines.any(|line| !line.starts_with("X-TIMESTAMP-MAP="))
-    {
+    if header_lines.next() != Some("WEBVTT") {
         return Err("Source native header unsupported".into());
+    }
+    if let Some(map) = header_lines.next() {
+        if header_lines.next().is_some() || !valid_timestamp_map(map) {
+            return Err("Source native timestamp map unsupported".into());
+        }
     }
     let mut count = 0usize;
     for block in blocks {
@@ -699,6 +858,74 @@ fn validate_text(bytes: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
+fn normalize_source_window(
+    raw: &[u8],
+    anchor: i64,
+    end: i64,
+    indexed: bool,
+) -> Result<Vec<u8>, SourceWorkerError> {
+    validate_window_text(raw).map_err(|_| SourceWorkerError::Unsupported)?;
+    let bytes = if indexed {
+        crate::subtitle_ranges::filter_absolute_window(raw, anchor, end)
+            .map_err(|_| SourceWorkerError::Unsupported)?
+    } else {
+        crate::subtitles::normalize_window_cues(raw, anchor)
+    };
+    validate_window_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
+    Ok(bytes)
+}
+fn validate_window_text(bytes: &[u8]) -> Result<(), String> {
+    validate_text(bytes)?;
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| "Source native text is not UTF-8".to_owned())?;
+    if text
+        .lines()
+        .take_while(|line| !line.is_empty())
+        .any(|line| line.starts_with("X-TIMESTAMP-MAP="))
+    {
+        return Err("Source unsliced window cannot carry a timestamp map".into());
+    }
+    Ok(())
+}
+fn valid_timestamp_map(line: &str) -> bool {
+    let Some(raw) = line.strip_prefix("X-TIMESTAMP-MAP=") else {
+        return false;
+    };
+    let Some((first, second)) = raw.split_once(',') else {
+        return false;
+    };
+    let (mpeg, local) = match (
+        first.strip_prefix("MPEGTS:"),
+        second.strip_prefix("LOCAL:"),
+        first.strip_prefix("LOCAL:"),
+        second.strip_prefix("MPEGTS:"),
+    ) {
+        (Some(mpeg), Some(local), _, _) | (_, _, Some(local), Some(mpeg)) => (mpeg, local),
+        _ => return false,
+    };
+    !mpeg.is_empty()
+        && mpeg.bytes().all(|byte| byte.is_ascii_digit())
+        && mpeg.parse::<u64>().is_ok_and(|value| value < (1_u64 << 33))
+        && valid_local_timestamp(local)
+}
+fn valid_local_timestamp(raw: &str) -> bool {
+    let parts: Vec<_> = raw.split(':').collect();
+    let [hours, minutes, seconds] = parts.as_slice() else {
+        return false;
+    };
+    let Some((seconds, millis)) = seconds.split_once('.') else {
+        return false;
+    };
+    hours.len() >= 2
+        && hours.bytes().all(|byte| byte.is_ascii_digit())
+        && minutes.len() == 2
+        && minutes.bytes().all(|byte| byte.is_ascii_digit())
+        && seconds.len() == 2
+        && seconds.bytes().all(|byte| byte.is_ascii_digit())
+        && millis.len() == 3
+        && millis.bytes().all(|byte| byte.is_ascii_digit())
+        && timestamp(raw).is_ok()
+}
 fn timestamp(raw: &str) -> Result<f64, String> {
     let parts: Vec<_> = raw.trim().split(':').collect();
     let parsed = match parts.as_slice() {
@@ -725,6 +952,47 @@ fn timestamp(raw: &str) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_raw_positive_anchor_rejects_lossy_utf8_and_invalid_timestamp_maps() {
+        let invalid = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nbad \xff\n";
+        assert_eq!(
+            normalize_source_window(invalid, 600, 860, false),
+            Err(SourceWorkerError::Unsupported)
+        );
+        let valid = b"WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:8589934591,LOCAL:00:00:00.000\n\n";
+        assert!(validate_text(valid).is_ok());
+        assert!(validate_window_text(valid).is_err());
+        for map in [
+            "X-TIMESTAMP-MAP=garbage", "X-TIMESTAMP-MAP=MPEGTS:8589934592,LOCAL:00:00:00.000",
+            "X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:NaN", "X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:0e0",
+            "X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000",
+        ] { assert!(validate_text(format!("WEBVTT\n{map}\n\n").as_bytes()).is_err(), "{map}"); }
+    }
+    #[test]
+    fn source_optional_index_timeline_falls_back_without_hiding_typed_work_failures() {
+        assert_eq!(
+            optional_source_timeline(Err(SourceResourceChildFailure::Conversion)),
+            Ok(None)
+        );
+        assert_eq!(
+            optional_source_timeline(Ok(crate::ffmpeg::BoundedOutput {
+                stdout: b"not-a-clock".to_vec(),
+                stderr: Vec::new()
+            })),
+            Ok(None)
+        );
+        for error in [
+            SourceWorkerError::Unsupported,
+            SourceWorkerError::Unavailable,
+            SourceWorkerError::Deadline,
+            SourceWorkerError::Capacity,
+        ] {
+            assert_eq!(
+                optional_source_timeline(Err(SourceResourceChildFailure::Work(error))),
+                Err(error)
+            );
+        }
+    }
     #[test]
     fn source_native_text_refuses_malformed_and_excessive_cues() {
         assert!(validate_text(b"WEBVTT\n\n00:00:00.200 --> 00:00:01.800\nactual\n").is_ok());

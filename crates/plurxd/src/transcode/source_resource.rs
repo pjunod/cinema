@@ -35,6 +35,18 @@ pub(crate) struct SourceResourceReadCustody {
     guard: Arc<SourceResponseGuard>,
     hooks: Arc<SourceResourceHookOwner>,
 }
+/// Classify managed-cache admission pressure without hiding real input or
+/// authority errors. This is used only at cache allocation/pin/write sites.
+pub(super) fn cache_io_error(error: std::io::Error) -> SourceWorkerError {
+    match error.kind() {
+        std::io::ErrorKind::StorageFull | std::io::ErrorKind::WouldBlock => {
+            SourceWorkerError::Capacity
+        }
+        std::io::ErrorKind::TimedOut => SourceWorkerError::Deadline,
+        _ => SourceWorkerError::Unavailable,
+    }
+}
+
 impl SourceResourceReadCustody {
     pub(super) fn new(
         guard: Arc<SourceResponseGuard>,
@@ -83,6 +95,21 @@ impl SourceResourceReadCustody {
         authority.validate_before_spawn()?;
         Ok(authority)
     }
+    pub(crate) fn request_revocation(&self) {
+        self.guard.request_revocation();
+    }
+    pub(crate) async fn reserve_subtitle(
+        &self,
+        path: &Path,
+        bytes: u64,
+        deadline: Instant,
+    ) -> Result<Option<crate::playback_cache::CacheReservation>, SourceWorkerError> {
+        tokio::select! {
+            result = crate::playback_cache::reserve(path, bytes) => result.map_err(cache_io_error),
+            () = self.cancelled() => Err(SourceWorkerError::Unavailable),
+            () = tokio::time::sleep_until(deadline.into()) => Err(SourceWorkerError::Deadline),
+        }
+    }
     /// All actual cache observations retain the counted Source guard, even if
     /// their async waiter goes away while the filesystem job is blocked.
     pub(crate) async fn read_subtitle(
@@ -97,8 +124,7 @@ impl SourceResourceReadCustody {
             custody
                 .source()
                 .map_err(|_| SourceWorkerError::Unavailable)?;
-            let _pin =
-                crate::playback_cache::pin(&path).map_err(|_| SourceWorkerError::Unavailable)?;
+            let _pin = crate::playback_cache::pin(&path).map_err(cache_io_error)?;
             let mut file = match plurx_core::fs_secure::open_read_nofollow_blocking(&path) {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -130,44 +156,48 @@ impl SourceResourceReadCustody {
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?
     }
-    pub(crate) async fn publish_subtitle(&self, path: &Path, bytes: Vec<u8>) -> Result<(), String> {
-        let reservation =
-            crate::playback_cache::reserve(path, (bytes.len() as u64).saturating_mul(2))
-                .await
-                .map_err(|error| format!("Source subtitle disk admission: {error}"))?;
+    pub(crate) async fn publish_subtitle(
+        &self,
+        path: &Path,
+        bytes: Vec<u8>,
+        deadline: Instant,
+    ) -> Result<(), SourceWorkerError> {
+        let reservation = self
+            .reserve_subtitle(path, (bytes.len() as u64).saturating_mul(2), deadline)
+            .await?;
         let size = bytes.len() as u64;
         let custody = self.clone();
         let path = path.to_owned();
         tokio::task::spawn_blocking(move || {
             use std::io::Write;
-            custody.source()?;
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
             if custody.is_cancelled() {
-                return Err("Source resource retired".to_owned());
+                return Err(SourceWorkerError::Unavailable);
             }
-            let directory = path
-                .parent()
-                .ok_or("Source subtitle cache directory missing")?;
-            std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+            let directory = path.parent().ok_or(SourceWorkerError::Unavailable)?;
+            std::fs::create_dir_all(directory).map_err(cache_io_error)?;
             let mut temporary = tempfile::Builder::new()
                 .prefix(".tmp-source-caption-")
                 .tempfile_in(directory)
-                .map_err(|error| error.to_string())?;
+                .map_err(cache_io_error)?;
             let _temporary_pin =
-                crate::playback_cache::pin(temporary.path()).map_err(|error| error.to_string())?;
-            temporary
-                .write_all(&bytes)
-                .map_err(|error| error.to_string())?;
-            custody.source()?;
+                crate::playback_cache::pin(temporary.path()).map_err(cache_io_error)?;
+            temporary.write_all(&bytes).map_err(cache_io_error)?;
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
             if custody.is_cancelled() {
-                return Err("Source resource retired".to_owned());
+                return Err(SourceWorkerError::Unavailable);
             }
             temporary
                 .persist(&path)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| cache_io_error(error.error))?;
             Ok(())
         })
         .await
-        .map_err(|error| format!("Source subtitle cache publication: {error}"))??;
+        .map_err(|_| SourceWorkerError::Unavailable)??;
         if let Some(reservation) = reservation {
             reservation.commit(size);
         }
@@ -341,5 +371,30 @@ impl SourceResourceHookOwner {
             .as_any()
             .downcast_ref::<SourceResourceJobPause>()
             .expect("actual Source file job hook")
+    }
+}
+
+#[cfg(test)]
+mod caption_cache_pressure_tests {
+    use super::*;
+    #[test]
+    fn managed_caption_cache_pressure_keeps_typed_busy_and_deadline() {
+        for kind in [
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::StorageFull,
+        ] {
+            assert_eq!(
+                cache_io_error(std::io::Error::from(kind)),
+                SourceWorkerError::Capacity
+            );
+        }
+        assert_eq!(
+            cache_io_error(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            SourceWorkerError::Deadline
+        );
+        assert_eq!(
+            cache_io_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            SourceWorkerError::Unavailable
+        );
     }
 }

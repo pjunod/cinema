@@ -526,6 +526,35 @@ impl SourceViewerActor {
         }
         Ok((response, guard))
     }
+    /// Actual selected-caption work shares the control's counted physical
+    /// guard. Its HTTP observer may leave; this factory retains custody until
+    /// the child, pipes, sparse readers and cache jobs have really settled.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_native_window_work(
+        &self,
+        tracks: Arc<super::source_subtitles::SourceNativeTracks>,
+        manager: Arc<TranscodeManager>,
+        index: u16,
+        demand: i64,
+        span: i64,
+        custody: resource::SourceResourceReadCustody,
+        deadline: Instant,
+    ) -> tokio::task::JoinHandle<Result<Vec<u8>, SourceWorkerError>> {
+        tokio::spawn(async move {
+            let result = tracks
+                .window(&manager, index, demand, span, &custody, deadline)
+                .await;
+            if matches!(
+                result,
+                Err(SourceWorkerError::Unavailable
+                    | SourceWorkerError::Conflict
+                    | SourceWorkerError::Unresolved)
+            ) {
+                custody.request_revocation();
+            }
+            result
+        })
+    }
     pub(crate) async fn open_resource(
         &self,
         resource: &SharingHlsResource,
