@@ -87,7 +87,7 @@ def main() -> int:
             )
             status = 1
         for match in pinned:
-            image = match.group("image").replace("${PLURX_MEDIA_REGISTRY}", "forge.lan:3000")
+            image = match.group("image").replace("${PLURX_MEDIA_RUNTIME_REPOSITORY}", "ghcr.io/pjunod/cinema-media-runtime").replace("${PLURX_MEDIA_REGISTRY}", "forge.lan:3000")
             current = None if args.offline else upstream_digest(image)
             rows.append(
                 {
