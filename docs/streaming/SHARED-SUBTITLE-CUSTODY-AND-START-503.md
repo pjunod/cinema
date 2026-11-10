@@ -9,7 +9,7 @@ fixture Start503. A1, native client releases and physical acceptance remain sepa
 
 ## Current state
 
-Implementation is in progress on `codex/shared-s5-and-start-503`, based on
+Implementation is complete on `codex/shared-s5-and-start-503`, based on
 `c8f8b5aa9`. Codex owns integration and delivery. Sol owns the custody
 initializer repair and Source subtitle implementation. One independent
 adversarial review follows complete implementation; focused regressions,
@@ -19,7 +19,8 @@ results are claimed yet for this follow-up.
 The pinned Rust 1.97.1 compiler loop is established in a source-only container.
 The owner explicitly approved at most 24 GiB, four CPUs and no swap for this
 follow-up. Compiler caches stay shared; source and receipts have separate
-owned paths. The live PR records gate and landing state once opened.
+owned paths. The live PR records gate and landing state once opened. Compilation and the
+final independent review are the current step; unit execution follows review.
 
 ## The Start503 defect
 
@@ -65,7 +66,12 @@ remains under its existing encoded operation custody.
 Demanded caption windows use the existing detached resource factory. Its
 counted response guard retains the actual Source file fence; caller timeout
 does not drop that owner, and Source SQL release waits for counted work.
-Window admission is bounded. End or revocation cancels the actual operation,
+Window admission is bounded. A Source copy producer owns a real CPU permit
+even though its recipe has no encoder. It must participate in the existing
+stopped-producer poll, contention decision and reaper-owned permit yield,
+so a paused producer cannot retain the pool indefinitely ahead of a caption
+waiter. This adds no separate timer or admission bypass. End or revocation
+cancels the actual operation,
 which retains admission and custody until the child is reaped, readers are
 joined and file work closes. No generic whole-track or window warmer is
 started as a substitute owner.
@@ -78,10 +84,18 @@ preparation/resource authorization. Cue-index and demux mechanics remain
 shared with local captions, with Source-owned reads of the held object.
 
 Cached reads and readiness observations retain counted Source custody.
-Cache identity alone grants no permission. Versioned whole/window
-revisions distinguish complete, partial and absent data; old or stale
+Cache identity alone grants no permission. Source-derived window names bind
+a SHA-256 of the exact held object version; generic local sidecars cannot
+supply Source cues. These artifacts use the existing managed subtitle cache,
+byte reservations, pins and eviction rather than a new cache owner. Versioned
+whole/window revisions distinguish complete, partial and absent data; old or stale
 revisions remain parseable but cannot supply another object's cues. Keep
 UTF-8, 2 MiB, cue-count, timestamp and timestamp-map bounds per served window.
+
+Caption work preserves typed capacity, deadlines and unsupported data. The
+Source and receiver retain bounded retry delays for busy caption resources;
+a caption-only unsupported response does not retire the movie. Authentication,
+physical-fence and unresolved Source failures still fail closed.
 
 ## Evidence required before merge
 
@@ -93,6 +107,8 @@ UTF-8, 2 MiB, cue-count, timestamp and timestamp-map bounds per served window.
 - Expired authority, changed grants/route/file and exhausted admission refuse work.
 - Revision identity, stale-cache absence and cached filesystem custody hold.
 - Existing encoded burn custody stays intact.
+- A Source copy yields its real permit through the existing reaper before
+  a caption waiter acquires it; an ordinary local copy retains its behavior.
 
 A before `/metrics` snapshot was captured from an existing server and is
 retained privately with the source-bound receipts. Its
