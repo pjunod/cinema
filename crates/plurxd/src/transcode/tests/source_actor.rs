@@ -544,7 +544,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         body.aac = Some(true);
         body.caps = Some(serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"hevc","max_height":2160,"present":["pq","sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"progressive_hevc_sample_entries":["hvc1"]})).expect("HDR10 client"));
     }
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
+    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
         body.copy = Some(false);
         body.height = Some(if mode == 31 { 144 } else { 36 });
     }
@@ -629,7 +629,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
             matches!(video, SourceFixtureVideo::Hdr10Retention)
         );
     }
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
+    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
         assert!(
             matches!(prepared.request().kind, SessionKind::Transcode { .. }),
             "actual common preparation resolves an encoded recipe"
@@ -1117,7 +1117,7 @@ async fn source_actual_actor(
         source_actual_unknown_register_reconciliation(state, manager, assignment).await;
         return;
     }
-    if matches!(mode, 3 | 19 | 28) {
+    if matches!(mode, 3 | 19) {
         state
             .store
             .put_setting(keys::SW_POOL_THREADS, "3")
@@ -1249,7 +1249,7 @@ async fn source_actual_actor(
         assert_eq!(manager.admissions.software_in_use(), 0);
         return;
     }
-    let index_pause = match mode {
+    let mut index_pause = match mode {
         6 => Some(manager.source_workers.index_hooks.pause_after_spawn()),
         7 | 9 | 10 | 11 => Some(manager.source_workers.index_hooks.pause_before_spawn()),
         8 => Some(
@@ -1268,7 +1268,9 @@ async fn source_actual_actor(
         ),
         20 => Some(manager.source_workers.probe_hooks.pause_after_evidence()),
         22 => Some(manager.source_workers.native_hooks.pause_after_spawn()),
-        23 | 25 | 26 | 27 => Some(manager.source_workers.native_hooks.pause_before_spawn()),
+        23 | 25 | 26 | 27 | 57 | 58 => {
+            Some(manager.source_workers.native_hooks.pause_before_spawn())
+        }
         24 => Some(
             manager
                 .source_workers
@@ -1277,6 +1279,15 @@ async fn source_actual_actor(
         ),
         _ => None,
     };
+    if mode == 58 {
+        client
+            .execute(
+                "UPDATE files SET probe_json=NULL WHERE id=1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("no stored probe; encoded recipe owns its physical probe");
+    }
     let actor = Box::pin(manager.start_source_worker(
         Arc::clone(&state),
         assignment.clone(),
@@ -1348,6 +1359,97 @@ async fn source_actual_actor(
         .lookup_source_worker(&assignment)
         .expect("full assignment lookup");
     assert!(Arc::ptr_eq(&actor.0, &joined.0));
+    if matches!(mode, 22..=27 | 57 | 58) {
+        // The hook is armed before Start. Publication must happen without
+        // reaching a native child, for both copy and encoded recipes.
+        actor
+            .wait_ready(Instant::now() + Duration::from_secs(15))
+            .await
+            .expect("native subtitle work cannot gate publication");
+        assert_eq!(manager.source_workers.native_hooks.spawned_pid(), 0);
+        let pause = index_pause.take().expect("native operation hook");
+        let owned = actor.clone();
+        let call = tokio::spawn(Box::pin(async move {
+            owned
+                .open_resource(
+                    &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("native segment"),
+                    Instant::now() + Duration::from_secs(15),
+                )
+                .await
+        }));
+        let held = pause.reached().await;
+        assert_eq!(
+            manager.admissions.software_in_use(),
+            4,
+            "real window work owns CPU admission"
+        );
+        let route = state
+            .store
+            .media_session_route_by_incarnation(&assignment.binding().incarnation_id().to_string())
+            .await
+            .expect("published route")
+            .expect("window work is post-publication");
+        assert_eq!(route.publication_ready_at_ms, 0);
+        assert!(actor.0.state.lock().expect("native body custody").bodies > 0);
+        if mode == 23 {
+            state
+                .store
+                .put_setting(keys::SHARING_ENABLED, "false")
+                .await
+                .expect("disable sharing before window spawn");
+        }
+        if mode == 26 {
+            let file = state.store.get_file(1).await.expect("file").expect("file");
+            std::fs::write(&file.path, b"changed native physical source").expect("physical drift");
+        }
+        if mode == 27 {
+            client
+                .execute(
+                    "DELETE FROM cluster_node_capabilities WHERE capability=$1",
+                    hiqlite::params!(
+                        plurx_core::cluster::membership::SHARING_PURPOSE_KEYS_CAPABILITY
+                    ),
+                )
+                .await
+                .expect("lost purpose floor");
+        }
+        if mode == 25 {
+            tokio::time::sleep(Duration::from_millis(5100)).await;
+        }
+        if matches!(mode, 22 | 24) {
+            call.abort();
+            assert!(matches!(call.await, Err(error) if error.is_cancelled()));
+            actor.request_retirement();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                actor.settlement_status().is_none(),
+                "actual child/readers retain Source retirement"
+            );
+            assert_eq!(manager.admissions.software_in_use(), 4);
+            drop(held);
+        } else {
+            drop(held);
+            let outcome = call.await.expect("native window waiter");
+            if matches!(mode, 25 | 57 | 58) {
+                let (payload, guard) = outcome.expect("fresh owned window authority").into_parts();
+                let SourceResourcePayload::SubtitleText(bytes) = payload else {
+                    panic!("actual caption bytes")
+                };
+                assert!(String::from_utf8_lossy(&bytes).contains("Actual Source caption"));
+                drop(guard);
+            } else {
+                assert!(outcome.is_err());
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(10), actor.retire())
+            .await
+            .expect("window physical settlement budget")
+            .expect("actual window settlement");
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(manager.lookup_source_worker(&assignment).is_none());
+        ingress_monitor.join().await;
+        return;
+    }
     if let Some(pause) = index_pause {
         let held = pause.reached().await;
         assert_eq!(
@@ -1363,7 +1465,7 @@ async fn source_actual_actor(
             .is_none());
         let pid = if mode >= 21 {
             manager.source_workers.native_hooks.spawned_pid()
-        } else if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
+        } else if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
             manager.source_workers.probe_hooks.spawned_pid()
         } else {
             manager.source_workers.index_hooks.spawned_pid()
@@ -1462,7 +1564,7 @@ async fn source_actual_actor(
         ingress_monitor.join().await;
         return;
     }
-    if matches!(mode, 3 | 19 | 28) {
+    if matches!(mode, 3 | 19) {
         assert!(actor
             .wait_ready(Instant::now() + Duration::from_secs(10))
             .await
@@ -1501,7 +1603,26 @@ async fn source_actual_actor(
         .await
         .expect("actual published actor");
     assert!(response.control.is_some());
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
+    if mode == 28 {
+        state
+            .store
+            .put_setting(keys::SW_POOL_THREADS, "3")
+            .await
+            .expect("remove window capacity after publication");
+        assert!(actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("native window"),
+                Instant::now() + Duration::from_secs(5)
+            )
+            .await
+            .is_err());
+        assert_eq!(manager.source_workers.native_hooks.spawned_pid(), 0);
+        actor.retire().await.expect("no-child native retirement");
+        ingress_monitor.join().await;
+        return;
+    }
+
+    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
         let value = serde_json::to_value(&response).expect("complete encoded response");
         assert_eq!(value["height"], 72);
         assert_eq!(
@@ -1533,10 +1654,6 @@ async fn source_actual_actor(
         12 => manager
             .source_workers
             .probe_hooks
-            .assert_closed_parent_settlements(),
-        21 => manager
-            .source_workers
-            .native_hooks
             .assert_closed_parent_settlements(),
         _ => {}
     }
@@ -1596,13 +1713,160 @@ async fn source_actual_actor(
             .expect("actual retained DTO"),
         serde_json::to_value(&response).expect("actual complete DTO")
     );
-    if matches!(mode, 42..=44) {
-        let resource = SharingHlsResource::parse(if mode != 43 {
-            "init.mp4"
+    if mode == 60 {
+        let opened = actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("native current window"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("actual current Source cues");
+        let (_, guard) = opened.into_parts();
+        let current_object = guard
+            .source
+            .as_ref()
+            .expect("current physical source")
+            .object_version()
+            .to_owned();
+        drop(guard);
+        let native = actor
+            .0
+            .state
+            .lock()
+            .expect("Source native group")
+            .native
+            .clone()
+            .expect("native group");
+        let revision = native.take_held_revision_for_test();
+        let file = state
+            .store
+            .get_file(1)
+            .await
+            .expect("current file")
+            .expect("file");
+        let other_path = file.path.with_extension("previous-object.mkv");
+        std::fs::copy(&file.path, &other_path).expect("same bytes, different physical inode");
+        let other = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&other_path)
+            .expect("old physical object");
+        let metadata = std::fs::metadata(&file.path).expect("current physical metadata");
+        other
+            .set_times(
+                std::fs::FileTimes::new().set_modified(metadata.modified().expect("current mtime")),
+            )
+            .expect("old object retains identical scanned mtime");
+        assert_eq!(other.metadata().expect("old size").len(), metadata.len());
+        assert_eq!(
+            other
+                .metadata()
+                .expect("old mtime")
+                .modified()
+                .expect("mtime"),
+            metadata.modified().expect("mtime")
+        );
+        let old_object = crate::fragment_index_cluster::SourceFence::clone_current_held(&other)
+            .expect("old physical identity");
+        assert_ne!(old_object.object_version(), current_object);
+        let stale_revision = native.revision_for_object_for_test(old_object.object_version());
+        assert_ne!(stale_revision, revision);
+        let stale_path = state.subs_dir.join(&stale_revision);
+        std::fs::write(
+            &stale_path,
+            b"WEBVTT\n\n00:00:00.200 --> 00:00:01.800\nSTALE OTHER PHYSICAL OBJECT\n",
+        )
+        .expect("real stale-object cached cues exist");
+        let generic = crate::subtitles::vtt_path(&state.subs_dir, &file, 0);
+        std::fs::write(
+            &generic,
+            b"WEBVTT\n\n00:00:00.200 --> 00:00:01.800\nUNATTESTED GENERIC CACHE\n",
+        )
+        .expect("generic cache has no physical provenance");
+        for requested in [
+            stale_revision,
+            generic
+                .file_name()
+                .expect("generic revision")
+                .to_str()
+                .expect("UTF8")
+                .to_owned(),
+        ] {
+            let opened = actor
+                .open_resource(
+                    &SharingHlsResource::parse(&format!("subs/0/cached-{requested}"))
+                        .expect("valid versioned cached resource"),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .expect("absent revision answer");
+            let (payload, guard) = opened.into_parts();
+            let SourceResourcePayload::CachedSubtitle {
+                bytes,
+                absent,
+                complete,
+            } = payload
+            else {
+                panic!("cached caption answer")
+            };
+            assert!(absent);
+            assert!(!complete);
+            assert!(bytes.is_empty());
+            drop(guard);
+        }
+        let opened = actor
+            .open_resource(
+                &SharingHlsResource::parse(&format!("subs/0/cached-{revision}"))
+                    .expect("current object revision"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("current object cache remains readable");
+        let (payload, guard) = opened.into_parts();
+        assert!(
+            matches!(payload, SourceResourcePayload::CachedSubtitle { absent: false, complete: false, bytes } if String::from_utf8_lossy(&bytes).contains("Actual Source caption"))
+        );
+        drop(guard);
+        actor
+            .retire()
+            .await
+            .expect("physical object cache retirement");
+        ingress_monitor.join().await;
+        return;
+    }
+    if matches!(mode, 42..=44 | 59) {
+        let native_cache_resource = if mode == 59 {
+            let opened = actor
+                .open_resource(
+                    &SharingHlsResource::parse("subs/0/seg00000.vtt")
+                        .expect("Source-derived window"),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .expect("derive from current held Source");
+            let (payload, guard) = opened.into_parts();
+            assert!(matches!(payload, SourceResourcePayload::SubtitleText(_)));
+            drop(guard);
+            let native = actor
+                .0
+                .state
+                .lock()
+                .expect("native cache witness")
+                .native
+                .clone()
+                .expect("native group");
+            let revision = native.take_held_revision_for_test();
+            Some(format!("subs/0/cached-{revision}"))
         } else {
-            "seg00000.m4s"
-        })
-        .expect("actual closed Source media resource");
+            None
+        };
+        let resource =
+            SharingHlsResource::parse(native_cache_resource.as_deref().unwrap_or(if mode != 43 {
+                "init.mp4"
+            } else {
+                "seg00000.m4s"
+            }))
+            .expect("actual closed Source media resource");
         let activity = manager
             .vod
             .source_control_observation_for_test(&response.session_id)
@@ -2127,17 +2391,10 @@ async fn source_actual_actor(
             .subtitle_revision
             .expect("cached caption fixture");
         drop(guard);
-        let revision = actor
-            .0
-            .state
-            .lock()
-            .expect("cached caption fixture")
-            .native
-            .as_ref()
-            .expect("cached caption fixture")
-            .revision(0)
-            .expect("cached caption fixture");
-        assert_eq!(reported, revision);
+        let revision = reported;
+        assert!(revision.starts_with("f1-s0-"));
+        assert!(revision.contains("-o"));
+        assert!(revision.contains("-w0-"));
         for (requested, present) in [(revision, true), ("source-stale.vtt".to_owned(), false)] {
             let opened = actor
                 .open_resource(
@@ -2156,7 +2413,10 @@ async fn source_actual_actor(
             else {
                 panic!("cached caption payload");
             };
-            assert_eq!(complete, present);
+            assert!(
+                !complete,
+                "a requested window is not a whole-track revision"
+            );
             assert_eq!(absent, !present);
             assert_eq!(bytes.is_empty(), !present);
             if present {
@@ -2245,6 +2505,13 @@ async fn source_actual_actor(
     } else {
         None
     };
+    #[cfg(unix)]
+    if mode == 21 {
+        manager
+            .source_workers
+            .native_hooks
+            .assert_closed_parent_settlements();
+    }
     let (start_body, start_guard) = actor
         .open_start_response(Instant::now() + Duration::from_secs(5))
         .await
@@ -2516,7 +2783,7 @@ async fn source_native_retains_permit_through_actual_reap_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn source_native_refuses_expired_original_observation() {
+async fn source_native_refreshes_publication_observation_before_window_child() {
     Box::pin(source_copy_preadmission_fixture(25)).await;
 }
 
@@ -3272,4 +3539,24 @@ async fn source_fixture_monitor_join_propagates_task_failure() {
 async fn source_assigned_owner_cached_caption_revision_reads_retained_bytes_and_refuses_stale_identity(
 ) {
     Box::pin(source_copy_preadmission_fixture(56)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_copy_start_does_not_wait_for_requested_caption_work() {
+    Box::pin(source_copy_preadmission_fixture(57)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_encoded_start_needs_no_stored_caption_probe_and_does_not_wait_for_caption_work(
+) {
+    Box::pin(source_copy_preadmission_fixture(58)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_cached_read_holds_actual_filesystem_job_through_waiter_cancel_and_end() {
+    Box::pin(source_copy_preadmission_fixture(59)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_cached_revision_refuses_another_inode_with_same_file_id_size_and_mtime() {
+    Box::pin(source_copy_preadmission_fixture(60)).await;
 }

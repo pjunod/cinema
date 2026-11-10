@@ -42,6 +42,127 @@ impl SourceResourceReadCustody {
     ) -> Self {
         Self { guard, hooks }
     }
+    pub(crate) fn source(&self) -> Result<&crate::fragment_index_cluster::SourceFence, String> {
+        self.guard
+            .source
+            .as_ref()
+            .filter(|source| source.unchanged())
+            .ok_or_else(|| "Source physical input changed".to_owned())
+    }
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.guard
+            .owner
+            .state
+            .lock()
+            .expect("Source resource retirement")
+            .retirement_requested
+            || self.source().is_err()
+    }
+    pub(crate) async fn cancelled(&self) {
+        self.guard.cancelled().await;
+    }
+    pub(crate) async fn authorize_work(&self) -> Result<SourceGenerationAuthority, String> {
+        if self.is_cancelled() {
+            return Err("Source resource retired".into());
+        }
+        let permission = self
+            .guard
+            .owner
+            .gate
+            .retained_ingress(self.guard.assignment())
+            .ok_or_else(|| "Source resource assignment changed".to_owned())?;
+        let authority = self
+            .guard
+            .owner
+            .gate
+            .authorize_generation(&[permission])
+            .await?;
+        if self.is_cancelled() {
+            return Err("Source resource retired during authorization".into());
+        }
+        authority.validate_before_spawn()?;
+        Ok(authority)
+    }
+    /// All actual cache observations retain the counted Source guard, even if
+    /// their async waiter goes away while the filesystem job is blocked.
+    pub(crate) async fn read_subtitle(
+        &self,
+        path: &Path,
+        cap: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let custody = self.clone();
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            custody.source()?;
+            let _pin = crate::playback_cache::pin(&path).map_err(|error| error.to_string())?;
+            let mut file = match plurx_core::fs_secure::open_read_nofollow_blocking(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.to_string()),
+            };
+            custody.hooks.slot.get().opened(&file);
+            let metadata = file.metadata().map_err(|error| error.to_string())?;
+            if !metadata.is_file() || metadata.len() > cap as u64 {
+                return Ok(None);
+            }
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take(cap as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            custody.source()?;
+            if bytes.len() > cap || custody.is_cancelled() {
+                return Err("Source subtitle read expired or exceeded its bound".into());
+            }
+            Ok(Some(bytes))
+        })
+        .await
+        .map_err(|error| format!("Source subtitle cache read: {error}"))?
+    }
+    pub(crate) async fn publish_subtitle(&self, path: &Path, bytes: Vec<u8>) -> Result<(), String> {
+        let reservation =
+            crate::playback_cache::reserve(path, (bytes.len() as u64).saturating_mul(2))
+                .await
+                .map_err(|error| format!("Source subtitle disk admission: {error}"))?;
+        let size = bytes.len() as u64;
+        let custody = self.clone();
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            custody.source()?;
+            if custody.is_cancelled() {
+                return Err("Source resource retired".to_owned());
+            }
+            let directory = path
+                .parent()
+                .ok_or("Source subtitle cache directory missing")?;
+            std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+            let mut temporary = tempfile::Builder::new()
+                .prefix(".tmp-source-caption-")
+                .tempfile_in(directory)
+                .map_err(|error| error.to_string())?;
+            let _temporary_pin =
+                crate::playback_cache::pin(temporary.path()).map_err(|error| error.to_string())?;
+            temporary
+                .write_all(&bytes)
+                .map_err(|error| error.to_string())?;
+            custody.source()?;
+            if custody.is_cancelled() {
+                return Err("Source resource retired".to_owned());
+            }
+            temporary
+                .persist(&path)
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| format!("Source subtitle cache publication: {error}"))??;
+        if let Some(reservation) = reservation {
+            reservation.commit(size);
+        }
+        Ok(())
+    }
     pub(crate) async fn open_ready(
         &self,
         path: &Path,

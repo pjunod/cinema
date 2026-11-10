@@ -10,7 +10,7 @@ use crate::playback_control::{
 pub(crate) struct SourceOpenedControl {
     result: Result<LocalControlResult, ControlStateError>,
     guard: SourceResponseGuard,
-    subtitle_revision: Option<String>,
+    subtitle: Option<(crate::playback_control::SubtitleTrackCache, Option<String>)>,
     projection: Box<(
         MediaSessionRoute,
         crate::http::hls::StartResponse,
@@ -35,9 +35,13 @@ impl SourceOpenedControl {
                 &result,
                 crate::media_sessions::unix_ms(),
             );
-            if let Some(revision) = self.subtitle_revision {
-                response.delivery.subtitle_readiness = Some("ready".into());
-                response.delivery.subtitle_revision = Some(revision);
+            if let Some((cache, revision)) = self.subtitle {
+                response.delivery.subtitle_readiness =
+                    crate::playback_control::subtitle_readiness_value(
+                        &request.selection.subtitle,
+                        Some(cache),
+                    );
+                response.delivery.subtitle_revision = revision;
             }
             response
         });
@@ -289,23 +293,53 @@ impl SourceViewerActor {
             .await
             .ok_or(SourceWorkerError::Unavailable)?;
         drop(authority);
-        let subtitle_revision = {
-            let state = self.0.state.lock().expect("Source native control");
-            match (
-                request.selection.subtitle.mode,
-                request.selection.subtitle.track,
-                state.native.as_ref(),
-            ) {
-                (crate::playback_control::SubtitleMode::Native, Some(index), Some(tracks)) => {
-                    u16::try_from(index)
-                        .ok()
-                        .and_then(|index| tracks.revision(index))
-                }
-                _ => None,
+        // This HTTP control already runs in its detached owned factory. A
+        // selected native demand uses that same counted guard while its actual
+        // window readers and children settle; polling an unselected track does
+        // no physical work.
+        let native = self
+            .0
+            .state
+            .lock()
+            .expect("Source native control")
+            .native
+            .clone();
+        let guard = Arc::new(guard);
+        let custody = resource::SourceResourceReadCustody::new(
+            Arc::clone(&guard),
+            Arc::clone(&self.0.resource_hooks),
+        );
+        let subtitle = match (
+            request.selection.subtitle.mode,
+            request.selection.subtitle.track,
+            native,
+        ) {
+            (crate::playback_control::SubtitleMode::Native, Some(index), Some(tracks)) => {
+                let demand = request.seek_target_ms.unwrap_or(request.position_ms).max(0) / 1_000;
+                let span =
+                    super::super::source_subtitles::SourceNativeTracks::window_seconds(&manager)
+                        .await;
+                Some(match u16::try_from(index) {
+                    Ok(index) => {
+                        if result.is_ok() {
+                            let _ = tracks
+                                .window(&manager, index, demand, span, &custody, deadline)
+                                .await;
+                        }
+                        tracks.readiness(index, demand, span, &custody)
+                    }
+                    Err(_) => (
+                        crate::playback_control::SubtitleTrackCache::Unavailable,
+                        None,
+                    ),
+                })
             }
+            _ => None,
         };
+        drop(custody);
+        let guard = Arc::try_unwrap(guard).map_err(|_| SourceWorkerError::Unresolved)?;
         Ok(SourceOpenedControl {
-            subtitle_revision,
+            subtitle,
             result,
             guard,
             projection: Box::new((route, current_response, recipe)),

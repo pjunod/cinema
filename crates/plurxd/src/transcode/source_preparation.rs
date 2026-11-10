@@ -655,11 +655,88 @@ pub(super) async fn run_child(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Physical work is authorized at the lifecycle boundary that owns it.
+/// A published resource cannot use the pre-activation preparation permission.
+enum SourceChildAuthority<'a> {
+    Preparation {
+        proof: &'a SourceSessionWriteAuthority,
+        store: &'a dyn Store,
+    },
+    Resource(&'a super::source_actor::resource::SourceResourceReadCustody),
+}
+impl SourceChildAuthority<'_> {
+    async fn cancelled(&self) {
+        match self {
+            Self::Preparation { .. } => std::future::pending::<()>().await,
+            Self::Resource(custody) => custody.cancelled().await,
+        }
+    }
+    fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Preparation { .. } => false,
+            Self::Resource(custody) => custody.is_cancelled(),
+        }
+    }
+}
+
+/// Runs inside the Source's detached, counted resource factory. Its caller
+/// retains CPU admission until this returns after actual reap and pipe joins.
+pub(super) async fn run_resource_child(
+    file: &MediaFile,
+    custody: &super::source_actor::resource::SourceResourceReadCustody,
+    deadline: Instant,
+    command: tokio::process::Command,
+    cap: usize,
+    hooks: &SourceProbeHookOwner,
+) -> Result<crate::ffmpeg::BoundedOutput, String> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    run_authorized_child(
+        file,
+        custody.source()?,
+        SourceChildAuthority::Resource(custody),
+        deadline,
+        &cancel,
+        command,
+        cap,
+        hooks,
+        None,
+    )
+    .await
+    .map(|(output, _)| output)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_child_with(
     file: &MediaFile,
     source: &crate::fragment_index_cluster::SourceFence,
     proof: &SourceSessionWriteAuthority,
     store: &dyn Store,
+    deadline: Instant,
+    cancel: &tokio_util::sync::CancellationToken,
+    command: tokio::process::Command,
+    cap: usize,
+    hooks: &SourceProbeHookOwner,
+    sink: Option<tokio::fs::File>,
+) -> Result<(crate::ffmpeg::BoundedOutput, Option<tokio::fs::File>), String> {
+    run_authorized_child(
+        file,
+        source,
+        SourceChildAuthority::Preparation { proof, store },
+        deadline,
+        cancel,
+        command,
+        cap,
+        hooks,
+        sink,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_authorized_child(
+    file: &MediaFile,
+    source: &crate::fragment_index_cluster::SourceFence,
+    authority: SourceChildAuthority<'_>,
     deadline: Instant,
     cancel: &tokio_util::sync::CancellationToken,
     mut command: tokio::process::Command,
@@ -675,26 +752,37 @@ async fn run_child_with(
     .await?;
     if Instant::now() >= deadline
         || cancel.is_cancelled()
+        || authority.is_cancelled()
         || !source.unchanged()
         || !current.unchanged()
     {
         return Err("Source probe cancelled or file changed before spawn".into());
     }
-    proof
-        .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
-        .map_err(|_| "Source probe observation expired".to_owned())?;
-    if !store
-        .authorize_source_media_preparation(proof)
-        .await
-        .map_err(|_| "Source probe authority write failed".to_owned())?
-    {
-        return Err("Source probe current authority unavailable".into());
+    let generation = match &authority {
+        SourceChildAuthority::Preparation { proof, store } => {
+            proof
+                .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+                .map_err(|_| "Source probe observation expired".to_owned())?;
+            if !store
+                .authorize_source_media_preparation(proof)
+                .await
+                .map_err(|_| "Source probe authority write failed".to_owned())?
+            {
+                return Err("Source probe current authority unavailable".into());
+            }
+            proof
+                .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+                .map_err(|_| "Source probe observation expired at spawn".to_owned())?;
+            None
+        }
+        SourceChildAuthority::Resource(custody) => Some(custody.authorize_work().await?),
+    };
+    if let Some(generation) = generation.as_ref() {
+        generation.validate_before_spawn()?;
     }
-    proof
-        .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
-        .map_err(|_| "Source probe observation expired at spawn".to_owned())?;
     if Instant::now() >= deadline
         || cancel.is_cancelled()
+        || authority.is_cancelled()
         || !source.unchanged()
         || !current.unchanged()
     {
@@ -752,6 +840,7 @@ async fn run_child_with(
             result=&mut collect=>result,
             ()=tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))=>Err("Source probe deadline".into()),
             ()=cancel.cancelled()=>Err("Source probe cancelled".into()),
+            ()=authority.cancelled()=>Err("Source resource retired".into()),
         }
     };
     if collected.is_err() {
