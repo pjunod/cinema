@@ -1280,13 +1280,43 @@ async fn source_actual_actor(
         _ => None,
     };
     if mode == 58 {
+        // Native caption facts need no stored probe. The encoded video still
+        // must satisfy its independent stored-vs-held scan attestation.
+        let video_probe = state
+            .store
+            .get_file_probe_json(prepared.file().id)
+            .await
+            .expect("stored video scan evidence")
+            .expect("encoded fixture has its required video probe");
         client
             .execute(
                 "UPDATE files SET probe_json=NULL WHERE id=1",
                 hiqlite::params!(),
             )
             .await
-            .expect("no stored probe; encoded recipe owns its physical probe");
+            .expect("isolate absent stored caption probe");
+        assert!(state
+            .store
+            .get_file_probe_json(prepared.file().id)
+            .await
+            .expect("probe absence")
+            .is_none());
+        let tracks = crate::transcode::source_subtitles::SourceNativeTracks::prepare(
+            prepared.file(),
+            &assignment,
+            prepared.native_subtitles().1,
+            state.subs_dir.clone(),
+        )
+        .expect("native track group uses only held track facts with no stored probe");
+        assert!(tracks.has_track(0));
+        assert_eq!(tracks.selected(), Some(0));
+        client
+            .execute(
+                "UPDATE files SET probe_json=$1 WHERE id=1",
+                hiqlite::params!(video_probe),
+            )
+            .await
+            .expect("restore independent video attestation before encoded Start");
     }
     let actor = Box::pin(manager.start_source_worker(
         Arc::clone(&state),
@@ -1788,6 +1818,21 @@ async fn source_actual_actor(
                 0
             );
             budget.configure_for_test(1024 * 1024);
+            let directory_baseline = budget
+                .used_bytes()
+                .await
+                .expect("empty root allocation is part of managed usage");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(
+                    directory_baseline,
+                    std::fs::metadata(&state.subs_dir)
+                        .expect("empty sidecar root")
+                        .blocks()
+                        * 512
+                );
+            }
             let input = native
                 .stage_sparse_input(
                     vec![0; 4096],
@@ -1796,14 +1841,25 @@ async fn source_actual_actor(
                 )
                 .await
                 .expect("admitted sparse input");
-            assert!(budget.used_bytes().await.expect("held reservation") >= 4096);
+            assert_eq!(
+                budget.used_bytes().await.expect("held reservation"),
+                directory_baseline + 4096,
+                "the exact sparse input reservation is charged above directory allocation"
+            );
             drop(input);
             assert_eq!(
                 budget
                     .used_bytes()
                     .await
                     .expect("closed input releases exact reservation"),
-                0
+                directory_baseline
+            );
+            assert_eq!(
+                std::fs::read_dir(&state.subs_dir)
+                    .expect("closed sparse staging root")
+                    .count(),
+                0,
+                "input closure leaves no named staging artifact"
             );
             drop(custody);
             drop(guard);
@@ -3846,7 +3902,7 @@ fn source_native_control_request(
         "protocol":crate::playback_control::PROTOCOL_V1,"generation":bootstrap.generation,"control_epoch":bootstrap.control_epoch,
         "client_instance_id":uuid::Uuid::new_v4().to_string(),"sequence":sequence,"demand":"active",
         "position_ms":0,"buffered_from_ms":0,"buffered_through_ms":1000,"playback_rate":1.0,
-        "render_state":"playing","seek_target_ms":null,
+        "render_state":"rendering","seek_target_ms":null,
         "selection":{"quality":{"mode":"original"},"audio_track":null,"subtitle":{"mode":"native","track":0},"audio_offset_ms":0,"codec":"auto","dynamic_range":"auto"},
         "capabilities":{"platform":"web","max_height":2160,"codecs":["h264"],"dynamic_ranges":["sdr"],"dual_player_preparation":false},
         "supported_actions":[],"intent":null
