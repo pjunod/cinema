@@ -37,7 +37,7 @@ pub(crate) struct SourceResourceReadCustody {
 }
 /// Classify managed-cache admission pressure without hiding real input or
 /// authority errors. This is used only at cache allocation/pin/write sites.
-pub(super) fn cache_io_error(error: std::io::Error) -> SourceWorkerError {
+pub(crate) fn cache_io_error(error: std::io::Error) -> SourceWorkerError {
     match error.kind() {
         std::io::ErrorKind::StorageFull | std::io::ErrorKind::WouldBlock => {
             SourceWorkerError::Capacity
