@@ -614,7 +614,7 @@ where
         if let Err(reason) = upserted {
             tracing::warn!(target: "plurxd::http::hls", session = %session, reason,
                 "processed upgrade not admitted: the quality catalog refused the candidate");
-            run.skipped(&reason);
+            run.skipped(reason);
             return "admission_refused";
         }
         processed.quality_catalog = Some(Arc::new(catalog));

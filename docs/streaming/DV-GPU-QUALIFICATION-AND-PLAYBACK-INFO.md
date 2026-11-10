@@ -1,7 +1,7 @@
 # Dolby Vision GPU qualification — reconstructed delivery and skipped reasons
 
-**Status:** implementation in progress; hardware qualification and deployment
-pending · **Written:** 2026-11-09 · **Owner:** Codex
+**Status:** implemented locally; Rust regressions, hardware qualification and
+deployment pending · **Written:** 2026-11-09 · **Owner:** Codex
 
 Companion to [reconstructed Profile 8.1](FEL-P81-RECONSTRUCTION.md)
 (the picture and quality decision), [source budgets](HDR-ENHANCEMENT-SOURCE-BUDGET.md)
@@ -72,6 +72,15 @@ The owned source workspace is based on main `3b64433bd`. The Linux compiler
 loop uses Rust 1.97.1, at most four CPUs and 8 GiB; compile the large daemon
 serially because simultaneous normal/test metadata builds exceeded that cap.
 
-Focused regressions, exact hardware measurements, independent review,
-bookkeeping checks and the affected main gate remain pending. No service
-has been deployed or settings changed by this task.
+Source review found no actionable defects. The web enhancement suite passes
+21 tests. Apple build 295 compiles for iOS/tvOS and its focused presentation
+suite passes 15 tests. Android build 194 compiles/assembles, its enhancement
+suite passes 10 tests, and lint passes. Documentation/release-counter checks
+pass (38 tests); paperwork passes all 16 checks against the current base.
+Native receipts and logs are retained outside compiler/cache directories.
+
+The Rust daemon compiles, but its complete test binary exceeded the 8 GiB
+voter compiler cap even with serial/nonincremental compilation. Test codegen
+is moving to an isolated capped learner slot; the voter limit is unchanged.
+Exact hardware measurements and the affected main gate remain pending. No
+service has been deployed or settings changed by this task.
