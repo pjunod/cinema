@@ -922,6 +922,8 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
   }
   const fileContext=playbackFileContext(fileId);
   if(fileContext.source_ref.kind!=="local"){
+    // The same start clock a Local create sends; B carries it to the Source.
+    const startupRemainingMs=typeof preparationRemainingMs==='function'?preparationRemainingMs(signal):null;
     // Shared initial Start never inherits a Local control/recovery envelope.
     // Actual supplied unsupported fields are refused by the typed adapter.
     if(opts&&opts.presentation==="direct"){
@@ -929,7 +931,7 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
       // subtitle group exists for them, and the Source refuses a subtitle ask.
       body.presentation="direct";
       for(const field of ["block_budget_secs","transport","height","copy","native_subtitles","subtitle"]) delete body[field];
-      return SHARED_DECISION.start(fileContext,body,signal);
+      return SHARED_DECISION.start(fileContext,body,signal,startupRemainingMs);
     }
     const player=typeof PLAYER!=="undefined"?PLAYER:null;
     const natives=(player&&player.subs||[]).filter(sub=>sub.native===true);
@@ -937,7 +939,7 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
     const hevcCopy=!!body.copy&&["hevc","h265","hevc10"].includes(String(player&&player.source&&player.source.video_codec||"").toLowerCase());
     const transport=typeof plannedHlsTransport==="function"?plannedHlsTransport(hevcCopy):null;if(transport)body.transport=transport;
     if(body.height==null&&!Object.hasOwn(opts||{},"height"))delete body.height;
-    return SHARED_DECISION.start(fileContext,body,signal);
+    return SHARED_DECISION.start(fileContext,body,signal,startupRemainingMs);
   }
   // HLS sessions carry native WebVTT renditions whenever this server says a
   // track can become one. Publishing the group up front lets a later subtitle

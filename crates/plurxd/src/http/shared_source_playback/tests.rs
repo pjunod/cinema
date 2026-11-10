@@ -2935,3 +2935,407 @@ fn sharing_source_start_registry_moves_a_joined_failed_start_to_the_settled_cach
     assert!(!new);
     assert!(std::sync::Arc::ptr_eq(&replay, &failed));
 }
+
+/// S6/S7/S10 at the Source. A Start that carries the viewer's clock is
+/// answered on it: a typed `startup_timeout` with `Retry-After` while the
+/// entry is still working, and a rejoin of that same entry and incarnation by
+/// the same request. The clock bounds answers only: owned preparation keeps
+/// its own budget, so a viewer who leaves (an End mid-preparation) still
+/// leaves a persisted cold index behind, and the entry settles after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_budgeted_start_answers_not_yet_and_rejoins_the_same_entry() {
+    Box::pin(actual_source_budgeted_start()).await;
+}
+async fn actual_source_budgeted_start() {
+    use std::time::{Duration, Instant};
+    let fixture = real_source_start_fixture_with(SourceFixtureMode::ColdCopy, None).await;
+    // Occupied software capacity: the Source cannot publish until released.
+    let hold = fixture
+        .state
+        .transcode
+        .test_hold_source_software_capacity()
+        .expect("actual occupied software capacity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("private fixture listener");
+    let address = listener.local_addr().expect("private address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let path = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("actual HTTP client");
+    // Two independent requests of the same file: one whose viewer leaves
+    // mid-preparation, and one that will publish.
+    let body = |request_id: Uuid| {
+        let mut value: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+        value["session"]["request_id"] = json!(request_id.to_string());
+        serde_json::to_vec(&value).expect("recipe bytes")
+    };
+    let (rejoined, abandoned) = (Uuid::new_v4(), Uuid::new_v4());
+    let post = |bytes: Vec<u8>, remaining: Option<u64>| {
+        let mut request = client
+            .post(&path)
+            .headers(fixture.headers.clone())
+            .body(bytes);
+        if let Some(ms) = remaining {
+            request = request.header(super::super::hls::STARTUP_REMAINING_HEADER, ms.to_string());
+        }
+        async move {
+            let response = request.send().await.expect("actual Source answer");
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = response.bytes().await.expect("actual Source body");
+            (status, headers, bytes)
+        }
+    };
+    let typed = |bytes: &[u8]| -> String {
+        serde_json::from_slice::<Value>(bytes)
+            .ok()
+            .and_then(|v| v["code"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    let entry_of = |request_id: Uuid| {
+        fixture
+            .state
+            .transcode
+            .source_http_starts
+            .entries
+            .lock()
+            .expect("registry")
+            .iter()
+            .find(|entry| entry.identity.request_id == request_id)
+            .cloned()
+    };
+    let file = fixture
+        .state
+        .store
+        .playback_planning_snapshot(1, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await
+        .expect("Source planning read")
+        .expect("Source file")
+        .file;
+    let indexed = || {
+        let store = std::sync::Arc::clone(&fixture.state.store);
+        let (id, size, mtime) = (file.id, file.size, file.mtime);
+        async move {
+            store
+                .holds_fragment_index_for_source(id, size, mtime)
+                .await
+                .expect("node-local index read")
+        }
+    };
+    assert!(!indexed().await, "the fixture title starts cold");
+    // Route discovery itself is an answer wait, before any Start exists.
+    // Keep its actual seam parked past the caller's allowance: a typed
+    // answer must not wait for discovery or create a Source entry.
+    let pause = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .discovery_pause
+        .arm("source_route_discovery");
+    let request = client
+        .post(&path)
+        .headers(fixture.headers.clone())
+        .header(super::super::hls::STARTUP_REMAINING_HEADER, "300")
+        .body(body(Uuid::new_v4()));
+    let discovery = tokio::spawn(async move {
+        let response = request.send().await.expect("discovery answer");
+        let status = response.status();
+        let bytes = response.bytes().await.expect("discovery body");
+        (status, bytes)
+    });
+    let held = pause.reached().await;
+    let (status, bytes) = tokio::time::timeout(Duration::from_secs(1), discovery)
+        .await
+        .expect("the caller clock bounds parked discovery")
+        .expect("discovery caller joined");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(typed(&bytes), "startup_timeout");
+    assert_eq!(fixture.state.transcode.source_http_starts.live_entries(), 0);
+    held.release();
+
+    // Discovery that finishes locally consumes the same answer allowance.
+    // Hold it for 1.5 s of a 2 s clock, then keep actual preparation queued:
+    // restarting the header clock in the local handler would answer at 3.5 s.
+    let pause = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .discovery_pause
+        .arm("source_local_discovery");
+    let request = client
+        .post(&path)
+        .headers(fixture.headers.clone())
+        .header(super::super::hls::STARTUP_REMAINING_HEADER, "2000")
+        .body(body(abandoned));
+    let began = Instant::now();
+    let caller = tokio::spawn(async move {
+        let response = request.send().await.expect("local Source answer");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.bytes().await.expect("local Source body");
+        (status, headers, bytes)
+    });
+    let held = pause.reached().await;
+    tokio::time::sleep_until(tokio::time::Instant::from_std(
+        began + Duration::from_millis(1500),
+    ))
+    .await;
+    held.release();
+    let (status, headers, bytes) = caller.await.expect("local caller joined");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(typed(&bytes[..]), "startup_timeout");
+    assert_eq!(
+        headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert!(
+        began.elapsed() < Duration::from_millis(2600),
+        "local fall-through preserves the ingress clock"
+    );
+    // Past the viewer's whole window (2 s plus the re-post grace) the
+    // entry is still working on its own budget: the clock bounded the
+    // answer, not the work.
+    tokio::time::sleep_until(tokio::time::Instant::from_std(
+        began + Duration::from_millis(4_600),
+    ))
+    .await;
+    let (status, _, bytes) = post(body(abandoned), Some(300)).await;
+    assert_eq!(
+        (status, typed(&bytes[..])),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "startup_timeout".to_owned()
+        ),
+        "the viewer's window does not end owned preparation: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let entry = entry_of(abandoned).expect("the abandoned start's entry");
+    let incarnation = entry
+        .task
+        .stage
+        .lock()
+        .expect("stage")
+        .incarnation()
+        .expect("the entry owns its claim");
+    // The viewer leaves: B sends the End while preparation waits on the
+    // held capacity. The capacity then frees inside the 5 s queue, the cold
+    // index runs to completion and persists, and only then does the start
+    // end at its next stage boundary and settle.
+    let end_url = format!("{path}/{abandoned}/end");
+    // End must arrive on a fresh driver: the Start driver's retained
+    // ingress custody cannot be settled while that same driver awaits End.
+    let end_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("independent End client");
+    let end = tokio::spawn({
+        let request = end_client
+            .post(end_url)
+            .headers(fixture.headers.clone())
+            .header("connection", "close")
+            .body(body(abandoned));
+        async move {
+            let response = request.send().await.expect("End");
+            let status = response.status();
+            let bytes = response.bytes().await.expect("End receipt");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "actual End settlement: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            bytes
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while entry.ending.lock().expect("End").is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the End is owned");
+    drop(hold);
+    let receipt = tokio::time::timeout(Duration::from_secs(40), end)
+        .await
+        .expect("the abandoned start settles after its preparation")
+        .expect("End task");
+    let receipt: Value = serde_json::from_slice(&receipt).expect("closed receipt");
+    assert_eq!(receipt["incarnation_id"], json!(incarnation));
+    assert_eq!(receipt["settled"], true);
+    assert!(receipt.get("session_id").is_none(), "never published");
+    assert!(
+        indexed().await,
+        "the abandoned start's cold index persisted for the next play"
+    );
+    let hold = fixture
+        .state
+        .transcode
+        .test_hold_source_software_capacity()
+        .expect("software capacity occupied again");
+    // The Start that publishes: told "not yet" on its 4 s clock while
+    // capacity is held (inside the 5 s admission queue), its entry and
+    // incarnation retained.
+    let began = Instant::now();
+    let (status, headers, bytes) = post(body(rejoined), Some(4_000)).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(typed(&bytes[..]), "startup_timeout");
+    assert_eq!(
+        headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert!(
+        began.elapsed() < Duration::from_millis(4_900),
+        "answered on the viewer's clock"
+    );
+    let entry = entry_of(rejoined).expect("the not-yet keeps its entry");
+    let incarnation = entry
+        .task
+        .stage
+        .lock()
+        .expect("stage")
+        .incarnation()
+        .expect("the entry owns its claim");
+    assert!(
+        entry
+            .result
+            .lock()
+            .expect("outcome")
+            .as_ref()
+            .is_none_or(Result::is_ok),
+        "a not-yet never settles the entry"
+    );
+    drop(hold);
+    // The client's ladder: re-post the same request until it is published.
+    let bytes = loop {
+        let (status, _, bytes) = post(body(rejoined), Some(1_000)).await;
+        if status == StatusCode::OK {
+            break bytes;
+        }
+        assert_eq!(
+            typed(&bytes[..]),
+            "startup_timeout",
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(30),
+            "published on the Source's own preparation budget"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("complete strict Source envelope");
+    assert_eq!(
+        decoded.incarnation_id(),
+        incarnation,
+        "the retry joined the same Source incarnation"
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        &entry,
+        &entry_of(rejoined).expect("still registered")
+    ));
+    let _ = stop.send(());
+    server
+        .await
+        .expect("server joined")
+        .expect("server drained");
+    fixture.shutdown().await;
+}
+
+/// S11 at the Source: a Start without the viewer's clock (an older receiver,
+/// or a client that sent none) is held exactly as today. No answer comes at
+/// the clock's 10 s cap, and whatever it is finally told is not one of the
+/// typed retries it never asked for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_unclocked_start_keeps_todays_shapes() {
+    Box::pin(actual_source_unclocked_start()).await;
+}
+async fn actual_source_unclocked_start() {
+    use std::time::Duration;
+    let fixture = real_source_start_fixture().await;
+    let hold = fixture
+        .state
+        .transcode
+        .test_hold_source_software_capacity()
+        .expect("actual occupied software capacity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("private fixture listener");
+    let address = listener.local_addr().expect("private address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let path = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let request = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("actual HTTP client")
+        .post(&path)
+        .headers(fixture.headers.clone())
+        .body(fixture.request.clone());
+    let answer = tokio::spawn(async move {
+        let response = request.send().await.expect("actual Source answer");
+        let headers = response.headers().clone();
+        (headers, response.bytes().await.expect("actual Source body"))
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !answer.is_finished(),
+        "an unclocked Start is held, never answered a quick not-yet"
+    );
+    let (headers, bytes) = tokio::time::timeout(Duration::from_secs(60), answer)
+        .await
+        .expect("the unclocked Start ends on today's bounds")
+        .expect("waiter");
+    let code = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|value| value["code"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    assert!(headers.get("retry-after").is_none(), "{code}");
+    assert!(
+        !["startup_timeout", "media_session_overloaded"].contains(&code.as_str()),
+        "{code}"
+    );
+    drop(hold);
+    let _ = stop.send(());
+    server
+        .await
+        .expect("server joined")
+        .expect("server drained");
+    fixture.shutdown().await;
+}

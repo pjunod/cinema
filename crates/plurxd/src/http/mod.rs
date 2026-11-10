@@ -2847,6 +2847,17 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     node_local_get || node_local_create || node_local_close || live_keepalive
 }
 
+/// Whether a node in `role` admits `method path`. The receiving gate
+/// (`capacity_role_refusal`) and any sender choosing peers for an internal
+/// route use this one predicate, so they cannot drift apart.
+fn serving_role_admits(role: LocalServingRole, method: &Method, path: &str) -> bool {
+    match role {
+        LocalServingRole::Unclustered | LocalServingRole::Voter => true,
+        LocalServingRole::Learner => learner_route_eligible(method, path),
+        LocalServingRole::Fenced => false,
+    }
+}
+
 fn capacity_role_refusal(
     role: Option<LocalServingRole>,
     method: &Method,
@@ -2854,7 +2865,7 @@ fn capacity_role_refusal(
 ) -> Option<Response> {
     match role {
         Some(LocalServingRole::Unclustered | LocalServingRole::Voter) => None,
-        Some(LocalServingRole::Learner) if learner_route_eligible(method, path) => None,
+        Some(role @ LocalServingRole::Learner) if serving_role_admits(role, method, path) => None,
         Some(LocalServingRole::Learner) => Some(
             (
                 StatusCode::SERVICE_UNAVAILABLE,
