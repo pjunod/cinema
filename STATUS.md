@@ -3,6 +3,9 @@
 **Updated:** 2026-11-08 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+- **2026-11-09 · Pipeline contract v2 integration:** Owner Codex, continuing Claude. T1–T7 are integrated; review and security corrections are complete. [Promotion #1469](http://forge.lan:3000/noirr/plurx/pulls/1469) carries qualification progress, retained passing evidence and the immutable landing receipt. [Contract](docs/features/PIPELINE-CONTRACT.md); [historical effort ledger](docs/archive/PIPELINE-V2-CINEMA-STATUS.md). Paul owns deployment and post-deploy Curator handoff acceptance.
+
+
 ## 2026-11-09 · Cinema uses the system renderer
 
 0.5.0 source selects system mpv and packages only Python/Lua Cinema controls.

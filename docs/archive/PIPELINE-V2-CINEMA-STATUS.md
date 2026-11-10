@@ -1,8 +1,9 @@
 # Pipeline contract v2 (cinema slice) — status ledger
 
-**Status:** built — the effort is not yet promoted to `main`. Archived on
-2026-11-08 by M6 (task T7, the last cinema task of `effort/pipeline-v2`). This
-is the effort's status ledger as it stood in
+**Status:** built — historical snapshot archived on 2026-11-08 by M6
+(task T7, the last cinema task of `effort/pipeline-v2`). Current ownership,
+qualification and landing are tracked on [promotion #1469](http://forge.lan:3000/noirr/plurx/pulls/1469).
+The ledger below records the effort as it stood in
 [STATUS.md](../../STATUS.md), moved here verbatim. The seam itself is
 documented in [INTEGRATION.md](../INTEGRATION.md) §1–§2, written from
 [the contract](../features/PIPELINE-CONTRACT.md); promotion to `main` is
