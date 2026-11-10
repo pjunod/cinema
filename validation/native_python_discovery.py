@@ -4,6 +4,7 @@ import re
 
 from validation import promotion_unit_retention as retention
 from validation.python_unit_receipts import require
+from validation.native_makefile_compatibility import native_makefile_digest
 
 
 # Reviewed environment and command bodies. Neither a run ID nor its log
@@ -56,7 +57,7 @@ def environment(source, workflow, *, historical):
     # or alternate key spelling outside the pinned preflight job.
     roots = re.findall(r'(?m)^[^\s#][^\n]*$', workflow)
     globals_ = re.findall(r'(?ms)^env:\n(.*?)(?=^[^ \n]|\Z)', workflow)
-    makefile = retention.digest(retention.git_bytes(source, 'Makefile') or b'')
+    makefile = native_makefile_digest(retention.git_bytes(source, 'Makefile') or b'')
     original = job_digest(workflow, 'preflight') == PREFLIGHT and makefile == MAKEFILE
     current = preflight_execution_digest(workflow) == CURRENT_EXECUTION and makefile == CURRENT_MAKEFILE
     require(roots == ['name: ci', 'on:', 'env:', 'concurrency:', 'jobs:']

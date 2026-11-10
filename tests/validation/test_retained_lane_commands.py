@@ -299,3 +299,31 @@ class NativePythonTransitionCase(unittest.TestCase):
             ambiguous = changed.replace('      promotion_pr:', native.PYTHON_DESCRIPTOR_INPUT + '      promotion_pr:')
             with self.assertRaises(ReceiptError):
                 native.scoped_workflow(ambiguous.encode(), 'preflight')
+
+
+class NativeJvmSourceOnlyPlaybackCase(unittest.TestCase):
+    def test_reviewed_catalog_and_web_test_delta_preserves_jvm_resources(self):
+        import subprocess
+        prior = '5ca3abcb0259b401b7da3716c41f6026e2b95415'
+        merged = subprocess.check_output(['git', 'rev-parse', '8d02a7b58'], text=True).strip()
+        self.assertTrue(native.same_jvm_fixture_tree(
+            prior, merged, 'tests/playback', retention.git_bytes))
+
+    def test_unknown_resource_tree_or_modified_reviewed_file_is_refused(self):
+        import subprocess
+        prior = '5ca3abcb0259b401b7da3716c41f6026e2b95415'
+        merged = subprocess.check_output(['git', 'rev-parse', '8d02a7b58'], text=True).strip()
+        for name in native.JVM_PLAYBACK_SOURCE_ONLY_FILES:
+            def altered(commit, path):
+                raw = retention.git_bytes(commit, path)
+                return raw + b'\nunknown change\n' if commit == merged and path.endswith('/' + name) else raw
+            with self.subTest(name=name):
+                self.assertFalse(native.same_jvm_fixture_tree(
+                    prior, merged, 'tests/playback', altered))
+        with patch.object(native, 'tree_id', side_effect=[
+                native.JVM_PLAYBACK_SOURCE_ONLY_TREES[0], 'unknown-resource-tree']):
+            self.assertFalse(native.same_jvm_fixture_tree(
+                prior, merged, 'tests/playback', retention.git_bytes))
+        with patch.object(native, 'tree_id', side_effect=native.JVM_PLAYBACK_SOURCE_ONLY_TREES):
+            self.assertFalse(native.same_jvm_fixture_tree(
+                prior, merged, 'tests/contracts', retention.git_bytes))

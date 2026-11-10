@@ -11,6 +11,7 @@ from validation import promotion_unit_retention as retention
 from validation import python_unit_receipts as receipts
 from validation import qualification_unit_continuation as commands
 from validation import workspace_rust_outcomes as native
+from validation.native_makefile_compatibility import reviewed_native_makefile_transition
 
 # Reviewed native job includes the unmodified checkout, toolchain, image, root
 # ownership prerequisite, Cargo flags and runtime limits. A changed historical
@@ -36,13 +37,14 @@ def check_changes(record, candidate, targets):
     known.update(target+'::'+row['interrupted_test'] for target, row in targets.items() if row.get('interrupted_test'))
     invalidated = set()
     for path, witness in changes.items():
-        receipts.require(path not in PROTECTED and not path.startswith(NATIVE_ACTIONS)
+        old, new = retention.git_bytes(prior, path), retention.git_bytes(candidate, path)
+        compatible_make = path == 'Makefile' and reviewed_native_makefile_transition(old, new)
+        receipts.require((path not in PROTECTED or compatible_make) and not path.startswith(NATIVE_ACTIONS)
                          and not path.endswith('/Cargo.toml'),
                          'Historical Rust compile or execution environment changed')
         receipts.require(isinstance(witness, dict) and set(witness) == {'before', 'after', 'affected', 'reason'}
                          and isinstance(witness['reason'], str) and 0 < len(witness['reason'].strip()) <= 2048,
                          'Rust applicability reason is missing')
-        old, new = retention.git_bytes(prior, path), retention.git_bytes(candidate, path)
         receipts.require(witness['before'] == (retention.digest(old) if old is not None else None)
                          and witness['after'] == (retention.digest(new) if new is not None else None),
                          'Rust applicability path bytes contradict source')
