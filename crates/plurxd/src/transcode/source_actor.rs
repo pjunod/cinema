@@ -736,10 +736,7 @@ impl SourceViewerActor {
                             .next()
                             .unwrap_or("");
                         if let Some(revision) = resource.cached_subtitle_revision() {
-                            let cached = tracks
-                                .cached(index, revision, &custody)
-                                .await
-                                .map_err(|_| SourceWorkerError::Unavailable)?;
+                            let cached = tracks.cached(index, revision, &custody).await?;
                             let absent = cached.is_none();
                             let (bytes, complete) = cached.unwrap_or_default();
                             SourceResourcePayload::CachedSubtitle {
@@ -763,11 +760,10 @@ impl SourceViewerActor {
                                     &custody,
                                     deadline,
                                 )
-                                .await
-                                .map_err(|_| SourceWorkerError::Unavailable)?
+                                .await?
                                 .ok_or(SourceWorkerError::Unavailable)?;
                             if bytes.len() > 2 * 1024 * 1024 {
-                                return Err(SourceWorkerError::Capacity);
+                                return Err(SourceWorkerError::Unsupported);
                             }
                             SourceResourcePayload::SubtitleText(bytes)
                         }

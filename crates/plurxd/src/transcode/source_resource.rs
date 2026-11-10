@@ -89,36 +89,46 @@ impl SourceResourceReadCustody {
         &self,
         path: &Path,
         cap: usize,
-    ) -> Result<Option<Vec<u8>>, String> {
+    ) -> Result<Option<Vec<u8>>, SourceWorkerError> {
         let custody = self.clone();
         let path = path.to_owned();
         tokio::task::spawn_blocking(move || {
             use std::io::Read;
-            custody.source()?;
-            let _pin = crate::playback_cache::pin(&path).map_err(|error| error.to_string())?;
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+            let _pin =
+                crate::playback_cache::pin(&path).map_err(|_| SourceWorkerError::Unavailable)?;
             let mut file = match plurx_core::fs_secure::open_read_nofollow_blocking(&path) {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error.to_string()),
+                Err(_) => return Err(SourceWorkerError::Unavailable),
             };
             custody.hooks.slot.get().opened(&file);
-            let metadata = file.metadata().map_err(|error| error.to_string())?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
             if !metadata.is_file() || metadata.len() > cap as u64 {
-                return Ok(None);
+                return Err(SourceWorkerError::Unsupported);
             }
             let mut bytes = Vec::new();
             file.by_ref()
                 .take(cap as u64 + 1)
                 .read_to_end(&mut bytes)
-                .map_err(|error| error.to_string())?;
-            custody.source()?;
-            if bytes.len() > cap || custody.is_cancelled() {
-                return Err("Source subtitle read expired or exceeded its bound".into());
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+            if bytes.len() > cap {
+                return Err(SourceWorkerError::Unsupported);
+            }
+            if custody.is_cancelled() {
+                return Err(SourceWorkerError::Unavailable);
             }
             Ok(Some(bytes))
         })
         .await
-        .map_err(|error| format!("Source subtitle cache read: {error}"))?
+        .map_err(|_| SourceWorkerError::Unavailable)?
     }
     pub(crate) async fn publish_subtitle(&self, path: &Path, bytes: Vec<u8>) -> Result<(), String> {
         let reservation =

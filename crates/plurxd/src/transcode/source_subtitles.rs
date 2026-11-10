@@ -2,7 +2,8 @@
 //! Physical work stays inside the actor's counted resource/control factory;
 //! no generic warmer or subtitle flight can confer Source authority.
 use super::{
-    source_actor::resource::SourceResourceReadCustody, source_preparation::SourceProbeHookOwner,
+    source_actor::{resource::SourceResourceReadCustody, SourceWorkerError},
+    source_preparation::{SourceProbeHookOwner, SourceResourceChildFailure},
     TranscodeManager,
 };
 use plurx_core::{domain::MediaFile, sharing_source_sessions::SourceDispatchAssignment};
@@ -152,11 +153,14 @@ impl SourceNativeTracks {
         index: u16,
         revision: &str,
         custody: &SourceResourceReadCustody,
-    ) -> Result<Option<(Vec<u8>, bool)>, String> {
+    ) -> Result<Option<(Vec<u8>, bool)>, SourceWorkerError> {
         if !self.has_track(index) {
             return Ok(None);
         }
-        let object = custody.source()?.object_version();
+        let object = custody
+            .source()
+            .map_err(|_| SourceWorkerError::Unavailable)?
+            .object_version();
         let prefix = format!(
             "f{}-s{}-{}-{}-o{}-w",
             self.file.id,
@@ -182,11 +186,13 @@ impl SourceNativeTracks {
             return Ok(None);
         }
         let path = self.window_path(index, anchor, span, object);
-        if Self::revision(&path)? != revision {
+        if Self::revision(&path).map_err(|_| SourceWorkerError::Unsupported)? != revision {
             return Ok(None);
         }
         let complete = false;
-        custody.source()?;
+        custody
+            .source()
+            .map_err(|_| SourceWorkerError::Unavailable)?;
         if let Some(bytes) = self
             .windows
             .lock()
@@ -199,7 +205,7 @@ impl SourceNativeTracks {
         let bytes = custody.read_subtitle(&path, TRACK_BYTES).await?;
         match bytes {
             Some(bytes) => {
-                validate_text(&bytes)?;
+                validate_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
                 Ok(Some((bytes, complete)))
             }
             None => Ok(None),
@@ -222,18 +228,26 @@ impl SourceNativeTracks {
         span: i64,
         custody: &SourceResourceReadCustody,
         deadline: Instant,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, SourceWorkerError> {
         if !self.has_track(index) {
-            return Err("Source native track is unsupported".into());
+            return Err(SourceWorkerError::Unsupported);
         }
         let _flight = tokio::select! {
             guard = self.flight.lock() => guard,
-            () = custody.cancelled() => return Err("Source subtitle demand retired".into()),
-            () = tokio::time::sleep_until(deadline.into()) => return Err("Source subtitle demand expired".into()),
+            () = custody.cancelled() => return Err(SourceWorkerError::Unavailable),
+            () = tokio::time::sleep_until(deadline.into()) => return Err(SourceWorkerError::Deadline),
         };
         let anchor = crate::subtitles::window_anchor_seconds(demand, span);
-        let path = self.window_path(index, demand, span, custody.source()?.object_version());
-        let revision = Self::revision(&path)?;
+        let path = self.window_path(
+            index,
+            demand,
+            span,
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?
+                .object_version(),
+        );
+        let revision = Self::revision(&path).map_err(|_| SourceWorkerError::Unsupported)?;
         if let Some((bytes, _)) = self.cached(index, &revision, custody).await? {
             self.remember(revision, bytes.clone());
             return Ok(bytes);
@@ -246,8 +260,9 @@ impl SourceNativeTracks {
         // adopts them, even when they are warm and small.
         let bytes = {
             let _permit = tokio::select! {
-                result = manager.admit_source_copy(deadline) => result.map_err(|error| format!("Source subtitle admission: {error:?}"))?,
-                () = custody.cancelled() => return Err("Source subtitle demand retired".into()),
+                result = manager.admit_source_copy(deadline) => result?,
+                () = custody.cancelled() => return Err(SourceWorkerError::Unavailable),
+                () = tokio::time::sleep_until(deadline.into()) => return Err(SourceWorkerError::Deadline),
             };
             let request = manager.foreground_source_request(
                 &self.file,
@@ -256,7 +271,12 @@ impl SourceNativeTracks {
                 plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling,
             );
             let _charge = match request {
-                Some(request) => Some(request.register("source-caption-window").await?),
+                Some(request) => Some(
+                    request
+                        .register("source-caption-window")
+                        .await
+                        .map_err(|_| SourceWorkerError::Unavailable)?,
+                ),
                 None => None,
             };
             self.extract_window(
@@ -269,12 +289,20 @@ impl SourceNativeTracks {
             )
             .await?
         };
-        validate_text(&bytes)?;
-        custody.source()?;
-        if custody.is_cancelled() || Instant::now() >= deadline {
-            return Err("Source subtitle demand expired".into());
+        validate_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
+        custody
+            .source()
+            .map_err(|_| SourceWorkerError::Unavailable)?;
+        if custody.is_cancelled() {
+            return Err(SourceWorkerError::Unavailable);
         }
-        custody.publish_subtitle(&path, bytes.clone()).await?;
+        if Instant::now() >= deadline {
+            return Err(SourceWorkerError::Deadline);
+        }
+        custody
+            .publish_subtitle(&path, bytes.clone())
+            .await
+            .map_err(|_| SourceWorkerError::Unavailable)?;
         self.remember(revision, bytes.clone());
         Ok(bytes)
     }
@@ -288,7 +316,7 @@ impl SourceNativeTracks {
         origin: f64,
         custody: &SourceResourceReadCustody,
         deadline: Instant,
-    ) -> Result<Option<Vec<u8>>, String> {
+    ) -> Result<Option<Vec<u8>>, SourceWorkerError> {
         let Some((start, end)) = crate::http::hls::source_native_segment_window(video, sequence)
         else {
             return Ok(None);
@@ -306,7 +334,7 @@ impl SourceNativeTracks {
             .await?;
         let out = crate::http::hls::source_native_slice(&bytes, origin, start, end);
         if let Some(bytes) = out.as_ref() {
-            validate_text(bytes)?;
+            validate_text(bytes).map_err(|_| SourceWorkerError::Unsupported)?;
         }
         Ok(out)
     }
@@ -318,14 +346,20 @@ impl SourceNativeTracks {
         custody: &SourceResourceReadCustody,
         deadline: Instant,
         hooks: &SourceProbeHookOwner,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, SourceWorkerError> {
         let source = crate::fragment_index_cluster::open_source_playback_fence(
             &self.file,
-            Some(custody.source()?.object_version()),
+            Some(
+                custody
+                    .source()
+                    .map_err(|_| SourceWorkerError::Unavailable)?
+                    .object_version(),
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| SourceWorkerError::Unavailable)?;
         let result = async {
-            let input = held_input(&source.handle)?;
+            let input = held_input(&source.handle).map_err(|_| SourceWorkerError::Unavailable)?;
             if matches!(
                 self.file.container.as_deref(),
                 Some("mkv" | "matroska" | "webm")
@@ -347,11 +381,12 @@ impl SourceNativeTracks {
                 let output = super::source_preparation::run_resource_child(
                     &self.file, custody, deadline, probe, 1024, hooks,
                 )
-                .await?;
+                .await
+                .map_err(SourceResourceChildFailure::worker_error)?;
                 let start = std::str::from_utf8(&output.stdout)
                     .ok()
                     .and_then(crate::subtitles::parse_source_start_seconds)
-                    .ok_or("Source subtitle timeline is invalid")?;
+                    .ok_or(SourceWorkerError::Unsupported)?;
                 if let Some(bytes) = self
                     .sparse_window(index, anchor, end, start, custody, deadline, hooks)
                     .await?
@@ -376,16 +411,18 @@ impl SourceNativeTracks {
                 TRACK_BYTES,
                 hooks,
             )
-            .await?;
+            .await
+            .map_err(SourceResourceChildFailure::worker_error)?;
             if !output.stderr.is_empty() {
-                return Err("Source subtitle decoder reported an error".into());
+                return Err(SourceWorkerError::Unsupported);
             }
             let bytes = if indexed {
-                crate::subtitle_ranges::filter_absolute_window(&output.stdout, anchor, end)?
+                crate::subtitle_ranges::filter_absolute_window(&output.stdout, anchor, end)
+                    .map_err(|_| SourceWorkerError::Unsupported)?
             } else {
                 crate::subtitles::normalize_window_cues(&output.stdout, anchor)
             };
-            validate_text(&bytes)?;
+            validate_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
             Ok(bytes)
         }
         .await;
@@ -404,8 +441,11 @@ impl SourceNativeTracks {
         custody: &SourceResourceReadCustody,
         deadline: Instant,
         hooks: &SourceProbeHookOwner,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let authority = custody.authorize_work().await?;
+    ) -> Result<Option<Vec<u8>>, SourceWorkerError> {
+        let authority = custody
+            .authorize_work()
+            .await
+            .map_err(|_| SourceWorkerError::Unavailable)?;
         let cancel = tokio_util::sync::CancellationToken::new();
         let owned_cancel = cancel.clone();
         let owned_custody = custody.clone();
@@ -418,12 +458,16 @@ impl SourceNativeTracks {
         // The blocking parser and its scoped workers retain the exact Source
         // guard. Cancellation is signalled, followed by actual job completion.
         let mut job = tokio::task::spawn_blocking(move || {
-            authority.validate_before_spawn()?;
-            owned_custody.source()?;
+            authority
+                .validate_before_spawn()
+                .map_err(|_| SourceSparseFailure::Work(SourceWorkerError::Unavailable))?;
+            owned_custody
+                .source()
+                .map_err(|_| SourceSparseFailure::Work(SourceWorkerError::Unavailable))?;
             let reader = SourceCaptionReader(&owned_custody);
             let index_data =
                 crate::mkv_sparse::read_index_cancellable(&reader, &owned_cancel, deadline)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| SourceSparseFailure::from_read(error, deadline))?;
             let Some(index_data) = index_data else {
                 return Ok(None);
             };
@@ -449,22 +493,28 @@ impl SourceNativeTracks {
                 deadline,
                 &owned_cancel,
             )
-            .map_err(|error| error.to_string())?;
-            owned_custody.source()?;
-            Ok::<_, String>(Some(subset))
+            .map_err(|error| SourceSparseFailure::from_read(error, deadline))?;
+            owned_custody
+                .source()
+                .map_err(|_| SourceSparseFailure::Work(SourceWorkerError::Unavailable))?;
+            Ok::<_, SourceSparseFailure>(Some(subset))
         });
         let result = tokio::select! {
             result = &mut job => result,
             () = custody.cancelled() => { cancel.cancel(); job.await },
             () = tokio::time::sleep_until(deadline.into()) => { cancel.cancel(); job.await },
         }
-        .map_err(|error| format!("Source subtitle cue read: {error}"))?;
-        if cancel.is_cancelled() || custody.is_cancelled() {
-            return Err("Source subtitle cue read retired".into());
+        .map_err(|_| SourceWorkerError::Unavailable)?;
+        if custody.is_cancelled() {
+            return Err(SourceWorkerError::Unavailable);
+        }
+        if cancel.is_cancelled() {
+            return Err(SourceWorkerError::Deadline);
         }
         let subset = match result {
             Ok(Some(subset)) => subset,
-            Ok(None) | Err(_) => return Ok(None),
+            Ok(None) | Err(SourceSparseFailure::Fallback) => return Ok(None),
+            Err(SourceSparseFailure::Work(error)) => return Err(error),
         };
         if subset.blocks == 0 {
             return Ok(Some(b"WEBVTT\n\n".to_vec()));
@@ -482,8 +532,9 @@ impl SourceNativeTracks {
             Ok::<_, String>(input)
         })
         .await
-        .map_err(|error| error.to_string())??;
-        let path = held_input(&input)?;
+        .map_err(|_| SourceWorkerError::Unavailable)?
+        .map_err(|_| SourceWorkerError::Unavailable)?;
+        let path = held_input(&input).map_err(|_| SourceWorkerError::Unavailable)?;
         let mut args = vec!["-copyts".to_owned()];
         if start != 0.0 {
             args.extend(["-itsoffset".to_owned(), format!("{:.6}", -start)]);
@@ -501,12 +552,44 @@ impl SourceNativeTracks {
         .await
         {
             Ok(output) if output.stderr.is_empty() => output,
-            _ if !custody.is_cancelled() && Instant::now() < deadline => return Ok(None),
-            _ => return Err("Source subtitle conversion retired".into()),
+            Ok(_) | Err(SourceResourceChildFailure::Conversion)
+                if !custody.is_cancelled() && Instant::now() < deadline =>
+            {
+                return Ok(None)
+            }
+            Err(SourceResourceChildFailure::Work(error)) => return Err(error),
+            _ => {
+                return Err(if custody.is_cancelled() {
+                    SourceWorkerError::Unavailable
+                } else {
+                    SourceWorkerError::Deadline
+                });
+            }
         };
-        let bytes = crate::subtitle_ranges::filter_absolute_window(&output.stdout, anchor, end)?;
-        validate_text(&bytes)?;
+        let bytes = crate::subtitle_ranges::filter_absolute_window(&output.stdout, anchor, end)
+            .map_err(|_| SourceWorkerError::Unsupported)?;
+        validate_text(&bytes).map_err(|_| SourceWorkerError::Unsupported)?;
         Ok(Some(bytes))
+    }
+}
+enum SourceSparseFailure {
+    Work(SourceWorkerError),
+    Fallback,
+}
+impl SourceSparseFailure {
+    fn from_read(error: crate::mkv_sparse::SparseError, deadline: Instant) -> Self {
+        match error {
+            crate::mkv_sparse::SparseError::Cancelled => {
+                Self::Work(if Instant::now() >= deadline {
+                    SourceWorkerError::Deadline
+                } else {
+                    SourceWorkerError::Unavailable
+                })
+            }
+            crate::mkv_sparse::SparseError::NotIndexed(_)
+            | crate::mkv_sparse::SparseError::Malformed(_)
+            | crate::mkv_sparse::SparseError::Io(_) => Self::Fallback,
+        }
     }
 }
 struct SourceCaptionReader<'a>(&'a SourceResourceReadCustody);

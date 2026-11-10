@@ -1609,14 +1609,44 @@ async fn source_actual_actor(
             .put_setting(keys::SW_POOL_THREADS, "3")
             .await
             .expect("remove window capacity after publication");
-        assert!(actor
+        let busy = actor
             .open_resource(
                 &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("native window"),
-                Instant::now() + Duration::from_secs(5)
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            matches!(busy, Err(SourceWorkerError::Capacity)),
+            "caption capacity remains typed"
+        );
+        assert_eq!(manager.source_workers.native_hooks.spawned_pid(), 0);
+        let movie = actor
+            .open_resource(
+                &SharingHlsResource::parse("index.m3u8").expect("movie resource"),
+                Instant::now() + Duration::from_secs(5),
             )
             .await
-            .is_err());
-        assert_eq!(manager.source_workers.native_hooks.spawned_pid(), 0);
+            .expect("movie survives caption capacity refusal");
+        let (_, guard) = movie.into_parts();
+        drop(guard);
+        state
+            .store
+            .put_setting(keys::SW_POOL_THREADS, "4")
+            .await
+            .expect("restore window capacity");
+        let caption = actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt")
+                    .expect("same-owner caption retry"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("same Source owner serves retried window");
+        let (payload, guard) = caption.into_parts();
+        assert!(
+            matches!(payload, SourceResourcePayload::SubtitleText(bytes) if String::from_utf8_lossy(&bytes).contains("Actual Source caption"))
+        );
+        drop(guard);
         actor.retire().await.expect("no-child native retirement");
         ingress_monitor.join().await;
         return;
@@ -1713,6 +1743,47 @@ async fn source_actual_actor(
             .expect("actual retained DTO"),
         serde_json::to_value(&response).expect("actual complete DTO")
     );
+    if mode == 61 {
+        let opened = actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("current native window"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("derive actual Source window");
+        let (_, guard) = opened.into_parts();
+        drop(guard);
+        let native = actor
+            .0
+            .state
+            .lock()
+            .expect("actual Source native group")
+            .native
+            .clone()
+            .expect("native group");
+        let revision = native.take_held_revision_for_test();
+        let path = state.subs_dir.join(&revision);
+        let resource = SharingHlsResource::parse(&format!("subs/0/cached-{revision}"))
+            .expect("current Source revision");
+        for invalid in [vec![b'x'; 2 * 1024 * 1024 + 1], vec![0xff, 0xfe, 0xfd]] {
+            std::fs::write(&path, invalid).expect("deterministically invalid cached caption bytes");
+            assert!(
+                matches!(
+                    actor
+                        .open_resource(&resource, Instant::now() + Duration::from_secs(5))
+                        .await,
+                    Err(SourceWorkerError::Unsupported)
+                ),
+                "caption data bounds are not transient capacity"
+            );
+        }
+        actor
+            .retire()
+            .await
+            .expect("invalid caption cache retirement");
+        ingress_monitor.join().await;
+        return;
+    }
     if mode == 60 {
         let opened = actor
             .open_resource(
@@ -3559,4 +3630,9 @@ async fn source_native_cached_read_holds_actual_filesystem_job_through_waiter_ca
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_native_cached_revision_refuses_another_inode_with_same_file_id_size_and_mtime() {
     Box::pin(source_copy_preadmission_fixture(60)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_oversized_and_non_utf8_cached_cues_are_unsupported_not_busy() {
+    Box::pin(source_copy_preadmission_fixture(61)).await;
 }
