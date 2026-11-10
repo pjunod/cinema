@@ -68,3 +68,13 @@ class NativeMakefileCompatibilityCase(unittest.TestCase):
     def test_an_unreviewed_historical_makefile_cannot_use_the_transition(self):
         with self.assertRaises(ReceiptError):
             self.rust_changes(self.old + b'\n# unknown source\n', self.new)
+
+
+    def test_reviewed_player_package_help_keeps_native_consumers(self):
+        import subprocess
+        source = subprocess.check_output(['git', 'rev-parse', 'f203f265'], text=True).strip()
+        makefile = retention.git_bytes(source, 'Makefile')
+        with patch.object(retention, 'git_bytes', return_value=makefile):
+            python_native.environment(PRIOR, self.workflow, historical=False)
+        self.assertEqual(self.android_inputs(self.old), self.android_inputs(makefile))
+        self.assertEqual(self.rust_changes(self.old, makefile), set())
