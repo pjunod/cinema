@@ -21,6 +21,12 @@ bump may break compatibility and a **patch** bump never does.
 - Scan request status and replay stay bound to the creating credential after an
   API key is deleted and its numeric ID is reused. Expected-file reports skip
   paths outside their requested scope without probing their filesystem targets.
+- Linux Cinema now defaults to the system mpv and no longer ships a duplicate
+  renderer, so qualified system HDR/DV updates reach Cinema. Explicit binary
+  overrides, isolated configuration and Cinema controls remain available.
+  Mapper diagnostics validate the shared renderer’s physical-target success
+  against its current eligibility and generation.
+
 - Cinema application images reuse a separately published, digest-pinned media
   runtime instead of downloading Debian packages and recompiling bundled tools.
 

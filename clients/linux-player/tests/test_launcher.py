@@ -83,6 +83,22 @@ class CallSequence(LauncherCase):
         self.assertNotIn("supported_actions", control, "passive: the server may only answer none")
 
 
+class RendererNegotiation(LauncherCase):
+    def test_unmarked_explicit_renderer_keeps_playback_and_negotiates_conversion(self):
+        self.mpv.state["native_dovi"] = False
+        self.mpv._write_state()
+        self.close_at(8)
+        self.assertEqual(self.run_launcher(), 0)
+        caps = self.server.calls("POST", pattern=r"/decision$")[0]["body"]["caps"]
+        self.assertFalse(caps["display"]["dolby_vision"])
+        hevc = next(video for video in caps["video"] if video["codec"] == "hevc")
+        self.assertEqual(hevc["dv_profiles"], [])
+        controls = self.server.calls("POST", pattern=r"/control$")
+        self.assertTrue(controls)
+        self.assertNotIn("dolby_vision", controls[0]["body"]["capabilities"]["dynamic_ranges"])
+        self.assertTrue(any(command[0] == "loadfile" for command in self.mpv.commands()))
+
+
 class Cadence(LauncherCase):
     def test_heartbeat_every_5_s_and_progress_every_10_s(self):
         self.close_at(31)
@@ -491,6 +507,93 @@ class Mapper(LauncherCase):
                  if r["body"]["event"] == "native_mapper"]
         self.assertEqual([l["message"] for l in lines],
                          ["plurx Player (Linux): DV profile none, mapper unknown, target unknown"])
+
+
+class SharedNativeMapper(unittest.TestCase):
+    @staticmethod
+    def message(peak="616", generation=3):
+        return (f"automatic DV physical target 0.005..{peak} nits; encoding 0..10000; "
+                f"reference 203; PQ transport gain 1.5 -> signal 0.0075..924; generation {generation}\n")
+
+    def player(self):
+        mpv = mock.Mock(closed=False)
+        values = {"video-target-params": {"max-luma": 10000, "gamma": "pq", "primaries": "bt.2020"},
+                  "track-list": [{"type": "video", "selected": True, "dolby-vision-profile": 7}],
+                  "native-dovi-target-state": {"active": True, "generation": 3}}
+        self.values = values
+        mpv.get.side_effect = lambda name, *args: values.get(name)
+        return playback_module.Playback(mock.Mock(), mpv, {"file_id": 7}, {}, lambda: 0, lambda _: None)
+
+    def event(self, text=None, prefix="vo/gpu-next", level="info"):
+        return {"event": "log-message", "prefix": prefix, "level": level,
+                "text": self.message() if text is None else text}
+
+    def test_authoritative_success_reports_physical_peak_in_existing_fact_fields(self):
+        player = self.player()
+        player.on_log(self.event())
+        player.capture_facts()
+        self.assertEqual(player.facts, {"dv_profile": 7, "mapper": "shared native Dolby renderer",
+                                       "target_nits": 616, "target_gamma": "pq", "target_primaries": "bt.2020"})
+        player.log_mapper()
+        body = player.http.request.call_args.args[2]
+        self.assertEqual(json.loads(body["detail"])["target_nits"], 616)
+        self.assertIn("mapper shared native Dolby renderer, target 616 nits", body["message"])
+
+    def test_spoofed_prefix_level_malformed_and_nonfinite_peaks_keep_properties_fallback(self):
+        events = [self.event(prefix=prefix) for prefix in
+                  ("cplayer", "vo/gpu-next/libplacebo", "vo/gpu-next/other", "scripting")]
+        events += [self.event(level=level) for level in ("warn", "error", "debug")]
+        events += [self.event(text=self.message(peak)) for peak in
+                   ("nan", "inf", "-inf", "1e309", "0", "-1", "10000.1")]
+        events += [self.event(text="prefix " + self.message()),
+                   self.event(text=self.message() + "extra"), self.event(text={"peak": 616}),
+                   self.event(text="x" * 513 + self.message())]
+        for event in events:
+            with self.subTest(event=event):
+                player = self.player()
+                player.on_log(event)
+                player.capture_facts()
+                self.assertEqual(player.facts["mapper"], "unknown")
+                self.assertEqual(player.facts["target_nits"], 10000)
+
+    def test_success_requires_current_active_matching_backend_generation(self):
+        for state in (None, {}, {"active": False, "generation": 3},
+                      {"active": True, "generation": 4}, {"active": True, "generation": True},
+                      {"active": 1, "generation": 3}, {"active": True, "generation": -1}):
+            with self.subTest(state=state):
+                player = self.player()
+                self.values["native-dovi-target-state"] = state
+                player.on_log(self.event())
+                player.capture_facts()
+                self.assertEqual((player.facts["mapper"], player.facts["target_nits"]), ("unknown", 10000))
+
+    def test_load_source_and_changed_target_policy_require_a_fresh_success(self):
+        player = self.player()
+        player.on_log(self.event())
+        player.load("https://example.test/control", 0)
+        player.capture_facts()
+        self.assertEqual((player.facts["mapper"], player.facts["target_nits"]), ("unknown", 10000))
+        player.on_log(self.event())
+        # Compositor HDR/physical lease loss needs no option change or new success log.
+        self.values["native-dovi-target-state"] = {"active": False, "generation": 4}
+        player.on_event({"event": "property-change", "name": "native-dovi-target-state",
+                         "data": {"active": True, "generation": 3}})
+        self.assertIsNone(player.physical_target_nits)
+        self.values["native-dovi-target-state"] = {"active": True, "generation": 5}
+        player.on_log(self.event(text=self.message("850", generation=5)))
+        # A queued old state cannot erase the newer generation's valid success.
+        player.on_event({"event": "property-change", "name": "native-dovi-target-state",
+                         "data": {"active": False, "generation": 4}})
+        player.capture_facts()
+        self.assertEqual(player.facts["target_nits"], 850)
+        self.values["native-dovi-target-state"] = {"active": True, "generation": 6}
+        player.on_event({"event": "property-change", "name": "native-dovi-target-state",
+                         "data": {"active": True, "generation": 6}})
+        self.assertIsNone(player.physical_target_nits)  # Eligibility alone is not grade proof.
+        player.on_event({"event": "start-file"})
+        player.capture_facts()
+        self.assertEqual(player.facts["mapper"], "unknown")
+        self.assertIsNone(self.player().mapper)
 
 
 class NoTokenOnDisk(LauncherCase):
