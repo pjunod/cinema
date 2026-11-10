@@ -2997,6 +2997,7 @@
         "validation/release_aliases.py",
         "validation/release_dockerfile.py",
         ".github/workflows/publish-release.yml",
+        ".github/workflows/ci.yml",
         "Dockerfile",
         "Cargo.toml",
         "scripts/container-smoke",
@@ -3500,7 +3501,7 @@
     {
       "id_prefix": "operations:test_contracts.OperationsContractCase.test_runtime_assets_layer_drops_build_time_state",
       "inputs": [
-        "Dockerfile",
+        "Dockerfile.media-runtime",
         "scripts/build-static-ffprobe"
       ],
       "reason": "Reads the listed repository files; invoked scripts are bound only when loaded/executed, not when their names occur in asserted text."
@@ -3523,28 +3524,29 @@
     {
       "id_prefix": "operations:test_contracts.OperationsContractCase.test_docker_build_frees_each_ffmpeg_download_before_the_next",
       "inputs": [
-        "Dockerfile"
+        "Dockerfile.media-runtime"
       ],
       "reason": "Reads the listed repository files; invoked scripts are bound only when loaded/executed, not when their names occur in asserted text."
     },
     {
       "id_prefix": "operations:test_contracts.OperationsContractCase.test_docker_build_requires_the_profile5_renderer_used_at_runtime",
       "inputs": [
-        "Dockerfile"
+        "Dockerfile.media-runtime"
       ],
       "reason": "Reads the listed repository files; invoked scripts are bound only when loaded/executed, not when their names occur in asserted text."
     },
     {
       "id_prefix": "operations:test_contracts.OperationsContractCase.test_docker_build_requires_the_atsc3_audio_decoder",
       "inputs": [
-        "Dockerfile"
+        "Dockerfile.media-runtime"
       ],
       "reason": "Reads the listed repository files; invoked scripts are bound only when loaded/executed, not when their names occur in asserted text."
     },
     {
       "id_prefix": "operations:test_contracts.OperationsContractCase.test_dockerfile_base_images_are_pinned_by_digest",
       "inputs": [
-        "Dockerfile"
+        "Dockerfile",
+        "Dockerfile.media-runtime"
       ],
       "reason": "Reads the listed repository files; invoked scripts are bound only when loaded/executed, not when their names occur in asserted text."
     },
@@ -3560,6 +3562,7 @@
       "id_prefix": "operations:test_contracts.OperationsContractCase.test_docker_build_pins_and_verifies_disk_conversion_tools",
       "inputs": [
         "Dockerfile",
+        "Dockerfile.media-runtime",
         ".github/workflows/ci.yml"
       ],
       "reason": "Reads the listed repository files; invoked scripts are bound only when loaded/executed, not when their names occur in asserted text."
@@ -4967,6 +4970,42 @@
         "validation/knowledge/evaluation_isolation.py"
       ],
       "reason": "Reviewed synthetic or mocked evaluation boundaries; no private gold, provider calls or live executor is part of this unit family."
+    },
+    {
+      "id_prefix": "validation:test_main_preflight_adoption.MainPreflightAdoptionCase.test_media_runtime_witnesses_bind_only_the_recipes_they_read",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/history.py",
+        "validation/main_preflight_adoption.py",
+        "validation/python_unit_receipts.py",
+        "validation/regression_field.py",
+        "validation/runner.py",
+        "validation/test_markers.py",
+        "validation/main-preflight-inputs.json"
+      ],
+      "reason": "Reads committed witness rows and compares declared-input digests over synthetic trees; this defines applicability and does not claim test execution or authenticated CI adoption."
+    },
+    {
+      "id_prefix": "validation:test_main_preflight_adoption.MainPreflightAdoptionCase.test_release_publication_witness_binds_current_ci_recipe",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/history.py",
+        "validation/main_preflight_adoption.py",
+        "validation/python_unit_receipts.py",
+        "validation/regression_field.py",
+        "validation/runner.py",
+        "validation/test_markers.py",
+        "validation/main-preflight-inputs.json"
+      ],
+      "reason": "Reads committed witness rows and compares declared-input digests over synthetic trees; this defines applicability and does not claim test execution or authenticated CI adoption."
+    },
+    {
+      "id_prefix": "operations:test_registry_push.RegistryPushCase.test_docker_up_resolves_ssh_and_scp_origins_to_the_registry_port",
+      "inputs": [
+        "Makefile",
+        "scripts/media-registry-default"
+      ],
+      "reason": "Executes the tracked docker-up recipe and registry resolver in temporary Git checkouts; Docker and startup/hardware probes are explicit fixtures."
     }
   ]
 }

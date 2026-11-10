@@ -5158,7 +5158,7 @@ test("a pre-play burn rides the first session open rather than a restart", () =>
   });
 });
 
-test("a default subtitle in a transcode decision rides the first session recipe", () => {
+test("a default subtitle rides the first session recipe on every route", () => {
   const decision={...PGS_DECISION,
     subtitles:PGS_DECISION.subtitles.map(s=>({...s,default:s.index===2}))};
   const h=detailHarness();
@@ -5169,8 +5169,25 @@ test("a default subtitle in a transcode decision rides the first session recipe"
   }
   assert.equal(h.prePlayApplication(decision,{subtitle:-1}).burnedSub,null,
     "explicit Off overrides the server default");
-  assert.equal(h.prePlayApplication({...decision,method:'remux'},null).burnedSub,null,
-    "a default must not force a copy decision into transcode");
+  assert.equal(h.prePlayApplication({...decision,method:'remux'},null).burnedSub,2,
+    "a selected bitmap default belongs to the first burn recipe, not a late restart");
+  assert.equal(h.prePlayApplication(decision,null,{skipDefaultSub:true}).subtitle,-1,
+    "leaving a burned subtitle must not restore its default");
+  assert.equal(h.prePlayApplication(decision,{subtitle:2},{skipDefaultSub:true}).subtitle,2,
+    "an explicit choice still owns the recipe");
+});
+
+test("Gran Turismo's default forced text subtitle is admitted before a cold create", () => {
+  const h=detailHarness();
+  for(const method of ["direct_play","remux","transcode"]){
+    const decision={method,delivered_dynamic_range:"dolby_vision",
+      subtitles:[{index:0,codec:"subrip",text:true,default:true}],
+      selection:{subtitle_index:0,subtitle_requires_burn_in:false}};
+    assert.deepEqual(h.prePlayApplication(decision,null),{
+      subtitle:0,blockedByHdr:false,burnedSub:null,textSub:0});
+    assert.equal(h.prePlayApplication(decision,{subtitle:-1}).textSub,null);
+    assert.equal(h.prePlayApplication({...decision,subtitles:[]},null).textSub,null);
+  }
 });
 
 test("a pre-play text subtitle is a <track>, not a second session", () => {

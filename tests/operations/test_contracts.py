@@ -1271,7 +1271,7 @@ assert.equal(context.ACT_TIMER, null);
         the static probe's `config.log` and (across days) the account's
         last-change day. Each is either removed or given a fixed input.
         """
-        dockerfile = read("Dockerfile")
+        dockerfile = read("Dockerfile.media-runtime")
         assets = dockerfile.split(" AS runtime-assets\n", 1)[1].split("\nFROM ", 1)[0]
         run = assets[assets.index("\nRUN ") :]
         removal = run.index("rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache")
@@ -1377,10 +1377,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('std::env::var("SOURCE_DATE_EPOCH")', build_rs)
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
-        dockerfile = read("Dockerfile")
+        dockerfile = read("Dockerfile.media-runtime")
         # Only the shipped media installer owns these two cache-clean points.
         # The CI tooling stage cleans its independently installed build tools.
-        dockerfile = dockerfile.split("FROM runtime-assets AS ci", 1)[0]
+        dockerfile = dockerfile.split("FROM runtime-assets AS linux-dolby-package-build", 1)[0]
         distro_install = dockerfile.index("intel-media-va-driver-non-free")
         first_clean = dockerfile.index("apt-get clean", distro_install)
         jellyfin_verify = dockerfile.index("sha256sum -c -", first_clean)
@@ -1398,7 +1398,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(dockerfile.count("&& apt-get clean"), 2)
 
     def test_docker_build_requires_the_profile5_renderer_used_at_runtime(self):
-        dockerfile = read("Dockerfile")
+        dockerfile = read("Dockerfile.media-runtime")
         self.assertIn("-h filter=tonemapx", dockerfile)
         self.assertIn(
             "grep -q '^[[:space:]]*apply_dovi[[:space:]]'",
@@ -1408,7 +1408,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("apply_dolbyvision", dockerfile)
 
     def test_docker_build_requires_the_atsc3_audio_decoder(self):
-        dockerfile = read("Dockerfile")
+        dockerfile = read("Dockerfile.media-runtime")
         self.assertIn("jellyfin-ffmpeg8", dockerfile)
         self.assertIn("-decoders", dockerfile)
         self.assertIn("AC-4 decoder", dockerfile)
@@ -1425,7 +1425,7 @@ assert.equal(context.ACT_TIMER, null);
         #
         # Digests are index digests (multi-platform), because the image is
         # built for amd64 and arm64 from the same `FROM`.
-        dockerfile = read("Dockerfile")
+        dockerfile = read("Dockerfile") + "\n" + read("Dockerfile.media-runtime")
         registry_bases = re.findall(
             r"(?m)^FROM\s+(\S+)\s+AS\s+(\S+)",
             dockerfile,
@@ -1475,21 +1475,22 @@ assert.equal(context.ACT_TIMER, null);
         self.assertTrue((ROOT / "scripts/image-base-drift").exists())
 
     def test_docker_build_pins_and_verifies_disk_conversion_tools(self):
+        media = read("Dockerfile.media-runtime")
         dockerfile = read("Dockerfile")
-        self.assertIn("ARG DOVI_TOOL_VERSION=2.3.3", dockerfile)
-        self.assertIn("ARG MKVTOOLNIX_VERSION=74.0.0-1", dockerfile)
-        self.assertIn('"mkvtoolnix=${MKVTOOLNIX_VERSION}"', dockerfile)
+        self.assertIn("ARG DOVI_TOOL_VERSION=2.3.3", media)
+        self.assertIn("ARG MKVTOOLNIX_VERSION=74.0.0-1", media)
+        self.assertIn('"mkvtoolnix=${MKVTOOLNIX_VERSION}"', media)
         self.assertIn(
             "dovi_sha=5dae82cb2becd3b9fd726127f936a8d32635e60746d16238fdfded12aa05988c",
-            dockerfile,
+            media,
         )
         self.assertIn(
             "dovi_sha=daf538c275f4e702219ce8eb61db28382193ac9d0126e1ef4185a88303af4485",
-            dockerfile,
+            media,
         )
-        self.assertIn('sha256sum -c -', dockerfile)
-        self.assertIn('dovi_tool --version | grep -F "${DOVI_TOOL_VERSION}"', dockerfile)
-        self.assertIn('mkvmerge --version | grep -F "mkvmerge v74.0.0"', dockerfile)
+        self.assertIn('sha256sum -c -', media)
+        self.assertIn('dovi_tool --version | grep -F "${DOVI_TOOL_VERSION}"', media)
+        self.assertIn('mkvmerge --version | grep -F "mkvmerge v74.0.0"', media)
         self.assertIn("PLURX_DOVI_TOOL=/usr/local/bin/dovi_tool", dockerfile)
         self.assertIn("PLURX_MKVMERGE=/usr/bin/mkvmerge", dockerfile)
 
@@ -1518,9 +1519,7 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertLess(runtime_assets, runtime_image)
         self.assertLess(runtime_image, binary_copy)
-        runtime_assets_stage = dockerfile.split(runtime_assets_marker, 1)[1].split(
-            runtime_image_marker, 1
-        )[0]
+        runtime_assets_stage = media.split(runtime_assets_marker, 1)[1].split("\nFROM ", 1)[0]
         for assertion in (
             "dovi_sha=daf538c275f4e702219ce8eb61db28382193ac9d0126e1ef4185a88303af4485",
             "sha256sum -c -",

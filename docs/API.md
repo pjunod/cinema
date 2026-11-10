@@ -4406,9 +4406,9 @@ retain their copy semantics; H.264 remux can still build its index on demand.
 | GET | `/api/v1/shared/imports/{import}/continue-watching` | Hydrate this Source's current watch items; an unavailable Source is reported without stale title fallback. |
 | POST | `/api/v1/shared/imports/{import}/items/{item}/progress` | Ordered Shared progress `{session_id, sequence, position_ms, duration_ms, watched}` for the viewer's exact published Shared session; `409 sharing_progress_conflict` carries `current_sequence`, and `503 sharing_progress_session_binding_unavailable` answers when no live session binds the beat. |
 | POST | `/api/v1/shared/imports/{import}/items/{item}/watched` | B-private manual watched state `{watched: bool}` for a Shared movie or episode, after one fresh pinned Source membership read under current assignment. The Store write takes the next history sequence, so an earlier beat cannot restore the old position; Source history and Local watch state are untouched. Other item kinds answer `409 sharing_watch_unsupported`. |
-| GET | `/api/v1/shared/imports/{import}/art/{resource}` | Fetch an advertised signed recipient art alias after current account, import and Source-scope checks; no arbitrary Source URL is accepted. |
+| GET | `/api/v1/shared/imports/{import}/art/{resource}` | Signed recipient art alias under current viewer/import/Source scope. Verified snapshots reuse bytes; each delivery checks live scope. Variant or scope-capacity waits answer 429 with `Retry-After`; failed proofs remain 503.
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/decision` | Negotiate the complete existing decision DTO from runtime v2 capabilities, a signed file locator and current account/import/Source authority. The request body is bounded to 128 KiB. |
-| POST | `/api/v1/shared/imports/{import}/files/{locator}/hls/sessions` | Start Shared HLS playback through B's receiver actor from the ordinary `CreateSession` body (at most 128 KiB, initial play/resume only). The answer is the ordinary Start envelope with B's own session, playlist and control URLs; the session then serves `/api/v1/hls/{session}/…`, `status` (the Shared grammar) and `control` (current rendition only). |
+| POST | `/api/v1/shared/imports/{import}/files/{locator}/hls/sessions` | Shared HLS Start from a `CreateSession` body (at most 128 KiB, initial play/resume). The Start envelope uses B's session, playlist/control URLs and Shared status/control grammar.
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/playback` | The same Shared Start, at the typed playback alias. With `"presentation":"direct"` in the `CreateSession` body the Source recomputes the decision with the real caps and admits only direct play; the answer is `{presentation:"direct", session_id, url, length, mime}` where `url` is `{file_base}/direct?session=<B session>`. |
 | GET | `/api/v1/shared/imports/{import}/files/{locator}/subs/{subtitle}` | One text subtitle track as WebVTT (`{n}` or `{n}.vtt`), read fresh from the pinned Source (at most 2 MiB, `text/vtt`, never cached on B). Caller: the signed-in viewer (header or `?token=`), or `?session=` naming a live Shared session that plays exactly this file revision; an account sent alongside a session must be that session's viewer. A bitmap track answers `422 sharing_asset_unsupported`. |
 | GET | `/api/v1/shared/imports/{import}/files/{locator}/subs/{index}/overlay.json` | The track's `pgs-v1` manifest with its generation, cue geometry, source-time intervals and relative object names preserved, the file ID replaced by the canonical Source string plus the full reference (Source body at most 1 MiB). `202 {"state":"preparing","retry_after_ms":1000}` while the Source prepares it. Same callers as the subtitle route. |
@@ -4417,29 +4417,30 @@ retain their copy semantics; H.264 remux can still build its index on demand.
 | any | `/api/v1/shared/imports/{import}/files/{locator}/stream.mp4` | Always `422 sharing_resource_unsupported`, for every method and before any import, account or Local lookup: progressive remux is not offered for shared files (Copy HLS covers it). |
 | GET/HEAD | `/api/v1/shared/imports/{import}/files/{locator}/direct` | Shared direct-play bytes. Requires exactly one `session=<B session>` query naming a live direct session bound to this file alias, login and delivery grant; account headers are optional and, when present, must name the session's viewer. Range, If-Range, 206 and 416 behave exactly as `/api/v1/files/{id}/direct`. Never admits a session; an unknown session is 404, a missing one 400. |
 
-Captured recipient scope is revalidated through accepted metadata and
-decision bodies; content fetched from a Source also retains its Source-scope
-checks. A file alias is not login or
-session authority: the decision route verifies its current import lifecycle
-and exact file/revision binding before contacting the pinned Source. Missing
-keys, revoked scope and unavailable Sources refuse delivery. Shared Start is
-registered on the authenticated media router and dispatches through B's
-receiver owner.
+Recipient metadata and decision bodies revalidate captured scope; Source
+content retains its Source-scope checks. File aliases are not login/session
+authority: decisions validate the current import and exact revision before
+dialling the pinned Source. Missing keys, revoked scope and unavailable
+Sources refuse delivery. Shared Start dispatches through B's receiver owner.
 
-Shared HLS accepts embedded subtitle burns and HDR10 requests. The Source
-recomputes the plan from the original capabilities and its own file facts;
-burn extraction and font preparation belong to its admitted operation. A
-burn sidecar is bounded to 64 MiB, and a burn always encodes. B verifies the
-returned HDR grade against the viewer's exact PQ or HLG presentation claim.
-An SDR display declaration overrides a decoder's HDR claim.
+Shared Start reads `x-plurx-startup-remaining-ms`. B forwards it only to peers
+advertising `start_budget_v1`; one ingress clock bounds discovery and answer
+waits. Typed 503 `startup_timeout` or `media_session_overloaded`, with
+`Retry-After`, preserves the request for rejoin. Owned preparation keeps its
+own budget. Ready results without an accepted Start writer retire at the
+fixed rejoin deadline through ordinary End. Clockless peers keep prior bounds.
 
-Dolby Vision preservation, conversion and re-encoding return `422
-sharing_start_dolby_vision_unsupported`. Direct play keeps the original bytes
-when the Source's direct-play decision permits them. Downloaded subtitle
-burns and native subtitle renditions beside HDR remain unsupported. A typed
-Start refusal is not an End receipt or proof that an earlier invocation owns
-no resources. Runtime qualification of these additions remains recorded
-separately in [the sharing status](features/SHARED-LIBRARIES-STATUS.md).
+Shared HLS accepts embedded burns and HDR10. The Source recomputes the plan
+from original caps and its file facts; extraction and fonts belong to the
+admitted operation. Burns encode and sidecars are capped at 64 MiB. B checks
+returned HDR against the viewer's exact PQ/HLG claim; an SDR declaration
+overrides decoder HDR capability.
+
+Non-direct Dolby Vision returns 422 `sharing_start_dolby_vision_unsupported`.
+Direct keeps original bytes when the Source permits it. Downloaded burns and
+native subtitles beside HDR remain unsupported. A typed Start refusal proves
+neither End nor absence of earlier resources. Runtime qualification stays in
+[the sharing status](features/SHARED-LIBRARIES-STATUS.md).
 
 The four pre-session asset routes answer `Cache-Control: no-store` and hold
 no B cache; each body is file-scoped and the current login, import,

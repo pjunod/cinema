@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from urllib.parse import urlsplit
 
 
 BOOTSTRAP = r'''
@@ -77,7 +78,8 @@ FORWARD_ENV = (
 
 
 def media_target(source: str) -> str:
-    # Match publish-release.yml's amd64 media contract selection.
+    # Current source inherits its published runtime; historical tags retain
+    # their inline amd64 package contract, matching publish-release.yml.
     return ("runtime-assets-dolby-amd64" if
             "FROM scratch AS linux-dolby-package-export" in source.splitlines()
             else "runtime-assets")
@@ -86,9 +88,9 @@ def media_target(source: str) -> str:
 def ci_dockerfile(source: str) -> str:
     """Put the candidate's unchanged CI tooling on its selected shipping assets.
 
-    The audited media stage is declared after the ordinary CI stage. Move the
-    CI stage to the end so its new parent is an earlier Dockerfile declaration;
-    no tooling recipes or production Dockerfile stages are replaced.
+    Current source uses the pinned external runtime directly. Historical tags
+    declare their audited media stage after CI, so moving CI to the end also
+    keeps that earlier build contract valid without replacing tooling recipes.
     """
     start = source.index("FROM runtime-assets AS ci\n")
     end = source.index("\nFROM runtime-assets AS runtime\n", start)
@@ -131,6 +133,23 @@ def export_package(output: Path) -> Path:
     return exported / "package"
 
 
+def media_registry() -> str:
+    """Use an explicit registry or this checkout's forge, without URL secrets."""
+    if registry := os.environ.get("PLURX_MEDIA_REGISTRY"):
+        return registry
+    try:
+        origin = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"], text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        parsed = urlsplit(origin)
+        if parsed.scheme in ("http", "https") and parsed.hostname:
+            return parsed.hostname + (f":{parsed.port}" if parsed.port else "")
+    except (subprocess.CalledProcessError, ValueError):
+        pass
+    return "forge.lan:3000"
+
+
 def build_image() -> str:
     """Build exactly the media contract selected by release publication."""
     source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -149,6 +168,7 @@ def build_image() -> str:
             "docker", "buildx", "build", "--load", "--platform", "linux/amd64",
             "--file", str(generated), "--target", "ci", *extra,
             "--build-arg", "PLURX_CI_SOURCE_SHA=" + source,
+            "--build-arg", "PLURX_MEDIA_REGISTRY=" + media_registry(),
             "--iidfile", str(image_id), ".",
         ])
         image = read_image_id(image_id)

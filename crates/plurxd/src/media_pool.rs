@@ -448,6 +448,12 @@ impl CreateStartupBudget {
             .max(self.deadline)
             .min(claim_limit)
     }
+    /// What is left of the viewer's whole start now: what a shared create's
+    /// receiver forwards to its Source, so both hops run on this one clock.
+    pub(crate) fn viewer_remaining(&self) -> Duration {
+        self.viewer_end
+            .saturating_duration_since(tokio::time::Instant::now())
+    }
     pub(crate) fn calls(&self) -> u32 {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
     }
