@@ -69,6 +69,9 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/http/shared_receiver_forwarding_fixture.rs::http::shared_receiver_fixture::forwarding_fixture::sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_driver_closure",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_and_logs_one_stage",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_not_yet_rejoins_the_same_source_start",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_ready_in_retry_gap_is_retired_without_delivery",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_direct_range_head_through_b",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_quality_reopen_preserves_position_and_releases_slot",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_prepared_handoff_commit_and_abort",
@@ -243,6 +246,8 @@ class KnownRedContractTest(unittest.TestCase):
         )
         self.assertEqual(len(additional_fixtures), 15)
         # HDR/DV and the explicit Mac graph check are operator-run fixtures.
+        # Explicitly registered CGNAT fixtures are excluded from this unchanged
+        # unadmitted-identity bound; they are not known-red exemptions.
         self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 39)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):

@@ -269,6 +269,19 @@ impl RaftRequest {
         }
     }
 
+    /// Entries carried by an append, for attribution only. Its serialized size
+    /// is not known here (the writer task encodes it once, later), and it is
+    /// not encoded a second time just to be logged.
+    fn append_entry_count(&self) -> Option<usize> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::AppendDB((_, request)) => Some(request.entries.len()),
+            #[cfg(feature = "cache")]
+            Self::AppendCache((_, request)) => Some(request.entries.len()),
+            _ => None,
+        }
+    }
+
     fn snapshot_chunk_bytes(&self) -> Option<usize> {
         match self {
             #[cfg(feature = "sqlite")]
@@ -1396,6 +1409,10 @@ impl NetworkConnectionStreaming {
         // that drop also tears down a half-open WebSocket and lets the next
         // snapshot/append attempt establish a clean stream.
         let mut reset = ConnectionResetGuard::new(Arc::clone(&self.reset));
+        let request_kind = req.kind();
+        let chunk_bytes = req.snapshot_chunk_bytes();
+        let entry_count = req.append_entry_count();
+        let started = time::Instant::now();
         let result = tokio::time::timeout(soft_ttl, async {
             self.sender.send_async(req).await.map_err(|err| {
                 error!(
@@ -1416,7 +1433,23 @@ impl NetworkConnectionStreaming {
                 reset.disarm();
                 result
             }
-            Err(error) => Err(RPCError::Unreachable(Unreachable::new(&error))),
+            Err(_elapsed) => {
+                // The bare `Elapsed` says only "deadline has elapsed"; name
+                // what timed out so the openraft log line is attributable.
+                let error = std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "rpc to node {} timed out: request_kind={} entries={} snapshot_chunk_bytes={} elapsed_ms={} soft_ttl_ms={}",
+                        self.node.id,
+                        request_kind,
+                        entry_count.map_or_else(|| "none".to_owned(), |n| n.to_string()),
+                        chunk_bytes.map_or_else(|| "none".to_owned(), |n| n.to_string()),
+                        started.elapsed().as_millis(),
+                        soft_ttl.as_millis(),
+                    ),
+                );
+                Err(RPCError::Unreachable(Unreachable::new(&error)))
+            }
         }
     }
 }
