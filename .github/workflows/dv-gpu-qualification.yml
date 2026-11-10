@@ -16,9 +16,10 @@ jobs:
     timeout-minutes: 120
     container:
       image: ubuntu:24.04
-      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096 --cgroup-parent plurx-heavy.slice --cgroupns host
       volumes:
         - /var/run/docker.sock:/var/run/docker.sock
+        - /sys/fs/cgroup/plurx.slice/plurx-heavy.slice:/aggregate:ro
     steps:
       - name: Verify effective capacity-one nonvoter bounds
         shell: sh
@@ -26,12 +27,15 @@ jobs:
           set -eu
           IFS=: read -r hierarchy controllers relative < /proc/self/cgroup
           test "$hierarchy" = 0 && test -z "$controllers"
-          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "$relative" in /plurx.slice/plurx-heavy.slice/*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="/sys/fs/cgroup$relative"
+          test "$(stat -c %d:%i /aggregate)" = "$(stat -c %d:%i /sys/fs/cgroup/plurx.slice/plurx-heavy.slice)"
+          awk '$5 == "/aggregate" && $6 ~ /(^|,)ro(,|$)/ { found=1 } END { exit !found }' /proc/self/mountinfo
           for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
             name=${limit%%=*}
             expected=${limit#*=}
+            test "$(cat "/aggregate/$name")" = "$expected"
             actual="$(cat "$cgroup_root/$name")"
             test "$actual" = "$expected" || { printf '%s\n' "Unexpected $name: $actual (required $expected)" >&2; exit 1; }
           done
@@ -52,8 +56,11 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Compile full daemon unit binary and execute ten fixed regressions
+      - name: Compile full daemon unit binary and execute eleven fixed regressions
         run: python3 scripts/dv-qualification-unit parent
+      - name: Stop owned compiler and collect immutable output before upload
+        if: always()
+        run: python3 scripts/dv-qualification-unit collect
       - name: Retain exact source, native ELF, receipts and failure logs
         id: retained
         if: always()
