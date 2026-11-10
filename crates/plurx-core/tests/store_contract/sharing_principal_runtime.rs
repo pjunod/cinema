@@ -1,6 +1,7 @@
 //! Production writers against the admitted Local and installed Source layouts.
 use super::*;
 use plurx_core::playback_principal::PlaybackPrincipal;
+use plurx_core::store::BackgroundJobStore;
 
 const REQUEST_INCARNATION: &str = "00000000-0000-4000-a000-000000000080";
 const RETRY_INCARNATION: &str = "00000000-0000-4000-a000-000000000081";
