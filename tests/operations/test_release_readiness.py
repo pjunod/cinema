@@ -54,27 +54,28 @@ class ReleaseReadinessCase(unittest.TestCase):
                       readiness.BOOTSTRAP)
 
     def test_media_registry_prefers_explicit_override_without_reading_origin(self):
-        with patch.dict(os.environ, {"PLURX_MEDIA_REGISTRY": "mirror.example:5000"}, clear=True), \
+        with patch.dict(os.environ, {"PLURX_MEDIA_RUNTIME_REPOSITORY": "mirror.example:5000/media/runtime"}, clear=True), \
              patch.object(readiness.subprocess, "check_output") as origin:
-            self.assertEqual(readiness.media_registry(), "mirror.example:5000")
+            self.assertEqual(readiness.media_repository(), "mirror.example:5000/media/runtime")
             origin.assert_not_called()
 
     def test_media_registry_strips_origin_credentials_and_repository_path(self):
+        # The public default supersedes origin parsing, so credentials and
+        # transport details never participate in registry selection.
         with patch.dict(os.environ, {}, clear=True), \
-             patch.object(readiness.subprocess, "check_output",
-                          return_value="https://operator:private-token@forge.example:3000/noirr/plurx.git\n"):
-            self.assertEqual(readiness.media_registry(), "forge.example:3000")
+             patch.object(readiness.subprocess, "check_output") as origin:
+            self.assertEqual(readiness.media_repository(), "ghcr.io/pjunod/cinema-media-runtime")
+            origin.assert_not_called()
+
 
     def test_media_registry_falls_back_for_ssh_or_unavailable_origins(self):
         with patch.dict(os.environ, {}, clear=True):
-            for origin in ("operator@forge.example:noirr/plurx.git", "ssh://operator@forge.example/noirr/plurx.git",
-                           "https://forge.example:invalid/noirr/plurx.git"):
-                with self.subTest(origin=origin), \
-                     patch.object(readiness.subprocess, "check_output", return_value=origin):
-                    self.assertEqual(readiness.media_registry(), "forge.lan:3000")
-            with patch.object(readiness.subprocess, "check_output",
-                              side_effect=subprocess.CalledProcessError(2, ["git"])):
-                self.assertEqual(readiness.media_registry(), "forge.lan:3000")
+            for value in ("git@forge.example:noirr/plurx.git", "https://github.com/pjunod/cinema.git"):
+                with self.subTest(origin=value), \
+                     patch.object(readiness.subprocess, "check_output", return_value=value) as origin:
+                    self.assertEqual(readiness.media_repository(), "ghcr.io/pjunod/cinema-media-runtime")
+                    origin.assert_not_called()
+
 
     def test_image_is_built_from_checkout_and_run_by_immutable_id(self):
         image = "sha256:" + "a" * 64

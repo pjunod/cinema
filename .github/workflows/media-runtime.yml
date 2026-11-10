@@ -164,7 +164,7 @@ jobs:
           retention-days: 30
 
   index:
-    name: publish index and candidate pin
+    name: publish private index and candidate receipt
     needs: platform
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 10
@@ -187,7 +187,7 @@ jobs:
           registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
           username: fleet
           password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
-      - name: Publish immutable index and prepare reviewed pin
+      - name: Publish immutable private index and prepare public-copy receipt
         env:
           AUDITED_AMD64: ${{ inputs.audited_amd64 }}
         run: |
@@ -200,11 +200,12 @@ jobs:
           docker manifest create --insecure --amend "$tag" "$RUNTIME_IMAGE@$amd64" "$RUNTIME_IMAGE@$arm64"
           digest=$(docker manifest push --insecure --purge "$tag" | tail -1)
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          scripts/media-runtime pin --insecure "$RUNTIME_IMAGE@$digest"
           mkdir -p media-candidate
-          cp Dockerfile media-candidate/Dockerfile
           printf 'Source-Revision: %s\nMedia-Runtime: %s@%s\nAudited-amd64: %s\namd64: %s\narm64: %s\n' \
             "$GITHUB_SHA" "$RUNTIME_IMAGE" "$digest" "$AUDITED_AMD64" "$amd64" "$arm64" > media-candidate/receipt.txt
+          printf '\nNext: run the public media-runtime copy workflow for this exact source index.\n' >> media-candidate/receipt.txt
+          printf 'After anonymous public verification, run: scripts/media-runtime pin ghcr.io/pjunod/cinema-media-runtime@%s\n' "$digest" >> media-candidate/receipt.txt
+          printf 'Do not commit a Dockerfile pin that is available only in the private registry.\n' >> media-candidate/receipt.txt
       - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: media-runtime-candidate

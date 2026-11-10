@@ -4998,6 +4998,14 @@
         "validation/main-preflight-inputs.json"
       ],
       "reason": "Reads committed witness rows and compares declared-input digests over synthetic trees; this defines applicability and does not claim test execution or authenticated CI adoption."
+    },
+    {
+      "id_prefix": "operations:test_registry_push.RegistryPushCase.test_docker_up_resolves_ssh_and_scp_origins_to_the_registry_port",
+      "inputs": [
+        "Makefile",
+        "deploy/docker-compose.yml"
+      ],
+      "reason": "Executes the tracked docker-up recipe in temporary Git checkouts and reads Compose interpolation; the same public default must hold for GitHub, Forgejo, SSH/scp and absent origins. Docker and startup/hardware probes are explicit fixtures."
     }
   ]
 }

@@ -2090,7 +2090,7 @@ jobs:
           context: .
           file: Dockerfile.release
           build-args: |
-            PLURX_MEDIA_REGISTRY=${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+            PLURX_MEDIA_RUNTIME_REPOSITORY=${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-media-runtime
           push: false
           load: true
           platforms: linux/${{ matrix.arch }}
