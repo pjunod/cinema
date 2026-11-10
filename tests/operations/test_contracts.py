@@ -4583,9 +4583,35 @@ assert.equal(context.ACT_TIMER, null);
         for path in paths:
             if path.relative_to(ROOT).as_posix() in GITHUB_ONLY_WORKFLOWS:
                 continue  # GitHub honours permissions; the GitHub-only contract scopes them
+            if path.relative_to(ROOT).as_posix() == ".github/workflows/media-runtime-public.yml":
+                self.test_public_media_copy_scopes_github_permissions_to_its_manual_trusted_job()
+                continue
             with self.subTest(path=path.relative_to(ROOT)):
                 workflow = path.read_text(encoding="utf-8")
                 self.assertNotRegex(workflow, r"(?m)^\s*permissions:\s*$")
+
+    def test_public_media_copy_scopes_github_permissions_to_its_manual_trusted_job(self):
+        path = ".github/workflows/media-runtime-public.yml"
+        workflow = read(path)
+        code = "\n".join(line for line in workflow.splitlines()
+                         if not line.lstrip().startswith("#")) + "\n"
+        triggers = re.search(r"(?m)^on:\n((?:(?:  .*)?\n)*)", code)
+        self.assertIsNotNone(triggers)
+        self.assertEqual(re.findall(r"(?m)^  ([a-z_]+):", triggers.group(1)), ["workflow_dispatch"])
+        scopes = re.search(r"(?m)^permissions:\n((?:  .+\n)+)", code)
+        self.assertIsNotNone(scopes)
+        self.assertEqual(scopes.group(1), "  contents: read\n  packages: write\n")
+        jobs = workflow_job_blocks(path)
+        self.assertEqual(set(jobs), {"copy"})
+        job = jobs["copy"]
+        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", job), ["github.server_url == 'https://github.com'"])
+        self.assertEqual(self_hosted_label_sets(job), [("self-hosted", "Linux", "X64", "lab", "general")])
+        self.assertNotRegex(job, r"(?m)^    permissions:")
+        self.assertIn("copy --all --preserve-digests", job)
+        self.assertIn('test "sha256:$actual" = "$digest"', job)
+        self.assertRegex(job, r"quay\.io/skopeo/stable@sha256:[a-f0-9]{64}")
+        for compiler in ("docker build", "build-push-action", "cargo ", "actions/checkout"):
+            self.assertNotIn(compiler, job)
 
     def test_rust_audit_can_report_informational_advisories(self):
         workflow = read(".github/workflows/rust-audit.yml")
