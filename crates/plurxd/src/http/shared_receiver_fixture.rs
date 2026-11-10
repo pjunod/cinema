@@ -415,6 +415,7 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
                 h2,
                 SourceFixtureMode::Copy,
                 None,
+                false,
                 fixture_body_budget,
             )),
         )
@@ -430,6 +431,7 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
             false,
             SourceFixtureMode::Copy,
             Some(false),
+            false,
             fixture_body_budget,
         )),
     )
@@ -444,6 +446,7 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
             false,
             SourceFixtureMode::Copy,
             Some(true),
+            false,
             fixture_body_budget,
         )),
     )
@@ -470,6 +473,7 @@ async fn sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b(
                     h2,
                     mode,
                     None,
+                    false,
                     fixture_body_budget,
                 )),
             )
@@ -477,6 +481,30 @@ async fn sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b(
             .expect("bounded real playback fixture");
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_caption_busy_preserves_same_native_session() {
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    assert!(plurx_core::sharing::is_tailnet_address(address));
+    let budget = crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(330),
+        Box::pin(actual_pinned_playback(
+            address,
+            true,
+            SourceFixtureMode::NativeCopy,
+            None,
+            true,
+            budget,
+        )),
+    )
+    .await
+    .expect("bounded real native caption busy and recovery fixture");
 }
 
 /// The current-rendition control selection a client derives from its own
@@ -527,6 +555,7 @@ async fn actual_pinned_playback(
     h2: bool,
     mode: SourceFixtureMode,
     endpoint_failure: Option<bool>,
+    exercise_caption_busy: bool,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) {
     use axum::http::StatusCode;
@@ -557,6 +586,10 @@ async fn actual_pinned_playback(
     };
     // Actual HTTP-arrival diagnostics only, never no-admission/settlement proof.
     let source_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source_ends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_ends = source_ends.clone();
+    let source_resource_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_resource_status = source_resource_status.clone();
     let source_start_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let stalled_end_release = tokio_util::sync::CancellationToken::new();
     let observed_stall_release = stalled_end_release.clone();
@@ -573,8 +606,13 @@ async fn actual_pinned_playback(
                 let refusal = observed_refusal.clone();
                 let end_bodies = observed_end_bodies.clone();
                 let starts = observed_starts.clone();
+                let ends = observed_ends.clone();
+                let resource_status = observed_resource_status.clone();
                 let status = observed_status.clone();
                 async move {
+                    if request.uri().path().ends_with("/end") {
+                        ends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     if refusal.load(std::sync::atomic::Ordering::Relaxed)
                         && request.uri().path().ends_with("/end")
                     {
@@ -595,7 +633,14 @@ async fn actual_pinned_playback(
                     if is_start {
                         starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
+                    let is_resource = request.uri().path().ends_with("/resources");
                     let response = next.run(request).await;
+                    if is_resource {
+                        resource_status.store(
+                            usize::from(response.status().as_u16()),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
                     if is_start {
                         status.store(
                             usize::from(response.status().as_u16()),
@@ -877,6 +922,113 @@ async fn actual_pinned_playback(
         4
     );
     let prefix = format!("/api/v1/hls/{session}/");
+    if exercise_caption_busy {
+        use plurx_core::store::keys::SW_POOL_THREADS;
+        use std::sync::atomic::Ordering;
+        // Start has published. Ordinary policy now refuses the first actual
+        // caption window's CPU admission; no status/control request warms it.
+        let previous = fixture
+            .source
+            .state
+            .store
+            .get_or_init_setting(
+                SW_POOL_THREADS,
+                &crate::admission::software_budget().to_string(),
+            )
+            .await
+            .expect("saved effective Source CPU policy");
+        fixture
+            .source
+            .state
+            .store
+            .put_setting(SW_POOL_THREADS, "0")
+            .await
+            .expect("temporarily disable Source software admission");
+        let caption_path = format!("{prefix}subs/0/seg00000.vtt");
+        let (busy, headers, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &caption_path,
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            busy,
+            StatusCode::TOO_MANY_REQUESTS,
+            "actual Source caption admission must remain retryable through B: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(
+            source_resource_status.load(Ordering::Relaxed),
+            429,
+            "the actual pinned Source resource route refused admission"
+        );
+        assert_eq!(headers["retry-after"], "1");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).expect("local typed retry")["code"],
+            "sharing_resource_busy"
+        );
+        assert_eq!(source_starts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            source_ends.load(Ordering::Relaxed),
+            0,
+            "one busy caption window must not retire the movie"
+        );
+        assert_eq!(fixture.source.active_source_sessions().await, 1);
+        let (video, _, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &format!("{prefix}init.mp4"),
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            video,
+            StatusCode::OK,
+            "video remains live while caption admission is busy"
+        );
+        assert!(bytes.windows(4).any(|part| part == b"ftyp"));
+        fixture
+            .source
+            .state
+            .store
+            .put_setting(SW_POOL_THREADS, &previous)
+            .await
+            .expect("restore original Source CPU policy");
+        let (ready, _, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &caption_path,
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            ready,
+            StatusCode::OK,
+            "same caption window resumes on the same published session"
+        );
+        assert_eq!(source_resource_status.load(Ordering::Relaxed), 200);
+        assert!(std::str::from_utf8(&bytes)
+            .expect("actual native VTT")
+            .contains("Actual HTTP Source caption"));
+        assert_eq!(
+            source_starts.load(Ordering::Relaxed),
+            1,
+            "caption recovery must not Start another movie"
+        );
+        assert_eq!(
+            source_ends.load(Ordering::Relaxed),
+            0,
+            "ordinary confirmed End still belongs to the viewer"
+        );
+        assert_eq!(fixture.source.active_source_sessions().await, 1);
+    }
     let mut playlist_path = start["playlist_url"]
         .as_str()
         .expect("actual B playlist")

@@ -1591,17 +1591,34 @@ async fn resources(
         deadline,
     )
     .await?;
-    let opened = owned
-        .actor
-        .open_resource(&input.resource, deadline)
-        .await
-        .map_err(|e| SourceStartFailure::from(e).response())?;
+    let opened = owned.actor.open_resource(&input.resource, deadline).await;
     let (_, current_grant) =
         current_reference(&state, &headers, &input.operation.start.reference).await?;
     ingress::publication_allowed(&state, &owned.assignment).await?;
     if current_grant != grant {
         return Err(unavailable());
     }
+    let opened = opened.map_err(|error| {
+        use crate::transcode::source_actor::SourceWorkerError;
+        let native_caption = input.resource.cached_subtitle_revision().is_none()
+            && matches!(
+                input.resource.kind(),
+                SharingHlsResourceKind::SubtitlePlaylist { .. }
+                    | SharingHlsResourceKind::SubtitleSegment { .. }
+            );
+        if error == SourceWorkerError::Capacity
+            || (error == SourceWorkerError::Deadline && native_caption)
+        {
+            ApiError::TypedRetry {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                code: "sharing_resource_busy",
+                message: "The shared playback resource is still preparing".into(),
+                retry_after_seconds: 1,
+            }
+        } else {
+            SourceStartFailure::from(error).response()
+        }
+    })?;
     let (payload, guard) = opened.into_parts();
     let guard = std::sync::Arc::new(guard);
     let mut subtitle_complete = None;
