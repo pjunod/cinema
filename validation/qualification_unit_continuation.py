@@ -1335,9 +1335,16 @@ def bound_execution(record, item, raw, source_commands=historical_canonical, *, 
         return original_capture(record,item,raw)
     if witness['mode'] == 'local-binary':
         fields = {'mode','first_line','build_invocation','archive_sha256','binary_sha256_before','binary_sha256_after','features','fingerprint','binary_path','fingerprint_path'}
+        from validation import incremental_binary_control as incremental
         default_harness = '--test-threads=1' not in rust_identity(item['invocation'])['harness']
+        fingerprint = witness.get('fingerprint')
+        actual_profile = fingerprint.get('profile') if isinstance(fingerprint, dict) else None
+        canonical_profile = TEST_PROFILE_FINGERPRINTS[record['environment']['runtime']['profile']['debuginfo']]
+        incremental_fields = {'source_artifact', 'source_list_log', 'incremental_control'}
+        extension = (incremental_fields if actual_profile == incremental.INCREMENTAL_TEST_PROFILE_0
+                     and canonical_profile != actual_profile else set())
         receipts.require(origin['kind'] == 'attested-local' and kind in RUST_KINDS
-                         and set(witness) == fields | ({'harness_environment'} if default_harness else set()),
+                         and set(witness) == fields | extension | ({'harness_environment'} if default_harness else set()),
                          'Unknown local binary witness')
         if default_harness:
             receipts.require(witness['harness_environment'] == {'RUST_TEST_THREADS': None}
@@ -1354,9 +1361,11 @@ def bound_execution(record, item, raw, source_commands=historical_canonical, *, 
                          and witness['archive_sha256'] == source_archive_digest(record['source_commit'])
                          and isinstance(witness['fingerprint'],dict)
                          and json.loads(witness['fingerprint'].get('features','null')) == witness['features']
-                         and witness['fingerprint'].get('profile')==TEST_PROFILE_FINGERPRINTS[record['environment']['runtime']['profile']['debuginfo']]
+                         and actual_profile in {canonical_profile, incremental.INCREMENTAL_TEST_PROFILE_0}
                          and witness['fingerprint'].get('rustc')==RUSTC_FINGERPRINT
                          and witness['fingerprint'].get('compile_kind')==0 and witness['fingerprint'].get('rustflags')==[], 'Local build/binary witness differs')
+        if extension:
+            incremental.verify(record, item, witness, proof)
         build = normalized_cargo(witness['build_invocation'],compile_only=True);target = rust_identity(item['invocation'])
         keys = {'-p','--manifest-path','--test','--bin','--lib','--no-default-features','--release'}
         receipts.require({k:v for k,v in build['cargo'].items() if k in keys} == {k:v for k,v in target['cargo'].items() if k in keys}

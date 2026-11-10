@@ -25,6 +25,9 @@ PROTOCOL_PATHS = {
     'tests/validation/test_promotion_unit_retention.py',
     'validation/retained_lane_commands.py',
     'tests/validation/test_retained_lane_commands.py',
+    'validation/qualification_unit_continuation.py',
+    'validation/incremental_binary_control.py',
+    'tests/validation/test_incremental_binary_control.py',
     # Receipt adoption machinery decides what runs, not what a unit proves.
     'validation/main_preflight_adoption.py', 'validation/main_unit_receipts.py',
 }
