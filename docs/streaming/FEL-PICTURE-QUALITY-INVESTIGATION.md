@@ -386,3 +386,36 @@ energy alone, the PPS chroma offset is one global value, and Main10 has
 no per-CU chroma offset. Lowering block QP lowers QpC with it, and that
 removes the tail.
 
+## Zero-mean redistribution passes the fixed bar on the selected frames
+
+The [zero-mean protocol](../../tools/dv_processing/diagnostics/fel_quality/protocol-roi-zeromean-20261111.json)
+was committed after arm S and before any of its own output. It keeps the
+same dark selection and −3 QP. Every other block gets
++min(3, 3c/(1−c)) QP, where c is that frame's dark fraction, so the frame
+mean offset is zero, like x265's own AQ. The positive offset came out at
++1.16 to +1.69 QP on the selected frames. The new harness binary passed
+the byte-identity gate again before its results were used.
+
+| ModelB (base / S / Z, F) | Shadow mean | Shadow p99 | Full mean | Authored Mb/s (Z) |
+|---|---|---|---|---:|
+| M5400 f0 | 1.114 / 1.068 / 1.063 (1.566) | 3.388 / 3.281 / 3.270 (4.741) | 1.583 / 1.588 / 1.611 | 127.332 |
+| M5400 f24 | 1.597 / 1.481 / 1.420 (1.753) | 4.340 / 3.995 / 3.839 (4.194) | 1.620 / 1.640 / 1.642 | 127.332 |
+| M1800 f0 | 0.907 / 0.863 / 0.856 (1.642) | 2.134 / 2.009 / 1.997 (3.184) | 1.220 / 1.230 / 1.239 | 128.031 |
+| M1800 f24 | 0.934 / 0.909 / 0.882 (1.717) | 2.237 / 2.115 / 2.036 (3.164) | 1.357 / 1.376 / 1.393 | 128.031 |
+
+**All 16 rows pass the strict quality bar and the 130 Mb/s screen.** This
+is the first candidate admitted under the fixed rule. The cost lands in
+brighter content. The 1–10 nit band rises by 0.05–0.10 ΔITP and the 10–100
+nit band by 0.05–0.09. Full active p99 rises by up to 0.20 (M1800 f24) and
+the full maximum by up to 2.7 (M5400 f24). All remain far better than F.
+Rate is still above the retained baseline on M5400 (127.3 vs 123.7 Mb/s),
+so zero mean QP offset is not rate-neutral.
+[Portable results](../../tools/dv_processing/diagnostics/fel_quality/results/roi-zeromean-20261111.json).
+
+Limits: the arm passes only on the two calibration windows and the selected
+frames 0/24. The fixtures were also used to design it, and frame 24 was not
+the worst of the earlier 48-frame samples. Before any broader claim it
+needs the all-48-frame lattice evaluation and, ideally, a held-out scene.
+It is not a perceptual, HRD/CPB, Dolby-conformance or playback
+qualification, and no runtime change is made.
+
