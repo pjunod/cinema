@@ -59,27 +59,35 @@ class CapsPolicyTest {
     }
 
     @Test
-    fun performancePointsBoundTheDecoderEnvelopeRate() {
+    fun decoderEnvelopeRateIsTheHighestRateMedia3Admits() {
         // Google TV Streamer (c2.mtk.hevc.decoder): HEVC L5.1 alone allows
-        // 64.47 fps at 3840x2160, but the vendor declares one performance point,
-        // 3840x2160@60. Media3 refuses 64 there, so the envelope must stop at 60
-        // or the hvc1 probe (which asks Media3 at the envelope's maximum) fails.
-        val mtk = performancePointCeiling(declared = true) { rate -> rate <= 60 }
+        // 64.47 fps at 3840x2160; the vendor declares one performance point,
+        // 3840x2160@60, and Media3 covers PerformancePoint(w, h, rate.toInt()),
+        // so it refuses 64. The hvc1 probe asks Media3 at the envelope's maximum.
+        val levelLimit = 32237.0 / 500.0
+        var calls = 0
+        val mtk = highestAcceptedRate(levelLimit) { rate -> calls++; rate.toInt() <= 60 }
         assertEquals(60.0, mtk, 0.0)
-        assertEquals(60.0, minOf(32237.0 / 500.0, mtk), 0.0)
-        assertEquals(Double.POSITIVE_INFINITY, performancePointCeiling(declared = false) { false }, 0.0)
-        assertEquals(0.0, performancePointCeiling(declared = true) { false }, 0.0)
-        assertEquals(1000.0, performancePointCeiling(declared = true) { true }, 0.0)
+        assertTrue("bisection, not a scan: $calls", calls <= 8)
+        // Where Media3 ignores wrong performance points, nothing is lowered.
+        assertEquals(levelLimit, highestAcceptedRate(levelLimit) { true }, 0.0)
+        assertEquals(0.0, highestAcceptedRate(levelLimit) { false }, 0.0)
+        assertEquals(Double.POSITIVE_INFINITY, highestAcceptedRate(Double.POSITIVE_INFINITY) { false }, 0.0)
+        calls = 0
+        assertEquals(240.0, highestAcceptedRate(999.5) { rate -> calls++; rate <= 240.0 }, 0.0)
+        assertTrue("bisection over the whole range: $calls", calls <= 12)
     }
 
     @Test
-    fun decoderEnvelopeRateIntersectsPerformancePointsAtTheCallSite() {
+    fun decoderEnvelopeAsksMedia3AtEveryRectangleAndRate() {
         val source = java.io.File("src/main/java/tv/plurx/app/data/Caps.kt").readText()
-        val envelope = source.substringAfter("val upper = minOf(").substringBefore(")\n")
-        assertTrue(envelope, envelope.contains("performancePointRateCeiling(video, size.first, size.second)"))
+        val limits = source.substringAfter("private fun videoDecoderLimits(").substringBefore("    /**")
+        assertEquals("both rectangle choices ask Media3", 2, Regex("admits\\(width, height, 30\\.0\\)").findAll(limits).count())
+        assertTrue(limits.contains("highestAcceptedRate(minOf("))
+        assertTrue(limits.contains("admits(size.first, size.second, cadence)"))
+        assertTrue(source.contains("selector.isVideoSizeAndRateSupportedV21(width, height, rate)"))
         val probe = source.substringAfter("private fun hlsHevcSampleEntries(").substringBefore("private fun ")
         assertTrue(probe.contains("val rate = entry.maxFrameRate"))
-        assertTrue(probe.contains(".setFrameRate(rate.numerator.toFloat() / rate.denominator)"))
     }
 
     @Test

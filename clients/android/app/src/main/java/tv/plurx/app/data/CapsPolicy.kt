@@ -310,20 +310,23 @@ internal fun capsDocument(
 }
 
 /**
- * Media3 admits a decoder rate only when a declared performance point covers
- * `rate.toInt()` at the rectangle; an empty list defers to the platform
- * ranges. Returns the highest whole rate covered (Media3 truncates, so any
- * cadence below the next integer is covered too, but the envelope keeps to the
- * integer), [Double.POSITIVE_INFINITY] when no points are declared, and 0.0
- * when points are declared and none covers the rectangle at all.
+ * The highest rate up to [upper] that [accepts] admits: [upper] itself when
+ * admitted, otherwise the highest whole rate (Media3 compares whole frames),
+ * found by bisection because a decoder that plays a rate at a rectangle plays
+ * every lower one there; 0.0 when no whole rate is admitted. A non-finite or
+ * non-positive [upper] is returned unchanged for the caller to refuse.
  */
-internal fun performancePointCeiling(declared: Boolean, covers: (Int) -> Boolean): Double {
-    if (!declared) return Double.POSITIVE_INFINITY
-    return (MAX_PERFORMANCE_POINT_RATE downTo 1).firstOrNull(covers)?.toDouble() ?: 0.0
+internal fun highestAcceptedRate(upper: Double, accepts: (Double) -> Boolean): Double {
+    if (!upper.isFinite() || upper <= 0.0 || accepts(upper)) return upper
+    var low = 1
+    var high = minOf(kotlin.math.floor(upper), 1000.0).toInt()
+    var best = 0
+    while (low <= high) {
+        val mid = (low + high) ushr 1
+        if (accepts(mid.toDouble())) { best = mid; low = mid + 1 } else high = mid - 1
+    }
+    return best.toDouble()
 }
-
-/** Above any decoder rate the envelope admits (it refuses rates over 1000). */
-private const val MAX_PERFORMANCE_POINT_RATE = 1000
 
 internal fun shouldFallBackToLegacyDecision(
     statusCode: Int,
