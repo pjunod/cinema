@@ -3,6 +3,11 @@ name: Task-only DV GPU qualification
 # the task's named regressions once. Remove before the final PR merges.
 on:
   workflow_dispatch:
+    inputs:
+      tests:
+        description: Space-separated regression names to run (empty runs every named regression)
+        required: false
+        default: ""
 permissions:
   contents: read
 concurrency:
@@ -74,7 +79,9 @@ jobs:
           cp "$elf" "$out/plurxd-tests"; sha256sum "$out/plurxd-tests" | tee "$out/plurxd-tests.sha256"
           rm -f "$out/build.json"
           failed=0
+          selected="${{ inputs.tests }}"
           while read -r name; do
+            case " ${selected:-$name} " in *" $name "*) ;; *) continue ;; esac
             [ -n "$name" ] || continue
             if "$out/plurxd-tests" "$name" --test-threads=1 > "$out/test-$name.log" 2>&1; then
               grep -E '^test result:' "$out/test-$name.log" | sed "s/^/$name: /"
@@ -109,6 +116,7 @@ jobs:
           tracked_raw_probe_retirement_survives_timeout_and_abandoned_collector
           reader_recovery_refuses_unarmed_unmediated_foreign_kernel_and_replaced_inode
           finish_during_blocked_enrolled_read_leaves_settlement_to_the_ledger
+          dead_owner_source_census_releases_only_exact_quiescent_custody
           NAMES
           printf '{"sha":"%s","elf_sha256":"%s","failed":%s}\n' "$GITHUB_SHA" "$(cut -d' ' -f1 "$out/plurxd-tests.sha256")" "$failed" > "$out/receipt.json"
           exit $failed
