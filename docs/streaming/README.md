@@ -9,10 +9,10 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | File | Answers | |
 |---|---|---|
 | [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
-| [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract (nine lanes). | open |
-| [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 contract: one claim, sparse copy, v3. | open |
+| [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract. | open |
+| [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 build contract. | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
-| [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Effort plan: rulings, lanes, reviews, status. | open |
+| [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Effort plan: rulings, lanes, status. | open |
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |
 | [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
 | [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, implementation, retained evidence and merge prerequisites. | built |
