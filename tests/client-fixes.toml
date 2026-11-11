@@ -8477,3 +8477,21 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/Caps.kt"
 source_anchor = "selector.isVideoSizeAndRateSupportedV21(width, height, rate)"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
 test_anchor = "fun decoderEnvelopeAsksMedia3AtEveryRectangleAndRate()"
+
+# PR #1491: Playback Info shows the owner's generation-scoped skip reason.
+[[fixes]]
+id = "apple.dv-enhancement-skip-reason"
+commits = ["481ac9de236fe3c93596973b34500f50cd831573"]
+source = "clients/apple/Sources/Models.swift"
+source_anchor = "struct ProcessingSkip: Codable, Equatable {"
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "func testSkippedUpgradeExplainsOnlyCurrentInactiveEnhancements()"
+
+[[fixes]]
+id = "android.dv-enhancement-skip-reason"
+commits = []
+supplements = "apple.dv-enhancement-skip-reason"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "data class ProcessingSkip(val generation: String, val reason: String) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun aSkippedUpgradeExplainsOnlyCurrentInactiveEnhancements()"
