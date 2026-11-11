@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "frozen_source": "087e836d369eb2b8f94ec1d0454ea6c157612df9",
-  "status": "Dark-block under-allocation (luma and chroma) identified as the lever; zero-mean source-luma quantOffsets meets the fixed selected-frame bar; -6 QP reaches 46/48 M5400 sampled frames. Not iso-rate; held-out scene and dose choice pending; no runtime change.",
+  "status": "Dark-block under-allocation (luma and chroma) identified as the lever. Zero-mean source-luma quantOffsets at -6 QP (dose chosen by Paul 2026-11-11) meets the fixed selected-frame bar and beats F on 46/48 M5400 and 48/48 M1800 sampled frames. Not iso-rate; held-out scene pending; no runtime change.",
   "private_evidence_parent": "~/.local/state/plurx-fel-quality",
   "prior_calibration": {
     "directory": "20261026-measurement-calibration",
@@ -200,20 +200,22 @@
         "results/roi-zeromean-qpm6-20261111.json",
         "results/lattice-michael5400-qpm6-20261111.json"
       ],
-      "status": "16/16 selected rows + rate pass (129.095/128.360 Mb/s); M5400 all-48 sampled shadow p99 < F in 46/48 ModelB frames."
-    }
+      "status": "16/16 selected rows + rate pass (129.095/128.360 Mb/s); M5400 all-48 sampled shadow p99 < F in 46/48 ModelB frames. M1800 all-48: 48/48. Dose -6 QP chosen by Paul 2026-11-11."
+    },
+    "gates_and_binding": "results/roi-gates-and-binding-20261111.json"
   },
   "lattice": {
     "tool": "lattice_eval.py",
     "protocols": [
-      "lattice-michael1800/protocol.json (private)",
+      "protocol-lattice-michael1800-20261026.json",
       "protocol-lattice-michael5400-20261111.json"
     ],
     "results": [
       "results/lattice-michael1800-20261111.json",
       "results/lattice-michael5400-20261111.json",
       "results/lattice-michael5400-swaps-20261111.json",
-      "results/lattice-michael5400-qpm6-20261111.json"
+      "results/lattice-michael5400-qpm6-20261111.json",
+      "results/lattice-michael1800-qpm6-20261111.json"
     ],
     "m5400_capture": "$FEL_ROI_ROOT/layer-capture-michael5400 + metadata-michael5400; logs/verify-layer-capture-michael5400.json, logs/metadata-binding-michael5400.json"
   }

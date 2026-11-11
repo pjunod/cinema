@@ -387,9 +387,10 @@ same dark selection and −3 QP. Every other block gets
 +min(3, 3c/(1−c)) QP, where c is that frame's dark fraction, so the frame
 mean offset is zero, like x265's own AQ. The positive offset came out at
 +1.16 to +1.69 QP on the selected frames. The rebuilt harness binary was re-gated (no-ROI byte identity on
-Michael5400) before its results were used. Its all-zero-ROI gate and Michael1800
-no-ROI gate are still owed. The M3 that holds the evidence went offline
-during review.
+Michael5400) before its results were used. Its all-zero-ROI gate on Michael5400 and no-ROI gate on Michael1800 also
+pass byte-for-byte. Rebuilding each harness source reproduces its binary
+exactly, which binds every run to a committed source.
+[Gate and binding receipt](../../tools/dv_processing/diagnostics/fel_quality/results/roi-gates-and-binding-20261111.json).
 
 | ModelB (base / S / Z, F) | Shadow mean | Shadow p99 | Full mean | Authored Mb/s (Z) |
 |---|---|---|---|---:|
@@ -485,7 +486,11 @@ Z:
 - the 100–1000 nit band +0.04 to +0.15;
 - full maximum up to +1.5.
 
-Z6 has no Michael1800 all-48 lattice yet; see Resuming.
+On Michael1800's all 48 frames, Z6 beats F on shadow p99, shadow mean
+and full mean in every frame for all four models. Its pooled ModelB
+shadow p99 is 2.231, against 2.546 for the baseline and 3.384 for F.
+[Michael1800 Z6 lattice](../../tools/dv_processing/diagnostics/fel_quality/results/lattice-michael1800-qpm6-20261111.json),
+scored under the [Michael1800 lattice protocol](../../tools/dv_processing/diagnostics/fel_quality/protocol-lattice-michael1800-20261026.json).
 
 What the evidence supports: the remaining FEL shadow loss is a dark-block
 allocation shortfall, in both luma and chroma, that x265's default policy
@@ -548,18 +553,13 @@ packaging change, and packaging as a separate workstream.
   below 1 nit gets −3 or −6 QP, and every other block gets the balancing
   positive offset. Both doses pass the fixed selected-frame bar (16/16
   rows) and the 130 Mb/s screen. At −6 QP, Michael5400 beats F in 46/48
-  sampled frames.
+  sampled frames and Michael1800 in 48/48.
+- **Dose decision.** Paul chose −6 QP on 2026-11-11. It fixes the most
+  shadow frames, and its bright-content cost stays well inside the FEL
+  benefit.
 - **Not done.**
   - A held-out scene. Both windows were used for the design.
-  - The dose choice, which trades shadow error against bright-content
-    error and is the owner's decision.
   - Two marginal Michael5400 frames (5 and 6).
-  - Owed on the M3, which went offline during review:
-    - the `roi_encode-v6` all-zero-ROI and Michael1800 no-ROI gates;
-    - the Michael1800 all-48 lattice for Z6;
-    - a first run of the new per-frame metadata checks on both fixtures;
-    - committing the private Michael1800 lattice protocol and a binary↔source
-      binding receipt for each harness build.
   - Any production implementation.
 
 ### Evidence and tools
@@ -610,7 +610,9 @@ Audit notes from the adversarial review (2026-11-11):
   passing `none` and `zero` gate receipts from the same harness binary and
   arguments that match the protocol. A failed gate now ends as
   `gate_failed`, never `encoded`. The lattice evaluator also checks every
-  frame's header, mapping and NLQ fields. Runs recorded above used the
+  frame's header, mapping and NLQ fields. Those checks pass on both
+fixtures. The updated evaluator reproduces Z6's Michael5400 per-frame
+statistics exactly. Earlier runs recorded above used the
   earlier tool versions, whose hashes are in their receipts.
 
 Selected-frame scores are full resolution. All-48 scores are on a sampled
