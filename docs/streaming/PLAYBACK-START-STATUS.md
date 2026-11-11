@@ -1,7 +1,7 @@
 # Playback start — continuation and merge ledger
 
-**Status:** open · **Owner:** Codex, session
-`01a1c166-b5b2-7033-bd74-77816ba09733` · **Updated:** 2026-11-09.
+**Status:** open · **Owner:** Claude (claude-opus-5-5), session
+`session_01BCWL9ypnQEiQUyRaZtMhh3`, resumed from Codex on 2026-11-11 · **Updated:** 2026-11-11.
 
 Companion to the [implementation plan](PLAYBACK-START-PLAN.md) and
 [Phase 1 build contract](PLAYBACK-START-BUILD.md). Phase 1 merged in
@@ -40,46 +40,36 @@ and native prepared-switch/TTFF measurements remain open.
 
 ## Current batch — A1/B1
 
-Codex owns `effort/playback-start-phase2`; the next A1/B1 pull request is not open yet.
-GPT 6.1 Sol extracted the canonical video-only fragment row observation
-for reuse by the growing engine. The owner-accepted
-[A1/B1 implementation contract](PLAYBACK-START-A1-B1-BUILD.md) now records
-Analysis coordination, one-input canonical measurements, source-DTS normalization,
-sparse publication and explicit target/init failure outcomes. Shared argv and
-checked measurements are implemented in the owned workspace. Foundation commit
-`d7cec0ef8` passed normal commit hooks; the larger staged Core checkpoint,
-including the shared incremental cut planner, passed capped compilation.
-Authenticated receiver mode selection is implemented under explicit human
-authorization; its regressions remain unrun. Growing-engine runtime, coordinator
-integration and qualification remain incomplete. Daemon test compilation exceeds
-the voter-safe 8 GiB cap even serially without debug/incremental metadata; use the
-new verified nonvoter CI role after its routing change lands. No tests were run
-for this batch before its final adversarial review.
-Server/web development and web testing proceed independently of mobile
-publication. The deployed Phase 1 web build can be tested now.
+Claude owns `effort/playback-start-phase2` (resumed from Codex 2026-11-11; the
+handed-over staged and unstaged layers are preserved verbatim as two
+checkpoint commits). Current main is merged in. The
+[A1/B1 implementation contract](PLAYBACK-START-A1-B1-BUILD.md) remains the
+design authority.
 
-The queue stall is traced to an identifier-contract mismatch. Analysis
-requests accept opaque identifiers, including 64-character generation
-digests. Both stores retain the normal 64-byte creation limit and the
-legacy repair path's 128-byte limit. Shared validators now preserve both
-limits while custody accepts every admitted identity. The old
-`background_owner_key` incorrectly required a UUID for analysis custody.
-Registration rejects a legitimate request before creating custody;
-`settle_unstarted_analysis_source` retries the deterministic rejection while
-the independent heartbeat retains its lease and maintenance source-I/O
-reservation. The measured request is `fragment_index`; its ID matches the captured
-registration rejection and its stored requested generation. The earlier
-subtitle-source classification was unsupported and is corrected. The old
-attempt later expired around a container restart and is queued again with
-no owner; this is not deployment or acceptance of the repair. The final repair matches custody
-validation to every admission path and exercises registration/settlement
-with real generated and opaque legacy IDs;
-retain the exact owner/fence checks and ambiguous-write recovery protocol.
-PR #1478 merged as `30f4343bad` after final independent review, the two focused
-regressions and Main promotion gate 7079 passed. Publication is coordinated
-with the existing release qualification; fleet acceptance remains open.
-The learner currently has a separate active `transcode_prepare` custody
-owner, which must be preserved.
+Built on the branch, compiled and lint-clean (plurx-core lib, plurxd bin,
+clippy `-D warnings`, rustc 1.97.1):
+
+- Source growing engine for authenticated bounded shared playback, canonical
+  range observations, normalization and the companion verifier (Codex).
+- Copy-range consumer: the Analysis dispatcher coalesces committed ranges per
+  exact source; a fully covered title is claimed under the existing Analysis
+  lease and heartbeat, attested in one fenced full-source phase, sealed,
+  installed as a content-addressed v3 blob and published through a claimed
+  `fragment_index_publish` job.
+- v3 publication: one guarded transaction and trigger adopts a pending or
+  quarantined head at the next epoch (a healthy same-contract head keeps its
+  first variant), records only the publisher's verified location, readies the
+  Analysis and settles job and waiters, and rolls back on a pointer mismatch.
+  Real-SQLite regressions in `copy_index_v3_tests.rs`.
+
+Not yet built: background gap filling through the common engine (an index
+publishes today only when playback itself covered the whole title), a v3
+consumer and peer hydration, discrepancy quarantine, and local-playback
+observations. A sealed observation index must not be bridged into the legacy
+local index store: its head-census promotion lacks the whole-title HDR10
+metadata the legacy key promises. Daemon test compilation exceeds the 8 GiB
+voter cap, so it runs on the nonvoter effort compile gate. No unit suite has
+run for this batch; the fast lane runs once after the final review.
 
 ## Native admission — A1-N, PR #1476
 
@@ -159,3 +149,4 @@ follow-ups in the history below remain open.
 | 2026-11-09 | continuation | Codex / 01a1c166-b5b2-7033-bd74-77816ba09733 | Phase 1 merge ledger reconciled against main `8ab61a779`. Media1 reports that build; queue still degraded (3,840 eligible, 0 ready in 24 h), so merged implementation is not fleet acceptance. Signing publisher is offline; its last attempted export reported no account and no distribution identity/private key. |
 | 2026-11-09 | S4, S12 | Codex; GPT 6.1 Sol for S12 | Root-cause follow-ups from [shared-library RCA](SHARED-LIBRARY-PLAYBACK-RCA.md): index muxer timestamp correction and route-eligible Source locate directory implemented; review and validation pending. No feature gates. |
 | 2026-11-09 | process | Paul; executed by Codex | Current direction supersedes the original per-lane/design review schedule: batch normal commits into a reviewable PR, adversarial review when ready to merge, fix findings, then one final-candidate validation run with only failed checks repeated. Keep all task storage on the external agent drive. |
+| 2026-11-11 | A1/B1 | claude-opus-5-5 / session_01BCWL9ypnQEiQUyRaZtMhh3 | Resumed from Codex; layers checkpointed, main merged, compile/clippy clean; copy-range consumer and v3 publication trigger built with real-store regressions. |
