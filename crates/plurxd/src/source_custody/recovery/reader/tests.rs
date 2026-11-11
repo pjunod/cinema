@@ -1169,7 +1169,7 @@ async fn finish_during_blocked_enrolled_read_leaves_settlement_to_the_ledger() {
     observe_children(false).expect("foreign unmediated launch");
     #[allow(clippy::disallowed_methods)] // The fixture owns and reaps this exact child.
     let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", "read line"])
+        .args(["-c", "cat >/dev/null"])
         .stdin(std::process::Stdio::piped())
         .spawn()
         .expect("child launched after the escape");

@@ -55,8 +55,11 @@ async fn dead_owner() -> Dead {
     let recovery = root.path().join("source-custody-recovery");
     let witnesses = recovery.join("v2");
     let legacy = recovery.join("v1");
-    std::fs::create_dir_all(&witnesses).expect("v2");
-    std::fs::create_dir_all(&legacy).expect("v1");
+    for directory in [&recovery, &witnesses, &legacy] {
+        std::fs::create_dir_all(directory).expect("recovery directory");
+        // Production recovery directories are private to the worker.
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).expect("0700");
+    }
     let name = format!("background-{}", token.custody_id);
     let anchor = witnesses.join(format!("{name}.anchor"));
     let nonce = uuid::Uuid::new_v4().to_string();
