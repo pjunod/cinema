@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Android TV devices whose HEVC decoder declares performance points (Google TV
+  Streamer) now report HLS fMP4 HEVC support, so processed Dolby Vision
+  (HDR10-E) upgrades reach them instead of being declined at every start.
+
 - Linux Cinema now defaults to the system mpv and no longer ships a duplicate
   renderer, so qualified system HDR/DV updates reach Cinema. Explicit binary
   overrides, isolated configuration and Cinema controls remain available.
