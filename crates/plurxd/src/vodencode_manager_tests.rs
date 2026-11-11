@@ -270,6 +270,13 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             Err(reason) => reason,
             Ok(_) => panic!("unmeasured title reconstructed"),
         };
+        // Internally a deferred upgrade receives its exact pending
+        // continuation; ordinary delivery projects it to the explanation.
+        assert!(
+            crate::transcode::errors::pending_fel_qualification(&reason).is_some(),
+            "missing measurement must leave an exact pending continuation: {reason}"
+        );
+        let reason = crate::transcode::errors::ordinary_processing_decline(reason);
         assert!(
             reason.contains("quality measurement"),
             "missing measurement must be named: {reason}"
