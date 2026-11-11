@@ -3621,3 +3621,92 @@ async fn packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls() {
     );
     active.finish().await;
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tracked_raw_probe_retirement_survives_timeout_and_abandoned_collector() {
+    struct ReleaseWorker;
+    impl Drop for ReleaseWorker {
+        fn drop(&mut self) {
+            *COMPLETION_WORKER_RELEASE.0.lock().expect("worker gate") = true;
+            COMPLETION_WORKER_RELEASE.1.notify_all();
+        }
+    }
+    let root = crate::test_tempdir().expect("probe fixture");
+    let probe_path = root.path().join("static-ffprobe");
+    build_static_probe(&probe_path, 0);
+    let mut probe = DecodeProbeIdentity::discover(probe_path.to_str().expect("probe path"))
+        .await
+        .expect("actual production probe");
+    probe.launch_mode = ProbeLaunchMode::ProductionCompletionWorkerHeld;
+    COMPLETION_WORKER_STARTED.store(false, Ordering::Release);
+    COMPLETION_CLEANUP_STARTED.store(false, Ordering::Release);
+    *COMPLETION_WORKER_RELEASE.0.lock().expect("worker gate") = false;
+    let release_worker = ReleaseWorker;
+    let (_store, _job, active) = crate::background_jobs::tests::active().await;
+    let budget = active.fence().source_budget();
+    let mut original = tempfile::tempfile().expect("held original");
+    std::io::Write::write_all(&mut original, b"source").expect("real source bytes");
+    let source = Arc::new(original);
+    let operation = budget
+        .enroll_preparation(Arc::clone(&source))
+        .expect("audited operation");
+    let held = DecodeFactSource::new(
+        Arc::clone(&source),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        crate::process_control::ChildWork::background("tracked raw collector regression"),
+    )
+    .with_source_scope(None, Some(Arc::clone(&budget)));
+    let query = tokio::spawn(async move {
+        DecodeFactCache::new()
+            .get_or_probe(
+                &probe,
+                held,
+                None,
+                ProbeStreamSelection::LegacyVideoOrdinal(0),
+                Duration::from_millis(200),
+                None,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !COMPLETION_WORKER_STARTED.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("actual supervisor owns source-bearing child");
+    assert_eq!(budget.completion_observation(), Some((1, 1, false)));
+    // Abandon the caller while the existing owned collector handles deadline
+    // and actual child/worker cleanup. Its retirement guard must not disappear.
+    query.abort();
+    assert!(query.await.expect_err("abandoned waiter").is_cancelled());
+    drop((operation, source));
+    assert_eq!(
+        budget.completion_observation(),
+        Some((0, 1, false)),
+        "the detached collector still owns retirement"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !COMPLETION_CLEANUP_STARTED.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owned collector reaches actual deadline cleanup");
+    assert_eq!(
+        budget.completion_observation(),
+        Some((0, 1, false)),
+        "worker remains charged during deadline child reap"
+    );
+    drop(release_worker);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while budget.completion_observation().expect("completion owner").1 != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("explicit child reap and worker join retire the collector");
+    assert_eq!(budget.completion_observation(), Some((0, 0, false)));
+    active.finish().await;
+}

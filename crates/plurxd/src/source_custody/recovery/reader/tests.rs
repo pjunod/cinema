@@ -271,6 +271,7 @@ async fn reader_recovery_refuses_unarmed_unmediated_foreign_kernel_and_replaced_
     for mode in [
         "unarmed",
         "unmediated",
+        "declared_raw",
         "prepared_descriptor",
         "retry_descriptor",
         "foreign_kernel",
@@ -285,7 +286,7 @@ async fn reader_recovery_refuses_unarmed_unmediated_foreign_kernel_and_replaced_
             &record,
             if matches!(
                 mode,
-                "unmediated" | "prepared_descriptor" | "retry_descriptor"
+                "unmediated" | "declared_raw" | "prepared_descriptor" | "retry_descriptor"
             ) {
                 mode
             } else {
@@ -727,6 +728,22 @@ fn reader_process_fixture() {
                         "classification survives a successful reusable spawn too"
                     );
                 }
+                if config.mode == "declared_raw" {
+                    let Record::Background { token } = &config.record else {
+                        panic!("declared raw background owner");
+                    };
+                    let output = declared_background_spawn(token, || {
+                        plurx_core::process::output_job_owned_blocking(
+                            std::process::Command::new("/bin/cat").arg(&config.source),
+                            plurx_core::process::ChildWork::background(
+                                "declared raw crash fixture",
+                            ),
+                        )
+                    })
+                    .expect("actual declared raw helper");
+                    assert!(output.status.success());
+                    assert_eq!(output.stdout, vec![42; 4096]);
+                }
                 if config.mode == "unmediated" {
                     let output = plurx_core::process::output_job_owned_blocking(
                         std::process::Command::new("/bin/cat").arg(&config.source),
@@ -1027,4 +1044,305 @@ fn run_packet_probe(config: &Configuration) {
             serde_json::json!({"packets":[]})
         );
     });
+}
+
+/// A planning error calls `finish` while an enrolled blocking read, an original
+/// File clone and a declared raw child are still alive. Only the completion
+/// ledger may publish the joined proof, after each physically retires.
+/// Unenrolled jobs keep the explicit legacy join; a vetoed ledger never falls
+/// back to it.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn finish_during_blocked_enrolled_read_leaves_settlement_to_the_ledger() {
+    use std::sync::Arc;
+    fn held(fixture: &Fixture) -> i64 {
+        fixture
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM background_source_custody",
+                [],
+                |row| row.get(0),
+            )
+            .expect("custody count")
+    }
+    async fn started() -> (Fixture, crate::background_jobs::ActiveBackgroundJob) {
+        let fixture = Fixture::new();
+        super::super::configure_backend(&fixture.store, fixture.root.path(), true)
+            .expect("exact backend");
+        let (_, active) =
+            crate::background_jobs::tests::active_on(Arc::clone(&fixture.store)).await;
+        assert_eq!(held(&fixture), 1, "job owns its exact source custody");
+        (fixture, active)
+    }
+    fn original(fixture: &Fixture) -> Arc<std::fs::File> {
+        let path = fixture.root.path().join("actual-source");
+        std::fs::write(&path, vec![42; 4096]).expect("source");
+        Arc::new(std::fs::File::open(path).expect("open original"))
+    }
+    // The actor polls every 25ms; give it ample time to (wrongly) settle.
+    async fn quiet() {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // Unenrolled: the explicit finish is still the join.
+    let (fixture, active) = started().await;
+    active.finish().await;
+    assert_eq!(held(&fixture), 0, "legacy explicit join settles");
+
+    // Enrolled planning error: finish returns while the read is blocked.
+    let (fixture, active) = started().await;
+    let budget = active.fence().source_budget();
+    let source = original(&fixture);
+    let operation = budget
+        .enroll_preparation(Arc::clone(&source))
+        .expect("enrollment")
+        .expect("Linux completion ledger");
+    let retirement = budget
+        .raw_retirement()
+        .expect("registration")
+        .expect("declared raw child");
+    let surviving_original = Arc::clone(&source);
+    let (input, parked, gate) =
+        crate::source_input::SourceInput::completion_read_fixture(&source, &budget).await;
+    let url = input.url().to_owned();
+    let reading = tokio::spawn(async move {
+        match reqwest::get(url).await {
+            Ok(response) => response.bytes().await.map(|_| ()),
+            Err(error) => Err(error),
+        }
+    });
+    parked.await.expect("real blocking reader owns InputState");
+    // The planner gave up: its operation and handles are gone, the read is not.
+    drop((operation, source, input));
+    tokio::time::timeout(Duration::from_secs(5), active.finish())
+        .await
+        .expect("finish never waits on a blocked physical read");
+    quiet().await;
+    assert_eq!(held(&fixture), 1, "blocked read keeps custody after finish");
+    gate.release();
+    let _ = reading.await.expect("HTTP waiter joined");
+    quiet().await;
+    assert_eq!(
+        held(&fixture),
+        1,
+        "original File clone is a real capability"
+    );
+    drop(surviving_original);
+    quiet().await;
+    assert_eq!(held(&fixture), 1, "declared raw retirement is outstanding");
+    retirement.joined();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while held(&fixture) != 0 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("ledger settles after every physical retirement");
+
+    // A vetoed ledger owns settlement and refuses it; finish must not fall
+    // back to the legacy join.
+    let (fixture, active) = started().await;
+    let budget = active.fence().source_budget();
+    let operation = budget
+        .enroll_preparation(original(&fixture))
+        .expect("enrollment")
+        .expect("Linux completion ledger");
+    budget.untracked_source_capability();
+    drop(operation);
+    active.finish().await;
+    quiet().await;
+    assert_eq!(held(&fixture), 1, "unknown escape vetoes joined proof");
+}
+
+/// Real File/InputState/read-worker ownership, not recovery-anchor Arc counts.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn live_completion_waits_for_read_original_clones_and_explicit_raw_retirement() {
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+    async fn started() -> (
+        Fixture,
+        Record,
+        Arc<crate::background_jobs::SourceReadBudget>,
+        CancellationToken,
+        Arc<std::fs::File>,
+    ) {
+        let fixture = Fixture::new();
+        let record = fixture.background("analysis");
+        preread(&fixture, &record);
+        super::super::configure_backend(&fixture.store, fixture.root.path(), true)
+            .expect("exact backend");
+        let Record::Background { token } = &record else {
+            unreachable!()
+        };
+        crate::source_custody::activate_background_with_journal(&fixture.store, token.clone())
+            .await
+            .expect("active exact custody");
+        let cancel = CancellationToken::new();
+        let budget = crate::background_jobs::SourceReadBudget::with_completion(
+            Arc::clone(&fixture.store),
+            token,
+            cancel.clone(),
+            cancel.clone(),
+        );
+        let path = fixture.root.path().join("actual-source");
+        std::fs::write(&path, vec![42; 4096]).expect("source");
+        let source = Arc::new(std::fs::File::open(path).expect("open original"));
+        (fixture, record, budget, cancel, source)
+    }
+    async fn released(fixture: &Fixture, record: &Record) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while count(fixture, record) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("independent owner settles after all physical closures");
+    }
+    // Before enrollment cancellation cannot manufacture an empty-reader proof.
+    let (fixture, record, budget, cancel, source) = started().await;
+    cancel.cancel();
+    assert!(budget.enroll_preparation(Arc::clone(&source)).is_err());
+    assert!(budget.source_holder().is_err());
+    assert_eq!(count(&fixture, &record), 1);
+    drop((budget, source));
+
+    // The HTTP waiter may disappear while its blocking physical read remains.
+    let (fixture, record, budget, cancel, source) = started().await;
+    let operation = budget
+        .enroll_preparation(Arc::clone(&source))
+        .expect("enrollment");
+    let surviving_original = Arc::clone(&source);
+    let (input, parked, gate) =
+        crate::source_input::SourceInput::completion_read_fixture(&source, &budget).await;
+    let url = input.url().to_owned();
+    let reading = tokio::spawn(async move {
+        match reqwest::get(url).await {
+            Ok(response) => response.bytes().await.map(|_| ()),
+            Err(error) => Err(error),
+        }
+    });
+    parked.await.expect("real blocking reader owns InputState");
+    cancel.cancel();
+    drop(operation);
+    drop(source);
+    drop(input);
+    assert_eq!(count(&fixture, &record), 1, "live read must stay charged");
+    assert!(
+        budget.source_holder().is_err(),
+        "closed registration cannot add readers"
+    );
+    gate.release();
+    let _ = reading.await.expect("HTTP waiter joined");
+    assert_eq!(
+        count(&fixture, &record),
+        1,
+        "original Arc clone is a real capability"
+    );
+    drop(surviving_original);
+    released(&fixture, &record).await;
+
+    // Declared raw children still poison crash recovery. The LIVE actor needs
+    // the explicit child+worker retirement, never a guard Drop notification.
+    let (fixture, record, budget, cancel, source) = started().await;
+    let operation = budget
+        .enroll_preparation(Arc::clone(&source))
+        .expect("enrollment");
+    let retirement = budget
+        .raw_retirement()
+        .expect("registration")
+        .expect("tracked raw child");
+    let spawned = retirement
+        .spawn(|| {
+            crate::producer_spawn::spawn(
+                Path::new("/bin/sh"),
+                &["-c".into(), "dd bs=1 count=1 <&3 >/dev/null".into()],
+                crate::producer_spawn::SpawnOptions {
+                    runtime_cache: fixture.root.path(),
+                    progress: crate::producer_spawn::Progress::None,
+                    descriptors: crate::producer_spawn::Descriptors::from_files(
+                        Some(&source),
+                        None,
+                        None,
+                        false,
+                    ),
+                    env: &[],
+                    work: plurx_core::process::ChildWork::background(
+                        "declared raw retirement fixture",
+                    ),
+                },
+            )
+        })
+        .expect("real source-bearing child launch");
+    let output = joined_producer_output(spawned).await;
+    assert!(
+        output.status.success(),
+        "child consumed its real original FD"
+    );
+    // A separate actual source worker remains owned until explicit join.
+    let worker_source = source.try_clone().expect("declared worker descriptor");
+    let (worker_release, worker_wait) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        use std::os::unix::fs::FileExt;
+        worker_wait.recv().expect("worker release");
+        worker_source
+            .read_at(&mut [0; 1], 0)
+            .expect("physical source read");
+    });
+    let directory = fixture.dir.with_file_name("v2");
+    assert!(live_background_join_allowed(
+        &directory,
+        match &record {
+            Record::Background { token } => token,
+            _ => unreachable!(),
+        }
+    ));
+    replay_at(&fixture.store, &directory, &fixture.dir, NODE)
+        .await
+        .expect("invalidated replay remains conservative");
+    assert_eq!(count(&fixture, &record), 1);
+    cancel.cancel();
+    drop((operation, source));
+    assert_eq!(
+        count(&fixture, &record),
+        1,
+        "declared raw retirement is still outstanding"
+    );
+    worker_release.send(()).expect("release actual read worker");
+    worker.join().expect("actual source worker joined");
+    retirement.joined();
+    released(&fixture, &record).await;
+
+    // Unknown escape and dropped/unjoined declaration independently veto live
+    // proof. Neither can turn an invalidated restart record into joined proof.
+    for unknown in [false, true] {
+        let (fixture, record, budget, cancel, source) = started().await;
+        let operation = budget
+            .enroll_preparation(Arc::clone(&source))
+            .expect("enrollment");
+        let retirement = budget
+            .raw_retirement()
+            .expect("registration")
+            .expect("tracked raw child");
+        retirement
+            .spawn(|| observe_children(false))
+            .expect("declared raw launch");
+        if unknown {
+            observe_children(false).expect("unknown raw escape");
+            retirement.joined();
+        } else {
+            drop(retirement);
+        }
+        cancel.cancel();
+        drop((operation, source));
+        replay_at(
+            &fixture.store,
+            &fixture.dir.with_file_name("v2"),
+            &fixture.dir,
+            NODE,
+        )
+        .await
+        .expect("raw restart replay");
+        assert_eq!(count(&fixture, &record), 1);
+    }
 }

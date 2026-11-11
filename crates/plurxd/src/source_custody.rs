@@ -35,6 +35,19 @@ pub(crate) async fn replay_verified_recovery(
     recovery::replay(store, node).await
 }
 
+pub(crate) fn declared_background_spawn<T>(
+    receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+    spawn: impl FnOnce() -> T,
+) -> T {
+    recovery::declared_background_spawn(receipt, spawn)
+}
+pub(crate) fn live_background_join_allowed(
+    store: &Arc<dyn Store>,
+    receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) -> bool {
+    recovery::live_background_join_allowed(store, receipt)
+}
+
 const LEASE_MS: i64 = 30_000;
 pub(crate) const SERVICE_EPOCH_MS: i64 = 5_000;
 pub(crate) const BACKGROUND_QUANTUM: u64 = 1_048_576;

@@ -13,6 +13,25 @@ mod physical_stop;
 mod reader;
 pub(super) use reader::Witness;
 
+pub(super) fn declared_background_spawn<T>(
+    receipt: &BackgroundSourceCustodyToken,
+    spawn: impl FnOnce() -> T,
+) -> T {
+    reader::declared_background_spawn(receipt, spawn)
+}
+pub(super) fn live_background_join_allowed(
+    store: &Arc<dyn Store>,
+    receipt: &BackgroundSourceCustodyToken,
+) -> bool {
+    context_snapshot(store)
+        .ok()
+        .flatten()
+        .filter(|context| context.authoritative)
+        .is_some_and(|context| {
+            reader::live_background_join_allowed(&context.dir.with_file_name("v2"), receipt)
+        })
+}
+
 const MAX_BYTES: u64 = 1_048_576;
 const MAX_RECORDS: usize = 128;
 const MAX_FILES: usize = 4096;

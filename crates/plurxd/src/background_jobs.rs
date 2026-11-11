@@ -34,7 +34,9 @@ pub(crate) use metrics::{accepted_claims, prometheus};
 pub(crate) mod analysis_reconcile;
 #[path = "background_jobs/source.rs"]
 mod source;
-pub(crate) use source::{budgeted, source_budget, SourcePacingClock, SourceReadBudget};
+pub(crate) use source::{
+    budgeted, source_budget, RawRetirement, SourceHolder, SourcePacingClock, SourceReadBudget,
+};
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
 
@@ -269,6 +271,9 @@ struct Inner {
     source_custody:
         Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
     source_budget: Arc<SourceReadBudget>,
+    /// Opened only by `finish` after retirement; authorizes the live
+    /// completion ledger. Drop never opens it.
+    settle: CancellationToken,
 }
 
 #[derive(Clone)]
@@ -598,13 +603,16 @@ impl ActiveBackgroundJob {
             }
         }
         let lost = CancellationToken::new();
-        let source_budget = SourceReadBudget::new(
-            Arc::clone(&store),
-            plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job {
-                token: token.clone(),
-            },
-            lost.clone(),
-        );
+        let settle = CancellationToken::new();
+        let source_budget = match &source_custody {
+            Some(receipt) => SourceReadBudget::with_completion(
+                Arc::clone(&store),
+                receipt,
+                lost.clone(),
+                settle.clone(),
+            ),
+            None => SourceReadBudget::new(Arc::clone(&store), owner, lost.clone()),
+        };
         let (deadline, _) = watch::channel(deadline);
         let fence = JobFence(Arc::new(Inner {
             kind,
@@ -620,6 +628,7 @@ impl ActiveBackgroundJob {
             copy_output_completed: AtomicBool::new(false),
             source_custody,
             source_budget,
+            settle,
         }));
         let stop = CancellationToken::new();
         let heartbeat_stop = stop.clone();
@@ -690,7 +699,16 @@ impl ActiveBackgroundJob {
             tracing::warn!(%error, "background retirement remains ambiguous");
         }
         if let Some(custody) = self.fence.0.source_custody.clone() {
-            settle_joined_source_custody(&self.fence.0.store, custody).await;
+            // `lost` is cancelled above, so enrollment is closed. An enrolled
+            // producer's File clones, InputState holders and declared raw
+            // children may outlive this call (a planning error can return while
+            // a blocking read still runs); only the ledger may publish the
+            // joined proof, after they physically retire.
+            if self.fence.0.source_budget.completion_owns_settlement() {
+                self.fence.0.settle.cancel();
+            } else {
+                settle_joined_source_custody(&self.fence.0.store, custody).await;
+            }
         }
         metrics::execution(self.fence.0.kind, self.fence.0.started.elapsed());
     }
@@ -3526,6 +3544,22 @@ pub(crate) mod tests {
         authority: Arc<dyn ClusterJobAuthority>,
     ) -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let (id, active) = claimed_on(Arc::clone(&store), local_deadline, authority).await;
+        (store, id, active)
+    }
+
+    /// A real claimed job on a caller-configured Store (e.g. one whose exact
+    /// source-custody backend is enabled).
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn active_on(store: Arc<dyn Store>) -> (String, ActiveBackgroundJob) {
+        claimed_on(store, None, Arc::new(UnclusteredJobAuthority)).await
+    }
+
+    async fn claimed_on(
+        store: Arc<dyn Store>,
+        local_deadline: Option<Duration>,
+        authority: Arc<dyn ClusterJobAuthority>,
+    ) -> (String, ActiveBackgroundJob) {
         let library = store
             .create_library(&plurx_core::domain::NewLibrary {
                 name: "worker fault fixture".into(),
@@ -3618,7 +3652,7 @@ pub(crate) mod tests {
         )
         .await
         .expect("start");
-        (store, id, active)
+        (id, active)
     }
 
     struct ArtifactAuthority(std::sync::atomic::AtomicBool);

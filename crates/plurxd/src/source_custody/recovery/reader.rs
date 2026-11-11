@@ -37,6 +37,7 @@ pub(crate) struct Witness {
     #[cfg(unix)]
     anchor_ctime: (i64, i64),
     disqualified: Mutex<bool>,
+    unknown_escape: std::sync::atomic::AtomicBool,
 }
 
 impl Witness {
@@ -61,7 +62,11 @@ impl Witness {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn observe_child(&self, mediated: bool) -> std::io::Result<()> {
+    fn observe_launch(&self, mediated: bool, declared: bool) -> std::io::Result<()> {
+        if !mediated && !declared {
+            self.unknown_escape
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         if mediated {
             return Ok(());
         }
@@ -260,6 +265,7 @@ pub(super) fn prepare_at(
             _anchor: anchor,
             anchor_ctime: anchor_ctime(&metadata),
             disqualified: Mutex::new(false),
+            unknown_escape: std::sync::atomic::AtomicBool::new(false),
         });
         owned.insert(path, Arc::clone(&witness));
         Ok(Some(witness))
@@ -342,6 +348,46 @@ fn read_private_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, S
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
+thread_local! { static DECLARED_RAW: std::cell::RefCell<Option<BackgroundSourceCustodyToken>> = const { std::cell::RefCell::new(None) }; }
+
+pub(super) fn declared_background_spawn<T>(
+    receipt: &BackgroundSourceCustodyToken,
+    spawn: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<BackgroundSourceCustodyToken>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DECLARED_RAW.with(|value| {
+                value.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(DECLARED_RAW.with(|value| value.replace(Some(receipt.clone()))));
+    spawn()
+}
+
+pub(super) fn live_background_join_allowed(
+    directory: &Path,
+    receipt: &BackgroundSourceCustodyToken,
+) -> bool {
+    let record = Record::Background {
+        token: receipt.clone(),
+    };
+    let Ok(name) = record.name() else {
+        return false;
+    };
+    OWNED
+        .lock()
+        .ok()
+        .and_then(|owned| owned.get(&directory.join(name)).cloned())
+        .is_some_and(|witness| {
+            witness.record.same_owner(&record)
+                && !witness
+                    .unknown_escape
+                    .load(std::sync::atomic::Ordering::Acquire)
+        })
+}
+
 pub(super) fn observe_children(mediated: bool) -> std::io::Result<()> {
     if mediated {
         return Ok(());
@@ -353,7 +399,16 @@ pub(super) fn observe_children(mediated: bool) -> std::io::Result<()> {
         .cloned()
         .collect();
     for witness in witnesses {
-        witness.observe_child(false)?;
+        let declared = DECLARED_RAW.with(|value| {
+            value.borrow().as_ref().is_some_and(|receipt| {
+                witness.record.same_owner(&Record::Background {
+                    token: receipt.clone(),
+                })
+            })
+        });
+        // Declared raw children STILL invalidate the durable anchor. Only the
+        // in-memory exact-owner ledger can later prove their explicit joins.
+        witness.observe_launch(false, declared)?;
     }
     Ok(())
 }

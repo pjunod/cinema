@@ -823,6 +823,7 @@ paths = [
   "crates/plurxd/src/cache_preparation.rs",
   "crates/plurxd/src/background_jobs.rs",
   "crates/plurxd/src/background_jobs/source.rs",
+  "crates/plurxd/src/background_jobs/source/completion.rs",
   "crates/plurxd/src/background_jobs/analysis_reconcile.rs",
   "crates/plurxd/src/source_custody.rs",
   "crates/plurxd/src/source_custody/**",
