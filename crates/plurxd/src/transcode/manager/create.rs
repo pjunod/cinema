@@ -1687,7 +1687,11 @@ impl TranscodeManager {
 
     /// Recheck the actual helper/encoder identity before a pending receipt is
     /// consumed. A receipt for an old deployment never arms a new measurement.
-    pub(crate) async fn pending_fel_backend_current(&self, wait: &PendingFelQualification) -> bool {
+    pub(crate) async fn pending_fel_backend_current(
+        &self,
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+        wait: &PendingFelQualification,
+    ) -> bool {
         #[cfg(target_os = "linux")]
         {
             let Ok(Some(tools)) = crate::vodencode::dv_runtime::ToolSet::capture().await else {
@@ -1699,7 +1703,6 @@ impl TranscodeManager {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = wait;
             false
         }
     }

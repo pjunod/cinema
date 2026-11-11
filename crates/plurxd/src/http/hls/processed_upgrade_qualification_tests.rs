@@ -1,7 +1,7 @@
 use super::*;
 use plurx_core::transcode::dv_fel_qualification as q;
 
-pub(in crate::http::hls) fn fixture_wait(
+pub(in crate::http::hls) fn pending_qualification_fixture(
     file_id: i64,
     size: i64,
     mtime: i64,
@@ -56,7 +56,7 @@ fn awaiting(user: i64) -> (String, String, String) {
     assert!(retain(
         &intent,
         &run,
-        fixture_wait(7, 1, 1, 0, "metadata:1")
+        pending_qualification_fixture(7, 1, 1, 0, "metadata:1")
     ));
     drop(run);
     (playback, session, generation)
@@ -78,7 +78,7 @@ fn document(wait: &PendingFelQualification, admitted: bool) -> String {
 
 #[test]
 fn only_an_exact_pending_token_can_arm_a_continuation() {
-    let wait = fixture_wait(7, 1, 1, 0, "metadata:1");
+    let wait = pending_qualification_fixture(7, 1, 1, 0, "metadata:1");
     let encoded = crate::transcode::pending_fel_qualification_error(wait.clone());
     let decoded = crate::transcode::pending_fel_qualification(&encoded).expect("typed token");
     assert!(decoded.matches(7, 0, "metadata:1", &wait.request));
@@ -97,7 +97,7 @@ fn only_an_exact_pending_token_can_arm_a_continuation() {
 
 #[test]
 fn a_new_exact_receipt_can_resume_but_rejected_foreign_or_stale_receipts_cannot() {
-    let wait = fixture_wait(7, 1, 1, 0, "metadata:1");
+    let wait = pending_qualification_fixture(7, 1, 1, 0, "metadata:1");
     assert!(matches!(
         exact_receipt(&wait, 1, 1, 0, None),
         Receipt::Missing

@@ -28,7 +28,7 @@ mod qualification;
 pub(super) use qualification::exercise_check;
 pub(super) use qualification::note_accepted_control;
 #[cfg(test)]
-pub(super) use qualification::tests::fixture_wait as pending_qualification_fixture;
+pub(super) use qualification::tests::pending_qualification_fixture;
 
 /// How long an intent waits for its first frame. A start whose picture has
 /// not appeared by then is not one an upgrade should be spent on; the entry is
