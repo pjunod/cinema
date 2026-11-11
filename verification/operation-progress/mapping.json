@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "3f2adf8c778287f329829ef3d5ce8758229cac4965c2463a6b2159df0fdac959"
+        "sha256": "e3f6f473298bf833c422af29ad2f4268f9fee22829880192ec43c4cf8d8534e9"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "3f2adf8c778287f329829ef3d5ce8758229cac4965c2463a6b2159df0fdac959"
+        "sha256": "e3f6f473298bf833c422af29ad2f4268f9fee22829880192ec43c4cf8d8534e9"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "3f2adf8c778287f329829ef3d5ce8758229cac4965c2463a6b2159df0fdac959"
+        "sha256": "e3f6f473298bf833c422af29ad2f4268f9fee22829880192ec43c4cf8d8534e9"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -165,7 +165,7 @@
         "table": "27 vendor serial SQLite transaction",
         "source": "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs",
         "anchor": "Query::Transaction(req) => {",
-        "sha256": "1ab742f0eb9354d5a83d83a526f7d76184e7e94dbd421b44a11639d451b21440"
+        "sha256": "f8a650550c2f8c8fb35d642b903d97cf01fb3f71e3a3ded454c4b217f67ccd73"
       },
       {
         "table": "28 library completion conditional update",
@@ -201,7 +201,7 @@
         "table": "33 local raft metrics authority",
         "source": "vendor/hiqlite/src/client/mgmt.rs",
         "anchor": "pub async fn metrics_db(&self) -> Result<RaftMetrics<NodeId, Node>, Error> {",
-        "sha256": "57692b5030198b18825d7be9c9641dfb2f9e353cdafd22a9ea6673c5a2a16298"
+        "sha256": "5e78ddcbe108eb1a1f4f27b2d23d51f4a360d899307df5deb69a84951a706178"
       },
       {
         "table": "34 scanner page capacity",
@@ -255,19 +255,19 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "8c38ad39d15d28b28e0d307a2b8ab67245c048844ddc2ea0b71ea62d76cb3ff2"
+        "sha256": "9063667cbd68ece243c3853b8a94c7701bfdf9a995fc2a80a561d7d9cb2719ee"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "8c38ad39d15d28b28e0d307a2b8ab67245c048844ddc2ea0b71ea62d76cb3ff2"
+        "sha256": "9063667cbd68ece243c3853b8a94c7701bfdf9a995fc2a80a561d7d9cb2719ee"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "bf80d42087d763f8ec46f18a365f4837caed2ac6e3d81ea5511899a5f25864fc"
+        "sha256": "cffdf625602c84f4d8899c10008ed574f8dab9398e66c20cc68f5755eda46811"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
