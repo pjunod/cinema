@@ -32,6 +32,13 @@ requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
 command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b -- --ignored --exact --nocapture"
 
 [[fixtures]]
+test = "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_caption_busy_preserves_same_native_session"
+owner = "sharing"
+reason = "Pinned B and Source voters must exercise real Native-caption 429 and 422 responses and recover the same session; this operator fixture requires an isolated Linux CGNAT namespace."
+requires = "Linux disposable CGNAT namespace with 100.127.89.2 assigned; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::sharing_receiver_real_pinned_caption_busy_preserves_same_native_session -- --ignored --exact --nocapture"
+
+[[fixtures]]
 test = "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_and_logs_one_stage"
 owner = "sharing"
 reason = "Real B and Source voters, pinned TLS and an actual held FFmpeg scan verify abandoned Start settlement and one terminal stage; they require an isolated Linux CGNAT namespace."

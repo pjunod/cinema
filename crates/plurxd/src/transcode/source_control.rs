@@ -9,8 +9,8 @@ use crate::playback_control::{
 #[allow(dead_code)] // Source HTTP control transport follows actual actor qualification.
 pub(crate) struct SourceOpenedControl {
     result: Result<LocalControlResult, ControlStateError>,
-    guard: SourceResponseGuard,
-    subtitle_revision: Option<String>,
+    guard: Arc<SourceResponseGuard>,
+    subtitle: Option<(crate::playback_control::SubtitleTrackCache, Option<String>)>,
     projection: Box<(
         MediaSessionRoute,
         crate::http::hls::StartResponse,
@@ -23,7 +23,7 @@ impl SourceOpenedControl {
         request: &ControlRequestV1,
     ) -> (
         Result<crate::playback_control::ControlResponseV1, ControlStateError>,
-        SourceResponseGuard,
+        Arc<SourceResponseGuard>,
     ) {
         let (route, start, recipe) = *self.projection;
         let response = self.result.map(|result| {
@@ -35,9 +35,13 @@ impl SourceOpenedControl {
                 &result,
                 crate::media_sessions::unix_ms(),
             );
-            if let Some(revision) = self.subtitle_revision {
-                response.delivery.subtitle_readiness = Some("ready".into());
-                response.delivery.subtitle_revision = Some(revision);
+            if let Some((cache, revision)) = self.subtitle {
+                response.delivery.subtitle_readiness =
+                    crate::playback_control::subtitle_readiness_value(
+                        &request.selection.subtitle,
+                        Some(cache),
+                    );
+                response.delivery.subtitle_revision = revision;
             }
             response
         });
@@ -48,7 +52,7 @@ impl SourceOpenedControl {
         self,
     ) -> (
         Result<LocalControlResult, ControlStateError>,
-        SourceResponseGuard,
+        Arc<SourceResponseGuard>,
     ) {
         (self.result, self.guard)
     }
@@ -289,23 +293,89 @@ impl SourceViewerActor {
             .await
             .ok_or(SourceWorkerError::Unavailable)?;
         drop(authority);
-        let subtitle_revision = {
-            let state = self.0.state.lock().expect("Source native control");
-            match (
-                request.selection.subtitle.mode,
-                request.selection.subtitle.track,
-                state.native.as_ref(),
-            ) {
-                (crate::playback_control::SubtitleMode::Native, Some(index), Some(tracks)) => {
-                    u16::try_from(index)
-                        .ok()
-                        .and_then(|index| tracks.revision(index))
-                }
-                _ => None,
+        // This HTTP control already runs in its detached owned factory. A
+        // selected native demand uses that same counted guard while its actual
+        // window readers and children settle; polling an unselected track does
+        // no physical work.
+        let native = self
+            .0
+            .state
+            .lock()
+            .expect("Source native control")
+            .native
+            .clone();
+        let guard = Arc::new(guard);
+        let custody = resource::SourceResourceReadCustody::new(
+            Arc::clone(&guard),
+            Arc::clone(&self.0.resource_hooks),
+        );
+        let subtitle = match (
+            request.selection.subtitle.mode,
+            request.selection.subtitle.track,
+            native,
+        ) {
+            (crate::playback_control::SubtitleMode::Native, Some(index), Some(tracks)) => {
+                use crate::playback_control::SubtitleTrackCache as Cache;
+                let demand = request.seek_target_ms.unwrap_or(request.position_ms).max(0) / 1_000;
+                let reserve = Duration::from_millis(250);
+                let observe_until = deadline
+                    .checked_sub(reserve)
+                    .unwrap_or(deadline)
+                    .min(Instant::now() + Duration::from_millis(100));
+                Some(match u16::try_from(index) {
+                    Ok(index) if Instant::now() < observe_until => {
+                        let span = tokio::time::timeout_at(
+                            observe_until.into(),
+                            super::super::source_subtitles::SourceNativeTracks::window_seconds(
+                                &manager,
+                            ),
+                        )
+                        .await;
+                        match span {
+                            Ok(span) => {
+                                let readiness = tracks.readiness(index, demand, span, &custody);
+                                if result.is_err() || readiness.0 != Cache::Warming {
+                                    readiness
+                                } else {
+                                    let work = self.start_native_window_work(
+                                        Arc::clone(&tracks),
+                                        Arc::clone(&manager),
+                                        index,
+                                        demand,
+                                        span,
+                                        custody.clone(),
+                                        deadline,
+                                    );
+                                    match tokio::time::timeout_at(observe_until.into(), work).await
+                                    {
+                                        Ok(Ok(Ok(_))) => {
+                                            tracks.readiness(index, demand, span, &custody)
+                                        }
+                                        Ok(Ok(Err(SourceWorkerError::Unsupported))) => {
+                                            (Cache::Unavailable, None)
+                                        }
+                                        Ok(Ok(Err(
+                                            SourceWorkerError::Capacity
+                                            | SourceWorkerError::Deadline,
+                                        ))) => (Cache::Warming, None),
+                                        Ok(Ok(Err(error))) => return Err(error),
+                                        Ok(Err(_)) => return Err(SourceWorkerError::Unavailable),
+                                        Err(_) => tracks.readiness(index, demand, span, &custody),
+                                    }
+                                }
+                            }
+                            Err(_) => (Cache::Warming, None),
+                        }
+                    }
+                    Ok(_) => (Cache::Warming, None),
+                    Err(_) => (Cache::Unavailable, None),
+                })
             }
+            _ => None,
         };
+        drop(custody);
         Ok(SourceOpenedControl {
-            subtitle_revision,
+            subtitle,
             result,
             guard,
             projection: Box::new((route, current_response, recipe)),
