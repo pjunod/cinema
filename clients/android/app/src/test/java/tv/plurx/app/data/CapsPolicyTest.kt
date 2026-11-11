@@ -59,6 +59,30 @@ class CapsPolicyTest {
     }
 
     @Test
+    fun performancePointsBoundTheDecoderEnvelopeRate() {
+        // Google TV Streamer (c2.mtk.hevc.decoder): HEVC L5.1 alone allows
+        // 64.47 fps at 3840x2160, but the vendor declares one performance point,
+        // 3840x2160@60. Media3 refuses 64 there, so the envelope must stop at 60
+        // or the hvc1 probe (which asks Media3 at the envelope's maximum) fails.
+        val mtk = performancePointCeiling(declared = true) { rate -> rate <= 60 }
+        assertEquals(60.0, mtk, 0.0)
+        assertEquals(60.0, minOf(32237.0 / 500.0, mtk), 0.0)
+        assertEquals(Double.POSITIVE_INFINITY, performancePointCeiling(declared = false) { false }, 0.0)
+        assertEquals(0.0, performancePointCeiling(declared = true) { false }, 0.0)
+        assertEquals(1000.0, performancePointCeiling(declared = true) { true }, 0.0)
+    }
+
+    @Test
+    fun decoderEnvelopeRateIntersectsPerformancePointsAtTheCallSite() {
+        val source = java.io.File("src/main/java/tv/plurx/app/data/Caps.kt").readText()
+        val envelope = source.substringAfter("val upper = minOf(").substringBefore(")\n")
+        assertTrue(envelope, envelope.contains("performancePointRateCeiling(video, size.first, size.second)"))
+        val probe = source.substringAfter("private fun hlsHevcSampleEntries(").substringBefore("private fun ")
+        assertTrue(probe.contains("val rate = entry.maxFrameRate"))
+        assertTrue(probe.contains(".setFrameRate(rate.numerator.toFloat() / rate.denominator)"))
+    }
+
+    @Test
     fun hlsHevcKeepsMeasuredEnvelopeWhenDisplayAwareAutoIsOff() {
         fun document(entries: List<VideoDecoderLimit>, claim: List<String>) = capsDocument(
             videoCodecCaps(entries), listOf("aac"), emptySet(), emptyList(),

@@ -302,13 +302,19 @@ object Caps {
                         } ?: return@levelLoop
                         // Unlike a successful query at one cadence, the platform
                         // ranges supply an advertised maximum for this rectangle.
-                        // Intersect the component and profile-level envelopes, then
-                        // round downward to a rational and verify that exact tuple.
+                        // Intersect the component and profile-level envelopes and
+                        // the vendor's declared performance points, then round
+                        // downward to a rational and verify that exact tuple.
+                        // The level range alone is theoretical (HEVC L5.1 gives
+                        // 64.47 fps at 2160p); Media3's decoder selector refuses
+                        // any rate the performance points do not cover, so an
+                        // envelope above them is one this app cannot play.
                         val rate = if (profile != null && profileVideo != null) {
                             runCatching {
                                 val upper = minOf(
                                     video.getSupportedFrameRatesFor(size.first, size.second).upper,
                                     profileVideo.getSupportedFrameRatesFor(size.first, size.second).upper,
+                                    performancePointRateCeiling(video, size.first, size.second),
                                 )
                                 if (!upper.isFinite() || upper <= 0.0 || upper > 1000.0) {
                                     null
@@ -332,6 +338,24 @@ object Caps {
                 }
             }
         }
+
+    /**
+     * The highest frame rate the decoder's declared performance points cover
+     * at this rectangle, by the same rule Media3's decoder selector applies
+     * (`PerformancePoint(width, height, rate.toInt())` must be covered). No
+     * declared points, or an API below 29, leaves the platform ranges alone.
+     */
+    private fun performancePointRateCeiling(
+        video: MediaCodecInfo.VideoCapabilities,
+        width: Int,
+        height: Int,
+    ): Double {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return Double.POSITIVE_INFINITY
+        val points = video.supportedPerformancePoints
+        return performancePointCeiling(!points.isNullOrEmpty()) { rate ->
+            points!!.any { it.covers(MediaCodecInfo.VideoCapabilities.PerformancePoint(width, height, rate)) }
+        }
+    }
 
     /** Unmapped profiles remain absent instead of becoming a blanket main claim. */
     private fun videoProfileName(codec: String, profile: Int): String? = when (codec) {
