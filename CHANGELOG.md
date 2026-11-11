@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- CM4 display mapping evaluates the ST 2084 transfer functions in its point and
+  final passes with precise split-float helpers and the normative black and
+  white endpoints. On the measured Source16 frame no enhanced pixel is farther
+  from the licensed reference than the unenhanced picture; before, three were.
 - Preparation demand reads Local viewers on both admitted session layouts,
   without requiring the optional principal-rebuild column or admitting Shared viewers.
 - Subtitle extraction and durable self-claim futures use heap storage at their

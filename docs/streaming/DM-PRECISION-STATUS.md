@@ -4,6 +4,10 @@
 **Branch:** `codex/cm29-residual-dm-parity` · **PR:** #1284 (authoritative landing state)
 
 Companion to the [display-target build ledger](DISPLAY-TARGETED-DV-BUILD.md).
+The 2026-11-11 CM4 normative ST 2084 helpers (split-float PQ, analytical
+black, exact white) and their native fidelity results are tracked in the
+[processing ledger](DV_HDR_PROCESSING_STATUS.md); this page's legacy `pq_*`
+repair still serves CM v2.9, lattice and horizontal passes.
 This page tracks the shader precision repair and the separate near-black
 model experiment handed off on 2026-10-25. It records measured scope;
 physical display acceptance remains in the build ledger.
