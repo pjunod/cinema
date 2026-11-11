@@ -1347,11 +1347,11 @@ fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
     if let Some(document) = value.as_object_mut() {
         // Application-owned measurements are grafted after the scan. A fresh
         // probe never carries them; their presence says nothing about whether
-        // the source bytes changed. Keep all FFprobe-owned fields comparable.
-        document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
-        document.remove(plurx_core::store::CONTENT_ENCODING_PROBE_KEY);
-        document.remove(plurx_core::scan::dv_title::PROBE_FIELD);
-        document.remove(plurx_core::transcode::dv_fel_qualification::PROBE_KEY);
+        // the source bytes changed. They are excluded by their namespace, not
+        // by a list: a list missed `plurx_dv_fel_requests_v3` (#1477), and every
+        // title with a pending FEL request then failed held-source
+        // verification. Keep all FFprobe-owned fields comparable.
+        document.retain(|key, _| !plurx_core::scan::probe::is_application_graft(key));
     }
     if let Some(format) = value
         .get_mut("format")

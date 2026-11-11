@@ -120,6 +120,22 @@ fn probe_invocation(path: &Path) -> ProbeInvocation {
 /// never a wildcard that matches one.
 pub const REPORTER_FIELD: &str = "plurx_probe_reporter";
 
+/// Every field the application grafts onto a stored FFprobe document after
+/// the scan (parameter-set census, content encoding, Dolby Vision title and
+/// FEL facts, pending FEL requests, the reporter stamp) is named under this
+/// prefix, and FFprobe itself never emits a key that starts with it. A key is
+/// an application field by its name, so a new graft is excluded from the
+/// source-identity comparison without anyone having to list it.
+pub const APPLICATION_FIELD_PREFIX: &str = "plurx_";
+
+/// Whether a root key of a stored probe is application metadata rather than
+/// an FFprobe measurement of the source. The reporter stamp is application
+/// metadata too, but the comparison reads it to tell two builds apart, so it
+/// is the one application field a comparison keeps.
+pub fn is_application_graft(key: &str) -> bool {
+    key.starts_with(APPLICATION_FIELD_PREFIX) && key != REPORTER_FIELD
+}
+
 /// A reporter name longer than this is truncated. The string comes from an
 /// external executable and is stored on every file row.
 const REPORTER_MAX_CHARS: usize = 160;
