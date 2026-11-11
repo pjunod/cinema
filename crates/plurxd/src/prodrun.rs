@@ -900,7 +900,7 @@ mod tests {
             writers.settled();
             let receipt = registration.wait_confirmed_reap().await;
             assert_eq!(receipt.exit_success(), code == 0);
-            assert_eq!(receipt.exit_status().code(), Some(code));
+            assert_eq!(receipt.exit_status.code(), Some(code));
         }
     }
     #[tokio::test]
