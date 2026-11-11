@@ -1,17 +1,8 @@
 name: Task-only DV GPU qualification
-# Temporary source-archive proof; remove this workflow and helper before final PR.
+# Temporary: builds the exact daemon test ELF for GPU qualification and runs
+# the task's named regressions once. Remove before the final PR merges.
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/dv-gpu-qualification]
-    paths:
-      - .github/workflows/dv-gpu-qualification.yml
-      - scripts/dv-qualification-unit
-      - crates/**
-      - tools/dv_processing/**
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
 permissions:
   contents: read
 concurrency:
@@ -19,58 +10,109 @@ concurrency:
   cancel-in-progress: false
 jobs:
   native:
-    if: github.ref == 'refs/heads/codex/dv-gpu-qualification'
     runs-on: [ci-nonvoter-heavy-amd64]
-    timeout-minutes: 120
     container:
       image: ubuntu:24.04
-      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096 --cgroup-parent plurx-heavy.slice --cgroupns host
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
-        - /sys/fs/cgroup/plurx.slice/plurx-heavy.slice:/aggregate:ro
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      MALLOC_ARENA_MAX: "1"
     steps:
-      - name: Verify effective capacity-one nonvoter bounds
+      - name: Verify effective nonvoter resource bounds
         shell: sh
         run: |
           set -eu
           IFS=: read -r hierarchy controllers relative < /proc/self/cgroup
-          test "$hierarchy" = 0 && test -z "$controllers"
-          case "$relative" in /plurx.slice/plurx-heavy.slice/*) ;; *) exit 1 ;; esac
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
-          cgroup_root="/sys/fs/cgroup$relative"
-          test "$(stat -c %d:%i /aggregate)" = "$(stat -c %d:%i /sys/fs/cgroup/plurx.slice/plurx-heavy.slice)"
-          awk '$5 == "/aggregate" && $6 ~ /(^|,)ro(,|$)/ { found=1 } END { exit !found }' /proc/self/mountinfo
           for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
-            name=${limit%%=*}
-            expected=${limit#*=}
-            test "$(cat "/aggregate/$name")" = "$expected"
-            actual="$(cat "$cgroup_root/$name")"
-            test "$actual" = "$expected" || { printf '%s\n' "Unexpected $name: $actual (required $expected)" >&2; exit 1; }
+            name=${limit%%=*}; expected=${limit#*=}
+            actual="$(cat "/sys/fs/cgroup$relative/$name")"
+            [ "$actual" = "$expected" ] || { echo "Unexpected $name: $actual (required $expected)" >&2; exit 1; }
           done
-      - name: Install parent client and pinned checkout runtime
-        shell: sh
+      - name: Install prerequisites
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           apt-get -o Acquire::Retries=3 update
-          apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates curl docker.io git python3 xz-utils
-          node_dir="$(mktemp -d)"
-          trap 'rm -rf "$node_dir"' EXIT
-          curl --fail --silent --show-error --location --retry 3 https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz -o "$node_dir/node.tar.xz"
-          echo "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce  $node_dir/node.tar.xz" | sha256sum --check --strict
-          tar -xJf "$node_dir/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
-          node --version | grep -Fx v22.23.4
-          docker version
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
+            libgtk-4-dev libdbus-1-dev make nasm ninja-build xz-utils pkg-config python3
+          node_tmp="$(mktemp -d)"; trap 'rm -rf "$node_tmp"' EXIT
+          curl --fail --silent --show-error --location --retry 3 \
+            https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz -o "$node_tmp/node.tar.xz"
+          echo "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce  $node_tmp/node.tar.xz" | sha256sum --check --strict
+          tar -xJf "$node_tmp/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
+          node --version | grep -Fx 'v22.23.4'
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Compile full daemon unit binary and execute focused regressions
-        run: python3 scripts/dv-qualification-unit parent
-      - name: Stop owned compiler and collect immutable output before upload
-        if: always()
-        run: python3 scripts/dv-qualification-unit collect
-      - name: Retain exact source, native ELF, receipts and failure logs
-        id: retained
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "6"
+      - name: Restore the task Cargo cache
+        id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: dv-gpu-qualification
+      - name: Build the daemon test ELF and run the named regressions once
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/dv-gpu-qualification"; mkdir -p "$out"
+          export PLURX_BUILD_SHA="$GITHUB_SHA"
+          rustc --version | tee "$out/rustc.txt" | grep -F '1.97.1'
+          cargo test --locked -j1 -p plurxd --bin plurxd --no-run --message-format=json-render-diagnostics > "$out/build.json"
+          elf="$(python3 .github/dv-elf.py "$out/build.json")"
+          cp "$elf" "$out/plurxd-tests"; sha256sum "$out/plurxd-tests" | tee "$out/plurxd-tests.sha256"
+          rm -f "$out/build.json"
+          failed=0
+          while read -r name; do
+            [ -n "$name" ] || continue
+            if "$out/plurxd-tests" "$name" --test-threads=1 > "$out/test-$name.log" 2>&1; then
+              grep -E '^test result:' "$out/test-$name.log" | sed "s/^/$name: /"
+              grep -qE 'test result: ok\. [1-9]' "$out/test-$name.log" || { echo "$name: matched no test" >&2; failed=1; }
+            else
+              echo "$name: FAILED" >&2; tail -40 "$out/test-$name.log" >&2; failed=1
+            fi
+          done <<'NAMES'
+          intel_and_nvidia_windows_use_the_actual_production_encoder_without_amd_flags
+          intel_and_nvidia_qualification_resolve_the_same_saved_completed_encoder
+          a_skipped_upgrade_explains_only_its_own_generation_until_release_or_replacement
+          public_skip_report_requires_current_generation_and_bounded_owner_text
+          skipped_processing_owner_reason_survives_relay_only_for_its_generation
+          the_window_encode_is_the_routes_recipe
+          a_busy_reduced_recipe_remains_pending_then_executes_its_exact_output
+          a_foreign_backend_recipe_request_stays_pending_without_measurement
+          qualification_source_reader_graph_is_busy_at_eight_threads_and_admitted_at_nine
+          a_failed_trial_leaves_the_predecessors_route_and_actor_untouched
+          a_qualification_inside_its_title_job_is_not_preempted_by_itself_and_stores_its_verdict
+          brokered_cache_parts_keep_reader_recovery_but_raw_fallbacks_remain_fenced
+          only_an_exact_pending_token_can_arm_a_continuation
+          a_new_exact_receipt_can_resume_but_rejected_foreign_or_stale_receipts_cannot
+          duplicate_control_events_claim_one_check_and_keep_the_truthful_reason
+          release_changed_selection_and_expiry_cannot_revive_an_old_waiter
+          a_qualified_retry_keeps_auto_original_and_manual_as_the_user_actually_selected
+          refreshed_auto_candidate_identity_is_not_a_new_user_quality_choice
+          a_late_qualification_resumes_once_with_fresh_authority_and_keeps_its_reason
+          a_viewer_change_cancels_a_pending_receipt_check_before_it_can_resume
+          a_resumed_quality_mode_uses_its_fresh_auto_policy_and_accepted_owner_epoch
+          an_ordinary_fallback_reports_the_reason_without_private_qualification_data
+          live_completion_waits_for_read_original_clones_and_explicit_raw_retirement
+          tracked_raw_probe_retirement_survives_timeout_and_abandoned_collector
+          reader_recovery_refuses_unarmed_unmediated_foreign_kernel_and_replaced_inode
+          finish_during_blocked_enrolled_read_leaves_settlement_to_the_ledger
+          NAMES
+          printf '{"sha":"%s","elf_sha256":"%s","failed":%s}\n' "$GITHUB_SHA" "$(cut -d' ' -f1 "$out/plurxd-tests.sha256")" "$failed" > "$out/receipt.json"
+          exit $failed
+      - name: Retain the ELF, receipt and logs
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
@@ -78,6 +120,14 @@ jobs:
           path: ${{ runner.temp }}/dv-gpu-qualification/
           if-no-files-found: error
           retention-days: 14
-      - name: Release only this run's source extraction after retention
-        if: steps.retained.outcome == 'success'
-        run: python3 scripts/dv-qualification-unit cleanup-source
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' "$GITHUB_WORKSPACE")" "$GITHUB_WORKSPACE"
