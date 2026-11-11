@@ -712,7 +712,7 @@ test_anchor = "testTheaterPlaybackSkipsUnavailableFilesAndRejectsUnavailableTitl
 id = "apple.shared-initial-parking-readiness-budget"
 commits = ["39a72929788172b04d868618defbdc3eed69ae16"]
 source = "clients/apple/Sources/SharedPlayerController.swift"
-source_anchor = "guard await alignPrepared(item, to: preparedFilmPositionMs, boundMs: remaining)"
+source_anchor = "guard await alignPrepared(item, to: preparedTimeline.itemPositionMs(filmPositionMs: preparedFilmPositionMs), boundMs: remaining)"
 test = "clients/apple/Tests/PreparedReplacementTests.swift"
 test_anchor = "testStalledInitialSeekConsumesRemainingReadinessAndSettlesFailed"
 
