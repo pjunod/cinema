@@ -5243,7 +5243,12 @@ impl HiqliteAuthStore {
                 "DELETE FROM continuous_quality_ledgers".to_owned(),
                 params!(),
             ),
-            ("DELETE FROM media_sessions".to_owned(), params!()),
+            // `WHERE true`: SQLite's truncate shortcut for an unqualified
+            // DELETE skips the update hook that moves the applied mark.
+            (
+                "DELETE FROM media_sessions WHERE true".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM media_session_requests".to_owned(), params!()),
             ("DELETE FROM job_leases".to_owned(), params!()),
             ("DELETE FROM pretranscode_jobs".to_owned(), params!()),
