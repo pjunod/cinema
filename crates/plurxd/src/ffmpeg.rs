@@ -1372,17 +1372,20 @@ async fn held_source_probe_json_with_limits(
     }
 }
 
+/// Top-level `probe_json` keys the daemon writes beside FFprobe's own.
+pub(crate) const APPLICATION_PROBE_PREFIX: &str = "plurx_";
+
 fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|error| format!("invalid ffprobe JSON: {error}"))?;
     if let Some(document) = value.as_object_mut() {
-        // Application-owned measurements are grafted after the scan. A fresh
-        // probe never carries them; their presence says nothing about whether
-        // the source bytes changed. Keep all FFprobe-owned fields comparable.
-        document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
-        document.remove(plurx_core::store::CONTENT_ENCODING_PROBE_KEY);
-        document.remove(plurx_core::scan::dv_title::PROBE_FIELD);
-        document.remove(plurx_core::transcode::dv_fel_qualification::PROBE_KEY);
+        // Application-owned measurements are grafted after the scan under a
+        // `plurx_` key, which FFprobe never emits. A fresh probe never carries
+        // them; their presence says nothing about whether the source bytes
+        // changed. Strip the whole namespace rather than a list, so a new
+        // annotation (e.g. a queued FEL request) cannot make every annotated
+        // title fail verification. Keep all FFprobe-owned fields comparable.
+        document.retain(|key, _| !key.starts_with(APPLICATION_PROBE_PREFIX));
     }
     if let Some(format) = value
         .get_mut("format")

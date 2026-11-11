@@ -2800,3 +2800,35 @@ async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_argum
         "(http://127.0.0.1:43210/REDACTED), ü http://127.0.0.1:43210/REDACTED/part.m4s"
     );
 }
+
+/// Every application annotation, including the FEL request/variant maps a
+/// late qualification writes, is outside the source comparison.
+#[test]
+fn application_probe_annotations_never_invalidate_a_held_source() {
+    let held = serde_json::json!({
+        "format": {"filename": "/dev/fd/3", "format_name": "matroska,webm", "size": "10"},
+        "streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc"}]
+    });
+    let mut stored = held.clone();
+    for key in [
+        plurx_core::transcode::hevc_census::PROBE_KEY,
+        plurx_core::store::CONTENT_ENCODING_PROBE_KEY,
+        plurx_core::scan::dv_title::PROBE_FIELD,
+        plurx_core::transcode::dv_fel_qualification::PROBE_KEY,
+        plurx_core::transcode::dv_fel_qualification::VARIANTS_KEY,
+        plurx_core::transcode::dv_fel_qualification::REQUESTS_KEY,
+    ] {
+        assert!(key.starts_with(super::APPLICATION_PROBE_PREFIX), "{key}");
+        stored[key] = serde_json::json!({"recorded": true});
+    }
+    let comparison = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+        .expect("comparable documents");
+    assert!(comparison.same, "{}", comparison.rendered_differences());
+    // A real source fact still differs.
+    stored["streams"][0]["codec_name"] = serde_json::json!("h264");
+    assert!(
+        !super::compare_probe_documents(&stored.to_string(), &held.to_string())
+            .expect("comparable documents")
+            .same
+    );
+}
