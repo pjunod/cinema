@@ -615,9 +615,11 @@ mod signed_source_native_projection_tests {
     fn negative_source_origin_projects_film_zero_to_positive_item_cue() {
         let video=b"#EXTM3U\n#EXT-X-TARGETDURATION:16\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:6.0,\nseg00000.m4s\n";
         let track = b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nfilm-zero\n";
-        let (start, end) = super::source_native_segment_window(video, 0).unwrap();
-        let bytes = super::source_native_slice(track, -0.083, start, end).unwrap();
-        let text = std::str::from_utf8(&bytes).unwrap();
+        let (start, end) =
+            super::source_native_segment_window(video, 0).expect("first segment window");
+        let bytes = super::source_native_slice(track, -0.083, start, end)
+            .expect("signed-origin native slice");
+        let text = std::str::from_utf8(&bytes).expect("UTF-8 WebVTT slice");
         assert!(text.contains("00:00:00.083 --> 00:00:01.083"));
         assert!(text.contains("X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000"));
         assert!(super::source_native_slice(track, f64::NAN, start, end).is_none());

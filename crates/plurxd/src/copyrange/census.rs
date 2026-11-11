@@ -387,7 +387,7 @@ mod clock_projection_tests {
                 0,
                 90000
             )
-            .unwrap(),
+            .expect("projected media origin"),
             -83
         );
         assert_eq!(
@@ -399,11 +399,12 @@ mod clock_projection_tests {
                 0,
                 90000
             )
-            .unwrap(),
+            .expect("projected media origin"),
             -62
         );
         assert_eq!(
-            project_media_origin_ms(stamp(-7500, 1, 90000), None, 0, 0, 0, 90000).unwrap_err(),
+            project_media_origin_ms(stamp(-7500, 1, 90000), None, 0, 0, 0, 90000)
+                .expect_err("negative origin without a format start refuses"),
             "copy_format_start_unknown"
         );
     }
@@ -412,11 +413,13 @@ mod clock_projection_tests {
         let source = stamp(-7500, 1, 90000);
         let format = Some(stamp(0, 1, 1000000));
         assert_eq!(
-            project_media_origin_ms(source, format, 486000000, 0, 0, 90000).unwrap(),
+            project_media_origin_ms(source, format, 486000000, 0, 0, 90000)
+                .expect("projected media origin"),
             5399916
         );
         assert_eq!(
-            project_media_origin_ms(source, format, 486000000, 0, 486000000, 90000).unwrap(),
+            project_media_origin_ms(source, format, 486000000, 0, 486000000, 90000)
+                .expect("projected media origin"),
             -83
         );
         assert!(project_media_origin_ms(source, format, 0, 0, 0, 0).is_err());

@@ -517,13 +517,13 @@ async fn verified_seek_bootstrap_unlocks_only_its_fresh_primary_input() {
     let (primary, _file, _budget) = input(&bytes, SOURCE_WINDOW_MAX, None).await;
     let token = primary
         .seal_seek_bootstrap_limit(SOURCE_HTTP_CHUNK as u64)
-        .unwrap();
+        .expect("source input fixture");
     assert!(!token.is_verified());
     assert!(primary.seal_seek_bootstrap_limit(u64::MAX).is_err());
     assert_eq!(
         read_source(&primary.state, 0, bytes.len() as u64)
             .await
-            .unwrap()
+            .expect("source input fixture")
             .len(),
         SOURCE_HTTP_CHUNK
     );
@@ -535,21 +535,21 @@ async fn verified_seek_bootstrap_unlocks_only_its_fresh_primary_input() {
     let (other, _other_file, _other_budget) = input(&bytes, SOURCE_WINDOW_MAX, None).await;
     let other_token = other
         .seal_seek_bootstrap_limit(SOURCE_HTTP_CHUNK as u64)
-        .unwrap();
+        .expect("source input fixture");
     token.verified_landing();
     assert!(token.is_verified());
     assert!(!other_token.is_verified());
     assert_eq!(
         read_source(&primary.state, SOURCE_HTTP_CHUNK as u64, bytes.len() as u64)
             .await
-            .unwrap()
+            .expect("source input fixture")
             .len(),
         SOURCE_HTTP_CHUNK
     );
     assert_eq!(
         read_source(&other.state, 0, bytes.len() as u64)
             .await
-            .unwrap()
+            .expect("source input fixture")
             .len(),
         SOURCE_HTTP_CHUNK
     );
@@ -559,11 +559,13 @@ async fn verified_seek_bootstrap_unlocks_only_its_fresh_primary_input() {
             .is_err()
     );
     let (census, _census_file, _census_budget) = input(&bytes, SOURCE_WINDOW_MAX, None).await;
-    census.seal_read_ceiling(SOURCE_HTTP_CHUNK as u64).unwrap();
+    census
+        .seal_read_ceiling(SOURCE_HTTP_CHUNK as u64)
+        .expect("source input fixture");
     assert!(census
         .seal_seek_bootstrap_limit(SOURCE_HTTP_CHUNK as u64)
         .is_err());
-    primary.close_and_wait().await.unwrap();
-    other.close_and_wait().await.unwrap();
-    census.close_and_wait().await.unwrap();
+    primary.close_and_wait().await.expect("reader closes");
+    other.close_and_wait().await.expect("reader closes");
+    census.close_and_wait().await.expect("reader closes");
 }

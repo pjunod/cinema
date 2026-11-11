@@ -627,7 +627,7 @@ mod publisher_tests {
                 calls += 1;
                 Ok(())
             })
-            .unwrap();
+            .expect("storage fixture");
         publisher.retire();
         assert!(publisher
             .commit(&stop, &mut || {

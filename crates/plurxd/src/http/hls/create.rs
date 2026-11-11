@@ -6959,7 +6959,7 @@ mod source_copy_head_tests {
         }
     }
     fn caps() -> plurx_core::playback::DeviceCaps {
-        serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","profiles":["high"],"max_height":1080,"max_width":1920,"present":["sdr"]}]})).unwrap()
+        serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","profiles":["high"],"max_height":1080,"max_width":1920,"present":["sdr"]}]})).expect("capabilities fixture")
     }
     fn facts() -> plurx_core::fmp4::CopyVideoSampleEntryFacts {
         plurx_core::fmp4::CopyVideoSampleEntryFacts {

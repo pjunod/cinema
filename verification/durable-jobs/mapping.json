@@ -661,13 +661,13 @@
       },
       {
         "anchor": "pub(crate) fn verify_resource_predecessor(conn: &rusqlite::Connection) -> Result<(), StoreError> {",
-        "sha256": "cef258a017dda0410ff8e08cb445f997a610394bbd548fb2ef451027b3f5b5de",
+        "sha256": "7b2fec787a0a14b7f472ee23ed38f81750af52cfec6c393b6965a53f9d834e6d",
         "source": "crates/plurx-core/src/store/subtitle_managed_schema.rs",
         "table": "subtitle admission 2026-10-28 exact predecessor validation"
       },
       {
         "anchor": "pub(crate) const RESOURCE_GUARD: &str =",
-        "sha256": "cef258a017dda0410ff8e08cb445f997a610394bbd548fb2ef451027b3f5b5de",
+        "sha256": "7b2fec787a0a14b7f472ee23ed38f81750af52cfec6c393b6965a53f9d834e6d",
         "source": "crates/plurx-core/src/store/subtitle_managed_schema.rs",
         "table": "subtitle admission 2026-10-28 replicated resource upgrade guard"
       },
@@ -691,13 +691,13 @@
       },
       {
         "anchor": "pub(crate) fn verify_artifact_predecessor(conn: &rusqlite::Connection) -> Result<(), StoreError> {",
-        "sha256": "cef258a017dda0410ff8e08cb445f997a610394bbd548fb2ef451027b3f5b5de",
+        "sha256": "7b2fec787a0a14b7f472ee23ed38f81750af52cfec6c393b6965a53f9d834e6d",
         "source": "crates/plurx-core/src/store/subtitle_managed_schema.rs",
         "table": "artifact caption 2026-10-28 exact v2 predecessor"
       },
       {
         "anchor": "pub(crate) const ARTIFACT_GUARD: &str =",
-        "sha256": "cef258a017dda0410ff8e08cb445f997a610394bbd548fb2ef451027b3f5b5de",
+        "sha256": "7b2fec787a0a14b7f472ee23ed38f81750af52cfec6c393b6965a53f9d834e6d",
         "source": "crates/plurx-core/src/store/subtitle_managed_schema.rs",
         "table": "artifact caption 2026-10-28 replicated v2 predecessor guard"
       },
