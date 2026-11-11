@@ -2913,3 +2913,92 @@ fn production() { let _ = "SELECT $1 FROM b"; }
         );
     }
 }
+
+/// Vendor patch 27's hook limits (playback-start E1 §4.1). SQLite's update
+/// hook is not called for a `DELETE` without `WHERE` (the truncate shortcut)
+/// or for a `WITHOUT ROWID` table, so on a table the applied mark counts
+/// either would change rows without moving its revision, and an applied view
+/// would keep answering from a memo the replica no longer matches.
+///
+/// It reads string literals, so SQL assembled with `format!` is invisible
+/// to it, and it covers this binary only: an entry an older binary wrote is
+/// applied as written (PLAYBACK-START-E1-BUILD.md §4.1).
+#[test]
+fn applied_view_tables_never_escape_the_update_hook() {
+    let mut offenders = Vec::new();
+    let mut scanned = 0_usize;
+    for (name, source) in STORE_SOURCES.iter().chain(SHARED_CONSTANT_SOURCES) {
+        let (literals, is_code) = literals_and_code_mask(source);
+        let test_ranges = test_item_ranges(source, &is_code);
+        for literal in &literals {
+            if test_ranges
+                .iter()
+                .any(|(start, end)| literal.start >= *start && literal.start < *end)
+            {
+                continue;
+            }
+            let text = literal
+                .text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase();
+            for table in super::APPLIED_VIEW_TABLES {
+                for statement in text.split(';') {
+                    let statement = statement.trim();
+                    let delete = format!("delete from {table}");
+                    if let Some(rest) = statement.strip_prefix(&delete).or_else(|| {
+                        statement
+                            .find(&format!(" {delete}"))
+                            .map(|at| &statement[at + delete.len() + 1..])
+                    }) {
+                        let rest_untrimmed = rest;
+                        let rest = rest.trim_start();
+                        // `delete from media_sessions_x`: another table.
+                        if rest_untrimmed
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                        {
+                            continue;
+                        }
+                        scanned += 1;
+                        // Qualified means the next token is WHERE: an alias,
+                        // RETURNING or the end of the statement is not.
+                        let qualified = rest.strip_prefix("where").is_some_and(|after| {
+                            !after
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                        });
+                        if !qualified {
+                            offenders.push(format!(
+                                "{name}:{}: unqualified DELETE on {table}",
+                                literal.line
+                            ));
+                        }
+                    }
+                    let creates = [
+                        format!("create table {table} "),
+                        format!("create table {table}("),
+                        format!("create table if not exists {table} "),
+                        format!("create table if not exists {table}("),
+                    ];
+                    if creates
+                        .iter()
+                        .any(|create| statement.contains(create.as_str()))
+                        && statement.contains("without rowid")
+                    {
+                        offenders
+                            .push(format!("{name}:{}: {table} is WITHOUT ROWID", literal.line));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        scanned > 0,
+        "the census found no DELETE on an applied-view table; it is not looking"
+    );
+    assert_eq!(offenders, Vec::<String>::new());
+}

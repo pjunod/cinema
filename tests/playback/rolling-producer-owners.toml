@@ -1810,12 +1810,18 @@ pattern = "DurableRouteResolution"
 # 82 -> 101 with M6 server prime: the media-only prepared classifier, its
 # authoritative/local callers, and exact regressions all name the durable
 # verdict they consume. Control classification remains the original authority.
-expected_occurrences = 102
+# 102 -> 105 with playback-start E1a's route-read baseline: the status
+# resolution and the two site-labelled authoritative helpers return the same
+# enum. Counting only (`site="status"`); no new resolution, no producer.
+expected_occurrences = 105
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
 pattern = "authoritative_route_resolution_before"
-expected_occurrences = 9
+# 9 -> 8 with E1a's route-read baseline: the media form now reaches the shared
+# body through `authoritative_route_resolution_at`, which carries the site
+# label. The same quorum read, counted; no call site changed authority.
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-owner-bound-vod-facade"

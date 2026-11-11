@@ -880,8 +880,111 @@ impl Drop for TakeoverMetricGuard {
     }
 }
 
-pub(crate) fn prometheus() -> String {
+/// Where a session-keyed route read (`MediaSessionStore::media_session_route`)
+/// was made: the playback-start E1a baseline (`PLAYBACK-START-E1-BUILD.md` §7),
+/// so the "before" says which sites make the authority reads that E1c sizes
+/// its route view against.
+///
+/// One label per decision the contract leaves open (§6.1, §12-4, §12-5), so
+/// E1c can size each move on its own numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RouteReadSite {
+    /// The cached route lookup behind media and status routing
+    /// (`raw_route_before`; moves to the view in E1c).
+    Routing,
+    /// The first status resolution (`http/hls/status.rs`, before local actor
+    /// state; §12-5 moves it view-first).
+    StatusFirst,
+    /// The post-publication half of the status pre/post bracket (stays).
+    StatusBracket,
+    /// Status reclassification after a relayed peer answer (stays).
+    StatusReclassify,
+    /// Control exchanges and other pre-mutation reads through `control_route`.
+    Control,
+    /// Final verdicts, ownership and terminal proofs, pre-mutation reads.
+    Verdict,
+    /// The fence before a claim or durable observation: the link-receipt
+    /// claim, the prepared-link registration and candidate recovery (stay).
+    ReceiptFence,
+    /// The other link-receipt and prepared-link reads, which §6.1 lets E1c
+    /// move only if this baseline shows them hot.
+    ReceiptCandidate,
+    /// Read-only observers (the Activity detail).
+    Observer,
+}
+
+impl RouteReadSite {
+    pub(crate) const ALL: [Self; 9] = [
+        Self::Routing,
+        Self::StatusFirst,
+        Self::StatusBracket,
+        Self::StatusReclassify,
+        Self::Control,
+        Self::Verdict,
+        Self::ReceiptFence,
+        Self::ReceiptCandidate,
+        Self::Observer,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Routing => "routing",
+            Self::StatusFirst => "status_first",
+            Self::StatusBracket => "status_bracket",
+            Self::StatusReclassify => "status_reclassify",
+            Self::Control => "control",
+            Self::Verdict => "verdict",
+            Self::ReceiptFence => "receipt_fence",
+            Self::ReceiptCandidate => "receipt_candidate",
+            Self::Observer => "observer",
+        }
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Every read is a Store read until E1c moves `routing` onto the view.
+const ROUTE_READ_SOURCES: [&str; 2] = ["authority", "view"];
+
+static ROUTE_READS: [[AtomicU64; ROUTE_READ_SOURCES.len()]; RouteReadSite::ALL.len()] =
+    [const { [const { AtomicU64::new(0) }; ROUTE_READ_SOURCES.len()] }; RouteReadSite::ALL.len()];
+
+/// The one way production code reads a session-keyed route: through the
+/// Store, counted by the site that asked.
+pub(crate) async fn read_media_session_route<S>(
+    store: &S,
+    site: RouteReadSite,
+    session_id: &str,
+) -> Result<Option<MediaSessionRoute>, StoreError>
+where
+    S: plurx_core::store::MediaSessionStore + Sync + ?Sized,
+{
+    ROUTE_READS[site.index()][0].fetch_add(1, Ordering::Relaxed);
+    store.media_session_route(session_id).await
+}
+
+fn route_reads_prometheus() -> String {
     let mut out = String::from(
+        "# HELP plurx_media_session_route_reads_total Session-keyed media-session route reads by the site that made them and what answered: authority is a Store read (a quorum read on a replicated node), view a node-local applied-view read.\n\
+         # TYPE plurx_media_session_route_reads_total counter\n",
+    );
+    for site in RouteReadSite::ALL {
+        for (source_index, source) in ROUTE_READ_SOURCES.iter().enumerate() {
+            out.push_str(&format!(
+                "plurx_media_session_route_reads_total{{site=\"{}\",source=\"{source}\"}} {}\n",
+                site.label(),
+                ROUTE_READS[site.index()][source_index].load(Ordering::Relaxed)
+            ));
+        }
+    }
+    out
+}
+
+pub(crate) fn prometheus() -> String {
+    let mut out = route_reads_prometheus();
+    out.push_str(
         "# HELP plurx_media_session_takeovers_total Expired media-session takeover decisions.\n\
          # TYPE plurx_media_session_takeovers_total counter\n",
     );
@@ -2464,6 +2567,22 @@ impl MediaSessionCoordinator {
         local_node_id: &str,
         request_deadline: Instant,
     ) -> Result<DurableRouteResolution, StoreError> {
+        self.authoritative_route_resolution_at(
+            RouteReadSite::Verdict,
+            session_id,
+            local_node_id,
+            request_deadline,
+        )
+        .await
+    }
+
+    async fn authoritative_route_resolution_at(
+        &self,
+        site: RouteReadSite,
+        session_id: &str,
+        local_node_id: &str,
+        request_deadline: Instant,
+    ) -> Result<DurableRouteResolution, StoreError> {
         self.reject_pending_release(session_id).await?;
         let now = tokio::time::Instant::now();
         let remaining = request_deadline.saturating_duration_since(Instant::now());
@@ -2479,11 +2598,14 @@ impl MediaSessionCoordinator {
             .map_err(|_| {
                 StoreError::Database("media-session route reclassification timed out".to_owned())
             })?;
-        let route = tokio::time::timeout_at(deadline, self.store.media_session_route(session_id))
-            .await
-            .map_err(|_| {
-                StoreError::Database("media-session route reclassification timed out".to_owned())
-            })??;
+        let route = tokio::time::timeout_at(
+            deadline,
+            read_media_session_route(&*self.store, site, session_id),
+        )
+        .await
+        .map_err(|_| {
+            StoreError::Database("media-session route reclassification timed out".to_owned())
+        })??;
         self.reject_pending_release(session_id).await?;
         validate_route_resolution(
             session_id,
@@ -2498,8 +2620,49 @@ impl MediaSessionCoordinator {
         local_node_id: &str,
         request_deadline: Instant,
     ) -> Result<DurableRouteResolution, StoreError> {
+        self.authoritative_media_route_resolution_at(
+            RouteReadSite::Verdict,
+            session_id,
+            local_node_id,
+            request_deadline,
+        )
+        .await
+    }
+
+    /// [`Self::authoritative_media_route_resolution_before`] for a status
+    /// resolution: the same quorum read, counted under the status site that
+    /// made it (`status_first`, `status_bracket`, `status_reclassify`).
+    pub(crate) async fn status_media_route_resolution_before(
+        &self,
+        site: RouteReadSite,
+        session_id: &str,
+        local_node_id: &str,
+        request_deadline: Instant,
+    ) -> Result<DurableRouteResolution, StoreError> {
+        debug_assert!(matches!(
+            site,
+            RouteReadSite::StatusFirst
+                | RouteReadSite::StatusBracket
+                | RouteReadSite::StatusReclassify
+        ));
+        self.authoritative_media_route_resolution_at(
+            site,
+            session_id,
+            local_node_id,
+            request_deadline,
+        )
+        .await
+    }
+
+    async fn authoritative_media_route_resolution_at(
+        &self,
+        site: RouteReadSite,
+        session_id: &str,
+        local_node_id: &str,
+        request_deadline: Instant,
+    ) -> Result<DurableRouteResolution, StoreError> {
         let resolution = self
-            .authoritative_route_resolution_before(session_id, local_node_id, request_deadline)
+            .authoritative_route_resolution_at(site, session_id, local_node_id, request_deadline)
             .await?;
         self.authorize_prepared_media_before(resolution, local_node_id, request_deadline)
             .await
@@ -2599,11 +2762,12 @@ impl MediaSessionCoordinator {
         self.route_cache_metrics.lookup(RouteLookup::Store);
         #[cfg(test)]
         self.wait_route_store_gate().await;
-        let route = tokio::time::timeout_at(deadline, self.store.media_session_route(session_id))
-            .await
-            .map_err(|_| {
-                StoreError::Database("media-session route lookup timed out".to_owned())
-            })??;
+        let route = tokio::time::timeout_at(
+            deadline,
+            read_media_session_route(&*self.store, RouteReadSite::Routing, session_id),
+        )
+        .await
+        .map_err(|_| StoreError::Database("media-session route lookup timed out".to_owned()))??;
         let route = tokio::time::timeout_at(
             deadline,
             self.cache_queried_route_result(session_id, route, observed_generation),
@@ -2631,11 +2795,14 @@ impl MediaSessionCoordinator {
             .map_err(|_| {
                 StoreError::Database("media-session control route admission timed out".to_owned())
             })?;
-        let route = tokio::time::timeout_at(deadline, self.store.media_session_route(session_id))
-            .await
-            .map_err(|_| {
-                StoreError::Database("media-session control route lookup timed out".to_owned())
-            })??;
+        let route = tokio::time::timeout_at(
+            deadline,
+            read_media_session_route(&*self.store, RouteReadSite::Control, session_id),
+        )
+        .await
+        .map_err(|_| {
+            StoreError::Database("media-session control route lookup timed out".to_owned())
+        })??;
         self.reject_pending_release(session_id).await?;
         Ok(route)
     }

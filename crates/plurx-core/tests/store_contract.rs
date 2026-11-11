@@ -19,6 +19,8 @@ use plurx_core::store::background_jobs::{
 use plurx_core::store::RootRemovalOutcome;
 use queue_fixture::QueueFixture;
 
+#[path = "store_contract/applied_view.rs"]
+mod applied_view;
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
 #[path = "store_contract/dv_title_jobs.rs"]

@@ -4098,11 +4098,13 @@ async fn create_with_purpose_inner(
         std::collections::HashSet::new()
     };
     let predecessor_owner = if let Some(previous) = request.previous_session_id.as_deref() {
-        state
-            .store
-            .media_session_route(previous)
-            .await?
-            .map(|route| route.owner_node_id)
+        crate::media_sessions::read_media_session_route(
+            &*state.store,
+            crate::media_sessions::RouteReadSite::Verdict,
+            previous,
+        )
+        .await?
+        .map(|route| route.owner_node_id)
     } else {
         None
     };

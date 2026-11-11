@@ -489,7 +489,13 @@ impl LinkReceipts {
                 }
             }
             let file = state.store.get_file(value.binding.file_id).await.ok()??;
-            let route = state.store.media_session_route(session).await.ok()??;
+            let route = crate::media_sessions::read_media_session_route(
+                &*state.store,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
+                session,
+            )
+            .await
+            .ok()??;
             let proof = self
                 .current_negative_until(
                     state,
@@ -605,11 +611,13 @@ impl LinkReceipts {
                 }
                 row.binding.clone()
             };
-            let route = state
-                .store
-                .media_session_route(&captured.session)
-                .await
-                .ok()??;
+            let route = crate::media_sessions::read_media_session_route(
+                &*state.store,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
+                &captured.session,
+            )
+            .await
+            .ok()??;
             if !Self::same_route(&captured, &route, &state.node_id) {
                 return None;
             }
@@ -622,11 +630,13 @@ impl LinkReceipts {
             if current_source != captured.source {
                 return None;
             }
-            let current_route = state
-                .store
-                .media_session_route(&captured.session)
-                .await
-                .ok()??;
+            let current_route = crate::media_sessions::read_media_session_route(
+                &*state.store,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
+                &captured.session,
+            )
+            .await
+            .ok()??;
             if !Self::same_route(&captured, &current_route, &state.node_id)
                 || playback_id.is_some_and(|playback| playback != current_route.playback_id)
             {
@@ -944,7 +954,11 @@ impl LinkReceipts {
         }
         let route = tokio::time::timeout(
             Duration::from_secs(1),
-            state.store.media_session_route(&captured.session),
+            crate::media_sessions::read_media_session_route(
+                &*state.store,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
+                &captured.session,
+            ),
         )
         .await
         .ok()?
@@ -1011,7 +1025,12 @@ impl LinkReceipts {
         // Source lookup can suspend while the exact serving attachment is
         // retired or replaced. Claim only after its current authority fence.
         let route = tokio::time::timeout(Duration::from_secs(1), async {
-            let route = state.store.media_session_route(&captured.session).await;
+            let route = crate::media_sessions::read_media_session_route(
+                &*state.store,
+                crate::media_sessions::RouteReadSite::ReceiptFence,
+                &captured.session,
+            )
+            .await;
             if staged.is_some() {
                 state
                     .hls_route_hooks

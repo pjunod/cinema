@@ -1173,7 +1173,11 @@ impl ClientPreparedSeam {
 async fn prepared_seam_session_processed(state: &AppState, session_id: &str) -> bool {
     let read = tokio::time::timeout(
         std::time::Duration::from_millis(250),
-        state.store.media_session_route(session_id),
+        crate::media_sessions::read_media_session_route(
+            &*state.store,
+            crate::media_sessions::RouteReadSite::Observer,
+            session_id,
+        ),
     )
     .await;
     let Ok(Ok(Some(route))) = read else {
@@ -6029,6 +6033,7 @@ pub(crate) struct MetricsState {
     plex_census: Arc<super::PlexCensus>,
     start_attempts: Arc<crate::playstart::StartAttempts>,
     route_cache: Arc<crate::media_sessions::RouteCacheMetrics>,
+    applied: plurx_core::store::AppliedViewMetrics,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -6053,6 +6058,7 @@ impl FromRef<AppState> for MetricsState {
             plex_census: Arc::clone(&state.plex_census),
             start_attempts: Arc::clone(&state.start_attempts),
             route_cache: state.media_sessions.route_cache_metrics(),
+            applied: state.applied.metrics_handle(),
         }
     }
 }
@@ -6255,6 +6261,89 @@ fn render_snapshot_metrics(out: &mut String, snapshot: DbSnapshotMetricsSnapshot
             histogram.count,
         ));
     }
+}
+
+/// Playback-start E1a: the applied view's reads and the baseline it is sized
+/// against. Loaded at scrape time from atomics; no Store read, no timer.
+fn render_applied_view_metrics(
+    observation: &plurx_core::store::AppliedViewObservation,
+    wait: &hiqlite::DbReadPoolWait,
+) -> String {
+    let mut out = String::from(
+        "# HELP plurx_applied_view_reads_total Applied-view reads by view and by what answered: view is this node's own replica (on SQLite, the only copy), authority a quorum read, with the reason the view could not answer.\n\
+         # TYPE plurx_applied_view_reads_total counter\n",
+    );
+    for (view, source, reason, count) in &observation.reads {
+        out.push_str(&format!(
+            "plurx_applied_view_reads_total{{view=\"{view}\",source=\"{source}\",reason=\"{reason}\"}} {count}\n"
+        ));
+    }
+    out.push_str(
+        "# HELP plurx_applied_view_reloads_total Memo or route-cache reloads caused by an applied-view stamp that no longer matched, by view. Zero until the settings memo (E1b) and route cache (E1c) read through the view; until then plurx_applied_view_table_changes_total is the upper bound per-table invalidation would reload at.\n\
+         # TYPE plurx_applied_view_reloads_total counter\n",
+    );
+    for (view, count) in &observation.reloads {
+        out.push_str(&format!(
+            "plurx_applied_view_reloads_total{{view=\"{view}\"}} {count}\n"
+        ));
+    }
+    if !observation.revisions.is_empty() {
+        out.push_str(
+            "# HELP plurx_applied_view_table_changes_total Applied entries that changed each view's table on this replica (the applied mark's revision). Per-table invalidation reloads a view at most this often.\n\
+             # TYPE plurx_applied_view_table_changes_total counter\n",
+        );
+        for (view, revision) in &observation.revisions {
+            out.push_str(&format!(
+                "plurx_applied_view_table_changes_total{{view=\"{view}\"}} {revision}\n"
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "# HELP plurx_applied_view_proof Whether this node holds a serving proof the applied view can read under (always 1 on SQLite).\n\
+         # TYPE plurx_applied_view_proof gauge\n\
+         plurx_applied_view_proof{{mode=\"{}\"}} {}\n",
+        observation.mode,
+        u8::from(observation.proof_present),
+    ));
+    if let (Some(generation), Some(applied_index)) =
+        (observation.generation, observation.applied_index)
+    {
+        out.push_str(&format!(
+            "# HELP plurx_applied_view_image_stable Whether this replica's SQLite image is stable (0 while a snapshot is installed, and until restart after a failed restore).\n\
+             # TYPE plurx_applied_view_image_stable gauge\n\
+             plurx_applied_view_image_stable {}\n\
+             # HELP plurx_applied_view_applied_index The last Raft log index whose effects this node's read pool can see.\n\
+             # TYPE plurx_applied_view_applied_index gauge\n\
+             plurx_applied_view_applied_index {applied_index}\n\
+             # HELP plurx_applied_view_failed_replacements_total Snapshot restores that began and did not complete in this process.\n\
+             # TYPE plurx_applied_view_failed_replacements_total counter\n\
+             plurx_applied_view_failed_replacements_total {}\n",
+            u8::from(generation & 1 == 0),
+            observation.failed_replacements,
+        ));
+    }
+    out.push_str(
+        "# HELP plurx_hiqlite_read_pool_wait_seconds Time a local replicated-store query waited for a read-pool connection before it ran.\n\
+         # TYPE plurx_hiqlite_read_pool_wait_seconds histogram\n",
+    );
+    for (bound, count) in hiqlite::DB_READ_POOL_WAIT_BOUNDS_NANOS
+        .iter()
+        .zip(wait.cumulative_buckets)
+    {
+        out.push_str(&format!(
+            "plurx_hiqlite_read_pool_wait_seconds_bucket{{le=\"{}\"}} {count}\n",
+            prometheus_seconds_label(*bound)
+        ));
+    }
+    out.push_str(&format!(
+        "plurx_hiqlite_read_pool_wait_seconds_bucket{{le=\"+Inf\"}} {count}\n\
+         plurx_hiqlite_read_pool_wait_seconds_sum {}.{:09}\n\
+         plurx_hiqlite_read_pool_wait_seconds_count {count}\n",
+        wait.sum_nanos / 1_000_000_000,
+        wait.sum_nanos % 1_000_000_000,
+        count = wait.count,
+    ));
+    out
 }
 
 fn prometheus_seconds_label(nanos: u64) -> String {
@@ -6518,7 +6607,8 @@ pub(crate) async fn metrics(
     let (sessions, active_cache_entries) = state.transcode.snapshot();
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
-    let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot());
+    let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot())
+        + &render_applied_view_metrics(&state.applied.observation(), &hiqlite::db_read_pool_wait());
     let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\

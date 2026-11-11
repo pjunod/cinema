@@ -583,6 +583,7 @@ pub(crate) async fn readiness(
                 ),
             )
             .await,
+            applied_view(&state.applied.observation()),
             cluster_backup(
                 &state,
                 settings.get(plurx_core::store::keys::BACKUP_DESTINATION),
@@ -1097,6 +1098,106 @@ async fn bounded_catalogue_reads(state: &AppState, enabled: bool) -> DeveloperEn
             id: "watch_floor", title: "Watch state consistency", status: RequirementStatus::Met,
             evidence: "Watch reads require a valid client write-position echo and a sufficiently applied replica. Missing, expired or unknown positions use authority; authentication always uses authority.".into(),
         }],
+    }
+}
+
+/// Playback-start E1: the node-local applied view of settings and routes.
+/// No switch; every row is a fact this process loads now, and none of them
+/// changes what the view does.
+pub(crate) fn applied_view(
+    observation: &plurx_core::store::AppliedViewObservation,
+) -> DeveloperEnableItem {
+    use plurx_core::store::ViewSource;
+    use RequirementStatus::{Met, Unknown, Unmet, Unobservable};
+    let (proof_status, proof_evidence) = match observation.mode {
+        "standalone" => (
+            Met,
+            "This node's SQLite store is the only copy, so the view is always current.".to_owned(),
+        ),
+        "remote_authority" => (
+            Unmet,
+            "This process has no local replica; every view read is a quorum read.".to_owned(),
+        ),
+        _ if observation.proof_present => (
+            Met,
+            "This node has applied a quorum-confirmed commit index whose confirmation is inside its one-second lease.".to_owned(),
+        ),
+        _ => (
+            Unmet,
+            "No current quorum proof (apply lag, a leader change, or an older leader during a rolling upgrade). Reads use quorum until it returns, with no wait.".to_owned(),
+        ),
+    };
+    let (image_status, image_evidence) = match observation.generation {
+        None => (
+            Unobservable,
+            "No applied mark here: the SQLite store and a remote-authority process have no replica image to replace.".to_owned(),
+        ),
+        Some(generation) if generation & 1 == 0 => (
+            Met,
+            format!(
+                "Image generation {generation} is stable; applied index {}; table revisions {}.",
+                observation.applied_index.unwrap_or_default(),
+                observation
+                    .revisions
+                    .iter()
+                    .map(|(view, revision)| format!("{view} {revision}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        Some(generation) => (
+            Unmet,
+            if observation.failed_replacements > 0 {
+                format!(
+                    "Image generation {generation}: {} snapshot restore(s) did not complete in this process. Either one left the image closed, or a later install is in progress; reads use quorum until a restore completes or this node restarts.",
+                    observation.failed_replacements
+                )
+            } else {
+                format!("Image generation {generation}: a snapshot is being installed; reads use quorum until the read pool sees the new image.")
+            },
+        ),
+    };
+    let view_reads = observation.total(ViewSource::View);
+    let authority_reads = observation.total(ViewSource::Authority);
+    let (reads_status, reads_evidence) = if view_reads == 0 && authority_reads == 0 {
+        (
+            Unknown,
+            "No readers yet: settings (E1b) and media-session routes (E1c) move onto this view in later lanes.".to_owned(),
+        )
+    } else {
+        (
+            if view_reads > 0 { Met } else { Unmet },
+            format!(
+                "Since start: {view_reads} view reads, {authority_reads} quorum reads; last fallback {}.",
+                observation.last_fallback.map_or("none", |reason| reason.label())
+            ),
+        )
+    };
+    DeveloperEnableItem {
+        id: "applied_view",
+        title: "Applied view",
+        enabled: None,
+        setting: None,
+        requirements: vec![
+            DeveloperRequirement {
+                id: "applied_view_proof",
+                title: "Replica proof present",
+                status: proof_status,
+                evidence: proof_evidence,
+            },
+            DeveloperRequirement {
+                id: "applied_view_image",
+                title: "Replica image stable",
+                status: image_status,
+                evidence: image_evidence,
+            },
+            DeveloperRequirement {
+                id: "applied_view_reads",
+                title: "Reads through the view",
+                status: reads_status,
+                evidence: reads_evidence,
+            },
+        ],
     }
 }
 
@@ -3901,5 +4002,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// E1a: the Applied view row reports what the observation says, with a
+    /// failed restore named as closed until a restore completes or a restart,
+    /// and no readers named as such.
+    #[test]
+    fn applied_view_rows_name_proof_image_and_readers() {
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let mut observation = plurx_core::store::AppliedView::authority(store).observation();
+        let item = super::applied_view(&observation);
+        assert_eq!(item.id, "applied_view");
+        assert!(
+            item.enabled.is_none() && item.setting.is_none(),
+            "no switch"
+        );
+        let status = |item: &super::DeveloperEnableItem, id: &str| {
+            item.requirements
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| (row.status, row.evidence.clone()))
+                .expect("row")
+        };
+        assert_eq!(
+            status(&item, "applied_view_proof").0,
+            super::RequirementStatus::Met
+        );
+        assert_eq!(
+            status(&item, "applied_view_image").0,
+            super::RequirementStatus::Unobservable
+        );
+        let (reads, evidence) = status(&item, "applied_view_reads");
+        assert_eq!(reads, super::RequirementStatus::Unknown);
+        assert!(evidence.starts_with("No readers yet"));
+
+        observation.mode = "replicated";
+        observation.proof_present = false;
+        observation.generation = Some(5);
+        observation.applied_index = Some(9);
+        observation.failed_replacements = 1;
+        let item = super::applied_view(&observation);
+        assert_eq!(
+            status(&item, "applied_view_proof").0,
+            super::RequirementStatus::Unmet
+        );
+        let (image, evidence) = status(&item, "applied_view_image");
+        assert_eq!(image, super::RequirementStatus::Unmet);
+        assert!(evidence.contains("or this node restarts"), "{evidence}");
     }
 }

@@ -995,7 +995,13 @@ pub(crate) async fn control_authorized(
     state: AppState,
     request: crate::playback_control::ControlRelayRequest,
 ) -> Response {
-    let route = match state.store.media_session_route(&request.session_id).await {
+    let route = match crate::media_sessions::read_media_session_route(
+        &*state.store,
+        crate::media_sessions::RouteReadSite::Verdict,
+        &request.session_id,
+    )
+    .await
+    {
         Ok(Some(route)) => route,
         Ok(None) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);

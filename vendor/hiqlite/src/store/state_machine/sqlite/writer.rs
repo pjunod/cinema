@@ -1,3 +1,4 @@
+use crate::applied_mark::AppliedMark;
 use crate::helpers::{deserialize, serialize};
 use crate::migration::Migration;
 use crate::query::rows::{ColumnOwned, RowOwned, ValueOwned};
@@ -21,6 +22,7 @@ use rusqlite::{Batch, CachedStatement, Rows, Transaction};
 use std::borrow::Cow;
 use std::default::Default;
 use std::ops::Sub;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use thread_priority::ThreadPriority;
@@ -239,6 +241,7 @@ pub fn spawn_writer(
     log_statements: bool,
     do_reset_metadata: bool,
     #[cfg(feature = "backup")] local_backup_keep_days: u16,
+    mark: Arc<AppliedMark>,
 ) -> flume::Sender<WriterRequest> {
     let (tx, rx) = flume::bounded::<WriterRequest>(1);
 
@@ -278,6 +281,18 @@ CREATE TABLE IF NOT EXISTS _metadata
         )
         .expect("_metadata table creation to always succeed");
 
+        // Plurx patch 27: count committed changes to the registered tables.
+        // The hook runs on this thread inside each statement step; `publish`
+        // turns its bits into revisions once the work has committed.
+        let hook_mark = Arc::clone(&mark);
+        conn.update_hook(Some(
+            move |_action, database: &str, table: &str, _rowid: i64| {
+                hook_mark.note_row_change(database, table);
+            },
+        ))
+        .expect("the writer owns its connection, so installing the update hook succeeds");
+        mark.prime_schema_version(schema_version(&conn));
+
         'main: loop {
             if !copy_in_flight && let Some(request) = pending_snapshot.take() {
                 copy_in_flight = start_snapshot_copy(request, &conn, &sm_data, &rt, &copy_tx);
@@ -310,8 +325,14 @@ CREATE TABLE IF NOT EXISTS _metadata
                                 Ok(stmt) => stmt,
                                 Err(err) => {
                                     error!("Preparing cached query {}: {:?}", q.sql, err);
-                                    q.tx.send(Err(Error::PrepareStatement(err.to_string().into())))
-                                        .expect("oneshot tx to never be dropped");
+                                    publish_then_send(
+                                        &mark,
+                                        Some(&conn),
+                                        sm_data.last_applied_log_id,
+                                        q.tx,
+                                        Err(Error::PrepareStatement(err.to_string().into())),
+                                    )
+                                    .expect("oneshot tx to never be dropped");
                                     continue;
                                 }
                             };
@@ -337,14 +358,28 @@ CREATE TABLE IF NOT EXISTS _metadata
                             }
 
                             if let Some(err) = params_err {
-                                q.tx.send(Err(err)).expect("oneshot tx to never be dropped");
+                                publish_then_send(
+                                    &mark,
+                                    Some(&conn),
+                                    sm_data.last_applied_log_id,
+                                    q.tx,
+                                    Err(err),
+                                )
+                                .expect("oneshot tx to never be dropped");
                                 continue;
                             }
 
                             stmt.raw_execute().map_err(Error::from)
                         };
 
-                        q.tx.send(res).expect("oneshot tx to never be dropped");
+                        publish_then_send(
+                            &mark,
+                            Some(&conn),
+                            sm_data.last_applied_log_id,
+                            q.tx,
+                            res,
+                        )
+                        .expect("oneshot tx to never be dropped");
                     }
 
                     Query::ExecuteReturning(q) => {
@@ -359,8 +394,14 @@ CREATE TABLE IF NOT EXISTS _metadata
                                 Ok(stmt) => stmt,
                                 Err(err) => {
                                     error!("Preparing cached query {}: {:?}", q.sql, err);
-                                    q.tx.send(Err(Error::PrepareStatement(err.to_string().into())))
-                                        .expect("oneshot tx to never be dropped");
+                                    publish_then_send(
+                                        &mark,
+                                        Some(&conn),
+                                        sm_data.last_applied_log_id,
+                                        q.tx,
+                                        Err(Error::PrepareStatement(err.to_string().into())),
+                                    )
+                                    .expect("oneshot tx to never be dropped");
                                     continue;
                                 }
                             };
@@ -372,8 +413,14 @@ CREATE TABLE IF NOT EXISTS _metadata
                             {
                                 Ok(c) => c,
                                 Err(err) => {
-                                    q.tx.send(Err(Error::PrepareStatement(err.to_string().into())))
-                                        .expect("oneshot tx to never be dropped");
+                                    publish_then_send(
+                                        &mark,
+                                        Some(&conn),
+                                        sm_data.last_applied_log_id,
+                                        q.tx,
+                                        Err(Error::PrepareStatement(err.to_string().into())),
+                                    )
+                                    .expect("oneshot tx to never be dropped");
                                     continue;
                                 }
                             };
@@ -396,7 +443,14 @@ CREATE TABLE IF NOT EXISTS _metadata
                             }
 
                             if let Some(err) = params_err {
-                                q.tx.send(Err(err)).expect("oneshot tx to never be dropped");
+                                publish_then_send(
+                                    &mark,
+                                    Some(&conn),
+                                    sm_data.last_applied_log_id,
+                                    q.tx,
+                                    Err(err),
+                                )
+                                .expect("oneshot tx to never be dropped");
                                 continue;
                             }
 
@@ -419,7 +473,14 @@ CREATE TABLE IF NOT EXISTS _metadata
                             Ok(res)
                         };
 
-                        q.tx.send(res).expect("oneshot tx to never be dropped");
+                        publish_then_send(
+                            &mark,
+                            Some(&conn),
+                            sm_data.last_applied_log_id,
+                            q.tx,
+                            res,
+                        )
+                        .expect("oneshot tx to never be dropped");
                     }
 
                     Query::Transaction(req) => {
@@ -435,9 +496,16 @@ CREATE TABLE IF NOT EXISTS _metadata
                             Ok(txn) => txn,
                             Err(err) => {
                                 error!("Opening database transaction: {err:?}");
-                                req.tx
-                                    .send(Err(Error::Transaction(err.to_string().into())))
-                                    .expect("oneshot tx to never be dropped");
+                                // No statement ran, so the schema cannot have moved;
+                                // the failed open still borrows `conn` here.
+                                publish_then_send(
+                                    &mark,
+                                    None,
+                                    sm_data.last_applied_log_id,
+                                    req.tx,
+                                    Err(Error::Transaction(err.to_string().into())),
+                                )
+                                .expect("oneshot tx to never be dropped");
                                 continue;
                             }
                         };
@@ -574,9 +642,14 @@ CREATE TABLE IF NOT EXISTS _metadata
                                 layout_guard_failed,
                                 rollback_succeeded,
                             );
-                            req.tx
-                                .send(Err(err))
-                                .expect("oneshot tx to never be dropped");
+                            publish_then_send(
+                                &mark,
+                                Some(&conn),
+                                sm_data.last_applied_log_id,
+                                req.tx,
+                                Err(err),
+                            )
+                            .expect("oneshot tx to never be dropped");
                         } else {
                             #[cfg(feature = "validation-test-helpers")]
                             if matches_hold && let Some(hold) = precommit_hold.take() {
@@ -590,14 +663,24 @@ CREATE TABLE IF NOT EXISTS _metadata
                             }
                             match txn.commit() {
                                 Ok(()) => {
-                                    req.tx
-                                        .send(Ok(results))
-                                        .expect("oneshot tx to never be dropped");
+                                    publish_then_send(
+                                        &mark,
+                                        Some(&conn),
+                                        sm_data.last_applied_log_id,
+                                        req.tx,
+                                        Ok(results),
+                                    )
+                                    .expect("oneshot tx to never be dropped");
                                 }
                                 Err(err) => {
-                                    req.tx
-                                        .send(Err(Error::Transaction(err.to_string().into())))
-                                        .expect("oneshot tx to never be dropped");
+                                    publish_then_send(
+                                        &mark,
+                                        Some(&conn),
+                                        sm_data.last_applied_log_id,
+                                        req.tx,
+                                        Err(Error::Transaction(err.to_string().into())),
+                                    )
+                                    .expect("oneshot tx to never be dropped");
                                 }
                             }
                         }
@@ -629,14 +712,27 @@ CREATE TABLE IF NOT EXISTS _metadata
                             }
                         }
 
+                        // DDL and table rebuilds travel here; the hook reports
+                        // them under a temporary name or not at all.
+                        mark.note_every_table();
                         if let Some(err) = err {
-                            req.tx
-                                .send(Err(err))
-                                .expect("oneshot tx to never be dropped");
+                            publish_then_send(
+                                &mark,
+                                Some(&conn),
+                                sm_data.last_applied_log_id,
+                                req.tx,
+                                Err(err),
+                            )
+                            .expect("oneshot tx to never be dropped");
                         } else {
-                            req.tx
-                                .send(Ok(res))
-                                .expect("oneshot tx to never be dropped");
+                            publish_then_send(
+                                &mark,
+                                Some(&conn),
+                                sm_data.last_applied_log_id,
+                                req.tx,
+                                Ok(res),
+                            )
+                            .expect("oneshot tx to never be dropped");
                         }
                     }
                 },
@@ -646,12 +742,14 @@ CREATE TABLE IF NOT EXISTS _metadata
 
                     // TODO should be maybe always panic if migrations throw an error?
                     let res = migrate(&mut conn, req.migrations);
+                    mark.note_every_table();
 
                     if let Err(err) = conn.execute("PRAGMA optimize", []) {
                         error!("Error during 'PRAGMA optimize': {}", err);
                     }
 
-                    req.tx.send(res).unwrap();
+                    publish_then_send(&mark, Some(&conn), sm_data.last_applied_log_id, req.tx, res)
+                        .unwrap();
                 }
 
                 WriterRequest::Snapshot(request) => {
@@ -736,7 +834,20 @@ CREATE TABLE IF NOT EXISTS _metadata
                         }),
                     };
 
-                    let _ = ack.send(result);
+                    // A restore replaced every table. The state machine's
+                    // replacement guard keeps the generation odd until the
+                    // read pool sees the new image; the bumps make sure no
+                    // revision taken before it can match after it.
+                    if result.is_ok() {
+                        mark.note_every_table();
+                    }
+                    let _ = publish_then_send(
+                        &mark,
+                        Some(&conn),
+                        sm_data.last_applied_log_id,
+                        ack,
+                        result,
+                    );
                 }
 
                 WriterRequest::MetadataRead(ack) => {
@@ -751,6 +862,11 @@ CREATE TABLE IF NOT EXISTS _metadata
                         }) {
                             Ok(bytes) => {
                                 sm_data = deserialize(&bytes).unwrap();
+                                // Plurx patch 27: the persisted index is what
+                                // the read pool sees after a restart.
+                                mark.publish(
+                                    sm_data.last_applied_log_id.map(|log_id| log_id.index),
+                                );
                             }
                             Err(err) => {
                                 warn!("No metadata exists inside the DB yet");
@@ -764,12 +880,14 @@ CREATE TABLE IF NOT EXISTS _metadata
                 WriterRequest::MetadataMembership(req) => {
                     sm_data.last_membership = req.last_membership;
                     sm_data.last_applied_log_id = req.last_applied_log_id;
-                    req.ack.send(()).unwrap();
+                    publish_then_send(&mark, Some(&conn), sm_data.last_applied_log_id, req.ack, ())
+                        .unwrap();
                 }
 
                 WriterRequest::MetadataApplied((log_id, ack)) => {
                     sm_data.last_applied_log_id = log_id;
-                    let _ = ack.send(());
+                    let _ =
+                        publish_then_send(&mark, Some(&conn), sm_data.last_applied_log_id, ack, ());
                 }
 
                 WriterRequest::Backup(req) => {
@@ -784,7 +902,13 @@ CREATE TABLE IF NOT EXISTS _metadata
                         info!(
                             "Received duplicate backup request within the last 60 seconds - ignoring it"
                         );
-                        req.ack.send(Ok(()));
+                        let _ = publish_then_send(
+                            &mark,
+                            Some(&conn),
+                            sm_data.last_applied_log_id,
+                            req.ack,
+                            Ok(()),
+                        );
                         continue;
                     }
 
@@ -816,7 +940,13 @@ CREATE TABLE IF NOT EXISTS _metadata
                         &rt,
                     ) {
                         error!("Error creating backup: {:?}", err);
-                        req.ack.send(Err(err));
+                        let _ = publish_then_send(
+                            &mark,
+                            Some(&conn),
+                            sm_data.last_applied_log_id,
+                            req.ack,
+                            Err(err),
+                        );
                         continue;
                     }
 
@@ -837,12 +967,19 @@ CREATE TABLE IF NOT EXISTS _metadata
                     }
 
                     ts_last_backup = Some(now);
-                    req.ack.send(Ok(()));
+                    let _ = publish_then_send(
+                        &mark,
+                        Some(&conn),
+                        sm_data.last_applied_log_id,
+                        req.ack,
+                        Ok(()),
+                    );
                 }
 
                 WriterRequest::RTT(req) => {
                     sm_data.last_applied_log_id = req.last_applied_log_id;
-                    req.ack.send(()).unwrap();
+                    publish_then_send(&mark, Some(&conn), sm_data.last_applied_log_id, req.ack, ())
+                        .unwrap();
                 }
 
                 WriterRequest::Shutdown(ack) => {
@@ -889,6 +1026,32 @@ CREATE TABLE IF NOT EXISTS _metadata
     });
 
     tx
+}
+
+/// Publish what this entry applied, then reply. Every arm that applies a log
+/// entry replies through here, early `continue` paths included, so a reply is
+/// never sent before the mark shows the entry: after commit (or rollback) and
+/// before the caller can observe the acknowledgement.
+fn publish_then_send<T>(
+    mark: &AppliedMark,
+    conn: Option<&rusqlite::Connection>,
+    applied: Option<LogId<NodeId>>,
+    tx: oneshot::Sender<T>,
+    value: T,
+) -> Result<(), T> {
+    if let Some(conn) = conn {
+        mark.note_schema_version(schema_version(conn));
+    }
+    mark.publish(applied.map(|log_id| log_id.index));
+    tx.send(value)
+}
+
+/// The schema cookie: SQLite increments it on every DDL statement, including
+/// the `DROP` and `RENAME` of a table rebuild the update hook never reports.
+fn schema_version(conn: &rusqlite::Connection) -> Option<i64> {
+    conn.prepare_cached("PRAGMA schema_version")
+        .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)))
+        .ok()
 }
 
 #[inline]
@@ -1301,6 +1464,7 @@ mod snapshot_cut_tests {
             false,
             #[cfg(feature = "backup")]
             30,
+            AppliedMark::new::<&str>(&[]),
         );
         execute(
             &writer,
@@ -1725,5 +1889,446 @@ mod source_layout_rollback_tests {
         .unwrap();
         let other = conn.execute("INSERT INTO other VALUES(0)", []).unwrap_err();
         assert!(!is_source_layout_check_failure(&other));
+    }
+}
+
+#[cfg(test)]
+mod applied_mark_tests {
+    use super::*;
+    use crate::AppliedMarkHandle;
+    use openraft::CommittedLeaderId;
+
+    fn log(index: u64) -> Option<LogId<NodeId>> {
+        Some(LogId::new(CommittedLeaderId::new(1, 1), index))
+    }
+
+    struct Fixture {
+        root: std::path::PathBuf,
+        writer: flume::Sender<WriterRequest>,
+        mark: AppliedMarkHandle,
+        /// Revisions once the fixture's own `CREATE TABLE`s have applied
+        /// (each moved every slot: a schema change).
+        base: (u64, u64),
+    }
+
+    impl Fixture {
+        async fn start() -> Self {
+            let root = std::env::temp_dir().join(format!("hiqlite-mark-{}", Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            let mut fixture = Self::open(root);
+            for (index, sql) in [
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+                "CREATE TABLE media_sessions (id TEXT PRIMARY KEY, state TEXT NOT NULL)",
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, title TEXT NOT NULL)",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                fixture
+                    .execute(sql, u64::try_from(index).unwrap() + 1)
+                    .await
+                    .unwrap();
+            }
+            fixture.base = fixture.revisions();
+            fixture
+        }
+
+        /// A writer with a fresh mark over the database under `root`.
+        fn open(root: std::path::PathBuf) -> Self {
+            let connection = rusqlite::Connection::open(root.join("live.db")).unwrap();
+            connection
+                .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+                .unwrap();
+            let mark = AppliedMark::new(&["settings", "media_sessions"]);
+            let handle = mark.handle();
+            let writer = spawn_writer(
+                connection,
+                1,
+                root.join("lock").to_string_lossy().into_owned(),
+                false,
+                false,
+                #[cfg(feature = "backup")]
+                30,
+                mark,
+            );
+            Self {
+                root,
+                writer,
+                mark: handle,
+                base: (0, 0),
+            }
+        }
+
+        /// Stop the writer (it persists its metadata) and start a new one,
+        /// with a new mark, over the same file: a process restart.
+        async fn restart(self) -> Self {
+            let root = self.stop().await;
+            Self::open(root)
+        }
+
+        async fn execute(&self, sql: &'static str, index: u64) -> Result<usize, Error> {
+            let (tx, rx) = oneshot::channel();
+            self.writer
+                .send_async(WriterRequest::Query(Query::Execute(SqlExecute {
+                    sql: sql.into(),
+                    params: vec![],
+                    last_applied_log_id: log(index),
+                    tx,
+                })))
+                .await
+                .unwrap();
+            rx.await.unwrap()
+        }
+
+        /// Slot movements since the fixture's schema was created.
+        fn revisions(&self) -> (u64, u64) {
+            (
+                self.mark.revision(self.mark.slot("settings").unwrap()) - self.base.0,
+                self.mark
+                    .revision(self.mark.slot("media_sessions").unwrap())
+                    - self.base.1,
+            )
+        }
+
+        fn reader(&self) -> rusqlite::Connection {
+            rusqlite::Connection::open(self.root.join("live.db")).unwrap()
+        }
+
+        async fn stop(self) -> std::path::PathBuf {
+            let (ack, rx) = oneshot::channel();
+            self.writer
+                .send_async(WriterRequest::Shutdown(ack))
+                .await
+                .unwrap();
+            rx.await.unwrap();
+            drop(self.writer);
+            self.root
+        }
+
+        async fn shutdown(self) {
+            std::fs::remove_dir_all(self.stop().await).unwrap();
+        }
+
+        async fn transaction(&self, queries: &[&'static str], index: u64) -> Result<(), Error> {
+            let (tx, rx) = oneshot::channel();
+            self.writer
+                .send_async(WriterRequest::Query(Query::Transaction(SqlTransaction {
+                    queries: queries
+                        .iter()
+                        .map(|sql| state_machine::Query {
+                            sql: (*sql).into(),
+                            params: vec![],
+                        })
+                        .collect(),
+                    last_applied_log_id: log(index),
+                    tx,
+                })))
+                .await
+                .unwrap();
+            rx.await.unwrap().map(|_| ())
+        }
+    }
+
+    /// Plurx's schema steps on `media_sessions` travel as transactions
+    /// (`schema_migration_transaction`), and the Source-layout rebuild is
+    /// create-copy-drop-rename: the hook sees only the copy, under the new
+    /// table's temporary name. The schema cookie moves every slot.
+    #[tokio::test]
+    async fn a_transaction_that_rebuilds_a_registered_table_moves_every_slot() {
+        let fixture = Fixture::start().await;
+        fixture
+            .execute("INSERT INTO media_sessions VALUES ('s1', 'active')", 4)
+            .await
+            .unwrap();
+        assert_eq!(fixture.revisions(), (0, 1));
+        fixture
+            .transaction(
+                &[
+                    "CREATE TABLE media_sessions_new (id TEXT PRIMARY KEY, state TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0)",
+                    "INSERT INTO media_sessions_new (id, state) SELECT id, state FROM media_sessions",
+                    "DROP TABLE media_sessions",
+                    "ALTER TABLE media_sessions_new RENAME TO media_sessions",
+                ],
+                5,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fixture.revisions(), (1, 2), "the rebuild moved every slot");
+        assert_eq!(fixture.mark.applied_index(), 5);
+        fixture.shutdown().await;
+    }
+
+    /// The single-statement form: `ALTER TABLE ... ADD COLUMN` reports no row.
+    #[tokio::test]
+    async fn an_executed_alter_table_moves_every_slot() {
+        let fixture = Fixture::start().await;
+        fixture
+            .execute(
+                "ALTER TABLE media_sessions ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0",
+                4,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fixture.revisions(), (1, 1));
+        // An ordinary row change afterwards moves only its own slot again.
+        fixture
+            .execute("INSERT INTO settings VALUES ('a', '1')", 5)
+            .await
+            .unwrap();
+        assert_eq!(fixture.revisions(), (2, 1));
+        fixture.shutdown().await;
+    }
+
+    /// After a restart the mark starts at 0; the state machine's metadata read
+    /// publishes the persisted index before any entry applies, so a caught-up
+    /// node does not report 0 (and fail every floor) until the next write.
+    #[tokio::test]
+    async fn a_restart_publishes_the_persisted_applied_index() {
+        let fixture = Fixture::start().await;
+        fixture
+            .execute("INSERT INTO settings VALUES ('a', '1')", 7)
+            .await
+            .unwrap();
+        let fixture = fixture.restart().await;
+        assert_eq!(fixture.mark.applied_index(), 0, "a fresh mark");
+        let (ack, rx) = oneshot::channel();
+        fixture
+            .writer
+            .send_async(WriterRequest::MetadataRead(ack))
+            .await
+            .unwrap();
+        let metadata = rx.await.unwrap();
+        assert_eq!(metadata.last_applied_log_id.map(|id| id.index), Some(7));
+        assert_eq!(fixture.mark.applied_index(), 7);
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_registered_write_moves_its_own_slot_and_an_unregistered_one_moves_none() {
+        let fixture = Fixture::start().await;
+        assert_eq!(fixture.revisions(), (0, 0));
+        assert_eq!(fixture.mark.applied_index(), 3);
+
+        fixture
+            .execute("INSERT INTO items (title) VALUES ('x')", 4)
+            .await
+            .unwrap();
+        assert_eq!(fixture.revisions(), (0, 0));
+        assert_eq!(fixture.mark.applied_index(), 4);
+
+        fixture
+            .execute("INSERT INTO settings VALUES ('a', '1')", 5)
+            .await
+            .unwrap();
+        assert_eq!(fixture.revisions(), (1, 0));
+        fixture
+            .execute(
+                "INSERT INTO settings VALUES ('a', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                6,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fixture.revisions(), (2, 0), "an upsert is a row change");
+        fixture
+            .execute("DELETE FROM media_sessions WHERE id = 'none'", 7)
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.revisions(),
+            (2, 0),
+            "a statement that changes no row moves nothing"
+        );
+
+        // A failed entry is still applied: its index is published, no slot moves.
+        assert!(
+            fixture
+                .execute("INSERT INTO missing VALUES (1)", 8)
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.revisions(), (2, 0));
+        assert_eq!(fixture.mark.applied_index(), 8);
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn batch_and_migrate_move_every_slot() {
+        let fixture = Fixture::start().await;
+        let (tx, rx) = oneshot::channel();
+        fixture
+            .writer
+            .send_async(WriterRequest::Query(Query::Batch(SqlBatch {
+                sql: "CREATE TABLE settings_rebuilt (key TEXT PRIMARY KEY); DROP TABLE settings_rebuilt;"
+                    .into(),
+                last_applied_log_id: log(4),
+                tx,
+            })))
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+        assert_eq!(fixture.revisions(), (1, 1));
+        assert_eq!(fixture.mark.applied_index(), 4);
+
+        let (tx, rx) = oneshot::channel();
+        fixture
+            .writer
+            .send_async(WriterRequest::Migrate(Migrate {
+                migrations: vec![],
+                last_applied_log_id: log(5),
+                tx,
+            }))
+            .await
+            .unwrap();
+        // An empty migration set is refused, but the entry is still applied:
+        // the arm cannot know what a failed migration left behind.
+        assert!(rx.await.unwrap().is_err());
+        assert_eq!(fixture.revisions(), (2, 2));
+        assert_eq!(fixture.mark.applied_index(), 5);
+        fixture.shutdown().await;
+    }
+
+    /// The precommit hold keeps the real uncommitted transaction on the writer:
+    /// while it is held the row is invisible and neither the slot nor the
+    /// applied index has moved; once the reply arrives both have. That the
+    /// publish comes *before* the reply is pinned by the source test
+    /// `every_applying_reply_publishes_first`: swapped, this test would
+    /// usually still pass, because the publish follows the send at once.
+    #[cfg(feature = "validation-test-helpers")]
+    #[tokio::test]
+    async fn the_slot_moves_only_once_the_entry_has_committed() {
+        let fixture = Fixture::start().await;
+        let statement = "INSERT INTO media_sessions VALUES ('s1', 'active')";
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let (registered, registered_rx) = oneshot::channel();
+        fixture
+            .writer
+            .send_async(WriterRequest::RegisterPrecommitHold {
+                hold: ValidationPrecommitHold {
+                    exact_statement: statement.to_owned(),
+                    entered,
+                    release: release_rx,
+                    until: Instant::now() + Duration::from_secs(10),
+                },
+                registered,
+            })
+            .await
+            .unwrap();
+        registered_rx.await.unwrap();
+
+        let (tx, mut reply) = oneshot::channel();
+        fixture
+            .writer
+            .send_async(WriterRequest::Query(Query::Transaction(SqlTransaction {
+                queries: vec![state_machine::Query {
+                    sql: statement.into(),
+                    params: vec![],
+                }],
+                last_applied_log_id: log(9),
+                tx,
+            })))
+            .await
+            .unwrap();
+        entered_rx.await.unwrap();
+
+        let visible = |reader: &rusqlite::Connection| -> i64 {
+            reader
+                .query_row("SELECT count(*) FROM media_sessions", [], |row| row.get(0))
+                .unwrap()
+        };
+        let reader = fixture.reader();
+        assert_eq!(visible(&reader), 0, "held: the row is not committed");
+        assert_eq!(fixture.revisions(), (0, 0), "held: the slot has not moved");
+        assert_eq!(
+            fixture.mark.applied_index(),
+            3,
+            "held: the index has not moved"
+        );
+        assert!(reply.try_recv().is_err(), "held: no reply yet");
+
+        release.send(()).unwrap();
+        reply.await.unwrap().unwrap();
+        assert_eq!(fixture.revisions(), (0, 1), "the reply follows the publish");
+        assert_eq!(fixture.mark.applied_index(), 9);
+        assert_eq!(visible(&reader), 1);
+        fixture.shutdown().await;
+    }
+
+    /// Every reply from an arm that applies a log entry goes through
+    /// `publish_then_send`; only the snapshot-successor refusal and the
+    /// metadata read, neither of which applies an entry, reply directly.
+    #[test]
+    fn every_applying_reply_publishes_first() {
+        let source = include_str!("writer.rs");
+        let body = source
+            .split_once("'main: loop {")
+            .expect("writer loop")
+            .1
+            .split_once("WriterRequest::Shutdown(ack) => {")
+            .expect("end of writer arms")
+            .0;
+        let allowed = [
+            "request.ack.send(Err(StorageError::IO {",
+            "ack.send(sm_data.clone()).unwrap();",
+            "let _ = entered.send(());",
+            "let _ = registered.send(());",
+            "let _ = hold.entered.send(());",
+        ];
+        let mut direct = Vec::new();
+        for (offset, _) in body.match_indices(".send(") {
+            let line_start = body[..offset].rfind('\n').map_or(0, |at| at + 1);
+            let line_end = body[offset..]
+                .find('\n')
+                .map_or(body.len(), |at| offset + at);
+            let line = body[line_start..line_end].trim();
+            if !allowed.iter().any(|ok| line.contains(ok)) {
+                direct.push(line.to_owned());
+            }
+        }
+        assert_eq!(
+            direct,
+            Vec::<String>::new(),
+            "replies that skip the publish"
+        );
+        let published = body.matches("publish_then_send(").count();
+        assert!(
+            published >= 19,
+            "every applying arm replies through the publish: {published}"
+        );
+        let without_schema = body
+            .split("publish_then_send(")
+            .skip(1)
+            .filter(|call| {
+                call.trim_start()
+                    .trim_start_matches("&mark,")
+                    .trim_start()
+                    .starts_with("None,")
+            })
+            .count();
+        assert_eq!(
+            without_schema, 1,
+            "only the failed transaction open, which ran no SQL, skips the schema check"
+        );
+        assert!(
+            source.contains(
+                "        mark.note_schema_version(schema_version(conn));\n    }\n    mark.publish(applied.map(|log_id| log_id.index));\n    tx.send(value)"
+            ),
+            "the helper publishes before it sends"
+        );
+        let batch = body
+            .split_once("Query::Batch(req) => {")
+            .unwrap()
+            .1
+            .split_once("WriterRequest::Migrate(req) => {")
+            .unwrap();
+        assert!(batch.0.contains("mark.note_every_table();"));
+        assert!(
+            batch
+                .1
+                .split_once("WriterRequest::Snapshot(request)")
+                .unwrap()
+                .0
+                .contains("mark.note_every_table();")
+        );
     }
 }

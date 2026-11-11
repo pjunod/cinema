@@ -798,6 +798,10 @@ pub struct AppState {
     pub(crate) trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
     pub catalogue: CatalogueReader,
+    /// Node-local applied views of settings and media-session routes
+    /// (playback-start E1). E1a builds and observes it; no call site reads
+    /// through it yet.
+    pub applied: plurx_core::store::AppliedView,
     /// Read-only projection of the selected backend's watch-state convergence.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     /// Monotonic, Store-free authority for mutable media and readiness.
@@ -1127,6 +1131,7 @@ impl AppState {
         logs: Arc<LogBuffer>,
     ) -> Self {
         let catalogue = CatalogueReader::authority(Arc::clone(&store));
+        let applied = plurx_core::store::AppliedView::authority(Arc::clone(&store));
         Self::new_configured(
             AppConfig {
                 sharing_network: Default::default(),
@@ -1146,6 +1151,7 @@ impl AppState {
                 shared_cache_dir: PathBuf::new(),
                 shared_cache_id: String::new(),
                 catalogue,
+                applied,
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
                 data_dir: PathBuf::new(),
                 credential_key_path: PathBuf::new(),
@@ -1185,6 +1191,7 @@ impl AppState {
             shared_cache_dir,
             shared_cache_id,
             catalogue,
+            applied,
             snapshot_recovery_budgets,
             data_dir,
             credential_key_path,
@@ -1385,6 +1392,7 @@ impl AppState {
             jellyfin_standard_port: Default::default(),
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
+            applied,
             replication,
             peer_activity,
             peer_status_cache: Default::default(),
@@ -1596,6 +1604,7 @@ pub struct AppConfig {
     pub shared_cache_dir: PathBuf,
     pub shared_cache_id: String,
     pub catalogue: CatalogueReader,
+    pub applied: plurx_core::store::AppliedView,
     pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
     pub data_dir: PathBuf,
     pub credential_key_path: PathBuf,
