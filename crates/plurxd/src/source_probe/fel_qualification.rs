@@ -1629,11 +1629,13 @@ mod tests {
             assert_eq!(value("-maxrate"), Some("90000k"));
             assert_eq!(value("-bufsize"), Some("120000k"));
             assert_eq!(value("-vaapi_device").is_some(), upload);
-            assert_eq!(
-                value("-vf").expect("picture contract").contains("hwupload"),
-                upload
-            );
-            assert_eq!(value("-pix_fmt"), Some("p010le"));
+            let filter = value("-vf").expect("picture contract");
+            assert_eq!(filter.contains("hwupload"), upload);
+            // 10-bit 4:2:0 either way: VA-API uploads p010 surfaces (an
+            // output -pix_fmt on hardware frames would force a conversion),
+            // NVENC takes p010le system frames.
+            assert!(filter.contains("format=p010le"));
+            assert_eq!(value("-pix_fmt"), (!upload).then_some("p010le"));
         }
     }
 
