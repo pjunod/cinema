@@ -662,3 +662,51 @@ class NonRustSourceCohortCase(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RetiredNativePythonMembershipCase(unittest.TestCase):
+    def fixture(self, current, invalid=()):
+        old = ['test_old.Case.test_stable', 'test_old.Case.test_changed',
+               'test_old.Case.test_removed']
+        raw = b'authenticated old discovery placeholder'
+        key = retention.digest(raw)
+        proof = {'logs': {key: {'sha256': key, 'base64': base64.b64encode(raw).decode()}}}
+        record = {'sequence': 1, 'source_commit': 'a' * 40,
+            'origin': {'kind': 'authenticated-ci', 'identity': 'run:1/job:2',
+                'command': continuation.COMMANDS['validation'],
+                'execution': {'mode': 'source-cohort-v1', 'kind': 'validation',
+                              'native_discovery': True}},
+            'changes': list(invalid), 'log': {'sha256_ref': key},
+            'coverage': {'mode': 'python-discovery', 'ids': old}, 'exit_code': 0}
+        item = {'name': 'validation', 'invocation': continuation.COMMANDS['validation'],
+            'protocol': 'source-cohort-v1', 'contract': cohort.CONTRACTS['validation'],
+            'inventory': {'ids': current}, 'records': [record], 'obligations': []}
+        counts = {'native_discovered': 3, 'native_skipped': 1, 'native_skipped_ids': None}
+        def validate(selection):
+            with mock.patch('validation.native_python_discovery.source_cohort',
+                            return_value=(old, counts)):
+                return cohort.validate(item, proof, 'b' * 40, lambda *_: current,
+                    lambda row, *_: set(row['changes']), continuation.clean_log,
+                    lambda _: 'c' * 64, selection=selection)
+        return validate, counts
+
+    def test_retired_ids_never_supply_replacement_or_invalidated_body_credit(self):
+        current = ['test_old.Case.test_stable', 'test_old.Case.test_changed',
+                   'test_new.Case.test_replacement']
+        validate, counts = self.fixture(current, [current[1]])
+        plan = validate(True)
+        self.assertEqual(plan['inventory'], current)
+        self.assertEqual(plan['uncovered'], sorted(current[1:]))
+        self.assertEqual(plan['prior_discovery'], [counts])
+        with self.assertRaises(receipts.ReceiptError):
+            validate(False)
+
+    def test_complete_surviving_membership_preserves_original_counts_and_unnamed_skips(self):
+        validate, counts = self.fixture(['test_old.Case.test_stable'])
+        result = validate(False)
+        self.assertEqual(result['actual_named_pass_count'], 0)
+        summary = result['opaque_source_cohorts'][0]
+        self.assertEqual(summary['membership_count'], 1)
+        self.assertIsNone(summary['runtime_named_outcomes'])
+        for key, value in counts.items():
+            self.assertEqual(summary[key], value)

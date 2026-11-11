@@ -163,10 +163,14 @@ function everySelect(id,options,value,title){
 }
 // The per-library schedule lives in the row's drawer with everything else
 // that configures the library; the row itself only reports.
+// A library at Never relies on every Curator notification arriving. New
+// libraries start at six hours; older ones keep Never until someone opts in
+// here, and the drawer says what Never costs (pipeline contract v2 §5.2).
 function libScheduleFields(l){
   const last=l.last_scan_at?`<div><label>&nbsp;</label><span class="muted" style="font-size:12px">last scan ${esc(agoLabel(l.last_scan_at))}</span></div>`:'';
+  const never=Number(l.scan_interval_mins)===0?`<div class="schednever"><span class="muted" style="font-size:12px">${esc("Never: a missed Curator notification is found only by a manual scan, or at startup if 'Scan every library at startup' is on (it is off by default).")}</span> <button class="btn sm" type="button" onclick="enableReconcile(${l.id},this)">Enable 6-hourly reconcile</button></div>`:'';
   return `<div><label for="sched-scan-${l.id}">Scan for changes</label>${everySelect(`sched-scan-${l.id}`,SCAN_EVERY,l.scan_interval_mins,"How often to look for new & changed files")}</div>
-    <div><label for="sched-ref-${l.id}">Refresh art</label>${everySelect(`sched-ref-${l.id}`,REFRESH_EVERY,l.refresh_interval_mins,"How often to re-fetch metadata for everything — heavy; days, not hours")}</div>${last}`;
+    <div><label for="sched-ref-${l.id}">Refresh art</label>${everySelect(`sched-ref-${l.id}`,REFRESH_EVERY,l.refresh_interval_mins,"How often to re-fetch metadata for everything — heavy; days, not hours")}</div>${last}${never}`;
 }
 function agoLabel(ts){
   const s=Math.max(0,Math.floor(Date.now()/1000)-ts);
