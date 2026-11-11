@@ -3393,6 +3393,11 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
     Ok(request)
 }
 
+/// Wake the Analysis dispatcher: a viewer joined, or a copy range committed.
+pub(crate) fn wake_fragment_analysis() {
+    let _ = fragment_analysis_wake().send(());
+}
+
 pub(crate) fn clock_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -6585,6 +6590,31 @@ impl JobManager {
             loop {
                 let kinds = [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate];
                 let before = crate::background_jobs::accepted_claims(&kinds);
+                // Copy-range observations are metadata-owned Analysis work of
+                // their own, independent of the optional cluster cache build.
+                if self
+                    .job_authority
+                    .may_execute_job(JobKind::FragmentIndexPublish)
+                    .await
+                {
+                    let jobs = Arc::clone(&self);
+                    let transcode = Arc::clone(&transcode);
+                    tokio::spawn(async move {
+                        let policy = jobs.analysis_retry_policy().await;
+                        let context = crate::copy_analysis::CopyAnalysisContext {
+                            store: Arc::clone(&jobs.store),
+                            node_id: jobs.coordinator.node_id().to_owned(),
+                            cache_dir: transcode.runtime_cache_dir().to_path_buf(),
+                            checkpoint_root: jobs.source_checkpoint_dir.clone(),
+                            lease_ms: policy.lease_ms,
+                            renew_every: policy.renew_every(),
+                            retry_ms: policy.backoff_base_ms,
+                            metrics: Arc::clone(&jobs.analysis_metrics),
+                        };
+                        crate::copy_analysis::work_copy_observations(&jobs.copy_analysis, &context)
+                            .await;
+                    });
+                }
                 if self
                     .job_authority
                     .may_execute_job(JobKind::FragmentIndexBuild)

@@ -910,7 +910,7 @@ impl TranscodeManager {
                         Ok(authority) => {
                             let manifest = checkpoint.manifest_sha256.clone();
                             let message=crate::copy_analysis::CompletedCopyRange{file:Arc::clone(&backing.file),catalog_namespace:backing.catalog_namespace.clone(),source:backing.observation_source.clone(),authority:crate::copy_analysis::CopyObservationAuthority::Source{assignment:owner.assignment.clone(),authority:plurx_core::store::analysis_coordination::AnalysisSourceInterestAuthority::Active(authority)},range_id:backing.range_id,range_epoch:backing.range_epoch,init,checkpoint};
-                            if state.copy_analysis.inbox().try_send(message).is_ok() {
+                            if state.copy_analysis.notify(message).is_ok() {
                                 notified_manifest = Some(manifest);
                             }
                         }

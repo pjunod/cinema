@@ -679,18 +679,24 @@ pub struct PublishCopyIndexV3 {
     pub now_ms: i64,
 }
 
-fn publication_body(request: &PublishCopyIndexV3) -> Result<serde_json::Value, StoreError> {
-    request.token.validate()?;
-    request.artifact.validate()?;
-    if !metadata_shape_valid(&request.source, &request.claim, request.now_ms)
-        || request.expected_head_epoch < 0
-        || request.artifact.file_id != request.source.file_id
-        || request.artifact.contract_version != request.source.contract_version
+/// The exact publisher payload a worker enqueues for this candidate. The
+/// guarded publication later requires the running job's payload to equal it
+/// field for field, so producer and publisher share this one constructor.
+pub fn copy_index_v3_publish_payload(
+    claim: &super::analysis_coordination::AnalysisCoordinationClaim,
+    source: &AnalysisCoordinationSource,
+    artifact: &CopyIndexV3Artifact,
+    expected_head_epoch: i64,
+) -> Result<super::background_jobs::JobPayload, StoreError> {
+    artifact.validate()?;
+    if !metadata_shape_valid(source, claim, 0)
+        || expected_head_epoch < 0
+        || artifact.file_id != source.file_id
+        || artifact.contract_version != source.contract_version
     {
         return Err(invalid());
     }
-    let artifact = &request.artifact;
-    let source_key = copy_index_v3_source_key(&artifact.catalog_namespace, &request.source)?;
+    let source_key = copy_index_v3_source_key(&artifact.catalog_namespace, source)?;
     let logical_key = super::fragment_index_cluster::cluster_fragment_index_v3_key(
         &artifact.catalog_namespace,
         artifact.file_id,
@@ -706,27 +712,44 @@ fn publication_body(request: &PublishCopyIndexV3) -> Result<serde_json::Value, S
     }
     let payload = super::background_jobs::JobPayload::FragmentIndexPublish {
         publication_version: 3,
-        source_key: source_key.clone(),
+        source_key,
         catalog_namespace: artifact.catalog_namespace.clone(),
         init_contract_sha256: artifact.init_contract_sha256.clone(),
-        expected_head_epoch: request.expected_head_epoch,
-        file_id: request.source.file_id,
-        source_size: request.source.source_size,
-        source_mtime: request.source.source_mtime,
-        origin_node_id: request.source.origin_node_id.clone(),
-        object_version: request.source.object_version.clone(),
-        coordinator_request_id: request.claim.request_id.clone(),
-        coordinator_fence: request.claim.fence,
-        requested_generation: request.source.requested_generation.clone(),
+        expected_head_epoch,
+        file_id: source.file_id,
+        source_size: source.source_size,
+        source_mtime: source.source_mtime,
+        origin_node_id: source.origin_node_id.clone(),
+        object_version: source.object_version.clone(),
+        coordinator_request_id: claim.request_id.clone(),
+        coordinator_fence: claim.fence,
+        requested_generation: source.requested_generation.clone(),
         contract_version: artifact.contract_version,
         output_contract_sha256: artifact.output_contract_sha256.clone(),
         source_sha256: artifact.source_sha256.clone(),
         blob_sha256: artifact.blob_sha256.clone(),
         bytes: artifact.bytes,
-        cache_key: logical_key.clone(),
+        cache_key: logical_key,
         producer_engine_sha256: artifact.producer_engine_sha256.clone(),
     };
     payload.validate()?;
+    Ok(payload)
+}
+
+fn publication_body(request: &PublishCopyIndexV3) -> Result<serde_json::Value, StoreError> {
+    request.token.validate()?;
+    if !metadata_shape_valid(&request.source, &request.claim, request.now_ms) {
+        return Err(invalid());
+    }
+    let artifact = &request.artifact;
+    let payload = copy_index_v3_publish_payload(
+        &request.claim,
+        &request.source,
+        artifact,
+        request.expected_head_epoch,
+    )?;
+    let source_key = copy_index_v3_source_key(&artifact.catalog_namespace, &request.source)?;
+    let logical_key = artifact.contract_key.clone();
     // Renewal clocks/revisions and builder timestamps are not a new semantic
     // publication. Attempt identity is independently checked against history.
     let semantic = serde_json::json!({"version":3,"source_key":source_key,"source":request.source,"claim":request.claim,

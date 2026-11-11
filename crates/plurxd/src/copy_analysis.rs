@@ -2,6 +2,9 @@
 //! grants physical source I/O, a complete-source proof, or media publication.
 
 mod physical;
+mod work;
+
+pub(crate) use work::{work_copy_observations, CopyAnalysisContext};
 
 use plurx_core::{
     fmp4::{Init, PromotionInputs},
@@ -71,6 +74,8 @@ pub(crate) type CopyAnalysisInbox = tokio::sync::mpsc::Sender<CompletedCopyRange
 pub(crate) struct CopyAnalysisRegistry {
     sender: CopyAnalysisInbox,
     receiver: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<CompletedCopyRange>>,
+    /// Coalesced per-source observations. Holding this lock is the pass.
+    pending: tokio::sync::Mutex<work::PendingSources>,
 }
 impl Default for CopyAnalysisRegistry {
     fn default() -> Self {
@@ -78,12 +83,29 @@ impl Default for CopyAnalysisRegistry {
         Self {
             sender,
             receiver: tokio::sync::Mutex::new(receiver),
+            pending: Default::default(),
         }
     }
 }
 impl CopyAnalysisRegistry {
     pub(crate) fn inbox(&self) -> CopyAnalysisInbox {
         self.sender.clone()
+    }
+    /// Deliver one committed range and wake the existing Analysis dispatcher.
+    /// A full inbox returns the message; the producer retries on its own
+    /// next lease or production event.
+    pub(crate) fn notify(&self, message: CompletedCopyRange) -> Result<(), CompletedCopyRange> {
+        match self.sender.try_send(message) {
+            Ok(()) => {
+                crate::state::wake_fragment_analysis();
+                Ok(())
+            }
+            Err(error) => Err(error.into_inner()),
+        }
+    }
+    /// At most one pass at a time; a concurrent wake finds it held.
+    pub(crate) fn begin_pass(&self) -> Option<tokio::sync::MutexGuard<'_, work::PendingSources>> {
+        self.pending.try_lock().ok()
     }
     pub(crate) fn take_pending(&self) -> Vec<CompletedCopyRange> {
         let Ok(mut receiver) = self.receiver.try_lock() else {
@@ -155,6 +177,18 @@ pub(crate) struct CopyObservationSet {
     hevc: bool,
 }
 impl CopyObservationSet {
+    pub(crate) fn source(&self) -> &AnalysisCoordinationSource {
+        &self.source
+    }
+    pub(crate) fn catalog_namespace(&self) -> &str {
+        &self.catalog_namespace
+    }
+    pub(crate) fn init_contract_sha256(&self) -> &str {
+        &self.init_contract_sha256
+    }
+    pub(crate) fn is_complete(&self) -> bool {
+        self.rows.is_complete()
+    }
     pub(crate) fn new(message: &CompletedCopyRange) -> Result<Self, CopyObservationError> {
         use plurx_core::segplan::ranges::{RangeBinding, SparseIndexRows};
         let init_contract_sha256 = plurx_core::fmp4::copy_video_init_contract_sha256(&message.init)
