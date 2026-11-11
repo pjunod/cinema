@@ -225,7 +225,8 @@ async fn dead_owner_source_census_releases_only_exact_quiescent_custody() {
     );
     assert_eq!(dead.held(), 1, "every refusal keeps the custody");
 
-    dead.apply(&dead.proof(0), started)
+    let quiescent = dead.proof(0);
+    dead.apply(&quiescent, started)
         .await
         .expect("exact quiescent census releases");
     assert_eq!(dead.held(), 0);
@@ -242,7 +243,7 @@ async fn dead_owner_source_census_releases_only_exact_quiescent_custody() {
         "the worker clears only its own witness"
     );
     // Replay after release is a no-op until the operator removes the proof.
-    dead.apply(&dead.proof(0), started)
+    dead.apply(&quiescent, started)
         .await
         .expect("idempotent replay");
 }
