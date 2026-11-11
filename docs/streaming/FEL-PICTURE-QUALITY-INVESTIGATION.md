@@ -318,3 +318,34 @@ Original files match their archived copies. The bundle retains experimental
 sources, original paths, receipts, binaries and media; Git retains portable
 findings and tools. No worker, live playback or packaging change accompanies
 this handoff. No diagnostic child or encode job remains pending.
+
+## Smaller QP groups miss the same shadow tail
+
+Both qg8 encodes are now authored and scored. The [qualifier](../../tools/dv_processing/diagnostics/fel_quality/qualify_spatial_control.py)
+adds the two receipts the handoff required before scoring. The encoder logs
+report the AQ tuple 2 / 1.0 / 8 / 1. Coded SPS/PPS give CTB64 with
+`diff_cu_qp_delta_depth=3`, so the effective QP group is 8 in both the
+encoded and the authored stream. The frozen author preserves all 48 VCL
+payloads, clocks and RPUs, and the R/F images and reference masks exactly
+match the prior run.
+
+Michael5400 frame 24, ModelB, reference below 0.1 nit:
+
+| Arm | Shadow mean | Shadow p99 | Authored Mb/s |
+|---|---:|---:|---:|
+| Fallback | 1.752768 | 4.193800 | — |
+| Single-pass115, qg32 | 1.597174 | 4.340212 | 123.749451 |
+| Single-pass115, qg8 | 1.605252 | 4.381678 | 122.864220 |
+
+Michael1800 passes all 8 selected rows at 129.542 Mb/s. Michael5400 passes
+frame 0 but fails the frame-24 shadow p99 in all four models, so 4/8 rows
+pass. The mean is also slightly worse than qg32. Finer AQ sampling and QP
+groups do not protect the shadow tail. No candidate is selected.
+[Portable results](../../tools/dv_processing/diagnostics/fel_quality/results/qg8-20261111.json).
+
+The original `/private/tmp` working root had been wiped by a reboot. This run
+used an APFS clone of the durable archive with derived, hash-reverified
+paths, and the sealed archive was left untouched. The first attempt was
+refused because the sealed RPU list names the wiped paths. That refusal is
+kept as an invalid test, not as a quality result.
+

@@ -19,7 +19,7 @@ from pathlib import Path
 import argparse, hashlib, json, re, subprocess, sys
 
 ROOT = Path(__file__).resolve().parents[1]
-OLD = Path('/Users/pjunod/.local/state/plurx-fel-quality/20261026-measurement-calibration')
+OLD = Path.home() / '.local/state/plurx-fel-quality/20261026-measurement-calibration'
 FFMPEG = '/opt/homebrew/bin/ffmpeg'
 FFPROBE = '/opt/homebrew/bin/ffprobe'
 VARIANTS = ['hdr-off', 'psyoff', 'no-sao', 'chroma-fine', 'hdr-off-chroma6', 'hdr-off-chroma9']

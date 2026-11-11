@@ -140,7 +140,11 @@
     "tool_sha256": "c1772345fbf6298100c2f8c383a2df3e292dd7aefd6e9ec2a9ae3f2180d43931",
     "protocol": "protocol-spatial-20261026.json",
     "protocol_sha256": "7f303eb515d05845c78820db4afafeed84e83a6959c708416db8ff417d87e023",
-    "status": "Both encodes complete; hashes checked. Authoring/native0/24/syntax/quality qualification NOT_RUN. See Claude handoff."
+    "status": "Qualified and scored 2026-11-11: AQ tuple 2/1.0/8/1 and SPS/PPS effective QP group 8 verified; M1800 8/8, M5400 4/8 (frame-24 shadow p99 fails all models). Not selected.",
+    "qualifier": "qualify_spatial_control.py",
+    "portable_results": "results/qg8-20261111.json",
+    "private_root": "$HOME/.local/state/plurx-fel-quality/20261111-qg8-relocated (M3), APFS clone of rate_control_archive; RELOCATION-20261111.json",
+    "qualifier_note": "Executed bytes differ only on the OLD root line (absolute home path, now Path.home()); executed sha256 is recorded in each qualification receipt."
   },
   "two_pass_results": {
     "file": "results/twopass-20261026.json",
