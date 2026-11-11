@@ -1237,37 +1237,6 @@ pub(crate) fn source_burn_sidecar_command(
     Ok(command)
 }
 
-/// Build native text extraction without starting unowned subtitle work.
-pub(crate) fn source_native_text_command(
-    source: &std::fs::File,
-    ordinal: u16,
-) -> Result<tokio::process::Command, String> {
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    #[cfg(unix)]
-    inherit_file_descriptors(&mut command, &[(source, 3)]);
-    command.args(["-hide_banner", "-loglevel", "error", "-threads", "1", "-i"]);
-    #[cfg(unix)]
-    command.arg("/dev/fd/3");
-    #[cfg(windows)]
-    {
-        let path = windows_source_path(source)?;
-        verify_windows_source_path(source, &path)?;
-        command.arg(path);
-    }
-    command.args([
-        "-map",
-        &format!("0:s:{ordinal}"),
-        "-vn",
-        "-an",
-        "-threads",
-        "1",
-        "-f",
-        "webvtt",
-        "pipe:1",
-    ]);
-    Ok(command)
-}
-
 async fn held_source_probe_json_with_limits(
     source: &std::fs::File,
     timeout: Duration,
@@ -1372,20 +1341,17 @@ async fn held_source_probe_json_with_limits(
     }
 }
 
-/// Top-level `probe_json` keys the daemon writes beside FFprobe's own.
-pub(crate) const APPLICATION_PROBE_PREFIX: &str = "plurx_";
-
 fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|error| format!("invalid ffprobe JSON: {error}"))?;
     if let Some(document) = value.as_object_mut() {
-        // Application-owned measurements are grafted after the scan under a
-        // `plurx_` key, which FFprobe never emits. A fresh probe never carries
-        // them; their presence says nothing about whether the source bytes
-        // changed. Strip the whole namespace rather than a list, so a new
-        // annotation (e.g. a queued FEL request) cannot make every annotated
-        // title fail verification. Keep all FFprobe-owned fields comparable.
-        document.retain(|key, _| !key.starts_with(APPLICATION_PROBE_PREFIX));
+        // Application-owned measurements are grafted after the scan. A fresh
+        // probe never carries them; their presence says nothing about whether
+        // the source bytes changed. They are excluded by their namespace, not
+        // by a list: a list missed `plurx_dv_fel_requests_v3` (#1477), and every
+        // title with a pending FEL request then failed held-source
+        // verification. Keep all FFprobe-owned fields comparable.
+        document.retain(|key, _| !plurx_core::scan::probe::is_application_graft(key));
     }
     if let Some(format) = value
         .get_mut("format")

@@ -20,7 +20,18 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.8.0**, build `194` — a prepared switch hands MediaSession the successor only
+> Status: **v0.8.0**, build `196` — Playback Info shows the server's
+> real reason a Dolby Vision enhancement was skipped or is still qualifying.
+>
+> Build `195` — the HEVC decoder envelope is the one
+> Media3's own decoder selector reports, rather than a re-derivation of it.
+>
+> Build `194` — the HEVC decoder envelope stops at the
+> vendor's declared performance points, the bound Media3's decoder selector
+> applies, so the hvc1 probe holds and processed Dolby Vision (HDR10-E) can
+> upgrade playback on decoders such as the Google TV Streamer's.
+>
+> Build `193` — a prepared switch hands MediaSession the successor only
 > after its decoded frame and reports its seam (`prepared_seam`) with decoder-counter frame
 > and audio-underrun evidence, once per commit that began, with whether an ordinary reopen
 > actually ran in its window; a create refusal no retry can outlive

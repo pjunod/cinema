@@ -17,6 +17,17 @@ bump may break compatibility and a **patch** bump never does.
   reason an enhancement was skipped. Source custody left behind by a job whose
   owner died before its join can now be released from a host source-open
   census instead of holding the shared storage fence indefinitely (#1491).
+
+- Titles with a pending Dolby Vision FEL request no longer fail source
+  verification ("the stored probe differs from the source at
+  /<unknown-field> missing"), which had declined their processed HDR10-E
+  upgrade. Application metadata in a stored probe is now excluded by its
+  `plurx_` namespace rather than a list a new field could miss.
+
+- Android TV devices whose HEVC decoder declares performance points (Google TV
+  Streamer) now report HLS fMP4 HEVC support, so processed Dolby Vision
+  (HDR10-E) upgrades reach them instead of being declined at every start.
+
 - Linux Cinema now defaults to the system mpv and no longer ships a duplicate
   renderer, so qualified system HDR/DV updates reach Cinema. Explicit binary
   overrides, isolated configuration and Cinema controls remain available.

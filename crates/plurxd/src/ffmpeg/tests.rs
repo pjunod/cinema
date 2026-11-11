@@ -585,6 +585,63 @@ fn a_dv_title_report_is_not_a_source_change_for_either_reporter_direction() {
         .contains("/<unknown-field> missing"));
 }
 
+/// The production failure of 2026-11-11 (Avatar: Fire and Ash on a lab node): #1477
+/// grafted pending FEL requests under `plurx_dv_fel_requests_v3`, the
+/// normalizer's list of grafts did not name it, and a same-reporter
+/// comparison refused the unchanged source as "/<unknown-field> missing", so
+/// its processed Dolby Vision upgrade was declined. Grafts are now excluded by
+/// their namespace, including ones nobody has written yet.
+#[test]
+fn every_application_graft_is_excluded_from_the_source_comparison() {
+    let held = current_reporter_probe();
+    let mut stored = held.clone();
+    stored[plurx_core::transcode::dv_fel_qualification::REQUESTS_KEY] =
+        serde_json::json!({"fixture": {"state": "pending"}});
+    stored["plurx_a_graft_not_yet_written"] = serde_json::json!(1);
+    for (left, right) in [(&stored, &held), (&held, &stored)] {
+        let comparison = super::compare_probe_documents(&left.to_string(), &right.to_string())
+            .expect("compare grafted probe");
+        assert!(comparison.same, "{:?}", comparison.differences);
+        assert!(!comparison.admitted_on_reporter_drift);
+    }
+    // The reporter stamp is the one application field kept: it is how a
+    // comparison tells two FFprobe builds apart.
+    let mut other_build = stored.clone();
+    plurx_core::scan::probe::stamp_reporter(&mut other_build, "ffprobe version 5.1.9");
+    let drift = super::compare_probe_documents(&other_build.to_string(), &held.to_string())
+        .expect("compare across builds");
+    assert!(drift.same, "{:?}", drift.differences);
+    assert!(drift.admitted_on_reporter_drift);
+    // A grafted document still refuses a changed source.
+    stored["streams"][0]["width"] = serde_json::json!(1920);
+    let changed = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+        .expect("compare changed media beside grafts");
+    assert!(!changed.same);
+    assert!(changed.rendered_differences().contains("/streams/0/width"));
+}
+
+#[test]
+fn every_graft_the_application_writes_is_in_its_namespace() {
+    use plurx_core::scan::probe::{is_application_graft, REPORTER_FIELD};
+    for key in [
+        plurx_core::transcode::hevc_census::PROBE_KEY,
+        plurx_core::store::CONTENT_ENCODING_PROBE_KEY,
+        plurx_core::scan::dv_title::PROBE_FIELD,
+        plurx_core::transcode::dv_fel_qualification::PROBE_KEY,
+        plurx_core::transcode::dv_fel_qualification::REQUESTS_KEY,
+        plurx_core::transcode::dv_fel_qualification::VARIANTS_KEY,
+    ] {
+        assert!(
+            is_application_graft(key),
+            "{key} is outside the application namespace"
+        );
+    }
+    assert!(!is_application_graft(REPORTER_FIELD));
+    for ffprobe_owned in ["format", "streams", "chapters", "programs", "stream_groups"] {
+        assert!(!is_application_graft(ffprobe_owned));
+    }
+}
+
 /// The production failure this exists to stop: three refusals on `media1`
 /// inside four minutes, on a file nothing had touched, because the scan
 /// and the held-descriptor probe came from different FFprobe builds. 5,061
@@ -2798,37 +2855,5 @@ async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_argum
     assert_eq!(
         crate::scratch_put::redact(&format!("({url}), ü {url}/part.m4s")),
         "(http://127.0.0.1:43210/REDACTED), ü http://127.0.0.1:43210/REDACTED/part.m4s"
-    );
-}
-
-/// Every application annotation, including the FEL request/variant maps a
-/// late qualification writes, is outside the source comparison.
-#[test]
-fn application_probe_annotations_never_invalidate_a_held_source() {
-    let held = serde_json::json!({
-        "format": {"filename": "/dev/fd/3", "format_name": "matroska,webm", "size": "10"},
-        "streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc"}]
-    });
-    let mut stored = held.clone();
-    for key in [
-        plurx_core::transcode::hevc_census::PROBE_KEY,
-        plurx_core::store::CONTENT_ENCODING_PROBE_KEY,
-        plurx_core::scan::dv_title::PROBE_FIELD,
-        plurx_core::transcode::dv_fel_qualification::PROBE_KEY,
-        plurx_core::transcode::dv_fel_qualification::VARIANTS_KEY,
-        plurx_core::transcode::dv_fel_qualification::REQUESTS_KEY,
-    ] {
-        assert!(key.starts_with(super::APPLICATION_PROBE_PREFIX), "{key}");
-        stored[key] = serde_json::json!({"recorded": true});
-    }
-    let comparison = super::compare_probe_documents(&stored.to_string(), &held.to_string())
-        .expect("comparable documents");
-    assert!(comparison.same, "{}", comparison.rendered_differences());
-    // A real source fact still differs.
-    stored["streams"][0]["codec_name"] = serde_json::json!("h264");
-    assert!(
-        !super::compare_probe_documents(&stored.to_string(), &held.to_string())
-            .expect("comparable documents")
-            .same
     );
 }

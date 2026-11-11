@@ -138,6 +138,93 @@ async fn snapshot<T: Backend>(
     )
     .await
 }
+// The daemon's dev-dependency enables `fixtures`; release builds carry no
+// scheduling seam. Keying by the complete request UUID isolates concurrent tests.
+#[cfg(feature = "fixtures")]
+#[derive(Default)]
+enum InitializationAssertion {
+    #[default]
+    CurrentAuthority,
+    AccountingSnapshotCounterfactual,
+}
+#[cfg(feature = "fixtures")]
+struct InitializationPause {
+    reached: tokio::sync::oneshot::Sender<(SourceDispatchAssignment, i64)>,
+    release: tokio::sync::oneshot::Receiver<InitializationAssertion>,
+    captured: tokio::sync::watch::Sender<bool>,
+}
+#[cfg(feature = "fixtures")]
+static INITIALIZATION_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, InitializationPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(feature = "fixtures")]
+pub struct SourceIngressInitializationPause {
+    request_id: String,
+    reached: tokio::sync::oneshot::Receiver<(SourceDispatchAssignment, i64)>,
+    release: Option<tokio::sync::oneshot::Sender<InitializationAssertion>>,
+}
+#[cfg(feature = "fixtures")]
+impl SourceIngressInitializationPause {
+    pub async fn reached(
+        &mut self,
+    ) -> Result<(SourceDispatchAssignment, i64), tokio::sync::oneshot::error::RecvError> {
+        (&mut self.reached).await
+    }
+    pub fn release(mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(InitializationAssertion::CurrentAuthority);
+        }
+    }
+    /// Execute the original accounting predicate in this one armed fixture
+    /// request, so its actual SQL/HTTP failure can be compared in one binary.
+    pub fn release_old_accounting_assertion(mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(InitializationAssertion::AccountingSnapshotCounterfactual);
+        }
+    }
+}
+#[cfg(feature = "fixtures")]
+impl Drop for SourceIngressInitializationPause {
+    fn drop(&mut self) {
+        INITIALIZATION_PAUSES
+            .lock()
+            .expect("fixture initialization pauses")
+            .remove(&self.request_id);
+        // Dropping the sender also releases an initializer if its test exits.
+    }
+}
+/// Order actual accepted-driver registration after initialization's captured
+/// snapshot and before its authority assertion. This confers no authority.
+#[cfg(feature = "fixtures")]
+pub fn pause_source_ingress_initialization_for_fixture(
+    request_id: &str,
+) -> SourceIngressInitializationPause {
+    let (reached, observed) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let mut pauses = INITIALIZATION_PAUSES
+        .lock()
+        .expect("fixture initialization pauses");
+    assert!(
+        !pauses.contains_key(request_id),
+        "request initialization already paused"
+    );
+    let (captured, _) = tokio::sync::watch::channel(false);
+    pauses.insert(
+        request_id.to_owned(),
+        InitializationPause {
+            reached,
+            release: released,
+            captured,
+        },
+    );
+    SourceIngressInitializationPause {
+        request_id: request_id.to_owned(),
+        reached: observed,
+        release: Some(release),
+    }
+}
+
 async fn initialized<T: Backend>(
     store: &T,
     assignment: &SourceDispatchAssignment,
@@ -148,17 +235,41 @@ async fn initialized<T: Backend>(
     let Some(snapshot) = snapshot(store, assignment).await? else {
         return Ok(SourceCustodyWrite::Refused);
     };
+    #[cfg(feature = "fixtures")]
+    let mut assertion_mode = InitializationAssertion::CurrentAuthority;
+    #[cfg(feature = "fixtures")]
+    {
+        let pause = INITIALIZATION_PAUSES
+            .lock()
+            .expect("fixture initialization pauses")
+            .remove(assignment.binding().request_id());
+        if let Some(pause) = pause {
+            // The actual registrar may run now; the captured snapshot predates
+            // its accounting mutation regardless of which task arrived first.
+            pause.captured.send_replace(true);
+            let _ = pause.reached.send((assignment.clone(), snapshot.revision));
+            assertion_mode = pause.release.await.unwrap_or_default();
+        }
+    }
     let Some(routing) = snapshot.state.source_routing() else {
         return Ok(SourceCustodyWrite::Refused);
     };
     if routing.owner_node_id != assignment.owner_node_id() {
         return Ok(SourceCustodyWrite::Refused);
     }
+    // This operation only asserts ownership. A registration or ACK can
+    // change accounting while retaining the same current owner.
+    let custody_guard = current_admission_guard(&snapshot, false)?;
+    #[cfg(feature = "fixtures")]
+    let custody_guard = match assertion_mode {
+        InitializationAssertion::CurrentAuthority => custody_guard,
+        InitializationAssertion::AccountingSnapshotCounterfactual => snapshot_guard(&snapshot)?,
+    };
     let counts = store
         .sharing_txn(vec![assertion(&format!(
             "{} AND {}",
             source_guard(assignment),
-            snapshot_guard(&snapshot)?
+            custody_guard
         ))])
         .await?;
     if counts.as_slice() == [0] {
@@ -414,6 +525,18 @@ impl<T: Backend> SharingSourceIngressCustodyStore for T {
     ) -> Result<SourceCustodyWrite, StoreError> {
         if !registration.valid() || registration.closed_confirmation.is_some() {
             return Err(invalid());
+        }
+        #[cfg(feature = "fixtures")]
+        {
+            let captured = INITIALIZATION_PAUSES
+                .lock()
+                .expect("fixture initialization pauses")
+                .get(assignment.binding().request_id())
+                .map(|pause| pause.captured.subscribe());
+            if let Some(mut captured) = captured {
+                // Cancellation of the owning test also releases this wait.
+                let _ = captured.wait_for(|captured| *captured).await;
+            }
         }
         let Some(snapshot) = snapshot(self, assignment).await? else {
             return Ok(SourceCustodyWrite::Refused);
