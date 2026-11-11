@@ -650,6 +650,139 @@ async fn sharing_source_ingress_ack_preserves_authority_faults_and_retry_bounds(
 }
 
 #[tokio::test]
+async fn sharing_source_ingress_initialization_accepts_accounting_but_refuses_changed_authority() {
+    use crate::sharing_ingress_custody::IngressRegistration;
+    use crate::store::sharing_source_ingress_custody::SourceCustodyWrite;
+    for action in [
+        AdmissionInterleave::Register,
+        AdmissionInterleave::Ack,
+        AdmissionInterleave::AckAll,
+        AdmissionInterleave::Seal,
+        AdmissionInterleave::WrongOwner,
+        AdmissionInterleave::WrongRoutingOwner,
+        AdmissionInterleave::WrongBoot,
+        AdmissionInterleave::WrongInitialHash,
+        AdmissionInterleave::MalformedRouting,
+        AdmissionInterleave::SqlFault,
+    ] {
+        let store = SqliteStore::open_in_memory().expect("actual Store");
+        let (grant, credential) = setup(&store).await;
+        install_fixture_ingress_context(&store).await;
+        let planned = intent(&store, grant, &credential, "initialization-interleave").await;
+        let binding = match store
+            .claim_source_media_session(&planned, &proof())
+            .await
+            .expect("actual claim")
+        {
+            SourceClaimOutcome::Acquired(value) => value,
+            _ => panic!("fresh claim"),
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &credential, &proof())
+            .await
+            .expect("actual assignment")
+            .expect("exact assignment");
+        assert_eq!(
+            store
+                .initialize_source_ingress_custody(&assignment)
+                .await
+                .expect("empty current ledger"),
+            SourceCustodyWrite::ExactReplay,
+            "initialization does not require an accepted driver"
+        );
+        let first = IngressRegistration {
+            node_id: "voter".into(),
+            boot_id: planned.request.ingress_registry_boot_id,
+            connection_id: Uuid::new_v4(),
+            driver_sequence: 1,
+            registration_sequence: 1,
+            closed_confirmation: None,
+        };
+        let second = IngressRegistration {
+            connection_id: Uuid::new_v4(),
+            driver_sequence: 2,
+            registration_sequence: 2,
+            ..first.clone()
+        };
+        assert_eq!(
+            store
+                .register_source_ingress_custody(&assignment, &first, &proof())
+                .await
+                .expect("first registration"),
+            SourceCustodyWrite::Applied
+        );
+        if !matches!(action, AdmissionInterleave::Register) {
+            assert_eq!(
+                store
+                    .register_source_ingress_custody(&assignment, &second, &proof())
+                    .await
+                    .expect("second registration"),
+                SourceCustodyWrite::Applied
+            );
+        }
+        let original = store
+            .source_ingress_custody(&assignment)
+            .await
+            .expect("read")
+            .expect("exact ledger");
+        let writes = std::sync::atomic::AtomicUsize::new(0);
+        let interleaved = AdmissionInterleavedStore {
+            store: &store,
+            assignment: &assignment,
+            action: std::sync::Mutex::new(Some(action)),
+            writes: Some(&writes),
+            second,
+        };
+        let result = interleaved
+            .initialize_source_ingress_custody(&assignment)
+            .await;
+        assert_eq!(
+            writes.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "one authority assertion, without retries: {action:?}"
+        );
+        if matches!(
+            action,
+            AdmissionInterleave::Register | AdmissionInterleave::Ack | AdmissionInterleave::AckAll
+        ) {
+            assert_eq!(
+                result.expect("current owner survives accounting changes"),
+                SourceCustodyWrite::ExactReplay,
+                "{action:?}"
+            );
+            let current = store
+                .source_ingress_custody(&assignment)
+                .await
+                .expect("read")
+                .expect("same owner");
+            let (mutations, open) = match action {
+                AdmissionInterleave::Register => (1, 2),
+                AdmissionInterleave::Ack => (1, 1),
+                AdmissionInterleave::AckAll => (2, 0),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                current.revision,
+                original.revision + mutations,
+                "initialization must not mutate accounting"
+            );
+            assert_eq!(current.state.open().count(), open);
+            assert!(!current.state.is_sealed());
+        } else {
+            let error = result.expect_err("changed authority and SQL faults remain errors");
+            if matches!(action, AdmissionInterleave::SqlFault) {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("source_ack_injected_missing_table"),
+                    "preserve the actual SQL fault: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn sharing_source_ingress_admission_accepts_current_accounting_but_refuses_changed_authority()
 {
     use crate::sharing_ingress_custody::IngressRegistration;
@@ -2771,6 +2904,14 @@ async fn sharing_source_designation_offline_or_new_boot_never_retires_unresolved
             designation_owner_for(&store, &request).await.as_deref(),
             Some("voter")
         );
+        // A restart while still a member: a removed member may rejoin only
+        // through a fresh join, so the boot fault comes before the removal.
+        store.sharing_txn(vec![("UPDATE cluster_node_capabilities SET capability=$1 WHERE capability GLOB 'sharing_ingress_boot_v1:*'".into(),vec![format!("sharing_ingress_boot_v1:{}",Uuid::new_v4()).into()])]).await.expect("restart fault");
+        assert_eq!(
+            designation_owner_for(&store, &request).await.as_deref(),
+            Some("voter"),
+            "new boot does not settle the old invocation"
+        );
         store
             .sharing_txn(vec![(
                 "UPDATE cluster_nodes SET removed_at=1 WHERE node_id='voter'".into(),
@@ -2782,12 +2923,6 @@ async fn sharing_source_designation_offline_or_new_boot_never_retires_unresolved
             designation_owner_for(&store, &request).await.as_deref(),
             Some("voter"),
             "offline does not prove physical stop"
-        );
-        store.sharing_txn(vec![("UPDATE cluster_nodes SET removed_at=NULL WHERE node_id='voter'".into(),vec![]),("UPDATE cluster_node_capabilities SET capability=$1 WHERE capability GLOB 'sharing_ingress_boot_v1:*'".into(),vec![format!("sharing_ingress_boot_v1:{}",Uuid::new_v4()).into()])]).await.expect("restart fault");
-        assert_eq!(
-            designation_owner_for(&store, &request).await.as_deref(),
-            Some("voter"),
-            "new boot does not settle the old invocation"
         );
         let retained = binding_row(
             &store,

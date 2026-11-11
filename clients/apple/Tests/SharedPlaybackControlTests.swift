@@ -497,6 +497,8 @@ final class SharedBoundedRangeTimelineTests: XCTestCase {
         XCTAssertTrue(completedRange.reachedTitleEnd(filmPositionMs: 7_200_000, durationMs: 7_200_000))
         let whole = SharedPlaybackTimeline(vod: true, mediaOriginMs: 0, startSeconds: 0, requestedStartMs: 5_400_000)
         XCTAssertTrue(whole.wholeTitle)
+        XCTAssertTrue(whole.reachedTitleEnd(filmPositionMs: 7_197_000, durationMs: 7_200_000))
+        XCTAssertFalse(completedRange.reachedTitleEnd(filmPositionMs: 7_197_000, durationMs: nil))
         XCTAssertEqual(whole.itemPositionMs(filmPositionMs: 5_400_000), 5_400_000)
     }
 }

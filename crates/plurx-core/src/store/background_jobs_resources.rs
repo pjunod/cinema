@@ -654,16 +654,17 @@ mod source_tests {
           CREATE TABLE job_leases(resource TEXT PRIMARY KEY,owner_node_id TEXT,fence INTEGER,revision INTEGER,expires_at_ms INTEGER,updated_at_ms INTEGER);
           CREATE TABLE offline_packages(id TEXT PRIMARY KEY,node_id TEXT,file_id INTEGER,source_size INTEGER,source_mtime INTEGER,claim_generation INTEGER,state TEXT,expires_at INTEGER);
           CREATE TABLE background_storage_domains(library_id INTEGER,root_path TEXT,domain_id TEXT);
-          CREATE TABLE background_jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,fence INTEGER,owner_node_id TEXT,owner_boot_id TEXT,claim_id TEXT,lease_expires_ms INTEGER,priority INTEGER DEFAULT 0);
+          CREATE TABLE background_jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,fence INTEGER,owner_node_id TEXT,owner_boot_id TEXT,claim_id TEXT,lease_expires_ms INTEGER,priority INTEGER DEFAULT 0,result_ref TEXT,revision INTEGER NOT NULL DEFAULT 0,updated_at_ms INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE background_job_commands(id TEXT PRIMARY KEY,operation TEXT,request_json TEXT,result_json TEXT);
-          CREATE TABLE background_job_waiters(request_scope TEXT,request_id TEXT,state TEXT,updated_at_ms INTEGER,request_digest TEXT,job_id TEXT,consumer_kind TEXT,consumer_ref TEXT,priority INTEGER,deadline_ms INTEGER,target_node_id TEXT,PRIMARY KEY(request_scope,request_id));
+          CREATE TABLE background_job_waiters(request_scope TEXT,request_id TEXT,state TEXT,updated_at_ms INTEGER,request_digest TEXT,job_id TEXT,consumer_kind TEXT,consumer_ref TEXT,priority INTEGER,deadline_ms INTEGER,target_node_id TEXT,retry_deadline_ms INTEGER NOT NULL DEFAULT 0,last_error_code TEXT,result_ref TEXT,PRIMARY KEY(request_scope,request_id));
           CREATE TABLE media_session_requests(user_id INTEGER,playback_id TEXT,incarnation_id TEXT,state TEXT,claim_expires_at_ms INTEGER);
           CREATE TABLE media_sessions(user_id INTEGER,playback_id TEXT,incarnation_id TEXT,state TEXT,lease_expires_at_ms INTEGER,recipe_json TEXT);
           CREATE TABLE media_playback_pointers(user_id INTEGER,playback_id TEXT,current_incarnation_id TEXT);
           CREATE TABLE background_job_reservations(resource_key TEXT,slot INTEGER,job_id TEXT,fence INTEGER,expires_at_ms INTEGER,PRIMARY KEY(resource_key,slot));
           CREATE TABLE analysis_requests(request_id TEXT PRIMARY KEY,owner_node_id TEXT,fence INTEGER,state TEXT,cancel_requested INTEGER,lease_expires_ms INTEGER,
-            requested_generation TEXT,file_id INTEGER,source_size INTEGER,source_mtime INTEGER,priority TEXT,trigger TEXT,updated_at_ms INTEGER,force_rebuild INTEGER,component TEXT,pipeline_version TEXT NOT NULL DEFAULT '',video_identity TEXT NOT NULL DEFAULT '',last_error_code TEXT);
-          CREATE TABLE analysis_source_reservations(resource_key TEXT,request_id TEXT,fence INTEGER,expires_at_ms INTEGER);
+            requested_generation TEXT,file_id INTEGER,source_size INTEGER,source_mtime INTEGER,priority TEXT,trigger TEXT,updated_at_ms INTEGER,force_rebuild INTEGER,component TEXT,pipeline_version TEXT NOT NULL DEFAULT '',video_identity TEXT NOT NULL DEFAULT '',last_error_code TEXT,result_cache_key TEXT);
+          CREATE TABLE analysis_attempts(request_id TEXT,attempt INTEGER,claim_node_id TEXT,claim_epoch INTEGER,claim_expires_at_ms INTEGER,phase TEXT,started_at_ms INTEGER,phase_updated_at_ms INTEGER,terminal_code TEXT,PRIMARY KEY(request_id,claim_epoch));
+          CREATE TABLE analysis_source_reservations(resource_key TEXT,request_id TEXT,fence INTEGER,expires_at_ms INTEGER,PRIMARY KEY(request_id,resource_key));
           CREATE VIEW analysis_required_resources AS SELECT request_id,'source_io' AS resource_key FROM analysis_requests;
           INSERT INTO libraries VALUES(1,'[\"/media\"]'); INSERT INTO items VALUES(1,1);INSERT INTO files VALUES(1,1,100,1);").expect("existing arbiter");
         connection
@@ -686,8 +687,7 @@ mod source_tests {
               ALTER TABLE analysis_requests ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0;
               ALTER TABLE analysis_requests ADD COLUMN expected_predecessor_generation TEXT NOT NULL DEFAULT '';
               ALTER TABLE analysis_requests ADD COLUMN target_node_id TEXT NOT NULL DEFAULT 'worker';
-              ALTER TABLE analysis_requests ADD COLUMN result_cache_key TEXT;
-              CREATE TABLE analysis_attempts(request_id TEXT,attempt INTEGER,claim_node_id TEXT,claim_epoch INTEGER,claim_expires_at_ms INTEGER,phase TEXT,started_at_ms INTEGER,phase_updated_at_ms INTEGER,terminal_code TEXT,PRIMARY KEY(request_id,claim_epoch));").expect("coordinator fixture columns");
+              ").expect("coordinator fixture columns");
         }
         let source = super::super::analysis_coordination::AnalysisCoordinationSource {
             file_id: 1,

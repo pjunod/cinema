@@ -583,32 +583,30 @@ pub(crate) fn source_native_master(
 pub(crate) fn source_native_playlist(video: &[u8]) -> Vec<u8> {
     subtitle_media_playlist(video).into_bytes()
 }
-pub(crate) fn source_native_segment(
-    video: &[u8],
-    track: &[u8],
-    sequence: u64,
-    origin: f64,
-) -> Option<Vec<u8>> {
-    if !origin.is_finite() || (origin * 1000.0).abs() > 9_007_199_254_740_991.0 {
-        return None;
-    }
+/// Pure projection of the video segment's session-local subtitle window.
+pub(crate) fn source_native_segment_window(video: &[u8], sequence: u64) -> Option<(f64, f64)> {
     let timeline = subtitle_timeline(video);
     let window = timeline
         .segments
         .iter()
         .find(|window| window.sequence == sequence)?;
-    if !window.start_seconds.is_finite()
-        || !window.end_seconds.is_finite()
-        || window.end_seconds <= window.start_seconds
-    {
+    (window.start_seconds.is_finite()
+        && window.end_seconds.is_finite()
+        && window.end_seconds > window.start_seconds)
+        .then_some((window.start_seconds, window.end_seconds))
+}
+pub(crate) fn source_native_slice(
+    track: &[u8],
+    origin: f64,
+    start: f64,
+    end: f64,
+) -> Option<Vec<u8>> {
+    // Native origins are signed: a film zero before the item's first
+    // sample projects to a positive item cue. Only JS-safe values cross.
+    if !origin.is_finite() || (origin * 1000.0).abs() > 9_007_199_254_740_991.0 {
         return None;
     }
-    Some(slice_webvtt(
-        track,
-        origin,
-        window.start_seconds,
-        window.end_seconds,
-    ))
+    Some(slice_webvtt(track, origin, start, end))
 }
 
 #[cfg(test)]
@@ -617,10 +615,13 @@ mod signed_source_native_projection_tests {
     fn negative_source_origin_projects_film_zero_to_positive_item_cue() {
         let video=b"#EXTM3U\n#EXT-X-TARGETDURATION:16\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:6.0,\nseg00000.m4s\n";
         let track = b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nfilm-zero\n";
-        let bytes = super::source_native_segment(video, track, 0, -0.083).unwrap();
-        let text = std::str::from_utf8(&bytes).unwrap();
+        let (start, end) =
+            super::source_native_segment_window(video, 0).expect("first segment window");
+        let bytes = super::source_native_slice(track, -0.083, start, end)
+            .expect("signed-origin native slice");
+        let text = std::str::from_utf8(&bytes).expect("UTF-8 WebVTT slice");
         assert!(text.contains("00:00:00.083 --> 00:00:01.083"));
         assert!(text.contains("X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000"));
-        assert!(super::source_native_segment(video, track, 0, f64::NAN).is_none());
+        assert!(super::source_native_slice(track, f64::NAN, start, end).is_none());
     }
 }

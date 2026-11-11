@@ -851,10 +851,13 @@ mod tests {
         let limit = fragment.len() * 32;
         let mut engine = audio_kernel(&init, &av_init, limit, limit * 8);
         let mut ordinary = Vec::new();
+        let duration = fragment.video_duration(&init);
 
         for number in 0..3 {
             let (canonical, clock, mut av) = pair(&init, &fragment, number);
-            av.tracks[0].base_decode_time = 0;
+            // The AV video timeline starts with the audio at zero and stays
+            // continuous with the source clock, as the companion requires.
+            av.tracks[0].base_decode_time = number * duration;
             append_audio(
                 &mut av,
                 audio_fragment(&av_init, number * 5_000, &[1_000; 5]),

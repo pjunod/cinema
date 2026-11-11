@@ -712,7 +712,7 @@ test_anchor = "testTheaterPlaybackSkipsUnavailableFilesAndRejectsUnavailableTitl
 id = "apple.shared-initial-parking-readiness-budget"
 commits = ["39a72929788172b04d868618defbdc3eed69ae16"]
 source = "clients/apple/Sources/SharedPlayerController.swift"
-source_anchor = "guard await alignPrepared(item, to: preparedFilmPositionMs, boundMs: remaining)"
+source_anchor = "guard await alignPrepared(item, to: preparedTimeline.itemPositionMs(filmPositionMs: preparedFilmPositionMs), boundMs: remaining)"
 test = "clients/apple/Tests/PreparedReplacementTests.swift"
 test_anchor = "testStalledInitialSeekConsumesRemainingReadinessAndSettlesFailed"
 
@@ -8468,3 +8468,30 @@ source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = "def invalidate_native_target(self, state):"
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_load_source_and_changed_target_policy_require_a_fresh_success(self):"
+
+# PR #1489: the Android decoder envelope claims only what Media3's selector admits.
+[[fixes]]
+id = "android.decoder-envelope-media3-admits"
+commits = ["a7b9ad4e35c52c1fc0a0819bcbcb9bf094c28f57", "b195904dd0fbe7c1707c0726115b2aab383a6ca0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Caps.kt"
+source_anchor = "selector.isVideoSizeAndRateSupportedV21(width, height, rate)"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "fun decoderEnvelopeAsksMedia3AtEveryRectangleAndRate()"
+
+# A1/B1 review: a whole-title shared attachment ending is the title's end.
+[[fixes]]
+id = "android.shared-whole-title-end"
+commits = ["26c0f3cc9c1344346ef779ed1b62e44290abb21b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/MediaOrigin.kt"
+source_anchor = "isVod || titleDurationMs?.takeIf { it > 0 }?.let { filmPositionMs >= it - 1_000L } == true"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/MediaOriginTest.kt"
+test_anchor = "assertTrue(sharedTitleEnded(true, 7_198_000, range.duration_ms))"
+
+[[fixes]]
+id = "apple.shared-whole-title-end"
+commits = []
+supplements = "android.shared-whole-title-end"
+source = "clients/apple/Sources/SharedPlaybackModels.swift"
+source_anchor = "if wholeTitle { return true }"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "XCTAssertTrue(whole.reachedTitleEnd(filmPositionMs: 7_197_000, durationMs: 7_200_000))"

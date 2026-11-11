@@ -616,6 +616,17 @@ impl SourceInput {
         Ok(())
     }
 
+    /// Qualification control only: the production read window is fixed.
+    #[cfg(test)]
+    pub(crate) fn with_read_window(self, bytes: usize) -> Result<Self, String> {
+        if !(SOURCE_WINDOW_CONTROL..=SOURCE_WINDOW_MAX).contains(&bytes) {
+            return Err("source read window outside qualification bounds".into());
+        }
+        self.state
+            .window_bytes
+            .store(bytes, std::sync::atomic::Ordering::SeqCst);
+        Ok(self)
+    }
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn observation(&self) -> SourceInputObservation {
         SourceInputObservation {

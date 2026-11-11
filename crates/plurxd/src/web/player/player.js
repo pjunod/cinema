@@ -39,6 +39,7 @@
  * @property {{active:string[],details:{badge:string,active:boolean,text:string}[],requires_effective_processing:boolean}|null} [enhancement] this session's server-computed DV enhancement (FEL / RPU / DYN), or null
  * @property {boolean} [copyHls]           the HLS session copies the video stream
  * @property {boolean} [vod]               the session answered with a VOD (fixed) playlist
+ * @property {boolean} [rangePresentation] the session presents a bounded range of a growing title, so its playlist end is not the title end
  * @property {string|null} [encoder]       the session's encoder, once one reports
  *
  * Position and duration

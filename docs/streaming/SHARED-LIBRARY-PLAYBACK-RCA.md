@@ -10,8 +10,8 @@ independent repairs · **Written:** 2026-11-08 · **Evidence build:**
 correction) and S12 (route-eligible locate peers) landed in PR #1475.
 PR #1472 carries the independent repairs and relay budget, retry and
 abandonment work; its final review is complete. Validation and landing
-evidence are tracked in the delivery ledger and PR. S1–S3, S8 and S9 remain A1 work; S5's asynchronous subtitle
-preparation remains deferred for Source custody. This does not qualify
+evidence are tracked in the delivery ledger and PR. S1–S3, S8 and S9 remain A1 work; S5's Source-owned caption windows and the fixture Start503 landed in
+[#1490](SHARED-SUBTITLE-CUSTODY-AND-START-503.md). This does not qualify
 physical devices. See [the shared-library delivery ledger](SHARED-LIBRARY-PLAYBACK-STATUS.md)
 and [the playback-start execution log](PLAYBACK-START-PLAN.md#8-execution-log).
 

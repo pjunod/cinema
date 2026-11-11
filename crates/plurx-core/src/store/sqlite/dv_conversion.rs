@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 80] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 82] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1750,6 +1750,11 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS foreground_source_owners",
             "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=4))",
             "CREATE TABLE dispatch_turn_ready",
+            // v125/v126: the shared coordination fixture validates the empty
+            // coordination and v3 copy index tail, removes it, restores the
+            // v124 claim reservation trigger, then managed v4 before the rest.
+            "CREATE TABLE IF NOT EXISTS analysis_coordination_schema",
+            "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=5))",
         ];
 
         assert!(

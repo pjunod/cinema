@@ -379,6 +379,10 @@ mod tests {
     use super::*;
     use rusqlite::{params, Connection};
 
+    /// The publication trigger's target table, which every real schema
+    /// creates long before v125.
+    const COMMAND_ENVELOPE: &str = "CREATE TABLE background_job_commands(id TEXT PRIMARY KEY,operation TEXT,request_json TEXT,result_json TEXT);";
+
     fn source() -> AnalysisCoordinationSource {
         AnalysisCoordinationSource {
             file_id: 1,
@@ -477,6 +481,8 @@ mod tests {
     #[test]
     fn schema_keeps_engine_blob_variants_immutable_and_heads_explicitly_healthy() {
         let conn = Connection::open_in_memory().expect("SQLite");
+        conn.execute_batch(COMMAND_ENVELOPE)
+            .expect("command envelope");
         conn.execute_batch(include_str!("copy_index_v3.sql"))
             .expect("mechanical v3 schema");
         let first = "1".repeat(64);
@@ -589,6 +595,8 @@ mod tests {
         value["sample_sha256"] = "c".repeat(64).into();
         assert!(serde_json::from_value::<CopyIndexSourceAttestation>(value).is_err());
         let conn = Connection::open_in_memory().expect("SQLite");
+        conn.execute_batch(COMMAND_ENVELOPE)
+            .expect("command envelope");
         conn.execute_batch(include_str!("copy_index_v3.sql"))
             .expect("v3 schema");
         let insert = |regime: i64| {
@@ -791,7 +799,7 @@ WITH input AS (SELECT json($1) AS body), snapshot AS (
   AND job.revision=json_extract(body,'$.token.revision') AND job.lease_expires_ms=json_extract(body,'$.token.lease_expires_ms')
   AND job.lease_expires_ms>json_extract(body,'$.now_ms') AND job.revision<9223372036854775807
   AND (job.retry_deadline_ms=0 OR job.retry_deadline_ms>json_extract(body,'$.now_ms'))
-  AND job.target_node_id=json_extract(body,'$.source.origin_node_id') AND job.target_node_id=job.owner_node_id
+  AND json_extract(job.payload_json,'$.origin_node_id')=json_extract(body,'$.source.origin_node_id') AND job.owner_node_id=json_extract(body,'$.source.origin_node_id')
   AND NOT EXISTS(SELECT 1 FROM settings WHERE key='internal.cluster_job_owner_removed.'||job.owner_node_id)
   AND EXISTS(SELECT 1 FROM background_job_attempts attempt WHERE attempt.job_id=job.id AND attempt.fence=job.fence
    AND attempt.claim_id=job.claim_id AND attempt.owner_node_id=job.owner_node_id AND attempt.owner_boot_id=job.owner_boot_id
@@ -809,7 +817,9 @@ WITH input AS (SELECT json($1) AS body), snapshot AS (
   AND head.head_epoch=json_extract(body,'$.expected_head_epoch')
   AND ((head.state='healthy' AND head.contract_key=json_extract(body,'$.artifact.contract_key')
       AND head.published_generation=json_extract(body,'$.source.requested_generation'))
-   OR (head.state IN ('pending','quarantined') AND head.head_epoch<9223372036854775807)) THEN 1 ELSE 0 END AS head_matches,
+   OR (head.state IN ('pending','quarantined') AND head.head_epoch<9223372036854775807
+    AND NOT EXISTS(SELECT 1 FROM copy_index_v3_quarantines bad WHERE bad.source_key=head.source_key
+     AND bad.bad_blob_sha256=json_extract(body,'$.artifact.blob_sha256')))) THEN 1 ELSE 0 END AS head_matches,
  CASE WHEN EXISTS(SELECT 1 FROM copy_index_source_attestations receipt
    WHERE receipt.origin_node_id=json_extract(body,'$.source.origin_node_id') AND receipt.file_id=json_extract(body,'$.source.file_id')
     AND receipt.object_version=json_extract(body,'$.source.object_version') AND receipt.source_size=json_extract(body,'$.source.source_size')
@@ -838,8 +848,8 @@ WITH input AS (SELECT json($1) AS body), snapshot AS (
 ), classified AS (
  SELECT *, CASE WHEN state='succeeded' AND same_attempt=1 AND json_valid(result_ref)
    AND json_extract(result_ref,'$.publication_digest')=json_extract(body,'$.publication_digest') THEN 'already_published'
-  WHEN owns=0 OR metadata_owns=0 THEN 'lost_ownership'
   WHEN source_matches=0 THEN 'source_changed'
+  WHEN owns=0 OR metadata_owns=0 THEN 'lost_ownership'
   WHEN payload_matches=0 OR head_matches=0 OR attested=0 OR variant_matches=0 THEN 'artifact_conflict'
   ELSE 'published' END AS outcome FROM snapshot
 )

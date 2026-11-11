@@ -72,30 +72,41 @@ pub fn associate_fragment_clock(
     }
     let first = packets[0];
     let mut next_sequence = expected_sequence;
-    let mut next_source_dts = i128::from(first.dts);
     let mut duration = 0u64;
-    for (sample, packet) in track.samples().zip(packets) {
+    // A container's per-packet duration is rounded to its own time base (a
+    // Matroska 1/1000 clock gives 41 ms to every 41.708 ms frame), so it is
+    // never the sample's duration. The exact authority is the next packet's
+    // DTS, as the mov muxer itself uses: each sample's duration must equal its
+    // DTS delta. The fragment's last sample is closed by the next fragment's
+    // first DTS, which range continuity checks against this row's end.
+    for (at, (sample, packet)) in track.samples().zip(packets).enumerate() {
         if packet.sequence != next_sequence
-            || i128::from(packet.dts) != next_source_dts
             || packet.time_base_num == 0
             || packet.time_base_den == 0
             || packet.time_base_num != first.time_base_num
             || packet.time_base_den != first.time_base_den
             || packet.duration == 0
             || packet.size != u64::from(sample.size)
-        {
-            return Err(PacketClockError::FragmentMismatch);
-        }
-        let numerator = u128::from(packet.duration)
-            .checked_mul(u128::from(packet.time_base_num))
-            .and_then(|value| value.checked_mul(u128::from(video.timescale)))
-            .ok_or(PacketClockError::Overflow)?;
-        let denominator = u128::from(packet.time_base_den);
-        if numerator % denominator != 0
-            || numerator / denominator != u128::from(sample.duration)
             || sample.duration == 0
         {
             return Err(PacketClockError::FragmentMismatch);
+        }
+        if let Some(following) = packets.get(at + 1) {
+            let delta = i128::from(following.dts) - i128::from(packet.dts);
+            if delta <= 0 {
+                return Err(PacketClockError::FragmentMismatch);
+            }
+            let numerator = u128::try_from(delta)
+                .ok()
+                .and_then(|delta| delta.checked_mul(u128::from(packet.time_base_num)))
+                .and_then(|value| value.checked_mul(u128::from(video.timescale)))
+                .ok_or(PacketClockError::Overflow)?;
+            let denominator = u128::from(packet.time_base_den);
+            if numerator % denominator != 0
+                || numerator / denominator != u128::from(sample.duration)
+            {
+                return Err(PacketClockError::FragmentMismatch);
+            }
         }
         // Decode order alone cannot establish the presentation clock of a
         // reordered stream. Preserve the exact signed composition offset.
@@ -114,9 +125,6 @@ pub fn associate_fragment_clock(
             .ok_or(PacketClockError::Overflow)?;
         next_sequence = next_sequence
             .checked_add(1)
-            .ok_or(PacketClockError::Overflow)?;
-        next_source_dts = next_source_dts
-            .checked_add(i128::from(packet.duration))
             .ok_or(PacketClockError::Overflow)?;
     }
     let canonical_dts = normalize_to_index_ticks(
@@ -427,11 +435,26 @@ mod association_tests {
             associate_fragment_clock(&fragment, &init, &packets, 6, origin, 11),
             Err(PacketClockError::FragmentMismatch)
         );
+        // A rounded container duration is not the sample clock: only the
+        // DTS deltas are, so packets that keep them still associate.
+        let mut rounded = packets.clone();
+        for packet in &mut rounded {
+            packet.duration = packet.duration.saturating_sub(1).max(1);
+        }
+        assert_eq!(
+            associate_fragment_clock(&fragment, &init, &rounded, 7, origin, 11)
+                .expect("rounded packet durations")
+                .duration,
+            track.duration()
+        );
         for field in 0..5 {
             let mut wrong = packets.clone();
             match field {
                 0 => wrong[0].size += 1,
-                1 => wrong[0].duration += 1,
+                1 => {
+                    wrong[1].dts += 1;
+                    wrong[1].pts += 1;
+                }
                 2 => wrong[0].time_base_den = 0,
                 3 => wrong[0].sequence += 1,
                 _ => wrong[0].pts += 1,

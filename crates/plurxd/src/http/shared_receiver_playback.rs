@@ -60,6 +60,18 @@ pub(crate) enum ReceiverStartError {
     /// Source's own answer passed through, or the viewer's clock running out
     /// at B. The attempt lives on, and the same `request_id` rejoins it.
     NotYet(crate::sharing_client::StartRetry),
+    /// One resource is waiting for admission; the published session remains live.
+    ResourceBusy {
+        retry_after_secs: u64,
+    },
+}
+pub(super) fn resource_busy_response(retry_after_secs: u64) -> super::error::ApiError {
+    super::error::ApiError::TypedRetry {
+        status: axum::http::StatusCode::TOO_MANY_REQUESTS,
+        code: "sharing_resource_busy",
+        message: "The shared playback resource is still preparing".into(),
+        retry_after_seconds: retry_after_secs,
+    }
 }
 fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_client::PeerError) {
     use crate::sharing_client::PeerError;
@@ -1278,12 +1290,26 @@ impl ReceiverStartActor {
                 &known,
                 resource,
             )
-            .await
-            .map_err(|_| ReceiverStartError::Unresolved)?;
+            .await;
         // Source IO can park. Reobserve the original B login, exact route,
-        // current binding and delivery grant before returning any body bytes.
+        // current binding and delivery grant before returning bytes or retry.
         self.current_delivery_attachment(state).await?;
-        Ok(opened)
+        opened.map_err(|error| match error {
+            crate::sharing_client::PeerError::Busy { retry_after_secs } => {
+                ReceiverStartError::ResourceBusy { retry_after_secs }
+            }
+            crate::sharing_client::PeerError::Rejected(
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            ) if matches!(
+                resource.kind(),
+                plurx_core::sharing_resources::SharingHlsResourceKind::SubtitlePlaylist { .. }
+                    | plurx_core::sharing_resources::SharingHlsResourceKind::SubtitleSegment { .. }
+            ) =>
+            {
+                ReceiverStartError::Unsupported
+            }
+            _ => ReceiverStartError::Unresolved,
+        })
     }
     async fn current_source_status(
         &self,
@@ -2308,7 +2334,19 @@ pub(super) async fn receiver_media_actor(
     };
     let opened = match actor.open_source_resource(&state, &resource).await {
         Ok(opened) => opened,
-        Err(ReceiverStartError::Capacity) => return StatusCode::TOO_MANY_REQUESTS.into_response(),
+        Err(ReceiverStartError::Capacity) => return resource_busy_response(1).into_response(),
+        Err(ReceiverStartError::ResourceBusy { retry_after_secs }) => {
+            return resource_busy_response(retry_after_secs).into_response();
+        }
+        Err(ReceiverStartError::Unsupported)
+            if matches!(
+                resource.kind(),
+                plurx_core::sharing_resources::SharingHlsResourceKind::SubtitlePlaylist { .. }
+                    | plurx_core::sharing_resources::SharingHlsResourceKind::SubtitleSegment { .. }
+            ) =>
+        {
+            return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+        }
         Err(_) => {
             actor.begin_retirement(
                 state,

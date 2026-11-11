@@ -62,14 +62,93 @@ clippy `-D warnings`, rustc 1.97.1):
   Analysis and settles job and waiters, and rolls back on a pointer mismatch.
   Real-SQLite regressions in `copy_index_v3_tests.rs`.
 
-Not yet built: background gap filling through the common engine (an index
-publishes today only when playback itself covered the whole title), a v3
-consumer and peer hydration, discrepancy quarantine, and local-playback
-observations. A sealed observation index must not be bridged into the legacy
+Not yet built, planned [below](#after-the-first-a1b1-merge--remaining-build-order): background
+gap filling through the common engine (an index publishes today only when
+playback itself covered the whole title), a v3 consumer and peer hydration,
+discrepancy quarantine, and local-playback observations. A sealed observation index must not be bridged into the legacy
 local index store: its head-census promotion lacks the whole-title HDR10
 metadata the legacy key promises. Daemon test compilation exceeds the 8 GiB
 voter cap, so it runs on the nonvoter effort compile gate. No unit suite has
 run for this batch; the fast lane runs once after the final review.
+
+## After the first A1/B1 merge — remaining build order
+
+The first merge publishes a v3 index only when playback itself observed the
+whole title. These items remain, in build order; each extends an existing
+owner and adds no gate, timer or watchdog.
+
+### 1. Common spawn adapter
+
+`copyrange::spawn_source_generation` and `run_source_census` take
+`SourceRenditionOwners`, a `SourceGenerationDispatch` and a
+`SourceGenerationAuthority`. Give both a typed owner instead:
+
+- `Source { owners, dispatch, authority }`: today's arguments, unchanged.
+- `Analysis { phase }`: an exact `AnalysisPhysicalPhase` whose custody is
+  already active, with `SourceInput::open_background_held` reading under
+  `SourceReadBudget::from_analysis_phase`. No admission permit, no Source
+  grant and no media-serving authority.
+
+The ffmpeg recipe, `ObservedCopyMux`, normalizer and companion verifier stay
+the same code on both paths. AV output is discarded only after the companion
+verifies it. Every pipe task and the reap join before the phase finishes.
+
+### 2. Background gap filling
+
+When a pending source set (`copy_analysis::work::PendingSources`) is
+incomplete and `begin_analysis_source_phase` admits it (its capacity clause
+is the idle test), run one Analysis-owned generation through the adapter:
+
+- From title start when `begin` is missing; otherwise from the first gap.
+- Feed its rows into the same `CopyObservationSet`, so overlap equality with
+  playback rows is checked, not assumed.
+- Stop at the next observed row or EOF. Foreground pressure pauses the budget
+  through the existing pause controller.
+- A seeked start uses the verified seek-bootstrap landing, never a long
+  sequential fallback.
+
+The full-source attestation phase reads every byte. Fold the whole-title
+HDR10 maximum scan into that same read (item 3).
+
+### 3. Whole-title HDR10 metadata in the attestation read
+
+A sealed observation index carries the bounded head census's promotion. The
+legacy local index promises `indexed_hdr10_metadata` with the scanned
+`hdr10_sei` (`fragindex.rs`, the `--plurx-hdr10-index` argv revision).
+Compute the same maximum over the attestation phase's bytes, record it with
+the receipt, and seal it into the promotion. Until then, never bridge a v3
+index into `put_fragment_index`: HDR10 titles would get different init
+metadata than the legacy key claims.
+
+### 4. v3 consumer and peer hydration
+
+- VOD planning reads `copy_index_v3_head` for the exact source key.
+- A healthy head's blob is read from `copy_index_v3_locations`, or hydrated
+  from a listed holder and verified by digest before use.
+- The hydrating node records its own verified location.
+- Decode with `decode_cluster_fragment_index_blob_v3` against the head's
+  source and output identity.
+
+### 5. Discrepancy quarantine
+
+A consumer that finds a healthy head's bytes contradict a fresh observation
+calls `quarantine_copy_index_v3_head`. The deterministic successor
+generation re-enters items 1–2. The old pointer stays readable until the
+successor publishes.
+
+### 6. Local playback observations
+
+Local rolling copy and indexed-VOD copy become the same growing engine.
+`CopyObservationAuthority` gains a typed local demand variant that never
+reuses a Source grant.
+
+### Acceptance for the next merge
+
+- A partially played shared title publishes after background filling, with
+  no playback interruption on any node.
+- An HDR10 and a DV title's v3 index serves the same init as their legacy
+  index.
+- A second node plays the title through hydration.
 
 ## Native admission — A1-N, PR #1476
 

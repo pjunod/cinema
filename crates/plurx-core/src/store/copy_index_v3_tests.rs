@@ -92,42 +92,7 @@ async fn fixture(full_receipt: bool) -> Fixture {
         )
         .expect("source receipt");
     }
-    let request = store
-        .enqueue_analysis_request(&NewAnalysisRequest {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            file_id: 100,
-            source_size: 4096,
-            source_mtime: 77,
-            component: "fragment_index".into(),
-            pipeline_version: source.pipeline_marker(),
-            video_identity: source.video_marker(),
-            requested_generation: source.requested_generation.clone(),
-            priority: "normal".into(),
-            trigger: "background".into(),
-            force_rebuild: false,
-            target_node_id: NODE.into(),
-            not_before_ms: NOW - 10,
-            created_at_ms: NOW - 10,
-        })
-        .await
-        .expect("coordination request");
-    store
-        .establish_analysis_coordination(&request.request_id, source.clone(), NOW - 5)
-        .await
-        .expect("establish")
-        .expect("role");
-    let claim = store
-        .claim_analysis_coordination(
-            &request.request_id,
-            source.clone(),
-            NODE,
-            request.fence,
-            NOW - 1,
-            NOW + 600_000,
-        )
-        .await
-        .expect("claim")
-        .expect("metadata claim");
+    let claim = coordinate(&store, &source, NOW).await;
     let head = store
         .ensure_copy_index_v3_head(NAMESPACE, source.clone(), claim.clone(), NOW)
         .await
@@ -142,6 +107,55 @@ async fn fixture(full_receipt: bool) -> Fixture {
         claim,
         head_epoch: head.head_epoch,
     }
+}
+
+/// A fresh queued coordination request for the source, established and
+/// claimed through the real coordinator APIs.
+async fn coordinate(
+    store: &SqliteStore,
+    source: &AnalysisCoordinationSource,
+    at: i64,
+) -> AnalysisCoordinationClaim {
+    let request = store
+        .enqueue_analysis_request(&NewAnalysisRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            file_id: 100,
+            source_size: 4096,
+            source_mtime: 77,
+            component: "fragment_index".into(),
+            pipeline_version: source.pipeline_marker(),
+            video_identity: source.video_marker(),
+            requested_generation: source.requested_generation.clone(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: NODE.into(),
+            not_before_ms: at - 10,
+            created_at_ms: at - 10,
+        })
+        .await
+        .expect("coordination request");
+    let role = store
+        .establish_analysis_coordination(&request.request_id, source.clone(), at - 5)
+        .await
+        .expect("establish")
+        .expect("role");
+    assert_eq!(
+        role.request_id, request.request_id,
+        "a fresh request owns the role"
+    );
+    store
+        .claim_analysis_coordination(
+            &request.request_id,
+            source.clone(),
+            NODE,
+            request.fence,
+            at - 1,
+            at + 600_000,
+        )
+        .await
+        .expect("claim")
+        .expect("metadata claim")
 }
 
 async fn publisher(fixture: &Fixture, artifact: &CopyIndexV3Artifact) -> JobToken {
@@ -333,7 +347,7 @@ async fn publication_adopts_the_candidate_and_settles_analysis_job_and_location(
 }
 
 #[tokio::test]
-async fn publication_refuses_a_sampled_receipt_and_rolls_back_everything() {
+async fn publication_refuses_a_sampled_receipt_and_writes_nothing() {
     let fixture = fixture(false).await;
     let artifact = artifact('a', '1');
     let token = publisher(&fixture, &artifact).await;
@@ -430,10 +444,7 @@ async fn publication_refuses_a_changed_source_file() {
         .await
         .expect("publish");
     assert!(
-        matches!(
-            outcome,
-            JobPublishOutcome::SourceChanged | JobPublishOutcome::LostOwnership
-        ),
+        matches!(outcome, JobPublishOutcome::SourceChanged),
         "{outcome:?}"
     );
     let state: String = db
@@ -442,4 +453,72 @@ async fn publication_refuses_a_changed_source_file() {
         })
         .expect("head");
     assert_eq!(state, "pending");
+}
+
+#[tokio::test]
+async fn a_quarantined_head_adopts_a_new_variant_but_never_the_quarantined_blob() {
+    let mut fixture = fixture(true).await;
+    let bad = artifact('a', '1');
+    let token = publisher(&fixture, &bad).await;
+    assert!(matches!(
+        fixture
+            .store
+            .publish_copy_index_v3(publish(&fixture, &token, &bad, NOW + 1))
+            .await
+            .expect("publication"),
+        JobPublishOutcome::Published { .. }
+    ));
+    let key = super::copy_index_v3_source_key(NAMESPACE, &fixture.source).expect("key");
+    let epoch = fixture.head_epoch + 1;
+    let successor =
+        super::copy_index_v3_rebuild_generation(&key, &bad.blob_sha256, epoch).expect("successor");
+    fixture.source.requested_generation = successor;
+    fixture.claim = coordinate(&fixture.store, &fixture.source, NOW + 10).await;
+    assert!(fixture
+        .store
+        .quarantine_copy_index_v3_head(super::background_jobs::QuarantineCopyIndexV3Head {
+            catalog_namespace: NAMESPACE.into(),
+            source: fixture.source.clone(),
+            claim: fixture.claim.clone(),
+            expected_epoch: epoch,
+            bad_blob_sha256: bad.blob_sha256.clone(),
+            code: "row_mismatch".into(),
+            now_ms: NOW + 11,
+        })
+        .await
+        .expect("quarantine"));
+    fixture.head_epoch = epoch;
+    let token = publisher(&fixture, &bad).await;
+    let outcome = fixture
+        .store
+        .publish_copy_index_v3(publish(&fixture, &token, &bad, NOW + 12))
+        .await
+        .expect("re-publication");
+    assert!(
+        matches!(outcome, JobPublishOutcome::ArtifactConflict),
+        "{outcome:?}"
+    );
+    let repaired = artifact('b', '3');
+    let token = publisher(&fixture, &repaired).await;
+    let outcome = fixture
+        .store
+        .publish_copy_index_v3(publish(&fixture, &token, &repaired, NOW + 13))
+        .await
+        .expect("repair publication");
+    assert!(
+        matches!(outcome, JobPublishOutcome::Published { .. }),
+        "{outcome:?}"
+    );
+    let head = fixture
+        .store
+        .copy_index_v3_head(&key)
+        .await
+        .expect("head")
+        .expect("head");
+    assert_eq!(head.state, CopyIndexV3HeadState::Healthy);
+    assert_eq!(
+        head.blob_sha256.as_deref(),
+        Some(repaired.blob_sha256.as_str())
+    );
+    assert_eq!(head.head_epoch, epoch + 1);
 }

@@ -113,22 +113,22 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 
 | Lane | Owner (model, session) | Plan rev | Built on effort | Accepted on fleet (before → after) |
 |---|---|---|---|---|
-| H2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (#1424, review 1) | build/protocol/owner inventory; placement through each mixed cohort → |
-| C2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (#1424, review 1 fixes #1436) | verdict idle; 3,878 waiting unreported; 2026-11-07 22:3x UTC media1 (`4ddbf1229`): verdict `degraded`, claimable 2, ready_24h 0, claimed_24h 0, claims_since_start 36, depth `retry_wait` fragment_index 3,881 (due rows mislabelled: ms compared to s) → |
-| C3 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (#1424, review 1 fixes #1436) | active 4,097/4,096; retired-digest queued 3,878; ready_24h 0 → |
-| C1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1434, review 2 fixes #1438) | claims/2.7 d 16 (media1); lab4/lab6 cannot claim → |
-| D2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1431, review 1 fixes #1440) | codeless 503s; create p99 → |
-| D1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 (review 3) | DV vs non-DV cold TTFF; 20 switches/platform → |
-| G1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1433, review 2 fixes #1438) | — |
-| R1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1428, review 1 fix #1440) | authority_fence won 16/18 → by cause |
-| H1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 (#1427) | — |
+| H2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 | build/protocol/owner inventory; placement through each mixed cohort → |
+| C2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 | verdict idle; 3,878 waiting unreported; 2026-11-07 22:3x UTC media1 (`4ddbf1229`): verdict `degraded`, claimable 2, ready_24h 0, claimed_24h 0, claims_since_start 36, depth `retry_wait` fragment_index 3,881 (due rows mislabelled: ms compared to s) → |
+| C3 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 | active 4,097/4,096; retired-digest queued 3,878; ready_24h 0 → |
+| C1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 | claims/2.7 d 16 (media1); lab4/lab6 cannot claim → |
+| D2 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 | codeless 503s; create p99 → |
+| D1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | on main via #1454 | DV vs non-DV cold TTFF; 20 switches/platform → |
+| G1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 | — |
+| R1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 | authority_fence won 16/18 → by cause |
+| H1 | claude-sonnet-5-5, 01BCWL9xwmpSjitHqZMTRAht (sub-agent) | 3 | on main via #1454 | — |
 | A1-N | Codex/root, chat `01a1c172-ef6a-77e3-8422-95798308bc5c` | 3 | [PR #1476](http://forge.lan:3000/noirr/plurx/pulls/1476); reviewed, local acceptance passed; landing tracked in PR | matched-source off/cold/warm native playing 0.759/0.745/0.713 s; fleet pending |
 | A1 | — | 3 | unclaimed (design review first); shared S1–S12: [RCA](SHARED-LIBRARY-PLAYBACK-RCA.md) | vod_index_pending fallbacks 18/29; remux ≤5 s share; p90 → |
 | A2 | — | 3 | unclaimed | HW/SW transcode TTFF → |
 | A3 | — | 3 | unclaimed | — |
 | B1 | — | 3 | unclaimed (design with A1) | artifacts matched across a deploy → |
 | D3 | — | 3 | unclaimed | create elapsed p99 → |
-| E1 | — | 3 | unclaimed | settings/playback authority reads per request → |
+| E1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | [contract](PLAYBACK-START-E1-BUILD.md), review applied | settings/playback authority reads per request → |
 | F1 | — | 3 | unclaimed | retries per attempt; overshoot → |
 
 ## 7. Reviews applied

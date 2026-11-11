@@ -249,7 +249,7 @@ fn validate_activation_shape(activation: &MediaSessionActivation) -> Result<(), 
         && activation.recipe_json.len() <= 32 * 1024
         && activation.response_json.len() <= 64 * 1024
         && activation.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
-        && (0..=MAX_MEDIA_MILLIS).contains(&activation.media_origin_ms)
+        && (-MAX_MEDIA_MILLIS..=MAX_MEDIA_MILLIS).contains(&activation.media_origin_ms)
         && activation.lease_expires_at_ms > activation.now_ms
         // Zero is the sentinel the statement reads as "no expectation", so an
         // activation may not state it: a caller that meant "no ask" says
@@ -355,7 +355,7 @@ fn validate_preparation(preparation: &MediaSessionPreparation) -> Result<(), Sto
         && preparation.owner_node_id.len() <= 256
         && preparation.recipe_json.len() <= 32 * 1024
         && preparation.response_json.len() <= 64 * 1024
-        && (0..=MAX_MEDIA_MILLIS).contains(&preparation.media_origin_ms)
+        && (-MAX_MEDIA_MILLIS..=MAX_MEDIA_MILLIS).contains(&preparation.media_origin_ms)
         && preparation.now_ms > 0
         && preparation.deadline_ms > preparation.now_ms;
     if valid {

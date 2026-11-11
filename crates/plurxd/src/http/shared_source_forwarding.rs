@@ -1235,7 +1235,7 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
             // Every local attempt, including a retarget, carries the one
             // ingress clock minted above, never a fresh header allowance.
             let mut local = parts.clone();
-            if clocked {
+            if op == Operation::Start {
                 local.extensions.insert(clock.clone());
             }
             let response = next

@@ -1,5 +1,23 @@
 use super::*;
 
+/// Source copies transfer an actual copy permit through SourceRenditionOwners
+/// even though their recipe has no Encoding. Local copy owns no such permit.
+pub(super) fn producer_contention(
+    belief: Producer,
+    encoding: Option<&crate::vodencode::Encoding>,
+    source_copy_admissions: Option<&crate::admission::Admissions>,
+    handoff_waiting: bool,
+) -> Contention {
+    let admissions = encoding
+        .map(|encoding| &encoding.admissions)
+        .or(source_copy_admissions);
+    Contention {
+        live_waiting: admissions.is_some_and(|admissions| admissions.live_is_waiting()),
+        holds_permit: crate::prodexec::holds_permit(belief, admissions.is_some()),
+        handoff_waiting: admissions.is_some() && handoff_waiting,
+    }
+}
+
 pub(super) fn spawn_driver(
     shared: Arc<Shared>,
     rendition: Arc<Rendition>,
@@ -18,12 +36,20 @@ pub(super) fn spawn_driver(
                 .encoding
                 .as_ref()
                 .is_some_and(|encoding| encoding.is_waiting());
-            let stopped_encoder = rendition.recipe.encoding.is_some()
-                && matches!(rendition.slot.belief().await, Producer::Stopped { .. });
-            if encoded_waiting || stopped_encoder {
+            let belief = rendition.slot.belief().await;
+            let copy_admissions = rendition.source_owners.copy_admissions();
+            let stopped_permit_owner = matches!(belief, Producer::Stopped { .. })
+                && producer_contention(
+                    belief,
+                    rendition.recipe.encoding.as_deref(),
+                    copy_admissions.as_ref(),
+                    false,
+                )
+                .holds_permit;
+            if encoded_waiting || stopped_permit_owner {
                 // One owned driver, not one retry task per GET. Pool releases
                 // outside VOD cannot notify this registry. A queued rendition
-                // retries admission quickly; a stopped encoder polls slowly
+                // retries admission quickly; a stopped permit owner polls slowly
                 // enough to yield inside the live start's five-second budget.
                 let poll = if encoded_waiting {
                     Duration::from_millis(250)
@@ -35,7 +61,7 @@ pub(super) fn spawn_driver(
                     _ = rendition.wake.notified() => {},
                     _ = tokio::time::sleep(poll) => {},
                 }
-                if stopped_encoder && !encoded_waiting {
+                if stopped_permit_owner && !encoded_waiting {
                     rendition.hooks.stopped_poll_fired();
                 }
             } else {
@@ -719,17 +745,12 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             (demands, ledgers)
         };
         let handoff_requested = handoff.is_some();
-        let contention = rendition.recipe.encoding.as_ref().map_or(
-            Contention {
-                live_waiting: false,
-                holds_permit: false,
-                handoff_waiting: false,
-            },
-            |encoding| Contention {
-                live_waiting: encoding.admissions.live_is_waiting(),
-                holds_permit: crate::prodexec::holds_permit(belief, true),
-                handoff_waiting: handoff_requested,
-            },
+        let copy_admissions = rendition.source_owners.copy_admissions();
+        let contention = producer_contention(
+            belief,
+            rendition.recipe.encoding.as_deref(),
+            copy_admissions.as_ref(),
+            handoff_requested,
         );
         let position = Position {
             produced_through: belief.produced_through(),
