@@ -279,7 +279,7 @@ class NativeCaseReceiptTests(unittest.TestCase):
         specs = native.FAMILY_SPECS['tv_navigation']
         source = {path: (root / path).read_bytes() for path in specs}
         tree = ''.join('100644 blob ' + 'a' * 40 + '\t' + path + '\0' for path in specs)
-        project = 'clients/apple/project.yml'
+        extended_path = 'clients/apple/project.yml'
         extension = b''
 
         def show(command, timeout):
@@ -289,18 +289,20 @@ class NativeCaseReceiptTests(unittest.TestCase):
             commit, path = command[2].split(':', 1)
             self.assertIn(commit, ('original', 'current'))
             self.assertIn(path, specs)
-            return source[path] + (extension if path == project else b'')
+            return source[path] + (extension if path == extended_path else b'')
 
         with patch.object(native, 'regular_inputs'), \
                 patch.object(native, 'git', return_value=tree), \
                 patch.object(native.subprocess, 'check_output', side_effect=show):
             self.assertEqual(native.case_input_compatibility('original', 'current'), set())
             # Equal inputs still need the independently reviewed build boundary.
-            for extension in [b'\n  - path: "../../extra/F.swift"\n',
-                    b'\npackages: {Extra: ../Extra}\n',
-                    b'\npreBuildScripts: [{script: cat ../../extra/file}]\n']:
-                with self.subTest(extension=extension), self.assertRaisesRegex(
-                        ReceiptError, '^Unreviewed native build specification: clients/apple/project[.]yml$'):
+            for extended_path, extension in [
+                    ('clients/apple/project.yml', b'\n  - path: "../../extra/F.swift"\n'),
+                    ('clients/apple/project.yml', b'\npackages: {Extra: ../Extra}\n'),
+                    ('clients/apple/project.yml', b'\npreBuildScripts: [{script: cat ../../extra/file}]\n'),
+                    ('Makefile', b'\napple-tv-navigation-test:\n\t@echo unreviewed\n')]:
+                with self.subTest(path=extended_path, extension=extension), self.assertRaisesRegex(
+                        ReceiptError, '^Unreviewed native build specification: ' + extended_path.replace('.', '[.]') + '$'):
                     native.case_input_compatibility('original', 'current')
 
     def receipt(self):

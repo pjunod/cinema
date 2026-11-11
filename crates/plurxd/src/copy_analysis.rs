@@ -214,7 +214,7 @@ impl CopyObservationSet {
                 .require_local_authority()
                 .map_err(|_| CopyObservationError::Binding)?,
             CopyObservationAuthority::Source { assignment, .. } => {
-                if assignment.owner_node_id != self.source.origin_node_id {
+                if assignment.owner_node_id() != self.source.origin_node_id {
                     return Err(CopyObservationError::Binding);
                 }
             }

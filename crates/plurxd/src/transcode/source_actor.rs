@@ -1,6 +1,7 @@
 //! Owned Source producer admission and lifetime. HTTP callers only wait.
 use super::*;
 #[cfg(unix)]
+#[path = "source_actor/growing.rs"]
 mod growing;
 #[cfg(unix)]
 pub(crate) use growing::{SourceGrowingBacking, SourceGrowingPreparation};
@@ -468,6 +469,25 @@ impl SourceResponseGuard {
             }
             notification.await;
         }
+    }
+}
+#[cfg(test)]
+impl TranscodeManager {
+    /// Hold the Source's cold-index scan after its child spawns, so a test can
+    /// act while a start is mid-preparation.
+    pub(crate) fn pause_source_index_after_spawn(
+        &self,
+        bound: Duration,
+    ) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.source_workers.index_hooks.pause_after_spawn_for(bound)
+    }
+    /// Source owners still holding a worker registry slot.
+    pub(crate) fn source_worker_count(&self) -> usize {
+        self.source_workers
+            .entries
+            .lock()
+            .expect("Source workers")
+            .len()
     }
 }
 impl SourceViewerActor {
@@ -1488,6 +1508,7 @@ impl TranscodeManager {
             Some(request) => match request.register("source-preparation").await {
                 Ok(custody) => Some(custody),
                 Err(_) => {
+                    tracing::warn!(target: "plurxd::transcode", stage = "preparation_custody", error_class = ?SourceWorkerError::Unavailable, "Source producer startup failed");
                     let mut current = owner.state.lock().expect("Source worker state");
                     current.start = Some(Err(SourceWorkerError::Unavailable));
                     current.settled = Some(Err(SourceWorkerError::Unavailable));
@@ -1505,6 +1526,22 @@ impl TranscodeManager {
         let mut native_work = None;
         let mut unowned_existing = true;
         let mut startup_stage = "deadline";
+        // Retirement (a Source End, a drain, a revocation) ends a start that
+        // has not published at its next stage boundary: after the route
+        // proof, after native tracks, after recipe preparation, and after
+        // reservation. Each stage runs to its own end under the start's
+        // bounded budget, so a cold index the viewer left still completes
+        // and persists for the next play, and nothing is dropped mid-await:
+        // no custody registration, index write or file fence is abandoned
+        // half-done. The registry slot and copy permit are freed when the
+        // boundary is reached, by the ordinary settlement below.
+        let retirement_requested = || {
+            owner
+                .state
+                .lock()
+                .expect("Source worker state")
+                .retirement_requested
+        };
         let start = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             Box::pin(async {
@@ -1525,6 +1562,9 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unresolved);
                 }
                 unowned_existing = false;
+                if retirement_requested() {
+                    return Err(SourceWorkerError::Unavailable);
+                }
                 // This actual worker owns the configured queue/materialization
                 // allowance. Its inherited deadline can only become shorter.
                 startup_stage = "startup_budget";
@@ -1566,6 +1606,9 @@ impl TranscodeManager {
                     .await?;
                     owner.state.lock().expect("Source native actor").native = Some(tracks);
                 }
+                if retirement_requested() {
+                    return Err(SourceWorkerError::Unavailable);
+                }
                 startup_stage = "recipe_preparation";
                 let encoding = if source_recipe_is_encoded(prepared.request()) {
                     Some(
@@ -1588,6 +1631,11 @@ impl TranscodeManager {
                     .await?;
                     None
                 };
+                // The prepared recipe (and a cold index, persisted) is done;
+                // a viewer who left during it is acted on before admission.
+                if retirement_requested() {
+                    return Err(SourceWorkerError::Unavailable);
+                }
                 startup_stage = "vod_admission";
                 let admitted = Box::pin(self.vod.prepare_admitted_source_vod(
                     &prepared,
@@ -1752,8 +1800,9 @@ impl TranscodeManager {
         )
         .await
         .unwrap_or(Err(SourceWorkerError::Deadline));
+        // Every start that does not publish ends here with its stage, once.
         if let Err(error) = &start {
-            tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, "Source producer startup failed");
+            tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, retirement_requested = owner.state.lock().expect("Source worker state").retirement_requested, "Source producer startup failed");
         }
         if start.is_ok() {
             // Readiness helpers have returned; join their independent owners

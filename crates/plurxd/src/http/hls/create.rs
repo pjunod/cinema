@@ -3153,17 +3153,28 @@ fn emit_start_attempt(
 /// clamps); a client with more time left re-posts on `startup_timeout` and
 /// joins the same owner. Only a create with no header gets the 10 s default.
 pub(super) fn startup_allowance_ms(headers: &HeaderMap) -> u64 {
+    startup_allowance(headers).unwrap_or(10_000)
+}
+
+/// The viewer's remaining start as it sent it, or `None` when it sent no
+/// `x-plurx-startup-remaining-ms`. A shared create reads it through this so
+/// the receiver and the Source keep the local create's one clock, and a
+/// caller that sent none (an older client or peer) keeps its fixed bounds.
+pub(crate) fn startup_allowance(headers: &HeaderMap) -> Option<u64> {
     headers
-        .get("x-plurx-startup-remaining-ms")
+        .get(STARTUP_REMAINING_HEADER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(10_000)
 }
+
+/// The header that carries a viewer's remaining start, from the client to its
+/// create and, on a shared create, from the receiver on to the Source.
+pub(crate) const STARTUP_REMAINING_HEADER: &str = "x-plurx-startup-remaining-ms";
 
 /// The answer for a create whose owner is still working: `startup_timeout`,
 /// which every client's create ladder re-posts with the same `request_id`,
 /// and that re-post joins the owner through the durable claim.
-fn create_still_starting(message: &'static str) -> ApiError {
+pub(crate) fn create_still_starting(message: &'static str) -> ApiError {
     ApiError::TypedRetry {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: "startup_timeout",
@@ -3205,7 +3216,7 @@ fn coded_create_unavailable(error: ApiError) -> ApiError {
 
 /// How long a viewer told `startup_timeout` waits before re-posting: about
 /// one placement step of the owner it is about to join.
-const CREATE_STILL_STARTING_RETRY_AFTER_SECS: u64 = 1;
+pub(crate) const CREATE_STILL_STARTING_RETRY_AFTER_SECS: u64 = 1;
 /// How long a create's durable request claim lasts once acquired.
 const MEDIA_SESSION_REQUEST_CLAIM_MS: i64 = 60_000;
 /// The owner stops this long before its claim expires, so its last durable
@@ -3215,11 +3226,11 @@ const OWNED_CREATE_CLAIM_MARGIN: std::time::Duration = std::time::Duration::from
 /// How long past its viewer's remaining start an owner keeps working: one
 /// re-post's `Retry-After` and its round trip, which is how the viewer's last
 /// retry reaches the owner and takes the answer.
-const OWNED_CREATE_REPOST_GRACE: std::time::Duration =
+pub(crate) const OWNED_CREATE_REPOST_GRACE: std::time::Duration =
     std::time::Duration::from_secs(CREATE_STILL_STARTING_RETRY_AFTER_SECS + 1);
 /// How long a viewer told `media_session_overloaded` waits before re-posting:
 /// the per-user start caps free as this user's other starts activate or end.
-const MEDIA_SESSION_OVERLOADED_RETRY_AFTER_SECS: u64 = 2;
+pub(crate) const MEDIA_SESSION_OVERLOADED_RETRY_AFTER_SECS: u64 = 2;
 
 async fn create_with_purpose_inner(
     user: plurx_core::domain::User,

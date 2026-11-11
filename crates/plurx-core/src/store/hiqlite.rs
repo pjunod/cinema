@@ -7791,7 +7791,7 @@ dump_row!(JobLeaseDumpRow {
     updated_at_ms: i64,
 });
 dump_row!(MediaSessionRequestDumpRow {
-    user_id: i64,
+    user_id: Option<i64>,
     request_id: String,
     request_fingerprint: String,
     playback_id: String,
@@ -7810,7 +7810,7 @@ dump_row!(LibraryChannelSessionRecipeDumpRow {
     created_at_ms: i64,
 });
 dump_row!(MediaPlaybackPointerDumpRow {
-    user_id: i64,
+    user_id: Option<i64>,
     playback_id: String,
     current_incarnation_id: String,
     updated_at_ms: i64,
@@ -7818,7 +7818,7 @@ dump_row!(MediaPlaybackPointerDumpRow {
 dump_row!(MediaSessionDumpRow {
     incarnation_id: String,
     session_id: String,
-    user_id: i64,
+    user_id: Option<i64>,
     playback_id: String,
     request_fingerprint: String,
     owner_node_id: String,
@@ -7837,7 +7837,7 @@ dump_row!(MediaSessionDumpRow {
     updated_at_ms: i64,
 });
 dump_row!(MediaSessionPreparationDumpRow {
-    user_id: i64,
+    user_id: Option<i64>,
     playback_id: String,
     staged_incarnation_id: String,
     expected_predecessor_incarnation_id: String,

@@ -121,6 +121,7 @@ fn normalize_init(
 ) -> Result<(), CopyNormalizationError> {
     crate::copyseg::sanitize_stale_dolby_brand(init);
     fmp4::promote_from(init, promotion)
+        .map(|_| ())
         .map_err(|error| CopyNormalizationError::Init(error.to_string()))
 }
 struct PipeNormalizer {

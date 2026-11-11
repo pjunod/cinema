@@ -234,7 +234,7 @@ impl SourceViewerActor {
                         };
                         let (codecs, supplemental_codecs) = copied_hls_codecs(
                             &backing.file,
-                            backing.request.audio,
+                            backing.request.audio_index,
                             CopySessionOptions {
                                 transcode_audio: aac,
                                 preserve_dolby_vision,
@@ -482,7 +482,13 @@ impl TranscodeManager {
         prepared
             .validate_copy_head(head.canonical_init())
             .map_err(|_| SourceWorkerError::RescanRequired)?;
-        let namespace = state.membership.cluster_id().to_owned();
+        // The cluster's shared catalogue identity: file ids are scoped to it,
+        // and every member reports the same value.
+        let namespace = state
+            .store
+            .instance_id()
+            .await
+            .map_err(|_| SourceWorkerError::Unavailable)?;
         let video_identity = crate::fragindex::identity_for(&file, video).argv_fingerprint;
         let observation_source = crate::copy_analysis::source_for_copy(
             &namespace,
@@ -538,7 +544,7 @@ impl TranscodeManager {
         let args = plurx_core::transcode::copy_pipe_args_with_index_and_packet_clock(
             &file,
             prepared.request().start_seconds,
-            prepared.request().audio,
+            prepared.request().audio_index,
             aac,
             Pacing::unpaced(),
             video,

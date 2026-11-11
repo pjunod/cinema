@@ -69,6 +69,20 @@ fn query_component(value: &str) -> String {
     result
 }
 
+/// A peer 429 that names no wait (an older Source, or a capacity refusal that
+/// never carried one) is asked again after this long.
+const PEER_BUSY_DEFAULT_RETRY_AFTER_SECS: u64 = 1;
+/// A peer's `Retry-After` is untrusted input relayed to our own client, so it
+/// is bounded: a hostile or broken Source cannot park a browser for minutes.
+const PEER_BUSY_MAX_RETRY_AFTER_SECS: u64 = 10;
+fn peer_retry_after_secs(value: Option<&HeaderValue>) -> u64 {
+    value
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(PEER_BUSY_DEFAULT_RETRY_AFTER_SECS)
+        .min(PEER_BUSY_MAX_RETRY_AFTER_SECS)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PeerError {
     Unavailable,
@@ -77,8 +91,79 @@ pub(crate) enum PeerError {
     Authentication,
     InvalidResponse,
     Rejected(StatusCode),
+    /// The peer answered 429: it is working on the request, or is at capacity,
+    /// and says when to ask again. Distinct from `Rejected` so the wait
+    /// survives to the client instead of being flattened into "unavailable".
+    Busy {
+        retry_after_secs: u64,
+    },
     /// An authenticated Start refusal, never a physical cleanup receipt.
     DolbyVisionUnsupported,
+    /// A Source's typed 503 `startup_timeout` to a Start that carried the
+    /// viewer's start clock: its owned work goes on, and the same request
+    /// rejoins it. Distinct from `Busy` (429: no capacity right now), which
+    /// such a Start may also be answered with; both are retried.
+    StartNotYet {
+        retry_after_secs: u64,
+    },
+}
+
+/// The Start capability a Source advertises in its identity handshake: it
+/// reads the viewer's remaining start (`x-plurx-startup-remaining-ms`) on a
+/// peer Start and may answer it with a typed retryable refusal. A receiver
+/// sends that header only to a Source that advertises this, and a Source
+/// answers typed retries only to a Start that carried it, so an older peer on
+/// either side sees exactly the shapes it always has.
+pub(crate) const START_BUDGET_FEATURE: &str = "start_budget_v1";
+
+/// A retryable shared Start answer as B gives it to its viewer: the codes and
+/// `Retry-After` a local create answers with (`create_503_not_yet` in the
+/// playback contract). From the Source it comes as `PeerError::StartNotYet`
+/// (still working) or `PeerError::Busy` (no capacity).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StartRetry {
+    pub code: StartRetryCode,
+    pub retry_after_secs: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartRetryCode {
+    /// The owner is still working: `startup_timeout`.
+    StartupTimeout,
+    /// No start slot is free right now: `media_session_overloaded`.
+    Overloaded,
+}
+impl StartRetryCode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::StartupTimeout => "startup_timeout",
+            Self::Overloaded => "media_session_overloaded",
+        }
+    }
+}
+impl StartRetry {
+    /// The retryable answer a budgeted Start's peer refusal carries, if any.
+    pub(crate) fn from_peer(error: PeerError) -> Option<Self> {
+        match error {
+            PeerError::StartNotYet { retry_after_secs } => Some(Self {
+                code: StartRetryCode::StartupTimeout,
+                retry_after_secs,
+            }),
+            PeerError::Busy { retry_after_secs } => Some(Self {
+                code: StartRetryCode::Overloaded,
+                retry_after_secs,
+            }),
+            _ => None,
+        }
+    }
+    /// The typed answer to the viewer, the way a local create gives it.
+    pub(crate) fn response(self, message: &str) -> crate::http::error::ApiError {
+        crate::http::error::ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: self.code.as_str(),
+            message: message.to_owned(),
+            retry_after_seconds: self.retry_after_secs,
+        }
+    }
 }
 #[derive(Deserialize)]
 pub(crate) struct Identity {
@@ -89,6 +174,15 @@ pub(crate) struct Identity {
     pub name: String,
     pub protocol_min: u8,
     pub protocol_max: u8,
+    /// Additive capabilities. A Source that predates them sends none, and a
+    /// receiver that predates them ignores the field.
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+impl Identity {
+    pub(crate) fn supports(&self, feature: &str) -> bool {
+        self.features.iter().any(|known| known == feature)
+    }
 }
 pub(crate) struct PeerArtwork {
     pub bytes: axum::body::Bytes,
@@ -339,6 +433,9 @@ impl PeerConnection {
         if identity.name.len() > 128 || identity.name.chars().any(char::is_control) {
             return Err(PeerError::InvalidResponse);
         }
+        if identity.features.len() > 32 || identity.features.iter().any(|f| f.len() > 64) {
+            return Err(PeerError::InvalidResponse);
+        }
         Ok(identity)
     }
     async fn request<T: DeserializeOwned>(
@@ -470,11 +567,16 @@ impl PeerConnection {
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
             if status != StatusCode::OK {
+                let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
                 axum::body::to_bytes(Body::new(response.into_body()), MANAGEMENT_RESPONSE_BYTES)
                     .await
                     .map_err(|_| PeerError::InvalidResponse)?;
                 return Err(if status == StatusCode::UNAUTHORIZED {
                     PeerError::Authentication
+                } else if status == StatusCode::TOO_MANY_REQUESTS {
+                    PeerError::Busy {
+                        retry_after_secs: peer_retry_after_secs(retry_after.as_ref()),
+                    }
                 } else {
                     PeerError::Rejected(status)
                 });
@@ -560,6 +662,7 @@ impl PeerConnection {
         expected: &crate::http::hls::SourcePlaybackTarget,
         viewer_hash: &str,
         request_json: &str,
+        startup_remaining: Option<Duration>,
     ) -> Result<crate::http::sharing_direct_wire::DecodedSourceStart, PeerError> {
         crate::http::validate_source_start_request(request_json.as_bytes(), expected)
             .map_err(|_| PeerError::InvalidResponse)?;
@@ -585,7 +688,7 @@ impl PeerConnection {
             let mut viewer =
                 HeaderValue::from_str(viewer_hash).map_err(|_| PeerError::InvalidResponse)?;
             viewer.set_sensitive(true);
-            let request = Request::builder()
+            let mut request = Request::builder()
                 .method(Method::POST)
                 .uri(format!(
                     "/sharing/v1/items/{}/files/{}/sessions",
@@ -597,7 +700,20 @@ impl PeerConnection {
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::AUTHORIZATION, authorization)
                 .header("cinemashare-viewer", viewer)
-                .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE,
+                );
+            // Outside the canonical body: the Source's Start identity is the
+            // digest of those bytes, so a re-post with less time left is
+            // still the same Start.
+            if let Some(remaining) = startup_remaining {
+                request = request.header(
+                    crate::http::hls::STARTUP_REMAINING_HEADER,
+                    remaining.as_millis().to_string(),
+                );
+            }
+            let request = request
                 .body(Body::from(request_json.to_owned()))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.receiver_presentation_affirmed = true;
@@ -611,6 +727,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             let bytes = axum::body::to_bytes(
                 Body::new(
                     response
@@ -632,7 +749,11 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if !status.is_success() {
-                return Err(source_start_refusal(status, &bytes));
+                return Err(source_start_refusal(
+                    status,
+                    &bytes,
+                    startup_remaining.map(|_| retry_after.as_ref()),
+                ));
             }
             crate::http::sharing_direct_wire::decode_source_start(&bytes, expected, direct)
                 .map_err(|_| PeerError::InvalidResponse)
@@ -894,6 +1015,7 @@ mod tests {
                                     header::LOCATION,
                                     "https://outside.example.invalid/credential-sink",
                                 )
+                                .header(header::RETRY_AFTER, "3")
                                 .body(Full::new(Bytes::from(
                                     serde_json::to_vec(&payload).expect("fixture response"),
                                 )))
@@ -974,6 +1096,74 @@ mod tests {
             drop(peer);
             server.abort();
             let _ = server.await;
+        }
+    }
+    /// A Source 429 is a typed wait, not an opaque failure: the client keeps
+    /// the Source's `Retry-After` so the receiver can hand it to the browser.
+    #[tokio::test]
+    async fn sharing_art_client_keeps_source_429_and_its_retry_after() {
+        use plurx_core::{
+            secrets::CredentialKey,
+            sharing_artwork::{artwork_expiry, ArtKind, ArtVariant, SourceArtReference},
+            sharing_catalogue_details::CatalogueRevisionKey,
+        };
+        let identity = SharingIdentity {
+            server_id: Uuid::new_v4(),
+            catalogue_epoch: Uuid::new_v4(),
+            created_at_ms: 1,
+        };
+        let key = CredentialKey::from_bytes([1; 32]);
+        let envelope =
+            CatalogueRevisionKey::generate_sealed(&key, identity.clone()).expect("fixture key");
+        let key = CatalogueRevisionKey::open(&key, identity.clone(), &envelope).expect("open");
+        let now = crate::state::clock_ms();
+        let resource = key
+            .issue_art(
+                &SourceArtReference {
+                    server_id: identity.server_id,
+                    catalogue_epoch: identity.catalogue_epoch,
+                    grant_id: Uuid::new_v4(),
+                    library_id: SourceId::parse("1").expect("lib"),
+                    item_id: SourceId::parse("1").expect("item"),
+                    kind: ArtKind::Poster,
+                    variant: ArtVariant::W300,
+                    expires_at_ms: artwork_expiry(now).expect("expiry"),
+                },
+                now,
+            )
+            .expect("resource");
+        let credential = plurx_core::sharing::new_secret().expect("credential");
+        let (mut peer, requests, server) = fixture(
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({"code":"sharing_art_variant_busy"}),
+        )
+        .await;
+        for _ in 0..2 {
+            assert!(matches!(
+                peer.artwork(&credential, &resource).await,
+                Err(PeerError::Busy {
+                    retry_after_secs: 3
+                })
+            ));
+        }
+        assert_eq!(requests.lock().expect("requests").len(), 2);
+        drop(peer);
+        server.abort();
+        let _ = server.await;
+        // The wait is untrusted input bound for a browser: missing or garbled
+        // falls back to the default, and a long one is capped.
+        for (value, expected) in [
+            (None, PEER_BUSY_DEFAULT_RETRY_AFTER_SECS),
+            (Some("soon"), PEER_BUSY_DEFAULT_RETRY_AFTER_SECS),
+            (Some("4"), 4),
+            (Some("99999"), PEER_BUSY_MAX_RETRY_AFTER_SECS),
+        ] {
+            let header = value.map(|v| HeaderValue::from_str(v).expect("value"));
+            assert_eq!(
+                peer_retry_after_secs(header.as_ref()),
+                expected,
+                "{value:?}"
+            );
         }
     }
     #[tokio::test]
@@ -1394,12 +1584,36 @@ mod driver_lifetime_tests {
 
 /// Preserve only the closed typed Start code; peer prose never reaches B's UI.
 /// This answer says nothing about whether an older invocation owns resources.
-fn source_start_refusal(status: StatusCode, bytes: &[u8]) -> PeerError {
+///
+/// `budgeted` is `Some(Retry-After)` only for a Start that carried the
+/// viewer's clock to a Source that advertised [`START_BUDGET_FEATURE`]: only
+/// then are retryable answers decoded (a 429 as `Busy`, a typed 503
+/// `startup_timeout` as `StartNotYet`, each with the bounded `Retry-After`
+/// every peer wait uses), so every other Start keeps today's mapping.
+fn source_start_refusal(
+    status: StatusCode,
+    bytes: &[u8],
+    budgeted: Option<Option<&HeaderValue>>,
+) -> PeerError {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Refusal {
         code: String,
         message: String,
+    }
+    if let Some(retry_after) = budgeted {
+        let retry_after_secs = peer_retry_after_secs(retry_after);
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return PeerError::Busy { retry_after_secs };
+        }
+        if status == StatusCode::SERVICE_UNAVAILABLE
+            && serde_json::from_slice::<Refusal>(bytes).is_ok_and(|refusal| {
+                refusal.code == StartRetryCode::StartupTimeout.as_str()
+                    && refusal.message.len() <= 4096
+            })
+        {
+            return PeerError::StartNotYet { retry_after_secs };
+        }
     }
     if status == StatusCode::UNPROCESSABLE_ENTITY {
         if let Ok(refusal) = serde_json::from_slice::<Refusal>(bytes) {
@@ -1422,23 +1636,134 @@ mod source_start_refusal_tests {
         let body =
             br#"{"code":"sharing_start_dolby_vision_unsupported","message":"source detail"}"#;
         assert!(matches!(
-            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, body),
+            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, body, None),
             PeerError::DolbyVisionUnsupported
         ));
         assert!(matches!(
-            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body),
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body, None),
             PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
         ));
         assert!(matches!(
             source_start_refusal(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                br#"{"code":"something_else","message":"detail"}"#
+                br#"{"code":"something_else","message":"detail"}"#,
+                None
             ),
             PeerError::Rejected(StatusCode::UNPROCESSABLE_ENTITY)
         ));
         assert!(matches!(
-            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, b"not json"),
+            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, b"not json", None),
             PeerError::Rejected(StatusCode::UNPROCESSABLE_ENTITY)
         ));
+    }
+
+    /// S11, both directions of the Start wire. Retryable answers are decoded
+    /// only for a Start that carried the viewer's clock; every other Start
+    /// keeps today's mapping, whatever the Source answered.
+    #[test]
+    fn sharing_source_start_typed_retry_is_decoded_only_for_a_budgeted_start() {
+        let not_yet = br#"{"code":"startup_timeout","message":"still preparing"}"#;
+        let busy = br#"{"code":"sharing_capacity_busy","message":"busy"}"#;
+        let two = HeaderValue::from_static("2");
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, not_yet, Some(Some(&two))),
+            PeerError::StartNotYet {
+                retry_after_secs: 2
+            }
+        ));
+        // A missing or garbled wait takes the bounded peer default; a long
+        // one is capped, as for every other peer wait.
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, not_yet, Some(None)),
+            PeerError::StartNotYet {
+                retry_after_secs: PEER_BUSY_DEFAULT_RETRY_AFTER_SECS
+            }
+        ));
+        assert!(matches!(
+            source_start_refusal(
+                StatusCode::TOO_MANY_REQUESTS,
+                busy,
+                Some(Some(&HeaderValue::from_static("3600")))
+            ),
+            PeerError::Busy {
+                retry_after_secs: PEER_BUSY_MAX_RETRY_AFTER_SECS
+            }
+        ));
+        assert_eq!(
+            StartRetry::from_peer(PeerError::StartNotYet {
+                retry_after_secs: 1
+            }),
+            Some(StartRetry {
+                code: StartRetryCode::StartupTimeout,
+                retry_after_secs: 1
+            })
+        );
+        assert_eq!(
+            StartRetry::from_peer(PeerError::Busy {
+                retry_after_secs: 2
+            }),
+            Some(StartRetry {
+                code: StartRetryCode::Overloaded,
+                retry_after_secs: 2
+            })
+        );
+        // An unbudgeted Start (an older receiver's, or a client that sent no
+        // clock) is exactly today's.
+        for (status, body) in [
+            (StatusCode::SERVICE_UNAVAILABLE, &not_yet[..]),
+            (StatusCode::TOO_MANY_REQUESTS, &busy[..]),
+        ] {
+            assert!(matches!(
+                source_start_refusal(status, body, None),
+                PeerError::Rejected(rejected) if rejected == status
+            ));
+        }
+        // Budgeted but not retryable: another 503 code, or prose that is not
+        // the closed shape.
+        for body in [
+            &br#"{"code":"sharing_start_deadline","message":"x"}"#[..],
+            &br#"{"code":"startup_timeout","message":"x","extra":1}"#[..],
+            &b"not json"[..],
+        ] {
+            assert!(
+                matches!(
+                    source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body, Some(Some(&two))),
+                    PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
+                ),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    /// S11 handshake: an older Source's identity (no `features`) decodes and
+    /// is not budget-capable; a newer one's decodes and is. The newer field is
+    /// additive, so an older receiver's decoder (no `deny_unknown_fields`)
+    /// reads the newer identity unchanged.
+    #[test]
+    fn sharing_identity_start_budget_feature_decodes_in_both_directions() {
+        let server = uuid::Uuid::new_v4();
+        let epoch = uuid::Uuid::new_v4();
+        let old = serde_json::json!({"server_id":server,"catalogue_epoch":epoch,"name":"Old","protocol_min":1,"protocol_max":1});
+        let mut new = old.clone();
+        new["features"] = serde_json::json!([START_BUDGET_FEATURE]);
+        let old: Identity = serde_json::from_value(old).expect("older Source identity");
+        assert!(!old.supports(START_BUDGET_FEATURE));
+        let decoded: Identity = serde_json::from_value(new.clone()).expect("newer identity");
+        assert!(decoded.supports(START_BUDGET_FEATURE));
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OlderReceiverIdentity {
+            #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+            server_id: uuid::Uuid,
+            #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+            catalogue_epoch: uuid::Uuid,
+            name: String,
+            protocol_min: u8,
+            protocol_max: u8,
+        }
+        let older: OlderReceiverIdentity =
+            serde_json::from_value(new).expect("an older receiver reads the newer identity");
+        assert_eq!(older.server_id, server);
     }
 }

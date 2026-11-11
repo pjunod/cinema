@@ -3639,9 +3639,7 @@ struct AvcCLocation {
     payload: Range<usize>,
     /// Structural visual header used by actual raster/color facts and fixtures.
     entry: BoxAt,
-    /// `stsd` first, then every enclosing box through `moov`. Fixture-only,
-    /// like `entry`.
-    #[cfg_attr(not(any(test, feature = "fixtures")), expect(dead_code))]
+    /// `stsd` first, then every enclosing box through `moov`.
     ancestors: Vec<BoxAt>,
 }
 

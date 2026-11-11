@@ -159,6 +159,17 @@ pub(super) fn unavailable() -> ApiError {
         "Receiver cannot recover this bounded presentation",
     )
 }
+/// Checked before registration: the bounded identity derives from the input
+/// alone, so refusing here never leaves a registered Start without its owner.
+pub(super) fn require_receiver_for_start(
+    input: &SourceStartInput,
+    headers: &impl AuthenticationHeaders,
+) -> Result<(), ApiError> {
+    if range_bound(input) && !authenticated_receiver_ready(headers) {
+        return Err(unavailable());
+    }
+    Ok(())
+}
 pub(super) fn require_current_receiver(
     entry: &SourceStartEntry,
     headers: &impl AuthenticationHeaders,

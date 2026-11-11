@@ -372,7 +372,13 @@ made-up URL and prevents the fork from being declared fully tracked.
   `src/config.rs` validates chunk, overall-transfer and install budgets; chunk
   and transfer defaults are 30 and 1200 seconds, also carried by the
   `src/config_toml.rs` construction path. Completing a chunk does not renew the
-  overall transfer deadline. This policy does not satisfy the generic transport
+  overall transfer deadline. The soft-TTL timeout in
+  `NetworkConnectionStreaming::send` now returns `Unreachable` wrapping a
+  `TimedOut` error that names the target node, request kind, append entry
+  count, snapshot chunk bytes, elapsed and soft-TTL milliseconds, instead of
+  the bare `Elapsed`; it adds no serialization (an append's encoded size is
+  unknown at that point and is not reported) and changes no behaviour. This
+  policy does not satisfy the generic transport
   repairs' upstream drop conditions.
   Files: `src/transport_status.rs`, `src/config.rs`, `src/config_toml.rs`,
   `src/network/raft_client.rs`, `src/network/raft_server.rs`,
