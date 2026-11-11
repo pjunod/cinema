@@ -102,6 +102,10 @@ int main(int argc, char **argv) {
     enc->colorspace = AVCOL_SPC_BT2020_NCL;
     enc->field_order = AV_FIELD_PROGRESSIVE;
     enc->bits_per_raw_sample = 10;
+    AVFormatContext *oc = NULL;
+    if ((ret = avformat_alloc_output_context2(&oc, NULL, "mp4", out)) < 0) die("alloc output", ret);
+    /* As ffmpeg_mux_init.c: a global-header muxer (mp4) makes the encoder emit extradata. */
+    if (oc->oformat->flags & AVFMT_GLOBALHEADER) enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     AVDictionary *opts = NULL;
     for (int i = 14; i < argc; i++) {
         char *eq = strchr(argv[i], '=');
@@ -117,8 +121,6 @@ int main(int argc, char **argv) {
         while ((e = av_dict_iterate(opts, e))) fprintf(stderr, "roi_encode: unused option %s=%s\n", e->key, e->value);
     }
 
-    AVFormatContext *oc = NULL;
-    if ((ret = avformat_alloc_output_context2(&oc, NULL, "mp4", out)) < 0) die("alloc output", ret);
     AVStream *st = avformat_new_stream(oc, NULL);
     avcodec_parameters_from_context(st->codecpar, enc);
     st->codecpar->codec_tag = MKTAG(tag[0], tag[1], tag[2], tag[3]);
