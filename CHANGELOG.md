@@ -10,6 +10,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Dolby Vision on Safari, web and mobile no longer stops at dynamic metadata
+  when the server's GPU can do better: AMD, Intel and NVIDIA reconstruction is
+  qualified with each vendor's actual production encoder, and a recipe that
+  qualifies during a play upgrades that same play. Playback Info shows the real
+  reason an enhancement was skipped. Source custody left behind by a job whose
+  owner died before its join can now be released from a host source-open
+  census instead of holding the shared storage fence indefinitely (#1491).
 - Linux Cinema now defaults to the system mpv and no longer ships a duplicate
   renderer, so qualified system HDR/DV updates reach Cinema. Explicit binary
   overrides, isolated configuration and Cinema controls remain available.
