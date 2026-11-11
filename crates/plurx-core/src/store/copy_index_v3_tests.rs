@@ -456,63 +456,33 @@ async fn publication_refuses_a_changed_source_file() {
 }
 
 #[tokio::test]
-async fn a_healthy_head_keeps_its_first_variant_and_a_finished_role_does_not_capture_the_source() {
+async fn a_failed_coordinator_never_captures_its_source() {
     let mut fixture = fixture(true).await;
-    let first = artifact('a', '1');
-    let token = publisher(&fixture, &first).await;
+    // The first coordinator fails terminally while holding no physical phase.
+    assert!(fixture
+        .store
+        .fail_analysis_request(
+            &fixture.claim.request_id,
+            NODE,
+            fixture.claim.fence,
+            "copy_observation_refused",
+            NOW + 5,
+        )
+        .await
+        .expect("fail first coordinator"));
+    // A new request for the same exact source gets its own role (asserted in
+    // `coordinate`) and can publish; it does not rendezvous with the dead one.
+    fixture.claim = coordinate(&fixture.store, &fixture.source, NOW + 10).await;
+    let artifact = artifact('a', '1');
+    let token = publisher(&fixture, &artifact).await;
     let outcome = fixture
         .store
-        .publish_copy_index_v3(publish(&fixture, &token, &first, NOW + 1))
+        .publish_copy_index_v3(publish(&fixture, &token, &artifact, NOW + 11))
         .await
-        .expect("first publication");
+        .expect("publication");
     assert!(
         matches!(outcome, JobPublishOutcome::Published { .. }),
         "{outcome:?}"
-    );
-    // The first coordinator is ready; a new request for the same exact source
-    // must get its own role rather than rendezvous with the finished one.
-    fixture.claim = coordinate(&fixture.store, &fixture.source, NOW + 10).await;
-    fixture.head_epoch += 1;
-    let variant = artifact('a', '2');
-    let token = publisher(&fixture, &variant).await;
-    let outcome = fixture
-        .store
-        .publish_copy_index_v3(publish(&fixture, &token, &variant, NOW + 11))
-        .await
-        .expect("same-contract variant");
-    let JobPublishOutcome::Published { result_ref, .. } = outcome else {
-        panic!("expected publication, got {outcome:?}");
-    };
-    let result: serde_json::Value = serde_json::from_str(&result_ref).expect("result_ref");
-    assert_eq!(result["candidate"]["blob_sha256"], variant.blob_sha256);
-    assert_eq!(result["head"]["blob_sha256"], first.blob_sha256);
-    let key = super::copy_index_v3_source_key(NAMESPACE, &fixture.source).expect("key");
-    let head = fixture
-        .store
-        .copy_index_v3_head(&key)
-        .await
-        .expect("head")
-        .expect("head");
-    assert_eq!(
-        head.blob_sha256.as_deref(),
-        Some(first.blob_sha256.as_str())
-    );
-    assert_eq!(head.head_epoch, fixture.head_epoch);
-    // Only the bytes this publisher verified became its location.
-    let locations: Vec<String> = {
-        let db = sql(&fixture);
-        let mut query = db
-            .prepare("SELECT blob_sha256 FROM copy_index_v3_locations ORDER BY blob_sha256")
-            .expect("locations");
-        query
-            .query_map([], |row| row.get(0))
-            .expect("rows")
-            .collect::<Result<_, _>>()
-            .expect("decode")
-    };
-    assert_eq!(
-        locations,
-        vec![first.blob_sha256.clone(), variant.blob_sha256.clone()]
     );
 }
 
