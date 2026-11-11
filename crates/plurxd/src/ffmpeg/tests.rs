@@ -585,7 +585,7 @@ fn a_dv_title_report_is_not_a_source_change_for_either_reporter_direction() {
         .contains("/<unknown-field> missing"));
 }
 
-/// The production failure of 2026-11-11 (Avatar: Fire and Ash on m6): #1477
+/// The production failure of 2026-11-11 (Avatar: Fire and Ash on a lab node): #1477
 /// grafted pending FEL requests under `plurx_dv_fel_requests_v3`, the
 /// normalizer's list of grafts did not name it, and a same-reporter
 /// comparison refused the unchanged source as "/<unknown-field> missing", so
