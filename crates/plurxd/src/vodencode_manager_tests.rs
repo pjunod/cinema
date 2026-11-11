@@ -209,7 +209,8 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                 convert_dolby_vision: true,
                 dual_layer_as_copied: false,
                 aac: true,
-                preserve_dolby_vision: false,
+                // Conversion preserves Dolby Vision; validation rejects otherwise.
+                preserve_dolby_vision: true,
             }
         } else {
             SessionKind::Transcode {
