@@ -1,0 +1,86 @@
+{
+  "scope": "M5400 all48 sampled diagnostic only; no full-resolution acceptance claim or gate change",
+  "window": [
+    "125/1000",
+    "2127/1000"
+  ],
+  "raster": [
+    3840,
+    2160
+  ],
+  "active_roi_xyxy": [
+    0,
+    42,
+    3840,
+    2118
+  ],
+  "fixed_lattice": {
+    "stride": 8,
+    "x_phases_relative_to_roi_origin": [
+      0,
+      1
+    ],
+    "y_phases_relative_to_roi_origin": [
+      0,
+      1
+    ],
+    "order": "ascending y then ascending x",
+    "selection": "Cartesian product of sorted unique ROI-origin+phase+8*k coordinates strictly inside ROI",
+    "retain_coordinates": true,
+    "all_four_absolute_xy_parities": true
+  },
+  "arms": {
+    "R": "same canonical BL+EL under each model",
+    "F": "same canonical BL without EL under each model",
+    "C": "Mac-decoded actual authored MP4s: retained singlepass115 (base), quantOffsets arm S, zero-mean arm Z",
+    "PRE": "calibrated top-left point pre-encode native YUV NUT"
+  },
+  "models": [
+    "A",
+    "B",
+    "C",
+    "D"
+  ],
+  "operators": "frozen four_model_audit.model_rgb, quantization, nearest-positive chroma and EL layer siting; vector_metrics.delta unchanged",
+  "metadata": "all48 native AVDOVIMetadata observed on raw-RPU-hash-verified BL frame and canonically matched back to accepted source; assert existing fixture semantics before use",
+  "qualification": "exact lattice RGB16 equality at source frames0/24 to retained full-resolution frozen-model R/F RGB before processing other frames; candidate0/24 native bytes bind to retained singlepass request",
+  "luminance_bands_reference_weighted_linear_Y_nits": [
+    [
+      0,
+      0.1
+    ],
+    [
+      0.1,
+      1
+    ],
+    [
+      1,
+      10
+    ],
+    [
+      10,
+      100
+    ],
+    [
+      100,
+      null
+    ]
+  ],
+  "band_mask": "same model R weighted linear Y; same fixed sample membership for comparing F,C,PRE",
+  "metrics": "sample count, deltaITP mean,p95,p99,max; reference-defined bands; all four parities; descriptive reference-relative advantage",
+  "not_claimed": [
+    "sampled means or p99 equal full-resolution statistics",
+    "normative Dolby composition",
+    "playback qualification",
+    "packaging correction",
+    "live playback change"
+  ],
+  "derived_from": {
+    "path": "lattice-michael1800/protocol.json",
+    "sha256": "a66da1ab30c35e93164d93fcc846de680afa24bec2cde1fe4057e4ae6c1f4858",
+    "change": "fixture/scope only; lattice, operators, bands and metrics unchanged"
+  },
+  "written_utc": "2026-11-11T17:30:00Z",
+  "author": "Claude Opus 5.5, session_01BCWLA1yYosvau4xhfH6R4S",
+  "status": "Fixed before any M5400 all-48 lattice output"
+}
