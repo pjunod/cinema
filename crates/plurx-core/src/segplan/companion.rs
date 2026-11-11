@@ -118,6 +118,21 @@ impl CopyCompanionVerifier {
 
 #[cfg(test)]
 mod tests {
+
+    fn fixture_packet() -> crate::segplan::packet_clock::SourcePacketObservation {
+        crate::segplan::packet_clock::SourcePacketObservation {
+            sequence: 0,
+            dts: 0,
+            pts: 0,
+            duration: 1,
+            size: 1,
+            checksum: 0,
+            flags: 1,
+            side_data_count: 0,
+            time_base_num: 1,
+            time_base_den: 1,
+        }
+    }
     use super::*;
     use crate::fmp4::{FragmentReader, Unit};
 
@@ -142,6 +157,7 @@ mod tests {
         let mut verifier =
             CopyCompanionVerifier::new(init.clone(), init).expect("matching decoder contracts");
         let first_clock = SourceFragmentClock {
+            first_packet: fixture_packet(),
             canonical_dts: 37,
             duration,
             next_packet_sequence: 1,
@@ -154,6 +170,7 @@ mod tests {
         // Identical sizes and cut class do not excuse replaying the old GOP
         // where the next source clock says a later fragment must begin.
         let later_clock = SourceFragmentClock {
+            first_packet: fixture_packet(),
             canonical_dts: 37 + duration,
             duration,
             next_packet_sequence: 2,
@@ -174,6 +191,7 @@ mod tests {
         let mut av = fragment.clone();
         av.tracks[0].runs[0].samples[0].size += 1;
         let clock = SourceFragmentClock {
+            first_packet: fixture_packet(),
             canonical_dts: 0,
             duration: fragment.video_duration(&init),
             next_packet_sequence: 1,

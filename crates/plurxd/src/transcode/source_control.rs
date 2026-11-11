@@ -412,6 +412,7 @@ impl SourceGrowingBacking {
         } else {
             crate::playback_control::SelectionObservation::default()
         };
+        let accepted_demand=accepted.then(||control.snapshot.clone());
         if accepted {
             let now = Instant::now();
             // This backing never restarts its producer in place. Generation,
@@ -431,6 +432,7 @@ impl SourceGrowingBacking {
         let mark_rendered = state.presented.presented();
         let lease_expires_at_unix_ms = state.lease_expires_at_unix_ms;
         drop(state);
+        if let Some(demand)=accepted_demand {self.observe_demand(demand).await.map_err(|_|ControlStateError::Unavailable)?;}
         if mark_rendered {
             self.production
                 .mark_rendered()

@@ -408,6 +408,21 @@ fn map_plan_error(error: CopyPlanError) -> VerifiedCopyError {
 
 #[cfg(test)]
 mod tests {
+
+    fn fixture_packet() -> crate::segplan::packet_clock::SourcePacketObservation {
+        crate::segplan::packet_clock::SourcePacketObservation {
+            sequence: 0,
+            dts: 0,
+            pts: 0,
+            duration: 1,
+            size: 1,
+            checksum: 0,
+            flags: 1,
+            side_data_count: 0,
+            time_base_num: 1,
+            time_base_den: 1,
+        }
+    }
     use super::*;
     use crate::fmp4::{FragmentReader, Unit};
 
@@ -479,6 +494,7 @@ mod tests {
         (
             canonical,
             SourceFragmentClock {
+                first_packet: fixture_packet(),
                 canonical_dts: 37 + number * duration,
                 duration,
                 next_packet_sequence: (number + 1) * samples,
@@ -666,6 +682,7 @@ mod tests {
         let mut engine = kernel(&init, fragment.len(), true);
         engine.next_packet_sequence = Some(u64::MAX);
         let clock = SourceFragmentClock {
+            first_packet: fixture_packet(),
             canonical_dts: 0,
             duration: fragment.video_duration(&init),
             next_packet_sequence: fragment

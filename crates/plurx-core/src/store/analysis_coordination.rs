@@ -388,9 +388,9 @@ pub(super) async fn is_coordinator_owner<T: QueueSql>(
 /// Shape-check adjunct installation independently of frozen Source v81/v82.
 pub(crate) fn schema_objects() -> Result<Vec<(String, String)>, StoreError> {
     let conn = rusqlite::Connection::open_in_memory()?;
-    conn.execute_batch("CREATE TABLE analysis_requests(request_id TEXT PRIMARY KEY,state TEXT,fence INTEGER,pipeline_version TEXT,video_identity TEXT,component TEXT,owner_node_id TEXT,updated_at_ms INTEGER,last_error_code TEXT); CREATE TABLE analysis_source_reservations(request_id TEXT,resource_key TEXT,fence INTEGER,expires_at_ms INTEGER);")?;
+    conn.execute_batch("CREATE TABLE analysis_requests(request_id TEXT PRIMARY KEY,state TEXT,fence INTEGER,pipeline_version TEXT,video_identity TEXT,component TEXT,owner_node_id TEXT,updated_at_ms INTEGER,last_error_code TEXT); CREATE TABLE analysis_source_reservations(request_id TEXT,resource_key TEXT,fence INTEGER,expires_at_ms INTEGER); CREATE TABLE background_job_commands(id TEXT PRIMARY KEY,operation TEXT,request_json TEXT,result_json TEXT);")?;
     conn.execute_batch(SCHEMA)?;
-    let mut query=conn.prepare("SELECT name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('analysis_requests','analysis_source_reservations') ORDER BY name")?;
+    let mut query=conn.prepare("SELECT name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('analysis_requests','analysis_source_reservations','background_job_commands') ORDER BY name")?;
     let rows = query
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;

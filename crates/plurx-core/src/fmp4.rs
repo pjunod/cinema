@@ -2920,7 +2920,7 @@ pub fn copy_video_sample_entry_facts(init: &Init) -> Result<CopyVideoSampleEntry
                     if nal.len() < 2
                         || nal[0] & 0x80 != 0
                         || nal[1] & 7 == 0
-                        || hevc_nal_type(nal) != kind
+                        || hevc_nal_type(nal) != Some(kind)
                     {
                         return malformed("hvcC array disagrees with NAL header");
                     }

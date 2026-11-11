@@ -41,6 +41,7 @@ pub struct SourcePacketObservation {
 /// This is an observation, not authority to publish or proof of full coverage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceFragmentClock {
+    pub first_packet: SourcePacketObservation,
     pub canonical_dts: u64,
     pub duration: u64,
     pub next_packet_sequence: u64,
@@ -96,6 +97,18 @@ pub fn associate_fragment_clock(
         {
             return Err(PacketClockError::FragmentMismatch);
         }
+        // Decode order alone cannot establish the presentation clock of a
+        // reordered stream. Preserve the exact signed composition offset.
+        let composition = (i128::from(packet.pts) - i128::from(packet.dts))
+            .checked_mul(i128::from(packet.time_base_num))
+            .and_then(|value| value.checked_mul(i128::from(video.timescale)))
+            .ok_or(PacketClockError::Overflow)?;
+        let composition_denominator = i128::from(packet.time_base_den);
+        if composition % composition_denominator != 0
+            || composition / composition_denominator != i128::from(sample.cto)
+        {
+            return Err(PacketClockError::FragmentMismatch);
+        }
         duration = duration
             .checked_add(u64::from(sample.duration))
             .ok_or(PacketClockError::Overflow)?;
@@ -121,6 +134,7 @@ pub fn associate_fragment_clock(
         .checked_add(duration)
         .ok_or(PacketClockError::Overflow)?;
     Ok(SourceFragmentClock {
+        first_packet: first,
         canonical_dts,
         duration,
         next_packet_sequence: next_sequence,
@@ -405,6 +419,7 @@ mod association_tests {
         };
         let timing = associate_fragment_clock(&fragment, &init, &packets, 7, origin, 11)
             .expect("exact association");
+        assert_eq!(timing.first_packet, packets[0]);
         assert_eq!(timing.canonical_dts, 11);
         assert_eq!(timing.duration, track.duration());
         assert_eq!(timing.next_packet_sequence, 7 + packets.len() as u64);
@@ -412,13 +427,14 @@ mod association_tests {
             associate_fragment_clock(&fragment, &init, &packets, 6, origin, 11),
             Err(PacketClockError::FragmentMismatch)
         );
-        for field in 0..4 {
+        for field in 0..5 {
             let mut wrong = packets.clone();
             match field {
                 0 => wrong[0].size += 1,
                 1 => wrong[0].duration += 1,
                 2 => wrong[0].time_base_den = 0,
-                _ => wrong[0].sequence += 1,
+                3 => wrong[0].sequence += 1,
+                _ => wrong[0].pts += 1,
             }
             assert_eq!(
                 associate_fragment_clock(&fragment, &init, &wrong, 7, origin, 11),

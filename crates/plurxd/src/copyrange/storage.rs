@@ -126,6 +126,10 @@ impl CopyRangePublisher {
 pub(crate) struct CopyRangeFiles {
     pub(crate) payload: SecureDirectory,
     pub(crate) payload_path: PathBuf,
+    payload_parent:SecureDirectory,
+    payload_name:String,
+    payload_pin:Option<crate::playback_cache::CachePin>,
+    payload_retired:bool,
     publisher: CopyRangePublisher,
     observation: SecureDirectory,
     observation_path: PathBuf,
@@ -223,7 +227,13 @@ impl CopyRangeFiles {
             .create_child_directory(&range)
             .await
             .map_err(|_| "copy_observation_range_unavailable".to_owned())?;
+        let payload_path=payload_root.join("source-copy-ranges").join(&incarnation).join(&range);
+        let payload_pin=crate::playback_cache::pin(&payload_path).map_err(|_|"copy_payload_pin_failed".to_owned())?;
         Ok(Self {
+            payload_parent:owner,
+            payload_name:range.clone(),
+            payload_pin,
+            payload_retired:false,
             publisher: CopyRangePublisher::default(),
             payload,
             payload_path: payload_root
@@ -258,6 +268,16 @@ impl CopyRangeFiles {
             current: None,
             old: Vec::new(),
         })
+    }
+    /// The actual actor calls this only after its exact physical generation
+    /// and counted response bodies/jobs are joined. Metadata is independent
+    /// durable state and survives this private payload cache retirement.
+    pub(crate) async fn retire_payload(&mut self)->Result<(),String>{
+        if self.payload_retired{return Ok(());}
+        self.publisher.retire();drop(self.payload_pin.take());
+        let _eviction=crate::playback_cache::begin_eviction(&self.payload_path).map_err(|_|"copy_payload_eviction_busy".to_owned())?;
+        self.payload_parent.remove_child_tree(&self.payload_name,120100,2).await.map_err(|_|"copy_payload_retirement_failed".to_owned())?;
+        self.payload_retired=true;Ok(())
     }
     pub(crate) fn publisher(&self) -> CopyRangePublisher {
         self.publisher.clone()

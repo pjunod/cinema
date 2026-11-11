@@ -20,7 +20,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
-const MAX_HELD: usize = 96 * 1024 * 1024;
+pub(super) const MAX_HELD: usize = 96 * 1024 * 1024;
 const MAX_FRAGMENTS: usize = 8;
 const MAX_PACKETS: usize = 131072;
 
@@ -34,6 +34,7 @@ pub(crate) enum CopyMuxEvent {
         av: Arc<Init>,
     },
     Origin {
+        first_packet:plurx_core::segplan::packet_clock::SourcePacketObservation,
         canonical_dts: u64,
         av_dts: u64,
         timescale: u32,
@@ -145,7 +146,7 @@ impl ObservedCopyMux {
                     while let Some(unit) = self
                         .av_reader
                         .next_unit()
-                        .map_err(|_| "copy_av_invalid".to_owned())?
+                        .map_err(av_observation_error)?
                     {
                         match unit {
                             Unit::Init(init) => {
@@ -266,7 +267,7 @@ impl ObservedCopyMux {
                 let fed = self
                     .assembler
                     .feed_media(&bytes[*at..])
-                    .map_err(|_| "copy_canonical_observation_failed".to_owned())?;
+                    .map_err(observation_error)?;
                 let consumed = fed.consumed;
                 progress |= consumed > 0 || fed.event.is_some();
                 if let Some((bytes, at)) = self.pending_media.front_mut() {
@@ -284,7 +285,7 @@ impl ObservedCopyMux {
                 let fed = self
                     .assembler
                     .feed_clock(&bytes[*at..])
-                    .map_err(|_| "copy_clock_observation_failed".to_owned())?;
+                    .map_err(observation_error)?;
                 let consumed = fed.consumed;
                 progress |= consumed > 0 || fed.event.is_some();
                 if let Some((bytes, at)) = self.pending_clock.front_mut() {
@@ -310,14 +311,14 @@ impl ObservedCopyMux {
                 event = self
                     .assembler
                     .feed_media(&[])
-                    .map_err(|_| "copy_canonical_observation_failed".to_owned())?
+                    .map_err(observation_error)?
                     .event;
             }
             if event.is_none() && !self.clock_marked {
                 event = self
                     .assembler
                     .feed_clock(&[])
-                    .map_err(|_| "copy_clock_observation_failed".to_owned())?
+                    .map_err(observation_error)?
                     .event;
             }
             if let Some(event) = event {
@@ -329,13 +330,13 @@ impl ObservedCopyMux {
         if self.media_eof && self.pending_media.is_empty() && !self.media_marked {
             self.assembler
                 .mark_media_eof()
-                .map_err(|_| "copy_canonical_truncated".to_owned())?;
+                .map_err(observation_error)?;
             self.media_marked = true;
         }
         if self.clock_eof && self.pending_clock.is_empty() && !self.clock_marked {
             self.assembler
                 .mark_clock_eof()
-                .map_err(|_| "copy_clock_truncated".to_owned())?;
+                .map_err(observation_error)?;
             self.clock_marked = true;
         }
         Ok(())
@@ -487,6 +488,7 @@ impl ObservedCopyMux {
             if self.first_pair {
                 self.first_pair = false;
                 events.push(CopyMuxEvent::Origin {
+                    first_packet:clock.first_packet,
                     canonical_dts: clock.canonical_dts,
                     av_dts,
                     timescale,
@@ -529,7 +531,7 @@ impl ObservedCopyMux {
         self.pump_observations()?;
         self.assembler
             .finish()
-            .map_err(|_| "copy_clock_incomplete".to_owned())?;
+            .map_err(observation_error)?;
         let mut events = Vec::new();
         self.pair(&mut events)?;
         if !self.canonical.is_empty()
@@ -582,5 +584,17 @@ fn normalization_error(error: CopyNormalizationError) -> String {
             "copy_init_contract_changed".into()
         }
         other => other.to_string(),
+    }
+}
+
+fn av_observation_error(error:fmp4::Fmp4Error)->String {
+    if error.unsupported_kind()==Some(fmp4::Fmp4UnsupportedKind::InitContractChanged){"copy_init_contract_changed".into()}else{"copy_av_invalid".into()}
+}
+fn observation_error(error:plurx_core::segplan::observed_range::ObservationError)->String {
+    use plurx_core::segplan::observed_range::ObservationError;
+    match error {
+        ObservationError::InitContractChanged=>"copy_init_contract_changed".into(),
+        ObservationError::Clock=>"copy_clock_unknown".into(),
+        _=>"copy_canonical_observation_failed".into(),
     }
 }

@@ -665,3 +665,146 @@ pub(super) async fn source_attestation<T: super::background_jobs::QueueSql>(
     }
     Ok(value)
 }
+
+/// Publish verified candidate bytes under an exact metadata and worker attempt.
+/// Byte verification is the producer's obligation; this transaction grants no IO.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishCopyIndexV3 {
+    pub token: super::background_jobs::JobToken,
+    pub claim: super::analysis_coordination::AnalysisCoordinationClaim,
+    pub source: AnalysisCoordinationSource,
+    pub artifact: CopyIndexV3Artifact,
+    pub expected_head_epoch: i64,
+    pub now_ms: i64,
+}
+
+fn publication_body(request: &PublishCopyIndexV3) -> Result<serde_json::Value, StoreError> {
+    request.token.validate()?;
+    request.artifact.validate()?;
+    if !metadata_shape_valid(&request.source, &request.claim, request.now_ms)
+        || request.expected_head_epoch < 0 || request.artifact.file_id != request.source.file_id
+        || request.artifact.contract_version != request.source.contract_version {
+        return Err(invalid());
+    }
+    let artifact = &request.artifact;
+    let source_key = copy_index_v3_source_key(&artifact.catalog_namespace, &request.source)?;
+    let logical_key = super::fragment_index_cluster::cluster_fragment_index_v3_key(
+        &artifact.catalog_namespace, artifact.file_id, &artifact.source_sha256,
+        &super::fragment_index_cluster::FragmentIndexOutputIdentity {
+            contract_version: artifact.contract_version,
+            keyframe_table_sha256: artifact.output_contract_sha256.clone(),
+        },
+    ).ok_or_else(invalid)?;
+    if logical_key != artifact.contract_key { return Err(invalid()); }
+    let payload = super::background_jobs::JobPayload::FragmentIndexPublish {
+        publication_version: 3, source_key: source_key.clone(),
+        catalog_namespace: artifact.catalog_namespace.clone(), init_contract_sha256: artifact.init_contract_sha256.clone(),
+        expected_head_epoch: request.expected_head_epoch, file_id: request.source.file_id,
+        source_size: request.source.source_size, source_mtime: request.source.source_mtime,
+        origin_node_id: request.source.origin_node_id.clone(), object_version: request.source.object_version.clone(),
+        coordinator_request_id: request.claim.request_id.clone(), coordinator_fence: request.claim.fence,
+        requested_generation: request.source.requested_generation.clone(), contract_version: artifact.contract_version,
+        output_contract_sha256: artifact.output_contract_sha256.clone(), source_sha256: artifact.source_sha256.clone(),
+        blob_sha256: artifact.blob_sha256.clone(), bytes: artifact.bytes, cache_key: logical_key.clone(),
+        producer_engine_sha256: artifact.producer_engine_sha256.clone(),
+    };
+    payload.validate()?;
+    // Renewal clocks/revisions and builder timestamps are not a new semantic
+    // publication. Attempt identity is independently checked against history.
+    let semantic = serde_json::json!({"version":3,"source_key":source_key,"source":request.source,"claim":request.claim,
+        "expected_head_epoch":request.expected_head_epoch,"catalog_namespace":artifact.catalog_namespace,
+        "file_id":artifact.file_id,"contract_key":logical_key,"blob_sha256":artifact.blob_sha256,
+        "source_sha256":artifact.source_sha256,"contract_version":artifact.contract_version,
+        "output_contract_sha256":artifact.output_contract_sha256,"init_contract_sha256":artifact.init_contract_sha256,
+        "bytes":artifact.bytes,"producer_engine_sha256":artifact.producer_engine_sha256});
+    let mut hash = Sha256::new();
+    hash.update(b"plurx/copy-index/publication/v3\0");
+    hash.update(super::background_jobs::encode(&semantic)?.as_bytes());
+    let mut body = serde_json::to_value(request).map_err(|_| invalid())?;
+    body["source_key"] = source_key.into();
+    body["catalog_namespace"] = artifact.catalog_namespace.clone().into();
+    body["expected_payload"] = serde_json::to_value(payload).map_err(|_| invalid())?;
+    body["publication_digest"] = hex::encode(hash.finalize()).into();
+    Ok(body)
+}
+
+pub(super) async fn publish<T: super::background_jobs::QueueSql>(
+    store: &T, request: PublishCopyIndexV3,
+) -> Result<super::background_jobs::JobPublishOutcome, StoreError> {
+    let body = super::background_jobs::encode(&publication_body(&request)?)?;
+    let rows = store.queue_sql(publication_sql(), body, true, true).await?;
+    super::background_jobs::decode(rows.first().ok_or_else(invalid)?)
+}
+
+fn publication_sql() -> String {
+    let metadata = super::analysis_coordination::metadata_owned_condition();
+    let source_head = head_source_condition();
+    format!(r#"
+WITH input AS (SELECT json($1) AS body), snapshot AS (
+ SELECT body, job.id, job.state, job.result_ref,
+ CASE WHEN job.kind='fragment_index_publish' AND job.payload_version=1 AND job.state='running'
+  AND job.owner_node_id=json_extract(body,'$.token.node_id') AND job.owner_boot_id=json_extract(body,'$.token.boot_id')
+  AND job.claim_id=json_extract(body,'$.token.claim_id') AND job.fence=json_extract(body,'$.token.fence')
+  AND job.revision=json_extract(body,'$.token.revision') AND job.lease_expires_ms=json_extract(body,'$.token.lease_expires_ms')
+  AND job.lease_expires_ms>json_extract(body,'$.now_ms') AND job.revision<9223372036854775807
+  AND (job.retry_deadline_ms=0 OR job.retry_deadline_ms>json_extract(body,'$.now_ms'))
+  AND job.target_node_id=json_extract(body,'$.source.origin_node_id') AND job.target_node_id=job.owner_node_id
+  AND NOT EXISTS(SELECT 1 FROM settings WHERE key='internal.cluster_job_owner_removed.'||job.owner_node_id)
+  AND EXISTS(SELECT 1 FROM background_job_attempts attempt WHERE attempt.job_id=job.id AND attempt.fence=job.fence
+   AND attempt.claim_id=job.claim_id AND attempt.owner_node_id=job.owner_node_id AND attempt.owner_boot_id=job.owner_boot_id
+   AND attempt.finished_at_ms IS NULL AND attempt.outcome IS NULL) THEN 1 ELSE 0 END AS owns,
+ CASE WHEN EXISTS(SELECT 1 FROM background_job_attempts attempt WHERE attempt.job_id=job.id AND attempt.fence=job.fence
+   AND attempt.fence=json_extract(body,'$.token.fence') AND attempt.claim_id=json_extract(body,'$.token.claim_id')
+   AND attempt.owner_node_id=json_extract(body,'$.token.node_id') AND attempt.owner_boot_id=json_extract(body,'$.token.boot_id')) THEN 1 ELSE 0 END AS same_attempt,
+ CASE WHEN {metadata} AND EXISTS(SELECT 1 FROM analysis_coordination_roles role
+   WHERE role.request_id=json_extract(body,'$.claim.request_id') AND role.active_custody_id IS NULL) THEN 1 ELSE 0 END AS metadata_owns,
+ CASE WHEN file.id IS NOT NULL AND file.size=json_extract(body,'$.source.source_size') AND file.mtime=json_extract(body,'$.source.source_mtime') THEN 1 ELSE 0 END AS source_matches,
+ CASE WHEN (SELECT count(*) FROM json_each(job.payload_json))=(SELECT count(*) FROM json_each(json_extract(body,'$.expected_payload')))
+  AND NOT EXISTS(SELECT 1 FROM json_each(json_extract(body,'$.expected_payload')) field
+   WHERE json_type(job.payload_json,'$.'||field.key) IS NOT field.type OR json_extract(job.payload_json,'$.'||field.key) IS NOT field.value) THEN 1 ELSE 0 END AS payload_matches,
+ CASE WHEN {source_head} AND head.desired_generation=json_extract(body,'$.source.requested_generation')
+  AND head.head_epoch=json_extract(body,'$.expected_head_epoch')
+  AND ((head.state='healthy' AND head.contract_key=json_extract(body,'$.artifact.contract_key')
+      AND head.published_generation=json_extract(body,'$.source.requested_generation'))
+   OR (head.state IN ('pending','quarantined') AND head.head_epoch<9223372036854775807)) THEN 1 ELSE 0 END AS head_matches,
+ CASE WHEN EXISTS(SELECT 1 FROM copy_index_source_attestations receipt
+   WHERE receipt.origin_node_id=json_extract(body,'$.source.origin_node_id') AND receipt.file_id=json_extract(body,'$.source.file_id')
+    AND receipt.object_version=json_extract(body,'$.source.object_version') AND receipt.source_size=json_extract(body,'$.source.source_size')
+    AND receipt.source_mtime=json_extract(body,'$.source.source_mtime') AND receipt.source_sha256=json_extract(body,'$.artifact.source_sha256') AND receipt.regime_revision=1)
+  OR EXISTS(SELECT 1 FROM cluster_fragment_index_sources receipt
+   WHERE receipt.node_id=json_extract(body,'$.source.origin_node_id') AND receipt.file_id=json_extract(body,'$.source.file_id')
+    AND receipt.object_version='hevc-full-v1:'||json_extract(body,'$.source.object_version') AND receipt.source_size=json_extract(body,'$.source.source_size')
+    AND receipt.source_mtime=json_extract(body,'$.source.source_mtime') AND receipt.source_sha256=json_extract(body,'$.artifact.source_sha256')) THEN 1 ELSE 0 END AS attested,
+ CASE WHEN (artifact.contract_key IS NULL AND json_extract(body,'$.artifact.built_by_node_id')=json_extract(body,'$.token.node_id'))
+  OR (artifact.contract_key IS NOT NULL AND artifact.catalog_namespace=json_extract(body,'$.artifact.catalog_namespace')
+   AND artifact.file_id=json_extract(body,'$.artifact.file_id') AND artifact.source_sha256=json_extract(body,'$.artifact.source_sha256')
+   AND artifact.contract_version=json_extract(body,'$.artifact.contract_version') AND artifact.output_contract_sha256=json_extract(body,'$.artifact.output_contract_sha256')
+   AND artifact.init_contract_sha256=json_extract(body,'$.artifact.init_contract_sha256') AND artifact.bytes=json_extract(body,'$.artifact.bytes')
+   AND artifact.producer_engine_sha256=json_extract(body,'$.artifact.producer_engine_sha256')) THEN 1 ELSE 0 END AS variant_matches,
+ json_object('artifact_kind','fragment_index_v3','artifact_key',json_extract(body,'$.artifact.contract_key'),
+  'candidate',json_object('contract_key',json_extract(body,'$.artifact.contract_key'),'blob_sha256',json_extract(body,'$.artifact.blob_sha256'),
+    'node_id',json_extract(body,'$.token.node_id'),'bytes',json_extract(body,'$.artifact.bytes')),
+  'head',json_object('source_key',json_extract(body,'$.source_key'),'contract_key',json_extract(body,'$.artifact.contract_key'),
+    'blob_sha256',CASE WHEN head.state='healthy' THEN head.blob_sha256 ELSE json_extract(body,'$.artifact.blob_sha256') END,
+    'head_epoch',CASE WHEN head.state='healthy' THEN head.head_epoch ELSE head.head_epoch+1 END),
+  'publication_digest',json_extract(body,'$.publication_digest')) AS output
+ FROM input LEFT JOIN background_jobs job ON job.id=json_extract(body,'$.token.job_id')
+ LEFT JOIN files file ON file.id=json_extract(body,'$.source.file_id')
+ LEFT JOIN copy_index_v3_heads head ON head.source_key=json_extract(body,'$.source_key')
+ LEFT JOIN copy_index_v3_artifacts artifact ON artifact.contract_key=json_extract(body,'$.artifact.contract_key') AND artifact.blob_sha256=json_extract(body,'$.artifact.blob_sha256')
+), classified AS (
+ SELECT *, CASE WHEN state='succeeded' AND same_attempt=1 AND json_valid(result_ref)
+   AND json_extract(result_ref,'$.publication_digest')=json_extract(body,'$.publication_digest') THEN 'already_published'
+  WHEN owns=0 OR metadata_owns=0 THEN 'lost_ownership'
+  WHEN source_matches=0 THEN 'source_changed'
+  WHEN payload_matches=0 OR head_matches=0 OR attested=0 OR variant_matches=0 THEN 'artifact_conflict'
+  ELSE 'published' END AS outcome FROM snapshot
+)
+INSERT INTO background_job_commands(id,operation,request_json,result_json)
+ SELECT json_extract(body,'$.token.claim_id'),'publish_copy_index_v3',body,
+  CASE WHEN outcome IN ('published','already_published') THEN json_object('outcome',outcome,'job_id',id,
+    'result_ref',(CASE WHEN outcome='already_published' THEN result_ref ELSE output END)||'')
+   ELSE json_object('outcome',outcome) END FROM classified RETURNING result_json
+"#)
+}

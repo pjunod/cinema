@@ -18,6 +18,7 @@ use super::background_jobs_delivery::{DELIVERIES_SQL, WAITERS_SQL};
 pub use super::background_jobs_domain::BindLibraryJob;
 use super::background_jobs_fragment::PUBLISH_FRAGMENT_SQL;
 pub use super::background_jobs_fragment::{FragmentJobFailure, PublishFragmentJob};
+pub use super::copy_index_v3::PublishCopyIndexV3;
 pub use super::background_jobs_fragment_admission::EnqueueFragmentJob;
 pub use super::background_jobs_library::{
     CompleteLibraryWork, LibraryWorkQuery, LibraryWorkRecord, NewLibraryWork,
@@ -1015,6 +1016,10 @@ pub enum JobPayload {
     /// Engine provenance never participates in contract identity or dedupe.
     FragmentIndexPublish {
         publication_version: u32,
+        source_key: String,
+        catalog_namespace: String,
+        init_contract_sha256: String,
+        expected_head_epoch: i64,
         file_id: i64,
         source_size: i64,
         source_mtime: i64,
@@ -1365,6 +1370,10 @@ impl JobPayload {
             }
             Self::FragmentIndexPublish {
                 publication_version,
+                source_key,
+                catalog_namespace,
+                init_contract_sha256,
+                expected_head_epoch,
                 file_id,
                 source_size,
                 origin_node_id,
@@ -1382,6 +1391,11 @@ impl JobPayload {
                 ..
             } => {
                 *publication_version == 3
+                    && digest(source_key)
+                    && !catalog_namespace.trim().is_empty()
+                    && catalog_namespace.len() <= 256
+                    && digest(init_contract_sha256)
+                    && *expected_head_epoch >= 0
                     && *file_id > 0
                     && *source_size >= 0
                     && identifier(origin_node_id)
@@ -1676,6 +1690,8 @@ mod fragment_publish_payload_tests {
     fn fixture() -> serde_json::Value {
         serde_json::json!({
             "kind":"fragment_index_publish", "publication_version":3,
+            "source_key":"1".repeat(64),"catalog_namespace":"catalogue",
+            "init_contract_sha256":"2".repeat(64),"expected_head_epoch":0,
             "file_id":1,"source_size":100,"source_mtime":-1,
             "origin_node_id":"source-one","object_version":"held-object:one",
             "coordinator_request_id":"opaque / request\u{0000}é","coordinator_fence":7,
@@ -2786,6 +2802,10 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: PublishFragmentJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+    async fn publish_copy_index_v3(
+        &self,
+        request: PublishCopyIndexV3,
+    ) -> Result<JobPublishOutcome, StoreError>;
 }
 
 /// What [`BackgroundJobStore::analysis_source_admission`] decided.
@@ -3678,6 +3698,13 @@ LIMIT 1
             return Err(invalid("background staging inventory exceeds active bound"));
         }
         rows.iter().map(|row| decode(row)).collect()
+    }
+
+    async fn publish_copy_index_v3(
+        &self,
+        request: PublishCopyIndexV3,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::copy_index_v3::publish(self, request).await
     }
 
     async fn publish_fragment_job(

@@ -285,6 +285,10 @@ pub(crate) const SHARING_START_DOLBY_VISION_UNSUPPORTED: &str =
 enum SourceStartFailure {
     Unavailable,
     RescanRequired,
+    CopyTargetExceeded,
+    CopyInitContractChanged,
+    CopyClockUnknown,
+    CopySyncUnverified,
     Capacity,
     Conflict,
     Unresolved,
@@ -1175,6 +1179,10 @@ impl From<crate::transcode::source_actor::SourceWorkerError> for SourceStartFail
         match value {
             E::Unavailable => Self::Unavailable,
             E::RescanRequired => Self::RescanRequired,
+            E::CopyTargetExceeded=>Self::CopyTargetExceeded,
+            E::CopyInitContractChanged=>Self::CopyInitContractChanged,
+            E::CopyClockUnknown=>Self::CopyClockUnknown,
+            E::CopySyncUnverified=>Self::CopySyncUnverified,
             E::Capacity => Self::Capacity,
             E::Conflict => Self::Conflict,
             E::Deadline => Self::Deadline,
@@ -1188,6 +1196,10 @@ impl SourceStartFailure {
         let (status, code) = match self {
             Self::Conflict => (StatusCode::CONFLICT, "sharing_start_conflict"),
             Self::RescanRequired => (StatusCode::CONFLICT, "source_rescan_required"),
+            Self::CopyTargetExceeded=>(StatusCode::UNPROCESSABLE_ENTITY,"copy_target_exceeded"),
+            Self::CopyInitContractChanged=>(StatusCode::CONFLICT,"copy_init_contract_changed"),
+            Self::CopyClockUnknown=>(StatusCode::UNPROCESSABLE_ENTITY,"copy_clock_unknown"),
+            Self::CopySyncUnverified=>(StatusCode::UNPROCESSABLE_ENTITY,"copy_sync_unverified"),
             Self::RetargetUnassigned => (StatusCode::CONFLICT, "sharing_start_relocate_unassigned"),
             Self::Capacity => (StatusCode::TOO_MANY_REQUESTS, "sharing_start_capacity"),
             Self::Unsupported => (
