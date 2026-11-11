@@ -817,15 +817,15 @@ mod tests {
     fn publisher_v5_claims_no_source_slot_and_old_kind_cannot_take_its_job() {
         let conn = rusqlite::Connection::open_in_memory().expect("SQLite");
         SqliteStore::apply_migrations_for_test(&conn, 125).expect("deployed v4 resources");
-        for id in ["busy-one", "busy-two"] {
-            queued(
-                &conn,
-                id,
-                "metadata_refresh",
-                r#"{"kind":"metadata_refresh"}"#,
-            );
-            assert!(claim_raw(&conn, id, "metadata_refresh"));
-        }
+        // One ordinary reader fills the background source slot; the second
+        // slot is reserved for live demand, so no further reader is admitted.
+        queued(
+            &conn,
+            "busy",
+            "metadata_refresh",
+            r#"{"kind":"metadata_refresh"}"#,
+        );
+        assert!(claim_raw(&conn, "busy", "metadata_refresh"));
         queued(
             &conn,
             "publisher",

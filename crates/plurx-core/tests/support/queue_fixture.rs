@@ -1115,6 +1115,7 @@ fn historical_caption_rewind_refuses_owned_data_and_partial_shapes_without_mutat
         let path=directory.path().join("refusal.db");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
         let connection=rusqlite::Connection::open(path).expect("raw owned fixture");
+        source_extensions_fixture::rewind_empty_coordination_tail_to_v124(&connection);
         connection.execute_batch("PRAGMA foreign_keys=OFF;").expect("raw refusal injection");
         connection.execute_batch(injection).expect("inject refusal condition");
         let snapshot=|| {
@@ -1152,6 +1153,7 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
         let path = directory.path().join("current.db");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
         let connection = rusqlite::Connection::open(path).expect("owned fixture");
+        source_extensions_fixture::rewind_empty_coordination_tail_to_v124(&connection);
         if schema_version < 124 {
             rewind_empty_source_extensions_to_v121(&connection);
             if schema_version >= 122 {
@@ -1631,10 +1633,13 @@ fn validated_empty_managed_subtitle_rewind(connection: &rusqlite::Connection) ->
 }
 
 pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connection) {
-    let plan = validated_empty_managed_subtitle_rewind(connection);
-    connection
-        .execute_batch(&plan)
-        .expect("atomic empty managed fixture rewind");
+    source_extensions_fixture::within_fixture_savepoint(connection, || {
+        source_extensions_fixture::rewind_empty_coordination_tail_to_v124(connection);
+        let plan = validated_empty_managed_subtitle_rewind(connection);
+        connection
+            .execute_batch(&plan)
+            .expect("atomic empty managed fixture rewind");
+    });
 }
 
 fn complete_fixture_snapshot(connection: &rusqlite::Connection) -> String {
@@ -1688,6 +1693,7 @@ fn current_fixture_rewind_accepts_exact_empty_v120_with_foreign_keys() {
         let path = dir.path().join("store.sqlite");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture schema"));
         let connection = rusqlite::Connection::open(path).expect("fixture connection");
+        source_extensions_fixture::rewind_empty_coordination_tail_to_v124(&connection);
         if version < 124 {
             rewind_empty_source_extensions_to_v121(&connection);
             if version >= 122 {
@@ -1876,6 +1882,8 @@ pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
             "historical fixture must not discard managed subtitle model receipts"
         );
     }
+    // The coordination tail is the newest; it must be empty and exact first.
+    source_extensions_fixture::rewind_empty_coordination_tail_to_v124(connection);
     // Validate all subtitle ownership before changing the later source tail.
     let managed_rewind = validated_empty_managed_subtitle_rewind(connection);
     connection

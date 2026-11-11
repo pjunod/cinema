@@ -2904,6 +2904,14 @@ async fn sharing_source_designation_offline_or_new_boot_never_retires_unresolved
             designation_owner_for(&store, &request).await.as_deref(),
             Some("voter")
         );
+        // A restart while still a member: a removed member may rejoin only
+        // through a fresh join, so the boot fault comes before the removal.
+        store.sharing_txn(vec![("UPDATE cluster_node_capabilities SET capability=$1 WHERE capability GLOB 'sharing_ingress_boot_v1:*'".into(),vec![format!("sharing_ingress_boot_v1:{}",Uuid::new_v4()).into()])]).await.expect("restart fault");
+        assert_eq!(
+            designation_owner_for(&store, &request).await.as_deref(),
+            Some("voter"),
+            "new boot does not settle the old invocation"
+        );
         store
             .sharing_txn(vec![(
                 "UPDATE cluster_nodes SET removed_at=1 WHERE node_id='voter'".into(),
@@ -2915,12 +2923,6 @@ async fn sharing_source_designation_offline_or_new_boot_never_retires_unresolved
             designation_owner_for(&store, &request).await.as_deref(),
             Some("voter"),
             "offline does not prove physical stop"
-        );
-        store.sharing_txn(vec![("UPDATE cluster_nodes SET removed_at=NULL WHERE node_id='voter'".into(),vec![]),("UPDATE cluster_node_capabilities SET capability=$1 WHERE capability GLOB 'sharing_ingress_boot_v1:*'".into(),vec![format!("sharing_ingress_boot_v1:{}",Uuid::new_v4()).into()])]).await.expect("restart fault");
-        assert_eq!(
-            designation_owner_for(&store, &request).await.as_deref(),
-            Some("voter"),
-            "new boot does not settle the old invocation"
         );
         let retained = binding_row(
             &store,

@@ -40,7 +40,9 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // extension shape and singleton authority: eight consistent reads.
     // Text translation and shared captions add four more schema/marker reads.
     // Source arbitration verifies both the committed object shape and marker.
-    ("hiqlite.rs", 62),
+    // Analysis coordination checks its table marker, canonical objects and
+    // protocol singleton before admitting adjunct work: three more.
+    ("hiqlite.rs", 65),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
