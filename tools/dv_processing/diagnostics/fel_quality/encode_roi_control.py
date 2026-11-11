@@ -94,6 +94,9 @@ p.add_argument('--threshold-nits', type=float, default=0.0)
 p.add_argument('--qp-offset', type=int, default=0)
 p.add_argument('--protocol', type=Path)
 p.add_argument('--harness-source', type=Path, help='roi_encode.c the harness binary was built from (bound by hash)')
+p.add_argument('--override', action='append', default=[],
+               help='KEY=VALUE replaces an encoder dictionary entry; KEY+=VALUE appends ":VALUE" (x265-params)')
+p.add_argument('--timeout', type=int, default=1800, help='encode timeout in seconds')
 p.add_argument('--gate-receipt', type=Path, action='append', default=[],
                help='luma modes: passing none/zero gate recipe(s) produced by this same harness binary')
 a = p.parse_args()
@@ -101,6 +104,17 @@ a = p.parse_args()
 base = json.loads(a.baseline_recipe.read_text())
 assert base['status'] == 'encoded' and sha(a.baseline_mp4) == base['sha256']
 opts, pos, _ = translate(base['argv'])
+overrides = []
+for o in a.override:
+    k, v = o.split('=', 1)
+    if k.endswith('+'):
+        assert k[:-1] in opts, f'cannot append to missing option {k[:-1]}'
+        opts[k[:-1]] = opts[k[:-1]] + ':' + v
+    else:
+        opts[k] = v
+    overrides.append(o)
+# A gate is a none/zero run on the unmodified baseline options; with overrides it is an ordinary encode.
+is_gate = a.mode in ('none', 'zero') and not overrides
 src = Path(pos['input'])
 if not src.exists():
     src = a.baseline_input_root / src.name
@@ -137,7 +151,7 @@ argv = [str(a.harness), str(src), str(dst), str(mapj), a.mode, str(a.grid), repr
         str(pos['frames']), str(num), str(den), str(pos['tb_den']), pos['movflags'], pos['tag']] + [f'{k}={v}' for k, v in opts.items()]
 t = time.monotonic()
 with log.open('xb') as f:
-    r = subprocess.run(['nice', '-n', '15', *argv], stdout=f, stderr=subprocess.STDOUT, timeout=1800)
+    r = subprocess.run(['nice', '-n', '15', *argv], stdout=f, stderr=subprocess.STDOUT, timeout=a.timeout)
 record = {'variant': 'hdr-off-chroma9', 'fixture': a.prefix.split('-')[0], 'mode': a.mode, 'grid': a.grid,
           'threshold_nits': a.threshold_nits, 'qp_offset': a.qp_offset, 'qg_size': 8 if grid == 8 else 32,
           'cadence': f'{num}/{den}', 'source': str(src), 'source_sha256': base['source_sha256'],
@@ -147,7 +161,7 @@ record = {'variant': 'hdr-off-chroma9', 'fixture': a.prefix.split('-')[0], 'mode
           'gate_receipts': [{'path': str(g), 'sha256': sha(g)} for g in a.gate_receipt],
           'driver': {'path': str(Path(__file__).resolve()), 'sha256': sha(Path(__file__).resolve())},
           'protocol': {'path': str(a.protocol), 'sha256': sha(a.protocol)} if a.protocol else None,
-          'encoder_dictionary': opts, 'argv': argv, 'exit_code': r.returncode, 'elapsed_seconds': time.monotonic() - t,
+          'encoder_dictionary': opts, 'overrides': overrides, 'argv': argv, 'exit_code': r.returncode, 'elapsed_seconds': time.monotonic() - t,
           'scope': 'offline encoder control; no playback/deployment/packaging change'}
 cli_unused = sorted(set(re.findall(r'Codec AVOption (\S+) \(', Path(str(a.baseline_recipe).replace('-recipe.json', '-encode.log')).read_text())))
 harness_unused = sorted(set(re.findall(r'roi_encode: unused option ([^=\s]+)=', log.read_text())))
@@ -159,7 +173,7 @@ if record['status'] == 'encoded':
     eb = annexb(dst, Path(f'{stem}-annexb.hevc'))
     bb_path = Path(f'{stem}-baseline-annexb.hevc'); bb = annexb(a.baseline_mp4, bb_path)
     record['elementary_stream'] = {'candidate_sha256': eb, 'baseline_sha256': bb, 'identical_to_baseline': eb == bb}
-    if a.mode in ('none', 'zero'):
+    if is_gate:
         record['equivalence_gate'] = 'pass' if eb == bb else 'FAIL'
         if eb != bb:
             record['status'] = 'gate_failed'  # an invalid harness, never an encoded candidate

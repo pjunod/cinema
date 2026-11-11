@@ -30,6 +30,10 @@ ap.add_argument('variant', choices=VARIANTS)
 ap.add_argument('prefix')
 ap.add_argument('--qg-size', type=int, required=True)
 ap.add_argument('--aq-strength', default='1.0')
+ap.add_argument('--psy-rd', type=float, help='expected psy-rd when an arm overrides it')
+ap.add_argument('--psy-rdoq', type=float, help='expected psy-rdoq when an arm overrides it')
+ap.add_argument('--cbqpoffs', type=int, help='expected Cb offset when an arm overrides it')
+ap.add_argument('--crqpoffs', type=int, help='expected Cr offset when an arm overrides it')
 ap.add_argument('--rpu-list', type=Path, help='derived ordered RPU list (same order and hashes as the sealed list, relocated paths)')
 a = ap.parse_args()
 fixture, variant, prefix = a.fixture, a.variant, a.prefix
@@ -163,8 +167,11 @@ assert actual['sao'] == (variant != 'no-sao')
 for key in ['cbqpoffs', 'crqpoffs']:
     vals = [int(x) for x in re.findall((rb'(?<![-\w])' + key.encode() + rb'=(-?[0-9]+)'), data)]
     assert vals and len(set(vals)) == 1; actual[key] = vals[0]
-    assert actual[key] == ({'chroma-fine': -6, 'hdr-off-chroma6': -6, 'hdr-off-chroma9': -9}.get(variant, 0))
-assert actual['psy-rd'] == (0 if variant == 'psyoff' else 2) and actual['psy-rdoq'] == 1 and actual['rdoq-level'] == 2 and actual['qg-size'] == a.qg_size
+    want = getattr(a, key)
+    assert actual[key] == (want if want is not None else {'chroma-fine': -6, 'hdr-off-chroma6': -6, 'hdr-off-chroma9': -9}.get(variant, 0)), (key, actual[key])
+assert actual['psy-rd'] == (a.psy_rd if a.psy_rd is not None else (0 if variant == 'psyoff' else 2))
+assert actual['psy-rdoq'] == (a.psy_rdoq if a.psy_rdoq is not None else 1)
+assert actual['rdoq-level'] == 2 and actual['qg-size'] == a.qg_size
 
 out = {'scope': 'Mac software decoder raw accepted ordinals0/24, actual frozen Rust author, no worker/native-device/display or full-window renderer claim.',
        'fixture': fixture, 'variant': variant, 'prefix': prefix, 'input_sha256': sha(input_mp4), 'authored_mp4': str(output), 'authored_sha256': sha(output),

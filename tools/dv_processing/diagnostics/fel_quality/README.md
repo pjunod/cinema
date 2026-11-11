@@ -24,6 +24,8 @@ locations. Media, decoded frames and binaries stay outside Git.
 | `make_component_swaps.py` | Builds luma/chroma swap counterfactual YUV for the lattice evaluator; diagnostic only. |
 | `portable_lattice.py` | Reduces a private lattice report to the committed portable JSON with neutral path prefixes. |
 | `heldout_eval.py` | Frozen four-model scoring with observer metadata for fixtures that have no retained parsed metadata; full resolution or lattice; validated by exact reproduction of a retained result. |
+| `land_rate.py` | Lands an arm in the 128.5–130.0 Mb/s authored band by changing only the ABR target (secant, at most 4 encodes); the iso-rate rule for every coding arm. |
+| `make_export_oracle.py` | X0: oracle 10-bit 4:2:0 exports from the composition (rounded, truncated, swaps) and signed PRE−oracle plane statistics. |
 | `roi_encode.c` | In-process libavcodec/libx265 encode carrying a per-frame quantOffsets map as ROI side data; options pass verbatim as one dictionary. |
 | `encode_roi_control.py` | Translates a retained CLI recipe into the ROI harness, runs the byte-identity gates and the predeclared source-luma map arm. |
 | `encode_spatial_control.py` | Fixed qg-size8 spatial-allocation control at the retained single-pass115/125 budget. |
