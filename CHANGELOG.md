@@ -14,6 +14,10 @@ bump may break compatibility and a **patch** bump never does.
   filtering, keeping letterbox bars from brightening the first and last
   active rows or side edges. Pixels outside the boundary are still mapped,
   so subtitles in the bars and picture under a wrong boundary are kept.
+- Android TV devices whose HEVC decoder declares performance points (Google TV
+  Streamer) now report HLS fMP4 HEVC support, so processed Dolby Vision
+  (HDR10-E) upgrades reach them instead of being declined at every start.
+
 - Linux Cinema now defaults to the system mpv and no longer ships a duplicate
   renderer, so qualified system HDR/DV updates reach Cinema. Explicit binary
   overrides, isolated configuration and Cinema controls remain available.

@@ -309,6 +309,25 @@ internal fun capsDocument(
     )
 }
 
+/**
+ * The highest rate up to [upper] that [accepts] admits: [upper] itself when
+ * admitted, otherwise the highest whole rate (Media3 compares whole frames),
+ * found by bisection because a decoder that plays a rate at a rectangle plays
+ * every lower one there; 0.0 when no whole rate is admitted. A non-finite or
+ * non-positive [upper] is returned unchanged for the caller to refuse.
+ */
+internal fun highestAcceptedRate(upper: Double, accepts: (Double) -> Boolean): Double {
+    if (!upper.isFinite() || upper <= 0.0 || accepts(upper)) return upper
+    var low = 1
+    var high = minOf(kotlin.math.floor(upper), 1000.0).toInt()
+    var best = 0
+    while (low <= high) {
+        val mid = (low + high) ushr 1
+        if (accepts(mid.toDouble())) { best = mid; low = mid + 1 } else high = mid - 1
+    }
+    return best.toDouble()
+}
+
 internal fun shouldFallBackToLegacyDecision(
     statusCode: Int,
     caps: DeviceCaps? = null,

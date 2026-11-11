@@ -72,6 +72,9 @@ fn actor_error(error: ReceiverStartError) -> ApiError {
         ReceiverStartError::Unavailable => {
             (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable")
         }
+        ReceiverStartError::ResourceBusy { retry_after_secs } => {
+            return super::shared_receiver_playback::resource_busy_response(retry_after_secs);
+        }
         // The same code and `Retry-After` a local create answers, so the
         // client's create ladder retries it with the same `request_id`.
         ReceiverStartError::NotYet(retry) => {
