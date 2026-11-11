@@ -616,3 +616,39 @@ reason = """Landing commit of #1408 (fix(scan): probe_paths and six-hourly defau
 [[errata]]
 commit = "c23e06f75ca6fddd3d0e7ed6caba66082abf6471"
 reason = """Landing commit of #1409 (fix(web): targeted waiting_on in Activity; v2 seam docs (M5 T6)), merged 2026-11-08 18:03-18:04 UTC into effort/pipeline-v2 through the API without MergeMessageField, so the landing message is title-only. #1409's body carried Regression-Test lines that never reached the landing message, and a landing commit cannot be amended. The pinning tests are: tests/web/activity-node-names.test.js::a waiting targeted library request names what it waits on; tests/web/activity-node-names.test.js::a targeted library job is labelled as one, not as a library scan. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution."""
+
+[[errata]]
+commit = "bbd0fd9f240ec91e5556f9d1a7655603c66410ab"
+reason = """Corrective commit bbd0fd9f (fix(web): declare the Player range presentation flag) is an A1/B1 effort commit. Its effort-internal merge dad217a6c was titled "Merge PR #1493: ...", which the history audit reads as a landing commit, and it carried no Regression-Test lines, so the commit cannot resolve one there. Its check is the web type baseline (tests/web/tsc-baseline.tsv via scripts/web-types), not a named unit test. The effort reaches main through #1495, whose landing commit carries those lines. This permanent row records only that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "eb0bb5bb2848b61fbc32dd5c3cca3240e54d29d2"
+reason = """Corrective commit eb0bb5bb (fix(playback): retry a refused copy seal under its single-use generation) is an A1/B1 effort commit. Its effort-internal merge dad217a6c was titled "Merge PR #1493: ...", which the history audit reads as a landing commit, and it carried no Regression-Test lines, so the commit cannot resolve one there. #1495's body names the publication regressions in crates/plurx-core/src/store/copy_index_v3_tests.rs that bound this path. The effort reaches main through #1495, whose landing commit carries those lines. This permanent row records only that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "26c0f3cc9c1344346ef779ed1b62e44290abb21b"
+reason = """Corrective commit 26c0f3cc (fix(playback): address the adversarial review of the A1/B1 merge) is an A1/B1 effort commit. Its effort-internal merge dad217a6c was titled "Merge PR #1493: ...", which the history audit reads as a landing commit, and it carried no Regression-Test lines, so the commit cannot resolve one there. #1495's body carries the Regression-Test lines for each review finding. The effort reaches main through #1495, whose landing commit carries those lines. This permanent row records only that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "2acf1076949e56703726afba28f68c44956c4ef9"
+reason = """Corrective commit 2acf1076 (fix(playback): bind v3 publication to the origin named in the publisher payload) is an A1/B1 effort commit. Its effort-internal merge dad217a6c was titled "Merge PR #1493: ...", which the history audit reads as a landing commit, and it carried no Regression-Test lines, so the commit cannot resolve one there. #1495's body names crates/plurx-core/src/store/copy_index_v3_tests.rs::publication_adopts_the_candidate_and_settles_analysis_job_and_location. The effort reaches main through #1495, whose landing commit carries those lines. This permanent row records only that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "260cc0e466e1eec0f8ec6f8fbe3b7929826272ff"
+reason = """Corrective commit 260cc0e4 (fix(playback): record a coordination claim in the real analysis attempt phases) is an A1/B1 effort commit. Its effort-internal merge dad217a6c was titled "Merge PR #1493: ...", which the history audit reads as a landing commit, and it carried no Regression-Test lines, so the commit cannot resolve one there. #1495's body names the real-store publication regressions in crates/plurx-core/src/store/copy_index_v3_tests.rs that exercise this claim. The effort reaches main through #1495, whose landing commit carries those lines. This permanent row records only that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "4dff402efb63c595152390fd7bc7b861550f53a1"
+reason = """Corrective commit 4dff402e (fix(playback): serve growing-copy native subtitles through main's windowed reads) is an A1/B1 effort commit. Its effort-internal merge dad217a6c was titled "Merge PR #1493: ...", which the history audit reads as a landing commit, and it carried no Regression-Test lines, so the commit cannot resolve one there. #1495's body names crates/plurxd/src/http/hls/playlist_text.rs coverage through its listed Source engine regressions. The effort reaches main through #1495, whose landing commit carries those lines. This permanent row records only that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "a57f9383036704d9f7d18d53e348de8d38e06591"
+reason = """Corrective commit a57f9383 (fix(playback): settle the copy-range consumer's dead paths and lints) is an A1/B1 effort commit. Its effort-internal merge dad217a6c was titled "Merge PR #1493: ...", which the history audit reads as a landing commit, and it carried no Regression-Test lines, so the commit cannot resolve one there. It removes dead code and lints only; #1495's body names the consumer regressions. The effort reaches main through #1495, whose landing commit carries those lines. This permanent row records only that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "19c37a07e1c841422953e78e52f3bc31d6497da5"
+reason = """Corrective commit 19c37a07 (perf(playback): publish the v3 copy index from committed playback ranges) is an A1/B1 effort commit. Its effort-internal merge dad217a6c was titled "Merge PR #1493: ...", which the history audit reads as a landing commit, and it carried no Regression-Test lines, so the commit cannot resolve one there. #1495's body names crates/plurxd/src/copy_analysis/physical.rs::ambiguous_begin_requires_exact_phase_and_never_treats_empty_initial_role_as_closed and the copy_index_v3_tests publication regressions. The effort reaches main through #1495, whose landing commit carries those lines. This permanent row records only that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "d7cec0ef896ff27a0c91d19b9cfb9f106cf888b2"
+reason = """Corrective commit d7cec0ef (fix(playback): establish exact canonical range observations) is an A1/B1 effort commit. Its effort-internal merge dad217a6c was titled "Merge PR #1493: ...", which the history audit reads as a landing commit, and it carried no Regression-Test lines, so the commit cannot resolve one there. #1495's body names crates/plurx-core/src/segplan/ranges.rs::conflicts_and_resource_limits_leave_prior_rows_unchanged. The effort reaches main through #1495, whose landing commit carries those lines. This permanent row records only that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
