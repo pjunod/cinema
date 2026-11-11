@@ -2211,36 +2211,45 @@ mod namespace_tests {
         let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store")];
         let mut checked = 0;
         while let Some(dir) = pending.pop() {
-          for entry in std::fs::read_dir(&dir).expect("store sources") {
-            let path = entry.expect("store entry").path();
-            if path.is_dir() {
-                pending.push(path);
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path).expect("store source");
-            for (at, _) in source.match_indices("probe_json") {
-                let rest = source[at + "probe_json".len()..].trim_start();
-                let Some(rest) = rest.strip_prefix(',') else { continue };
-                let Some(rest) = rest.trim_start().strip_prefix("'$.") else { continue };
-                let key: String = rest
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '{' || *c == '}')
-                    .collect();
-                if key.starts_with('{') {
+            for entry in std::fs::read_dir(&dir).expect("store sources") {
+                let path = entry.expect("store entry").path();
+                if path.is_dir() {
+                    pending.push(path);
                     continue;
                 }
-                assert!(
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("store source");
+                for (at, _) in source.match_indices("probe_json") {
+                    let rest = source[at + "probe_json".len()..].trim_start();
+                    let Some(rest) = rest.strip_prefix(',') else {
+                        continue;
+                    };
+                    let Some(rest) = rest.trim_start().strip_prefix("'$.") else {
+                        continue;
+                    };
+                    let key: String = rest
+                        .chars()
+                        .take_while(|c| {
+                            c.is_ascii_alphanumeric() || *c == '_' || *c == '{' || *c == '}'
+                        })
+                        .collect();
+                    if key.starts_with('{') {
+                        continue;
+                    }
+                    assert!(
                     key == "chapters" || key == "streams" || key.starts_with(super::APPLICATION_FIELD_PREFIX),
                     "{}: probe_json path '$.{key}' is neither an FFprobe section nor an application graft",
                     path.display()
                 );
-                checked += 1;
+                    checked += 1;
+                }
             }
-          }
         }
-        assert!(checked >= 20, "the scan found only {checked} literal probe_json paths");
+        assert!(
+            checked >= 20,
+            "the scan found only {checked} literal probe_json paths"
+        );
     }
 }
