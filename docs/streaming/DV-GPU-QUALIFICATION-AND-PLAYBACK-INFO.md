@@ -1,7 +1,8 @@
 # Dolby Vision GPU qualification — reconstructed delivery and skipped reasons
 
-**Status:** implemented locally; Rust regressions, hardware qualification and
-deployment pending · **Written:** 2026-11-09 · **Owner:** Codex
+**Status:** draft PR #1491; named regressions executed, hardware qualification
+and deployment pending · **Written:** 2026-11-09 · **Updated:** 2026-11-11 ·
+**Owner:** Claude (from Codex)
 
 Companion to [reconstructed Profile 8.1](FEL-P81-RECONSTRUCTION.md)
 (the picture and quality decision), [source budgets](HDR-ENHANCEMENT-SOURCE-BUDGET.md)
@@ -141,3 +142,27 @@ the real queue/job and GPU measurements remain pending. The temporary workflow,
 helper and catalog entry are removed before final integration.
 Exact hardware measurements and the affected main gate remain pending. No
 service has been deployed or settings changed by this task.
+
+**2026-11-11.** The nested child-container job never ran: its `/aggregate`
+check fails on the heavy runner, and its path filter never fired for the new
+branch. It now runs in the fast lane's own capped container on the shipping
+image's bookworm base (so the ELF loads there) and is dispatched by hand. Its
+first execution passed 25 of 26 named regressions; the failure was a wrong
+VA-API `-pix_fmt` expectation (VA-API carries p010 in its upload filter),
+corrected in the test.
+
+The lifecycle ledger's blocking finding is fixed. `ActiveBackgroundJob::finish`
+now hands enrolled custody to the completion ledger, authorized only after
+claim retirement, instead of publishing the joined proof while a blocking read
+can still hold its File. The handed-off patch had also never compiled: its
+`#[path]` parent resolved the new module beside `background_jobs.rs`.
+
+The stale m6-blocking custody is a dead owner's poisoned witness, not an AMD
+refusal. Its anchor was poisoned 176 ms after activation, by a launch at job
+start. The daemon container was recreated seven hours later, before any
+explicit join. The old container's json-file logs went with it, so why the
+cancelled job never joined is not recoverable. A read-only kernel census on
+the owner host shows no open file description, lock, silly-rename or argv
+reference for its exact source. The new
+[source-open census model](../server/SOURCE-CUSTODY-RECOVERY.md#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census)
+releases it once deployed and published; nothing has been released yet.
