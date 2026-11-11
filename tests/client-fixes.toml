@@ -8490,6 +8490,7 @@ test_anchor = "assertTrue(sharedTitleEnded(true, 7_198_000, range.duration_ms))"
 [[fixes]]
 id = "apple.shared-whole-title-end"
 commits = []
+supplements = "android.shared-whole-title-end"
 source = "clients/apple/Sources/SharedPlaybackModels.swift"
 source_anchor = "if wholeTitle { return true }"
 test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
