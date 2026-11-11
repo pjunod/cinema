@@ -194,6 +194,15 @@ yields a different base-layer reference than software decode. Intel's VA-API
 HEVC decode probe crashes (SIGSEGV) in the shipping image, so Intel
 measurement used software decode; that is charged and identity-bound.
 
+The first real serving check then reached three production defects, each
+fixed in this PR: strict parser reads above one 1 MiB service quantum were
+refused; FEL request/verdict annotations failed held-source verification
+(fixed independently on main, #1477); and Profile 8.1 authoring admitted only
+synthetic identity reshaping. With those fixes, Twilight serves end to end
+as reconstructed 8.1 on AMD and Intel (`serving_proved:true`, 48/48 FEL frames
+per window). NVIDIA serves correct windows at 1.5–1.7× real time because
+decode is software; an NVDEC path is the follow-up.
+
 The proof harness had never executed. Three gaps were fixed in the task
 copy (not product code): new volumes are root-owned while the image runs as
 `plurx`; the render group was not passed; restaging must replace the
