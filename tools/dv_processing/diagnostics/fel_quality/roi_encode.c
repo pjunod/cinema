@@ -74,6 +74,9 @@ int main(int argc, char **argv) {
     int m_none = !strcmp(mode, "none"), m_zero = !strcmp(mode, "zero"), m_luma = !strcmp(mode, "luma");
     if (!(m_none || m_zero || m_luma) || (grid != 8 && grid != 16) || strlen(tag) != 4) die("bad arguments", 0);
 
+    /* CLI ran with -loglevel verbose; libx265.c forwards the av_log level to x265's log-level,
+       which x265 records in its info SEI. */
+    av_log_set_level(AV_LOG_VERBOSE);
     AVFormatContext *ic = NULL;
     int ret;
     if ((ret = avformat_open_input(&ic, in, NULL, NULL)) < 0) die("open input", ret);
