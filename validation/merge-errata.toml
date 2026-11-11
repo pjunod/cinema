@@ -592,3 +592,15 @@ reason = "Corrective commit 4f417e85 (fix(test): align recovery fixtures with jo
 [[errata]]
 commit = "87770f69abcfeac6c4df137a2663f7177e9c0525"
 reason = "Corrective commit 87770f69 (fix(ci): publish the verified image configuration by digest) reached main through d0e9349c (fix(cinema): preserve completed subtitle work and finish release regressions), which is not a recognized pull-request landing, as reported by the authenticated history audit against actual main ce11e8fd2. Its immutable Regression-Test field names tests/operations/test_registry_push.py::test_verified_publication_requires_the_reviewed_manifest_and_configuration. It resolves in actual main ce11e8fd2. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "b76a5a5cb71bb23cca9316e77bd565e15552c27a"
+reason = "Landing commit b76a5a5c (Merge PR #1489: fix(android): bound the HEVC decoder envelope by what Media3 admits) reached main through the API merge path with no Regression-Test line in its message, as reported by the history audit on the A1/B1 effort gate against main 0c57d812f. Its regression is mapped in tests/client-fixes.toml as android.decoder-envelope-media3-admits, test clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt::decoderEnvelopeAsksMedia3AtEveryRectangleAndRate. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "b195904dd0fbe7c1707c0726115b2aab383a6ca0"
+reason = "Corrective commit b195904d (fix(android): ask Media3's selector for the decoder envelope, not a re-derivation) landed in b76a5a5c (PR #1489) with no Regression-Test line that resolves, as reported by the history audit on the A1/B1 effort gate against main 0c57d812f. Its regression is clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt::decoderEnvelopeAsksMedia3AtEveryRectangleAndRate, mapped in tests/client-fixes.toml. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
+
+[[errata]]
+commit = "a7b9ad4e35c52c1fc0a0819bcbcb9bf094c28f57"
+reason = "Corrective commit a7b9ad4e (fix(android): bound the HEVC decoder envelope by its performance points) landed in b76a5a5c (PR #1489) with no Regression-Test line that resolves, as reported by the history audit on the A1/B1 effort gate against main 0c57d812f. Its regression is clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt::decoderEnvelopeRateIsTheHighestRateMedia3Admits, mapped in tests/client-fixes.toml. This permanent row records only that exact immutable publication omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution or coverage proof."
