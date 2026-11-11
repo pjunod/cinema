@@ -4,6 +4,7 @@
 mod cache_preparation;
 #[path = "library_work.rs"]
 mod library_work;
+pub use library_work::ScanAdmission;
 #[path = "subtitle_work.rs"]
 mod subtitle_work;
 
@@ -1808,6 +1809,10 @@ pub struct JobManager {
     live: Mutex<HashMap<i64, Arc<ScanProgress>>>,
     /// Wake durable library consumers promptly after local admission.
     library_wake: tokio::sync::Notify,
+    /// Per-request completion signals for a `POST /scan` that waits
+    /// (`wait_ms`). Local only: a request finished by another node is found
+    /// by the waiter's own re-read of the durable record.
+    scan_waiters: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     library_readiness: crate::background_jobs::LibraryReadiness,
     /// Shared with TranscodeManager when attached; standalone managers have
     /// no other encoder pool. Foreground subtitles reserve one CPU thread.
@@ -2938,6 +2943,22 @@ pub struct ScanRequestRecord {
     pub items: Option<Vec<PlacedFile>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// A machine-readable failure: `path_unreadable` when the library root
+    /// could not be read at scan time, so the caller retries; `cancelled`
+    /// when the request's job was cancelled before it finished.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
+    /// Contract v2: what a queued request is waiting on (`full_scan:<lib>`,
+    /// `root_unreadable:<path>`, `queue_position:<n>`; the contract's
+    /// `heavy_lane:<holder>` is never written for a targeted job), empty when
+    /// nothing is in its way. Present only on v2 requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<String>,
+    /// Contract v2: the per-file report for the request's `expected_files`.
+    /// Present only on v2 requests, so a caller can tell "no file placed"
+    /// from "this plurx does not report files".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<plurx_core::store::scan_request_v2::PlacedReport>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -3884,6 +3905,7 @@ impl JobManager {
             statuses: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             library_wake: tokio::sync::Notify::new(),
+            scan_waiters: std::sync::Mutex::new(HashMap::new()),
             library_readiness: Default::default(),
             subtitle_admissions: std::sync::Mutex::new(crate::admission::Admissions::new()),
             metrics: Arc::new(IntegrationMetrics::default()),
@@ -5641,8 +5663,15 @@ impl JobManager {
     async fn run_targeted(
         &self,
         requests: &[ScanRequest],
+        expected: &[plurx_core::store::scan_request_v2::ExpectedFile],
         publisher: &PublicationStore<'_>,
-    ) -> Result<TargetedScan, TargetError> {
+    ) -> Result<
+        (
+            TargetedScan,
+            Vec<plurx_core::store::scan_request_v2::PlacedReport>,
+        ),
+        TargetError,
+    > {
         library_work::check_active()?;
         let req = requests.first().ok_or_else(|| {
             TargetError::Store(StoreError::Task(
@@ -5669,7 +5698,25 @@ impl JobManager {
             waiters = requests.len(),
             "targeted scan requested"
         );
-        let mut out = scan::scan_path_with_publication(publisher, &library, &req.path).await?;
+        // Files the caller says it just placed are probed whatever their
+        // size and whole-second mtime say (contract v2 §5.1).
+        let force_probe = library_work::canonical_expected(expected, &library, &req.path).await;
+        let (mut out, detail) = scan::scan_path_targeted(
+            publisher,
+            &library,
+            &req.path,
+            &scan::TargetedOptions {
+                force_probe: force_probe
+                    .values()
+                    .filter_map(|path| match path {
+                        library_work::ExpectedPath::Canonical(path) => Some(path.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            },
+        )
+        .await?;
+        let files = library_work::placed_reports(expected, &force_probe, &out, &detail).await;
         self.note_fresh_index_files(out.items.iter().map(|placed| placed.file_id).collect());
         for request in requests {
             library_work::check_active()?;
@@ -5749,7 +5796,7 @@ impl JobManager {
             "targeted scan enriched what it placed"
         );
         library_work::check_active()?;
-        Ok(out)
+        Ok((out, files))
     }
 
     /// Which item ids a targeted scan should enrich, given what it placed.

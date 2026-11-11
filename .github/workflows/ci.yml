@@ -248,9 +248,10 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Allows the 5-minute worker witness smoke, other package smokes, toolchain
-    # provisioning and preflight validation to finish with headroom.
-    timeout-minutes: 10
+    # Match the fast lane's cold Python/history budget. Run 6887 spent over
+    # four minutes before units and was still progressing at the 10m cutoff.
+    # Keep all validation and receipt publication within a finite 30m limit.
+    timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -624,9 +625,10 @@ jobs:
       needs.scope.outputs.cluster_auth == 'true' &&
       needs.scope.outputs.execution_mode != 'accelerated'
     runs-on: [ci-nonvoter-store]
-    # Run 5228 completed 188 of 367 serial controls before the 40m cutoff.
-    # Preserve the full inventory with a finite budget for its measured runtime.
-    timeout-minutes: 95
+    # Run 6867 reached 418 of 430 serial controls at the 95m cutoff.
+    # Measured compile + full suite + the separate lineage bridge need about
+    # 106m. Keep every test and allow a finite 120m budget for this inventory.
+    timeout-minutes: 120
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1774,12 +1776,12 @@ jobs:
       - name: Create isolated iPhone, iPad, and Apple TV simulators
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
-          # A job-level timeout cancels its `always()` cleanup along with the
-          # test step. Remove only simulators owned by this workflow before
-          # creating the next isolated set, so a wedged prior boot cannot
-          # consume CoreSimulator capacity indefinitely.
-          stale_ids="$(xcrun simctl list devices | sed -n \
-            's/.*plurx CI .* (\([0-9A-F-][0-9A-F-]*\)) .*/\1/p')"
+          # A job-level timeout can leave simulators from an earlier attempt
+          # of this run. Keep devices with ambiguous or foreign ownership.
+          set -euo pipefail
+          stale_ids="$(xcrun simctl list devices --json | \
+            python3 -m validation.apple_simulator_ownership \
+              --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT")"
           for stale_id in $stale_ids; do
             xcrun simctl shutdown "$stale_id" || true
             xcrun simctl delete "$stale_id" || true
@@ -2083,6 +2085,14 @@ jobs:
               exit 1
             }
           done
+      # Dockerfile.release starts FROM the private, digest-pinned media
+      # runtime; its builder needs the same fleet credential the publishers use.
+      - name: Authenticate the runtime build to the private media-runtime registry
+        uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Build the runtime from only the verified binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:

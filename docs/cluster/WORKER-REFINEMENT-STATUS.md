@@ -74,8 +74,10 @@ independent final review and its findings are recorded below.
 
 Scan and metadata refresh have different dedupe keys and can both be queued
 for one library. Qualification corrected the initial claim that both could
-hold the source reservation concurrently: normal same-root library work is
-serialized by the `source_io` claim predicate. The model admits both claims
+hold the source reservation concurrently: normal library work on one storage
+domain (or with an unmapped root) is serialized by the `source_io` claim
+predicate. A targeted library job takes no source reader; only the
+`scan:library:<id>` fence serialises it against its own library's scan. The model admits both claims
 as an explicit abstraction. Its domain-overlap witness is model evidence;
 a simulation and fairness argument remains necessary before transferring
 its temporal result to Rust. Both complete pipelines remain in the model.

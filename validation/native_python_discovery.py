@@ -4,37 +4,75 @@ import re
 
 from validation import promotion_unit_retention as retention
 from validation.python_unit_receipts import require
+from validation.native_makefile_compatibility import native_makefile_digest
 
 
 # Reviewed environment and command bodies. Neither a run ID nor its log
 # digest authorizes execution: the caller also authenticates both through CI.
 PREFLIGHT = 'e1c1d63930937e64b70da4e9de434c00d6416cad0182f95d6ba58570f7094cd2'
 CURRENT_PREFLIGHT = '8c31cb8cc8bc56c8625e5e1eff387801008521d1bbb696618efc421592840df5'
+# The trusted current job at 49c4ec103 and its 5ca3abcb0 successor differ
+# only in three top-level comment lines and the completed job's timeout
+# (10 -> 30). The earlier raw job is CURRENT_PREFLIGHT above.
+# Keep every step, command, action, runner, environment and error control.
+CURRENT_EXECUTION = '2f331e4884702090f48afd7ccd371ac227df485355775077ff798f9bb3f27cbd'
 HISTORICAL_SCOPE = '0ee1ac7960c2417e5eba56611b80ece17b81c30d9913ccf9aa38386b94c98a75'
 MAKEFILE = 'd74b5626264702988ac3d7bc9f64aac246a1656e8408d539c0241659375971d8'
+# From the original 5ab77b99 Makefile to 49c4ec103, seven inserted lines add
+# only the HDR Rust check and an activity Node web check. The full-file hash
+# still refuses any further Make recipe drift.
+CURRENT_MAKEFILE = 'df9c99f78aab7649439e60cc376cf0796ee744ff19b39396ef78aad5a079a112'
+
+
+def job_body(workflow, name):
+    jobs = re.findall(r'(?ms)^  ' + name + r':\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)', workflow)
+    require(len(jobs) == 1, 'Ambiguous Python preflight source')
+    return jobs[0]
 
 
 def job_digest(workflow, name):
-    jobs = re.findall(r'(?ms)^  ' + name + r':\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)', workflow)
-    require(len(jobs) == 1, 'Ambiguous Python preflight source')
-    return retention.digest(jobs[0].encode())
+    return retention.digest(job_body(workflow, name).encode())
 
 
-def environment(source, workflow, expected=PREFLIGHT):
-    globals_ = workflow.partition('\njobs:\n')[0]
-    require(not re.search(r'(?m)^defaults:', globals_)
-            and re.findall(r'(?ms)^env:\n(.*?)(?=^[^ \n]|\Z)', globals_)
-            == ['  CARGO_TERM_COLOR: always\n\n']
-            and job_digest(workflow, 'preflight') == expected
-            and retention.digest(retention.git_bytes(source, 'Makefile') or b'') == MAKEFILE,
+def preflight_execution_digest(workflow):
+    lines = job_body(workflow, 'preflight').splitlines(keepends=True)
+    steps = [index for index, line in enumerate(lines) if line == '    steps:\n']
+    require(len(steps) == 1, 'Ambiguous Python preflight steps')
+    timeouts = [index for index, line in enumerate(lines[:steps[0]])
+                if re.fullmatch(r'    timeout-minutes: [1-9]\d*\n', line)]
+    require(len(timeouts) == 1, 'Ambiguous Python preflight timeout')
+    # Only YAML comments at the job's own indentation are metadata. Comments
+    # inside a nested run body remain part of the exact execution projection.
+    execution = ''.join(line for index, line in enumerate(lines)
+                        if index not in timeouts and not line.startswith('    #'))
+    return retention.digest(execution.encode())
+
+
+def environment(source, workflow, *, historical):
+    from validation.qualification_unit_continuation import canonical_job_keys
+
+    canonical_job_keys(workflow)
+    # This workflow has exactly five plain root entries. Checking the whole
+    # source refuses a trailing defaults/env override, duplicate key, alias,
+    # or alternate key spelling outside the pinned preflight job.
+    roots = re.findall(r'(?m)^[^\s#][^\n]*$', workflow)
+    globals_ = re.findall(r'(?ms)^env:\n(.*?)(?=^[^ \n]|\Z)', workflow)
+    makefile = native_makefile_digest(retention.git_bytes(source, 'Makefile') or b'')
+    original = job_digest(workflow, 'preflight') == PREFLIGHT and makefile == MAKEFILE
+    current = preflight_execution_digest(workflow) == CURRENT_EXECUTION and makefile == CURRENT_MAKEFILE
+    require(roots == ['name: ci', 'on:', 'env:', 'concurrency:', 'jobs:']
+            and not re.search(r'(?m)^defaults:', workflow)
+            and globals_ == ['  CARGO_TERM_COLOR: always\n\n']
+            and ((historical and original) or current),
             'Python command, executor or workflow environment differs from reviewed preflight')
 
 
 def native_event(source, workflow, inputs):
-    environment(source, workflow)
+    environment(source, workflow, historical=True)
     require(job_digest(workflow, 'scope') == HISTORICAL_SCOPE
             and all(not inputs.get(key) for key in (
-                'retained_units_sha256', 'retained_units_attachment_id', 'retained_units_attachment_uuid')),
+                'retained_units_sha256', 'retained_units_attachment_id',
+                'retained_units_attachment_uuid', 'python_unit_evidence')),
             'Historical Python discovery may have adopted retained results')
 
 
@@ -76,7 +114,7 @@ def source_cohort(record, text, kind, command, discovery, candidate):
     run_id, _ = authenticated_ids(origin['identity'])
     workflow = retention.git_bytes(candidate, '.github/workflows/ci.yml')
     require(workflow is not None, 'Candidate Python preflight unavailable')
-    environment(candidate, workflow.decode(), CURRENT_PREFLIGHT)
+    environment(candidate, workflow.decode(), historical=False)
     ids = list(discovery(record['source_commit'], kind))
     require(record['coverage'] == {'mode': 'python-discovery', 'ids': ids},
             'Native Python cohort differs from frozen source discovery')

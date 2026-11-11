@@ -5,7 +5,7 @@ pub(crate) const MANAGED_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_
 
 pub(crate) fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
     assert!(
-        matches!(version, 1..=5),
+        matches!(version, 1..=6),
         "only published managed fixture versions are recognized"
     );
     let expected = rusqlite::Connection::open_in_memory().expect("closed managed metadata witness");
@@ -34,12 +34,19 @@ pub(crate) fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
             ))
             .expect("published managed v4 objects");
     }
-    if version == 5 {
+    if version >= 5 {
         expected
             .execute_batch(include_str!(
                 "../../src/store/subtitle_managed_resources_v5.sql"
             ))
             .expect("published managed v5 objects");
+    }
+    if version == 6 {
+        expected
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_managed_resources_v6.sql"
+            ))
+            .expect("published managed v6 objects");
     }
     expected
 }
@@ -129,7 +136,157 @@ pub(crate) fn validated_source_tail_drops(
     statements
 }
 
-/// Rewind an owned, empty v122/v123/v124 source tail to published v121.
+pub(crate) const SCAN_REQUEST_FIXTURE_SHAPE_SQL: &str = "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (name GLOB 'background_scan_request_v2*' OR tbl_name GLOB 'background_scan_request_v2*') ORDER BY type,name";
+
+fn scan_request_fixture_objects(
+    connection: &rusqlite::Connection,
+) -> Vec<(String, String, String)> {
+    connection
+        .prepare(SCAN_REQUEST_FIXTURE_SHAPE_SQL)
+        .expect("scan request sidecar inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("scan request sidecar objects")
+        .collect::<Result<_, _>>()
+        .expect("complete scan request sidecar objects")
+}
+
+/// The published v125 sidecar objects, built from the migration's own SQL.
+pub(crate) fn scan_request_fixture_shape() -> Vec<(String, String, String)> {
+    let expected = rusqlite::Connection::open_in_memory().expect("scan request witness");
+    expected
+        .execute_batch("CREATE TABLE background_library_requests(request_id TEXT PRIMARY KEY);")
+        .expect("scan request sidecar dependency");
+    expected
+        .execute_batch(include_str!("../../src/store/scan_request_v2.sql"))
+        .expect("published v125 scan request sidecar");
+    scan_request_fixture_objects(&expected)
+}
+
+/// The pure removal plan for the v125 contract v2 scan request sidecar: the
+/// exact published DDL, its one marker and no request facts, or no plan. Triggers first, then the tables;
+/// the unique index goes with its table.
+pub(crate) fn validated_scan_request_drops(
+    objects: &[(String, String, String)],
+    marker: (i64, i64),
+    requests: i64,
+) -> Vec<String> {
+    assert_eq!(
+        objects,
+        scan_request_fixture_shape(),
+        "exact published scan request sidecar required"
+    );
+    assert_eq!(
+        marker,
+        (1, 1),
+        "the scan request sidecar requires its exact singleton marker"
+    );
+    assert_eq!(
+        requests, 0,
+        "targeted scan request facts must not be discarded"
+    );
+    let mut statements = Vec::new();
+    for kind in ["trigger", "table"] {
+        for (_, name, _) in objects
+            .iter()
+            .filter(|(object_kind, _, _)| object_kind == kind)
+        {
+            statements.push(format!(
+                "DROP {} \"{}\";",
+                kind.to_ascii_uppercase(),
+                name.replace('"', "\"\"")
+            ));
+        }
+    }
+    statements
+}
+
+/// At v125, the validated sidecar removal; below it the sidecar must be absent.
+fn scan_request_rewind_plan(connection: &rusqlite::Connection, version: i64) -> Vec<String> {
+    let objects = scan_request_fixture_objects(connection);
+    if version < 125 {
+        assert!(
+            objects.is_empty(),
+            "a fixture before v125 cannot carry the scan request sidecar"
+        );
+        return Vec::new();
+    }
+    // Validate DDL before using any table identity in the inventory.
+    assert_eq!(
+        objects,
+        scan_request_fixture_shape(),
+        "exact published scan request sidecar required"
+    );
+    let marker: (i64, i64) = connection
+        .query_row(
+            "SELECT count(*),COALESCE(sum(singleton=1 AND version=1),0) FROM background_scan_request_v2_schema",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("scan request marker inventory");
+    let requests: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM background_scan_request_v2",
+            [],
+            |row| row.get(0),
+        )
+        .expect("scan request data inventory");
+    validated_scan_request_drops(&objects, marker, requests)
+}
+
+/// Rewind an owned v126 fixture to published v125: the exact managed v5
+/// resource view and marker return to v4. Managed operations, receipts and
+/// every reservation stay as they are; only the requirement view changes.
+#[allow(dead_code)]
+pub(crate) fn rewind_empty_targeted_managed_to_v125(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture targeted managed ordinal");
+    assert_eq!(
+        version, 126,
+        "only the published v126 managed generation may be rewound"
+    );
+    assert_eq!(
+        managed_fixture_rows(connection),
+        managed_fixture_rows(&managed_fixture_connection(5)),
+        "exact published managed v5 shape required"
+    );
+    let marker: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=5",
+            [],
+            |row| row.get(0),
+        )
+        .expect("managed v5 marker");
+    assert_eq!(marker, 1, "managed v5 requires its exact singleton marker");
+    connection
+        .execute_batch(&format!(
+            "SAVEPOINT targeted_managed_fixture; {} PRAGMA user_version=125; RELEASE targeted_managed_fixture;",
+            include_str!("../../src/store/subtitle_managed_resources_v4.sql")
+        ))
+        .expect("atomic targeted managed fixture rewind");
+}
+
+/// Rewind an owned v125 fixture to published v124: only the exact empty
+/// scan request sidecar is removed.
+#[allow(dead_code)]
+pub(crate) fn rewind_empty_scan_request_to_v124(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture scan request ordinal");
+    assert_eq!(
+        version, 125,
+        "only the published v125 sidecar may be rewound"
+    );
+    let statements = scan_request_rewind_plan(connection, version).join("\n");
+    connection
+        .execute_batch(&format!(
+            "SAVEPOINT scan_request_fixture; {statements} PRAGMA user_version=124; RELEASE scan_request_fixture;"
+        ))
+        .expect("atomic scan request fixture rewind");
+}
+
+/// Rewind an owned, empty v122-v126 source tail to published v121 (the v125
+/// scan request sidecar first, through its own validated plan).
 /// Managed operations and receipts remain intact while their exact resource
 /// view and marker return to v3. Source custody, grants and checkpoints refuse.
 fn source_extension_rewind_plan(
@@ -140,9 +297,10 @@ fn source_extension_rewind_plan(
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture source extension ordinal");
     assert!(
-        matches!(version, 122..=124),
+        matches!(version, 122..=126),
         "only published source extensions may be rewound"
     );
+    let sidecar = scan_request_rewind_plan(connection, version);
     let objects = source_tail_objects(connection);
     let counts = objects
         .iter()
@@ -158,7 +316,13 @@ fn source_extension_rewind_plan(
             (name.clone(), count)
         })
         .collect::<Vec<_>>();
-    let mut statements = validated_source_tail_drops(&objects, &counts, version == 124, |_| true);
+    let mut statements = sidecar;
+    statements.extend(validated_source_tail_drops(
+        &objects,
+        &counts,
+        version >= 124,
+        |_| true,
+    ));
     let marker: i64 = connection
         .query_row(
             "SELECT count(*) FROM background_source_schema WHERE singleton=1 AND version=1",
@@ -167,7 +331,11 @@ fn source_extension_rewind_plan(
         )
         .expect("source tail exact marker");
     assert_eq!(marker, 1, "source tail requires its exact singleton marker");
-    let managed_version = if version == 122 { 3 } else { 4 };
+    let managed_version = match version {
+        122 => 3,
+        123..=125 => 4,
+        _ => 5,
+    };
     assert_eq!(
         managed_fixture_rows(connection),
         managed_fixture_rows(&managed_fixture_connection(managed_version)),
@@ -184,7 +352,7 @@ fn source_extension_rewind_plan(
         marker, 1,
         "managed generation marker must match the source ordinal"
     );
-    if restore_managed && managed_version == 4 {
+    if restore_managed && managed_version >= 4 {
         statements
             .push(include_str!("../../src/store/subtitle_managed_resources_v3.sql").to_owned());
     }
@@ -194,7 +362,7 @@ fn source_extension_rewind_plan(
     statements.join("\n")
 }
 
-/// The v125 adjunct exactly as published: metadata-only index coordination
+/// The v127 adjunct exactly as published: metadata-only index coordination
 /// and the v3 copy index, spelled as the migration spells them.
 const COORDINATION_FIXTURE_SCHEMA: &str = concat!(
     include_str!("../../src/store/analysis_coordination.sql"),
@@ -202,7 +370,7 @@ const COORDINATION_FIXTURE_SCHEMA: &str = concat!(
     include_str!("../../src/store/copy_index_v3.sql"),
 );
 
-/// v125 replaces this v124 trigger rather than adding it.
+/// v127 replaces this v124 trigger rather than adding it.
 const REPLACED_RESERVATION_TRIGGER: &str = "analysis_source_reserve_on_claim";
 
 fn coordination_tail_witness() -> Vec<(String, String, String)> {
@@ -216,7 +384,7 @@ fn coordination_tail_witness() -> Vec<(String, String, String)> {
         .expect("published coordination dependencies");
     witness
         .execute_batch(COORDINATION_FIXTURE_SCHEMA)
-        .expect("published v125 coordination extension");
+        .expect("published v127 coordination extension");
     let mut inventory = witness
         .prepare(
             "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL
@@ -231,7 +399,7 @@ fn coordination_tail_witness() -> Vec<(String, String, String)> {
         .expect("complete coordination witness")
 }
 
-/// The v124 definition v125 replaced, from its own published migration.
+/// The v124 definition v127 replaced, from its own published migration.
 fn published_v124_reservation_trigger() -> &'static str {
     let mut statements = include_str!("../../src/store/background_jobs_viewer_analysis.sql")
         .split("-- next statement")
@@ -250,18 +418,18 @@ fn published_v124_reservation_trigger() -> &'static str {
     statement
 }
 
-/// Plan the rewind of an owned, empty v125/v126 tail to published v124.
+/// Plan the rewind of an owned, empty v127/v128 tail to published v126.
 /// Coordination roles, interests, designations and every v3 copy index row
-/// refuse; the v124 claim reservation trigger and the managed v4 view return.
+/// refuse; the v124 claim reservation trigger and the managed v5 view return.
 fn coordination_tail_rewind_plan(connection: &rusqlite::Connection) -> Option<String> {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture coordination ordinal");
-    if version <= 124 {
+    if version <= 126 {
         return None;
     }
     assert!(
-        matches!(version, 125 | 126),
+        matches!(version, 127 | 128),
         "only published coordination tails may be rewound"
     );
     let expected = coordination_tail_witness();
@@ -323,7 +491,7 @@ fn coordination_tail_rewind_plan(connection: &rusqlite::Connection) -> Option<St
         marker, 1,
         "coordination tail requires its exact singleton marker"
     );
-    let managed_version = if version == 126 { 5 } else { 4 };
+    let managed_version = if version == 128 { 6 } else { 5 };
     assert_eq!(
         managed_fixture_rows(connection),
         managed_fixture_rows(&managed_fixture_connection(managed_version)),
@@ -355,11 +523,11 @@ fn coordination_tail_rewind_plan(connection: &rusqlite::Connection) -> Option<St
         }
     }
     statements.push(published_v124_reservation_trigger().to_owned());
-    if managed_version == 5 {
+    if managed_version == 6 {
         statements
-            .push(include_str!("../../src/store/subtitle_managed_resources_v4.sql").to_owned());
+            .push(include_str!("../../src/store/subtitle_managed_resources_v5.sql").to_owned());
     }
-    statements.push("PRAGMA user_version=124;".to_owned());
+    statements.push("PRAGMA user_version=126;".to_owned());
     Some(statements.join("\n"))
 }
 
@@ -382,10 +550,10 @@ pub(crate) fn within_fixture_savepoint(connection: &rusqlite::Connection, body: 
     }
 }
 
-/// Rewind an owned, empty v125/v126 coordination tail to published v124;
-/// a fixture already at or below v124 is left alone. The caller owns
+/// Rewind an owned, empty v127/v128 coordination tail to published v126;
+/// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
-pub(crate) fn rewind_empty_coordination_tail_to_v124(connection: &rusqlite::Connection) {
+pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
     if let Some(plan) = coordination_tail_rewind_plan(connection) {
         connection
             .execute_batch(&plan)
@@ -400,7 +568,7 @@ pub(crate) fn validated_empty_source_tail_removal(connection: &rusqlite::Connect
 
 pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Connection) {
     within_fixture_savepoint(connection, || {
-        rewind_empty_coordination_tail_to_v124(connection);
+        rewind_empty_coordination_tail_to_v126(connection);
         let statements = source_extension_rewind_plan(connection, true);
         if let Err(error) = connection.execute_batch(&statements) {
             panic!("atomic source fixture rewind: {error}");

@@ -1,11 +1,13 @@
--- V5 adds only canonical fragment publication to zero-source metadata work.
--- Changes affect only future resource requirements. Existing attempt reservations,
--- receipts and leases remain owned until their ordinary fenced retirement.
+-- V5: a targeted library probe (contract v2 §5.1, generation
+-- library-targeted-v1) takes no background source reader. Its only wait is the
+-- per-library scan:library:{id} fence. Changes affect only future resource
+-- requirements. Existing attempt reservations, receipts and leases remain owned
+-- until their ordinary fenced retirement.
 DROP VIEW background_job_required_resources;
 -- next statement
 CREATE VIEW IF NOT EXISTS background_job_required_resources AS
 WITH job_library AS (
-    SELECT job.id AS job_id, job.kind, COALESCE(
+    SELECT job.id AS job_id, job.kind, json_extract(job.payload_json, '$.generation') AS generation, COALESCE(
         json_extract(job.payload_json, '$.library_id'), item.library_id) AS library_id
     FROM background_jobs job
     LEFT JOIN files file ON file.id = json_extract(job.payload_json, '$.file_id')
@@ -15,7 +17,8 @@ SELECT DISTINCT job.job_id, COALESCE('source_io:' || mapping.domain_id, 'source_
 FROM job_library job LEFT JOIN libraries library ON library.id = job.library_id
 LEFT JOIN json_each(CASE WHEN json_valid(library.paths) THEN library.paths ELSE '[]' END) root
 LEFT JOIN background_storage_domains mapping ON mapping.library_id = job.library_id AND mapping.root_path = root.value
-WHERE job.kind NOT IN ('semantic_embedding','subtitle_model_operation','subtitle_text_model_operation','subtitle_text_translate_artifact','artifact_hydrate','artifact_verify','artwork_derivative','fragment_index_publish')
+WHERE job.kind NOT IN ('semantic_embedding','subtitle_model_operation','subtitle_text_model_operation','subtitle_text_translate_artifact','artifact_hydrate','artifact_verify','artwork_derivative')
+AND NOT (job.kind = 'library_scan' AND job.generation IS 'library-targeted-v1')
 UNION
 SELECT id, 'provider:tmdb' FROM background_jobs WHERE kind IN ('library_scan','metadata_refresh')
 UNION

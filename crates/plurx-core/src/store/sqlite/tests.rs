@@ -863,10 +863,12 @@ async fn v6_rebuild_preserves_everything() {
     // v120 gives artifact-only text model setup its managed v2 resource view;
     // v121 appends the managed v3 view for verified text-artifact inference.
     // v122 adds source custody; v123 gives prepared artifacts the v4 view;
-    // v124 appends shared dispatch turns; v125 metadata-only index
-    // coordination with the v3 copy index; v126 the managed v5 view.
+    // v124 appends shared dispatch turns; v125 the pipeline contract v2 scan
+    // request sidecar; v126 the managed v5 view, where a targeted library
+    // probe takes no background source reader; v127 metadata-only index
+    // coordination with the v3 copy index; v128 the managed v6 view.
     assert_eq!(
-        version, 126,
+        version, 128,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );

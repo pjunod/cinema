@@ -1335,9 +1335,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_managed_schema::PREPARED_MIGRATION,
     // v124: shared dispatch turns for interactive library work.
     super::background_job_turns::SCHEMA,
-    // v125: metadata-only index coordination and fenced physical phases.
+    // v125: pipeline contract v2 sidecar for targeted scan requests.
+    super::scan_request_v2::SCHEMA,
+    // v126: targeted library probes do not reserve a background source reader.
+    super::subtitle_managed_schema::TARGETED_MIGRATION,
+    // v127: metadata-only index coordination and fenced physical phases.
     super::analysis_coordination::SCHEMA,
-    // v126: canonical fragment publication never reserves original media.
+    // v128: canonical fragment publication never reserves original media.
     super::subtitle_managed_schema::PUBLISH_MIGRATION,
 ];
 
@@ -1801,6 +1805,9 @@ impl SqliteStore {
             if version == super::subtitle_managed_schema::PREPARED_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_prepared_predecessor(&tx)?;
             }
+            if version == super::subtitle_managed_schema::TARGETED_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_targeted_predecessor(&tx)?;
+            }
             if version == super::subtitle_managed_schema::PUBLISH_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_publish_predecessor(&tx)?;
             }
@@ -1897,6 +1904,7 @@ impl SqliteStore {
         super::subtitle_text_translation_schema::verify_sqlite(conn)?;
         super::shared_caption_schema::verify_sqlite(conn)?;
         super::playback_handoffs::verify_sqlite(conn)?;
+        super::scan_request_v2::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn
