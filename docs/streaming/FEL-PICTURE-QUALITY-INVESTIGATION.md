@@ -419,3 +419,37 @@ needs the all-48-frame lattice evaluation and, ideally, a held-out scene.
 It is not a perceptual, HRD/CPB, Dolby-conformance or playback
 qualification, and no runtime change is made.
 
+## All 48 frames: zero-mean helps broadly but leaves 10 Michael5400 frames
+
+The [lattice evaluator](../../tools/dv_processing/diagnostics/fel_quality/lattice_eval.py)
+implements the predeclared stride-8, phase-0/1 lattice (about 500k samples
+per frame) on the imported frozen operators. Before any other frame is
+scored, it requires several matches. Frames 0/24 must reproduce the
+retained full-resolution R/F/C RGB16 exactly at every lattice point, in all
+four models (24 checks). Every frame's metadata numerators must equal the
+retained 0/24 metadata, and decoded candidate frames 0/24 must match their
+qualified hashes. For Michael5400, the source clip was copied from the
+worker and hash-checked, then captured with the frozen binaries. That
+capture matches the retained events (48/48 canonical matches, all 48 RPU
+hashes bound). Sampled statistics do not replace full-resolution p99 and
+do not change the admission rule.
+
+Frames, out of 48, where the sampled shadow (<0.1 nit) p99 beats F, ModelB:
+
+| Arm | Michael1800 | Michael5400 | M5400 pooled shadow p99 (F 4.313) |
+|---|---:|---:|---:|
+| Retained single-pass115 | 48 | 17 | 4.392 |
+| ROI arm S (−3, all negative) | 48 | 29 | 4.069 |
+| ROI arm Z (−3, zero-mean) | 48 | 38 | 3.959 |
+
+Models A/C/D agree (Z: 43/39/37). Every arm beats F on the full mean in
+all 48 frames. The ten Z misses are frames 6, 12, 18, 20, 21, 29, 34,
+35, 38 and 43, by at most 0.234. On every one of them, exact UV with
+Z's luma, or exact luma with Z's UV, beats F (48/48 for both swaps).
+After the redistribution, the remaining loss is joint Y+UV coding error
+in the same dark blocks. That points to too small a dose, not a
+different mechanism. [M1800](../../tools/dv_processing/diagnostics/fel_quality/results/lattice-michael1800-20261111.json),
+[M5400](../../tools/dv_processing/diagnostics/fel_quality/results/lattice-michael5400-20261111.json)
+and [swap](../../tools/dv_processing/diagnostics/fel_quality/results/lattice-michael5400-swaps-20261111.json)
+results.
+
