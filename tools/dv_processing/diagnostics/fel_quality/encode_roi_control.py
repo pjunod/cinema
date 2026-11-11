@@ -81,7 +81,7 @@ p.add_argument('--baseline-mp4', required=True, type=Path)
 p.add_argument('--harness', required=True, type=Path)
 p.add_argument('--output-root', required=True, type=Path)
 p.add_argument('--prefix', required=True)
-p.add_argument('--mode', choices=['none', 'zero', 'luma'], required=True)
+p.add_argument('--mode', choices=['none', 'zero', 'luma', 'lumazm'], required=True)
 p.add_argument('--grid', type=int, default=16)
 p.add_argument('--threshold-nits', type=float, default=0.0)
 p.add_argument('--qp-offset', type=int, default=0)
@@ -96,7 +96,7 @@ if not src.exists():
     src = a.baseline_input_root / src.name
 assert sha(src) == base['source_sha256'], 'source hash mismatch'
 assert pos['rate'] == (24000, 1001) and pos['tb_den'] == 24000 and pos['frames'] == 48
-if a.mode == 'luma':
+if a.mode in ('luma', 'lumazm'):
     assert a.protocol and a.threshold_nits > 0 and a.qp_offset != 0, 'luma map needs a committed protocol and nonzero settings'
 grid = 8 if ':qg-size=8' in opts['x265-params'] else 16
 assert a.grid == grid, f'grid must follow libx265.c ({grid} for this qg-size)'

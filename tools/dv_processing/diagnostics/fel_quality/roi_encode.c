@@ -9,6 +9,9 @@
  * Map modes:
  *   none  - no side data (equivalence gate E0 against the CLI baseline)
  *   zero  - one full-frame region with qoffset 0 (gate E1)
+ *   lumazm - as luma, plus one full-frame region (listed last, so lower
+ *           priority) of +min(|QP_OFFSET|, |QP_OFFSET|*c/(1-c)) for the
+ *           remaining blocks, c = the frame's selected fraction: zero mean.
  *   luma  - per grid block, mean of the encoder's own input Y' (10-bit
  *           limited) -> nits via the ST 2084 EOTF; blocks below the declared
  *           threshold get the declared QP offset. Source-derived only.
@@ -71,7 +74,8 @@ int main(int argc, char **argv) {
     int qpoff = atoi(argv[7]), frames = atoi(argv[8]), num = atoi(argv[9]), den = atoi(argv[10]),
         tbden = atoi(argv[11]);
     const char *movflags = argv[12], *tag = argv[13];
-    int m_none = !strcmp(mode, "none"), m_zero = !strcmp(mode, "zero"), m_luma = !strcmp(mode, "luma");
+    int m_none = !strcmp(mode, "none"), m_zero = !strcmp(mode, "zero"), m_zm = !strcmp(mode, "lumazm"),
+        m_luma = !strcmp(mode, "luma") || m_zm;
     if (!(m_none || m_zero || m_luma) || (grid != 8 && grid != 16) || strlen(tag) != 4) die("bad arguments", 0);
 
     /* CLI ran with -loglevel verbose; libx265.c forwards the av_log level to x265's log-level,
@@ -165,6 +169,7 @@ int main(int argc, char **argv) {
         fr->color_trc = AVCOL_TRC_SMPTE2084;
         fr->colorspace = AVCOL_SPC_BT2020_NCL;
         int selected = 0;
+        double positive = 0;
         if (m_zero) {
             AVFrameSideData *sd = av_frame_new_side_data(fr, AV_FRAME_DATA_REGIONS_OF_INTEREST, sizeof(AVRegionOfInterest));
             AVRegionOfInterest *r = (AVRegionOfInterest *)sd->data;
@@ -188,9 +193,16 @@ int main(int argc, char **argv) {
                         if (bx == 0 || !sel[by * bw + bx - 1]) runs++;
                     }
                 }
-            if (runs) {
-                AVFrameSideData *sd =
-                    av_frame_new_side_data(fr, AV_FRAME_DATA_REGIONS_OF_INTEREST, (size_t)runs * sizeof(AVRegionOfInterest));
+            double c = (double)selected / (bw * bh), pos = 0;
+            if (m_zm && selected < bw * bh) {
+                pos = fabs((double)qpoff) * c / (1 - c);
+                if (pos > fabs((double)qpoff)) pos = fabs((double)qpoff);
+            }
+            positive = pos;
+            int extra = pos > 0 ? 1 : 0;
+            if (runs + extra) {
+                AVFrameSideData *sd = av_frame_new_side_data(fr, AV_FRAME_DATA_REGIONS_OF_INTEREST,
+                                                             (size_t)(runs + extra) * sizeof(AVRegionOfInterest));
                 AVRegionOfInterest *r = (AVRegionOfInterest *)sd->data;
                 int k = 0;
                 for (int by = 0; by < bh; by++)
@@ -203,10 +215,14 @@ int main(int argc, char **argv) {
                                                       .qoffset = (AVRational){qpoff, 63}};
                     }
                 if (k != runs) die("run count mismatch", 0);
+                if (extra)
+                    r[k++] = (AVRegionOfInterest){.self_size = sizeof *r, .top = 0, .bottom = fr->height, .left = 0,
+                                                  .right = fr->width, .qoffset = (AVRational){(int)lround(pos * 1e6), 63000000}};
             }
             free(sel);
         }
-        fprintf(mj, "%s{\"frame\":%d,\"selected_blocks\":%d,\"blocks\":%d}", n ? "," : "", n, selected, bw * bh);
+        fprintf(mj, "%s{\"frame\":%d,\"selected_blocks\":%d,\"blocks\":%d,\"positive_qp_offset\":%.6f}", n ? "," : "", n,
+                selected, bw * bh, positive);
         if ((ret = avcodec_send_frame(enc, fr)) < 0) die("send frame", ret);
         av_frame_unref(fr);
         if ((ret = write_packets(enc, oc, st, &outcount)) < 0) die("receive packet", ret);
