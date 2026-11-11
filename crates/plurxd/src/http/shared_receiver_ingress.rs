@@ -72,6 +72,11 @@ fn actor_error(error: ReceiverStartError) -> ApiError {
         ReceiverStartError::Unavailable => {
             (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable")
         }
+        // The same code and `Retry-After` a local create answers, so the
+        // client's create ladder retries it with the same `request_id`.
+        ReceiverStartError::NotYet(retry) => {
+            return retry.response("The sharing host is still preparing playback");
+        }
     };
     ApiError::typed(status, code, "Shared playback is unavailable")
 }
@@ -211,8 +216,15 @@ async fn start(
     State(state): State<AppState>,
     Path((import, locator)): Path<(String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
+    headers: axum::http::HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
+    // The viewer's start clock, through the local create's own rule: this
+    // answer comes by its deadline, and the attempt and its Source Start are
+    // worked on for the viewer's whole remaining start. A client that sends
+    // none (today's native players) keeps the fixed bounds and refusals.
+    let clock =
+        super::hls::startup_allowance(&headers).map(crate::media_pool::CreateStartupBudget::new);
     let import_id = Uuid::parse_str(&import).map_err(|_| invalid())?;
     if import_id.is_nil() || import_id.to_string() != import {
         return Err(invalid());
@@ -262,19 +274,25 @@ async fn start(
         .prepare_receiver_session_authority(intent.clone())
         .await?
         .ok_or_else(unavailable)?;
+    let shared_state = Arc::new(state.clone());
     let actor = state
         .sharing
         .receiver_starts
         .begin(
-            Arc::new(state.clone()),
+            Arc::clone(&shared_state),
             intent,
             request.request_id,
             request.playback_id,
             wrapper,
+            clock.clone(),
         )
         .map_err(actor_error)?;
-    let response = actor
-        .wait_ready(Instant::now() + Duration::from_secs(305))
+    let answer_by = clock.as_ref().map_or_else(
+        || Instant::now() + Duration::from_secs(305),
+        |clock| clock.deadline.into_std(),
+    );
+    let (response, _waiter) = actor
+        .wait_published(&shared_state, answer_by, clock.is_some())
         .await
         .map_err(actor_error)?;
     let connection = connection.ok_or_else(unavailable)?;

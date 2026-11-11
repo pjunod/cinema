@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 
-DEFAULT_BINARY = "/usr/lib/plurx-player/bin/mpv"
+DEFAULT_BINARY = "/usr/bin/mpv"
 # Plan section 4.2: vo=gpu-next on Vulkan, which receives the compositor's
 # preferred colour description through Wayland colour management and
 # presents PQ, with libplacebo mapping.
@@ -30,7 +30,7 @@ SEEK_ARGS = ["--force-seekable=yes"]
 SAFETY_ARGS = ["--ytdl=no"]
 # The dynamic loader honours these before the system's own library paths (or
 # injects code outright), so a stray value in the desktop session could make
-# the private mpv load other libraries or anything else. mpv gets an
+# mpv load other libraries or anything else. mpv gets an
 # environment without them.
 LOADER_OVERRIDES = ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT")
 CLOSED = "__closed__"
@@ -42,13 +42,44 @@ class MpvError(Exception):
 
 
 def resolve_binary(explicit=None):
-    """The private build when installed, otherwise mpv on PATH."""
+    """Explicit override, then the system executable, then mpv on PATH.
+
+    Ignore a legacy Cinema-bundled executable even when it is still present:
+    the qualified system renderer owns HDR and Dolby Vision updates.
+    """
     for candidate in (explicit, os.environ.get("PLURX_PLAYER_MPV")):
         if candidate:
             return candidate
     if os.access(DEFAULT_BINARY, os.X_OK):
         return DEFAULT_BINARY
     return shutil.which("mpv")
+
+
+NATIVE_DOVI_FEATURE = "native-dovi-api-1"
+
+
+def loader_environment():
+    return {key: value for key, value in os.environ.items() if key not in LOADER_OVERRIDES}
+
+
+def native_dovi_capable(binary):
+    """Read the compiled renderer contract, never infer it from a version.
+
+    Missing/failed/older probes negotiate server conversion. They neither
+    reject the selected binary nor change the user's playback choices.
+    """
+    try:
+        version = subprocess.run([binary, "--no-config", "--version"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 text=True, encoding="utf-8", errors="replace",
+                                 env=loader_environment(), timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if version.returncode != 0:
+        return False
+    return any(NATIVE_DOVI_FEATURE in line.partition(":")[2].split()
+               for line in version.stdout.splitlines()
+               if line.startswith("List of enabled features:"))
 
 
 class Mpv:
@@ -80,7 +111,7 @@ class Mpv:
                 "--osc=no", f"--script={CINEMA_SCRIPT}"]
 
     def start(self, connect_timeout=15.0):
-        env = {key: value for key, value in os.environ.items() if key not in LOADER_OVERRIDES}
+        env = loader_environment()
         self.proc = subprocess.Popen(self.args(), stdin=subprocess.DEVNULL, env=env)
         deadline = time.monotonic() + connect_timeout
         while True:

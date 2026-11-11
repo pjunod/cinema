@@ -7,8 +7,8 @@ const base=`/api/v1/shared/imports/${ref.import_id}/files/${"L".repeat(236)}`,re
 function detail(id="9007199254740993",life="9223372036854775807"){return `{"item":{"source":"shared","reference":${JSON.stringify(ref)}},"lifecycle_generation":${life},"files":[{"file_id":"${id}","revision":"${revision}","file_base":"${base}","reference":{"item":${JSON.stringify(ref)},"file_id":"${id}","revision":"${revision}","lifecycle_generation":${life}}}]}`;}
 function wire(id="9007199254740993",life="9223372036854775807"){return `{"file_id":"${id}","reference":{"item":${JSON.stringify(ref)},"file_id":"${id}","revision":"${revision}","lifecycle_generation":${life}},"method":"remux","play_url":"${base}/stream.mp4?audio=4095","delivery":{"mode":"remux","url":"${base}/stream.mp4?audio=4095","sessions_url":"${base}/hls/sessions"},"audio_tracks":[{"index":3,"codec":"aac","channels":6}],"subtitle_tracks":[{"index":1,"protocol":"vtt","format":"subrip"}],"quality_ladder":[{"height":1080,"bitrate":8000000}],"timeline_origin_ms":1234,"delivered_dynamic_range":"sdr","future_exact":9223372036854775807}`;}
 function response(text,url,status=200,options={}){const r=new Response(text,{status,headers:options.headers||{}});Object.defineProperty(r,"url",{value:options.url||url});Object.defineProperty(r,"redirected",{value:!!options.redirected});return r;}
-function harness(handler=null,diagnosticConsole=console,cryptoApi=undefined,pageOrigin="https://b.test"){const requests=[],ctx=vm.createContext({console:diagnosticConsole,crypto:cryptoApi,URL,URLSearchParams,Uint8Array,TextEncoder,TextDecoder,AbortController,setTimeout,clearTimeout,fetch:async(url,options)=>{requests.push({url,options});return handler?handler(url,options,requests.length):response(options.method==="GET"?detail():wire(),url);},location:{href:pageOrigin+"/#/shared",hash:"#/shared"},navigator:{userAgent:"actual-browser-fixture"}});
- const functions=[['pages/sharing-management.js',['sharingJSON','sharingInteger']],['pages/shared-libraries.js',['sharedCatalogueId','sharedCatalogueUuid','sharedCatalogueLibraryReference','sharedCatalogueReference']],['player/decode-tiers.js',['browserOutputChannels','browserOutputChannelsCached','browserAudioSinks','capsDocument','hdrDisplayPeakCaps','currentCapsDocument']]].flatMap(([file,names])=>names.map(n=>fn(file,n))).join('\n');
+function harness(handler=null,diagnosticConsole=console,cryptoApi=undefined,pageOrigin="https://b.test"){const requests=[],ctx=vm.createContext({PlaybackPolicy:require("../../"+WEB+"playback-policy.js"),console:diagnosticConsole,crypto:cryptoApi,URL,URLSearchParams,Uint8Array,TextEncoder,TextDecoder,AbortController,setTimeout,clearTimeout,fetch:async(url,options)=>{requests.push({url,options});return handler?handler(url,options,requests.length):response(options.method==="GET"?detail():wire(),url);},location:{href:pageOrigin+"/#/shared",hash:"#/shared"},navigator:{userAgent:"actual-browser-fixture"}});
+ const functions=[['pages/sharing-management.js',['sharingJSON','sharingInteger']],['pages/shared-libraries.js',['sharedCatalogueId','sharedCatalogueUuid','sharedCatalogueLibraryReference','sharedCatalogueReference']],['player/decode-tiers.js',['browserOutputChannels','browserOutputChannelsCached','browserAudioSinks','capsDocument','hdrDisplayPeakCaps','currentCapsDocument']],['core/api.js',['startupRemainingHeaders']]].flatMap(([file,names])=>names.map(n=>fn(file,n))).join('\n');
  vm.runInContext(`let TOKEN="first",API="/api/v1",AUTH_GENERATION=2,PAGE_RENDER_GENERATION=7;
  const SERVER={build:"test",playback_display_aware_auto:false},PLAY_CAPS={vcodec:"h264,hevc,hevc10",acodec:"aac",container:"mp4",maxheight:1080,progressiveHevcSampleEntries:["hvc1"]};
  let BROWSER_OUTPUT_CHANNELS=null;
@@ -304,6 +304,27 @@ test("Shared Start keeps a bounded typed refusal instead of reporting a decision
 });
 
 
+test("Shared Start sends the viewer start clock and a typed not-yet reaches the create ladder",async()=>{
+ const P=require("../../"+WEB+"playback-policy.js");
+ const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(startReply()),u)),c=(await h.details(ref)).files[0].context;
+ await h.start(c,startBody(h),null,7300.9);
+ assert.equal(h.requests.at(-1).options.headers["x-plurx-startup-remaining-ms"],"7300","the same header a Local create sends");
+ const plain=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(startReply()),u)),pc=(await plain.details(ref)).files[0].context;
+ await plain.start(pc,startBody(plain));
+ assert.equal(plain.requests.at(-1).options.headers["x-plurx-startup-remaining-ms"],undefined,"no clock, no header");
+ for(const code of ["startup_timeout","media_session_overloaded"]){
+  const x=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify({code,message:"untrusted peer detail"}),u,o.method==='GET'?200:503,o.method==='GET'?{}:{headers:{"retry-after":"1"}}),{warn(){}});
+  const xc=(await x.details(ref)).files[0].context;
+  await assert.rejects(x.start(xc,startBody(x),null,9000),e=>{
+   assert.equal(e.code,code);assert.equal(e.streamFailure.code,code);assert.equal(e.streamFailure.status,503);
+   assert.ok(!e.streamFailure.message.includes("untrusted"));
+   assert.equal(P.classifyStreamFailure({status:e.streamFailure.status,code:e.streamFailure.code,context:"start"}),"create_503_not_yet");
+   assert.equal(P.createRetryStep({attempt:0,elapsedMs:0,source:"create_503_not_yet"}).action,"retry");
+   return true;});
+ }
+ const t=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify({code:"sharing_start_unresolved",message:"x"}),u,o.method==='GET'?200:503),{warn(){}}),tc=(await t.details(ref)).files[0].context;
+ await assert.rejects(t.start(tc,startBody(t),null,9000),e=>e.code==="sharing_start_unresolved"&&e.streamFailure===undefined);
+});
 test("a streamed Shared authorization refusal retires context without draining its body",async()=>{
  for(const status of [401,403]){
   let cancelled=false;

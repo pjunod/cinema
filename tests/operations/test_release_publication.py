@@ -16,6 +16,7 @@ from validation.release_aliases import alias_action
 from tests.operations.test_release_debug import packed_pair
 from validation.release_dockerfile import (
     render,
+    pinned_runtime_image,
     render_binary_export,
     required_binaries,
 )
@@ -27,6 +28,24 @@ ELF_MACHINES = {
     "x86_64-unknown-linux-gnu": 62,
     "aarch64-unknown-linux-gnu": 183,
 }
+
+
+def historical_media_source() -> str:
+    """A pre-base-image recipe, retained to exercise old tagged releases."""
+    return """FROM rust:1-bookworm AS build
+WORKDIR /src
+RUN cargo build --release
+FROM debian:bookworm-slim AS runtime-assets
+RUN apt-get update
+FROM runtime-assets AS runtime
+COPY --from=build /plurxd /usr/local/bin/plurxd
+USER plurx
+FROM runtime-assets AS linux-dolby-install
+RUN --mount=from=linux-dolby-package,target=/package echo install
+FROM runtime-assets AS runtime-assets-dolby-amd64
+COPY --from=linux-dolby-install /usr/lib/media /usr/lib/media
+FROM runtime AS runtime-dolby-amd64
+"""
 
 
 # Git exports its repository-local variables to hooks, and during a commit
@@ -220,10 +239,12 @@ class ReleasePublicationContractCase(unittest.TestCase):
             "&& 'runtime-assets-dolby-amd64' || 'runtime-assets' }}",
             image,
         )
-        self.assertIn("REGISTRY_RUNTIME_IMAGE@$RUNTIME_DIGEST", image)
+        self.assertIn("--runtime-image \"$RUNTIME_REF\"", image)
+        self.assertIn("RUNTIME_REF: ${{ steps.runtime.outputs.ref }}", image)
+        self.assertIn("if: steps.media-contract.outputs.pinned_runtime == ''", image)
         self.assertIn("--runtime-image", image)
         self.assertLess(
-            image.index("Publish the reviewed platform runtime"),
+            image.index("Select the immutable runtime without rebuilding current dependencies"),
             image.index("Build and push the untagged platform manifest"),
         )
 
@@ -300,34 +321,97 @@ class ReleasePublicationContractCase(unittest.TestCase):
             alias_action("latest", "0.2.7", "main")
 
     def test_generated_dockerfile_keeps_only_the_tagged_runtime(self):
-        generated = render((ROOT / "Dockerfile").read_text(encoding="utf-8"))
+        source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        generated = render(source)
+        self.assertRegex(generated, r"(?m)^FROM \S+@sha256:[0-9a-f]{64} AS runtime-assets$")
+        for name in ("plurxd", "plurx-cluster-check"):
+            self.assertIn(
+                f"COPY --chmod=0755 release-bin/{name} /usr/local/bin/{name}",
+                generated,
+            )
+        for forbidden in ("apt-get", "AS dv-processing-dependencies", "AS dv-processing-helpers",
+                          "AS subtitle-engine-build", "FROM node:", "FROM runtime-assets AS ci",
+                          "cargo build", "COPY --from=build", "repo.jellyfin.org"):
+            self.assertNotIn(forbidden, generated)
 
-        self.assertIn("FROM debian:bookworm-slim", generated)
-        self.assertIn(
-            "COPY --chmod=0755 release-bin/plurxd /usr/local/bin/plurxd",
-            generated,
-        )
-        self.assertIn(
-            "COPY --chmod=0755 release-bin/plurx-cluster-check "
-            "/usr/local/bin/plurx-cluster-check",
-            generated,
-        )
-        # The runtime copies its private DV processing bundle from the stages
-        # that build it, so those stay; the daemon's Rust build stage and the
-        # bundle's own check stage do not.
-        self.assertIn("AS dv-processing-dependencies", generated)
-        self.assertIn("AS dv-processing-helpers", generated)
-        self.assertNotIn("AS dv-processing-helper-check", generated)
-        self.assertNotRegex(generated, r"(?m)^FROM \S+ AS build$")
-        self.assertNotIn("FROM node:", generated)
-        self.assertNotIn("FROM runtime-assets AS ci", generated)
+    def test_normal_build_has_no_media_acquisition_or_compilation(self):
+        source = (ROOT / "Dockerfile").read_text()
+        assets = source.split(" AS runtime-assets\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertNotIn("RUN ", assets)
+        self.assertNotIn("COPY ", assets)
+        self.assertNotIn("ARG DEBIAN_SNAPSHOT", source)
+        for stage in ("subtitle-engine-build", "dv-processing-dependencies",
+                      "linux-dolby-package-build", "linux-dolby-install"):
+            self.assertNotIn(f"AS {stage}", source)
+        exported = render_binary_export(source)
+        self.assertNotIn("runtime-assets", exported)
+        self.assertNotIn("apt-get", exported)
+        self.assertIn("cargo build", exported)
+
+
+    def test_external_media_pin_preserves_registry_declaration_when_rendered(self):
+        declaration = "ARG PLURX_MEDIA_REGISTRY=forge.lan:3000\n"
+        image = "${PLURX_MEDIA_REGISTRY}/noirr/plurx-media-runtime@sha256:" + "d" * 64
+        source = declaration + "FROM rust:1-bookworm AS build\nWORKDIR /src\nRUN cargo build\n"
+        source += f"FROM {image} AS runtime-assets\nFROM runtime-assets AS runtime\n"
+        source += "COPY --from=build /plurxd /usr/local/bin/plurxd\n"
+        generated = render(source)
+        self.assertEqual(generated.count(declaration), 1)
+        self.assertLess(generated.index(declaration), generated.index("FROM "))
+        self.assertIn(f"FROM {image} AS runtime-assets", generated)
         self.assertNotIn("cargo build", generated)
-        self.assertNotIn("COPY --from=build", generated)
-        self.assertIn("AS subtitle-engine-build", generated)
-        self.assertIn("COPY --from=subtitle-engine-build /opt/subtitle-engine/ /usr/local/bin/subtitle-engine/", generated)
-        # This audio asset cannot broaden the exception to any daemon source.
-        with self.assertRaisesRegex(ValueError, "daemon's sources"):
-            render((ROOT / "Dockerfile").read_text().replace("crates/plurxd/src/subtitle_models/self-test.wav", "crates/plurxd/src/subtitle_transcription.rs"))
+        self.assertEqual(pinned_runtime_image(source, "mirror.example:5000"),
+                         image.replace("${PLURX_MEDIA_REGISTRY}", "mirror.example:5000"))
+        with self.assertRaisesRegex(ValueError, "explicit global default"):
+            render(source.replace(declaration, ""))
+
+    def test_public_media_repository_preserves_digest_with_explicit_mirror(self):
+        source = (ROOT / "Dockerfile").read_text()
+        default = pinned_runtime_image(source)
+        self.assertTrue(default.startswith("ghcr.io/pjunod/cinema-media-runtime@sha256:"))
+        mirror = pinned_runtime_image(source, repository="mirror.example:5000/custom/media-runtime")
+        self.assertEqual(mirror.rsplit("@", 1)[1], default.rsplit("@", 1)[1])
+        self.assertTrue(mirror.startswith("mirror.example:5000/custom/media-runtime@"))
+        declaration = "ARG PLURX_MEDIA_RUNTIME_REPOSITORY=ghcr.io/pjunod/cinema-media-runtime\n"
+        generated = render(source)
+        self.assertEqual(generated.count(declaration), 1)
+        self.assertLess(generated.index(declaration), generated.index("FROM "))
+        with self.assertRaisesRegex(ValueError, "explicit global default"):
+            render(source.replace(declaration, ""))
+        for invalid in ("https://mirror.example/runtime", "mirror.example/runtime:latest",
+                        "mirror.example/runtime@sha256:" + "a" * 64):
+            with self.subTest(repository=invalid), self.assertRaises(ValueError):
+                pinned_runtime_image(source, repository=invalid)
+
+    def test_external_media_pin_rejects_unpublished_runtime_modifications(self):
+        image = "registry.example/noirr/plurx-media-runtime@sha256:" + "d" * 64
+        source = f"FROM {image} AS runtime-assets\nRUN apt-get update\n"
+        source += "FROM runtime-assets AS runtime\nCOPY --from=build /plurxd /usr/local/bin/plurxd\n"
+        with self.assertRaisesRegex(ValueError, "without modifying"):
+            pinned_runtime_image(source)
+        with self.assertRaisesRegex(ValueError, "without modifying"):
+            render(source)
+
+    def test_historical_pinned_bookworm_is_not_a_complete_media_base(self):
+        source = historical_media_source().replace(
+            "FROM debian:bookworm-slim AS runtime-assets",
+            "FROM debian:bookworm-slim@sha256:" + "c" * 64 + " AS runtime-assets",
+        )
+        self.assertIsNone(pinned_runtime_image(source))
+        self.assertIn("RUN apt-get update", render(source))
+
+    def test_registry_override_keeps_committed_runtime_digest(self):
+        source = ROOT / "Dockerfile"
+        declaration = next(line for line in source.read_text().splitlines()
+                           if line.startswith("FROM ") and line.endswith(" AS runtime-assets"))
+        digest = declaration.split("@sha256:", 1)[1].split()[0]
+        command = [sys.executable, "-m", "validation.release_dockerfile",
+                   "--print-runtime-image", "--media-registry", "mirror.example:5000", str(source)]
+        selected = subprocess.check_output(command, cwd=ROOT, text=True).strip()
+        self.assertEqual(selected, f"mirror.example:5000/noirr/plurx-media-runtime@sha256:{digest}")
+        rejected = subprocess.run(command[:-2] + ["https://mirror.example", str(source)],
+                                  cwd=ROOT, capture_output=True, text=True)
+        self.assertNotEqual(rejected.returncode, 0)
 
     def test_digest_bound_release_omits_mutable_runtime_install(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -411,6 +495,14 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         self.assertNotIn("helper", exporter.lower())
         self.assertNotIn("bookworm-slim", exporter)
 
+        subtitle_fixture = source.replace(
+            "COPY tools/helpers /inputs",
+            "COPY crates/plurxd/src/subtitle_models/self-test.wav /inputs",
+        )
+        render(subtitle_fixture)
+        with self.assertRaisesRegex(ValueError, "daemon's sources"):
+            render(subtitle_fixture.replace("subtitle_models/self-test.wav", "subtitle_transcription.rs"))
+
         published = render(source, "forge.lan:3000/noirr/plurx-media-runtime@sha256:" + "b" * 64)
         self.assertNotIn("helper", published.lower())
 
@@ -470,7 +562,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
     def test_named_dolby_package_context_is_accepted_only_in_its_render_mode(self):
         from validation.release_dockerfile import render
 
-        source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        source = historical_media_source()
         rendered = render(source, linux_dolby_package=True)
         self.assertIn("--mount=from=linux-dolby-package,", rendered)
         self.assertIn("FROM runtime-assets-dolby-amd64 AS runtime", rendered)
@@ -822,7 +914,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
 
 
     def test_audited_amd64_release_render_excludes_export_tools_and_keeps_arm_incumbent(self):
-        source = (ROOT / "Dockerfile").read_text()
+        source = historical_media_source()
         arm = render(source)
         assert "FROM runtime-assets AS runtime" in arm
         assert "linux-dolby-package-export" not in arm
@@ -841,27 +933,75 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
             render(source, runtime_image="example.invalid/media@sha256:" + "a" * 64, linux_dolby_package=True)
 
 
-    def test_publish_and_ci_produce_and_consume_same_audited_media_export(self):
+    def test_pinned_amd64_release_requires_audited_runtime_before_binary_packaging(self):
+        publication = WORKFLOW.read_text()
+        marker = "      - name: Require audited amd64 provenance for the pinned release runtime\n"
+        guard = publication.split(marker, 1)[1].split("      - name:", 1)[0]
+        self.assertIn("if: matrix.arch == 'amd64' && steps.media-contract.outputs.pinned_runtime != ''", guard)
+        self.assertIn("sha256sum -c", guard)
+        self.assertIn("shipping-system-elf-sha256.txt", guard)
+        self.assertIn("system-elf-sha256.txt", guard)
+        self.assertIn("linux-dolby-package.json", guard)
+        self.assertIn("libmfx1", guard)
+        self.assertIn("--step verify-shipping", guard)
+        self.assertIn('trusted-packaging/scripts/build-linux-dolby-ffmpeg', guard)
+        self.assertLess(publication.index(marker), publication.index("      - name: Compile and export the exact tagged binaries"))
+        # Run the actual container preflight body against an ordinary runtime
+        # with no audit capsule: release must stop with an actionable error.
+        preflight = guard.split("--entrypoint sh \"$RUNTIME_REF\" -eu -c '\n", 1)[1].split("\n          '\n", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            preflight = preflight.replace("provenance=/usr/lib/jellyfin-ffmpeg/provenance", "provenance=" + directory)
+            result = subprocess.run(["sh", "-eu", "-c", preflight], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Publish and promote an audited media base before releasing", result.stderr)
+
+    @unittest.skipUnless(shutil.which("sha256sum"), "release preflight requires sha256sum")
+    def test_pinned_runtime_preflight_refuses_changed_providers_and_competing_media_sdk(self):
+        publication = WORKFLOW.read_text()
+        guard = publication.split("      - name: Require audited amd64 provenance for the pinned release runtime\n", 1)[1].split("      - name:", 1)[0]
+        preflight = guard.split("--entrypoint sh \"$RUNTIME_REF\" -eu -c '\n", 1)[1].split("\n          '\n", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "linux-dolby-package.json").write_text("{}")
+            provider = root / "libprovider.so"
+            provider.write_bytes(b"reviewed provider bytes")
+            (root / "shipping-system-elf-sha256.txt").write_text(
+                hashlib.sha256(provider.read_bytes()).hexdigest() + "  " + str(provider) + "\n")
+            fake = root / "bin"
+            fake.mkdir()
+            dpkg = fake / "dpkg-query"
+            dpkg.write_text("#!/bin/sh\nexit 1\n")
+            dpkg.chmod(0o755)
+            environment = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ.get("PATH", ""))
+            preflight = preflight.replace("provenance=/usr/lib/jellyfin-ffmpeg/provenance", "provenance=" + directory)
+            def check():
+                return subprocess.run(["sh", "-eu", "-c", preflight], env=environment, capture_output=True, text=True)
+            self.assertEqual(check().returncode, 0)
+            provider.write_bytes(b"changed provider bytes")
+            self.assertNotEqual(check().returncode, 0)
+            provider.write_bytes(b"reviewed provider bytes")
+            dpkg.write_text("#!/bin/sh\nprintf installed\n")
+            result = check()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("competing Debian Media SDK", result.stderr)
+
+    def test_normal_package_ci_reuses_media_base_and_legacy_publication_remains_supported(self):
         publication = WORKFLOW.read_text()
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
-        for workflow in [publication, ci]:
-            assert "target: linux-dolby-package-export" in workflow
-            assert "linux-dolby-package=./linux-dolby-export/package" in workflow
-        assert "outputs: type=local,dest=linux-dolby-export" in publication
-        binary = ci.split("- name: Compile and export the exact candidate binaries", 1)[1].split("- name:", 1)[0]
-        media = ci.split("- name: Build and export the exact audited Bookworm media package", 1)[1].split("- name:", 1)[0]
-        unpack = ci.split("- name: Validate and unpack the complete audited media export", 1)[1].split("- name:", 1)[0]
-        assert "outputs: type=tar,dest=linux-dolby-export.tar" in media
-        assert "if: matrix.arch == 'amd64'" in media and "if: matrix.arch == 'amd64'" in unpack
-        assert "python3 -m validation.media_export linux-dolby-export.tar linux-dolby-export" in unpack
-        assert "outputs: type=local,dest=binary-export" in binary
-        assert ci.count("outputs: type=tar,dest=linux-dolby-export.tar") == 1
-        assert ci.index("- name: Validate and unpack") < ci.index("- name: Build the runtime")
-        assert "runtime-assets-dolby-amd64" in publication
-        candidate = (ROOT / "scripts/release-package-candidate").read_text()
-        assert '"$target" == x86_64-unknown-linux-gnu' in candidate
-        assert 'media_args+=(--linux-dolby-package)' in candidate
-        assert '"${media_args[@]}"' in candidate
+        # The source recipe no longer contains these targets, so ordinary CI
+        # must not try to export and reinstall an SDK before packaging it.
+        self.assertNotIn("target: linux-dolby-package-export", ci)
+        self.assertNotIn("linux-dolby-package=./linux-dolby-export/package", ci)
+        self.assertIn("outputs: type=local,dest=binary-export", ci)
+        self.assertIn("file: Dockerfile.release", ci)
+        # Release publication can still rebuild old tagged recipes, while
+        # current tags resolve their committed immutable runtime directly.
+        self.assertIn("--print-runtime-image", publication)
+        self.assertIn("id: legacy-runtime", publication)
+        self.assertIn("target: linux-dolby-package-export", publication)
+        self.assertIn("linux-dolby-package=./linux-dolby-export/package", publication)
+        self.assertIn("id: runtime", publication)
+
 
 
 if __name__ == "__main__":

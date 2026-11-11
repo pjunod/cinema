@@ -37,7 +37,7 @@ jobs:
     # queued every pull request forever the moment this path became required.
     # `validation/runner-fleet.toml` now says what the fleet carries and
     # `make operations-check` rejects a label no rostered runner answers to.
-    runs-on: [self-hosted, Linux, X64, lab, ci-store]
+    runs-on: [ci-nonvoter-store]
     timeout-minutes: 40
     continue-on-error: ${{ inputs.execution-mode == 'shadow' }}
     env:
@@ -48,7 +48,8 @@ jobs:
       # dropping tests: `validation/store_shard.py` rejects a receipt set whose
       # size or index set disagrees with the count the receipts declare.
       #
-      # Three, because the fleet carries three `ci-store` slots and one physical
+      # Two, because the qualified Store alias has two physical nonvoter slots.
+      # One physical
       # host may hold only one — so this number is bounded by eligible hosts
       # rather than chosen, and `make operations-check` fails when it exceeds
       # the slots `validation/runner-fleet.toml` records. The floor is two,
@@ -56,15 +57,15 @@ jobs:
       # in the aggregate validator, so the count can track the fleet up and
       # down without ever collapsing into a single unsharded job wearing the
       # sharded lane's name.
-      SHARD_COUNT: "3"
+      SHARD_COUNT: "2"
     strategy:
       fail-fast: false
       matrix:
-        # One shard per `ci-store` slot: `lab1`, `lab5` and `lab2`, one per
+        # One shard per `ci-nonvoter-store` slot: `lab1` and `lab2`, one per
         # physical non-voter host. Keep this list and SHARD_COUNT in step —
         # `make operations-check` fails when they disagree, and when the count
         # exceeds the number of slots the fleet actually carries.
-        shard_index: [0, 1, 2]
+        shard_index: [0, 1]
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

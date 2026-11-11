@@ -169,7 +169,8 @@ function fullOpenHarness() {
     "const requestIds=[];function newRequestId(){const id='rq-'+requestIds.length;requestIds.push(id);return id;}",
     shippedSource("playbackRetryDelay"),shippedSource("playbackCreateRetryContext"),
     shippedSource("openSessionRetryingNotYet"),
-    "function prePlayApplication(d,s){return {subtitle:s?.subtitle??null,burnedSub:null,textSub:null};} function autoskipOn(){return false;}",
+    shippedSource("prePlayBurnNeeded"),shippedSource("prePlayApplication"),
+    "function autoskipOn(){return false;}",
     "function newAttempt(){} function selectedAudioIndex(p){return p.audio[p.curAudio]?.index||0;} function setupAirplay(){} function setupTrackMenus(){}",
     "function renderPlayerInfo(){} function autoNextOn(){return false;} function useNativeHls(){return false;} function segmentedRemuxOk(){return false;}",
     "function tok(url){return url;} function armStall(){} function remuxUrl(url,audio,pos){return '/remux?audio='+audio+'&start='+pos;}",
@@ -288,6 +289,54 @@ function bootstrap() {
     lease_timeout_ms: 300_000,
   };
 }
+
+test("native default subtitle waits for track registration without reopening",async()=>{
+  const listeners=new Set();
+  const tracks={addEventListener(type,fn){assert.equal(type,"addtrack");listeners.add(fn);},
+    removeEventListener(type,fn){listeners.delete(fn);},[Symbol.iterator]:function*(){if(this[0])yield this[0];}};
+  const v={textTracks:tracks,querySelectorAll:()=>[]};
+  const p={sessionId:"native-start",curSub:0,subs:[{index:0}],offset:0,mediaAttachment:{},captionIntentSerial:1};
+  const build=new PlaybackContextFunction("video","player",[
+    "let PLAYER=player;const document={getElementById:()=>video};",
+    "function pbSyncSubIcon(){}function nativeHlsSubtitleOrdinal(){return 0;}",
+    shippedSource("clearSubs"),shippedSource("attachPlaybackSubtitle"),
+    "return {attach:()=>attachPlaybackSubtitle(video,player,0),clear:()=>clearSubs(video),replace(){player.mediaAttachment={};}};",
+  ].join("\n"));
+  const h=build(v,p);
+  await h.attach();
+  assert.equal(listeners.size,1,"selection waits on the track edge");
+  tracks[0]={mode:"disabled"};for(const fn of [...listeners])fn();
+  assert.equal(tracks[0].mode,"showing");assert.equal(listeners.size,0);
+  delete tracks[0];await h.attach();h.replace();
+  tracks[0]={mode:"disabled"};for(const fn of [...listeners])fn();
+  assert.equal(tracks[0].mode,"disabled","a replaced attachment cannot select a late track");
+  assert.equal(listeners.size,0);
+  delete tracks[0];await h.attach();assert.equal(listeners.size,1);
+  h.clear();assert.equal(listeners.size,0,"Close/replacement releases the listener");
+});
+
+test("Gran Turismo's default subtitle cannot supersede a slow initial HLS create", async()=>{
+  const h=fullOpenHarness();
+  const opening=h.play(7095,"Gran Turismo",0,8_055_589,{});
+  await flush();
+  h.decisions[0].resolve({method:"remux",source:{video_codec:"h264",duration_ms:8_055_589},
+    delivery:{requires_hls:true},audio:[{index:0,default:true}],
+    subtitles:[{index:0,codec:"subrip",text:true,default:true}],
+    selection:{subtitle_index:0,subtitle_requires_burn_in:false}});
+  for(let i=0;i<12;i++)await flush();
+  assert.equal(h.sessions.length,1);
+  assert.equal(h.current().preplay.subtitle,0,"default is frozen in the initial recipe");
+  h.advance(800);
+  for(let i=0;i<12;i++)await flush();
+  assert.equal(h.decisions.length,1,"no automatic subtitle command starts another play");
+  assert.equal(h.sessions.length,1);
+  assert.equal(h.sessions[0].signal.aborted,false,"the original create remains owned");
+  h.sessions[0].resolve({});
+  await opening;
+  assert.equal(h.current().curSub,0);
+  assert.equal(h.video.textTracks[0].mode,"showing");
+  assert.equal(h.sessions.length,1);
+});
 
 test("a refused cold start keeps its player identity and can close", async()=>{
  for(const previouslyPlayed of [false,true]){

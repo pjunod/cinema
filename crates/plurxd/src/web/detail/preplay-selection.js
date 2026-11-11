@@ -192,12 +192,12 @@ function prePlayBurnNeeded(decision, index){
 // What a pre-play selection means for the cold start, decided in one place so
 // it can be reasoned about — and checked — without standing a player up.
 //
-// A transcode decision's default subtitle is part of its candidate recipe.
-// Carry it on the first create, while leaving defaults on copy routes to the
-// existing subtitle setup. An echoed `selection` alone is not a viewer choice.
-function prePlayApplication(decision, selection){
+// The decision's default belongs to the initial recipe on every route. A
+// delayed setSub() is a new viewer command and can cancel an in-flight create.
+// An echoed `selection` alone is not a viewer choice.
+function prePlayApplication(decision, selection, {skipDefaultSub=false}={}){
   const sub=selection&&selection.subtitle!=null?selection.subtitle:
-    decision.method==='transcode'?(decision.subtitles||[]).find(s=>s.default)?.index??null:null;
+    skipDefaultSub?-1:(decision.subtitles||[]).find(s=>s.default)?.index??null;
   const action=prePlayBurnNeeded(decision, sub)
     ? PlaybackPolicy.subtitleBurnAction({requiresBurn:true,
         deliveredRange:decision.delivered_dynamic_range})
@@ -212,8 +212,7 @@ function prePlayApplication(decision, selection){
     // re-buffer to satisfy a choice made before playback began.
     burnedSub:action==="burn"?sub:null,
     // A text track is handed to a <track> once the route knows its offset. Off
-    // (`-1`) and "no explicit choice" apply nothing here; the latter leaves the
-    // cold-start server default alone.
+    // (`-1`) and a decision with no selected subtitle apply nothing here.
     textSub:action==="native"&&sub!=null&&sub>=0?sub:null,
   };
 }

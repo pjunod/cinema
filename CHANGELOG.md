@@ -13,6 +13,15 @@ bump may break compatibility and a **patch** bump never does.
 - CM4 display mapping uses the RPU's active picture boundary for spatial
   filtering and writes PQ black outside it, keeping letterbox bars from
   brightening the first and last active rows or side edges.
+- Linux Cinema now defaults to the system mpv and no longer ships a duplicate
+  renderer, so qualified system HDR/DV updates reach Cinema. Explicit binary
+  overrides, isolated configuration and Cinema controls remain available.
+  Mapper diagnostics validate the shared renderer’s physical-target success
+  against its current eligibility and generation.
+
+- Cinema application images reuse a separately published, digest-pinned media
+  runtime instead of downloading Debian packages and recompiling bundled tools.
+
 - Digest-keyed analysis requests can register their source custody,
   allowing the index queue to progress instead of renewing a rejected request
   indefinitely while holding its shared source-I/O slot.
@@ -67,6 +76,7 @@ bump may break compatibility and a **patch** bump never does.
   preserve explicit developer-directory overrides, and install missing Xcode
   through Homebrew/xcodes. Apple authentication, license and first-launch setup
   stay in the terminal; the media build continues after setup completes.
+
 
 - Subtitle workers keep polling pending writes during pressure checks, avoiding
   a deadlock that retained source-reader reservations and blocked library scans.

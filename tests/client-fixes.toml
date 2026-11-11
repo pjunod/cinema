@@ -8211,7 +8211,7 @@ test_anchor = "def test_cm29_evaluates_its_lattice_once_per_frame(self):"
 id = "claude.linux-player-control-capabilities"
 commits = ["484fbf97e51601a0d4dbfc309ec39cefdcbfc9e8"]
 source = "clients/linux-player/plurx_player/caps.py"
-source_anchor = "def control_capabilities():"
+source_anchor = "def control_capabilities(native_dovi=False):"
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_the_first_control_exchange_is_the_one_the_server_validates(self):"
 
@@ -8407,3 +8407,64 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.
 source_anchor = 'const val CREATE_CAPACITY_TERMINAL = "create_capacity_terminal"'
 test = "tests/validation/test_control_wire_conformance.py"
 test_anchor = "def test_every_code_a_create_answers_with_is_in_the_contract(self) -> None:"
+
+# PR #1483: one system renderer, truthful format negotiation and current physical facts.
+
+[[fixes]]
+id = "linux-player.system-mpv-default"
+commits = ["37435a672570e209b2953a1962b4589038d08290"]
+source = "clients/linux-player/plurx_player/mpv.py"
+source_anchor = "DEFAULT_BINARY = \"/usr/bin/mpv\""
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_system_mpv_wins_even_when_legacy_bundle_is_executable(self):"
+
+[[fixes]]
+id = "linux-player.system-mpv-native-capability"
+commits = []
+supplements = "linux-player.system-mpv-default"
+source = "clients/linux-player/plurx_player/mpv.py"
+source_anchor = "def native_dovi_capable(binary):"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_version_names_partial_markers_and_failed_probes_are_not_capabilities(self):"
+
+[[fixes]]
+id = "linux-player.system-mpv-frontend-package"
+commits = []
+supplements = "linux-player.system-mpv-default"
+source = "clients/linux-player/debian/control"
+source_anchor = "Depends: ${misc:Depends}, ${python3:Depends}, mpv, python3 (>= 3.10), zenity"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_package_ships_only_the_frontend_and_depends_on_system_mpv(self):"
+
+[[fixes]]
+id = "linux-player.frontend-verification-compiler"
+commits = ["c427d1e67b06452ea6c3eacbd9f04027b9452abe"]
+source = "clients/linux-player/packaging/verify-in-container.sh"
+source_anchor = "build-essential desktop-file-utils lintian binutils git lua5.2"
+test = "clients/linux-player/tests/test_dv_unorm16.py"
+test_anchor = "def test_exact_terminal_shader_against_rational_reference(self):"
+
+[[fixes]]
+id = "linux-player.shared-native-physical-target"
+commits = ["3cb2b008d0c2ca48680d63c1cd8aa9121533574a"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "NATIVE_MAPPER = \"shared native Dolby renderer\""
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_authoritative_success_reports_physical_peak_in_existing_fact_fields(self):"
+
+[[fixes]]
+id = "linux-player.shared-native-authoritative-state"
+commits = ["3024053e09c8d606724c82fb219567d7b86a7b1f"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def read_native_target_state(self):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_success_requires_current_active_matching_backend_generation(self):"
+
+[[fixes]]
+id = "linux-player.shared-native-state-lifecycle"
+commits = []
+supplements = "linux-player.shared-native-authoritative-state"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def invalidate_native_target(self, state):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_load_source_and_changed_target_policy_require_a_fresh_success(self):"
