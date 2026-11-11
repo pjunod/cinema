@@ -17,7 +17,27 @@ bump may break compatibility and a **patch** bump never does.
   reason an enhancement was skipped. Source custody left behind by a job whose
   owner died before its join can now be released from a host source-open
   census instead of holding the shared storage fence indefinitely (#1491).
-
+- CM4 display mapping evaluates the ST 2084 transfer functions in its point and
+  final passes with precise split-float helpers and the normative black and
+  white endpoints. On the measured Source16 frame no enhanced pixel is farther
+  from the licensed reference than the unenhanced picture; before, three were.
+- Preparation demand reads Local viewers on both admitted session layouts,
+  without requiring the optional principal-rebuild column or admitting Shared viewers.
+- Subtitle extraction and durable self-claim futures use heap storage at their
+  existing ownership boundaries, preventing debug-stack overflow without changing
+  extraction deadlines or cancellation cleanup.
+- The learner topology drill waits for locally applied schema before opening
+  a newly admitted learner, matching production startup readiness.
+- Apple CI startup cleanup now removes only valid simulators from an earlier
+  attempt of the same run, preserving devices whose ownership is ambiguous or
+  belongs to another active run.
+- Scan request status and replay stay bound to the creating credential after an
+  API key is deleted and its numeric ID is reused. Expected-file reports skip
+  paths outside their requested scope without probing their filesystem targets.
+- CM4 display mapping uses the RPU's active picture boundary for spatial
+  filtering, keeping letterbox bars from brightening the first and last
+  active rows or side edges. Pixels outside the boundary are still mapped,
+  so subtitles in the bars and picture under a wrong boundary are kept.
 - Titles with a pending Dolby Vision FEL request no longer fail source
   verification ("the stored probe differs from the source at
   /<unknown-field> missing"), which had declined their processed HDR10-E
@@ -54,6 +74,12 @@ bump may break compatibility and a **patch** bump never does.
   release as failover, and a control request racing the stop is answered with
   the existing `deleted` / `admin_stop` reason rather than `authority_fenced`,
   which clients treat as recoverable.
+- A targeted scan of a path under a library root that cannot be read right now
+  (an unmounted share, an empty mount point, `ENOTCONN`, `EIO`) answers
+  `503 {"code":"path_unreadable","retry_after_s":60}` with `Retry-After`,
+  instead of the permanent `422` that discarded a valid Curator notification.
+  A path under no root is `422 {"code":"path_outside_roots"}`, decided lexically
+  before the filesystem is consulted; the body still names every root.
 - New daemon-mediated source readers retain kernel lifetime witnesses on
   native macOS, Linux and containers, allowing exact-owner recovery after
   Cinema exits without rebooting the server. Legacy readers without this
@@ -145,6 +171,27 @@ bump may break compatibility and a **patch** bump never does.
 - Apple TV Settings enters each category at its first setting and restores the
   category when returning with Back. Picker controls expose their names and
   selected values to accessibility.
+
+### Added
+
+- Pipeline contract v2 at the scan seam (docs/features/PIPELINE-CONTRACT.md):
+  `POST /api/v1/scan` accepts `request_key` (a repeated key returns the same
+  request and result), `wait_ms` (hold the answer up to 15 s for a `200` with
+  the result), `expected_files` (probed whatever the size+mtime cache says, and
+  reported per file as `placed` with a fresh nanosecond mtime, `skipped` or
+  `missing`), and `probe_paths` (a connection test answering which library
+  roots plurx can see, without scanning).
+- The key that created a scan request may read it with `scan:trigger` alone;
+  the record carries `waiting_on` and the per-file `files`, and reports
+  `running` while a worker holds it.
+- Targeted scan requests run as their own job, claimed ahead of a pending full
+  scan with a probe admission (no heavy-lane permit) and never concurrently
+  with a running one; Activity shows what a waiting one is waiting on.
+- Activity labels a targeted library job "targeted scan" rather than "library
+  scan".
+- New libraries scan every six hours by default. Existing libraries keep their
+  schedule; a library at Never shows what that costs and offers a one-click
+  "Enable 6-hourly reconcile".
 
 ## [0.8.0] — 2026-10-29
 

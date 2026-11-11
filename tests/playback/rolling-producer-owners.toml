@@ -3848,16 +3848,25 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # `http::cluster_operations::worker_status_cache_loop`, a read-only refresh of local worker
 # capacity for Activity. It owns no child or source, and returns on `background_shutdown`, the
 # same cancellation as its sibling peer-status loop.
+# Pipeline contract v2 (effort/pipeline-v2 promotion merge, 2026-11-08): +2, both in
+# `http/scan.rs`. Two `tokio::task::spawn_blocking` calls run the targeted-scan path probes
+# (stat and containment checks on the library roots) off the request task. Each is awaited by
+# the handler under its `wait_ms` bound, so it is joined, not detached; no rolling producer,
+# child, session or source owner is created.
+# Pipeline-v2 final containment fix adds one awaited no-follow lstat worker;
+# it owns no producer, timer or process, and completes before canonicalization.
 # S5 review fix 21493f2fe: +1 is the start_native_window_work custody task
 # described under all-detached-tokio-tasks; the subtitle parser spawn_blocking
 # moves inside its owning helper (zero net).
+# Main df710af12 merged into effort/pipeline-v2 (2026-11-11): both sides' additions
+# are present; the total is the merge base plus each side's delta.
 # PR1491 DV GPU qualification: +11. The completion ledger actor (completion.rs)
 # owns enrolled custody until a clean live join and descendant exit; dropping it
 # never settles. processed_upgrade_qualification.rs adds one control task bounded
 # by its 4 s CHECK_BUDGET that owns no child; any upgrade it starts goes through
 # start_upgrade_claim. Nine are test fixtures (decode_facts, processed upgrade
 # runs, reader tests) joined or aborted before the test returns.
-expected_occurrences = 1133
+expected_occurrences = 1136
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4105,10 +4114,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # aborts it there; it owns nothing else.
 # Review 2 fixes (#1438): +1 is the fleet route test's server thread in
 # http/activity_starts/tests.rs, joined before the test returns; no production launcher.
+# Gate fixes (2026-11-08): +1 is the replicated browse K04 fixture's 8 MiB test thread in
+# http/browse.rs, joined before the test returns; no production launcher.
 # PR1491: +1 decode_facts.rs routes spawn_job_owned through the retirement
 # custody's declared spawn (same owned job, escape tick recorded first); +3
 # reader/tests.rs fixture threads/children, joined or reaped before return.
-expected_occurrences = 96
+expected_occurrences = 97
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5672,17 +5683,24 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # (`foreground_admission_tests`). Three are Jellyfin native-HLS test retries (d25a35ea3,
 # 9fde9d148, 55f84b0e8): 250 ms and 1 s sleeps while a fixture response is `503` pending.
 # No production producer, child or detached owner is added.
+# Pipeline contract v2 (promotion merge, 2026-11-08): +6. Two are `http/tests.rs` fixture
+# sleeps (25 ms) polling for a scan request to reach its state. Four are in `library_work.rs`:
+# one production `sleep` that wakes a waiting targeted claim at most every 500 ms until its
+# deadline (a bounded, cancel-on-drop wait with no task of its own), and three test-only
+# `timeout`/`sleep` bounds. No production producer, child or detached owner is added.
 # S5 review fix 21493f2fe: +4 awaited deadline shapes. source_control.rs adds
 # two timeout_at bounds on control observation (the caption work keeps custody
 # past them); source_resource.rs adds one sleep_until that returns a typed
 # Deadline; tests/source_actor.rs adds one 50 ms fixture wait. None retries.
+# Main df710af12 merged into effort/pipeline-v2 (2026-11-11): both sides' additions
+# are present; the total is the merge base plus each side's delta.
 # PR1491: +20. completion.rs: 1 s abandonment poll, 25 ms readiness wait and
 # 250 ms descendant-exit poll (its 60 s elapsed only logs; settlement still
 # needs physical exit). processed_upgrade_qualification.rs: one timeout_at
 # deadline and its Instant (timeout is a terminal refusal, never admission).
 # The other 15 are test fixture bounds (decode_facts, processed upgrade runs,
 # reader and census tests); elapsed bounds fail the test, never certify closure.
-expected_occurrences = 2188
+expected_occurrences = 2194
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6868,11 +6886,19 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +3 in `http/jellyfin/tests.rs` (d25a35ea3, 9fde9d148, 55f84b0e8): HTTP
 # `response.status()` reads in the pending-segment retry loops above. They match the
 # `.status(` shape but launch no process.
+# Pipeline contract v2 (promotion merge, 2026-11-08): +1 in `http/tests.rs`, a
+# `response.status()` assertion on a 503 scan reply. It matches the `.status(` shape but
+# launches no process.
+# Gate fixes (2026-11-08): +1 in `http/browse.rs`, the replicated browse K04 fixture's
+# 8 MiB test thread (a thread-builder call), joined before the test returns; it
+# launches no process.
 # S5 Source503 counterfactual e5ad9e66b: +1 `ended.status()` HTTP response
 # read in shared_source_playback/tests.rs; it launches no process.
+# Main df710af12 merged into effort/pipeline-v2 (2026-11-11): both sides' additions
+# are present; the total is the merge base plus each side's delta.
 # PR1491: +4. decode_facts.rs +1 is the declared spawn_job_owned call above;
 # reader/tests.rs +3 spawn/wait the same two reaped fixture children.
-expected_occurrences = 918
+expected_occurrences = 920
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7711,3 +7737,8 @@ id = "retention-handoff"
 anchor = "async fn gc_expired_segments("
 owns = ["attempt/path sampling", "retention rename"]
 replacement = "attempt and catalog-revision validation around a resource-scoped retention transaction"
+
+# Pipeline-v2 / HDR promotion union (2026-11-09): preserve both reviewed
+# sets of joined task owners, bounded qualification timers, and reap/cancel
+# process shapes. The exact merged counts are 1103 / 2128 / 897; neither
+# parent inventory alone includes the other branch's already-reviewed sites.

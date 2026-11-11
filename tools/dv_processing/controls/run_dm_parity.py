@@ -5,7 +5,10 @@ Runs dm_shader_control for each case; prints max |GPU-CPU| (PQ) and mean/max dE_
 usage: run_dm_parity.py DM_SHADER_CONTROL SCRATCH_DIR SRC_F32 [CASE ...]
 SRC_F32: at least five 3840x2160 frames of float32 BT.2020/PQ RGB (the decoded master).
 Optional CASE names rerun only those cases; unknown names fail.
-Real crops (real pixels, real or synthetic metadata) must match to dE_ITP max 0.05 and 2e-4 PQ.
+Real crops (real pixels, real or synthetic metadata) must match to dE_ITP max 0.05 and 2e-4 PQ;
+CM4 real crops and the CM4 black frame, which use the precise ST 2084 helpers, must match to 1.5e-6 PQ
+(a tenth of a 16-bit code; validated on lavapipe, whose fma is not fused: run_pq_helper_exact.py is the
+check of the helpers' own bits).
 The synthetic raster is a 9^3 lattice reaching 10000-nit fully saturated BT.2020 corners, where the
 shader's float32 arithmetic loses digits against the double reference; it must match to dE_ITP mean
 0.02 and max 0.5 (well under one JND). Each synthetic channel must differ by less than
@@ -55,8 +58,14 @@ def run(name, params, rgb, w, h, synthetic=False):
         lg, lc = eotf(g), eotf(c)
         print('  max linear channel error / target peak %.3e' % (np.abs(lg - lc).max() / target_peak))
         return e.mean() < 0.02 and e.max() < 0.5 and np.all(synthetic_channel_ok(g, c, lg, lc, target_peak))
+    # CM4 point/final passes use the precise ST 2084 helpers: on real pixels the shader must agree with
+    # the double reference to a tenth of a 16-bit code. The legacy float expansion missed by 2-3e-6.
+    if name.startswith('cm4_') and d >= PRECISE_CM4_PQ:
+        print('  FAIL: CM4 real-pixel PQ error %.2e is not within %.1e' % (d, PRECISE_CM4_PQ))
+        return False
     return e.max() < 0.05 and d < 2e-4
 
+PRECISE_CM4_PQ = 1.5e-6
 W, H = 512, 256
 frames = []
 n4k = 3840 * 2160 * 3
@@ -93,6 +102,22 @@ l8 48 25 1900 2000 2200 1900 2300 2048 1800 1900 120 128 140 128 128 110 140 128
 for tgt in ("400 0.005 1 4000", "1000 0 1 4000", "2000 0 0 4000", "100 0.005 2 4000"):
     ok &= run('cm4_syn_' + tgt.split()[0] + '_p' + tgt.split()[2], syn4 + 'target ' + tgt + '\n', syn, W, H, True)
     ok &= run('cm4_synreal_' + tgt.split()[0] + '_p' + tgt.split()[2], syn4 + 'target ' + tgt + '\n', frames[1], W, H)
+# CM4 L5 active areas: asymmetric bars over real pixels (bar content takes the pointwise mapping),
+# the synthetic lattice, a one-row and a one-column active picture. These select the boundary-aware
+# shaders; the full-frame cases above keep the original literals.
+# Bars carry an adversarial bright/dark checker so a filter tap that leaks one row or column past the
+# boundary moves the active result far beyond the real-crop limits.
+def with_bars(img, left, right, top, bottom):
+    out = img.copy(); yy, xx = np.mgrid[0:H, 0:W]
+    bars = (xx < left) | (xx >= W - right) | (yy < top) | (yy >= H - bottom)
+    out[bars] = np.where(((xx + yy) % 2)[bars, None] == 1, 0.92, 0.0001)
+    return out
+for name, l5, img, synthetic in (('real', '7 11 20 13', frames[0], False), ('syn', '0 0 31 29', syn, True),
+                                 ('row', '0 0 128 127', frames[1], False), ('col', '255 256 0 0', frames[1], False)):
+    img = with_bars(img, *map(int, l5.split()))
+    params = (syn4 if synthetic else up) + 'l5 ' + l5 + '\n'
+    for tgt in ("1000 0 1 4000", "100 0.005 2 4000"):
+        ok &= run('cm4_l5_' + name + '_' + tgt.split()[0] + '_p' + tgt.split()[2], params + 'target ' + tgt + '\n', img, W, H, synthetic)
 cm29 = """l1 80 1528 3728
 l6 50 4000
 l2 2081 2076 2030 2000 2020 2030 512

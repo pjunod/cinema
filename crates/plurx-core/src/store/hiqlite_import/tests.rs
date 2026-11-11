@@ -470,7 +470,13 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
             "durable source arbitration table: {name}"
         );
     }
-    assert_eq!(names.len(), 104, "review every imported durable table");
+    // The contract v2 scan request sidecar is durable request state; its
+    // schema marker is installed locally, like the annotations marker.
+    assert!(names.contains(&"background_scan_request_v2"));
+    assert!(!names.contains(&"background_scan_request_v2_schema"));
+    // 104 with the source arbitration tables (SQLite v122), 105 with the scan
+    // request sidecar (SQLite v125).
+    assert_eq!(names.len(), 105, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its
@@ -1058,6 +1064,7 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 | "background_source_custody"
                 | "background_source_service_epochs"
                 | "background_source_service_grants" => 122,
+                "background_scan_request_v2" => 125,
                 _ => 71,
             };
             assert_eq!(table.minimum_schema, introduced, "{}", table.name);

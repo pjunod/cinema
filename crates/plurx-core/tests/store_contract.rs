@@ -35,10 +35,14 @@ mod jellyfin_identity;
 mod jellyfin_login;
 #[path = "store_contract/jellyfin_play.rs"]
 mod jellyfin_play;
+#[path = "store_contract/library_schedule.rs"]
+mod library_schedule;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
 mod remote;
+#[path = "store_contract/scan_request_v2.rs"]
+mod scan_request_v2;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/session_principals.rs"]
 mod session_principals;
@@ -352,6 +356,9 @@ const USER_METHODS: &[&str] = &[
 ];
 const LIBRARY_METHODS: &[&str] = &[
     "create_library",
+    // Contract v2 §6: a library created with an explicit scan interval;
+    // store_contract/library_schedule.rs runs it on every backend.
+    "create_library_with_scan_interval",
     "update_library",
     "delete_library",
     "set_library_schedule",
@@ -594,6 +601,8 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "analysis_completions_executed_by",
+    "analysis_source_admission",
     // Both-backend title publication/cancellation/reprobe and priority
     // contracts in store_contract/dv_title_jobs.rs exercise these five.
     // The source-fenced FEL verdict/requalification contract exercises these
@@ -609,6 +618,15 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
     "probe_can_preempt_title",
+    // Contract v2 targeted-scan sidecar: admission with its sidecar, reads by
+    // request and by creating key, and the later report/waiting writes. All
+    // six run on every backend in store_contract/scan_request_v2.rs.
+    "enqueue_library_work_v2",
+    "scan_request_v2",
+    "scan_request_by_key",
+    "set_scan_request_waiting_on",
+    "set_library_job_waiting_on",
+    "set_scan_request_files",
     // Progressive translation's actual source-bind/publication/Stop/read-lease
     // contract below exercises these on every backend, including three voters.
     "maintain_translation_cache",
@@ -841,6 +859,7 @@ const COORDINATION_METHODS: &[&str] = &[
     "lease_expiry_hint",
 ];
 const MEDIA_SESSION_METHODS: &[&str] = &[
+    "media_session_request_progress",
     // `first_preparation_output_seal_is_exact_and_idempotent_on_every_backend`.
     "seal_prepared_output",
     // Same scenario: the complete seal is confirmed by a read, not a replay.
@@ -933,7 +952,10 @@ const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "delete_dv_recovery_guard_fenced",
     "mark_dv_conversion_failed_fenced",
 ];
-const METRICS_METHODS: &[&str] = &["prometheus_store_snapshot"];
+const METRICS_METHODS: &[&str] = &[
+    "prometheus_store_snapshot",
+    "prometheus_store_snapshot_with",
+];
 
 struct StoreFixture {
     name: &'static str,
@@ -12865,7 +12887,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,4)".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,5)".to_owned()),
             "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
             "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
             "caption-marker" => ("DELETE FROM shared_caption_schema".to_owned(), "INSERT INTO shared_caption_schema VALUES(1,1)".to_owned()),
@@ -12926,6 +12948,80 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .expect("fixture restored");
+    }
+}
+
+/// Review #1405 (4): a replicated cluster at managed v4 (the v125 release)
+/// upgrades to v5 on bootstrap — the exact v5 view and marker, with its
+/// managed receipts kept — and a later bootstrap is a no-op.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("managed upgrade client");
+    let telemetry = cluster._root.path().join("managed-v5-upgrade.db");
+    drop(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("bootstrap current"),
+    );
+    // Return exactly the managed view and marker to published v4.
+    let statements = include_str!("../src/store/subtitle_managed_resources_v4.sql")
+        .split("-- next statement")
+        .map(str::trim)
+        .filter(|sql| !sql.is_empty())
+        .map(|sql| (sql.to_owned(), hiqlite::params!()))
+        .collect::<Vec<_>>();
+    for result in client.txn(statements).await.expect("rewind to managed v4") {
+        result.expect("published v4 statement");
+    }
+    for result in client
+        .txn([(
+            "INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')",
+            hiqlite::params!(),
+        )])
+        .await
+        .expect("retained managed receipt")
+    {
+        result.expect("receipt insert");
+    }
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
+    assert_eq!(
+        replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
+        queue_fixture::managed_fixture_shape(4),
+        "exact published managed v4"
+    );
+    for round in ["upgrade", "restart"] {
+        drop(
+            HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+                .await
+                .unwrap_or_else(|error| panic!("{round} bootstrap: {error}")),
+        );
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
+        assert_eq!(
+            replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
+            queue_fixture::managed_fixture_shape(5),
+            "{round}: exact managed v5 view, marker and guards"
+        );
+        let receipts: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT count(*) AS value FROM subtitle_model_receipts",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("managed receipts");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].value, 1, "{round}: managed receipts kept");
     }
 }
 
@@ -12998,7 +13094,7 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
             "bootstrap exact published shape"
         );
     }
-    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
     require_replicated_fixture_marker(&client, "subtitle_translation_schema", 1).await;
     for marker in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
         require_replicated_fixture_marker(&client, marker, 1).await;
@@ -13086,6 +13182,48 @@ async fn replicated_source_tail_drops(
     validated_source_tail_drops(&source_shape, &source_counts, true, remove)
 }
 
+/// The v125 scan request sidecar, validated like the source tail: exact
+/// published DDL, its one marker and no request facts. Ordinary open
+/// reinstalls it whole.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_scan_request_drops(client: &Client) -> Vec<String> {
+    use queue_fixture::source_extensions_fixture::{
+        validated_scan_request_drops, SCAN_REQUEST_FIXTURE_SHAPE_SQL,
+    };
+    let shape: Vec<_> = client
+        .query_consistent(
+            SCAN_REQUEST_FIXTURE_SHAPE_SQL.to_owned(),
+            hiqlite::params!(),
+        )
+        .await
+        .expect("replicated scan request sidecar inventory")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        queue_fixture::source_extensions_fixture::scan_request_fixture_shape(),
+        "exact published scan request sidecar required before inventory"
+    );
+    let marker =
+        require_replicated_fixture_marker(client, "background_scan_request_v2_schema", 1).await;
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM background_scan_request_v2",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("replicated scan request data inventory");
+    assert_eq!(rows.len(), 1);
+    validated_scan_request_drops(&shape, (marker, marker), rows[0].value)
+}
+
 /// A historical queue fixture cannot retain half of the independent managed
 /// extension after removing its background objects. Rewind only an empty,
 /// unactivated current extension, then let ordinary open reinstall it.
@@ -13103,6 +13241,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
             .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
             .collect()
     }
+    let scan_request_drops = replicated_scan_request_drops(client).await;
     let source_drops = replicated_source_tail_drops(client, |_| true).await;
     let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
     assert_eq!(
@@ -13158,7 +13297,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     require_replicated_fixture_marker(client, "dv_title_jobs_schema", 1).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
-    require_replicated_fixture_marker(client, "subtitle_managed_schema", 4).await;
+    require_replicated_fixture_marker(client, "subtitle_managed_schema", 5).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
@@ -13194,7 +13333,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     let annotations_drops =
         queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=4) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=5) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -13226,7 +13365,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     );
     let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
     let managed_drops =
-        queue_fixture::validated_empty_managed_rewind(&managed_shape, 4, managed_data_count);
+        queue_fixture::validated_empty_managed_rewind(&managed_shape, 5, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -13266,8 +13405,9 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(jobs.len(), 1);
     let translation_drops =
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
-    let mut statements: Vec<_> = source_drops
+    let mut statements: Vec<_> = scan_request_drops
         .into_iter()
+        .chain(source_drops)
         .chain(tail_drops)
         .chain(handoff_drops)
         .chain(title_drops)
@@ -13832,13 +13972,14 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 4",
+             WHERE singleton = 1 AND version = 5",
             1,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'view' \
              AND name = 'background_job_required_resources' \
-             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%'",
+             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%' \
+             AND sql LIKE '%library-targeted-v1%'",
             1,
         ),
     ];
@@ -13858,11 +13999,11 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(4),
-            "{round}: exact current managed v4 view, marker and guards",
+            queue_fixture::managed_fixture_shape(5),
+            "{round}: exact current managed v5 view, marker and guards",
         );
         let views: Vec<SchemaText> = client
             .query_consistent_map(
@@ -17336,7 +17477,7 @@ mod managed_bootstrap_regressions {
             ),
             (
                 "DELETE FROM subtitle_managed_schema",
-                "INSERT INTO subtitle_managed_schema VALUES(1,4)".into(),
+                "INSERT INTO subtitle_managed_schema VALUES(1,5)".into(),
                 "marker missing",
             ),
         ]
@@ -19039,6 +19180,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "background_library_requests",
             "background_predictions",
             "background_provider_budgets",
+            "background_scan_request_v2",
             "background_source_custody",
             "background_source_pauses",
             "background_source_service_epochs",
@@ -21133,7 +21275,15 @@ fn contract_inventory_matches_every_store_method() {
     // 27 foreground/background source custody, service, and checkpoint methods,
     // plus library turn readiness and recent job completions.
     // The recovery sweep checks current authority and settlement in the writer.
-    assert_eq!(declared.len(), 547, "review the Store method count");
+    // +6: the contract v2 scan request sidecar methods in
+    // BACKGROUND_JOB_METHODS (pipeline v2 T1).
+    // +1: `create_library_with_scan_interval` in LIBRARY_METHODS (T5).
+    // +4: main's analysis_completions_executed_by, analysis_source_admission,
+    // media_session_request_progress and prometheus_store_snapshot_with, which
+    // main declared (551) without naming them here; named above.
+    // +1: request_dv_fel_variant is named in BACKGROUND_JOB_METHODS and
+    // exercised by the source-fenced DV title-job contracts.
+    assert_eq!(declared.len(), 559, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

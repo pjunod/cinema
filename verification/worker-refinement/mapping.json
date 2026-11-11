@@ -4,7 +4,7 @@
   "model_sha256": "abe9667c462b6275445f5c488456c208885e143e10bb0d017c20870cee63b3b0",
   "correspondence": {
     "path": "verification/worker-refinement/correspondence.json",
-    "sha256": "6ed585ab772cd65832c8fad9b44b821ee6e020b6b664c362b71a4f9729329e8c"
+    "sha256": "fba0131b4233c8e6d46ef17eebf88c11706b0146fa92b53d34fa97c88336f914"
   },
   "configs": {
     "progress.cfg": {
@@ -666,5 +666,6 @@
       },
       "minimum_trace_states": 2
     }
-  }
+  },
+  "review_basis": "Codex source-only correspondence reconciliation (2026-11-09) for the reviewed pipeline-v2 security corrections. Refreshed 14 library_work.rs action pins after verifying every mapped anchor remains present. The worker correspondence continues to cover queue admission/claim, scan start/finish, completion, acknowledgement timeout, detached drain, reconciliation, wake, and arrival; their selected claim/domain/settlement transitions are unchanged. Credential ownership now uses a keyed hash and expected-file resolution scopes/no-follows probes; those identity and file-selection details are outside the modeled claim/domain protocol. This is source correspondence only and does not claim Rust test or model-check execution."
 }

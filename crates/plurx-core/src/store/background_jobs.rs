@@ -2336,6 +2336,43 @@ pub trait BackgroundJobStore: Send + Sync {
     ) -> Result<Vec<LibraryWorkRecord>, StoreError>;
     async fn complete_library_work(&self, request: CompleteLibraryWork)
         -> Result<bool, StoreError>;
+    /// Admit targeted library work with its contract v2 sidecar in the same
+    /// transaction. A `(key_hash, request_key)` already taken aborts the whole
+    /// admission; the caller then answers with the request that holds it.
+    async fn enqueue_library_work_v2(
+        &self,
+        request: NewLibraryWork,
+        seed: super::scan_request_v2::ScanRequestV2Seed,
+    ) -> Result<EnqueueOutcome, StoreError>;
+    async fn scan_request_v2(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<super::scan_request_v2::ScanRequestV2>, StoreError>;
+    /// The request a creating key's idempotency key names, if any.
+    async fn scan_request_by_key(
+        &self,
+        key_hash: &str,
+        request_key: &str,
+    ) -> Result<Option<String>, StoreError>;
+    async fn set_scan_request_waiting_on(
+        &self,
+        request_id: &str,
+        waiting_on: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    /// Set `waiting_on` on every pending request of one library job.
+    async fn set_library_job_waiting_on(
+        &self,
+        job_id: &str,
+        waiting_on: &str,
+        now_ms: i64,
+    ) -> Result<u64, StoreError>;
+    async fn set_scan_request_files(
+        &self,
+        request_id: &str,
+        files: &[super::scan_request_v2::PlacedReport],
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
 
     async fn bind_library_job(&self, request: BindLibraryJob) -> Result<bool, StoreError>;
     async fn bind_transcode_job_recipe(
@@ -3174,6 +3211,50 @@ LIMIT 1
         request: CompleteLibraryWork,
     ) -> Result<bool, StoreError> {
         super::background_jobs_library::complete(self, request).await
+    }
+    async fn enqueue_library_work_v2(
+        &self,
+        request: NewLibraryWork,
+        seed: super::scan_request_v2::ScanRequestV2Seed,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        super::background_jobs_library::enqueue_with(self, request, Some(seed)).await
+    }
+    async fn scan_request_v2(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<super::scan_request_v2::ScanRequestV2>, StoreError> {
+        super::scan_request_v2::get(self, request_id).await
+    }
+    async fn scan_request_by_key(
+        &self,
+        key_hash: &str,
+        request_key: &str,
+    ) -> Result<Option<String>, StoreError> {
+        super::scan_request_v2::by_key(self, key_hash, request_key).await
+    }
+    async fn set_scan_request_waiting_on(
+        &self,
+        request_id: &str,
+        waiting_on: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::scan_request_v2::set_waiting_on(self, request_id, waiting_on, now_ms).await
+    }
+    async fn set_library_job_waiting_on(
+        &self,
+        job_id: &str,
+        waiting_on: &str,
+        now_ms: i64,
+    ) -> Result<u64, StoreError> {
+        super::scan_request_v2::set_job_waiting_on(self, job_id, waiting_on, now_ms).await
+    }
+    async fn set_scan_request_files(
+        &self,
+        request_id: &str,
+        files: &[super::scan_request_v2::PlacedReport],
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::scan_request_v2::set_files(self, request_id, files, now_ms).await
     }
 
     async fn bind_library_job(&self, request: BindLibraryJob) -> Result<bool, StoreError> {
