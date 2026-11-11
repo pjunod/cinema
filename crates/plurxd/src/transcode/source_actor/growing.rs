@@ -30,7 +30,7 @@ pub(crate) struct SourceGrowingBacking {
     pub(crate) request: SessionRequest,
     pub(crate) production: Arc<CopyRangeProduction>,
     pub(crate) delivery: Arc<crate::meter::Meter>,
-    activity:std::sync::Mutex<Instant>,
+    activity: std::sync::Mutex<Instant>,
     pub(crate) lifecycle: tokio::sync::Mutex<()>,
     pub(crate) control: tokio::sync::Mutex<super::control::GrowingControlState>,
     pub(crate) owners: Arc<SourceRenditionOwners>,
@@ -61,10 +61,23 @@ impl SourceGrowingBacking {
             && self.owners.contains_live_assignment(&self.assignment)
             && self.source.unchanged()
     }
-    pub(crate) fn note_activity(&self){*self.activity.lock().expect("Source growing activity")=Instant::now();}
-    fn activity_expired(&self)->bool{self.activity.lock().expect("Source growing activity").elapsed()>=Duration::from_millis(u64::from(crate::playback_control::ROLLING_LEASE_TIMEOUT_MS))}
-    pub(crate) async fn observe_demand(&self,demand:crate::playback_control::PlaybackDemandSnapshot)->Result<(),String>{
-        self.note_activity();let watermarks=rolling_source_watermarks(demand.playback_rate.clamp(0.25,4.0));self.production.observe_demand(demand,watermarks).await
+    pub(crate) fn note_activity(&self) {
+        *self.activity.lock().expect("Source growing activity") = Instant::now();
+    }
+    fn activity_expired(&self) -> bool {
+        self.activity
+            .lock()
+            .expect("Source growing activity")
+            .elapsed()
+            >= Duration::from_millis(u64::from(crate::playback_control::ROLLING_LEASE_TIMEOUT_MS))
+    }
+    pub(crate) async fn observe_demand(
+        &self,
+        demand: crate::playback_control::PlaybackDemandSnapshot,
+    ) -> Result<(), String> {
+        self.note_activity();
+        let watermarks = rolling_source_watermarks(demand.playback_rate.clamp(0.25, 4.0));
+        self.production.observe_demand(demand, watermarks).await
     }
     pub(crate) fn retire(&self) {
         self.production.retire();
@@ -572,8 +585,15 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
-        let seek_bootstrap=match input.seal_seek_bootstrap_limit(crate::copyrange::SOURCE_SEEK_BOOTSTRAP_BYTES){Ok(handle)=>handle,Err(_)=>{let _=input.close_and_wait().await;return Err(SourceWorkerError::Unavailable);}};
-        let observer=input.observer();
+        let seek_bootstrap =
+            match input.seal_seek_bootstrap_limit(crate::copyrange::SOURCE_SEEK_BOOTSTRAP_BYTES) {
+                Ok(handle) => handle,
+                Err(_) => {
+                    let _ = input.close_and_wait().await;
+                    return Err(SourceWorkerError::Unavailable);
+                }
+            };
+        let observer = input.observer();
         owners.set_source_observer(1, observer.clone());
         let running = spawn_source_generation(
             input,
@@ -587,14 +607,24 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
-        let production = CopyRangeProduction::start(files, running, mux, census, 0,observer,(prepared.request().start_seconds*1000.0).round().max(0.0) as i64,rolling_source_watermarks(1.0),seek_bootstrap);
+        let production = CopyRangeProduction::start(
+            files,
+            running,
+            mux,
+            census,
+            0,
+            observer,
+            (prepared.request().start_seconds * 1000.0).round().max(0.0) as i64,
+            rolling_source_watermarks(1.0),
+            seek_bootstrap,
+        );
         let backing = Arc::new(SourceGrowingBacking {
             session_id,
             file,
             request: prepared.request().clone(),
             production,
             delivery: Arc::new(crate::meter::Meter::for_method("copy")),
-            activity:std::sync::Mutex::new(Instant::now()),
+            activity: std::sync::Mutex::new(Instant::now()),
             lifecycle: tokio::sync::Mutex::new(()),
             control: Default::default(),
             owners,

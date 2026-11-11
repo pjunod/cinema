@@ -63,15 +63,25 @@ impl SourceResourceReadCustody {
         }
         let file = directory.open_read_child(name).await?;
         let file = file.into_std().await;
-        let custody=self.clone();
-        let (file,len)=tokio::task::spawn_blocking(move || {
+        let custody = self.clone();
+        let (file, len) = tokio::task::spawn_blocking(move || {
             custody.hooks.slot.get().opened(&file);
-            let metadata=file.metadata()?;
-            if !metadata.is_file() || custody.guard.source.as_ref().is_none_or(|source|!source.unchanged()) {
-                return Err(std::io::Error::other("Source resource changed during observation"));
+            let metadata = file.metadata()?;
+            if !metadata.is_file()
+                || custody
+                    .guard
+                    .source
+                    .as_ref()
+                    .is_none_or(|source| !source.unchanged())
+            {
+                return Err(std::io::Error::other(
+                    "Source resource changed during observation",
+                ));
             }
-            Ok((file,metadata.len()))
-        }).await.map_err(|_|std::io::Error::other("Source resource observation job failed"))??;
+            Ok((file, metadata.len()))
+        })
+        .await
+        .map_err(|_| std::io::Error::other("Source resource observation job failed"))??;
         Ok(crate::vodserve::SegmentReady {
             observed_media_duration_ms: None,
             retained_lease: None,

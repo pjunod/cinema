@@ -27,4 +27,6 @@ mod production;
 pub(crate) use production::CopyRangeProduction;
 
 #[cfg(unix)]
-pub(crate) const SOURCE_SEEK_BOOTSTRAP_BYTES:u64 = observed::MAX_HELD as u64 + plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64 + census::MAX_CENSUS_SOURCE_BYTES;
+pub(crate) const SOURCE_SEEK_BOOTSTRAP_BYTES: u64 = observed::MAX_HELD as u64
+    + plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64
+    + census::MAX_CENSUS_SOURCE_BYTES;

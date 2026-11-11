@@ -683,30 +683,47 @@ fn publication_body(request: &PublishCopyIndexV3) -> Result<serde_json::Value, S
     request.token.validate()?;
     request.artifact.validate()?;
     if !metadata_shape_valid(&request.source, &request.claim, request.now_ms)
-        || request.expected_head_epoch < 0 || request.artifact.file_id != request.source.file_id
-        || request.artifact.contract_version != request.source.contract_version {
+        || request.expected_head_epoch < 0
+        || request.artifact.file_id != request.source.file_id
+        || request.artifact.contract_version != request.source.contract_version
+    {
         return Err(invalid());
     }
     let artifact = &request.artifact;
     let source_key = copy_index_v3_source_key(&artifact.catalog_namespace, &request.source)?;
     let logical_key = super::fragment_index_cluster::cluster_fragment_index_v3_key(
-        &artifact.catalog_namespace, artifact.file_id, &artifact.source_sha256,
+        &artifact.catalog_namespace,
+        artifact.file_id,
+        &artifact.source_sha256,
         &super::fragment_index_cluster::FragmentIndexOutputIdentity {
             contract_version: artifact.contract_version,
             keyframe_table_sha256: artifact.output_contract_sha256.clone(),
         },
-    ).ok_or_else(invalid)?;
-    if logical_key != artifact.contract_key { return Err(invalid()); }
+    )
+    .ok_or_else(invalid)?;
+    if logical_key != artifact.contract_key {
+        return Err(invalid());
+    }
     let payload = super::background_jobs::JobPayload::FragmentIndexPublish {
-        publication_version: 3, source_key: source_key.clone(),
-        catalog_namespace: artifact.catalog_namespace.clone(), init_contract_sha256: artifact.init_contract_sha256.clone(),
-        expected_head_epoch: request.expected_head_epoch, file_id: request.source.file_id,
-        source_size: request.source.source_size, source_mtime: request.source.source_mtime,
-        origin_node_id: request.source.origin_node_id.clone(), object_version: request.source.object_version.clone(),
-        coordinator_request_id: request.claim.request_id.clone(), coordinator_fence: request.claim.fence,
-        requested_generation: request.source.requested_generation.clone(), contract_version: artifact.contract_version,
-        output_contract_sha256: artifact.output_contract_sha256.clone(), source_sha256: artifact.source_sha256.clone(),
-        blob_sha256: artifact.blob_sha256.clone(), bytes: artifact.bytes, cache_key: logical_key.clone(),
+        publication_version: 3,
+        source_key: source_key.clone(),
+        catalog_namespace: artifact.catalog_namespace.clone(),
+        init_contract_sha256: artifact.init_contract_sha256.clone(),
+        expected_head_epoch: request.expected_head_epoch,
+        file_id: request.source.file_id,
+        source_size: request.source.source_size,
+        source_mtime: request.source.source_mtime,
+        origin_node_id: request.source.origin_node_id.clone(),
+        object_version: request.source.object_version.clone(),
+        coordinator_request_id: request.claim.request_id.clone(),
+        coordinator_fence: request.claim.fence,
+        requested_generation: request.source.requested_generation.clone(),
+        contract_version: artifact.contract_version,
+        output_contract_sha256: artifact.output_contract_sha256.clone(),
+        source_sha256: artifact.source_sha256.clone(),
+        blob_sha256: artifact.blob_sha256.clone(),
+        bytes: artifact.bytes,
+        cache_key: logical_key.clone(),
         producer_engine_sha256: artifact.producer_engine_sha256.clone(),
     };
     payload.validate()?;
@@ -730,7 +747,8 @@ fn publication_body(request: &PublishCopyIndexV3) -> Result<serde_json::Value, S
 }
 
 pub(super) async fn publish<T: super::background_jobs::QueueSql>(
-    store: &T, request: PublishCopyIndexV3,
+    store: &T,
+    request: PublishCopyIndexV3,
 ) -> Result<super::background_jobs::JobPublishOutcome, StoreError> {
     let body = super::background_jobs::encode(&publication_body(&request)?)?;
     let rows = store.queue_sql(publication_sql(), body, true, true).await?;
@@ -740,7 +758,8 @@ pub(super) async fn publish<T: super::background_jobs::QueueSql>(
 fn publication_sql() -> String {
     let metadata = super::analysis_coordination::metadata_owned_condition();
     let source_head = head_source_condition();
-    format!(r#"
+    format!(
+        r#"
 WITH input AS (SELECT json($1) AS body), snapshot AS (
  SELECT body, job.id, job.state, job.result_ref,
  CASE WHEN job.kind='fragment_index_publish' AND job.payload_version=1 AND job.state='running'
@@ -806,5 +825,6 @@ INSERT INTO background_job_commands(id,operation,request_json,result_json)
   CASE WHEN outcome IN ('published','already_published') THEN json_object('outcome',outcome,'job_id',id,
     'result_ref',(CASE WHEN outcome='already_published' THEN result_ref ELSE output END)||'')
    ELSE json_object('outcome',outcome) END FROM classified RETURNING result_json
-"#)
+"#
+    )
 }

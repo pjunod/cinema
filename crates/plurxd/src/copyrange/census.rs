@@ -33,8 +33,18 @@ pub(crate) struct CopyClockCensus {
     pub(crate) promotion: PromotionInputs,
 }
 impl CopyClockCensus {
-    pub(crate) fn verify_seek_landing(&self,packet:SourcePacketObservation,wanted_ms:i64)->Result<(),String>{
-        verify_seek_landing(self.first_dts,self.first_pts,self.format_start,packet,wanted_ms)
+    pub(crate) fn verify_seek_landing(
+        &self,
+        packet: SourcePacketObservation,
+        wanted_ms: i64,
+    ) -> Result<(), String> {
+        verify_seek_landing(
+            self.first_dts,
+            self.first_pts,
+            self.format_start,
+            packet,
+            wanted_ms,
+        )
     }
     /// The canonical row is clock-associated, not a timestamp read from a
     /// rebased output. Keep exact rational arithmetic until the wire's final
@@ -46,67 +56,116 @@ impl CopyClockCensus {
         av_dts: u64,
         timescale: u32,
     ) -> Result<i64, String> {
-        project_media_origin_ms(self.first_dts,self.format_start,canonical_dts,canonical_title_start,av_dts,timescale)
+        project_media_origin_ms(
+            self.first_dts,
+            self.format_start,
+            canonical_dts,
+            canonical_title_start,
+            av_dts,
+            timescale,
+        )
     }
 }
-fn project_media_origin_ms(first_dts:SourceTimestamp,format_start:Option<SourceTimestamp>,canonical_dts:u64,canonical_title_start:u64,av_dts:u64,timescale:u32)->Result<i64,String>{
-        if timescale == 0 {
-            return Err("copy_clock_invalid".into());
-        }
-        let format = format_start.ok_or("copy_format_start_unknown")?;
-        let source = i128::from(first_dts.dts)
-            .checked_mul(i128::from(first_dts.time_base_num))
-            .and_then(|value| value.checked_mul(i128::from(timescale)))
-            .and_then(|value| value.checked_mul(i128::from(format.time_base_den)))
-            .ok_or("copy_clock_overflow")?;
-        let delta = i128::from(canonical_dts)
-            .checked_sub(i128::from(canonical_title_start))
-            .and_then(|value| value.checked_sub(i128::from(av_dts)))
-            .and_then(|value| value.checked_mul(i128::from(first_dts.time_base_den)))
-            .and_then(|value| value.checked_mul(i128::from(format.time_base_den)))
-            .ok_or("copy_clock_overflow")?;
-        let zero = i128::from(format.dts)
-            .checked_mul(i128::from(format.time_base_num))
-            .and_then(|value| value.checked_mul(i128::from(first_dts.time_base_den)))
-            .and_then(|value| value.checked_mul(i128::from(timescale)))
-            .ok_or("copy_clock_overflow")?;
-        let numerator = source
-            .checked_add(delta)
-            .and_then(|value| value.checked_sub(zero))
-            .and_then(|value| value.checked_mul(1000))
-            .ok_or("copy_clock_overflow")?;
-        let denominator = i128::from(first_dts.time_base_den)
-            .checked_mul(i128::from(timescale))
-            .and_then(|value| value.checked_mul(i128::from(format.time_base_den)))
-            .ok_or("copy_clock_overflow")?;
-        let millis = numerator
-            .checked_div(denominator)
-            .ok_or("copy_clock_overflow")?;
-        if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&millis) {
-            return Err("copy_clock_overflow".into());
-        }
-        i64::try_from(millis).map_err(|_| "copy_clock_overflow".into())
-
+fn project_media_origin_ms(
+    first_dts: SourceTimestamp,
+    format_start: Option<SourceTimestamp>,
+    canonical_dts: u64,
+    canonical_title_start: u64,
+    av_dts: u64,
+    timescale: u32,
+) -> Result<i64, String> {
+    if timescale == 0 {
+        return Err("copy_clock_invalid".into());
+    }
+    let format = format_start.ok_or("copy_format_start_unknown")?;
+    let source = i128::from(first_dts.dts)
+        .checked_mul(i128::from(first_dts.time_base_num))
+        .and_then(|value| value.checked_mul(i128::from(timescale)))
+        .and_then(|value| value.checked_mul(i128::from(format.time_base_den)))
+        .ok_or("copy_clock_overflow")?;
+    let delta = i128::from(canonical_dts)
+        .checked_sub(i128::from(canonical_title_start))
+        .and_then(|value| value.checked_sub(i128::from(av_dts)))
+        .and_then(|value| value.checked_mul(i128::from(first_dts.time_base_den)))
+        .and_then(|value| value.checked_mul(i128::from(format.time_base_den)))
+        .ok_or("copy_clock_overflow")?;
+    let zero = i128::from(format.dts)
+        .checked_mul(i128::from(format.time_base_num))
+        .and_then(|value| value.checked_mul(i128::from(first_dts.time_base_den)))
+        .and_then(|value| value.checked_mul(i128::from(timescale)))
+        .ok_or("copy_clock_overflow")?;
+    let numerator = source
+        .checked_add(delta)
+        .and_then(|value| value.checked_sub(zero))
+        .and_then(|value| value.checked_mul(1000))
+        .ok_or("copy_clock_overflow")?;
+    let denominator = i128::from(first_dts.time_base_den)
+        .checked_mul(i128::from(timescale))
+        .and_then(|value| value.checked_mul(i128::from(format.time_base_den)))
+        .ok_or("copy_clock_overflow")?;
+    let millis = numerator
+        .checked_div(denominator)
+        .ok_or("copy_clock_overflow")?;
+    if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&millis) {
+        return Err("copy_clock_overflow".into());
+    }
+    i64::try_from(millis).map_err(|_| "copy_clock_overflow".into())
 }
 
-fn verify_seek_landing(first_dts:SourceTimestamp,first_pts:i64,format:Option<SourceTimestamp>,packet:SourcePacketObservation,wanted_ms:i64)->Result<(),String>{
-    let failed=||"copy_sync_unverified".to_owned();
-    let format=format.ok_or_else(failed)?;
-    if wanted_ms<0 || packet.flags&1==0 || packet.time_base_num!=first_dts.time_base_num || packet.time_base_den!=first_dts.time_base_den || packet.time_base_num==0 || packet.time_base_den==0 || format.time_base_num==0 || format.time_base_den==0{return Err(failed());}
-    let denominator=i128::from(packet.time_base_den).checked_mul(i128::from(format.time_base_den)).ok_or_else(failed)?;
-    let film_pts=|pts:i64|->Result<i128,String>{
-        i128::from(pts).checked_mul(i128::from(packet.time_base_num)).and_then(|value|value.checked_mul(i128::from(format.time_base_den)))
-            .and_then(|value|i128::from(format.dts).checked_mul(i128::from(format.time_base_num)).and_then(|zero|zero.checked_mul(i128::from(packet.time_base_den))).and_then(|zero|value.checked_sub(zero)))
-            .and_then(|value|value.checked_mul(1000)).ok_or_else(failed)
-    };
-    let wanted=i128::from(wanted_ms).checked_mul(denominator).ok_or_else(failed)?;
-    if wanted<film_pts(first_pts)? {
-        if packet.dts==first_dts.dts && packet.pts==first_pts{return Ok(());}
+fn verify_seek_landing(
+    first_dts: SourceTimestamp,
+    first_pts: i64,
+    format: Option<SourceTimestamp>,
+    packet: SourcePacketObservation,
+    wanted_ms: i64,
+) -> Result<(), String> {
+    let failed = || "copy_sync_unverified".to_owned();
+    let format = format.ok_or_else(failed)?;
+    if wanted_ms < 0
+        || packet.flags & 1 == 0
+        || packet.time_base_num != first_dts.time_base_num
+        || packet.time_base_den != first_dts.time_base_den
+        || packet.time_base_num == 0
+        || packet.time_base_den == 0
+        || format.time_base_num == 0
+        || format.time_base_den == 0
+    {
         return Err(failed());
     }
-    let difference=wanted.checked_sub(film_pts(packet.pts)?).ok_or_else(failed)?;
-    let maximum=denominator.checked_mul(i128::from(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS)*1000).ok_or_else(failed)?;
-    if difference<0 || difference>maximum{return Err(failed());}
+    let denominator = i128::from(packet.time_base_den)
+        .checked_mul(i128::from(format.time_base_den))
+        .ok_or_else(failed)?;
+    let film_pts = |pts: i64| -> Result<i128, String> {
+        i128::from(pts)
+            .checked_mul(i128::from(packet.time_base_num))
+            .and_then(|value| value.checked_mul(i128::from(format.time_base_den)))
+            .and_then(|value| {
+                i128::from(format.dts)
+                    .checked_mul(i128::from(format.time_base_num))
+                    .and_then(|zero| zero.checked_mul(i128::from(packet.time_base_den)))
+                    .and_then(|zero| value.checked_sub(zero))
+            })
+            .and_then(|value| value.checked_mul(1000))
+            .ok_or_else(failed)
+    };
+    let wanted = i128::from(wanted_ms)
+        .checked_mul(denominator)
+        .ok_or_else(failed)?;
+    if wanted < film_pts(first_pts)? {
+        if packet.dts == first_dts.dts && packet.pts == first_pts {
+            return Ok(());
+        }
+        return Err(failed());
+    }
+    let difference = wanted
+        .checked_sub(film_pts(packet.pts)?)
+        .ok_or_else(failed)?;
+    let maximum = denominator
+        .checked_mul(i128::from(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS) * 1000)
+        .ok_or_else(failed)?;
+    if difference < 0 || difference > maximum {
+        return Err(failed());
+    }
     Ok(())
 }
 
@@ -313,33 +372,98 @@ pub(crate) async fn run_source_census(
 #[cfg(test)]
 mod clock_projection_tests {
     use super::*;
-    fn stamp(dts:i64,num:u32,den:u32)->SourceTimestamp{SourceTimestamp{dts,time_base_num:num,time_base_den:den}}
-    #[test]
-    fn signed_origin_uses_container_zero_and_canonical_dts_not_video_pts(){
-        assert_eq!(project_media_origin_ms(stamp(-7500,1,90000),Some(stamp(0,1,1000000)),0,0,0,90000).unwrap(),-83);
-        assert_eq!(project_media_origin_ms(stamp(-7500,1,90000),Some(stamp(-21333,1,1000000)),0,0,0,90000).unwrap(),-62);
-        assert_eq!(project_media_origin_ms(stamp(-7500,1,90000),None,0,0,0,90000).unwrap_err(),"copy_format_start_unknown");
+    fn stamp(dts: i64, num: u32, den: u32) -> SourceTimestamp {
+        SourceTimestamp {
+            dts,
+            time_base_num: num,
+            time_base_den: den,
+        }
     }
     #[test]
-    fn nonzero_seek_and_av_tfdt_are_independent_rational_coordinates(){
-        let source=stamp(-7500,1,90000);let format=Some(stamp(0,1,1000000));
-        assert_eq!(project_media_origin_ms(source,format,486000000,0,0,90000).unwrap(),5399916);
-        assert_eq!(project_media_origin_ms(source,format,486000000,0,486000000,90000).unwrap(),-83);
-        assert!(project_media_origin_ms(source,format,0,0,0,0).is_err());
-        assert!(project_media_origin_ms(stamp(i64::MAX,u32::MAX,u32::MAX),Some(stamp(0,1,u32::MAX)),u64::MAX,0,0,u32::MAX).is_err());
+    fn signed_origin_uses_container_zero_and_canonical_dts_not_video_pts() {
+        assert_eq!(
+            project_media_origin_ms(
+                stamp(-7500, 1, 90000),
+                Some(stamp(0, 1, 1000000)),
+                0,
+                0,
+                0,
+                90000
+            )
+            .unwrap(),
+            -83
+        );
+        assert_eq!(
+            project_media_origin_ms(
+                stamp(-7500, 1, 90000),
+                Some(stamp(-21333, 1, 1000000)),
+                0,
+                0,
+                0,
+                90000
+            )
+            .unwrap(),
+            -62
+        );
+        assert_eq!(
+            project_media_origin_ms(stamp(-7500, 1, 90000), None, 0, 0, 0, 90000).unwrap_err(),
+            "copy_format_start_unknown"
+        );
     }
     #[test]
-    fn seek_landing_is_bounded_in_format_film_pts_and_delayed_video_needs_exact_head(){
-        let first=stamp(-80,1,1000);let format=Some(stamp(0,1,1000000));
-        let mut packet=SourcePacketObservation{sequence:0,dts:5399920,pts:5400000,duration:40,size:100,checksum:0,side_data_count:0,time_base_num:1,time_base_den:1000,flags:1};
-        assert!(verify_seek_landing(first,0,format,packet,5400000).is_ok());
-        packet.pts=5384000;assert!(verify_seek_landing(first,0,format,packet,5400000).is_ok());
-        packet.pts=5383999;assert!(verify_seek_landing(first,0,format,packet,5400000).is_err());
-        packet.pts=5400001;assert!(verify_seek_landing(first,0,format,packet,5400000).is_err());
-        packet.dts=9920;packet.pts=10000;let delayed=stamp(9920,1,1000);
-        assert!(verify_seek_landing(delayed,10000,format,packet,0).is_ok());
-        packet.dts+=1;assert!(verify_seek_landing(delayed,10000,format,packet,0).is_err());
-        packet.dts=9920;packet.flags=0;assert!(verify_seek_landing(delayed,10000,format,packet,0).is_err());
+    fn nonzero_seek_and_av_tfdt_are_independent_rational_coordinates() {
+        let source = stamp(-7500, 1, 90000);
+        let format = Some(stamp(0, 1, 1000000));
+        assert_eq!(
+            project_media_origin_ms(source, format, 486000000, 0, 0, 90000).unwrap(),
+            5399916
+        );
+        assert_eq!(
+            project_media_origin_ms(source, format, 486000000, 0, 486000000, 90000).unwrap(),
+            -83
+        );
+        assert!(project_media_origin_ms(source, format, 0, 0, 0, 0).is_err());
+        assert!(project_media_origin_ms(
+            stamp(i64::MAX, u32::MAX, u32::MAX),
+            Some(stamp(0, 1, u32::MAX)),
+            u64::MAX,
+            0,
+            0,
+            u32::MAX
+        )
+        .is_err());
     }
-
+    #[test]
+    fn seek_landing_is_bounded_in_format_film_pts_and_delayed_video_needs_exact_head() {
+        let first = stamp(-80, 1, 1000);
+        let format = Some(stamp(0, 1, 1000000));
+        let mut packet = SourcePacketObservation {
+            sequence: 0,
+            dts: 5399920,
+            pts: 5400000,
+            duration: 40,
+            size: 100,
+            checksum: 0,
+            side_data_count: 0,
+            time_base_num: 1,
+            time_base_den: 1000,
+            flags: 1,
+        };
+        assert!(verify_seek_landing(first, 0, format, packet, 5400000).is_ok());
+        packet.pts = 5384000;
+        assert!(verify_seek_landing(first, 0, format, packet, 5400000).is_ok());
+        packet.pts = 5383999;
+        assert!(verify_seek_landing(first, 0, format, packet, 5400000).is_err());
+        packet.pts = 5400001;
+        assert!(verify_seek_landing(first, 0, format, packet, 5400000).is_err());
+        packet.dts = 9920;
+        packet.pts = 10000;
+        let delayed = stamp(9920, 1, 1000);
+        assert!(verify_seek_landing(delayed, 10000, format, packet, 0).is_ok());
+        packet.dts += 1;
+        assert!(verify_seek_landing(delayed, 10000, format, packet, 0).is_err());
+        packet.dts = 9920;
+        packet.flags = 0;
+        assert!(verify_seek_landing(delayed, 10000, format, packet, 0).is_err());
+    }
 }

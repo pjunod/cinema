@@ -18,7 +18,6 @@ use super::background_jobs_delivery::{DELIVERIES_SQL, WAITERS_SQL};
 pub use super::background_jobs_domain::BindLibraryJob;
 use super::background_jobs_fragment::PUBLISH_FRAGMENT_SQL;
 pub use super::background_jobs_fragment::{FragmentJobFailure, PublishFragmentJob};
-pub use super::copy_index_v3::PublishCopyIndexV3;
 pub use super::background_jobs_fragment_admission::EnqueueFragmentJob;
 pub use super::background_jobs_library::{
     CompleteLibraryWork, LibraryWorkQuery, LibraryWorkRecord, NewLibraryWork,
@@ -38,6 +37,7 @@ use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
 pub use super::background_jobs_publication::{
     JobPublishOutcome, PublishTranscodeJob, TranscodeJobOutput,
 };
+pub use super::copy_index_v3::PublishCopyIndexV3;
 pub use super::copy_index_v3::QuarantineCopyIndexV3Head;
 use crate::error::StoreError;
 

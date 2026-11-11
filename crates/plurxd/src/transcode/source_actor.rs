@@ -240,13 +240,23 @@ pub(crate) enum SourceWorkerError {
 }
 
 impl SourceWorkerError {
-    pub(super) fn copy_failure(code:&str)->Self {
+    pub(super) fn copy_failure(code: &str) -> Self {
         match code {
-            "copy_target_exceeded"=>Self::CopyTargetExceeded,
-            "copy_sync_unverified"=>Self::CopySyncUnverified,
-            "copy_init_contract_changed"|"copy_head_init_changed"=>Self::CopyInitContractChanged,
-            "copy_clock_unknown"|"copy_format_start_unknown"|"copy_clock_invalid"|"copy_clock_overflow"|"copy_head_clock_invalid"|"copy_head_clock_missing"|"copy_head_clock_sample_mismatch"|"copy_head_clock_truncated"|"copy_head_not_sync"=>Self::CopyClockUnknown,
-            _=>Self::Unavailable,
+            "copy_target_exceeded" => Self::CopyTargetExceeded,
+            "copy_sync_unverified" => Self::CopySyncUnverified,
+            "copy_init_contract_changed" | "copy_head_init_changed" => {
+                Self::CopyInitContractChanged
+            }
+            "copy_clock_unknown"
+            | "copy_format_start_unknown"
+            | "copy_clock_invalid"
+            | "copy_clock_overflow"
+            | "copy_head_clock_invalid"
+            | "copy_head_clock_missing"
+            | "copy_head_clock_sample_mismatch"
+            | "copy_head_clock_truncated"
+            | "copy_head_not_sync" => Self::CopyClockUnknown,
+            _ => Self::Unavailable,
         }
     }
 }
@@ -2098,9 +2108,22 @@ impl TranscodeManager {
         }
         #[cfg(unix)]
         {
-            let backing=owner.state.lock().expect("Source worker state").backing.clone();
-            if let SourceBacking::Growing(backing)=backing {
-                if backing.production.files.lock().await.retire_payload().await.is_err(){
+            let backing = owner
+                .state
+                .lock()
+                .expect("Source worker state")
+                .backing
+                .clone();
+            if let SourceBacking::Growing(backing) = backing {
+                if backing
+                    .production
+                    .files
+                    .lock()
+                    .await
+                    .retire_payload()
+                    .await
+                    .is_err()
+                {
                     tracing::warn!(target:"plurxd::transcode","Source payload cache retirement remains incomplete after physical/body settlement");
                 }
             }
