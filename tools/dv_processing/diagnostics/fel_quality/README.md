@@ -19,6 +19,9 @@ locations. Media, decoded frames and binaries stay outside Git.
 | `score_collections.py` | Hash/clock-bound 48-frame collection scoring, luminance strata and black-floor sensitivity. |
 | `prepare_author_request.py` | Preserve actual encoded native packet clocks and ordered RPU hashes when preparing the frozen Rust-author request. |
 | `audit_picture_payload.py` | Check all 48 coded-picture NAL sequences and clocks survive authoring; no presentation claim. |
+| `qualify_spatial_control.py` | Author, VCL/RPU/clock, native-frame and colour checks for a finished control, plus the AQ log tuple and SPS/PPS-derived effective QP-group receipts. |
+| `roi_encode.c` | In-process libavcodec/libx265 encode carrying a per-frame quantOffsets map as ROI side data; options pass verbatim as one dictionary. |
+| `encode_roi_control.py` | Translates a retained CLI recipe into the ROI harness, runs the byte-identity gates and the predeclared source-luma map arm. |
 | `encode_spatial_control.py` | Fixed qg-size8 spatial-allocation control at the retained single-pass115/125 budget. |
 | `encode_two_pass_control.py` | Two-pass allocation control with fresh 48-record statistics and identical requested coding settings across passes. |
 | `encode_quantization_control.py` | Fixed RDOQ/psy-RDOQ control, separate output root; protocol committed before its results. |

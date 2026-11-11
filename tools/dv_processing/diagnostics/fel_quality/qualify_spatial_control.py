@@ -71,12 +71,19 @@ def qp_group(lines, label):
 
 
 recipe = json.loads(Path(str(base) + '-recipe.json').read_text())
-assert recipe['status'] == 'encoded' and recipe['qg_size'] == a.qg_size and recipe['variant'] == variant
+assert recipe['status'] == 'encoded' and recipe.get('qg_size', 32) == a.qg_size and recipe['variant'] == variant
 input_mp4 = Path(str(base) + '-hdr.mp4'); output = Path(str(base) + '-rust-p81.mp4')
 assert sha(input_mp4) == recipe['sha256']
 log = Path(str(base) + '-encode.log').read_text()
-assert '48 frames decoded' in log and '48 frames encoded' in log and 'aq-mode=2' in ' '.join(recipe['argv'])
-assert f':qg-size={a.qg_size}' in ' '.join(recipe['argv'])
+joined = ' '.join(recipe['argv'])
+if 'harness' in recipe:
+    # In-process ROI harness (encode_roi_control.py): frame counts come from its own map receipt.
+    assert recipe['map']['encoded_frames'] == recipe['map']['packets'] == 48 and len(recipe['map']['frames']) == 48
+    assert recipe['unused_encoder_options']['equal']
+else:
+    assert '48 frames decoded' in log and '48 frames encoded' in log
+assert 'aq-mode=2' in joined
+assert f':qg-size={a.qg_size}' in joined or (a.qg_size == 32 and 'qg-size' not in joined), 'requested qg-size not in argv'
 
 # Receipt 1: exact AQ tuple reported by the encoder itself.
 aq = re.findall(r'AQ: mode / str / qg-size / cu-tree\s*:\s*(\d+) / ([0-9.]+) / (\d+) / (\d+)', log)
