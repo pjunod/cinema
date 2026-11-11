@@ -11,8 +11,9 @@ bump may break compatibility and a **patch** bump never does.
 ### Fixed
 
 - CM4 display mapping uses the RPU's active picture boundary for spatial
-  filtering and writes PQ black outside it, keeping letterbox bars from
-  brightening the first and last active rows or side edges.
+  filtering, keeping letterbox bars from brightening the first and last
+  active rows or side edges. Pixels outside the boundary are still mapped,
+  so subtitles in the bars and picture under a wrong boundary are kept.
 - Linux Cinema now defaults to the system mpv and no longer ships a duplicate
   renderer, so qualified system HDR/DV updates reach Cinema. Explicit binary
   overrides, isolated configuration and Cinema controls remain available.

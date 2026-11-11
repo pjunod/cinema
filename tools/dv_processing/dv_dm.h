@@ -57,6 +57,13 @@ static inline bool dv_dm_active_rect(const dv_dm_frame *f, int w, int h, dv_dm_r
   return true;
 }
 
+// True only for a valid partial CM4 active area: the one case that selects the
+// boundary-aware shaders. No L5, zero or full-frame L5 and every CM v2.9 frame
+// return false and keep the original full-frame literals.
+static inline bool dv_dm_active_cm4(const dv_dm_frame *f, const dv_dm_rect *r, int w, int h) {
+  return f->algo == 4 && (r->x0 || r->y0 || r->x1 != w || r->y1 != h);
+}
+
 // Preset target displays referenced by L8 target_display_index (no L10 needed).
 static inline bool dv_dm_preset(unsigned id, double *peak, double *min_nits, enum dm_prim *prim) {
   switch (id) {
@@ -252,10 +259,14 @@ static inline bool dv_dm_cpu_render(const dv_dm_frame *f, const float *in, int w
   dv_dm_rect active;
   if (!dv_dm_active_rect(f, w, h, &active)) return false;
   if ((size_t)w > SIZE_MAX / (size_t)h / (3 * sizeof(double))) return false;
-  if (f->algo == 4 && (active.x0 || active.y0 || active.x1 != w || active.y1 != h)) {
+  if (dv_dm_active_cm4(f, &active, w, h)) {
     // Reference definition: map the cropped active picture with the unchanged
-    // full-frame equations, then embed it in PQ black. This excludes bars from
-    // both separable spatial passes, including one-row/one-column pictures.
+    // full-frame equations. This excludes bars from both separable spatial
+    // passes, including one-row/one-column pictures. Pixels outside the active
+    // area keep their source content and take the pointwise mapping (no detail
+    // pass), so a stale or wrong L5 or picture in the bars (burned-in
+    // subtitles) is never erased, and black bars land on the target floor
+    // exactly as in-picture black does.
     int cw = active.x1 - active.x0, ch = active.y1 - active.y0;
     size_t bytes = (size_t)cw * ch * 4 * sizeof(float);
     float *crop = malloc(bytes), *mapped = malloc(bytes);
@@ -265,12 +276,10 @@ static inline bool dv_dm_cpu_render(const dv_dm_frame *f, const float *in, int w
              in + ((size_t)(y + active.y0) * w + active.x0) * 4,
              (size_t)cw * 4 * sizeof(float));
     dv_dm_frame full = *f; full.has_l5 = false;
-    bool ok = dv_dm_cpu_render(&full, crop, cw, ch, mapped);
+    dv_dm_frame point = full; point.weight = -1;
+    bool ok = dv_dm_cpu_render(&full, crop, cw, ch, mapped) &&
+              dv_dm_cpu_render(&point, in, w, h, out);
     if (ok) {
-      float black = (float)dm_pq_oetf(0.0);
-      for (size_t i = 0; i < (size_t)w * h; i++) {
-        out[4*i] = out[4*i+1] = out[4*i+2] = black; out[4*i+3] = 1;
-      }
       for (int y = 0; y < ch; y++)
         memcpy(out + ((size_t)(y + active.y0) * w + active.x0) * 4,
                mapped + (size_t)y * cw * 4, (size_t)cw * 4 * sizeof(float));
@@ -469,7 +478,7 @@ static const char dv_dm_body_final_cm4[] =   // pass 3: vertical, detail, finish
 static const char dv_dm_body_final_active_cm4[] =   // pass 3: vertical, detail, finish
   "ivec2 q=ivec2(gl_FragCoord.xy); vec3 rgb=texelFetch(master,q,0).rgb; float wgt=u[18].y;\n"
   "ivec4 a=ivec4(u[20]);\n"
-  "if(q.x<a.x || q.y<a.y || q.x>=a.z || q.y>=a.w){ color=vec4(vec3(7.309559025783966e-7),1.0); }else{\n"
+  "if(q.x<a.x || q.y<a.y || q.x>=a.z || q.y>=a.w){ vec3 res=c4finish(c4point(rgb)); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0); }else{\n"
   "float B1=0.0,dx1=0.0,dy1=0.0,B2=0.0,dx2=0.0,dy2=0.0;\n"
   "if(wgt>-1.0){\n"
   " for(int j=-2;j<=2;j++){ int y=clamp(q.y-j,a.y,a.w-1); vec4 t=texelFetch(hpass,ivec2(q.x,y),0); float g=GY[j+2], dg=-float(j)*g;\n"
@@ -530,7 +539,7 @@ static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_f
   // u[20] was unused. Full-frame/no-L5 keeps its old all-zero words; the
   // other colour/curve words remain unchanged.
   dv_dm_put(f->u[20], 0, 0, 0, 0);
-  bool active_cm4 = f->algo == 4 && (active.x0 || active.y0 || active.x1 != w || active.y1 != h);
+  bool active_cm4 = dv_dm_active_cm4(f, &active, w, h);
   if (active_cm4)
     dv_dm_put(f->u[20], active.x0, active.y0, active.x1, active.y1);
   if (!dv_dm_gpu.dispatch) dv_dm_gpu.dispatch = pl_dispatch_create(log, gpu);

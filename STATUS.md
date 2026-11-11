@@ -3,7 +3,7 @@
 **Updated:** 2026-11-11 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
-- **2026-11-11 · CM4 active-area fidelity:** [processing ledger](docs/streaming/DV_HDR_PROCESSING_STATUS.md). Owner Claude (claude-opus-5-5, session 01BCWLA2), taken over from Codex. PR #1481 constrains CM4 spatial filtering to the RPU L5 active picture and writes PQ black outside it; current main merged in. C/native compilation and three crop-domain CPU controls passed; unaffected routes keep their original shader literals. GPU parity and full picture/display/performance acceptance stay open.
+- **2026-11-11 · CM4 active-area fidelity:** [processing ledger](docs/streaming/DV_HDR_PROCESSING_STATUS.md). Owner Claude (claude-opus-5-5, session 01BCWLA2), taken over from Codex. PR #1481 constrains CM4 spatial filtering to the RPU L5 active picture; bars keep their content under the pointwise mapping (revised after adversarial review). Current main merged in. C/native compilation and three crop-domain CPU controls passed; unaffected routes keep their original shader literals. GPU parity and full picture/display/performance acceptance stay open.
 - **2026-11-09 · HDR enhancement source budget:** [scope and validation](docs/streaming/HDR-ENHANCEMENT-SOURCE-BUDGET.md). Owner Codex. Independent current-main port preserves measured Original video budgets and exact backend-bound FEL recipes while retaining current source custody and post-first-frame upgrades. Fresh compiler checks and all 39 focused Rust regressions pass; PR #1477 merged after the applicable current-head fast lane passed. Picture fidelity and deployment remain open.
 
 ## 2026-11-09 · Cinema uses the system renderer
