@@ -9,14 +9,14 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | File | Answers | |
 |---|---|---|
 | [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
-| [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract for Opus: all nine lanes. | open |
-| [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 contract: one claim, sparse copy, v3 identity. | open |
-| [PLAYBACK-START-A1-NEXT.md](PLAYBACK-START-A1-NEXT.md) | A1/B1 after the first merge: gap fill, HDR10 seal, v3 consumer, quarantine, local. | open |
+| [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract (nine lanes). | open |
+| [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 contract: one claim, sparse copy, v3. | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
-| [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Playback-start effort: rulings, lanes, reviews, lane status. | open |
-| [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions; current state is in the plan. | live |
+| [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Effort plan: rulings, lanes, reviews, status. | open |
+| [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |
 | [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
 | [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, implementation, retained evidence and merge prerequisites. | built |
+| [SHARED-SUBTITLE-CUSTODY-AND-START-503.md](SHARED-SUBTITLE-CUSTODY-AND-START-503.md) | S5 Source-owned caption windows, custody initialization race and follow-up qualification. | done |
 | [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold publication and Resume fault repair: review and merge ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs; review and acceptance. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |

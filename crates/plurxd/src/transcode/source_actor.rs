@@ -320,7 +320,7 @@ pub(super) struct SourceWorkerRegistry {
     entries: std::sync::Mutex<Vec<Arc<SourceViewerInner>>>,
     index_hooks: Arc<crate::fragindex::SourceIndexHookOwner>,
     probe_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
-    native_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
+    pub(super) native_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
 }
 struct SourceViewerInner {
     control_target_duration_ms: i64,
@@ -341,7 +341,6 @@ struct SourceViewerInner {
 struct SourcePreparationSettlements {
     index: Option<crate::fragindex::SourceIndexSettlement>,
     probe: Option<super::source_preparation::SourceProbeSettlement>,
-    native: Option<super::source_subtitles::SourceNativeSettlement>,
 }
 impl SourcePreparationSettlements {
     fn matches(&self, assignment: &SourceDispatchAssignment) -> bool {
@@ -350,10 +349,6 @@ impl SourcePreparationSettlements {
             .is_none_or(|receipt| receipt.matches(assignment))
             && self
                 .probe
-                .as_ref()
-                .is_none_or(|receipt| receipt.matches(assignment))
-            && self
-                .native
                 .as_ref()
                 .is_none_or(|receipt| receipt.matches(assignment))
     }
@@ -669,6 +664,35 @@ impl SourceViewerActor {
         }
         Ok((response, guard))
     }
+    /// Actual selected-caption work shares the control's counted physical
+    /// guard. Its HTTP observer may leave; this factory retains custody until
+    /// the child, pipes, sparse readers and cache jobs have really settled.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_native_window_work(
+        &self,
+        tracks: Arc<super::source_subtitles::SourceNativeTracks>,
+        manager: Arc<TranscodeManager>,
+        index: u16,
+        demand: i64,
+        span: i64,
+        custody: resource::SourceResourceReadCustody,
+        deadline: Instant,
+    ) -> tokio::task::JoinHandle<Result<Vec<u8>, SourceWorkerError>> {
+        tokio::spawn(async move {
+            let result = tracks
+                .window(&manager, index, demand, span, &custody, deadline)
+                .await;
+            if matches!(
+                result,
+                Err(SourceWorkerError::Unavailable
+                    | SourceWorkerError::Conflict
+                    | SourceWorkerError::Unresolved)
+            ) {
+                custody.request_revocation();
+            }
+            result
+        })
+    }
     pub(crate) async fn open_resource(
         &self,
         resource: &SharingHlsResource,
@@ -850,7 +874,11 @@ impl SourceViewerActor {
                 {
                     return Err(SourceWorkerError::Unavailable);
                 }
-                let (file, context) = source_native_presentation(facts, tracks.probe());
+                if !tracks.matches(&self.0.assignment, &facts.file) {
+                    return Err(SourceWorkerError::Unavailable);
+                }
+                let (file, context) =
+                    source_native_presentation(facts, tracks.presentation_probe().as_deref());
                 let payload = match kind {
                     SharingHlsResourceKind::Master => {
                         SourceResourcePayload::Playlist(crate::http::hls::source_native_master(
@@ -861,13 +889,17 @@ impl SourceViewerActor {
                         ))
                     }
                     SharingHlsResourceKind::SubtitlePlaylist { index } => {
-                        tracks.track(index).ok_or(SourceWorkerError::Unsupported)?;
+                        if !tracks.has_track(index) {
+                            return Err(SourceWorkerError::Unsupported);
+                        }
                         SourceResourcePayload::Playlist(crate::http::hls::source_native_playlist(
                             &video,
                         ))
                     }
                     SharingHlsResourceKind::SubtitleSegment { index } => {
-                        let track = tracks.track(index).ok_or(SourceWorkerError::Unsupported)?;
+                        if !tracks.has_track(index) {
+                            return Err(SourceWorkerError::Unsupported);
+                        }
                         let name = resource
                             .as_str()
                             .split('?')
@@ -877,11 +909,13 @@ impl SourceViewerActor {
                             .next()
                             .unwrap_or("");
                         if let Some(revision) = resource.cached_subtitle_revision() {
-                            let present = tracks.revision(index).as_deref() == Some(revision);
+                            let cached = tracks.cached(index, revision, &custody).await?;
+                            let absent = cached.is_none();
+                            let (bytes, complete) = cached.unwrap_or_default();
                             SourceResourcePayload::CachedSubtitle {
-                                bytes: if present { track.to_vec() } else { Vec::new() },
-                                complete: present,
-                                absent: !present,
+                                bytes,
+                                complete,
+                                absent,
                             }
                         } else {
                             let sequence = name
@@ -889,15 +923,20 @@ impl SourceViewerActor {
                                 .and_then(|name| name.strip_suffix(".vtt"))
                                 .and_then(|name| name.parse::<u64>().ok())
                                 .ok_or(SourceWorkerError::Unsupported)?;
-                            let bytes = crate::http::hls::source_native_segment(
-                                &video,
-                                track,
-                                sequence,
-                                context.media_origin_seconds,
-                            )
-                            .ok_or(SourceWorkerError::Unavailable)?;
+                            let bytes = tracks
+                                .segment(
+                                    &manager,
+                                    index,
+                                    &video,
+                                    sequence,
+                                    context.media_origin_seconds,
+                                    &custody,
+                                    deadline,
+                                )
+                                .await?
+                                .ok_or(SourceWorkerError::Unavailable)?;
                             if bytes.len() > 2 * 1024 * 1024 {
-                                return Err(SourceWorkerError::Capacity);
+                                return Err(SourceWorkerError::Unsupported);
                             }
                             SourceResourcePayload::SubtitleText(bytes)
                         }
@@ -912,18 +951,6 @@ impl SourceViewerActor {
                 .map_err(|_| SourceWorkerError::Unsupported)?;
         }
 
-        if let Some(native) = native.as_ref() {
-            if !native.matches(
-                &self.0.assignment,
-                guard
-                    .source
-                    .as_ref()
-                    .ok_or(SourceWorkerError::Unavailable)?
-                    .object_version(),
-            ) {
-                return Err(SourceWorkerError::Unavailable);
-            }
-        }
         // Detached observation survives waiter timeout only to settle actual
         // jobs; an expired request cannot extend authority or viewer activity.
         if Instant::now() >= deadline {
@@ -1226,7 +1253,7 @@ impl TranscodeManager {
     /// deadline and the foreground queue wait together, holding its waiter
     /// for the whole wait so background work yields and cannot refill the
     /// pool between attempts.
-    async fn admit_source_copy(
+    pub(super) async fn admit_source_copy(
         &self,
         deadline: Instant,
     ) -> Result<crate::vodencode::EncodePermit, SourceWorkerError> {
@@ -1286,6 +1313,15 @@ impl TranscodeManager {
             .is_some_and(|probe| probe.len() > 1024 * 1024)
         {
             return Err(SourceWorkerError::Unsupported);
+        }
+        if let Some(tracks) = owner
+            .state
+            .lock()
+            .expect("Source copy presentation")
+            .native
+            .as_ref()
+        {
+            tracks.set_presentation_probe(stored_probe.as_deref());
         }
         // Match Source VOD's exact recipe, including parameter-set promotion
         // and retention. A plain-copy identity cannot stand in for either.
@@ -1383,40 +1419,6 @@ impl TranscodeManager {
         }
         owner.gate.current_preparation(&owner.assignment).await?;
         Ok(())
-    }
-
-    async fn prepare_source_native_tracks(
-        &self,
-        owner: &Arc<SourceViewerInner>,
-        prepared: &crate::http::hls::PreparedSourcePlayback,
-        deadline: Instant,
-        work: &mut Option<super::source_subtitles::SourceNativeOperation>,
-    ) -> Result<Arc<super::source_subtitles::SourceNativeTracks>, SourceWorkerError> {
-        super::source_subtitles::supported_tracks(prepared.file(), prepared.native_subtitles().1)
-            .map_err(|_| SourceWorkerError::Unsupported)?;
-        let permit = self.admit_source_copy(deadline).await?;
-        let source =
-            crate::fragment_index_cluster::open_source_playback_fence(prepared.file(), None)
-                .await
-                .map_err(|_| SourceWorkerError::Unavailable)?;
-        *work = Some(super::source_subtitles::start_source_native(
-            prepared.file().clone(),
-            source,
-            owner.assignment.clone(),
-            Arc::clone(&owner.gate),
-            prepared.native_subtitles().1,
-            permit,
-            Arc::clone(&self.store),
-            deadline,
-            Arc::clone(&self.source_workers.native_hooks),
-        ));
-        let tracks = work
-            .as_ref()
-            .expect("Source native owner")
-            .outcome()
-            .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
-        Ok(Arc::new(tracks))
     }
 
     async fn prepare_source_encoded_recipe(
@@ -1533,7 +1535,6 @@ impl TranscodeManager {
         let mut reserved: Option<crate::vodserve::ReservedSourceVodRendition> = None;
         let mut index_work = None;
         let mut probe_work = None;
-        let mut native_work = None;
         let mut unowned_existing = true;
         let mut startup_stage = "deadline";
         // Retirement (a Source End, a drain, a revocation) ends a start that
@@ -1605,16 +1606,16 @@ impl TranscodeManager {
                     .await
                     .map_err(|_| SourceWorkerError::Unavailable)?
                     .ok_or(SourceWorkerError::Unavailable)?;
-                startup_stage = "native_tracks";
                 if prepared.native_subtitles().0 {
-                    let tracks = Box::pin(self.prepare_source_native_tracks(
-                        &owner,
-                        &prepared,
-                        deadline,
-                        &mut native_work,
-                    ))
-                    .await?;
-                    owner.state.lock().expect("Source native actor").native = Some(tracks);
+                    let tracks = super::source_subtitles::SourceNativeTracks::prepare(
+                        prepared.file(),
+                        &owner.assignment,
+                        prepared.native_subtitles().1,
+                        state.subs_dir.clone(),
+                    )
+                    .map_err(|_| SourceWorkerError::Unsupported)?;
+                    owner.state.lock().expect("Source native actor").native =
+                        Some(Arc::new(tracks));
                 }
                 if retirement_requested() {
                     return Err(SourceWorkerError::Unavailable);
@@ -1824,9 +1825,6 @@ impl TranscodeManager {
             if let Some(work) = probe_work.as_ref() {
                 let _ = work.settle().await;
             }
-            if let Some(work) = native_work.as_ref() {
-                let _ = work.settle().await;
-            }
             drop(preparation_custody.take());
         }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
@@ -1883,10 +1881,6 @@ impl TranscodeManager {
         if let Some(work) = probe_work.as_ref() {
             work.cancel();
             preparations.probe = Some(work.settle().await);
-        }
-        if let Some(work) = native_work.as_ref() {
-            work.cancel();
-            preparations.native = Some(work.settle().await);
         }
         // These operations' settle methods join the detached reader/child,
         // including work which outlived the startup deadline.
@@ -2204,7 +2198,7 @@ pub(crate) fn source_delivery_refusal(
 
 fn source_native_presentation(
     facts: crate::vodserve::VodHlsFacts,
-    probe: &str,
+    probe: Option<&str>,
 ) -> (plurx_core::domain::MediaFile, HlsContext) {
     if let Some(encoding) = facts.encoding.as_ref() {
         let file = encoded_vod_presentation_file(
@@ -2243,7 +2237,7 @@ fn source_native_presentation(
                 convert_dolby_vision: facts.convert_dolby_vision,
                 dual_layer_as_copied: false,
             },
-            Some(probe),
+            probe,
         );
         let context = HlsContext {
             codec_facts: Some(
@@ -2260,7 +2254,7 @@ fn source_native_presentation(
             media_origin_seconds: 0.0,
             codecs,
             supplemental_codecs,
-            frame_rate: frozen_video_frame_rate(Some(probe)),
+            frame_rate: frozen_video_frame_rate(probe),
         };
         (facts.file, context)
     }
