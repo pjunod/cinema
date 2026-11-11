@@ -1217,7 +1217,8 @@ async fn admit_native_processed_window_control(
         AudioRoute::EncodedVod,
         request.audio_offset_ms,
     ));
-    let copy_contract = profile81.then_some((true, false, true));
+    // (aac, preserve, convert): Profile 8.1 conversion preserves Dolby Vision.
+    let copy_contract = profile81.then_some((true, true, true));
     let query = crate::media_pool::QualityCatalogRequest {
         file_id: file.id,
         source_size: file.size,
