@@ -1,4 +1,5 @@
 import AVFoundation
+import Network
 import XCTest
 @testable import plurx
 
@@ -367,8 +368,15 @@ final class PlayerOperationOwnershipTests: XCTestCase {
     }
 
     func testFailedVODResumeStopsAndRetainsTheSavedPosition() async throws {
+        // A refused connection fails the real item at an uncontrolled moment,
+        // and an already failed item takes the compatibility ladder instead of
+        // the seek-failure stop this test is about. A silent origin keeps the
+        // item unresolved, so only the stubbed seek decides the outcome.
+        let silentOrigin = try SilentLoopbackOrigin()
+        let port = try await silentOrigin.start()
+        defer { silentOrigin.stop() }
         let prior = Session.shared.credentials
-        Session.shared.setCredentials(origin: "http://127.0.0.1:8769", token: nil)
+        Session.shared.setCredentials(origin: "http://127.0.0.1:\(port)", token: nil)
         defer { Session.shared.setCredentials(origin: prior.origin, token: prior.token) }
         let decision = try coldDecision()
         let hls = try JSONDecoder().decode(HlsStart.self, from: Data("""
@@ -1826,4 +1834,51 @@ private final class AccessLogTestClock: @unchecked Sendable {
     private var value = 0
     func read() -> Int { lock.lock(); defer { lock.unlock() }; return value }
     func set(_ next: Int) { lock.lock(); defer { lock.unlock() }; value = next }
+}
+
+/// Loopback HTTP origin that accepts every connection and never answers, so an
+/// AVPlayerItem pointed at it neither readies nor fails while a test runs.
+private final class SilentLoopbackOrigin: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "cinema.player.silent-origin.fixture")
+    private var connections: [NWConnection] = []
+    init() throws { listener = try NWListener(using: .tcp, on: .any) }
+    func start() async throws -> UInt16 {
+        try await withCheckedThrowingContinuation { continuation in
+            let once = SilentLoopbackOnce()
+            listener.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    if let port = self?.listener.port?.rawValue { once.finish { continuation.resume(returning: port) } }
+                case .failed(let error): once.finish { continuation.resume(throwing: error) }
+                case .cancelled: once.finish { continuation.resume(throwing: CancellationError()) }
+                default: break
+                }
+            }
+            // The handler runs on `queue`, which also serializes `stop()`.
+            listener.newConnectionHandler = { [weak self] connection in
+                guard let self else { connection.cancel(); return }
+                self.connections.append(connection)
+                connection.start(queue: self.queue)
+            }
+            listener.start(queue: queue)
+        }
+    }
+    func stop() {
+        listener.cancel()
+        queue.sync {
+            connections.forEach { $0.cancel() }
+            connections.removeAll()
+        }
+    }
+}
+
+private final class SilentLoopbackOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+    func finish(_ action: () -> Void) {
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        finished = true; lock.unlock(); action()
+    }
 }

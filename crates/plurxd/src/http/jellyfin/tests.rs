@@ -1995,6 +1995,10 @@ async fn jellyfin_subtitle_native_failures_and_bitmap_refusals_are_not_empty_suc
 
 #[tokio::test]
 async fn jellyfin_subtitle_aliases_reuse_native_extraction_with_global_indices_and_source_times() {
+    Box::pin(jellyfin_subtitle_aliases_flow()).await;
+}
+
+async fn jellyfin_subtitle_aliases_flow() {
     use plurx_core::testfixtures;
     testfixtures::require_ffmpeg();
     let f = playback_fixture().await;

@@ -139,6 +139,22 @@ def changed_inputs(record, candidate, shared_logs=None):
     return affected
 
 
+def canonical_job_keys(workflow):
+    """Refuse YAML job aliases, alternate key spellings, and duplicate IDs."""
+    receipts.require(workflow.count('\njobs:\n') == 1, 'Ambiguous workflow jobs mapping')
+    jobs = workflow.split('\njobs:\n', 1)[1]
+    names = set()
+    for line in jobs.splitlines():
+        if not re.match(r'^  [^ ]', line) or line.startswith('  #'):
+            continue
+        key = re.fullmatch(r'  ([A-Za-z_][A-Za-z0-9_-]*):', line)
+        receipts.require(key is not None and key[1] not in names,
+                         'Noncanonical or repeated workflow job key')
+        names.add(key[1])
+    receipts.require(names, 'Empty workflow jobs mapping')
+    return names
+
+
 def job_steps(workflow, job):
     """Retain step boundaries so pipefail in another step is not authority."""
     jobs = list(re.finditer(r"(?m)^  ([A-Za-z0-9_]+):\s*$", workflow))
@@ -178,6 +194,127 @@ def require_original_conditional_rust_dispatch(source, inputs, run_id, job, kind
                                     'promotion_base_sha': '8c654d37b5ee3f1418fa3393662c671a6555455e'},
                      'Historical conditional Rust job lacks its exact unretained dispatch')
 
+
+
+# This is the retained-command executor grammar, not authority to use retained
+# evidence. An authenticated old event must additionally prove that the
+# retention step was skipped and the logged Make branch actually ran.
+RETENTION_RUST_EXECUTORS = {
+    'store_contract': {
+        'name': 'Run replicated Store contracts',
+        'id': 'store_contracts', 'shell': 'bash', 'continue': 'true',
+        'env': {'RETAIN_STORE_UNITS': '${{ needs.scope.outputs.retain_store_contract_units }}',
+                'PLURX_RETAINED_UNITS': '${{ needs.scope.outputs.retained_units }}'},
+        'run': ['set -euo pipefail', 'mkdir -p target/validation',
+                'if [ "$RETAIN_STORE_UNITS" = true ]; then',
+                'echo "command=python3 -m validation.qualification_unit_continuation --compile-units store_contract" >> "$GITHUB_OUTPUT"',
+                'python3 -m validation.qualification_unit_continuation --compile-units store_contract 2>&1 | tee target/validation/cluster-store.log',
+                'else', 'echo "command=make cluster-store-check" >> "$GITHUB_OUTPUT"',
+                'make cluster-store-check 2>&1 | tee target/validation/cluster-store.log', 'fi'],
+    },
+    'wal': {
+        'name': 'Run exact Hiqlite and WAL recovery regressions',
+        'id': None, 'shell': None, 'continue': None,
+        'env': {'RETAIN_WAL_UNITS': '${{ needs.scope.outputs.retain_wal_units }}',
+                'PLURX_RETAINED_UNITS': '${{ needs.scope.outputs.retained_units }}'},
+        'run': ['if [ "$RETAIN_WAL_UNITS" = true ]; then',
+                'python3 -m validation.qualification_unit_continuation --compile-units wal',
+                'else', 'make cluster-wal-check', 'fi'],
+    },
+    'topology': {
+        'name': 'Run replicated topology contracts',
+        'id': 'topology_contracts', 'shell': 'bash', 'continue': 'true',
+        'env': {'RUN_CLUSTER_AUTH': '${{ needs.scope.outputs.cluster_auth }}',
+                'RUN_HIQLITE_SPIKE': '${{ needs.scope.outputs.hiqlite_spike }}',
+                'RETAIN_TOPOLOGY_UNITS': '${{ needs.scope.outputs.retain_topology_units }}',
+                'PLURX_RETAINED_UNITS': '${{ needs.scope.outputs.retained_units }}'},
+        'run': ['set -euo pipefail', 'mkdir -p target/validation', '{',
+                'if [ "$RUN_CLUSTER_AUTH" = true ]; then', 'make hiqlite-vendor-clippy',
+                'if [ "$RETAIN_TOPOLOGY_UNITS" = true ]; then',
+                'python3 -m validation.qualification_unit_continuation --compile-units topology',
+                'make cluster-harness-nonunit-check', 'else', 'make cluster-harness-check',
+                'fi', 'fi', 'if [ "$RUN_HIQLITE_SPIKE" = true ]; then',
+                'cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml \\',
+                '--tests --no-deps -- -D warnings', 'make hiqlite-spike', 'fi',
+                '} 2>&1 | tee target/validation/cluster-topology.log'],
+    },
+    'transport': {
+        'name': 'Run recovery schemas, validators, and focused regressions',
+        'id': 'recovery_contracts', 'shell': 'bash', 'continue': 'true',
+        'env': {'RETAIN_TRANSPORT_UNITS': '${{ needs.scope.outputs.retain_transport_units }}',
+                'PLURX_RETAINED_UNITS': '${{ needs.scope.outputs.retained_units }}'},
+        'run': ['set -euo pipefail', 'mkdir -p target/validation', '{',
+                'test "$(uname -s)" = Linux',
+                'if [ "$RETAIN_TRANSPORT_UNITS" = true ]; then',
+                'python3 -m validation.qualification_unit_continuation --compile-units transport',
+                'else', 'make cluster-transport-recovery-contracts', 'fi',
+                '} 2>&1 | tee target/validation/cluster-transport-recovery-contracts.log'],
+    },
+}
+
+
+def retention_enabled_rust_executor(workflow, kind, steps=None):
+    """Recognize only the reviewed conditional native executor source shape."""
+    expected = RETENTION_RUST_EXECUTORS.get(kind)
+    if expected is None:
+        return False
+    canonical_job_keys(workflow)
+    if steps is None:
+        job = {'store_contract': 'cluster_store_legacy', 'wal': 'cluster_wal',
+               'topology': 'cluster_topology',
+               'transport': 'cluster_transport_recovery_contracts'}[kind]
+        steps = job_steps(workflow, job)
+    header = ['      - name: ' + expected['name']]
+    for key, label in (('id', 'id'), ('continue', 'continue-on-error'),
+                       ('shell', 'shell')):
+        if expected[key] is not None:
+            header.append('        ' + label + ': ' + expected[key])
+    header.append('        env:')
+    header.extend('          ' + key + ': ' + value
+                  for key, value in expected['env'].items())
+    header.append('        run: |')
+    matches = []
+    for step in steps:
+        lines = step.rstrip('\n').splitlines()
+        if not lines or lines[0] != header[0]:
+            continue
+        receipts.require(lines[:len(header)] == header
+                         and all(line.startswith('          ') for line in lines[len(header):])
+                         and run_commands('jobs:\n  proof:\n' + step, 'proof') == expected['run'],
+                         'Retention-enabled Rust step changes execution context')
+        matches.append(step)
+    return len(matches) == 1
+
+
+RETENTION_SCOPE_BODY_SHA256 = '0ee1ac7960c2417e5eba56611b80ece17b81c30d9913ccf9aa38386b94c98a75'
+
+
+def require_unretained_historical_event(workflow, kind, inputs):
+    """An old full-job outcome must not have consumed any retained evidence."""
+    canonical_job_keys(workflow)
+    headers = list(re.finditer(r'(?m)^  ([A-Za-z_][A-Za-z0-9_-]*):\s*$', workflow))
+    scope = [index for index, match in enumerate(headers) if match[1] == 'scope']
+    receipts.require(len(scope) == 1 and scope[0] + 1 < len(headers)
+                     and retention.digest(workflow[headers[scope[0]].start():
+                             headers[scope[0] + 1].start()].encode()) == RETENTION_SCOPE_BODY_SHA256,
+                     'Historical retention scope executor source differs')
+    receipts.require(all(inputs.get(field, '') == '' for field in (
+        'retained_units_sha256', 'retained_units_attachment_id',
+        'retained_units_attachment_uuid')),
+        'Historical full Rust execution had retained evidence inputs')
+    steps = job_steps(workflow, 'scope')
+    retention_steps = [step for step in steps if re.search(r'(?m)^        id: retention$', step)]
+    receipts.require(len(retention_steps) == 1
+                     and re.findall(r'(?m)^        if: (.+)$', retention_steps[0]) == [
+                         "inputs.retained_units_sha256 != '' || inputs.retained_units_attachment_id != '' || inputs.retained_units_attachment_uuid != ''"],
+                     'Historical retention step could run without evidence inputs')
+    output = {'store_contract': 'retain_store_contract_units', 'wal': 'retain_wal_units',
+              'topology': 'retain_topology_units', 'transport': 'retain_transport_units'}[kind]
+    receipts.require(len(re.findall(r'(?m)^      ' + output + r': (.+)$', workflow)) == 1
+                     and re.search(r'(?m)^      ' + output + r': \$\{\{ steps\.retention\.outputs\.' + output + r' \}\}$', workflow)
+                     and len(re.findall(r'(?m)^      retained_units: (.+)$', workflow)) == 1
+                     and re.search(r'(?m)^      retained_units: \$\{\{ steps\.retention\.outputs\.retained_units \}\}$', workflow),
+                     'Historical Rust retention output is not bound to the skipped scope step')
 
 def historical_command(workflow, kind):
     if original_conditional_rust_workflow(workflow, kind):
@@ -227,7 +364,7 @@ def historical_command(workflow, kind):
         commands = run_commands('jobs:\n  proof:\n' + step, 'proof')
         if commands == expected:
             return True
-    return False
+    return retention_enabled_rust_executor(workflow, kind, steps)
 
 
 def authenticate_scope(api, run_id, run, workflow, document, prior, repository):
@@ -1319,9 +1456,16 @@ def bound_execution(record, item, raw, source_commands=historical_canonical, *, 
         return original_capture(record,item,raw)
     if witness['mode'] == 'local-binary':
         fields = {'mode','first_line','build_invocation','archive_sha256','binary_sha256_before','binary_sha256_after','features','fingerprint','binary_path','fingerprint_path'}
+        from validation import incremental_binary_control as incremental
         default_harness = '--test-threads=1' not in rust_identity(item['invocation'])['harness']
+        fingerprint = witness.get('fingerprint')
+        actual_profile = fingerprint.get('profile') if isinstance(fingerprint, dict) else None
+        canonical_profile = TEST_PROFILE_FINGERPRINTS[record['environment']['runtime']['profile']['debuginfo']]
+        incremental_fields = {'source_artifact', 'source_list_log', 'incremental_control'}
+        extension = (incremental_fields if actual_profile == incremental.INCREMENTAL_TEST_PROFILE_0
+                     and canonical_profile != actual_profile else set())
         receipts.require(origin['kind'] == 'attested-local' and kind in RUST_KINDS
-                         and set(witness) == fields | ({'harness_environment'} if default_harness else set()),
+                         and set(witness) == fields | extension | ({'harness_environment'} if default_harness else set()),
                          'Unknown local binary witness')
         if default_harness:
             receipts.require(witness['harness_environment'] == {'RUST_TEST_THREADS': None}
@@ -1338,9 +1482,11 @@ def bound_execution(record, item, raw, source_commands=historical_canonical, *, 
                          and witness['archive_sha256'] == source_archive_digest(record['source_commit'])
                          and isinstance(witness['fingerprint'],dict)
                          and json.loads(witness['fingerprint'].get('features','null')) == witness['features']
-                         and witness['fingerprint'].get('profile')==TEST_PROFILE_FINGERPRINTS[record['environment']['runtime']['profile']['debuginfo']]
+                         and actual_profile in {canonical_profile, incremental.INCREMENTAL_TEST_PROFILE_0}
                          and witness['fingerprint'].get('rustc')==RUSTC_FINGERPRINT
                          and witness['fingerprint'].get('compile_kind')==0 and witness['fingerprint'].get('rustflags')==[], 'Local build/binary witness differs')
+        if extension:
+            incremental.verify(record, item, witness, proof)
         build = normalized_cargo(witness['build_invocation'],compile_only=True);target = rust_identity(item['invocation'])
         keys = {'-p','--manifest-path','--test','--bin','--lib','--no-default-features','--release'}
         receipts.require({k:v for k,v in build['cargo'].items() if k in keys} == {k:v for k,v in target['cargo'].items() if k in keys}
@@ -1686,6 +1832,8 @@ def authenticate(api, proof, document, repository, live_logs=None):
             else:
                 receipts.require(historical_command(workflow.decode(), kind),
                                  'Historical command executor differs')
+                if retention_enabled_rust_executor(workflow.decode(), kind):
+                    require_unretained_historical_event(workflow.decode(), kind, inputs)
             key=(run_id,record['source_commit'])
             if key not in scopes:
                 authenticate_scope(api,run_id,run,workflow.decode(),document,record['source_commit'],repository)
