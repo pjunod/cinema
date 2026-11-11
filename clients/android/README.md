@@ -20,7 +20,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.8.0**, build `194` — the HEVC decoder envelope stops at the
+> Status: **v0.8.0**, build `195` — the HEVC decoder envelope is the one
+> Media3's own decoder selector reports, rather than a re-derivation of it.
+>
+> Build `194` — the HEVC decoder envelope stops at the
 > vendor's declared performance points, the bound Media3's decoder selector
 > applies, so the hvc1 probe holds and processed Dolby Vision (HDR10-E) can
 > upgrade playback on decoders such as the Google TV Streamer's.
