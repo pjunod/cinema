@@ -349,3 +349,40 @@ paths, and the sealed archive was left untouched. The first attempt was
 refused because the sealed RPU list names the wiped paths. That refusal is
 kept as an invalid test, not as a quality result.
 
+## A source-luma quantOffsets map fixes the shadow tail but costs rate
+
+The [ROI protocol](../../tools/dv_processing/diagnostics/fel_quality/protocol-roi-20261111.json)
+was committed before any map output. It defines one arm. Each 16x16 block of
+the encoder's own input whose mean Y' decodes below 1 nit gets −3 QP, passed
+as `AVRegionOfInterest` side data. No reference, F or error image enters the
+map. The [harness](../../tools/dv_processing/diagnostics/fel_quality/roi_encode.c)
+first had to reproduce the retained single-pass115 CLI encode byte-for-byte,
+both without ROI and with an all-zero ROI. It passed for both fixtures on
+attempt 5. Attempts 1–4 are kept: each one was a harness mismatch, and the
+gate caught all of them. The mismatches were global headers, x265's
+log-level in the info SEI and a stale file sync.
+
+The map covers 31% (M5400) and 39% (M1800) of blocks on average.
+
+| Fixture/frame, ModelB (base = retained single-pass115) | Shadow mean base→ROI (F) | Shadow p99 base→ROI (F) | Full mean base→ROI | Authored Mb/s |
+|---|---|---|---|---:|
+| M5400 f0 | 1.114→1.068 (1.566) | 3.388→3.281 (4.741) | 1.583→1.588 | 127.399 |
+| M5400 f24 | 1.597→1.481 (1.753) | 4.340→3.995 (4.194) | 1.620→1.640 | 127.399 |
+| M1800 f0 | 0.907→0.863 (1.642) | 2.134→2.009 (3.184) | 1.220→1.230 | 130.374 |
+| M1800 f24 | 0.934→0.909 (1.717) | 2.237→2.115 (3.164) | 1.357→1.376 | 130.374 |
+
+All 16 rows pass every quality criterion, including the M5400 frame-24
+shadow p99 that every earlier encoder control failed. Bands from 1 to
+1000 nits lose 0.03–0.07 ΔITP and remain far ahead of F. Michael1800's
+authored packet average is 130.374 Mb/s, which misses the unchanged
+130 Mb/s screen, so under the fixed bar the arm is **not admitted**.
+The map's net QP offset is negative and raises rate. The baseline
+already ran at 129.7 Mb/s on that fixture.
+[Portable results](../../tools/dv_processing/diagnostics/fel_quality/results/roi-20261111.json).
+
+This is the first direct, source-derived evidence for the cause. The tail
+is an allocation loss in dark blocks. x265 AQ2 sets block QP from texture
+energy alone, the PPS chroma offset is one global value, and Main10 has
+no per-CU chroma offset. Lowering block QP lowers QpC with it, and that
+removes the tail.
+

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "frozen_source": "087e836d369eb2b8f94ec1d0454ea6c157612df9",
-  "status": "Open investigation. No selected candidate passes the strict shadow-tail criterion. No live change.",
+  "status": "Open investigation. Source-luma quantOffsets arm passes every quality row but misses the rate screen on Michael1800; no candidate admitted. No live change.",
   "private_evidence_parent": "~/.local/state/plurx-fel-quality",
   "prior_calibration": {
     "directory": "20261026-measurement-calibration",
@@ -181,5 +181,13 @@
     "private_receipt_sha256": "7b34b20973496801e798b03a3397f3f37b25251963dfe2eddfb9649eda5e0a0b",
     "scope": "All48 native metadata rawRPUbound;0/24semanticsmatch. No latticeRGB orcandidate metrics."
   },
-  "handoff": "docs/streaming/FEL-CLAUDE-HANDOFF.md"
+  "handoff": "docs/streaming/FEL-CLAUDE-HANDOFF.md",
+  "roi_control": {
+    "protocol": "protocol-roi-20261111.json",
+    "harness": "roi_encode.c",
+    "driver": "encode_roi_control.py",
+    "portable_results": "results/roi-20261111.json",
+    "private_root": "$HOME/.local/state/plurx-fel-quality/20261111-roi-control (M3)",
+    "status": "Gates E0/E1 byte-identical. Arm S (<1 nit, -3 QP): 16/16 quality rows pass; M1800 authored 130.374 Mb/s misses the 130 screen. Not admitted."
+  }
 }
