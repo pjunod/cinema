@@ -217,16 +217,15 @@ impl SourceViewerActor {
             | SharingHlsResourceKind::SubtitlePlaylist { .. }
             | SharingHlsResourceKind::SubtitleSegment { .. } => {
                 let tracks = native.as_ref().ok_or(SourceWorkerError::Unsupported)?;
-                if !tracks.matches(
-                    &self.0.assignment,
-                    guard
-                        .source
-                        .as_ref()
-                        .ok_or(SourceWorkerError::Unavailable)?
-                        .object_version(),
-                ) {
+                if !tracks.matches(&self.0.assignment, &backing.file) {
                     return Err(SourceWorkerError::Unavailable);
                 }
+                let manager = self
+                    .0
+                    .manager
+                    .upgrade()
+                    .ok_or(SourceWorkerError::Unavailable)?;
+                let probe = tracks.presentation_probe();
                 let files = backing.production.files.lock().await;
                 let video = files.playlist();
                 let origin = files
@@ -254,7 +253,7 @@ impl SourceViewerActor {
                                 convert_dolby_vision,
                                 dual_layer_as_copied,
                             },
-                            Some(tracks.probe()),
+                            probe.as_deref(),
                         );
                         let context = HlsContext {
                             codec_facts: Some(super::super::response::FrozenHlsCodecFacts::audio(
@@ -268,7 +267,7 @@ impl SourceViewerActor {
                             media_origin_seconds: origin,
                             codecs,
                             supplemental_codecs,
-                            frame_rate: frozen_video_frame_rate(Some(tracks.probe())),
+                            frame_rate: frozen_video_frame_rate(probe.as_deref()),
                         };
                         SourceResourcePayload::Playlist(crate::http::hls::source_native_master(
                             &backing.file,
@@ -278,19 +277,25 @@ impl SourceViewerActor {
                         ))
                     }
                     SharingHlsResourceKind::SubtitlePlaylist { index } => {
-                        tracks.track(index).ok_or(SourceWorkerError::Unsupported)?;
+                        if !tracks.has_track(index) {
+                            return Err(SourceWorkerError::Unsupported);
+                        }
                         SourceResourcePayload::Playlist(crate::http::hls::source_native_playlist(
                             &video,
                         ))
                     }
                     SharingHlsResourceKind::SubtitleSegment { index } => {
-                        let track = tracks.track(index).ok_or(SourceWorkerError::Unsupported)?;
+                        if !tracks.has_track(index) {
+                            return Err(SourceWorkerError::Unsupported);
+                        }
                         if let Some(revision) = resource.cached_subtitle_revision() {
-                            let present = tracks.revision(index).as_deref() == Some(revision);
+                            let cached = tracks.cached(index, revision, &custody).await?;
+                            let absent = cached.is_none();
+                            let (bytes, complete) = cached.unwrap_or_default();
                             SourceResourcePayload::CachedSubtitle {
-                                bytes: if present { track.to_vec() } else { Vec::new() },
-                                complete: present,
-                                absent: !present,
+                                bytes,
+                                complete,
+                                absent,
                             }
                         } else {
                             let name = resource
@@ -306,10 +311,14 @@ impl SourceViewerActor {
                                 .and_then(|name| name.strip_suffix(".vtt"))
                                 .and_then(|name| name.parse::<u64>().ok())
                                 .ok_or(SourceWorkerError::Unsupported)?;
-                            let bytes = crate::http::hls::source_native_segment(
-                                &video, track, sequence, origin,
-                            )
-                            .ok_or(SourceWorkerError::Unavailable)?;
+                            // The same windowed sparse read the full-VOD
+                            // Source uses; no separate whole-track extraction.
+                            let bytes = tracks
+                                .segment(
+                                    &manager, index, &video, sequence, origin, &custody, deadline,
+                                )
+                                .await?
+                                .ok_or(SourceWorkerError::Unavailable)?;
                             if bytes.len() > 2 * 1024 * 1024 {
                                 return Err(SourceWorkerError::Capacity);
                             }
@@ -397,6 +406,16 @@ impl TranscodeManager {
             .is_some_and(|probe| probe.len() > 1024 * 1024)
         {
             return Err(SourceWorkerError::Unsupported);
+        }
+        // The native master presents the same probe this copy was planned from.
+        if let Some(tracks) = owner
+            .state
+            .lock()
+            .expect("Source copy presentation")
+            .native
+            .as_ref()
+        {
+            tracks.set_presentation_probe(probe.as_deref());
         }
         let video = CopyVideoOptions::from_probe(
             prepared.file(),
@@ -661,7 +680,6 @@ impl TranscodeManager {
         deadline: Instant,
     ) {
         let actor = SourceViewerActor(Arc::clone(&owner));
-        let mut native_work = None;
         let mut unowned_existing = true;
         let mut backing = None;
         let start = async {
@@ -697,10 +715,14 @@ impl TranscodeManager {
                 .map_err(|_| SourceWorkerError::Unavailable)?;
             let deadline = deadline.min(Instant::now() + startup_budget);
             if prepared.native_subtitles().0 {
-                let tracks = self
-                    .prepare_source_native_tracks(&owner, &prepared, deadline, &mut native_work)
-                    .await?;
-                owner.state.lock().expect("Source native actor").native = Some(tracks);
+                let tracks = super::super::source_subtitles::SourceNativeTracks::prepare(
+                    prepared.file(),
+                    &owner.assignment,
+                    prepared.native_subtitles().1,
+                    state.subs_dir.clone(),
+                )
+                .map_err(|_| SourceWorkerError::Unsupported)?;
+                owner.state.lock().expect("Source native actor").native = Some(Arc::new(tracks));
             }
             let session_id = uuid::Uuid::new_v4().to_string();
             let actual = self
@@ -866,11 +888,6 @@ impl TranscodeManager {
             Ok(response)
         }
         .await;
-        if let Some(work) = native_work.as_ref() {
-            if start.is_ok() {
-                let _ = work.settle().await;
-            }
-        }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
         owner.changed.notify_waiters();
         if let (Ok(_), Some(backing)) = (&start, backing.as_ref()) {
@@ -933,11 +950,7 @@ impl TranscodeManager {
             }
         }
         actor.request_retirement();
-        let mut preparations = SourcePreparationSettlements::default();
-        if let Some(work) = native_work.as_ref() {
-            work.cancel();
-            preparations.native = Some(work.settle().await);
-        }
+        let preparations = SourcePreparationSettlements::default();
         self.finish_source_owner(
             &owner,
             &state,
