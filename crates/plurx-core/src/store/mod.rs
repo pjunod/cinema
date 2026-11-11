@@ -272,6 +272,8 @@ mod background_jobs_tests;
 pub mod background_jobs_transcode;
 pub mod background_jobs_transcription;
 pub mod classification_schedule;
+#[cfg(test)]
+mod copy_index_v3_tests;
 pub mod dv_title_jobs;
 mod dv_title_jobs_schema;
 mod library_annotations_schema;
