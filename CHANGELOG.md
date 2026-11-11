@@ -23,6 +23,12 @@ bump may break compatibility and a **patch** bump never does.
 - Scan request status and replay stay bound to the creating credential after an
   API key is deleted and its numeric ID is reused. Expected-file reports skip
   paths outside their requested scope without probing their filesystem targets.
+- Titles with a pending Dolby Vision FEL request no longer fail source
+  verification ("the stored probe differs from the source at
+  /<unknown-field> missing"), which had declined their processed HDR10-E
+  upgrade. Application metadata in a stored probe is now excluded by its
+  `plurx_` namespace rather than a list a new field could miss.
+
 - Android TV devices whose HEVC decoder declares performance points (Google TV
   Streamer) now report HLS fMP4 HEVC support, so processed Dolby Vision
   (HDR10-E) upgrades reach them instead of being declined at every start.
