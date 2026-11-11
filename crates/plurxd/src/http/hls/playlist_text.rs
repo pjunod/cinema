@@ -589,7 +589,7 @@ pub(crate) fn source_native_segment(
     sequence: u64,
     origin: f64,
 ) -> Option<Vec<u8>> {
-    if !origin.is_finite() || origin < 0.0 {
+    if !origin.is_finite() || (origin * 1000.0).abs() > 9_007_199_254_740_991.0 {
         return None;
     }
     let timeline = subtitle_timeline(video);
@@ -609,4 +609,18 @@ pub(crate) fn source_native_segment(
         window.start_seconds,
         window.end_seconds,
     ))
+}
+
+#[cfg(test)]
+mod signed_source_native_projection_tests {
+    #[test]
+    fn negative_source_origin_projects_film_zero_to_positive_item_cue() {
+        let video=b"#EXTM3U\n#EXT-X-TARGETDURATION:16\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:6.0,\nseg00000.m4s\n";
+        let track = b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nfilm-zero\n";
+        let bytes = super::source_native_segment(video, track, 0, -0.083).unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(text.contains("00:00:00.083 --> 00:00:01.083"));
+        assert!(text.contains("X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000"));
+        assert!(super::source_native_segment(video, track, 0, f64::NAN).is_none());
+    }
 }

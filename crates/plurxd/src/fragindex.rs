@@ -2772,14 +2772,15 @@ async fn build_with_args_owned(
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        let mut inherited = InheritedFds::default();
+        let mut inherited =
+            crate::ffmpeg::output_pipe::InheritedFds::<{ MAX_PASS_OUTPUTS + 1 }>::default();
         if let Some(source_fd) = source_fd {
             inherited.push(source_fd, 3);
         }
         for (at, (_, writer)) in sibling_pipes.iter().enumerate() {
             inherited.push(writer.as_raw_fd(), 4 + at as SourceFd);
         }
-        if inherited.len > 0 {
+        if !inherited.is_empty() {
             // SAFETY: `inherit` makes only async-signal-safe calls (`fcntl`,
             // `dup2`, `close`) over a fixed-size array; it allocates nothing.
             unsafe {
@@ -3328,57 +3329,6 @@ fn is_refusal(outcome: &IndexOutcome, early: bool) -> bool {
 fn sibling_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
     let (reader, writer) = std::io::pipe()?;
     Ok((reader.into(), writer.into()))
-}
-
-/// The descriptors an index child receives at fixed numbers: the held source
-/// at 3 and each sibling output's writer at 4, 5, …. Fixed-size, so the
-/// `pre_exec` hook that installs them allocates nothing.
-#[cfg(unix)]
-#[derive(Clone, Copy, Default)]
-struct InheritedFds {
-    from: [SourceFd; MAX_PASS_OUTPUTS + 1],
-    to: [SourceFd; MAX_PASS_OUTPUTS + 1],
-    len: usize,
-}
-
-#[cfg(unix)]
-impl InheritedFds {
-    fn push(&mut self, from: SourceFd, to: SourceFd) {
-        self.from[self.len] = from;
-        self.to[self.len] = to;
-        self.len += 1;
-    }
-
-    /// Runs in the child between `fork` and `exec`. Every source is first
-    /// duplicated above the target range, so installing one target can never
-    /// close another's source — a writer that happens to be fd 4 is not lost
-    /// when the held source lands on 3.
-    fn inherit(&self) -> std::io::Result<()> {
-        let mut high = [0 as SourceFd; MAX_PASS_OUTPUTS + 1];
-        for (slot, from) in high.iter_mut().zip(&self.from).take(self.len) {
-            // SAFETY: plain descriptor syscalls on descriptors this process
-            // holds; async-signal-safe.
-            let duplicate = unsafe { libc::fcntl(*from, libc::F_DUPFD_CLOEXEC, 10) };
-            if duplicate == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            *slot = duplicate;
-        }
-        for (duplicate, to) in high.iter().zip(&self.to).take(self.len) {
-            // SAFETY: as above.
-            unsafe {
-                if libc::dup2(*duplicate, *to) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(*duplicate);
-                let flags = libc::fcntl(*to, libc::F_GETFD);
-                if flags == -1 || libc::fcntl(*to, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Attach the pass's one HEVC header proof to every index it built. The

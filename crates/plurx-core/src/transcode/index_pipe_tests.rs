@@ -897,7 +897,7 @@ fn playback_measurement_shares_one_input_and_preserves_both_output_recipes() {
 }
 
 #[test]
-fn playback_measurement_refuses_non_pipe_outputs_and_duplicate_input_recipes() {
+fn playback_measurement_refuses_non_pipe_outputs_and_keeps_legacy_offset_inputs() {
     let mut file = hevc_dv();
     let video = CopyVideoOptions::new(false, false);
     for url in [
@@ -934,7 +934,7 @@ fn playback_measurement_refuses_non_pipe_outputs_and_duplicate_input_recipes() {
         production.iter().filter(|arg| arg.as_str() == "-i").count(),
         2
     );
-    assert!(copy_pipe_args_with_index_measurement(
+    let measured = copy_pipe_args_with_index_measurement(
         &file,
         0.0,
         None,
@@ -944,5 +944,299 @@ fn playback_measurement_refuses_non_pipe_outputs_and_duplicate_input_recipes() {
         None,
         "pipe:4",
     )
-    .is_err());
+    .expect("copied audio offset uses the measured one-input recipe");
+    assert_eq!(
+        measured.iter().filter(|arg| arg.as_str() == "-i").count(),
+        1
+    );
+    assert!(!production.iter().any(|arg| arg.contains("setts=")));
+    assert!(production
+        .windows(2)
+        .any(|pair| pair == ["-itsoffset", "0.500"]));
+    assert!(production.windows(2).any(|pair| pair == ["-map", "1:a:0?"]));
+}
+
+#[test]
+fn exact_packet_clock_is_scoped_to_a_third_output_on_the_same_input() {
+    for codec in ["hevc", "h264"] {
+        let mut file = hevc_dv();
+        file.video_codec = Some(codec.into());
+        let video = CopyVideoOptions::new(false, true);
+        let measured = copy_pipe_args_with_index_measurement(
+            &file,
+            5400.0,
+            None,
+            true,
+            Pacing::unpaced(),
+            video,
+            None,
+            "pipe:4",
+        )
+        .expect("production and canonical measurement");
+        let clocked = copy_pipe_args_with_index_and_packet_clock(
+            &file,
+            5400.0,
+            None,
+            true,
+            Pacing::unpaced(),
+            video,
+            None,
+            "pipe:4",
+            "pipe:5",
+        )
+        .expect("distinct inherited outputs");
+        assert_eq!(clocked.first().map(String::as_str), Some("-copyts"));
+        assert_eq!(&clocked[1..=measured.len()], measured.as_slice());
+        assert_eq!(clocked.iter().filter(|arg| arg.as_str() == "-i").count(), 1);
+        let clock = &clocked[measured.len() + 1..];
+        assert!(contains_run(
+            clock,
+            &strip_plurx_markers(&copy_video_args(&file, video))
+        ));
+        assert!(!clock.iter().any(|arg| arg.contains("trace_headers")));
+        assert!(!clock.contains(&"make_zero".to_owned()));
+        assert!(contains_run(
+            clock,
+            &["-avoid_negative_ts".into(), "disabled".into()]
+        ));
+        assert!(clock.ends_with(&["-f".into(), "framecrc".into(), "pipe:5".into()]));
+        assert_eq!(
+            measured
+                .iter()
+                .filter(|arg| arg.as_str() == "make_zero")
+                .count(),
+            2
+        );
+    }
+}
+
+#[test]
+fn packet_clock_refuses_aliased_or_non_inherited_output_descriptors() {
+    let file = hevc_dv();
+    for clock in [
+        "pipe:4",
+        "pipe:04",
+        "pipe:1",
+        "pipe:2",
+        "pipe:-5",
+        "clock.txt",
+        "pipe:2147483648",
+    ] {
+        assert!(
+            copy_pipe_args_with_index_and_packet_clock(
+                &file,
+                0.0,
+                None,
+                true,
+                Pacing::unpaced(),
+                CopyVideoOptions::new(false, false),
+                None,
+                "pipe:4",
+                clock,
+            )
+            .is_err(),
+            "{clock}"
+        );
+    }
+}
+
+#[test]
+fn measured_copy_audio_offset_shifts_pts_and_dts_only_on_production_output() {
+    let mut file = hevc_dv();
+    file.audio_streams.push(crate::domain::AudioStream {
+        index: 2,
+        codec: "aac".into(),
+        channels: Some(2),
+        ..Default::default()
+    });
+    let video = CopyVideoOptions::new(false, false);
+    for (offset, expected) in [
+        (500, "setts=pts='if(eq(PTS,NOPTS),NOPTS,PTS+(500)/(1000*TB))':dts='if(eq(DTS,NOPTS),NOPTS,DTS+(500)/(1000*TB))'"),
+        (-250, "setts=pts='if(eq(PTS,NOPTS),NOPTS,PTS+(-250)/(1000*TB))':dts='if(eq(DTS,NOPTS),NOPTS,DTS+(-250)/(1000*TB))'"),
+    ] {
+        file.audio_offset_ms = offset;
+        let args = copy_pipe_args_with_index_and_packet_clock(
+            &file, 5_400.0, Some(2), false, Pacing::unpaced(), video, None, "pipe:4", "pipe:5",
+        ).expect("one-input offset with canonical measurement and clocks");
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "-i").count(), 1);
+        assert!(!args.contains(&"-itsoffset".into()));
+        assert!(args.windows(2).any(|pair| pair == ["-map", "0:a:2?"]));
+        let playback_end = args.iter().position(|arg| arg == "pipe:1").expect("production output");
+        assert!(args[..playback_end].windows(2).any(|pair| pair == ["-bsf:a", expected]));
+        assert!(!args[playback_end + 1..].contains(&"-bsf:a".into()));
+        assert!(!args.contains(&"-af".into()));
+        assert!(args.windows(2).any(|pair| pair == ["-ss", "5400.000"]));
+    }
+}
+
+#[test]
+fn measured_audio_offset_keeps_encode_filters_and_omits_packet_filter_without_copied_audio() {
+    let mut file = hevc_dv();
+    file.audio_offset_ms = -250;
+    let video = CopyVideoOptions::new(false, false);
+    // No source audio: an offset does not manufacture an audio packet filter.
+    file.audio_streams.clear();
+    let absent = copy_pipe_args_with_index_measurement(
+        &file,
+        0.0,
+        None,
+        false,
+        Pacing::unpaced(),
+        video,
+        None,
+        "pipe:4",
+    )
+    .expect("no source audio");
+    assert!(!absent.contains(&"-bsf:a".into()));
+    file.audio_streams.push(crate::domain::AudioStream {
+        index: 0,
+        codec: "aac".into(),
+        channels: Some(2),
+        ..Default::default()
+    });
+    let encoded = copy_pipe_args_with_index_measurement(
+        &file,
+        0.0,
+        None,
+        true,
+        Pacing::unpaced(),
+        video,
+        None,
+        "pipe:4",
+    )
+    .expect("encoded audio keeps its frame filter");
+    assert!(encoded
+        .windows(2)
+        .any(|pair| pair == ["-af", "atrim=start=0.250,asetpts=PTS-STARTPTS"]));
+    assert!(!encoded.contains(&"-bsf:a".into()));
+    let silent = crate::playback::audio::AudioDelivery {
+        action: crate::playback::audio::AudioAction::None,
+        downmix: None,
+        reason: "fixture".into(),
+    };
+    let silent_args = copy_pipe_args_with_index_measurement(
+        &file,
+        0.0,
+        None,
+        false,
+        Pacing::unpaced(),
+        video,
+        Some(&silent),
+        "pipe:4",
+    )
+    .expect("explicit no-audio delivery");
+    assert!(!silent_args.contains(&"-bsf:a".into()));
+    assert_eq!(
+        silent_args
+            .iter()
+            .filter(|arg| arg.as_str() == "-i")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn measured_offset_uses_resolved_audio_delivery_instead_of_legacy_encode_hint() {
+    use crate::playback::audio::{AudioAction, AudioDelivery};
+    let mut file = hevc_dv();
+    file.audio_offset_ms = -250;
+    file.audio_streams.push(crate::domain::AudioStream {
+        index: 0,
+        codec: "aac".into(),
+        channels: Some(2),
+        ..Default::default()
+    });
+    let video = CopyVideoOptions::new(false, false);
+    let copied = AudioDelivery {
+        action: AudioAction::Copy {
+            codec: "aac".into(),
+            channels: 2,
+        },
+        downmix: None,
+        reason: "resolved copy overrides legacy encode hint".into(),
+    };
+    let copied_args = copy_pipe_args_with_index_measurement(
+        &file,
+        0.0,
+        None,
+        true,
+        Pacing::unpaced(),
+        video,
+        Some(&copied),
+        "pipe:4",
+    )
+    .expect("resolved packet copy");
+    assert!(copied_args.contains(&"-bsf:a".into()));
+    assert!(!copied_args.contains(&"-af".into()));
+    let encoded = AudioDelivery {
+        action: AudioAction::Encode {
+            codec: "aac".into(),
+            channels: 2,
+            layout: None,
+            bitrate_kbps: 256,
+            sample_rate: 48_000,
+        },
+        downmix: None,
+        reason: "resolved encode overrides legacy copy hint".into(),
+    };
+    let encoded_args = copy_pipe_args_with_index_measurement(
+        &file,
+        0.0,
+        None,
+        false,
+        Pacing::unpaced(),
+        video,
+        Some(&encoded),
+        "pipe:4",
+    )
+    .expect("resolved audio encode");
+    assert!(encoded_args
+        .windows(2)
+        .any(|pair| pair == ["-af", "atrim=start=0.250,asetpts=PTS-STARTPTS"]));
+    assert!(!encoded_args.contains(&"-bsf:a".into()));
+}
+
+#[test]
+fn head_census_limits_every_output_without_changing_unbounded_measurement() {
+    let file = hevc_dv();
+    let video = CopyVideoOptions::from_probe(&file, None, false, false);
+    let full = copy_pipe_args_with_index_and_packet_clock(
+        &file,
+        0.0,
+        None,
+        false,
+        Pacing::unpaced(),
+        video,
+        None,
+        "pipe:6",
+        "pipe:7",
+    )
+    .expect("measured recipe");
+    let mut head = copy_head_census_args(&file, video, "pipe:6", "pipe:7").expect("head recipe");
+    assert_eq!(head.iter().filter(|arg| arg.as_str() == "-i").count(), 1);
+    assert_eq!(
+        head.iter()
+            .filter(|arg| arg.as_str() == "-frames:v")
+            .count(),
+        3
+    );
+    for output in ["pipe:1", "pipe:6", "pipe:7"] {
+        let position = head.iter().rposition(|arg| arg == output).expect("output");
+        assert_eq!(&head[position - 2..position], &["-frames:v", "1"]);
+    }
+    let av = head
+        .iter()
+        .position(|arg| arg == "pipe:1")
+        .expect("AV output");
+    assert_eq!(head.remove(av - 3), "-an");
+    let mut recovered = Vec::new();
+    let mut args = head.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "-frames:v" {
+            assert_eq!(args.next().as_deref(), Some("1"));
+        } else {
+            recovered.push(arg);
+        }
+    }
+    assert_eq!(recovered, full);
 }

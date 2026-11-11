@@ -385,6 +385,7 @@ impl PeerConnection {
                 .header(header::ACCEPT, "application/json")
                 .header(header::AUTHORIZATION, auth)
                 .header("cinemashare-viewer", viewer)
+                .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender
@@ -681,10 +682,19 @@ pub(crate) struct SourceStatusReceipt {
     direct: Option<SourceDirectStart>,
 }
 impl SourceStatusReceipt {
+    #[cfg(test)]
     fn parse(
         bytes: &[u8],
         session: &SourcePeerSession,
         known: &SourcePeerLineage,
+    ) -> Result<Self, PeerError> {
+        Self::parse_with_receiver(bytes, session, known, false)
+    }
+    fn parse_with_receiver(
+        bytes: &[u8],
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+        receiver_affirmed: bool,
     ) -> Result<Self, PeerError> {
         if session.is_direct() {
             let decoded = crate::http::sharing_direct_wire::DecodedSourceDirectStart::parse(
@@ -705,8 +715,13 @@ impl SourceStatusReceipt {
             .map_err(|_| PeerError::InvalidResponse)?;
         let (_, incarnation, response) = decoded.into_parts();
         if &SourcePeerLineage::from_start(incarnation, &response)? != known
-            || !response.vod
-            || response.media_origin_ms != Some(0)
+            || !crate::http::shared_source_playback::receiver_presentation::response_presentable(
+                &response,
+                crate::http::shared_source_playback::receiver_presentation::client_supports_range(
+                    &session.session.to_string(),
+                ),
+                receiver_affirmed,
+            )
         {
             return Err(PeerError::InvalidResponse);
         }
@@ -760,6 +775,7 @@ impl PeerConnection {
                 .header(header::ACCEPT, "application/json")
                 .header(header::AUTHORIZATION, auth)
                 .header("cinemashare-viewer", viewer)
+                .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender
@@ -795,7 +811,7 @@ impl PeerConnection {
             if status != StatusCode::OK {
                 return Err(PeerError::Rejected(status));
             }
-            SourceStatusReceipt::parse(&bytes, session, known)
+            SourceStatusReceipt::parse_with_receiver(&bytes, session, known, true)
         })
         .await
         .map_err(|_| PeerError::Unavailable)?
@@ -1044,6 +1060,7 @@ impl PeerConnection {
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::AUTHORIZATION, auth)
                 .header("cinemashare-viewer", viewer)
+                .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender
@@ -1736,6 +1753,7 @@ impl PeerConnection {
                 .header(header::ACCEPT, "application/json")
                 .header(header::AUTHORIZATION, auth)
                 .header("cinemashare-viewer", viewer)
+                .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender

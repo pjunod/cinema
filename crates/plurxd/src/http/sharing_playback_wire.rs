@@ -274,12 +274,31 @@ fn v4(id: Uuid) -> bool {
 /// Quality, timing, HDR/DV and VOD fields are retained. Control identity
 /// names the actual receiver owner, rather than exposing Source ownership.
 /// This pure projection cannot create or bind a session.
+#[cfg(test)]
 pub(crate) fn project_shared_start(
+    response: StartResponse,
+    source_session: Uuid,
+    receiver_session: Uuid,
+    receiver_incarnation: Uuid,
+    receiver_owner_epoch: i64,
+) -> Result<StartResponse> {
+    project_shared_start_with_receiver(
+        response,
+        source_session,
+        receiver_session,
+        receiver_incarnation,
+        receiver_owner_epoch,
+        false,
+    )
+}
+
+pub(crate) fn project_shared_start_with_receiver(
     mut response: StartResponse,
     source_session: Uuid,
     receiver_session: Uuid,
     receiver_incarnation: Uuid,
     receiver_owner_epoch: i64,
+    receiver_range: bool,
 ) -> Result<StartResponse> {
     if !response.start_seconds.is_finite()
         || response.start_seconds < 0.0
@@ -295,9 +314,9 @@ pub(crate) fn project_shared_start(
         || !v4(receiver_incarnation)
         || !(1..=9_007_199_254_740_991).contains(&receiver_owner_epoch)
         || response.control.is_none()
-        // A shared Start is always a VOD presentation (B accepts only `vod`
-        // or `direct`, and direct play has its own reply).
-        || !response.vod
+        // The receiver caller binds bounded views to both declared end-client
+        // support and its own sent transport affirmation.
+        || (!response.vod && !receiver_range)
         || source_session == receiver_session
         || response.session_id != source_session.to_string()
     {
@@ -805,6 +824,22 @@ mod tests {
         );
         response
     }
+    #[test]
+    fn bounded_projection_needs_receiver_affirmation_and_preserves_signed_origin() {
+        let source = Uuid::new_v4();
+        let receiver = Uuid::new_v4();
+        let incarnation = Uuid::new_v4();
+        let mut bounded = start(source);
+        bounded.vod = false;
+        bounded.media_origin_ms = Some(-83);
+        assert!(project_shared_start(bounded.clone(), source, receiver, incarnation, 9).is_err());
+        let projected =
+            project_shared_start_with_receiver(bounded, source, receiver, incarnation, 9, true)
+                .expect("affirmed bounded view");
+        assert!(!projected.vod);
+        assert_eq!(projected.media_origin_ms, Some(-83));
+    }
+
     #[test]
     fn sharing_start_projection_retains_every_engine_field_and_rejects_source_url_escape() {
         let source = Uuid::new_v4();

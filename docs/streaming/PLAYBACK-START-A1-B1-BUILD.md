@@ -215,8 +215,16 @@ epoch/manifest checks, not an independent heartbeat framework.
 ### 4.1 One demux input, two measurement domains
 
 Use one FFmpeg input for a range. Fan its selected video stream into the
-production AV output and a canonical video-only measurement output; audio
-exists only in AV output. Both video streams use the identical copy/sample
+production AV output, a canonical video-only MP4 measurement output and a
+bounded `framecrc` packet-clock output; audio exists only in AV output.
+The packet-clock output uses source timestamps (`-copyts`, disabled negative
+clock shifting and the demux time base); the MP4 outputs retain their required
+zero-based mux timelines. Exact signed packet DTS/PTS, durations and pre-conversion
+sizes associate canonical fragments with source time by ordered samples.
+FFmpeg's supported side-data columns remain metadata, never another source
+reader. The parser and argv exist; real seeked-row equality remains unqualified.
+The pipeline must establish this mapping under the held source generation before
+it can construct a verified origin. Both video streams use the identical copy/sample
 conversion contract. Parse both outputs with the existing `FragmentReader`
 and use the existing production `Segmenter`. Apply DV conversion consistently
 before row observation and use `IndexRow::from_fragment` on video-only
@@ -599,3 +607,5 @@ Measure these as separate evidence:
 | Isolation | Injected late mismatch gives one rebuild, unrelated warm title survives; no duplicate computation/observer input; Source grant revocation, exact-object replacement and relay cancellation observed. |
 
 Before/after `/metrics` cohorts and hardware receipts remain owed.
+
+Range invocation fingerprints use `plurx.sharing-source-invocation.bounded-range.v1\0`; legacy v2 retains its existing domain. Historical client transport tokens never establish Range provenance. Cleanup reconstructs the exact legacy identity.

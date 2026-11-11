@@ -17839,3 +17839,45 @@ async fn release_projection_is_the_first_terminal_and_keeps_its_cause() {
         Some(RollingTerminalCause::End)
     );
 }
+
+#[test]
+fn prepared_timeline_origin_is_signed_but_protocol_bounded() {
+    let session = uuid::Uuid::new_v4().to_string();
+    let playlist = format!("/api/v1/hls/{session}/index.m3u8");
+    let selection = prepared_selection();
+    for origin in [-MAX_MEDIA_ORIGIN_MILLIS, -83, 0, MAX_MEDIA_ORIGIN_MILLIS] {
+        assert!(prepared_payload_is_valid(
+            None, &session, &playlist, origin, &selection
+        ));
+    }
+    for origin in [
+        i64::MIN,
+        -MAX_MEDIA_ORIGIN_MILLIS - 1,
+        MAX_MEDIA_ORIGIN_MILLIS + 1,
+        i64::MAX,
+    ] {
+        assert!(!prepared_payload_is_valid(
+            None, &session, &playlist, origin, &selection
+        ));
+    }
+}
+
+#[test]
+fn committed_timeline_origin_is_signed_without_widening_buffer_positions() {
+    let mut ack = ActionAcknowledgement {
+        action_id: uuid::Uuid::new_v4().to_string(),
+        state: AcknowledgementState::Committed,
+        buffered_through_ms: Some(0),
+        committed_media_origin_ms: Some(-83),
+        first_frame_unix_ms: Some(1_700_000_000_000),
+    };
+    assert!(ack.validate().is_ok());
+    ack.committed_media_origin_ms = Some(MAX_MEDIA_ORIGIN_MILLIS + 1);
+    assert_eq!(
+        ack.validate(),
+        Err("acknowledgement.committed_media_origin_ms")
+    );
+    ack.committed_media_origin_ms = Some(-83);
+    ack.buffered_through_ms = Some(-1);
+    assert_eq!(ack.validate(), Err("acknowledgement.buffered_through_ms"));
+}

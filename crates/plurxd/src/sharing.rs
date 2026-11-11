@@ -119,6 +119,7 @@ pub(crate) struct ReceiverSourceStartResult {
     pub viewer_hash: String,
     pub endpoint: plurx_core::sharing::Endpoint,
     pub source: crate::http::sharing_direct_wire::DecodedSourceStart,
+    pub receiver_presentation_affirmed: bool,
 }
 pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
     let result = tokio::time::timeout(
@@ -278,6 +279,7 @@ impl SharingManager {
             viewer_hash: viewer,
             endpoint,
             source: reply,
+            receiver_presentation_affirmed: peer.receiver_presentation_affirmed(),
         })
     }
 

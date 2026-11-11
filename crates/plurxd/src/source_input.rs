@@ -230,6 +230,8 @@ struct InputState {
     len: u64,
     mime: &'static str,
     window_bytes: std::sync::atomic::AtomicUsize,
+    /// Immutable issued-read ceiling for a dedicated bounded census input.
+    read_ceiling: std::sync::atomic::AtomicU64,
     source_bytes: std::sync::atomic::AtomicU64,
     cache_hits: std::sync::atomic::AtomicU64,
     cached_bytes: std::sync::atomic::AtomicUsize,
@@ -238,6 +240,8 @@ struct InputState {
 }
 #[derive(Default)]
 struct ByteBudget {
+    /// Conservative issued bytes; never reset or refunded across seeks.
+    operation_used: u64,
     grant: Option<SourceServiceGrant>,
     used: u64,
     window: ReadWindow,
@@ -355,6 +359,7 @@ impl SourceInput {
             len,
             mime,
             window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -421,6 +426,7 @@ impl SourceInput {
             len,
             mime,
             window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -472,6 +478,7 @@ impl SourceInput {
             len,
             mime,
             window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -527,6 +534,35 @@ impl SourceInput {
     /// Internal qualification control; no host tuning or Developer switch.
     /// Set before passing the URL to a child. Both candidates remain bounded.
     #[cfg_attr(not(test), allow(dead_code))]
+    /// A ceiling belongs to this input's unique URL for its complete lifetime.
+    /// There is deliberately no reset/remove API: late census requests cannot
+    /// acquire the allowance of a later primary-input operation.
+    pub(crate) fn seal_read_ceiling(&self, bytes: u64) -> Result<(), String> {
+        if bytes == 0 {
+            return Err("source census byte ceiling is empty".into());
+        }
+        {
+            let budget = self
+                .state
+                .budget
+                .try_lock()
+                .map_err(|_| "source input already reading".to_owned())?;
+            if budget.operation_used != 0 {
+                return Err("source input already read".into());
+            }
+            self.state
+                .read_ceiling
+                .compare_exchange(
+                    u64::MAX,
+                    bytes,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .map_err(|_| "source input ceiling already sealed".to_owned())?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn with_read_window(self, bytes: usize) -> Result<Self, String> {
         if !(SOURCE_WINDOW_CONTROL..=SOURCE_WINDOW_MAX).contains(&bytes) {
             return Err("source read window outside qualification bounds".into());
@@ -739,7 +775,18 @@ async fn read_source(
         .store(0, std::sync::atomic::Ordering::SeqCst);
     let wanted = remaining
         .min(state.len.saturating_sub(offset))
-        .min(state.window_bytes.load(std::sync::atomic::Ordering::SeqCst) as u64);
+        .min(state.window_bytes.load(std::sync::atomic::Ordering::SeqCst) as u64)
+        .min(
+            state
+                .read_ceiling
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .saturating_sub(budget.operation_used),
+        );
+    if wanted == 0 {
+        return Err(std::io::Error::other(
+            "source census byte ceiling exhausted",
+        ));
+    }
     let observer = state.observer.as_ref();
     if observer.is_some_and(|observer| !observer.has_authority()) {
         return Err(std::io::Error::other("source authority lost"));
@@ -814,6 +861,10 @@ async fn read_source(
     // worker. Cancelled/short reads receive no refund and cannot reset an
     // epoch by abandoning their HTTP waiter.
     budget.used = budget.used.saturating_add(size as u64);
+    budget.operation_used = budget
+        .operation_used
+        .checked_add(size as u64)
+        .ok_or_else(|| std::io::Error::other("source issued-byte counter overflow"))?;
     if let Some(observer) = observer {
         tokio::select! {biased;
             ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),

@@ -90,9 +90,9 @@ function setPreparedHandoffEnabled(on){
 // field that says the same thing, and is the fallback.
 function sessionMediaOriginMs(session){
   if(!session||typeof session!=="object") return 0;
-  if(session.vod) return 0;
+  if(session.vod&&(session.media_origin_ms==null||Number(session.media_origin_ms)===0)) return 0;
   const explicit=Number(session.media_origin_ms);
-  if(Number.isFinite(explicit)) return Math.max(0,Math.round(explicit));
+  if(Number.isSafeInteger(explicit)) return explicit;
   const seconds=Number(session.start_seconds);
   if(Number.isFinite(seconds)) return Math.max(0,Math.round(seconds*1000));
   return 0;
@@ -103,13 +103,13 @@ function sessionMediaOriginMs(session){
 function realMediaPositionMs(localMs,baseMs,isVod){
   const local=Number(localMs);
   if(!Number.isFinite(local)) return 0;
-  const base=isVod?0:Math.max(0,Number(baseMs)||0);
+  const base=isVod?0:(Number(baseMs)||0);
   return Math.max(0,Math.round(base+local));
 }
 // The inverse: where a film position sits on a session whose zero is `baseMs`.
 // This is the only thing that puts the second pipeline on the first's second.
 function preparedLocalPositionMs(filmMs,baseMs){
-  return Math.max(0,Math.round((Number(filmMs)||0)-Math.max(0,Number(baseMs)||0)));
+  return Math.max(0,Math.round((Number(filmMs)||0)-(Number(baseMs)||0)));
 }
 // Where the incumbent is, in film time, right now.
 function playbackFilmPositionMs(v,p){
@@ -323,14 +323,11 @@ function beginPreparedReplacement(p,action,sharedContext=null){
   // is how it tells "the client built what I offered" from "the client built
   // something else and is asking me to publish it".
   //
-  // `mediaOriginMs` is what this client aligns against, and a VOD successor's
-  // is zero: a VOD playlist is the whole immutable title, so its own zero IS
-  // the source's zero and adding the resume position would seek the successor
-  // twice. A prepared replacement never changes presentation — the successor is
-  // the predecessor's request with the selection fields overwritten — so the
-  // predecessor's `vod` is the successor's.
-  const offeredOriginMs=Math.max(0,Math.round(Number(action.media_origin_ms)||0));
-  const originMs=sessionMediaOriginMs({vod:!!p.vod,media_origin_ms:offeredOriginMs});
+  // The offer owns its explicit origin. It contains no immutable whole-title
+  // proof, so never inherit the predecessor's VOD timeline for this successor.
+  const offeredOriginMs=Number(action.media_origin_ms);
+  if(!Number.isSafeInteger(offeredOriginMs)) return null;
+  const originMs=sessionMediaOriginMs({vod:false,media_origin_ms:offeredOriginMs});
   const filmMs=playbackFilmPositionMs(v,p);
   // A replacement that begins encoding at the incumbent's current second
   // spends its entire preparation chasing a moving playhead. Begin up to three
@@ -348,7 +345,7 @@ function beginPreparedReplacement(p,action,sharedContext=null){
     // absent (an older server) stays null.
     enhancement:typeof playbackEnhancementFromWire==="function"?playbackEnhancementFromWire(action.enhancement):null,
     sharedContext,
-    mediaOriginMs:originMs,offeredOriginMs,
+    mediaOriginMs:originMs,offeredOriginMs,vod:false,
     selection:action.effective_selection,
     startAtSec:preparedLocalPositionMs(filmMs+startLeadMs,originMs)/1000,
     stageAtMs,bufferReadyAtMs:null,overlapProofReadyAtMs:null,
@@ -1158,7 +1155,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   detachPreparedOverlapListeners(state);
   state.overlapPhase="exposed";
   state.predecessor={hls:predecessor,element:retired,sessionId:p.sessionId,
-    probeUrl:p.probeUrl,offset:p.offset,wantsPlayback:p.wantsPlayback,
+    probeUrl:p.probeUrl,offset:p.offset,vod:p.vod,rangePresentation:p.rangePresentation,wantsPlayback:p.wantsPlayback,
     method:p.method,copyHls:p.copyHls,autoHeight:p.autoHeight,encoder:p.encoder,
     qualityCandidateId:p.qualityCandidateId,deliveredRange:p.deliveredRange,
     enhancement:p.enhancement||null,health:p.health,healthObservedAt:p.healthObservedAt,
@@ -1176,6 +1173,8 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   p.sessionId=state.sessionId;
   p.probeUrl=state.playlistUrl;
   p.offset=state.mediaOriginMs/1000;
+  p.vod=!!state.vod&&state.mediaOriginMs===0;
+  p.rangePresentation=!p.vod;
   const candidate=(p.qualityCandidates||[]).find(row=>row.id===state.selection?.candidate_id);
   if(candidate){
     p.qualityCandidateId=candidate.id;

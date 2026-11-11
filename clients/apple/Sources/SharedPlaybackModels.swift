@@ -136,6 +136,33 @@ struct SharedStart {
     }
 }
 
+/// The shared renderer uses the same source/item clock rules as Local.
+/// ENDLIST or a completed range alone never establishes a whole-film clock.
+struct SharedPlaybackTimeline: Equatable {
+    static let capability = "hls-bounded-range-v1"
+    let mediaOriginMs: Int
+    let wholeTitle: Bool
+
+    init(vod: Bool?, mediaOriginMs: Int?, startSeconds: Double?, requestedStartMs: Int) {
+        wholeTitle = vod == true && (mediaOriginMs ?? 0) == 0
+        self.mediaOriginMs = PlayerController.sessionMediaOriginMs(
+            vod: wholeTitle, mediaOriginMs: mediaOriginMs, startSeconds: startSeconds,
+            requestedStartMs: requestedStartMs)
+    }
+    func itemPositionMs(filmPositionMs: Int) -> Int {
+        PlayerController.sessionAttachSeekMs(requestedStartMs: filmPositionMs,
+            mediaOriginMs: mediaOriginMs, minimumCorrectionMs: 0) ?? 0
+    }
+    func filmPositionMs(itemPositionMs: Int) -> Int {
+        let (film, overflow) = mediaOriginMs.addingReportingOverflow(max(0, itemPositionMs))
+        return overflow ? Int.max : max(0, film)
+    }
+    func reachedTitleEnd(filmPositionMs: Int, durationMs: Int?) -> Bool {
+        guard let durationMs, durationMs > 0 else { return wholeTitle }
+        return filmPositionMs >= max(0, durationMs - 1_500)
+    }
+}
+
 /// Ordinary complete B Start retained with its authenticated signed-file context.
 /// This is routing metadata; it never asserts Source physical production.
 struct SharedStartedPlayback {
@@ -147,7 +174,10 @@ struct SharedStartedPlayback {
 extension SharedStart {
     func bindInitial(_ context: PlaybackFileContext, request: CreateSessionRequest) throws -> SharedStartedPlayback {
         guard context.reference != nil, context.sessionId == nil,
-              response.vod == true, let position = response.startSeconds,
+              let vod = response.vod, let position = response.startSeconds,
+              (vod && (response.mediaOriginMs ?? 0) == 0)
+                || (request.caps?.transports.contains(SharedPlaybackTimeline.capability) == true
+                    && response.mediaOriginMs.map { (-9_007_199_254_740_991...9_007_199_254_740_991).contains($0) } == true),
               position.isFinite, position >= 0, position <= 9_007_199_254_740,
               response.durationMs.map({ (0...9_007_199_254_740_991).contains($0) }) ?? true,
               let control = response.control,

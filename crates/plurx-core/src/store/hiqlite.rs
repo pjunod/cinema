@@ -2047,6 +2047,7 @@ impl HiqliteAuthStore {
         store.install_remote_schema(None).await?;
         store.install_invitation_schema(None).await?;
         store.install_source_arbitration_schema(None).await?;
+        store.install_analysis_coordination_schema(None).await?;
         store.install_subtitle_managed_schema(None).await?;
         store.install_subtitle_translation_schema(None).await?;
         store.install_subtitle_text_translation_schema(None).await?;
@@ -2239,6 +2240,7 @@ impl HiqliteAuthStore {
                     self.install_remote_schema(admission).await?;
                     self.install_invitation_schema(admission).await?;
                     self.install_source_arbitration_schema(admission).await?;
+                    self.install_analysis_coordination_schema(admission).await?;
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
                     self.install_subtitle_text_translation_schema(admission)
@@ -4015,6 +4017,64 @@ impl HiqliteAuthStore {
         ))
     }
 
+    async fn analysis_coordination_shape(&self) -> Result<bool, StoreError> {
+        // authority: a marker plus canonical objects fences adjunct admission.
+        let marker = self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='analysis_coordination_schema'",params!()).await?;
+        if !matches!(marker.as_slice(),[row] if row.count==1) {
+            return Ok(false);
+        }
+        let expected = super::analysis_coordination::schema_objects()?;
+        let names = expected
+            .iter()
+            .map(|(name, _)| format!("'{}'", name.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        // authority: unknown/mutated coordination objects are not inferred safe.
+        let installed=self.client().query_consistent_map::<RemoteShapeRow,_>(format!("SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names}) ORDER BY name"),params!()).await?;
+        if installed.len() != expected.len()
+            || installed
+                .iter()
+                .zip(&expected)
+                .any(|(row, (name, sql))| row.name != *name || row.sql != *sql)
+        {
+            return Err(StoreError::Migration(
+                "analysis coordination extension has incompatible shape".into(),
+            ));
+        }
+        // authority: protocol marker and shape are checked together at startup.
+        let marker=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM analysis_coordination_schema WHERE singleton=1 AND version=1",params!()).await?;
+        if !matches!(marker.as_slice(),[row] if row.count==1) {
+            return Err(StoreError::Migration(
+                "analysis coordination marker missing".into(),
+            ));
+        }
+        Ok(true)
+    }
+    async fn install_analysis_coordination_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        if self.analysis_coordination_shape().await? {
+            return Ok(());
+        }
+        let mut statements=vec![("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='analysis_coordination_schema') THEN 1 ELSE json('analysis coordination extension raced') END".to_owned(),params!())];
+        statements.extend(
+            super::analysis_coordination::SCHEMA
+                .split("-- next statement\n")
+                .filter(|sql| !sql.trim().is_empty())
+                .map(|sql| (sql.to_owned(), params!())),
+        );
+        admit_schema_migration(admission)?;
+        let attempt = self.schema_migration_transaction(statements).await;
+        if self.analysis_coordination_shape().await? {
+            return Ok(());
+        }
+        attempt?;
+        Err(StoreError::Migration(
+            "analysis coordination extension did not settle".into(),
+        ))
+    }
+
     async fn subtitle_managed_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
@@ -4052,7 +4112,7 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.subtitle_managed_schema_version().await?;
-        if version == Some(4) {
+        if version == Some(5) {
             return Ok(());
         }
         if version.is_none() {
@@ -4119,7 +4179,7 @@ impl HiqliteAuthStore {
             );
             admit_schema_migration(admission)?;
             let result = self.schema_migration_transaction(statements).await;
-            if self.subtitle_managed_schema_version().await? != Some(4) {
+            if !matches!(self.subtitle_managed_schema_version().await?, Some(4 | 5)) {
                 result?;
                 return Err(StoreError::Migration(
                     "managed prepared-artifact schema upgrade did not settle".into(),
@@ -4127,6 +4187,25 @@ impl HiqliteAuthStore {
             }
         }
         if self.subtitle_managed_schema_version().await? == Some(4) {
+            let mut statements = vec![(
+                super::subtitle_managed_schema::PUBLISH_GUARD.to_owned(),
+                params!(super::subtitle_managed_schema::publish_predecessor_view()),
+            )];
+            statements.extend(
+                super::subtitle_managed_schema::publish_statements()
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await? != Some(5) {
+                result?;
+                return Err(StoreError::Migration(
+                    "fragment publisher resource upgrade did not settle".into(),
+                ));
+            }
+        }
+        if self.subtitle_managed_schema_version().await? == Some(5) {
             return Ok(());
         }
         Err(StoreError::Migration(

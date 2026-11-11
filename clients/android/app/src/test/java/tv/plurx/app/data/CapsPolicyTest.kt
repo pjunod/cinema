@@ -299,7 +299,8 @@ class CapsPolicyTest {
         assertEquals(listOf(7, 8), dolbyVision.video.single { it.codec == "hevc" }.dv_profiles)
         assertTrue(dolbyVision.display.dolby_vision)
         assertNull(dolbyVision.video.single { it.codec == "h264" }.dv_profiles)
-        assertEquals(listOf("progressive", "hls"), dolbyVision.transports)
+        assertEquals(listOf("progressive", "hls", "hls-bounded-range-v1"), dolbyVision.transports)
+        assertFalse(dolbyVision.transports.any { it.startsWith("plurx-internal-relay-") })
         assertEquals(DIRECT_PLAY_CONTAINERS.split(','), dolbyVision.containers)
 
         val wire = Json.encodeToString(dolbyVision)

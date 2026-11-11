@@ -7,6 +7,8 @@ use axum::http::{HeaderMap, StatusCode};
 use serde_json::Value;
 use uuid::Uuid;
 
+pub(crate) mod receiver_presentation;
+
 #[path = "shared_source_forwarding.rs"]
 pub(crate) mod forwarding;
 use forwarding::{AuthenticationHeaders, SourceHeaders};
@@ -271,6 +273,9 @@ struct SourceStartIdentity {
     request_id: Uuid,
     reference: SourcePlaybackTarget,
     recipe_hash: [u8; 32],
+    public_recipe_hash: [u8; 32],
+    recipe: Vec<u8>,
+    receiver_range: bool,
 }
 /// The typed refusal of a shared Dolby Vision delivery, on the Source and on
 /// B's own Start validation alike.
@@ -279,6 +284,7 @@ pub(crate) const SHARING_START_DOLBY_VISION_UNSUPPORTED: &str =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceStartFailure {
     Unavailable,
+    RescanRequired,
     Capacity,
     Conflict,
     Unresolved,
@@ -287,6 +293,8 @@ enum SourceStartFailure {
     /// its own typed code after a fresh invocation claim, before admission.
     DolbyVisionUnsupported,
     Deadline,
+    /// Only the Store's exact atomic no-claim proof constructs this result.
+    RetargetUnassigned,
 }
 impl SourceStartRegistry {
     // This object is installed on one actual manager. No global pointer map,
@@ -306,6 +314,10 @@ impl SourceStartRegistry {
             request_id: input.request_id,
             reference: input.reference.clone(),
             recipe_hash: sha2::Sha256::digest(&input.canonical_recipe).into(),
+            public_recipe_hash: receiver_presentation::public_recipe_hash(&input.canonical_recipe)
+                .map_err(|_| SourceStartFailure::Conflict)?,
+            recipe: input.canonical_recipe.clone(),
+            receiver_range: receiver_presentation::range_bound(input),
         };
         let mut entries = self.entries.lock().expect("Source HTTP starts");
         // Bookkeeping capacity follows in-process ownership. An entry leaves
@@ -675,8 +687,8 @@ impl SourceStartRegistry {
         viewer: &str,
         input: &SourceStartInput,
     ) -> Result<std::sync::Arc<SourceStartEntry>, SourceStartFailure> {
-        use sha2::Digest;
-        let recipe_hash: [u8; 32] = sha2::Sha256::digest(&input.canonical_recipe).into();
+        let recipe_hash = receiver_presentation::public_recipe_hash(&input.canonical_recipe)
+            .map_err(|_| SourceStartFailure::Conflict)?;
         let entries = self.entries.lock().expect("Source HTTP starts");
         let settled = self.settled.lock().expect("Source settled HTTP receipts");
         let entry = entries
@@ -693,7 +705,8 @@ impl SourceStartRegistry {
                         .any(|h| h == hash)
             })
             .ok_or(SourceStartFailure::Unresolved)?;
-        if entry.identity.reference != input.reference || entry.identity.recipe_hash != recipe_hash
+        if entry.identity.reference != input.reference
+            || entry.identity.public_recipe_hash != recipe_hash
         {
             return Err(SourceStartFailure::Conflict);
         }
@@ -819,6 +832,7 @@ async fn live_operation_owner(
     entry
         .validate_known(input.known.as_ref())
         .map_err(SourceStartFailure::response)?;
+    receiver_presentation::require_current_receiver(&entry, headers)?;
     let owned = entry
         .wait(deadline)
         .await
@@ -1022,6 +1036,7 @@ async fn status(
         || ledger.state.is_sealed()
         || entry.ending.lock().expect("Source ending owner").is_some();
     if !cleanup_only {
+        receiver_presentation::require_current_receiver(&entry, &headers)?;
         ingress::register_local(
             &state,
             &connection.as_ref().ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_status.connection", error_class = "absent", "Source status refused"); unavailable() })?.0,
@@ -1159,6 +1174,7 @@ impl From<crate::transcode::source_actor::SourceWorkerError> for SourceStartFail
         use crate::transcode::source_actor::SourceWorkerError as E;
         match value {
             E::Unavailable => Self::Unavailable,
+            E::RescanRequired => Self::RescanRequired,
             E::Capacity => Self::Capacity,
             E::Conflict => Self::Conflict,
             E::Deadline => Self::Deadline,
@@ -1171,6 +1187,8 @@ impl SourceStartFailure {
     fn response(self) -> ApiError {
         let (status, code) = match self {
             Self::Conflict => (StatusCode::CONFLICT, "sharing_start_conflict"),
+            Self::RescanRequired => (StatusCode::CONFLICT, "source_rescan_required"),
+            Self::RetargetUnassigned => (StatusCode::CONFLICT, "sharing_start_relocate_unassigned"),
             Self::Capacity => (StatusCode::TOO_MANY_REQUESTS, "sharing_start_capacity"),
             Self::Unsupported => (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1560,6 +1578,7 @@ async fn resources(
         .source_http_starts
         .current_entry(grant, &hash, &viewer, &input.operation.start)
         .map_err(SourceStartFailure::response)?;
+    receiver_presentation::require_current_receiver(&entry, &headers)?;
     entry
         .validate_known(input.operation.known.as_ref())
         .map_err(SourceStartFailure::response)?;
@@ -1724,6 +1743,7 @@ async fn start(
         .source_http_starts
         .register(grant, &viewer, &input, &authenticated_hash)
         .map_err(SourceStartFailure::response)?;
+    receiver_presentation::require_current_receiver(&entry, &headers)?;
     if new {
         // No await separates insertion and spawning the owned task. Disconnect
         // drops only a waiter; durable/physical work stays owned by this entry.
@@ -1827,13 +1847,10 @@ async fn own_start(
         SourceClaimOutcome, SourceIntentRead, SourceSessionRequest, SourceWriteAuthorityRead,
     };
     let reference = input.reference.clone();
-    // v2 identifies this complete canonical wire invocation, before fallible
-    // physical preparation. Engine normalization remains in prepared inputs.
-    use sha2::Digest;
-    let mut invocation = sha2::Sha256::new();
-    invocation.update(b"plurx.sharing-source-invocation.v2\0");
-    invocation.update(&input.canonical_recipe);
-    let invocation_fingerprint = format!("{:x}", invocation.finalize());
+    // Legacy v2 remains byte-for-byte stable. A separate bounded domain
+    // proves new-protocol invocation provenance rather than trusting a token
+    // that an old client could have injected into a historical v2 body.
+    let invocation_fingerprint = ingress::fingerprint(&input);
     let (hash, current_grant) = current_reference(&state, &headers, &reference)
         .await
         .map_err(|_| SourceStartFailure::Unavailable)?;
@@ -1889,6 +1906,22 @@ async fn own_start(
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unavailable)?;
+    // Pure planning precedes owner designation; the claim rechecks the exact
+    // catalog file revision atomically. No producer or Source I/O custody is
+    // admitted by this preparation.
+    let source_presentation = if receiver_presentation::range_bound(&input) {
+        super::hls::SourceCopyPresentation::BoundedRange
+    } else {
+        super::hls::SourceCopyPresentation::FullVod
+    };
+    validate_initial_source_start(&input.session)?;
+    let mut prepared = Box::pin(direct::prepare_source_start(
+        &state,
+        &headers,
+        reference.clone(),
+        input.session,
+    ))
+    .await?;
     entry.retain_stage(SourceStartTaskStage::Claiming {
         planned_incarnation,
         intent: (*intent).clone(),
@@ -1908,19 +1941,15 @@ async fn own_start(
         SourceClaimOutcome::Conflict => return Err(SourceStartFailure::Conflict),
         SourceClaimOutcome::Unavailable => return Err(SourceStartFailure::Unavailable),
         SourceClaimOutcome::Capacity(_) => return Err(SourceStartFailure::Capacity),
+        SourceClaimOutcome::RetargetUnassigned => {
+            // This is an affirmative atomic no-binding result, unlike an
+            // error/lost reply. Preserve no ambiguous-claim cleanup obligation.
+            entry.retain_stage(SourceStartTaskStage::Registered);
+            return Err(SourceStartFailure::RetargetUnassigned);
+        }
     };
     entry.retain_stage(SourceStartTaskStage::Acquired(binding.clone()));
-    // Only this fresh Acquired factory may cover preparation refusal. A
-    // historical or commit-unknown claim never reaches this stage.
-    validate_initial_source_start(&input.session)?;
-    let mut prepared = Box::pin(direct::prepare_source_start(
-        &state,
-        &headers,
-        reference.clone(),
-        input.session,
-    ))
-    .await?;
-    prepared.bind_invocation(&binding)?;
+    prepared.bind_invocation(&binding, source_presentation)?;
     if prepared.fingerprint() != invocation_fingerprint {
         return Err(SourceStartFailure::Unresolved);
     }
@@ -2212,6 +2241,7 @@ async fn fixture_start(
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     let code = [
         "sharing_start_conflict",
+        "sharing_start_relocate_unassigned",
         "sharing_start_capacity",
         "sharing_start_unsupported",
         SHARING_START_DOLBY_VISION_UNSUPPORTED,

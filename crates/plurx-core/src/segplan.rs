@@ -38,7 +38,12 @@ use serde::{Deserialize, Serialize};
 use crate::fmp4::{CutClass, CutPolicy, CutReason, PromotionInputs};
 
 /// Sparse canonical observations and exact source-clock normalization.
+pub mod companion;
+pub mod copy_cursor;
+pub mod observed_range;
+pub mod packet_clock;
 pub mod ranges;
+pub mod verified_copy;
 
 /// Bumped when a stored index or plan stops being readable by this binary.
 /// A persisted row from a newer version is discarded and rebuilt rather than
@@ -923,57 +928,21 @@ pub fn plan_copy(
     tracks: &TrackDurations,
 ) -> SegmentPlan {
     let timescale = index.timescale.max(1);
-    let mut entries: Vec<PlanEntry> = Vec::new();
-    let mut pending_ticks: u64 = 0;
-    let mut pending_bytes: u64 = 0;
-    let mut pending_fragments: u32 = 0;
-    let mut pending_start: Option<u64> = None;
-
+    let mut cursor = copy_cursor::CopyPlanCursor::new(timescale, *policy, *tracks);
+    let mut entries = Vec::new();
     for row in &index.rows {
-        // Decide in front of the arriving fragment, exactly as
-        // `Segmenter::push` does: the fragment being examined becomes the
-        // FIRST of the next segment, never the last of this one.
-        let with_headroom = pending_bytes.saturating_add(tracks.headroom(pending_ticks, timescale));
-        let reason = policy.cut_before(
-            pending_ticks,
-            usize::try_from(with_headroom).unwrap_or(usize::MAX),
-            row.class,
-            entries.is_empty(),
-        );
-        if let Some(reason) = reason {
-            entries.push(PlanEntry {
-                index: entries.len() as u32,
-                kind: PlanEntryKind::Video,
-                start_ticks: pending_start.unwrap_or(0),
-                duration_ticks: pending_ticks,
-                est_bytes: with_headroom,
-                cut: reason.into(),
-                fragments: pending_fragments,
-            });
-            pending_ticks = 0;
-            pending_bytes = 0;
-            pending_fragments = 0;
-            pending_start = None;
+        if let Some(entry) = cursor
+            .push(row)
+            .expect("validated fragment index exceeds segment plan representation")
+        {
+            entries.push(entry);
         }
-        if pending_start.is_none() {
-            pending_start = Some(row.dts);
-        }
-        pending_ticks += row.duration;
-        pending_bytes += u64::from(row.bytes);
-        pending_fragments += 1;
     }
-
-    if pending_fragments > 0 {
-        let with_headroom = pending_bytes.saturating_add(tracks.headroom(pending_ticks, timescale));
-        entries.push(PlanEntry {
-            index: entries.len() as u32,
-            kind: PlanEntryKind::Video,
-            start_ticks: pending_start.unwrap_or(0),
-            duration_ticks: pending_ticks,
-            est_bytes: with_headroom,
-            cut: PlanCut::EndOfStream,
-            fragments: pending_fragments,
-        });
+    if let Some(entry) = cursor
+        .finish()
+        .expect("validated fragment index exceeds segment plan representation")
+    {
+        entries.push(entry);
     }
 
     append_audio_tail(&mut entries, tracks, policy, timescale);

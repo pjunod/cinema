@@ -807,6 +807,8 @@ pub struct AppState {
     /// Shared complete observation owner. Pending startup hands this exact
     /// handle to normal HTTP; a second loop cannot claim its receiver.
     pub(crate) clock_observer: crate::clock_offset::ClockObserver,
+    pub(crate) copy_analysis: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
+    pub(crate) copy_observation_dir: Option<PathBuf>,
     /// Bounded authenticated client for node-local activity snapshots.
     #[allow(dead_code)] // aggregation child #326 is the first consumer
     pub peer_activity: crate::http::internal_activity::PeerActivityClient,
@@ -1191,6 +1193,8 @@ impl AppState {
             backup_client,
         } = config;
         crate::source_custody::configure_settlement_journal(&data_dir);
+        let copy_observation_dir = (!data_dir.as_os_str().is_empty())
+            .then(|| data_dir.join("copy-ranges").join("observations"));
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
             artwork: artwork_dir,
@@ -1373,6 +1377,8 @@ impl AppState {
             runtime_cache.join("live-tv"),
         );
         live_tv.set_settings_changes(settings_changes.clone());
+        let copy_analysis = Arc::clone(&jobs.copy_analysis);
+
         AppState {
             https: None,
             store,
@@ -1391,6 +1397,8 @@ impl AppState {
             membership_status_cache: Default::default(),
             serving,
             clock_observer: crate::clock_offset::ClockObserver::new(membership.clone()),
+            copy_analysis,
+            copy_observation_dir,
             node_hostname: membership.local_hostname(),
             membership,
             media_pool,
@@ -1773,6 +1781,7 @@ pub(crate) const TITLE_SCAN_INDEX_WAIT: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
 
 pub struct JobManager {
+    pub(crate) copy_analysis: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
     store: Arc<dyn Store>,
     /// Durable source continuation root. Standalone test managers omit it.
     source_checkpoint_dir: Option<PathBuf>,
@@ -3285,8 +3294,8 @@ pub(crate) struct PlaybackViewerDemand {
 }
 
 impl PlaybackViewerDemand {
-    /// Shared source admission is not installed. Refuse explicitly rather
-    /// than dropping typed viewer ownership from background or VOD work.
+    /// Local demand uses the Local viewer-interest path. Shared Source demand
+    /// must retain its typed Source grant and use the separate Source join.
     pub(crate) fn require_local_authority(&self) -> Result<(), &'static str> {
         match &self.principal {
             plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id }
@@ -3887,6 +3896,7 @@ impl JobManager {
             analysis_progress: std::sync::Mutex::new(HashMap::new()),
             analysis_progress_epoch: AtomicU64::new(0),
             analysis_metrics: Arc::new(AnalysisRuntimeMetrics::default()),
+            copy_analysis: Arc::new(Default::default()),
             #[cfg(test)]
             finished_analysis_rows: std::sync::Mutex::new(Vec::new()),
             now_producing: Mutex::new(None),

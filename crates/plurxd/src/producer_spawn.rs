@@ -60,6 +60,20 @@ impl Descriptors {
         )
     }
 
+    /// One-input copy observation outputs. The caller retains these handles
+    /// through spawn and concurrently drains both read ends until joined.
+    #[cfg(unix)]
+    pub(crate) fn with_copy_measurements(
+        mut self,
+        canonical: &std::fs::File,
+        clock: &std::fs::File,
+    ) -> Self {
+        use std::os::fd::AsRawFd as _;
+        self.inherited.push((canonical.as_raw_fd(), 6));
+        self.inherited.push((clock.as_raw_fd(), 7));
+        self
+    }
+
     #[cfg(unix)]
     fn configure(&self, command: &mut tokio::process::Command) {
         crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(

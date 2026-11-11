@@ -352,7 +352,8 @@ final class PreparedReplacementWireTests: XCTestCase {
         XCTAssertNil(PreparedReplacementAction(ControlAction(type: "prepare")))
         XCTAssertNil(PreparedReplacementAction(prepareAction(actionId: "not-a-uuid")))
         XCTAssertNil(PreparedReplacementAction(prepareAction(sessionId: "not-a-uuid")))
-        XCTAssertNil(PreparedReplacementAction(prepareAction(mediaOriginMs: -1)))
+        XCTAssertNotNil(PreparedReplacementAction(prepareAction(mediaOriginMs: -83)))
+        XCTAssertNil(PreparedReplacementAction(prepareAction(mediaOriginMs: -PlaybackControl.maximumMediaMs - 1)))
         XCTAssertNil(PreparedReplacementAction(
             prepareAction(selection: effectiveSelection(codec: "hevc"))
         ))
@@ -410,7 +411,7 @@ final class PreparedReplacementWireTests: XCTestCase {
             ActionAcknowledgement(
                 actionId: stagingId,
                 state: .committed,
-                committedMediaOriginMs: -1,
+                committedMediaOriginMs: -PlaybackControl.maximumMediaMs - 1,
                 firstFrameUnixMs: 1_788_000_000_000
             ).isValid
         )
@@ -901,7 +902,7 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
         XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
             filmPositionMs: -1, mediaOriginMs: 0, ranges: [0...20]))
         XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
-            filmPositionMs: 10_000, mediaOriginMs: -1, ranges: [0...20]))
+            filmPositionMs: 10_000, mediaOriginMs: -PlaybackControl.maximumMediaMs - 1, ranges: [0...20]))
         XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
             filmPositionMs: 10_000, mediaOriginMs: 0, ranges: [0...Double.infinity]))
         XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
@@ -1108,7 +1109,7 @@ final class PreparedReplacementAlignmentTests: XCTestCase {
             PlayerController.sessionMediaOriginMs(
                 vod: false, mediaOriginMs: -5, startSeconds: nil, requestedStartMs: 5_000
             ),
-            0
+            -5
         )
         // The floating-point echo remains the compatibility fallback.
         XCTAssertEqual(

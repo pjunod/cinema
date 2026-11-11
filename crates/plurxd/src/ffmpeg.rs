@@ -8,6 +8,8 @@
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux_dolby;
+#[cfg(unix)]
+pub(crate) mod output_pipe;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -132,24 +134,13 @@ pub(crate) fn inherit_raw_file_descriptors_with_cwd(
                 .all(|(_, target)| (3..=9).contains(target))
     );
     assert!(cwd_target.is_none_or(|target| descriptors.iter().any(|(_, fd)| *fd == target)));
-    let descriptors = descriptors.to_vec();
+    let mut inherited = output_pipe::InheritedFds::<7>::default();
+    for &(source, target) in descriptors {
+        inherited.push(source, target);
+    }
     unsafe {
         command.pre_exec(move || {
-            let mut copies = [None; 7];
-            for (index, (fd, target)) in descriptors.iter().enumerate() {
-                let duplicate = libc::fcntl(*fd, libc::F_DUPFD_CLOEXEC, 10);
-                if duplicate == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                copies[index] = Some((duplicate, *target));
-            }
-            for (duplicate, target) in copies.into_iter().flatten() {
-                if libc::dup2(duplicate, target) == -1 {
-                    libc::close(duplicate);
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(duplicate);
-            }
+            inherited.inherit()?;
             #[cfg(target_os = "macos")]
             if let Some(target) = cwd_target {
                 if libc::fchdir(target) == -1 {

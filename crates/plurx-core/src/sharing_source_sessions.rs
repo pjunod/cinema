@@ -213,6 +213,9 @@ pub enum SourceClaimOutcome {
     Conflict,
     Unavailable,
     Capacity(SourceCapacity),
+    /// Atomic first-claim refusal: this exact request owns no Source binding,
+    /// assignment or ingress custody; locate may select the designated owner.
+    RetargetUnassigned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

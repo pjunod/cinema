@@ -74,6 +74,7 @@ pub(super) async fn input(
         len: bytes.len() as u64,
         mime: "application/octet-stream",
         window_bytes: std::sync::atomic::AtomicUsize::new(window),
+        read_ceiling: AtomicU64::new(u64::MAX),
         source_bytes: AtomicU64::new(0),
         cache_hits: AtomicU64::new(0),
         cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -149,6 +150,7 @@ async fn companion_read_window_tracks_selected_purpose_at_physical_read() {
         len: bytes.len() as u64,
         mime: "application/octet-stream",
         window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+        read_ceiling: AtomicU64::new(u64::MAX),
         source_bytes: AtomicU64::new(0),
         cache_hits: AtomicU64::new(0),
         cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -465,4 +467,44 @@ async fn processed_input_close_waits_for_actual_registered_child_reap() {
         .expect("close owner")
         .expect("joined input close");
     assert!(state.source.lock().expect("source state").is_none());
+}
+
+#[tokio::test]
+async fn census_input_ceiling_is_immutable_and_cannot_borrow_a_later_inputs_budget() {
+    let bytes = vec![7u8; 1024 * 1024];
+    let (census, _file, _budget) = input(&bytes, SOURCE_WINDOW_MAX, None).await;
+    census
+        .seal_read_ceiling(SOURCE_HTTP_CHUNK as u64)
+        .expect("seal operation");
+    assert!(
+        census.seal_read_ceiling(u64::MAX).is_err(),
+        "no reset/remove API"
+    );
+    let first = read_source(&census.state, 0, bytes.len() as u64)
+        .await
+        .expect("bounded source read");
+    assert_eq!(first.len(), SOURCE_HTTP_CHUNK);
+    assert_eq!(census.observation().source_bytes, SOURCE_HTTP_CHUNK as u64);
+    assert!(
+        read_source(&census.state, SOURCE_HTTP_CHUNK as u64, bytes.len() as u64)
+            .await
+            .is_err()
+    );
+    let (primary, _primary_file, _primary_budget) = input(&bytes, SOURCE_WINDOW_MAX, None).await;
+    assert_ne!(primary.url(), census.url());
+    assert_eq!(
+        read_source(&primary.state, 0, bytes.len() as u64)
+            .await
+            .expect("independent operation")
+            .len(),
+        SOURCE_HTTP_CHUNK
+    );
+    assert!(
+        read_source(&census.state, 0, bytes.len() as u64)
+            .await
+            .is_err(),
+        "late census URL never sees primary allowance"
+    );
+    census.close_and_wait().await.expect("join census input");
+    primary.close_and_wait().await.expect("join primary input");
 }

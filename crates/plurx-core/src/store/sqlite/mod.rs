@@ -1335,6 +1335,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_managed_schema::PREPARED_MIGRATION,
     // v124: shared dispatch turns for interactive library work.
     super::background_job_turns::SCHEMA,
+    // v125: metadata-only index coordination and fenced physical phases.
+    super::analysis_coordination::SCHEMA,
+    // v126: canonical fragment publication never reserves original media.
+    super::subtitle_managed_schema::PUBLISH_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1796,6 +1800,9 @@ impl SqliteStore {
             }
             if version == super::subtitle_managed_schema::PREPARED_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_prepared_predecessor(&tx)?;
+            }
+            if version == super::subtitle_managed_schema::PUBLISH_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_publish_predecessor(&tx)?;
             }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;

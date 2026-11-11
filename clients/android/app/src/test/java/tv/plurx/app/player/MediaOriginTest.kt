@@ -8,6 +8,28 @@ import org.junit.Test
 import tv.plurx.app.data.HlsStart
 
 class MediaOriginTest {
+    @Test fun boundedSharedNinetyMinuteAttachmentAndPreparedCompletionKeepTitleClock() {
+        val range = HlsStart(session_id = "range", playlist_url = "/range.m3u8",
+            vod = false, start_seconds = 5_398.0, media_origin_ms = 5_398_000,
+            duration_ms = 7_200_000)
+        val origin = sharedMediaOriginMs(range)
+        assertEquals(5_398_000L, origin)
+        assertEquals(SessionPlaybackTimeline(baseMs = origin, attachPositionMs = 2_000),
+            sessionPlaybackTimeline(range, requestedStartMs = 5_400_000))
+        assertEquals(2_000L, successorAttachPositionMs(origin, 5_400_000))
+        assertEquals(5_400_000L, successorFilmPositionMs(origin, 2_000))
+        val window = sharedSeekableFilmRange(origin, 30_000, true)
+        assertTrue(window?.contains(5_405_000) == true)
+        assertFalse(window?.contains(6_000_000) == true)
+        assertNull(sharedSeekableFilmRange(origin, null, true))
+        val completedRange = range.copy(vod = true)
+        assertFalse(sharedFilmLocalVod(completedRange))
+        assertEquals(origin, sharedMediaOriginMs(completedRange))
+        assertFalse(sharedTitleEnded(sharedFilmLocalVod(completedRange), 5_428_000, range.duration_ms))
+        assertTrue(sharedTitleEnded(false, 7_200_000, range.duration_ms))
+        assertTrue(sharedFilmLocalVod(range.copy(vod = true, media_origin_ms = 0)))
+    }
+
     @Test
     fun hlsPrefersTheTrueOriginAndRetainsOldServerFallbacks() {
         val modern = HlsStart(
@@ -38,7 +60,7 @@ class MediaOriginTest {
             media_origin_ms = 10_000,
         )
         val timeline = sessionPlaybackTimeline(copied, requestedStartMs = 10_500)
-        assertEquals(SessionPlaybackTimeline(baseMs = 10_000, attachPositionMs = 0), timeline)
+        assertEquals(SessionPlaybackTimeline(baseMs = 10_000, attachPositionMs = 500), timeline)
         assertEquals(
             12_500L,
             realMediaPositionMs(
@@ -156,13 +178,13 @@ class SuccessorTimelineTest {
     }
 
     @Test
-    fun aLiveRecoveryOriginBecomesTheBaseAndAttachesAtZero() {
+    fun aLiveRecoveryOriginBecomesTheBaseAndAttachesAtTheRequestedFilmPosition() {
         val timeline = sessionPlaybackTimeline(
             mediaOriginMs = 1_800_000,
             isVod = false,
             requestedStartMs = 1_805_000,
         )
-        assertEquals(SessionPlaybackTimeline(baseMs = 1_800_000, attachPositionMs = 0), timeline)
+        assertEquals(SessionPlaybackTimeline(baseMs = 1_800_000, attachPositionMs = 5_000), timeline)
     }
 
     @Test
@@ -176,15 +198,18 @@ class SuccessorTimelineTest {
     }
 
     @Test
-    fun aNegativeOriginIsClampedRatherThanTrusted() {
-        assertEquals(
-            0L,
-            sessionPlaybackTimeline(
-                mediaOriginMs = -5,
-                isVod = false,
-                requestedStartMs = 0,
-            ).baseMs,
-        )
+    fun aSignedBoundedOriginMapsInitialSeekAndPreparedReplacementIntoFilmTime() {
+        val timeline = sessionPlaybackTimeline(mediaOriginMs = -83, isVod = false, requestedStartMs = 0)
+        assertEquals(SessionPlaybackTimeline(baseMs = -83, attachPositionMs = 83), timeline)
+        assertEquals(0L, successorFilmPositionMs(-83, 83))
+        assertEquals(0L, successorFilmPositionMs(-83, 0))
+        // A replacement has its own origin, rather than inheriting the incumbent's.
+        val film = successorFilmPositionMs(-83, 1_083)
+        assertEquals(1_041L, successorAttachPositionMs(-41, film))
+        assertEquals(film, successorFilmPositionMs(-41, 1_041))
+        assertEquals(83L, playerLocalPositionMs(0, false, false, false, 0, -83))
+        assertEquals(0L, realMediaPositionMs(83, false, false, false, 0, -83))
+        assertEquals(0L..4_917L, sharedSeekableFilmRange(-83, 5_000, true))
     }
 
     @Test

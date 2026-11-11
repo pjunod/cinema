@@ -585,7 +585,7 @@ struct ActionAcknowledgement: Codable, Equatable {
         }
         if let firstFrameUnixMs, firstFrameUnixMs <= 0 { return false }
         if let committedMediaOriginMs,
-           !(0...PlaybackControl.maximumMediaMs).contains(committedMediaOriginMs) {
+           !(-PlaybackControl.maximumMediaMs...PlaybackControl.maximumMediaMs).contains(committedMediaOriginMs) {
             return false
         }
         if state == .bufferReady && bufferedThroughMs == nil { return false }
@@ -644,7 +644,7 @@ struct PreparedReplacementAction: Equatable {
               actionId.utf8.count <= PlaybackControl.maximumActionIdBytes,
               PlaybackControl.isUUID(sessionId),
               Self.isNodeRelativePlaylist(playlistUrl, sessionId: sessionId),
-              (0...PlaybackControl.maximumMediaMs).contains(mediaOriginMs),
+              (-PlaybackControl.maximumMediaMs...PlaybackControl.maximumMediaMs).contains(mediaOriginMs),
               effectiveSelection.isValid,
               action.control.map({ $0.isValid && $0.url == "/api/v1/hls/\(sessionId)/control" }) ?? true
         else { return nil }

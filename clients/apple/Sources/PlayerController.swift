@@ -3652,7 +3652,8 @@ final class PlayerController: ObservableObject {
     func realPositionMs() -> Int {
         let seconds = player.currentTime().seconds
         let local = seconds.isFinite ? Int(seconds * 1000) : 0
-        return baseMs + max(local, 0)
+        let (film, overflow) = baseMs.addingReportingOverflow(max(local, 0))
+        return overflow ? Int.max : max(0, film)
     }
 
     // MARK: - Stream lifecycle
@@ -7742,7 +7743,8 @@ final class PlayerController: ObservableObject {
             // Fully seekable timelines whose local clock is film time.
             return .native(itemMs: targetMs)
         }
-        let local = targetMs - baseMs
+        let (local, overflow) = targetMs.subtractingReportingOverflow(baseMs)
+        guard !overflow else { return .reopen }
         // Exact containment first, across every advertised range: a target
         // inside a later range must seek there, not snap to an earlier
         // range's edge (PR #122 review: [0…10 s, 11 s…90 s] with a 12 s
@@ -8495,7 +8497,7 @@ final class PlayerController: ObservableObject {
         requestedStartMs: Int
     ) -> Int {
         if vod { return 0 }
-        if let mediaOriginMs { return max(0, mediaOriginMs) }
+        if let mediaOriginMs { return mediaOriginMs }
         return Int((startSeconds ?? Double(requestedStartMs) / 1000.0) * 1000)
     }
 
@@ -8507,7 +8509,8 @@ final class PlayerController: ObservableObject {
         mediaOriginMs: Int,
         minimumCorrectionMs: Int = 100
     ) -> Int? {
-        let correction = max(0, requestedStartMs) - max(0, mediaOriginMs)
+        let (correction, overflow) = max(0, requestedStartMs).subtractingReportingOverflow(mediaOriginMs)
+        guard !overflow else { return nil }
         return correction >= minimumCorrectionMs ? correction : nil
     }
 

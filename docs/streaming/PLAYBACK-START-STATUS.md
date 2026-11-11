@@ -46,8 +46,15 @@ for reuse by the growing engine. The owner-accepted
 [A1/B1 implementation contract](PLAYBACK-START-A1-B1-BUILD.md) now records
 Analysis coordination, one-input canonical measurements, source-DTS normalization,
 sparse publication and explicit target/init failure outcomes. Shared argv and
-checked measurements are in progress; growing-engine behavior and qualification
-remain unbuilt.
+checked measurements are implemented in the owned workspace. Foundation commit
+`d7cec0ef8` passed normal commit hooks; the larger staged Core checkpoint,
+including the shared incremental cut planner, passed capped compilation.
+Authenticated receiver mode selection is implemented under explicit human
+authorization; its regressions remain unrun. Growing-engine runtime, coordinator
+integration and qualification remain incomplete. Daemon test compilation exceeds
+the voter-safe 8 GiB cap even serially without debug/incremental metadata; use the
+new verified nonvoter CI role after its routing change lands. No tests were run
+for this batch before its final adversarial review.
 Server/web development and web testing proceed independently of mobile
 publication. The deployed Phase 1 web build can be tested now.
 

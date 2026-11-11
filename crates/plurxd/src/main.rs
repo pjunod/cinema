@@ -24,6 +24,9 @@ mod backup;
 mod cachekeep;
 mod channel_subjects;
 mod clock_offset;
+mod copy_analysis;
+mod copy_normalization;
+mod copyrange;
 mod copyseg;
 mod decode_facts;
 mod decoder_health;
@@ -92,6 +95,7 @@ mod sharing_network;
 #[cfg(test)]
 mod sharing_protocol_fixture;
 mod source_custody;
+mod source_generation;
 mod source_input;
 mod source_probe;
 mod state;

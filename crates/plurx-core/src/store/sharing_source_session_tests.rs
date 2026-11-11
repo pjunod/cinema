@@ -111,6 +111,7 @@ async fn setup_with_media_id(store: &SqliteStore, media_id: i64) -> (Uuid, Crede
         )])
         .await
         .expect("metadata-only current boot fixture");
+    store.sharing_txn(vec![("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT node_id,$1,last_seen_at FROM cluster_nodes WHERE node_id='voter'".into(),vec![super::super::analysis_coordination::SOURCE_COPY_COORDINATION_CAPABILITY.to_owned().into()])]).await.expect("current Source copy protocol fixture");
     store
         .sharing_txn(
             crate::cluster::membership::sharing_member_admission_guard_schema()
@@ -2653,5 +2654,258 @@ async fn sharing_source_retained_planned_intent_fences_only_exact_boot_bound_uni
             SourceReleaseOutcome::Refused,
             "a joined pre-factory intent cannot settle an already assigned incarnation"
         );
+    }
+}
+
+#[tokio::test]
+async fn source_owner_designation_is_part_of_claim_and_wrong_owner_refusal_is_unassigned() {
+    let store = SqliteStore::open_in_memory().expect("Store");
+    let (grant, credential) = setup(&store).await;
+    let first = intent(&store, grant, &credential, "designation-first").await;
+    let binding = match store
+        .claim_source_media_session(&first, &proof())
+        .await
+        .expect("claim")
+    {
+        SourceClaimOutcome::Acquired(binding) => binding,
+        _ => panic!("first claim"),
+    };
+    let designated = store
+        .source_copy_designated_owner(
+            binding.source_server_id(),
+            binding.catalogue_epoch(),
+            binding.file_id(),
+            binding.file_revision(),
+        )
+        .await
+        .expect("designation");
+    assert_eq!(designated.as_deref(), Some("voter"));
+    // Stand in for the other winner of the immutable designation CAS before
+    // this new request exists. This is metadata only, never a physical receipt.
+    store.sharing_txn(vec![("UPDATE copy_source_owner_designations SET owner_node_id='other-source' WHERE server_id=$1 AND catalogue_epoch=$2 AND file_id=$3 AND file_revision=$4".into(),vec![binding.source_server_id().into(),binding.catalogue_epoch().into(),binding.file_id().as_str().to_owned().into(),binding.file_revision().as_str().to_owned().into()])]).await.expect("other designated origin");
+    let other = intent(&store, grant, &credential, "designation-loser").await;
+    assert!(matches!(
+        store
+            .claim_source_media_session(&other, &proof())
+            .await
+            .expect("exact CAS refusal"),
+        SourceClaimOutcome::RetargetUnassigned
+    ));
+    let rows=store.sharing_read("SELECT json_quote(count(*)) AS payload FROM sharing_source_session_bindings WHERE owner_key=$1 AND request_id=$2",vec![other.request.principal.owner_key().into(),other.request.request_id.clone().into()]).await.expect("no binding");
+    assert_eq!(rows, vec!["0"]);
+    let rows=store.sharing_read("SELECT json_quote(count(*)) AS payload FROM media_session_requests WHERE owner_key=$1 AND request_id=$2",vec![other.request.principal.owner_key().into(),other.request.request_id.clone().into()]).await.expect("no request");
+    assert_eq!(rows, vec!["0"]);
+    // An existing exact request never turns into unassigned-retarget merely
+    // because another placement hint is now present.
+    assert!(!matches!(
+        store
+            .claim_source_media_session(&first, &proof())
+            .await
+            .expect("existing request"),
+        SourceClaimOutcome::RetargetUnassigned
+    ));
+}
+
+#[tokio::test]
+async fn sharing_source_receiver_normalizer_requires_same_current_sender_boot_observation() {
+    let dir = tempfile::tempdir().expect("normalizer fixture");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("normalizer.db")).expect("pool"),
+    ] {
+        setup(&store).await;
+        let boot = Uuid::parse_str("01a1128a-944d-4f11-9bf2-c7599d355213").expect("fixture boot");
+        assert!(store
+            .source_copy_coordination_boot_capable("voter", boot)
+            .await
+            .expect("current normalizer"));
+        assert!(!store
+            .source_copy_coordination_boot_capable("voter", Uuid::new_v4())
+            .await
+            .expect("wrong boot"));
+        store.sharing_txn(vec![("UPDATE cluster_node_capabilities SET last_seen_at=last_seen_at-1 WHERE capability=$1".into(),vec![super::super::analysis_coordination::SOURCE_COPY_COORDINATION_CAPABILITY.to_owned().into()])]).await.expect("stale marker");
+        assert!(!store
+            .source_copy_coordination_boot_capable("voter", boot)
+            .await
+            .expect("stale capability"));
+        store.sharing_txn(vec![("UPDATE cluster_node_capabilities SET last_seen_at=(SELECT last_seen_at FROM cluster_nodes WHERE node_id='voter') WHERE capability=$1".into(),vec![super::super::analysis_coordination::SOURCE_COPY_COORDINATION_CAPABILITY.to_owned().into()]),("UPDATE cluster_nodes SET removed_at=last_seen_at WHERE node_id='voter'".into(),vec![])]).await.expect("removed sender");
+        assert!(!store
+            .source_copy_coordination_boot_capable("voter", boot)
+            .await
+            .expect("removed sender fails closed"));
+    }
+}
+
+async fn designation_owner_for(
+    store: &SqliteStore,
+    request: &SourceSessionIntent,
+) -> Option<String> {
+    store
+        .source_copy_designated_owner(
+            request.witness.server,
+            request.witness.epoch,
+            &request.request.file_id,
+            &request.request.file_revision,
+        )
+        .await
+        .expect("current designation lookup")
+}
+
+#[tokio::test]
+async fn sharing_source_designation_offline_or_new_boot_never_retires_unresolved_anchor() {
+    let dir = tempfile::tempdir().expect("designation fixture");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("held-designation.db")).expect("pool"),
+    ] {
+        let (grant, key) = setup(&store).await;
+        let request = intent(&store, grant, &key, "held-designation").await;
+        let SourceClaimOutcome::Acquired(binding) = store
+            .claim_source_media_session(&request, &proof())
+            .await
+            .expect("first claim")
+        else {
+            panic!("fresh binding")
+        };
+        assert_eq!(
+            designation_owner_for(&store, &request).await.as_deref(),
+            Some("voter")
+        );
+        store
+            .sharing_txn(vec![(
+                "UPDATE cluster_nodes SET removed_at=1 WHERE node_id='voter'".into(),
+                vec![],
+            )])
+            .await
+            .expect("offline/removal fault");
+        assert_eq!(
+            designation_owner_for(&store, &request).await.as_deref(),
+            Some("voter"),
+            "offline does not prove physical stop"
+        );
+        store.sharing_txn(vec![("UPDATE cluster_nodes SET removed_at=NULL WHERE node_id='voter'".into(),vec![]),("UPDATE cluster_node_capabilities SET capability=$1 WHERE capability GLOB 'sharing_ingress_boot_v1:*'".into(),vec![format!("sharing_ingress_boot_v1:{}",Uuid::new_v4()).into()])]).await.expect("restart fault");
+        assert_eq!(
+            designation_owner_for(&store, &request).await.as_deref(),
+            Some("voter"),
+            "new boot does not settle the old invocation"
+        );
+        let retained = binding_row(
+            &store,
+            &binding.principal().owner_key(),
+            binding.request_id(),
+        )
+        .await
+        .expect("retained binding")
+        .expect("not erased")
+        .handle()
+        .expect("exact identity");
+        assert!(retained.same_identity(&binding));
+        assert!(!retained.is_released());
+        assert_eq!(count(&store, "sharing_source_session_bindings").await, 1);
+        assert_eq!(
+            count(&store, "sharing_ingress_custody").await,
+            1,
+            "no synthetic physical release"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sharing_source_designation_settled_anchor_re_elects_only_after_all_file_work_stops() {
+    let dir = tempfile::tempdir().expect("designation lifecycle fixture");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("settled-designation.db")).expect("pool"),
+    ] {
+        let (grant, key) = setup(&store).await;
+        let request = intent(&store, grant, &key, "old-designation").await;
+        let SourceClaimOutcome::Acquired(binding) = store
+            .claim_source_media_session(&request, &proof())
+            .await
+            .expect("claim")
+        else {
+            panic!("fresh binding")
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &key, &proof())
+            .await
+            .expect("assign")
+            .expect("actual assignment");
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("unsealed refuse"),
+            SourceReleaseOutcome::Refused
+        );
+        assert_eq!(
+            designation_owner_for(&store, &request).await.as_deref(),
+            Some("voter")
+        );
+        seal_fixture_owned_empty_ingress(&store, &assignment).await;
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("proven never spawned fixture"),
+            SourceReleaseOutcome::Released
+        );
+        assert_eq!(
+            designation_owner_for(&store, &request).await,
+            None,
+            "exact settled file is eligible, without erasing its epoch"
+        );
+        // Interrupted persisted Analysis states are injected only to exercise
+        // retirement refusal. They do not fabricate a physical stop receipt.
+        store.sharing_txn(vec![("INSERT INTO analysis_requests(request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,priority,trigger,force_rebuild,target_node_id,state,not_before_ms,created_at_ms,updated_at_ms) VALUES('designation-blocker',1,20,1000,'fragment_index','lifecycle-test','abcd','lifecycle-generation','normal','background',0,'voter','queued',0,1,1)".into(),vec![])]).await.expect("queued file work");
+        assert_eq!(
+            designation_owner_for(&store, &request).await.as_deref(),
+            Some("voter"),
+            "unfinished claim blocks retirement"
+        );
+        store.sharing_txn(vec![("UPDATE analysis_requests SET state='failed',lease_expires_ms=1 WHERE request_id='designation-blocker'".into(),vec![]),("INSERT INTO analysis_coordination_roles(request_id,file_id,source_size,source_mtime,origin_node_id,object_version,video_identity,contract_version,requested_generation,phase_sequence,active_custody_id,physical_node_id,physical_fence) VALUES('designation-blocker',1,20,1000,'voter','held-object','abcd',1,'lifecycle-generation',1,$1,'voter',1)".into(),vec![Uuid::new_v4().to_string().into()])]).await.expect("interrupted physical phase fault");
+        assert_eq!(
+            designation_owner_for(&store, &request).await.as_deref(),
+            Some("voter"),
+            "expired lease does not settle a physical phase"
+        );
+        // No actual reader was created by this fixture. Removing its injected
+        // phase restores the proven no-spawn Source settlement above.
+        store.sharing_txn(vec![("UPDATE analysis_coordination_roles SET active_custody_id=NULL,physical_node_id=NULL,physical_fence=NULL WHERE request_id='designation-blocker'".into(),vec![])]).await.expect("remove injected fault");
+        assert_eq!(designation_owner_for(&store, &request).await, None);
+        let next = intent(&store, grant, &key, "new-designation").await;
+        let SourceClaimOutcome::Acquired(next_binding) = store
+            .claim_source_media_session(&next, &proof())
+            .await
+            .expect("atomic re-election")
+        else {
+            panic!("fresh successor")
+        };
+        let epochs = store.sharing_read("SELECT json_array(designation_epoch,anchor_incarnation_id) AS payload FROM copy_source_owner_designations",vec![]).await.expect("persisted epoch");
+        assert_eq!(
+            epochs,
+            vec![serde_json::json!([2, next_binding.incarnation_id()]).to_string()]
+        );
+        let guarded = format!("SELECT json_quote(EXISTS(SELECT 1 FROM sharing_source_session_bindings b WHERE b.incarnation_id=$1 AND {})) AS payload",designation_fence_guard("b"));
+        assert_eq!(
+            store
+                .sharing_read(&guarded, vec![binding.incarnation_id().into()])
+                .await
+                .expect("old epoch guard"),
+            vec!["0".to_owned()]
+        );
+        assert_eq!(
+            store
+                .sharing_read(&guarded, vec![next_binding.incarnation_id().into()])
+                .await
+                .expect("new epoch guard"),
+            vec!["1".to_owned()]
+        );
+        assert_eq!(
+            designation_owner_for(&store, &next).await.as_deref(),
+            Some("voter"),
+            "new unresolved anchor cannot be replaced again"
+        );
+        assert_eq!(count(&store, "copy_source_designation_bindings").await, 2);
     }
 }

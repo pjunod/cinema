@@ -1,14 +1,15 @@
 //! Actual registered producer associations retained by private Source viewers.
 //! This barrier never releases SQL capacity or certifies downstream HTTP bodies.
-use super::*;
 use crate::prodrun::ProducerRegistration;
 use plurx_core::sharing_source_sessions::SourceDispatchAssignment;
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use tokio::sync::Notify;
 
 const SOURCE_OWNER_LIMIT: usize = 8;
 const UNSETTLED_GENERATION_LIMIT: usize = 64;
 
 #[derive(Default)]
-pub(super) struct SourceRenditionOwners {
+pub(crate) struct SourceRenditionOwners {
     state: Arc<StdMutex<SourceOwnersState>>,
 }
 #[derive(Default)]
@@ -51,13 +52,13 @@ impl SourceProducerAssociationsSettled {
 }
 
 impl SourceRenditionOwners {
-    pub(super) fn has_source_telemetry(&self) -> bool {
+    pub(crate) fn has_source_telemetry(&self) -> bool {
         self.state
             .lock()
             .expect("Source rendition owners")
             .telemetry_capable
     }
-    pub(super) async fn declare_source_telemetry(&self) -> Result<(), String> {
+    pub(crate) async fn declare_source_telemetry(&self) -> Result<(), String> {
         let observer = {
             let mut state = self.state.lock().expect("Source rendition owners");
             state.telemetry_capable = true;
@@ -72,7 +73,7 @@ impl SourceRenditionOwners {
         Ok(())
     }
 
-    pub(super) fn set_source_observer(
+    pub(crate) fn set_source_observer(
         &self,
         epoch: u64,
         observer: crate::source_custody::SourceObserver,
@@ -82,7 +83,7 @@ impl SourceRenditionOwners {
             .expect("Source rendition owners")
             .source_observer = Some((epoch, observer));
     }
-    pub(super) fn source_observer(
+    pub(crate) fn source_observer(
         &self,
         epoch: u64,
     ) -> Option<crate::source_custody::SourceObserver> {
@@ -95,7 +96,7 @@ impl SourceRenditionOwners {
             .map(|(_, observer)| observer.clone())
     }
 
-    pub(super) fn contains_live_assignment(&self, assignment: &SourceDispatchAssignment) -> bool {
+    pub(crate) fn contains_live_assignment(&self, assignment: &SourceDispatchAssignment) -> bool {
         self.state
             .lock()
             .expect("Source rendition owners")
@@ -110,7 +111,7 @@ impl SourceRenditionOwners {
                         .detached
             })
     }
-    pub(super) fn attach(
+    pub(crate) fn attach(
         &self,
         assignment: &SourceDispatchAssignment,
     ) -> Result<Arc<SourceRenditionOwner>, &'static str> {
@@ -170,7 +171,7 @@ impl SourceRenditionOwners {
 
     /// Capture associations before any async spawn preparation. Retirement
     /// cannot declare no producer while this actual dispatch is unresolved.
-    pub(super) fn begin_generation(&self) -> Result<SourceGenerationDispatch, &'static str> {
+    pub(crate) fn begin_generation(&self) -> Result<SourceGenerationDispatch, &'static str> {
         let mut state = self.state.lock().expect("Source rendition owners");
         let owners: Vec<_> = state
             .owners
@@ -217,7 +218,7 @@ impl SourceRenditionOwners {
 
     /// The actor transfers its actual first-start reservation before committing
     /// reader demand. A different pending owner cannot replace that reservation.
-    pub(super) fn arm_initial_permit(
+    pub(crate) fn arm_initial_permit(
         &self,
         owner: &Arc<SourceRenditionOwner>,
         permit: crate::vodencode::EncodePermit,
@@ -255,7 +256,7 @@ impl SourceRenditionOwners {
         Ok(())
     }
 
-    pub(super) fn copy_admissions(&self) -> Option<crate::admission::Admissions> {
+    pub(crate) fn copy_admissions(&self) -> Option<crate::admission::Admissions> {
         self.state
             .lock()
             .expect("Source rendition owners")
@@ -263,7 +264,18 @@ impl SourceRenditionOwners {
             .clone()
     }
 
-    pub(super) fn take_initial_permit(&self) -> Option<crate::vodencode::EncodePermit> {
+    /// A sequential preparing/primary operation retains the SAME admitted
+    /// reservation through its registered reaper. Viewer detachment may drop
+    /// the parent reservation only after this independent physical clone exists.
+    pub(crate) fn retained_initial_permit(&self) -> Option<crate::vodencode::EncodePermit> {
+        self.state
+            .lock()
+            .expect("Source rendition owners")
+            .initial_permit
+            .as_ref()
+            .map(|(_, permit)| permit.clone())
+    }
+    pub(crate) fn take_initial_permit(&self) -> Option<crate::vodencode::EncodePermit> {
         self.state
             .lock()
             .expect("Source rendition owners")
@@ -272,7 +284,7 @@ impl SourceRenditionOwners {
             .map(|(_, permit)| permit)
     }
 
-    pub(super) fn terminal_registration(&self) -> Option<ProducerRegistration> {
+    pub(crate) fn terminal_registration(&self) -> Option<ProducerRegistration> {
         let state = self.state.lock().expect("Source rendition owners");
         state
             .retiring_current
@@ -281,7 +293,7 @@ impl SourceRenditionOwners {
     }
 
     /// Called only with the token returned by actual job-owned producer attach.
-    pub(super) fn registered(
+    pub(crate) fn registered(
         &self,
         dispatch: &SourceGenerationDispatch,
         token: &ProducerRegistration,
@@ -424,14 +436,41 @@ impl SourceRenditionOwner {
 }
 
 /// Owned by the actual spawn path until its registration or no-child failure.
-pub(super) struct SourceGenerationDispatch {
+pub(crate) struct SourceGenerationDispatch {
     ledger: Arc<StdMutex<SourceOwnersState>>,
     owners: Vec<Arc<SourceRenditionOwner>>,
     producer_gate: Option<Arc<crate::transcode::source_actor::SourceProducerAuthority>>,
     assigned_namespace: bool,
 }
 impl SourceGenerationDispatch {
-    pub(super) async fn authorize_before_spawn(
+    /// Only the first private growing range uses preparing authority. The
+    /// association barrier still spans the actual child and all output drains.
+    pub(crate) async fn authorize_preparing_before_spawn(
+        &self,
+    ) -> Result<crate::transcode::source_actor::SourceGenerationAuthority, String> {
+        if !self.assigned_namespace {
+            return Err("Source bootstrap is not an assigned namespace".into());
+        }
+        let gate = self
+            .producer_gate
+            .as_ref()
+            .ok_or_else(|| "Source producer gate is unavailable".to_owned())?;
+        let permissions: Vec<_> = self
+            .owners
+            .iter()
+            .filter_map(|owner| {
+                owner
+                    .generations
+                    .lock()
+                    .expect("Source producer associations")
+                    .ingress
+                    .clone()
+            })
+            .collect();
+        gate.authorize_preparing_generation(&permissions).await
+    }
+
+    pub(crate) async fn authorize_before_spawn(
         &self,
     ) -> Result<Option<crate::transcode::source_actor::SourceGenerationAuthority>, String> {
         if !self.assigned_namespace {

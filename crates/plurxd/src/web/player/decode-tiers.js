@@ -410,7 +410,7 @@ function capsDocument(c, limits){
     video,
     audio:String(c.acodec||"").split(",").filter(Boolean),
     containers:String(c.container||"").split(",").filter(Boolean),
-    transports:["progressive","hls"],
+    transports:["progressive","hls","hls-bounded-range-v1"],
     // No `subtitle_overlays`. This player has no PGS renderer, and absent is
     // never a claim — so the server offers it no PGS default, advertises no
     // `overlay` protocol, and tells it the truth when a viewer picks a bitmap

@@ -100,6 +100,7 @@ pub(crate) struct PeerConnection {
     connection: tokio::task::JoinHandle<()>,
     host: String,
     verified_endpoint: Option<Endpoint>,
+    receiver_presentation_affirmed: bool,
 }
 
 // The socket future is dropped before its lifetime guard, including task
@@ -313,7 +314,11 @@ impl PeerConnection {
             }),
             host,
             verified_endpoint: None,
+            receiver_presentation_affirmed: false,
         })
+    }
+    pub(crate) fn receiver_presentation_affirmed(&self) -> bool {
+        self.receiver_presentation_affirmed
     }
     pub(crate) fn verified_endpoint(&self) -> Option<&Endpoint> {
         self.verified_endpoint.as_ref()
@@ -592,8 +597,10 @@ impl PeerConnection {
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::AUTHORIZATION, authorization)
                 .header("cinemashare-viewer", viewer)
+                .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .body(Body::from(request_json.to_owned()))
                 .map_err(|_| PeerError::InvalidResponse)?;
+            self.receiver_presentation_affirmed = true;
             self.sender
                 .ready()
                 .await

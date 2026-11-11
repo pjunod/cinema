@@ -6962,8 +6962,20 @@ impl MembershipManager {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
+        // Distinct protocol capability: an old Source must not accept a new
+        // owner-designated copy request merely because it can read the file.
+        statements.push((
+            "DELETE FROM cluster_node_capabilities WHERE node_id=$1 AND capability=$2".into(),
+            params!(
+                inner.identity.node_id.as_str(),
+                crate::store::analysis_coordination::SOURCE_COPY_COORDINATION_CAPABILITY
+            ),
+        ));
         if let Some(boot) = ingress_boot {
             let shape = crate::store::sharing_ingress_custody::schema_guard();
+            if inner.source_dispatch_ready.load(Ordering::Acquire) {
+                statements.push((format!("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE ({shape}) AND EXISTS(SELECT 1 FROM analysis_coordination_schema WHERE singleton=1 AND version=1) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at"),params!(inner.identity.node_id.as_str(),crate::store::analysis_coordination::SOURCE_COPY_COORDINATION_CAPABILITY,now)));
+            }
             let capability = format!("sharing_ingress_boot_v1:{boot}");
             statements.push((format!("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE ({shape}) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at"),params!(inner.identity.node_id.as_str(),capability,now)));
         }

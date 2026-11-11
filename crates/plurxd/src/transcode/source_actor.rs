@@ -1,5 +1,18 @@
 //! Owned Source producer admission and lifetime. HTTP callers only wait.
 use super::*;
+#[cfg(unix)]
+mod growing;
+#[cfg(unix)]
+pub(crate) use growing::{SourceGrowingBacking, SourceGrowingPreparation};
+
+#[derive(Clone)]
+enum SourceBacking {
+    ImmutableVod,
+    #[cfg(unix)]
+    Growing(Arc<SourceGrowingBacking>),
+    #[cfg(unix)]
+    PreparingRange(Arc<SourceGrowingPreparation>),
+}
 
 /// Actual daemon components retained by immutable Source renditions. Only
 /// the owned worker factory constructs this gate; there is no wire constructor.
@@ -13,6 +26,7 @@ pub(crate) struct SourceProducerAuthority {
 
 pub(crate) struct SourceGenerationAuthority {
     proofs: Vec<plurx_core::sharing_source_sessions::SourcePublicationAuthority>,
+    preparing: Vec<plurx_core::sharing_source_sessions::SourceSessionWriteAuthority>,
     ingress: Vec<plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission>,
 }
 
@@ -23,6 +37,11 @@ impl SourceGenerationAuthority {
             permission
                 .validate_observation_freshness(now)
                 .map_err(|_| "Source ingress observation expired before spawn".to_owned())?;
+        }
+        for proof in &self.preparing {
+            proof
+                .validate_observation_freshness(now)
+                .map_err(|_| "Source preparing observation expired before spawn".to_owned())?;
         }
         for proof in &self.proofs {
             proof
@@ -42,6 +61,53 @@ impl SourceProducerAuthority {
             && self.ingress.registry_boot_id() == self.registry_boot_id)
             .then(|| self.ingress.clone())
     }
+    /// Private first-range bootstrap only: the exact retained preparing
+    /// assignment and its existing index-preparation guard authorize physical
+    /// input before a measured timeline origin exists. No media is servable.
+    pub(crate) async fn authorize_preparing_generation(
+        &self,
+        permissions: &[plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission],
+    ) -> Result<SourceGenerationAuthority, String> {
+        if permissions.is_empty() || permissions.len() > 8 {
+            return Err("Source preparing assignment bound exceeded".into());
+        }
+        let mut preparing = Vec::new();
+        let mut ingress = Vec::new();
+        for permission in permissions {
+            if permission.registry_boot_id() != self.registry_boot_id
+                || !permission
+                    .assignment()
+                    .same_identity(self.ingress.assignment())
+            {
+                continue;
+            }
+            let proof = self
+                .current_preparation(permission.assignment())
+                .await
+                .map_err(|_| "Source preparing authority unavailable".to_owned())?;
+            if !self
+                .store
+                .authorize_source_index_preparation(&proof)
+                .await
+                .map_err(|_| "Source preparing input guard failed".to_owned())?
+            {
+                continue;
+            }
+            preparing.push(*proof);
+            ingress.push(permission.clone());
+        }
+        if preparing.is_empty() {
+            return Err("Source bootstrap has no current preparing owner".into());
+        }
+        let authority = SourceGenerationAuthority {
+            proofs: Vec::new(),
+            preparing,
+            ingress,
+        };
+        authority.validate_before_spawn()?;
+        Ok(authority)
+    }
+
     pub(crate) async fn authorize_generation(
         &self,
         permissions: &[plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission],
@@ -91,7 +157,11 @@ impl SourceProducerAuthority {
         if proofs.is_empty() {
             return Err("Source producer has no current authorized viewer".to_owned());
         }
-        let authority = SourceGenerationAuthority { proofs, ingress };
+        let authority = SourceGenerationAuthority {
+            proofs,
+            ingress,
+            preparing: Vec::new(),
+        };
         authority.validate_before_spawn()?;
         Ok(authority)
     }
@@ -156,6 +226,7 @@ use plurx_core::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SourceWorkerError {
     Unavailable,
+    RescanRequired,
     Capacity,
     Conflict,
     Deadline,
@@ -268,6 +339,7 @@ enum SourcePhysicalSettlement {
     ),
 }
 struct SourceViewerState {
+    backing: SourceBacking,
     native: Option<Arc<super::source_subtitles::SourceNativeTracks>>,
     start: Option<Result<crate::http::hls::StartResponse, SourceWorkerError>>,
     retirement_requested: bool,
@@ -437,15 +509,28 @@ impl SourceViewerActor {
         }
     }
     fn request_retirement(&self) {
-        self.0
-            .state
-            .lock()
-            .expect("Source worker state")
-            .retirement_requested = true;
+        let backing = {
+            let mut current = self.0.state.lock().expect("Source worker state");
+            current.retirement_requested = true;
+            current.backing.clone()
+        };
+        #[cfg(unix)]
+        match backing {
+            SourceBacking::Growing(backing) => backing.retire(),
+            SourceBacking::PreparingRange(preparing) => preparing.retire(),
+            SourceBacking::ImmutableVod => {}
+        }
         self.0.changed.notify_waiters();
     }
     /// Metadata retries have a real Body obligation but do not represent
     /// viewer media activity and therefore never touch the VOD idle clock.
+    #[cfg(unix)]
+    pub(crate) fn growing_backing(&self) -> Option<Arc<SourceGrowingBacking>> {
+        match &self.0.state.lock().expect("Source worker state").backing {
+            SourceBacking::ImmutableVod | SourceBacking::PreparingRange(_) => None,
+            SourceBacking::Growing(backing) => Some(Arc::clone(backing)),
+        }
+    }
     pub(crate) async fn open_start_response(
         &self,
         deadline: Instant,
@@ -475,6 +560,32 @@ impl SourceViewerActor {
             source: None,
             source_request: None,
         };
+        #[cfg(unix)]
+        if let Some(backing) = self.growing_backing() {
+            guard.source = Some(backing.physical_fence().await?);
+            let proof = self.0.gate.current_owned(&self.0.assignment).await?;
+            let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
+            if route.session_id != response.session_id
+                || route.publication_ready_at_ms != 0
+                || route.response_json
+                    != serde_json::to_string(&response)
+                        .map_err(|_| SourceWorkerError::Unavailable)?
+                || self
+                    .0
+                    .state
+                    .lock()
+                    .expect("Source worker state")
+                    .retirement_requested
+                || !backing.is_live()
+                || guard
+                    .source
+                    .as_ref()
+                    .is_none_or(|source| !source.unchanged())
+            {
+                return Err(SourceWorkerError::Unavailable);
+            }
+            return Ok((response, guard));
+        }
         let facts = manager
             .vod
             .hls_facts(&response.session_id)
@@ -537,6 +648,12 @@ impl SourceViewerActor {
         }
         if self.0.direct.is_some() {
             return Err(SourceWorkerError::Unsupported);
+        }
+        #[cfg(unix)]
+        if let Some(backing) = self.growing_backing() {
+            return self
+                .open_growing_resource_owned(backing, resource, deadline)
+                .await;
         }
         let native = self
             .0
@@ -1033,6 +1150,7 @@ impl TranscodeManager {
             retirement_deadline: Default::default(),
             direct: None,
             state: std::sync::Mutex::new(SourceViewerState {
+                backing: SourceBacking::ImmutableVod,
                 start: None,
                 retirement_requested: false,
                 retirement_mode: crate::sharing_connection_custody::DriverCloseMode::Drain,
@@ -1334,6 +1452,15 @@ impl TranscodeManager {
         prepared: crate::http::hls::PreparedSourcePlayback,
         deadline: Instant,
     ) {
+        #[cfg(unix)]
+        if prepared.source_presentation()
+            == Some(crate::http::hls::SourceCopyPresentation::BoundedRange)
+            && !source_recipe_is_encoded(prepared.request())
+        {
+            self.run_source_growing_owner(owner, state, prepared, deadline)
+                .await;
+            return;
+        }
         let actor = SourceViewerActor(Arc::clone(&owner));
         let source_request = self.foreground_source_request(
             prepared.file(),
@@ -1796,20 +1923,49 @@ impl TranscodeManager {
         preparations: &mut SourcePreparationSettlements,
     ) -> Result<(), SourceSettlementFault> {
         if physical.is_none() {
-            *physical = Some(if let Some(reserved) = reserved.as_mut() {
-                let receipt = Box::pin(reserved.retire(&self.vod))
-                    .await
-                    .map_err(|_| SourceSettlementFault::Transient)?;
-                if !receipt.matches(&owner.assignment) {
-                    return Err(SourceSettlementFault::Mismatch);
+            #[cfg(unix)]
+            {
+                let backing = owner
+                    .state
+                    .lock()
+                    .expect("Source worker state")
+                    .backing
+                    .clone();
+                let receipt = match backing {
+                    SourceBacking::Growing(backing) => Some(
+                        backing
+                            .wait_stopped()
+                            .await
+                            .map_err(|_| SourceSettlementFault::Transient)?,
+                    ),
+                    SourceBacking::PreparingRange(preparing) => {
+                        Some(preparing.wait_stopped().await)
+                    }
+                    SourceBacking::ImmutableVod => None,
+                };
+                if let Some(receipt) = receipt {
+                    *physical = Some(SourcePhysicalSettlement::Registered(
+                        Box::new(receipt),
+                        std::mem::take(preparations),
+                    ));
                 }
-                SourcePhysicalSettlement::Registered(
-                    Box::new(receipt),
-                    std::mem::take(preparations),
-                )
-            } else {
-                SourcePhysicalSettlement::NoProducer(std::mem::take(preparations))
-            });
+            }
+            if physical.is_none() {
+                *physical = Some(if let Some(reserved) = reserved.as_mut() {
+                    let receipt = Box::pin(reserved.retire(&self.vod))
+                        .await
+                        .map_err(|_| SourceSettlementFault::Transient)?;
+                    if !receipt.matches(&owner.assignment) {
+                        return Err(SourceSettlementFault::Mismatch);
+                    }
+                    SourcePhysicalSettlement::Registered(
+                        Box::new(receipt),
+                        std::mem::take(preparations),
+                    )
+                } else {
+                    SourcePhysicalSettlement::NoProducer(std::mem::take(preparations))
+                });
+            }
         }
         if matches!(physical, Some(SourcePhysicalSettlement::Registered(receipt, _)) if !receipt.matches(&owner.assignment))
         {

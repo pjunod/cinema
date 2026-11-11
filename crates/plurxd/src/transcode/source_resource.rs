@@ -42,6 +42,50 @@ impl SourceResourceReadCustody {
     ) -> Self {
         Self { guard, hooks }
     }
+    pub(crate) async fn open_ready_child(
+        &self,
+        directory: &plurx_core::fs_secure::SecureDirectory,
+        path: &Path,
+        name: &str,
+        etag: &str,
+        delivery: &Arc<crate::meter::Meter>,
+    ) -> std::io::Result<crate::vodserve::SegmentReady> {
+        let cache_pin = crate::playback_cache::pin(path)?;
+        if self
+            .guard
+            .source
+            .as_ref()
+            .is_none_or(|source| !source.unchanged())
+        {
+            return Err(std::io::Error::other(
+                "Source physical input changed before resource open",
+            ));
+        }
+        let file = directory.open_read_child(name).await?;
+        let len = file.metadata().await?.len();
+        let file = file.into_std().await;
+        self.hooks.slot.get().opened(&file);
+        if !file.metadata()?.is_file()
+            || self
+                .guard
+                .source
+                .as_ref()
+                .is_none_or(|source| !source.unchanged())
+        {
+            return Err(std::io::Error::other(
+                "Source resource changed during observation",
+            ));
+        }
+        Ok(crate::vodserve::SegmentReady {
+            observed_media_duration_ms: None,
+            retained_lease: None,
+            cache_pin,
+            file: tokio::fs::File::from_std(file),
+            len,
+            etag: etag.to_owned(),
+            delivery: Arc::clone(delivery),
+        })
+    }
     pub(crate) async fn open_ready(
         &self,
         path: &Path,
