@@ -346,9 +346,13 @@ internal class ProgressiveMediaOrigin : TransferListener {
     internal fun throughputWindowForTest(): ThroughputWindow = throughput
 }
 
-/** Range completion preserves the title clock; ENDLIST alone is insufficient. */
+/**
+ * A whole-title attachment ending is the title's end, whatever the container
+ * header claims. A bounded range ends the title only once it reaches the
+ * title clock's duration; ENDLIST alone is insufficient.
+ */
 internal fun sharedTitleEnded(isVod: Boolean, filmPositionMs: Long, titleDurationMs: Long?): Boolean =
-    titleDurationMs?.takeIf { it > 0 }?.let { filmPositionMs >= it - 1_000L } ?: isVod
+    isVod || titleDurationMs?.takeIf { it > 0 }?.let { filmPositionMs >= it - 1_000L } == true
 
 /** Current player-local seek window expressed on the title clock. */
 internal fun sharedSeekableFilmRange(originMs: Long, itemDurationMs: Long?, seekable: Boolean): LongRange? =

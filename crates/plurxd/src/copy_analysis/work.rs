@@ -245,9 +245,14 @@ async fn publish_source(
         Ok(None) => return Attempt::Busy,
         Err(error) => return Attempt::Retry(error.to_string()),
     };
-    let Ok(Some(claimed)) = context.store.analysis_request(&claim.request_id).await else {
-        return Attempt::Retry("claimed analysis request is unreadable".into());
-    };
+    // The claim is exactly this transition of the queued row; derive the
+    // running row from it so no unreadable re-read can strand the claim.
+    let mut claimed = request.clone();
+    claimed.state = "running".into();
+    claimed.owner_node_id = claim.node_id.clone();
+    claimed.fence = claim.fence;
+    claimed.attempts = claimed.attempts.saturating_add(1);
+    claimed.lease_expires_ms = now.saturating_add(context.lease_ms);
     let stop = CancellationToken::new();
     let lost = CancellationToken::new();
     let heartbeat = heartbeat(context, &claimed, stop.clone(), lost.clone());
@@ -260,20 +265,36 @@ async fn publish_source(
         Err(attempt) => {
             if !lost.is_cancelled() {
                 let now = crate::state::clock_ms();
-                let (code, charge) = match &attempt {
-                    Attempt::Discard(_) => ("copy_observation_refused", true),
-                    _ => ("copy_publication_retry", false),
+                let _ = match &attempt {
+                    // Nothing this coordinator can do will seal these rows;
+                    // a later observation starts a new request and role.
+                    Attempt::Discard(_) => {
+                        context
+                            .store
+                            .fail_analysis_request(
+                                &claimed.request_id,
+                                &claimed.owner_node_id,
+                                claimed.fence,
+                                "copy_observation_refused",
+                                now,
+                            )
+                            .await
+                    }
+                    // Busy is not charged; a failed step is, so a persistent
+                    // fault reaches the attempt limit instead of looping.
+                    other => {
+                        context
+                            .store
+                            .retry_analysis_request(
+                                &claimed,
+                                "copy_publication_retry",
+                                now,
+                                now.saturating_add(context.retry_ms),
+                                matches!(other, Attempt::Retry(_)),
+                            )
+                            .await
+                    }
                 };
-                let _ = context
-                    .store
-                    .retry_analysis_request(
-                        &claimed,
-                        code,
-                        now,
-                        now.saturating_add(context.retry_ms),
-                        charge,
-                    )
-                    .await;
             }
             attempt
         }
@@ -466,22 +487,45 @@ async fn publish_claimed(
         plurx_core::store::copy_index_v3_publish_payload(claim, source, &artifact, head.head_epoch)
             .map_err(|error| Attempt::Discard(error.to_string()))?;
     let token = claim_publisher(context, payload, claim, &head.source_key, &contract_key).await?;
-    if lost.is_cancelled() {
-        return Err(Attempt::Busy);
+    let outcome = if lost.is_cancelled() {
+        Err(Attempt::Busy)
+    } else {
+        context
+            .store
+            .publish_copy_index_v3(PublishCopyIndexV3 {
+                token: token.clone(),
+                claim: claim.clone(),
+                source: source.clone(),
+                artifact,
+                expected_head_epoch: head.head_epoch,
+                now_ms: crate::state::clock_ms(),
+            })
+            .await
+            .map_err(|error| Attempt::Retry(error.to_string()))
+    };
+    if !matches!(
+        outcome,
+        Ok(JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. })
+    ) {
+        // The publisher is one-shot per coordinator fence: a later attempt
+        // enqueues its own. Settle this one rather than leave it running.
+        let code = match &outcome {
+            Ok(JobPublishOutcome::SourceChanged) => "source_changed",
+            Ok(JobPublishOutcome::ArtifactConflict) => "artifact_conflict",
+            _ => "copy_publication_unsettled",
+        };
+        let _ = context
+            .store
+            .settle_job(plurx_core::store::background_jobs::SettleJob {
+                token,
+                settlement: plurx_core::store::background_jobs::JobSettlement::Fail {
+                    error_code: code.into(),
+                },
+                now_ms: crate::state::clock_ms(),
+            })
+            .await;
     }
-    let outcome = context
-        .store
-        .publish_copy_index_v3(PublishCopyIndexV3 {
-            token,
-            claim: claim.clone(),
-            source: source.clone(),
-            artifact,
-            expected_head_epoch: head.head_epoch,
-            now_ms: crate::state::clock_ms(),
-        })
-        .await
-        .map_err(|error| Attempt::Retry(error.to_string()))?;
-    match outcome {
+    match outcome? {
         JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. } => {
             tracing::info!(
                 file_id = source.file_id,
@@ -493,8 +537,9 @@ async fn publish_claimed(
         }
         JobPublishOutcome::LostOwnership => Err(Attempt::Busy),
         JobPublishOutcome::SourceChanged => Err(Attempt::Discard("source changed".into())),
+        // A conflicting variant does not resolve by repeating the same seal.
         JobPublishOutcome::ArtifactConflict => {
-            Err(Attempt::Retry("copy index v3 artifact conflict".into()))
+            Err(Attempt::Discard("copy index v3 artifact conflict".into()))
         }
     }
 }

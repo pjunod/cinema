@@ -133,6 +133,9 @@ pub(crate) struct CopyRangeFiles {
     publisher: CopyRangePublisher,
     observation: SecureDirectory,
     observation_path: PathBuf,
+    /// No reader reloads a retired range's manifests; its in-memory
+    /// observation already reached the Analysis inbox, so it is removed too.
+    observation_parent: SecureDirectory,
     catalog_namespace: String,
     source: AnalysisCoordinationSource,
     assignment: SourceDispatchAssignment,
@@ -245,7 +248,8 @@ impl CopyRangeFiles {
                 .join(incarnation)
                 .join(&range),
             observation,
-            observation_path: observation_root.join(range),
+            observation_path: observation_root.join(&range),
+            observation_parent: metadata,
             catalog_namespace,
             source,
             assignment,
@@ -288,6 +292,10 @@ impl CopyRangeFiles {
             .remove_child_tree(&self.payload_name, 120100, 2)
             .await
             .map_err(|_| "copy_payload_retirement_failed".to_owned())?;
+        self.observation_parent
+            .remove_child_tree(&self.payload_name, 120100, 2)
+            .await
+            .map_err(|_| "copy_observation_retirement_failed".to_owned())?;
         self.payload_retired = true;
         Ok(())
     }

@@ -27,6 +27,10 @@ class MediaOriginTest {
         assertEquals(origin, sharedMediaOriginMs(completedRange))
         assertFalse(sharedTitleEnded(sharedFilmLocalVod(completedRange), 5_428_000, range.duration_ms))
         assertTrue(sharedTitleEnded(false, 7_200_000, range.duration_ms))
+        // A whole-title attachment that ends short of the header duration is
+        // still the title's end, never a range to reopen.
+        assertTrue(sharedTitleEnded(true, 7_198_000, range.duration_ms))
+        assertFalse(sharedTitleEnded(false, 7_198_000, null))
         assertTrue(sharedFilmLocalVod(range.copy(vod = true, media_origin_ms = 0)))
     }
 

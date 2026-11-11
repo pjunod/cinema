@@ -185,8 +185,16 @@ pub(super) async fn establish<T: QueueSql>(
         AND request.requested_generation=json_extract($1,'$.source.requested_generation') AND request.file_id=json_extract($1,'$.source.file_id') AND request.source_size=json_extract($1,'$.source.source_size') AND request.source_mtime=json_extract($1,'$.source.source_mtime')
       ON CONFLICT DO NOTHING";
     let retire=format!("UPDATE analysis_requests SET state='cancelled',fence=fence+1,cancel_requested=1,last_error_code='coordination_joined',updated_at_ms=json_extract($1,'$.now_ms') WHERE request_id=json_extract($1,'$.request_id') AND state='queued' AND fence=0 AND pipeline_version=json_extract($1,'$.pipeline') AND video_identity=json_extract($1,'$.video') AND requested_generation=json_extract($1,'$.source.requested_generation') AND file_id=json_extract($1,'$.source.file_id') AND source_size=json_extract($1,'$.source.source_size') AND source_mtime=json_extract($1,'$.source.source_mtime') AND EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE role.request_id<>analysis_requests.request_id AND {})",source_match("role"));
+    // Rendezvous uniqueness belongs to live coordinators only. A role whose
+    // request already ended (failed, cancelled, ready) and holds no physical
+    // phase can never be claimed again, so it must not capture the source.
+    let release = format!("DELETE FROM analysis_coordination_roles WHERE {} AND active_custody_id IS NULL AND EXISTS(SELECT 1 FROM analysis_requests request WHERE request.request_id=analysis_coordination_roles.request_id AND request.state NOT IN ('queued','running','submitted'))",source_match("analysis_coordination_roles"));
     let attempt = store
-        .queue_transaction(vec![(insert.into(), body.clone()), (retire, body.clone())])
+        .queue_transaction(vec![
+            (release, body.clone()),
+            (insert.into(), body.clone()),
+            (retire, body.clone()),
+        ])
         .await;
     let rows = store
         .queue_sql(

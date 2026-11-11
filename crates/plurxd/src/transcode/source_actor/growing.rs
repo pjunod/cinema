@@ -927,15 +927,14 @@ impl TranscodeManager {
                         .map(|(checkpoint, init)| (init, checkpoint))
                 };
                 if let Some((init, checkpoint)) = candidate {
-                    match owner.gate.current_owned(&owner.assignment).await {
-                        Ok(authority) => {
-                            let manifest = checkpoint.manifest_sha256.clone();
-                            let message=crate::copy_analysis::CompletedCopyRange{file:Arc::clone(&backing.file),catalog_namespace:backing.catalog_namespace.clone(),source:backing.observation_source.clone(),authority:crate::copy_analysis::CopyObservationAuthority::Source{assignment:owner.assignment.clone(),authority:plurx_core::store::analysis_coordination::AnalysisSourceInterestAuthority::Active(authority)},range_id:backing.range_id,range_epoch:backing.range_epoch,init,checkpoint};
-                            if state.copy_analysis.notify(message) {
-                                notified_manifest = Some(manifest);
-                            }
+                    // Advisory only: a failed authority read skips this
+                    // notification; authority loss is the renewal tick's call.
+                    if let Ok(authority) = owner.gate.current_owned(&owner.assignment).await {
+                        let manifest = checkpoint.manifest_sha256.clone();
+                        let message=crate::copy_analysis::CompletedCopyRange{file:Arc::clone(&backing.file),catalog_namespace:backing.catalog_namespace.clone(),source:backing.observation_source.clone(),authority:crate::copy_analysis::CopyObservationAuthority::Source{assignment:owner.assignment.clone(),authority:plurx_core::store::analysis_coordination::AnalysisSourceInterestAuthority::Active(authority)},range_id:backing.range_id,range_epoch:backing.range_epoch,init,checkpoint};
+                        if state.copy_analysis.notify(message) {
+                            notified_manifest = Some(manifest);
                         }
-                        Err(_) => break,
                     }
                 }
                 tokio::select! {

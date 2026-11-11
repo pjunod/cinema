@@ -157,8 +157,12 @@ struct SharedPlaybackTimeline: Equatable {
         let (film, overflow) = mediaOriginMs.addingReportingOverflow(max(0, itemPositionMs))
         return overflow ? Int.max : max(0, film)
     }
+    /// A whole-title attachment ending is the title's end, whatever the
+    /// container header claims; a bounded range ends it only at the title
+    /// clock's duration.
     func reachedTitleEnd(filmPositionMs: Int, durationMs: Int?) -> Bool {
-        guard let durationMs, durationMs > 0 else { return wholeTitle }
+        if wholeTitle { return true }
+        guard let durationMs, durationMs > 0 else { return false }
         return filmPositionMs >= max(0, durationMs - 1_500)
     }
 }

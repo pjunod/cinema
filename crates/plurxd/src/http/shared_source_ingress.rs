@@ -253,6 +253,22 @@ pub(super) async fn receiver_effective_body(
     let input = input(path, bytes)?;
     let hash = source_credential_hash(headers)?;
     let viewer = viewer_hash(headers)?;
+    // A retained local owner already holds the exact invocation recipe and
+    // checks the receiver itself, so it needs no durable route read.
+    if let Ok(entry) = state
+        .transcode
+        .source_http_starts
+        .cleanup_entry(&hash, &viewer, &input)
+    {
+        let unassigned = matches!(
+            *entry.result.lock().expect("Source HTTP outcome"),
+            Some(Err(super::SourceStartFailure::RetargetUnassigned))
+        );
+        if !unassigned {
+            let selected = entry.identity.recipe.clone();
+            return receiver_presentation::operation_body(path, bytes, &selected);
+        }
+    }
     let current = current_reference(state, headers, &input.reference).await;
     // Header interpretation follows the existing exact current grant check.
     let ready = current.is_ok() && receiver_presentation::authenticated_receiver_ready(headers);
@@ -274,13 +290,7 @@ pub(super) async fn receiver_effective_body(
     let cleanup = path.ends_with("/end")
         || (path.ends_with("/status")
             && (current.is_err() || route.as_ref().is_some_and(|route| route.sealed)));
-    let selected = if let Ok(entry) = state
-        .transcode
-        .source_http_starts
-        .cleanup_entry(&hash, &viewer, &input)
-    {
-        entry.identity.recipe.clone()
-    } else if let Some(recipe) = state
+    let selected = if let Some(recipe) = state
         .transcode
         .source_http_starts
         .forwarding
@@ -325,9 +335,10 @@ pub(super) async fn resolve_forward_route(
             *entry.result.lock().expect("Source HTTP outcome"),
             Some(Err(SourceStartFailure::RetargetUnassigned))
         );
-        // Start may locate again after the affirmative no-claim result. End
-        // still reaches this retained local owner for its real cleanup reply.
-        if !path.ends_with("/sessions") || !unassigned_retarget {
+        // An affirmative no-claim result confers no ownership and leaves no
+        // cleanup obligation here: every later operation, End included,
+        // follows the durable route to the owner that did claim.
+        if !unassigned_retarget {
             return Ok(ForwardRoute::Local);
         }
     }
