@@ -129,6 +129,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Each cluster node keeps a lock-free account of what its own replica has
+  applied, and Settings → Developer shows an advisory Applied view card with
+  the node's replica proof, image state and view reads. `/metrics` adds the
+  route-read baseline by site, applied-view reads and reloads, table changes
+  and read-pool wait. Nothing reads through the view yet (playback-start E1a).
+
 - Shared imports can have a household-friendly name when imported and can be
   renamed from Shared libraries or Settings → Sharing. Names stay local and
   survive re-pairing.

@@ -1941,6 +1941,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let replication = selected.replication_monitor();
         let membership = selected.membership_manager();
         let catalogue = selected.catalogue_reader();
+        let applied = selected.applied_view();
         let dirs = create_dirs_for_config(&config)?;
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a
@@ -1961,6 +1962,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             replication,
             membership,
             catalogue,
+            applied,
             identity: selected.identity.clone(),
             credential_key: Arc::clone(&selected.credential_key),
             backup_client: selected.local_client(),
@@ -2015,6 +2017,7 @@ struct Boot {
     source_activation_at_boot: Option<bool>,
     store: Arc<dyn plurx_core::store::Store>,
     catalogue: plurx_core::store::CatalogueReader,
+    applied: plurx_core::store::AppliedView,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     identity: plurx_core::cluster::ClusterIdentity,
@@ -2369,6 +2372,7 @@ async fn boot_observing(
         replication,
         membership,
         catalogue,
+        applied,
         identity,
         credential_key,
         backup_client,
@@ -2406,6 +2410,7 @@ async fn boot_observing(
         replication,
         membership,
         catalogue,
+        applied,
         store,
         dirs,
         encoder_caps,
@@ -3460,6 +3465,7 @@ fn build_state(
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     catalogue: plurx_core::store::CatalogueReader,
+    applied: plurx_core::store::AppliedView,
     store: Arc<dyn plurx_core::store::Store>,
     dirs: crate::state::Dirs,
     encoder_caps: plurx_core::transcode::EncoderCaps,
@@ -3481,6 +3487,7 @@ fn build_state(
             shared_cache_dir: config.cluster.shared_cache_dir.clone(),
             shared_cache_id: config.cluster.shared_cache_id.clone(),
             catalogue,
+            applied,
             snapshot_recovery_budgets: crate::state::SnapshotRecoveryBudgets {
                 chunk_secs: config.cluster.snapshot_chunk_timeout_secs,
                 transfer_secs: config.cluster.snapshot_transfer_timeout_secs,

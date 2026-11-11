@@ -348,6 +348,17 @@ function indexingWhileServingCard(readiness){
     <p class="hint">Advisory: nothing here switches anything on or off.</p>
     ${devGraduation("after a deploy, idle nodes' analysis claims rise while another node serves, plurx_analysis_completed_total shows completions that reached their target, and no storage domain holds more than its two readers.","this card goes; indexing while serving is simply how analysis works.")}`,{id:"indexing-while-serving-card"});
 }
+// E1 (playback start): settings and media-session routes answered from this
+// node's own applied replica whenever it can prove the replica is current.
+// No switch; the rows are facts loaded when the page asks.
+function appliedViewCard(readiness){
+  return setCard(`${cardHead("Applied view","Settings and playback routes read from this node's own replica when a current quorum proof covers it, and from a quorum read when it does not.",'<span class="pill">no readers yet</span>')}
+    ${devReq(readiness,"applied_view","applied_view_proof","Replica proof present","A quorum-confirmed commit index this node has applied, inside its one-second lease. Without it every view read is a quorum read.")}
+    ${devReq(readiness,"applied_view","applied_view_image","Replica image stable","Closed while a snapshot is installed, and until restart if a restore failed.")}
+    ${devReq(readiness,"applied_view","applied_view_reads","Reads through the view","View and quorum reads since this node started, and the last reason a read fell back.")}
+    <p class="hint">Advisory: nothing here switches anything on or off, and fences never read the view.</p>
+    ${devGraduation("settings (E1b) and media-session routes (E1c) read through the view and the fleet's authority-read rate per request drops as the E1 contract measures it.","this card goes; reading the applied replica is simply how settings and routes are served.")}`,{id:"applied-view-card"});
+}
 // D1 (playback start, plan ruling 3): processed Dolby Vision / HDR10-E is an
 // upgrade after the first frame, switched in through the prepared
 // replacement. It always runs when Dolby Vision processing is on; the rows
@@ -388,6 +399,7 @@ function developerPanel(settings,readiness,httpsCard=""){
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
       <div class="setsection" id="enable-indexing-while-serving"><h2>Indexing while serving</h2><p>Content analysis beside playback. Automatic; the rows are advisory.</p></div>${indexingWhileServingCard(readiness)}
+      <div class="setsection" id="enable-applied-view"><h2>Applied view</h2><p>Node-local reads of settings and playback routes. Automatic; the rows are advisory.</p></div>${appliedViewCard(readiness)}
       <div class="setsection" id="enable-macos-video"><h2>Mac video processing</h2><p>Worker-local compatibility and outstanding visual and streaming qualification.</p></div>${macosVideoProcessingCard(settings,readiness)}
       <div class="setsection" id="enable-macos-hevc"><h2>Mac HEVC output</h2><p>Independent output negotiation and HDR presentation qualification.</p></div>${macosHevcOutputCard(settings,readiness)}`;
 }
