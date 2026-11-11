@@ -1611,7 +1611,6 @@ paths = [
   "scripts/paperwork",
   "scripts/outline",
   "scripts/quiet",
-  ".github/dv-elf.py",
   "scripts/ci-failures",
   "scripts/ci-failures.fleet.example.json",
   "swarm/*.txt",
