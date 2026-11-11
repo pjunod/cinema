@@ -1173,7 +1173,11 @@ impl ClientPreparedSeam {
 async fn prepared_seam_session_processed(state: &AppState, session_id: &str) -> bool {
     let read = tokio::time::timeout(
         std::time::Duration::from_millis(250),
-        state.store.media_session_route(session_id),
+        crate::media_sessions::read_media_session_route(
+            &*state.store,
+            crate::media_sessions::RouteReadSite::Observer,
+            session_id,
+        ),
     )
     .await;
     let Ok(Ok(Some(route))) = read else {

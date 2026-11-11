@@ -354,7 +354,13 @@ impl PreparedProof {
         if trial_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return;
         }
-        let Ok(Some(route)) = state.store.media_session_route(session).await else {
+        let Ok(Some(route)) = crate::media_sessions::read_media_session_route(
+            &*state.store,
+            crate::media_sessions::RouteReadSite::Receipt,
+            session,
+        )
+        .await
+        else {
             return;
         };
         if route.incarnation_id != incarnation
@@ -423,7 +429,13 @@ impl PreparedProof {
         else {
             return;
         };
-        let Ok(Some(current_route)) = state.store.media_session_route(session).await else {
+        let Ok(Some(current_route)) = crate::media_sessions::read_media_session_route(
+            &*state.store,
+            crate::media_sessions::RouteReadSite::Receipt,
+            session,
+        )
+        .await
+        else {
             return;
         };
         if current_route.incarnation_id != incarnation
