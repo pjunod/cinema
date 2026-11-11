@@ -7978,7 +7978,7 @@ test_anchor = "testEnhancementPillsFollowTheRangeBadgeOnlyForActiveEnhancements"
 id = "apple.prepared-successor-keeps-enhancement"
 commits = ["8a5672b3159e9f912d1826c23951d071124365c7"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "playbackEnhancement = action.enhancement"
+source_anchor = "adoptPlaybackEnhancement(action.enhancement)"
 test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
 test_anchor = "testCommitAdoptsTheSuccessorsEnhancementInsteadOfClearingIt"
 
