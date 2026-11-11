@@ -10,6 +10,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Titles with a pending Dolby Vision FEL request no longer fail source
+  verification ("the stored probe differs from the source at
+  /<unknown-field> missing"), which had declined their processed HDR10-E
+  upgrade. Application metadata in a stored probe is now excluded by its
+  `plurx_` namespace rather than a list a new field could miss.
+
 - Android TV devices whose HEVC decoder declares performance points (Google TV
   Streamer) now report HLS fMP4 HEVC support, so processed Dolby Vision
   (HDR10-E) upgrades reach them instead of being declined at every start.
