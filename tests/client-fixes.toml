@@ -8477,3 +8477,20 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/Caps.kt"
 source_anchor = "selector.isVideoSizeAndRateSupportedV21(width, height, rate)"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
 test_anchor = "fun decoderEnvelopeAsksMedia3AtEveryRectangleAndRate()"
+
+# A1/B1 review: a whole-title shared attachment ending is the title's end.
+[[fixes]]
+id = "android.shared-whole-title-end"
+commits = ["26c0f3cc9c1344346ef779ed1b62e44290abb21b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/MediaOrigin.kt"
+source_anchor = "isVod || titleDurationMs?.takeIf { it > 0 }?.let { filmPositionMs >= it - 1_000L } == true"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/MediaOriginTest.kt"
+test_anchor = "assertTrue(sharedTitleEnded(true, 7_198_000, range.duration_ms))"
+
+[[fixes]]
+id = "apple.shared-whole-title-end"
+commits = ["26c0f3cc9c1344346ef779ed1b62e44290abb21b"]
+source = "clients/apple/Sources/SharedPlaybackModels.swift"
+source_anchor = "if wholeTitle { return true }"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "XCTAssertTrue(whole.reachedTitleEnd(filmPositionMs: 7_197_000, durationMs: 7_200_000))"
