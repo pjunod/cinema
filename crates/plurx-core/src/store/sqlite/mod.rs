@@ -1335,6 +1335,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_managed_schema::PREPARED_MIGRATION,
     // v124: shared dispatch turns for interactive library work.
     super::background_job_turns::SCHEMA,
+    // v125: pipeline contract v2 sidecar for targeted scan requests.
+    super::scan_request_v2::SCHEMA,
+    // v126: targeted library probes do not reserve a background source reader.
+    super::subtitle_managed_schema::TARGETED_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1797,6 +1801,9 @@ impl SqliteStore {
             if version == super::subtitle_managed_schema::PREPARED_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_prepared_predecessor(&tx)?;
             }
+            if version == super::subtitle_managed_schema::TARGETED_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_targeted_predecessor(&tx)?;
+            }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
         }
@@ -1890,6 +1897,7 @@ impl SqliteStore {
         super::subtitle_text_translation_schema::verify_sqlite(conn)?;
         super::shared_caption_schema::verify_sqlite(conn)?;
         super::playback_handoffs::verify_sqlite(conn)?;
+        super::scan_request_v2::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

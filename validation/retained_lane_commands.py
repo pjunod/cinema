@@ -1,4 +1,5 @@
 """Authenticate complete native commands without claiming named test outcomes."""
+import hashlib
 import json
 import re
 import subprocess
@@ -62,11 +63,23 @@ def jvm_outcomes(raw):
     lines = [line.strip() for line in text.splitlines()]
     successful_terminal(lines)
     tasks = ['> Task :app:testDebugUnitTest', '> Task :app:lintDebug']
+    # The runner merges stdout and stderr without preserving write boundaries:
+    # a Java warning fragment can precede a complete Gradle task record. Keep
+    # every target record, including cache/skip suffixes, so a duplicate or an
+    # unexecuted task cannot be hidden by a separate successful-looking line.
+    records = []
+    for index, line in enumerate(lines):
+        match = re.search(
+            r'(?:^|[ \t])(> Task :app:(?:testDebugUnitTest|lintDebug)(?=$|[ \t]).*)$',
+            line,
+        )
+        if match:
+            records.append((index, match[1]))
     successful = [i for i, line in enumerate(lines) if re.fullmatch(r'BUILD SUCCESSFUL in .+', line)]
-    receipts.require(lines.count(JVM_ARGV) == 1 and all(lines.count(task) == 1 for task in tasks)
+    receipts.require(lines.count(JVM_ARGV) == 1 and [record for _, record in records] == tasks
                      and len(successful) == 1 and lines.count('🏁  Job succeeded') == 1
-                     and lines.index(JVM_ARGV) < lines.index(tasks[0])
-                     < lines.index(tasks[1]) < successful[0] < lines.index('🏁  Job succeeded')
+                     and lines.index(JVM_ARGV) < records[0][0]
+                     < records[1][0] < successful[0] < lines.index('🏁  Job succeeded')
                      and not re.search(r'^BUILD FAILED|^FAILURE: Build failed', text, re.M),
                      'Native Gradle command did not execute test and lint tasks successfully')
     return {'make android-test': 'pass'}
@@ -201,11 +214,37 @@ JVM_PLAYBACK_COMMENT_TREES = ('ad8414cfe9700cfadb8a42ab2a84ede121baa336',
                               '11407824d6dbbb6bcad85ca59f863bfd776dca9d')
 
 
+# The exact merged playback tree changes only the ownership census and two
+# web-only test scripts. Android JVM tests load the named JSON fixtures from
+# this resource directory; those and every other tree entry are unchanged.
+# Full tree IDs and complete per-file hashes refuse new or appended drift.
+JVM_PLAYBACK_SOURCE_ONLY_TREES = ('c680c055fe8bb48dfeb1ec3d677d8d9d54ecaa72',
+                                   'a8d0c60531d94c22393bad1f53ee4039ef06159d')
+JVM_PLAYBACK_SOURCE_ONLY_FILES = {
+    'rolling-producer-owners.toml': (
+        '53706e9cc898bd9048df784ce9dbc4d56be1de80d8df82b5020f2a9992a05cc0',
+        '6cd9e9d3ba7db8512bd676abb91c1584b172452cc85865e65667d252f16505c2'),
+    'web-control.test.js': (
+        '283894fe6436bb893b903d541eeb8d5d27598f7f1dbb6d15d7358daa556c6ecf',
+        '2f6a3f22522abf1a958f0b90c6005a7ed5647d6dd22b58ccdf40c3bc3a7fecab'),
+    'web-policy.test.js': (
+        '912de57e6fb5802121a26eceadd5deebc2dfa3db39e2eea837a50618870fb208',
+        '744bf5c4cf5237cc590c603d391a1275bb1d3b130d6faef085da8a448fff4065'),
+}
+
+
 def same_jvm_fixture_tree(prior, candidate, path, read_source):
     trees = tree_id(prior, path), tree_id(candidate, path)
     if trees[0] == trees[1]:
         return True
-    if path != 'tests/playback' or trees != JVM_PLAYBACK_COMMENT_TREES:
+    if path != 'tests/playback':
+        return False
+    if trees == JVM_PLAYBACK_SOURCE_ONLY_TREES:
+        return all(tuple(hashlib.sha256(raw).hexdigest() if raw is not None else None
+                         for raw in (read_source(prior, path + '/' + name),
+                                     read_source(candidate, path + '/' + name))) == hashes
+                   for name, hashes in JVM_PLAYBACK_SOURCE_ONLY_FILES.items())
+    if trees != JVM_PLAYBACK_COMMENT_TREES:
         return False
     ledger = path + '/rolling-producer-owners.toml'
     before, after = read_source(prior, ledger), read_source(candidate, ledger)

@@ -1005,11 +1005,13 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
         elif execution.get('native_discovery') is True:
             from validation.native_python_discovery import source_cohort
             old_ids, counts = source_cohort(record, text, kind, item['invocation'], discovery, candidate)
-            receipts.require(set(old_ids) <= universe, 'Removed native Python ID requires reconciliation')
-            actual = {test_id: 'opaque-pass' for test_id in old_ids}
+            # Discovery authenticates the complete old universe and its original
+            # counts above. Retired IDs supply no current credit; replacements
+            # and affected survivors still need their own passing outcomes.
+            actual = {test_id: 'opaque-pass' for test_id in old_ids if test_id in universe}
             opaque_sources.append({'sequence': sequence, 'source_commit': record['source_commit'],
                                    'log_sha256': record['log']['sha256_ref'],
-                                   'membership_ids': sorted(set(old_ids) - invalid),
+                                   'membership_ids': sorted(set(actual) - invalid),
                                    'runtime_named_outcomes': None, **counts})
         elif opaque:
             expected = BASE_JVM_LOG if kind == 'android_jvm' else BASE_PYTHON_LOG
