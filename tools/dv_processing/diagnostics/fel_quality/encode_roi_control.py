@@ -18,14 +18,18 @@ from pathlib import Path
 import argparse, hashlib, json, re, subprocess, time
 
 FFMPEG = '/opt/homebrew/bin/ffmpeg'
-VF = ('setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,'
-      'format=yuv420p10le,settb=expr=1/24000,setpts=N*1001')
+CADENCES = {(24000, 1001), (24, 1)}  # the retained fixtures' native cadences
+
+
+def vf_for(num, den):
+    return ('setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,'
+            f'format=yuv420p10le,settb=expr=1/{num},setpts=N*{den}')
 DICT = {'-preset': 'preset', '-profile:v': 'profile', '-x265-params': 'x265-params', '-b:v': 'b', '-maxrate': 'maxrate',
         '-bufsize': 'bufsize', '-bf': 'bf', '-flags': 'flags', '-g': 'g', '-keyint_min': 'keyint_min',
         '-sc_threshold': 'sc_threshold', '-color_primaries': 'color_primaries', '-color_trc': 'color_trc',
         '-colorspace': 'colorspace', '-color_range': 'color_range', '-threads:v': 'threads'}
 FIXED = {'-nostdin': None, '-hide_banner': None, '-loglevel': 'verbose', '-filter_threads': '1', '-threads': '1',
-         '-map': '0:v:0', '-an': None, '-sn': None, '-vf': VF, '-c:v': 'libx265', '-fps_mode': 'passthrough',
+         '-map': '0:v:0', '-an': None, '-sn': None, '-c:v': 'libx265', '-fps_mode': 'passthrough',
          '-force_key_frames': 'expr:eq(mod(n,48),0)', '-f': 'mp4'}
 
 
@@ -51,6 +55,8 @@ def translate(argv):
             opts[DICT[t]] = a[i + 1]; i += 2
         elif t == '-r':
             num, den = a[i + 1].split('/'); pos['rate'] = (int(num), int(den)); i += 2
+        elif t == '-vf':
+            pos['vf'] = a[i + 1]; i += 2
         elif t == '-i':
             pos['input'] = a[i + 1]; i += 2
         elif t == '-enc_time_base':
@@ -63,7 +69,8 @@ def translate(argv):
             pos['tag'] = a[i + 1]; i += 2
         else:
             raise SystemExit(f'refused: untranslated baseline argv token {t!r}')
-    assert set(pos) == {'rate', 'input', 'tb_den', 'frames', 'movflags', 'tag'}, pos
+    assert set(pos) == {'rate', 'input', 'tb_den', 'frames', 'movflags', 'tag', 'vf'}, pos
+    assert pos['rate'] in CADENCES and pos['vf'] == vf_for(*pos['rate']) and pos['tb_den'] == pos['rate'][0], ('cadence/filter', pos)
     return opts, pos, out
 
 
@@ -98,7 +105,8 @@ src = Path(pos['input'])
 if not src.exists():
     src = a.baseline_input_root / src.name
 assert sha(src) == base['source_sha256'], 'source hash mismatch'
-assert pos['rate'] == (24000, 1001) and pos['tb_den'] == 24000 and pos['frames'] == 48
+num, den = pos['rate']
+assert pos['frames'] == 48
 if a.mode in ('luma', 'lumazm'):
     assert a.protocol and a.threshold_nits > 0 and a.qp_offset != 0, 'luma map needs a committed protocol and nonzero settings'
     own = text = a.protocol.read_text()
@@ -126,13 +134,13 @@ dst = Path(f'{stem}-hdr.mp4'); mapj = Path(f'{stem}-map.json'); log = Path(f'{st
 for f in [dst, mapj, log, Path(f'{stem}-recipe.json')]:
     assert not f.exists(), f'refused: {f} exists'
 argv = [str(a.harness), str(src), str(dst), str(mapj), a.mode, str(a.grid), repr(a.threshold_nits), str(a.qp_offset),
-        str(pos['frames']), '24000', '1001', str(pos['tb_den']), pos['movflags'], pos['tag']] + [f'{k}={v}' for k, v in opts.items()]
+        str(pos['frames']), str(num), str(den), str(pos['tb_den']), pos['movflags'], pos['tag']] + [f'{k}={v}' for k, v in opts.items()]
 t = time.monotonic()
 with log.open('xb') as f:
     r = subprocess.run(['nice', '-n', '15', *argv], stdout=f, stderr=subprocess.STDOUT, timeout=1800)
 record = {'variant': 'hdr-off-chroma9', 'fixture': a.prefix.split('-')[0], 'mode': a.mode, 'grid': a.grid,
           'threshold_nits': a.threshold_nits, 'qp_offset': a.qp_offset, 'qg_size': 8 if grid == 8 else 32,
-          'cadence': '24000/1001', 'source': str(src), 'source_sha256': base['source_sha256'],
+          'cadence': f'{num}/{den}', 'source': str(src), 'source_sha256': base['source_sha256'],
           'baseline_recipe': {'path': str(a.baseline_recipe), 'sha256': sha(a.baseline_recipe)},
           'baseline_mp4_sha256': base['sha256'], 'harness': {'path': str(a.harness), 'sha256': sha(a.harness),
                       'source': {'path': str(a.harness_source), 'sha256': sha(a.harness_source)} if a.harness_source else None},
@@ -146,7 +154,7 @@ harness_unused = sorted(set(re.findall(r'roi_encode: unused option ([^=\s]+)=', 
 record['unused_encoder_options'] = {'cli_baseline': cli_unused, 'harness': harness_unused, 'equal': cli_unused == harness_unused}
 record['status'] = 'encoded' if r.returncode == 0 and cli_unused == harness_unused else 'encode_failed'
 if record['status'] == 'encoded':
-    record.update(bytes=dst.stat().st_size, sha256=sha(dst), average_mbps=dst.stat().st_size * 8 / (48 * 1001 / 24000) / 1e6,
+    record.update(bytes=dst.stat().st_size, sha256=sha(dst), average_mbps=dst.stat().st_size * 8 / (48 * den / num) / 1e6,
                   map=json.loads(mapj.read_text()), map_sha256=sha(mapj))
     eb = annexb(dst, Path(f'{stem}-annexb.hevc'))
     bb_path = Path(f'{stem}-baseline-annexb.hevc'); bb = annexb(a.baseline_mp4, bb_path)

@@ -25,7 +25,7 @@ FFPROBE = '/opt/homebrew/bin/ffprobe'
 VARIANTS = ['hdr-off', 'psyoff', 'no-sao', 'chroma-fine', 'hdr-off-chroma6', 'hdr-off-chroma9']
 
 ap = argparse.ArgumentParser()
-ap.add_argument('fixture', choices=['michael1800', 'michael5400'])
+ap.add_argument('fixture', choices=['michael1800', 'michael5400', 'beekeeper1800'])
 ap.add_argument('variant', choices=VARIANTS)
 ap.add_argument('prefix')
 ap.add_argument('--qg-size', type=int, required=True)
@@ -72,6 +72,9 @@ def qp_group(lines, label):
 
 recipe = json.loads(Path(str(base) + '-recipe.json').read_text())
 assert recipe['status'] == 'encoded' and recipe.get('qg_size', 32) == a.qg_size and recipe['variant'] == variant
+# Native cadence of the encode (24000/1001 for the Michael windows, 24/1 for Beekeeper).
+TS, TICK = (int(x) for x in recipe['cadence'].split('/'))
+assert (TS, TICK) in {(24000, 1001), (24, 1)}
 input_mp4 = Path(str(base) + '-hdr.mp4'); output = Path(str(base) + '-rust-p81.mp4')
 assert sha(input_mp4) == recipe['sha256']
 log = Path(str(base) + '-encode.log').read_text()
@@ -91,7 +94,10 @@ assert len(aq) == 1, ('AQ log line count', aq)
 aq_tuple = {'aq_mode': int(aq[0][0]), 'aq_strength': aq[0][1], 'qg_size': int(aq[0][2]), 'cu_tree': int(aq[0][3])}
 assert aq_tuple == {'aq_mode': 2, 'aq_strength': a.aq_strength, 'qg_size': a.qg_size, 'cu_tree': 1}, aq_tuple
 
-name = 'michael-' + fixture.removeprefix('michael'); sealed_rpulist = OLD / 'calibrated-quality' / name / 'ordered-source-rpus.json'
+name = {'michael1800': 'michael-1800', 'michael5400': 'michael-5400', 'beekeeper1800': 'beekeeper-1800'}[fixture]
+# Beekeeper's sealed ordered RPU list lives with its calibrated inputs rather than its quality case.
+sealed_rpulist = (OLD / 'inputs' / 'beekeeper1800-calibrated-ordered-rpus.json' if fixture == 'beekeeper1800'
+                  else OLD / 'calibrated-quality' / name / 'ordered-source-rpus.json')
 rpulist = sealed_rpulist
 if a.rpu_list:
     # The sealed list names wiped /private/tmp paths; a derived list must keep order and hashes exactly.
@@ -102,7 +108,7 @@ if a.rpu_list:
 req = Path(str(base) + '-author-request.json'); prep = Path(str(base) + '-prepare-result.json'); res = Path(str(base) + '-author-result.json')
 args = [sys.executable, str(OLD / 'author/prepare_request.py'), '--input-mp4', str(input_mp4), '--expected-input-sha256', recipe['sha256'],
         '--output-mp4', str(output), '--rpu-list', str(rpulist), '--source-level', '6', '--request-json', str(req), '--ffprobe', FFPROBE,
-        '--timescale', '24000', '--start', '0', '--frame-ticks', '1001', '--raster', '3840', '2160']
+        '--timescale', str(TS), '--start', '0', '--frame-ticks', str(TICK), '--raster', '3840', '2160']
 with prep.open('x') as f:
     subprocess.run(args, stdout=f, stderr=subprocess.STDOUT, check=True)
 with res.open('x') as f:
@@ -158,10 +164,10 @@ assert actual['psy-rd'] == (0 if variant == 'psyoff' else 2) and actual['psy-rdo
 out = {'scope': 'Mac software decoder raw accepted ordinals0/24, actual frozen Rust author, no worker/native-device/display or full-window renderer claim.',
        'fixture': fixture, 'variant': variant, 'prefix': prefix, 'input_sha256': sha(input_mp4), 'authored_mp4': str(output), 'authored_sha256': sha(output),
        'authored_bytes': output.stat().st_size,
-       'authored_video_packet_mbps': sum(int(x['size']) for x in probe['packets']) * 8 / (48 * 1001 / 24000) / 1e6,
+       'authored_video_packet_mbps': sum(int(x['size']) for x in probe['packets']) * 8 / (48 * TICK / TS) / 1e6,
        'author_request_sha256': sha(req), 'payload_audit_sha256': sha(payload), 'all48_RPUs_equal_actual_F': True, 'raw_file': str(raw), 'raw_sha256': sha(raw),
        'raw_bytes': len(b),
-       'native_frames': [{'source_ordinal': i, 'pts': f'{i*1001}/24000', 'duration': '1001/24000', 'bytes': framebytes,
+       'native_frames': [{'source_ordinal': i, 'pts': f'{i*TICK}/{TS}', 'duration': f'{TICK}/{TS}', 'bytes': framebytes,
                           'sha256': hashlib.sha256(b[j * framebytes:(j + 1) * framebytes]).hexdigest()} for j, i in enumerate([0, 24])],
        'decoder_command': argv, 'no_auto_scaler_in_verbose_log': True, 'encoder_info_effective_settings': actual, 'header_checks': expected,
        'header_lines': lines, 'encoder_input_frames': 48, 'encoder_output_frames': 48,
