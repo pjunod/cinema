@@ -16,8 +16,8 @@ owned abandonment, and startup clocks and retries across the relay. Main
 `30f4343ba` is integrated, retaining the canonical route policy, native startup,
 HDR and queued-analysis custody repairs from #1475–#1478.
 
-S5's asynchronous subtitle preparation needs Source custody and remains
-deferred. S1–S3, S8 and S9 remain A1 work. Native Apple/Android startup headers
+S5's Source-owned caption windows and the fixture Start503 landed in
+[#1490](SHARED-SUBTITLE-CUSTODY-AND-START-503.md). S1–S3, S8 and S9 remain A1 work. Native Apple/Android startup headers
 require a client release. RX-ring operations, deployment and physical
 playback acceptance remain separate.
 

@@ -1,6 +1,6 @@
 # Shared subtitles and Start503 — ownership, cause and delivery
 
-**Status:** open · **Owner:** Codex/root · **Updated:** 2026-11-09
+**Status:** done · **Owner:** Claude (from Codex/root) · **Updated:** 2026-11-11
 
 Companion to [the shared playback root causes](SHARED-LIBRARY-PLAYBACK-RCA.md),
 which defines S5, and [the prior delivery ledger](SHARED-LIBRARY-PLAYBACK-STATUS.md),
@@ -9,18 +9,14 @@ fixture Start503. A1, native client releases and physical acceptance remain sepa
 
 ## Current state
 
-Implementation is complete on `codex/shared-s5-and-start-503`, based on
-`c8f8b5aa9`. Codex owns integration and delivery. Sol owns the custody
-initializer repair and Source subtitle implementation. One independent
-adversarial review follows complete implementation; focused regressions,
-controlled negatives and the main fast lane follow that review. No unit
-results are claimed yet for this follow-up.
-
-The pinned Rust 1.97.1 compiler loop is established in a source-only container.
-The owner explicitly approved at most 24 GiB, four CPUs and no swap for this
-follow-up. Compiler caches stay shared; source and receipts have separate
-owned paths. The live PR records gate and landing state once opened. The single final independent review is complete. Its five findings are
-addressed; exact-source compilation and focused execution are next.
+Merged to `main` in PR #1490 as `df710af12` (head `32e9eec5d`, 2026-11-11),
+with all fourteen `Regression-Test:` trailers in the landing commit. Focused
+qualification passed 42 daemon and two core cases on pinned Rust 1.97.1. The
+fast lane on the merged head was green; its first run failed only the
+rolling-producer ownership inventory, which `32e9eec5d` recorded. One final
+adversarial review preceded qualification and all five findings are addressed.
+No Windows runtime run, fleet deployment or physical playback acceptance is
+claimed.
 
 ## The Start503 defect
 
