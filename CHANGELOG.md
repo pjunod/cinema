@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- CM4 display mapping uses the RPU's active picture boundary for spatial
+  filtering, keeping letterbox bars from brightening the first and last
+  active rows or side edges. Pixels outside the boundary are still mapped,
+  so subtitles in the bars and picture under a wrong boundary are kept.
 - Titles with a pending Dolby Vision FEL request no longer fail source
   verification ("the stored probe differs from the source at
   /<unknown-field> missing"), which had declined their processed HDR10-E

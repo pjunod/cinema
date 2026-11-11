@@ -5,7 +5,8 @@
 //
 // usage: dm_shader_control PARAMS RGBA_F32_IN W H GPU_OUT CPU_OUT
 // PARAMS lines (raw RPU units):
-//   l1 MIN AVG MAX | l3 MIN AVG MAX | l6 MIN_1E4 MAX | l9 INDEX | l254
+//   l1 MIN AVG MAX | l3 MIN AVG MAX | l5 LEFT RIGHT TOP BOTTOM
+//   l6 MIN_1E4 MAX | l9 INDEX | l254
 //   l2 TARGET_MAX_PQ SLOPE OFFSET POWER CHROMA SAT MS
 //   l8 INDEX LENGTH SLOPE OFFSET POWER CHROMA SAT MS MID CLIP S0..S5 H0..H5
 //   l10 INDEX TARGET_MAX_PQ TARGET_MIN_PQ PRIMARY_INDEX
@@ -29,6 +30,7 @@ int main(int argc, char **argv) {
   int w = atoi(argv[3]), h = atoi(argv[4]);
   require(w > 0 && h > 0 && w <= 8192 && h <= 8192, "size");
   static DoviExtMetadataBlockLevel1 l1; static DoviExtMetadataBlockLevel3 l3; static DoviExtMetadataBlockLevel6 l6;
+  static DoviExtMetadataBlockLevel5 l5;
   static DoviExtMetadataBlockLevel9 l9; static DoviExtMetadataBlockLevel254 l254;
   static DoviExtMetadataBlockLevel2 l2[16]; static const DoviExtMetadataBlockLevel2 *l2p[16];
   static DoviExtMetadataBlockLevel8 l8[16]; static const DoviExtMetadataBlockLevel8 *l8p[16];
@@ -45,6 +47,13 @@ int main(int argc, char **argv) {
       l3.min_pq_offset = v[0]; l3.avg_pq_offset = v[1]; l3.max_pq_offset = v[2]; dm.dm_data.level3 = &l3; }
     else if (!strcmp(key, "l6")) { require(fscanf(p, "%u %u", &v[0], &v[1]) == 2, "l6");
       l6.min_display_mastering_luminance = v[0]; l6.max_display_mastering_luminance = v[1]; dm.dm_data.level6 = &l6; }
+    else if (!strcmp(key, "l5")) {
+      require(fscanf(p, "%u %u %u %u", &v[0], &v[1], &v[2], &v[3]) == 4, "l5");
+      require(v[0] <= 65535 && v[1] <= 65535 && v[2] <= 65535 && v[3] <= 65535, "l5 range");
+      l5.active_area_left_offset=v[0]; l5.active_area_right_offset=v[1];
+      l5.active_area_top_offset=v[2]; l5.active_area_bottom_offset=v[3];
+      dm.dm_data.level5=&l5;
+    }
     else if (!strcmp(key, "l9")) { require(fscanf(p, "%u", &v[0]) == 1, "l9"); l9.source_primary_index = v[0]; dm.dm_data.level9 = &l9; }
     else if (!strcmp(key, "l254")) { l254.dm_version_index = 2; dm.dm_data.level254 = &l254; }
     else if (!strcmp(key, "l2")) { require(n2 < 16 && fscanf(p, "%u %u %u %u %u %u %u", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]) == 7, "l2");
