@@ -126,6 +126,8 @@ mod startup_cleanup;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 mod store;
 
+#[cfg(feature = "sqlite")]
+mod applied_mark;
 #[cfg(feature = "backup")]
 mod backup;
 #[cfg(feature = "dashboard")]
@@ -138,8 +140,6 @@ mod query;
 pub mod snapshot_admission;
 #[cfg(feature = "sqlite")]
 mod snapshot_metrics;
-#[cfg(feature = "sqlite")]
-mod applied_mark;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 mod split_brain_check;
 #[cfg(any(feature = "sqlite", feature = "cache"))]

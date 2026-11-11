@@ -405,13 +405,20 @@ made-up URL and prevents the fork from being declared fully tracked.
   per registered table, and `publish_then_send` turns those bits into
   revisions and stores the applied log index after the SQLite work has
   committed or rolled back and before every reply of an arm that applies an
-  entry, early-`continue` paths included. `Batch` and `Migrate` carry DDL and
-  table rebuilds, which the hook cannot attribute, and a restore replaces
-  every table: those bump every slot. The state machine, not the writer arm,
-  owns image replacement: a guard makes the generation odd before
-  `SnapshotApply` is sent and even after the read pool is reconnected, in
-  `update_state_machine_` (start-up restore and pending recovery) and in the
-  install task; a failed restore leaves it odd until restart.
+  entry, early-`continue` paths included. The hook cannot attribute DDL or a
+  table rebuild (it reports the copy under its temporary name and the drop
+  and rename not at all), so the helper re-reads `PRAGMA schema_version`
+  before every publish and bumps every slot when it moved, whichever arm
+  carried the change; `Batch`, `Migrate` and a successful restore also bump
+  every slot. `MetadataRead` publishes the persisted applied index, so a
+  restarted node does not report 0 until its next apply. The state machine,
+  not the writer arm, owns image replacement: a guard makes the generation odd
+  before `SnapshotApply` is sent and even after the read pool is reconnected,
+  in `update_state_machine_` (start-up restore and pending recovery) and in
+  the install task; a failed restore leaves it odd until a later replacement
+  completes or the node restarts. The hook only sees statements this binary
+  applies; an unqualified `DELETE` replayed from an older binary's log entry
+  would not move a slot (the plurx census refuses one in current source).
   `Client::local_db_applied_mark` is local only, with no remote fallback.
   The same row times every read-pool checkout into a fixed process-wide
   histogram (`db_read_pool_wait`), the baseline the E1 contract asks for.

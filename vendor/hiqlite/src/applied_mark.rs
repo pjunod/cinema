@@ -13,12 +13,18 @@
 //! the writer arm: an [`ImageReplacement`] guard makes `generation` odd before
 //! `SnapshotApply` is sent and even again only after the read pool has been
 //! reconnected. A guard dropped without completing leaves it odd: the view
-//! stays closed until restart.
+//! stays closed until a later replacement completes or the node restarts.
+//!
+//! Schema changes move every slot. The update hook reports a table rebuild
+//! under its temporary name and a `DROP`/`RENAME`/`ALTER` not at all, so the
+//! writer re-reads `PRAGMA schema_version` before every publish and bumps all
+//! slots when it moved, whichever arm carried the DDL (`Transaction`,
+//! `Execute`, `Batch`, `Migrate`).
 //!
 //! Nothing here crosses the wire; revisions are meaningless on another node.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Registered tables a node may name in [`crate::NodeConfig::applied_mark_tables`].
@@ -27,7 +33,8 @@ pub const APPLIED_MARK_MAX_TABLES: usize = 8;
 #[derive(Debug)]
 pub(crate) struct AppliedMark {
     /// Even: the image is stable. Odd: it is being replaced, or a replacement
-    /// failed and the image is not trusted until restart.
+    /// failed and the image is not trusted until a later replacement
+    /// completes or the node restarts.
     generation: AtomicU64,
     /// The last log index whose effects the read pool can see.
     applied_index: AtomicU64,
@@ -39,7 +46,13 @@ pub(crate) struct AppliedMark {
     pending: AtomicU8,
     /// Replacements that were begun and never completed.
     failed_replacements: AtomicU64,
+    /// Writer-local: the `PRAGMA schema_version` seen at the last publish,
+    /// [`SCHEMA_UNKNOWN`] when it could not be read.
+    schema_version: AtomicI64,
 }
+
+/// `schema_version` before the writer first reads it, or after a read failed.
+const SCHEMA_UNKNOWN: i64 = i64::MIN;
 
 impl AppliedMark {
     pub(crate) fn new<S: AsRef<str>>(tables: &[S]) -> Arc<Self> {
@@ -54,6 +67,7 @@ impl AppliedMark {
             names: tables.iter().map(|name| name.as_ref().to_owned()).collect(),
             pending: AtomicU8::new(0),
             failed_replacements: AtomicU64::new(0),
+            schema_version: AtomicI64::new(SCHEMA_UNKNOWN),
         })
     }
 
@@ -83,6 +97,23 @@ impl AppliedMark {
     /// or not at all, so the arms that carry them invalidate every slot.
     pub(crate) fn note_every_table(&self) {
         self.pending.fetch_or(self.all_bits(), Ordering::Relaxed);
+    }
+
+    /// The writer's starting schema, recorded without moving any slot.
+    pub(crate) fn prime_schema_version(&self, version: Option<i64>) {
+        self.schema_version
+            .store(version.unwrap_or(SCHEMA_UNKNOWN), Ordering::Relaxed);
+    }
+
+    /// Called by the writer before every publish with the current
+    /// `PRAGMA schema_version`: a change, or a value it could not read, moves
+    /// every slot.
+    pub(crate) fn note_schema_version(&self, version: Option<i64>) {
+        let version = version.unwrap_or(SCHEMA_UNKNOWN);
+        let previous = self.schema_version.swap(version, Ordering::Relaxed);
+        if version == SCHEMA_UNKNOWN || previous != version {
+            self.note_every_table();
+        }
     }
 
     /// Bump each table the hook saw, then publish the applied index. Called
@@ -147,7 +178,8 @@ impl Drop for ImageReplacement {
                 .fetch_add(1, Ordering::Relaxed);
             tracing::error!(
                 "SQLite image replacement did not complete; the applied mark stays \
-                 odd and local views stay closed until this node restarts"
+                 odd and local views stay closed until a later replacement \
+                 completes or this node restarts"
             );
         }
     }
@@ -331,6 +363,38 @@ mod tests {
             5,
             "a publish without an index keeps it"
         );
+    }
+
+    #[test]
+    fn a_schema_change_or_an_unreadable_schema_moves_every_slot() {
+        let mark = AppliedMark::new(&["settings", "media_sessions"]);
+        let handle = mark.handle();
+        let slots = [
+            handle.slot("settings").unwrap(),
+            handle.slot("media_sessions").unwrap(),
+        ];
+        let revisions = || slots.map(|slot| handle.revision(slot));
+        mark.prime_schema_version(Some(3));
+        mark.note_schema_version(Some(3));
+        mark.publish(Some(1));
+        assert_eq!(
+            revisions(),
+            [0, 0],
+            "priming and an unchanged cookie move nothing"
+        );
+        mark.note_schema_version(Some(4));
+        mark.publish(Some(2));
+        assert_eq!(revisions(), [1, 1]);
+        mark.note_schema_version(None);
+        mark.publish(Some(3));
+        assert_eq!(
+            revisions(),
+            [2, 2],
+            "a cookie it cannot read is treated as moved"
+        );
+        mark.note_schema_version(Some(4));
+        mark.publish(Some(4));
+        assert_eq!(revisions(), [3, 3], "and so is the first read after it");
     }
 
     #[test]

@@ -1160,8 +1160,8 @@ async fn request_snapshot_transport_status_sqlite(
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::{
-        RAFT_SHUTDOWN_TIMEOUT, SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES,
         request_snapshot_transport_status_sqlite, snapshot_transport_peer_from_current_membership,
+        RAFT_SHUTDOWN_TIMEOUT, SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES,
     };
     use crate::Node;
     use openraft::{Membership, RaftMetrics, StoredMembership};
@@ -1267,12 +1267,15 @@ mod tests {
             addr_api: address,
             ..peer
         };
-        assert!(
-            request_snapshot_transport_status_sqlite(&client, "exact-test-secret", false, &peer,)
-                .await
-                .expect("404 is compatible")
-                .is_none()
-        );
+        assert!(request_snapshot_transport_status_sqlite(
+            &client,
+            "exact-test-secret",
+            false,
+            &peer,
+        )
+        .await
+        .expect("404 is compatible")
+        .is_none());
         server.await.expect("join 404 server");
     }
 
@@ -1536,11 +1539,9 @@ mod tests {
         .into_db_quorum_watermark()
         .expect_err("a malformed advertised protocol is not an old leader");
 
-        assert!(
-            error
-                .to_string()
-                .contains("invalid local_read_protocol_version")
-        );
+        assert!(error
+            .to_string()
+            .contains("invalid local_read_protocol_version"));
     }
 
     #[tokio::test]
@@ -1591,33 +1592,25 @@ mod tests {
             .await
             .expect("remote shutdown deadline")
             .expect("remote shutdown");
-        assert!(
-            operation
-                .await
-                .expect("stream operation did not panic")
-                .is_err()
-        );
-        assert!(
-            db_rate
-                .await
-                .expect("DB rate waiter did not panic")
-                .is_err()
-        );
+        assert!(operation
+            .await
+            .expect("stream operation did not panic")
+            .is_err());
+        assert!(db_rate
+            .await
+            .expect("DB rate waiter did not panic")
+            .is_err());
         #[cfg(feature = "cache")]
-        assert!(
-            cache_rate
-                .await
-                .expect("cache rate waiter did not panic")
-                .is_err()
-        );
+        assert!(cache_rate
+            .await
+            .expect("cache rate waiter did not panic")
+            .is_err());
         assert!(*client.inner.stream_shutdown.borrow());
-        assert!(
-            client
-                .inner
-                .background_handles
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty()
-        );
+        assert!(client
+            .inner
+            .background_handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
     }
 }
