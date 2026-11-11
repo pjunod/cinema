@@ -48,7 +48,12 @@ is not yet measured: that needs a bound clip from a 4000-nit title and a
 frame-parameterized diagnostic build. The historical P7 audit stays separate
 (C 10 pixels worse than P8, as B). GPU-versus-double parity on CM4 real
 crops tightened from 2-3e-6 to under 7e-7 PQ; `test_dm_precision.py`
-enforces 1.5e-6. One frame is not whole-title or performance acceptance.
+enforces 1.5e-6. The helpers are one three-channel branchless implementation
+with Horner loops, so a CM4 shader compiles in about 2.4 s on lavapipe
+instead of 33-47 s (first proposal), with every parity output bit-identical.
+Correct rounding needs fused `fma`: lavapipe does not fuse, so
+`run_pq_helper_exact.py` accepts its unfused result there and
+`PLURX_DM_REQUIRE_FUSED_FMA=1` demands correct rounding on real GPUs. One frame is not whole-title or performance acceptance.
 
 The preceding source-budget correction merged in PR #1477 at `49c4ec103` after
 all applicable current-head fast-lane jobs passed. Its bitrate, level and

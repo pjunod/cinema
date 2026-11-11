@@ -320,9 +320,13 @@ enum { DV_DM_LATTICE_X = 66 };
 #define DV_DM_LATTICE_CHROMA 0.6
 #define DV_DM_LATTICE_MAX_R 120
 // Keep the legacy header expanded byte-for-byte for CM2.9, the lattice and
-// horizontal passes. CM4 point/final headers share one precise PQ definition.
-// Compile-time concatenation retains each pass's declaration order without
-// allocations or a second independently maintained colour implementation.
+// horizontal passes. CM4 point/final headers share one precise PQ definition and
+// carry only what their pass calls: the shader compiler inlines every call, so
+// its time grows with each instance of the split-float transfer functions. The
+// CM4 passes therefore convert all three channels in one vec3 instance, and
+// c4point_ic takes the ICtCp the pass already has instead of converting again.
+// Compile-time concatenation needs no allocations and no second independently
+// maintained colour implementation.
 #define DV_DM_GLSL_BASE \
   "#define DV_DM_LATTICE_X 66.0\n" \
   "const mat3 R2L_T = mat3(vec3(0.412109375,0.5239257812,0.06396484375), vec3(0.1667480469,0.7204589844,0.1127929688), vec3(0.02416992188,0.07543945312,0.900390625));\n" \
@@ -372,9 +376,12 @@ enum { DV_DM_LATTICE_X = 66 };
   "vec3 ictcp(vec3 rgb){ vec3 lms=pq_eotf3(rgb)*R2L_T; return pq_oetf3(lms)*L2I_T; }\n"
 
 #define DV_DM_GLSL_ICTCP_CM4 \
-  "vec3 ictcp(vec3 rgb){ vec3 lms=vec3(dfi_eq_finish_eotf(clamp(rgb.x,0.0,1.0)),dfi_eq_finish_eotf(clamp(rgb.y,0.0,1.0)),dfi_eq_finish_eotf(clamp(rgb.z,0.0,1.0)))*R2L_T; return eqpq_oetf3(lms)*L2I_T; }\n"
+  "vec3 ictcp(vec3 rgb){ vec3 lms=dfi_eq_finish_eotf(clamp(rgb,0.0,1.0))*R2L_T; return eqpq_oetf3(lms)*L2I_T; }\n"
 
-#define DV_DM_GLSL_CM4_CURVE \
+// POINT opens the pointwise mapping and leaves the pixel's ICtCp in ic.
+#define DV_DM_GLSL_CM4_POINT_LEGACY "vec3 c4point(vec3 rgb){\n vec3 ic=ictcp(rgb);"
+#define DV_DM_GLSL_CM4_POINT_IC "vec3 c4point_ic(vec3 ic){\n"
+#define DV_DM_GLSL_CM4_CURVE(POINT) \
   "float herm(float T,float y1,float y2,float s1,float s2,float dx){ float T2=T*T,T3=T2*T; return (2.0*T3-3.0*T2+1.0)*y1+(T3-2.0*T2+T)*dx*s1+(-2.0*T3+3.0*T2)*y2+(T3-T2)*dx*s2; }\n" \
   "float c4curve(float x){\n" \
   " float SMin=u[0].x,SMid=u[0].y,SMax=u[0].z,TMin=u[1].y,TMid=u[1].z,TMX=u[1].w,sMin=u[2].x,sMid=u[2].y,sMax=u[2].z;\n" \
@@ -389,8 +396,7 @@ enum { DV_DM_LATTICE_X = 66 };
   "float anc(int k){ return k<4 ? u[6][k] : u[7][k-4]; }\n" \
   "float sixsat(int k){ return k<4 ? u[8][k] : u[9][k-4]; }\n" \
   "float sixhue(int k){ return k<2 ? u[9][k+2] : u[10][k-2]; }\n" \
-  "vec3 c4point(vec3 rgb){\n" \
-  " vec3 ic=ictcp(rgb); float I=ic.x, S=sqrt(0.25*ic.y*ic.y+ic.z*ic.z);\n" \
+  POINT " float I=ic.x, S=sqrt(0.25*ic.y*ic.y+ic.z*ic.z);\n" \
   " float m=min(S,u[4].z), S3=m*m*m, cw=u[3].w;\n" \
   " float Ip=c4sop(c4curve(I));\n" \
   " vec3 o; o.x=Ip*(1.0+u[4].x*S3)*(1.0+2.0*cw*S);\n" \
@@ -438,282 +444,255 @@ enum { DV_DM_LATTICE_X = 66 };
   "  acc+=c29corner(lat,origin,step,base+b)*(w.x*w.y*w.z); }\n" \
   " vec3 lt=u[3].w>0.5 ? pow(acc*u[19].y+vec3(u[19].x),vec3(2.4)) : pq_eotf3(acc);\n" \
   " vec3 lin=mrow(u[14],u[15],u[16],lt);\n" \
-  " return max(pq_oetf3(clamp(lin,0.0,u[1].w)),vec3(u[3].z)); }\n" \
+  " return max(pq_oetf3(clamp(lin,0.0,u[1].w)),vec3(u[3].z)); }\n"
+
+#define DV_DM_GLSL_KERNELS \
   "const float GX[11]=float[11](0.008812229293,0.02714357714,0.0651140566,0.121649073,0.1769983568,0.2005654142,0.1769983568,0.121649073,0.0651140566,0.02714357714,0.008812229293);\n" \
   "const float GY[5]=float[5](0.05448868455,0.244201342,0.4026199469,0.244201342,0.05448868455);\n"
 
 #define DV_DM_GLSL_CM4_PQ \
-  "struct r20q_dw { float hi; float lo; };\n" \
-  "r20q_dw r20q_make(float hi,float lo) {\n" \
+  "// Split-float (double-word) ST 2084 helpers, three channels wide: every arithmetic step is the\n" \
+  "// componentwise form of the scalar algorithm, and wherever that algorithm branches a lane selects between\n" \
+  "// values computed for all lanes, so each lane keeps the scalar result's bits.\n" \
+  "struct r20q_dw { vec3 hi; vec3 lo; };\n" \
+  "r20q_dw r20q_make(vec3 hi,vec3 lo) {\n" \
   "    r20q_dw result;\n" \
   "    result.hi=hi; result.lo=lo;\n" \
   "    return result;\n" \
   "}\n" \
-  "r20q_dw r20q_F(float a) { return r20q_make(a,0.0); }\n" \
-  "r20q_dw r20q_ln2() { return r20q_make(uintBitsToFloat(0x3f317218u),uintBitsToFloat(0xb102e308u)); }\n" \
-  "r20q_dw r20q_i_m1() { return r20q_make(uintBitsToFloat(0x40c8e06bu),uintBitsToFloat(0xb4118e9du)); }\n" \
-  "r20q_dw r20q_i_m2() { return r20q_make(uintBitsToFloat(0x3c4fcdacu),uintBitsToFloat(0x2f413136u)); }\n" \
-  "r20q_dw r20q_ts(float a,float b) {\n" \
-  "    precise float sum=a+b;\n" \
-  "    precise float v=sum-a;\n" \
-  "    precise float left=sum-v;\n" \
-  "    precise float da=a-left;\n" \
-  "    precise float db=b-v;\n" \
-  "    precise float error=da+db;\n" \
+  "r20q_dw r20q_F(vec3 a) { return r20q_make(a,vec3(0.0)); }\n" \
+  "r20q_dw r20q_K(float a) { return r20q_make(vec3(a),vec3(0.0)); }\n" \
+  "r20q_dw r20q_C(uint hi,uint lo) { return r20q_make(vec3(uintBitsToFloat(hi)),vec3(uintBitsToFloat(lo))); }\n" \
+  "r20q_dw r20q_sel(bvec3 c,r20q_dw a,r20q_dw b) { return r20q_make(mix(b.hi,a.hi,c),mix(b.lo,a.lo,c)); }\n" \
+  "bvec3 r20q_and(bvec3 a,bvec3 b) { return bvec3(ivec3(a)&ivec3(b)); }\n" \
+  "bvec3 r20q_or(bvec3 a,bvec3 b) { return bvec3(ivec3(a)|ivec3(b)); }\n" \
+  "r20q_dw r20q_ln2() { return r20q_C(0x3f317218u,0xb102e308u); }\n" \
+  "r20q_dw r20q_i_m1() { return r20q_C(0x40c8e06bu,0xb4118e9du); }\n" \
+  "r20q_dw r20q_i_m2() { return r20q_C(0x3c4fcdacu,0x2f413136u); }\n" \
+  "r20q_dw r20q_ts(vec3 a,vec3 b) {\n" \
+  "    precise vec3 sum=a+b;\n" \
+  "    precise vec3 v=sum-a;\n" \
+  "    precise vec3 left=sum-v;\n" \
+  "    precise vec3 da=a-left;\n" \
+  "    precise vec3 db=b-v;\n" \
+  "    precise vec3 error=da+db;\n" \
   "    return r20q_make(sum,error);\n" \
   "}\n" \
   "r20q_dw r20q_add(r20q_dw a,r20q_dw b) {\n" \
   "    r20q_dw p=r20q_ts(a.hi,b.hi);\n" \
   "    r20q_dw q=r20q_ts(a.lo,b.lo);\n" \
-  "    precise float center=p.lo+q.hi;\n" \
+  "    precise vec3 center=p.lo+q.hi;\n" \
   "    r20q_dw r=r20q_ts(p.hi,center);\n" \
-  "    precise float tail=r.lo+q.lo;\n" \
+  "    precise vec3 tail=r.lo+q.lo;\n" \
   "    return r20q_ts(r.hi,tail);\n" \
   "}\n" \
   "r20q_dw r20q_neg(r20q_dw a) {\n" \
-  "    precise float hi=-a.hi;\n" \
-  "    precise float lo=-a.lo;\n" \
+  "    precise vec3 hi=-a.hi;\n" \
+  "    precise vec3 lo=-a.lo;\n" \
   "    return r20q_make(hi,lo);\n" \
   "}\n" \
   "r20q_dw r20q_sub(r20q_dw a,r20q_dw b) { return r20q_add(a,r20q_neg(b)); }\n" \
   "r20q_dw r20q_mul(r20q_dw a,r20q_dw b) {\n" \
-  "    precise float product=a.hi*b.hi;\n" \
-  "    precise float negative_product=-product;\n" \
-  "    precise float error=fma(a.hi,b.hi,negative_product);\n" \
-  "    precise float cross0=a.hi*b.lo;\n" \
+  "    precise vec3 product=a.hi*b.hi;\n" \
+  "    precise vec3 negative_product=-product;\n" \
+  "    precise vec3 error=fma(a.hi,b.hi,negative_product);\n" \
+  "    precise vec3 cross0=a.hi*b.lo;\n" \
   "    error=error+cross0;\n" \
-  "    precise float cross1=a.lo*b.hi;\n" \
+  "    precise vec3 cross1=a.lo*b.hi;\n" \
   "    error=error+cross1;\n" \
-  "    precise float cross2=a.lo*b.lo;\n" \
+  "    precise vec3 cross2=a.lo*b.lo;\n" \
   "    error=error+cross2;\n" \
   "    return r20q_ts(product,error);\n" \
   "}\n" \
   "r20q_dw r20q_divide(r20q_dw a,r20q_dw b) {\n" \
-  "    precise float q=a.hi/b.hi;\n" \
+  "    precise vec3 q=a.hi/b.hi;\n" \
   "    r20q_dw r=r20q_sub(a,r20q_mul(b,r20q_F(q)));\n" \
-  "    precise float residual=r.hi+r.lo;\n" \
-  "    precise float low=residual/b.hi;\n" \
+  "    precise vec3 residual=r.hi+r.lo;\n" \
+  "    precise vec3 low=residual/b.hi;\n" \
   "    return r20q_ts(q,low);\n" \
   "}\n" \
-  "r20q_dw r20q_scale(r20q_dw a,int k) {\n" \
-  "    precise float hi=ldexp(a.hi,k);\n" \
-  "    precise float lo=ldexp(a.lo,k);\n" \
+  "r20q_dw r20q_scale(r20q_dw a,ivec3 k) {\n" \
+  "    precise vec3 hi=ldexp(a.hi,k);\n" \
+  "    precise vec3 lo=ldexp(a.lo,k);\n" \
   "    return r20q_make(hi,lo);\n" \
   "}\n" \
-  "\n" \
+  "// Horner evaluation of a tail of one of the two coefficient tables (split-float words, highest\n" \
+  "// power first): the odd series of 2*atanh from term `first`, the exponential series over [first,last].\n" \
+  "const uint EQ_ODD[22]=uint[22](0x3d430c31u,0xb073cf3du,0x3d579436u,0xafd79436u,0x3d70f0f1u,0xaf70f0f1u,0x3d888889u,0xb16eeeefu,0x3d9d89d9u,0xb144ec4fu,0x3dba2e8cu,0xb13a2e8cu,0x3de38e39u,0xb0638e39u,0x3e124925u,0xb1db6db7u,0x3e4ccccdu,0xb14ccccdu,0x3eaaaaabu,0xb22aaaabu,0x3f800000u,0x00000000u);\n" \
+  "const uint EQ_EXP[30]=uint[30](0x2d49cba5u,0x208c07cau,0x2f309231u,0xa2c5792fu,0x310f76c7u,0x24ff8d89u,0x32d7322bu,0x25fea89cu,0x3493f27eu,0xa808760au,0x3638ef1du,0x292ad8e6u,0x37d00d01u,0xaabfcbfdu,0x39500d01u,0xac3fcbfdu,0x3ab60b61u,0xae13e93fu,0x3c088889u,0xafeeeeefu,0x3d2aaaabu,0xb0aaaaabu,0x3e2aaaabu,0xb1aaaaabu,0x3f000000u,0x00000000u,0x3f800000u,0x00000000u,0x3f800000u,0x00000000u);\n" \
+  "r20q_dw eqOddSeries(r20q_dw z,int first) {\n" \
+  "    r20q_dw p=r20q_C(EQ_ODD[2*first],EQ_ODD[2*first+1]);\n" \
+  "    for(int i=first+1;i<11;i++) p=r20q_add(r20q_C(EQ_ODD[2*i],EQ_ODD[2*i+1]),r20q_mul(z,p));\n" \
+  "    return p;\n" \
+  "}\n" \
+  "r20q_dw eqExpSeries(r20q_dw x,int first,int last) {\n" \
+  "    r20q_dw p=r20q_C(EQ_EXP[2*first],EQ_EXP[2*first+1]);\n" \
+  "    for(int i=first+1;i<=last;i++) p=r20q_add(r20q_C(EQ_EXP[2*i],EQ_EXP[2*i+1]),r20q_mul(x,p));\n" \
+  "    return p;\n" \
+  "}\n" \
   "r20q_dw eqAtanh(r20q_dw t) {\n" \
   "    r20q_dw z=r20q_mul(t,t);\n" \
-  "    r20q_dw p=r20q_make(uintBitsToFloat(0x3d430c31u),uintBitsToFloat(0xb073cf3du));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d579436u),uintBitsToFloat(0xafd79436u)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d70f0f1u),uintBitsToFloat(0xaf70f0f1u)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d888889u),uintBitsToFloat(0xb16eeeefu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d9d89d9u),uintBitsToFloat(0xb144ec4fu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3dba2e8cu),uintBitsToFloat(0xb13a2e8cu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3de38e39u),uintBitsToFloat(0xb0638e39u)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e124925u),uintBitsToFloat(0xb1db6db7u)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e4ccccdu),uintBitsToFloat(0xb14ccccdu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3eaaaaabu),uintBitsToFloat(0xb22aaaabu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(z,p));\n" \
-  "    return r20q_scale(r20q_mul(t,p),1);\n" \
+  "    r20q_dw p=eqOddSeries(z,0);\n" \
+  "    return r20q_scale(r20q_mul(t,p),ivec3(1));\n" \
   "}\n" \
-  "r20q_dw eqLog(r20q_dw a) {\n" \
-  "    int k=0;\n" \
-  "    precise float q=frexp(a.hi,k);\n" \
-  "    if(q<uintBitsToFloat(0x3f3504f3u))k--;\n" \
+  "// direct ? log(x) : log1p(x). The scalar log, and both branches of the scalar log1p, end in the\n" \
+  "// same odd series; here they share one evaluation of it.\n" \
+  "r20q_dw eqLogSel(r20q_dw x,bvec3 direct) {\n" \
+  "    bvec3 small=r20q_and(not(direct),lessThan(abs(x.hi),vec3(.125)));\n" \
+  "    r20q_dw a=r20q_sel(direct,x,r20q_add(r20q_K(1.0),x));\n" \
+  "    ivec3 k=ivec3(0);\n" \
+  "    precise vec3 q=frexp(a.hi,k);\n" \
+  "    k-=ivec3(lessThan(q,vec3(uintBitsToFloat(0x3f3504f3u))));\n" \
   "    r20q_dw v=r20q_scale(a,-k);\n" \
-  "    r20q_dw t=r20q_divide(r20q_sub(v,r20q_F(1.0)),r20q_add(v,r20q_F(1.0)));\n" \
-  "    return r20q_add(r20q_mul(r20q_ln2(),r20q_F(float(k))),eqAtanh(t));\n" \
-  "}\n" \
-  "r20q_dw eqLog1p(r20q_dw x) {\n" \
-  "    if(abs(x.hi)<.125)return eqAtanh(r20q_divide(x,r20q_add(r20q_F(2.0),x)));\n" \
-  "    return eqLog(r20q_add(r20q_F(1.0),x));\n" \
+  "    r20q_dw n=r20q_sel(small,x,r20q_sub(v,r20q_K(1.0)));\n" \
+  "    r20q_dw d=r20q_add(r20q_sel(small,r20q_K(2.0),v),r20q_sel(small,x,r20q_K(1.0)));\n" \
+  "    r20q_dw s=eqAtanh(r20q_divide(n,d));\n" \
+  "    return r20q_sel(small,s,r20q_add(r20q_mul(r20q_ln2(),r20q_F(vec3(k))),s));\n" \
   "}\n" \
   "r20q_dw eqExpm1(r20q_dw x) {\n" \
-  "    r20q_dw p=r20q_make(uintBitsToFloat(0x310f76c7u),uintBitsToFloat(0x24ff8d89u));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x32d7322bu),uintBitsToFloat(0x25fea89cu)),r20q_mul(x,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3493f27eu),uintBitsToFloat(0xa808760au)),r20q_mul(x,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3638ef1du),uintBitsToFloat(0x292ad8e6u)),r20q_mul(x,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x37d00d01u),uintBitsToFloat(0xaabfcbfdu)),r20q_mul(x,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x39500d01u),uintBitsToFloat(0xac3fcbfdu)),r20q_mul(x,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3ab60b61u),uintBitsToFloat(0xae13e93fu)),r20q_mul(x,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3c088889u),uintBitsToFloat(0xafeeeeefu)),r20q_mul(x,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d2aaaabu),uintBitsToFloat(0xb0aaaaabu)),r20q_mul(x,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e2aaaabu),uintBitsToFloat(0xb1aaaaabu)),r20q_mul(x,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f000000u),uintBitsToFloat(0x00000000u)),r20q_mul(x,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(x,p));\n" \
+  "    r20q_dw p=eqExpSeries(x,2,13);\n" \
   "    return r20q_mul(x,p);\n" \
   "}\n" \
-  "uint eqInteger(r20q_dw x,out float margin) {\n" \
-  "    int anchor=int(roundEven(x.hi));\n" \
-  "    r20q_dw r=r20q_sub(x,r20q_F(float(anchor)));\n" \
-  "    if(r.hi>.5 || (r.hi==.5 && (r.lo>0.0 || (r.lo==0.0 && (anchor&1)!=0))))anchor++;\n" \
-  "    if(r.hi<-.5 || (r.hi==-.5 && (r.lo<0.0 || (r.lo==0.0 && (anchor&1)!=0))))anchor--;\n" \
-  "    r20q_dw q=r20q_sub(x,r20q_F(float(anchor)));\n" \
-  "    precise float a=.5-abs(q.hi);\n" \
-  "    precise float b=q.hi<0.0?q.lo:-q.lo;\n" \
-  "    precise float distance=a+b;\n" \
-  "    margin=distance;\n" \
-  "    return uint(anchor);\n" \
+  "uvec3 eqInteger(r20q_dw x) {\n" \
+  "    ivec3 anchor=ivec3(roundEven(x.hi));\n" \
+  "    r20q_dw r=r20q_sub(x,r20q_F(vec3(anchor)));\n" \
+  "    bvec3 tie=r20q_and(equal(r.lo,vec3(0.0)),notEqual(anchor&1,ivec3(0)));\n" \
+  "    anchor+=ivec3(r20q_or(greaterThan(r.hi,vec3(.5)),r20q_and(equal(r.hi,vec3(.5)),r20q_or(greaterThan(r.lo,vec3(0.0)),tie))));\n" \
+  "    tie=r20q_and(equal(r.lo,vec3(0.0)),notEqual(anchor&1,ivec3(0)));\n" \
+  "    anchor-=ivec3(r20q_or(lessThan(r.hi,vec3(-.5)),r20q_and(equal(r.hi,vec3(-.5)),r20q_or(lessThan(r.lo,vec3(0.0)),tie))));\n" \
+  "    return uvec3(anchor);\n" \
   "}\n" \
-  "uint eqPackedExp(r20q_dw z,out float margin) {\n" \
-  "    precise float scaled=z.hi*uintBitsToFloat(0x3fb8aa3bu);\n" \
-  "    int k=int(roundEven(scaled));\n" \
-  "    r20q_dw r=r20q_sub(z,r20q_mul(r20q_F(float(k)),r20q_ln2()));\n" \
-  "    r20q_dw p=r20q_make(uintBitsToFloat(0x2d49cba5u),uintBitsToFloat(0x208c07cau));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x2f309231u),uintBitsToFloat(0xa2c5792fu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x310f76c7u),uintBitsToFloat(0x24ff8d89u)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x32d7322bu),uintBitsToFloat(0x25fea89cu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3493f27eu),uintBitsToFloat(0xa808760au)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3638ef1du),uintBitsToFloat(0x292ad8e6u)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x37d00d01u),uintBitsToFloat(0xaabfcbfdu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x39500d01u),uintBitsToFloat(0xac3fcbfdu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3ab60b61u),uintBitsToFloat(0xae13e93fu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3c088889u),uintBitsToFloat(0xafeeeeefu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d2aaaabu),uintBitsToFloat(0xb0aaaaabu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e2aaaabu),uintBitsToFloat(0xb1aaaaabu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f000000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
-  "    if(p.hi<1.0 || (p.hi==1.0 && p.lo<0.0)){p=r20q_scale(p,1);k--;}\n" \
-  "    if(k < -126)return eqInteger(r20q_scale(p,k+149),margin);\n" \
-  "    uint sig=eqInteger(r20q_scale(p,23),margin);\n" \
-  "    return uint(k+126)*0x800000u+sig;\n" \
+  "uvec3 eqPackedExp(r20q_dw z) {\n" \
+  "    precise vec3 scaled=z.hi*uintBitsToFloat(0x3fb8aa3bu);\n" \
+  "    ivec3 k=ivec3(roundEven(scaled));\n" \
+  "    r20q_dw r=r20q_sub(z,r20q_mul(r20q_F(vec3(k)),r20q_ln2()));\n" \
+  "    r20q_dw p=eqExpSeries(r,0,14);\n" \
+  "    bvec3 low=r20q_or(lessThan(p.hi,vec3(1.0)),r20q_and(equal(p.hi,vec3(1.0)),lessThan(p.lo,vec3(0.0))));\n" \
+  "    p=r20q_sel(low,r20q_scale(p,ivec3(1)),p); k-=ivec3(low);\n" \
+  "    bvec3 tiny=lessThan(k,ivec3(-126));\n" \
+  "    uvec3 sig=eqInteger(r20q_scale(p,mix(ivec3(23),k+149,tiny)));\n" \
+  "    return mix(uvec3(k+126)*0x800000u+sig,sig,tiny);\n" \
   "}\n" \
-  "uint eqFinite(uint key,out float margin) {\n" \
-  "    margin=1.0;\n" \
-  "    if((key>>31u)!=0u || key<0x35443723u)return 0u;\n" \
-  "    if(key>=0x3ffefbaeu)return 0x7f800000u;\n" \
-  "    if(key==0x3f800000u)return 0x461c4000u;\n" \
-  "    float e=uintBitsToFloat(key);r20q_dw n,d;\n" \
-  "    if(e>=1.0){\n" \
-  "        r20q_dw diff=r20q_sub(r20q_sub(r20q_F(e),r20q_make(uintBitsToFloat(0x3ffefbd3u),uintBitsToFloat(0x328e7b3eu))),r20q_F(uintBitsToFloat(0x2615be9bu)));\n" \
-  "        r20q_dw x=r20q_mul(eqLog1p(r20q_divide(diff,r20q_make(uintBitsToFloat(0x3ffefbd3u),uintBitsToFloat(0x328e7b3eu)))),r20q_i_m2());\n" \
-  "        r20q_dw h=eqExpm1(x);\n" \
-  "        n=r20q_add(r20q_sub(r20q_make(uintBitsToFloat(0x3f811faeu),uintBitsToFloat(0xb2c6a2adu)),r20q_F(.8359375)),r20q_mul(r20q_make(uintBitsToFloat(0x3f811faeu),uintBitsToFloat(0xb2c6a2adu)),h));\n" \
-  "        d=r20q_mul(r20q_F(-18.8515625),h);\n" \
-  "    } else if(e>=.0012){\n" \
-  "        r20q_dw h=eqExpm1(r20q_mul(eqLog(r20q_F(e)),r20q_i_m2()));\n" \
-  "        n=r20q_add(r20q_F(.1640625),h);\n" \
-  "        d=r20q_sub(r20q_F(.1640625),r20q_mul(r20q_F(18.6875),h));\n" \
-  "    } else {\n" \
-  "        r20q_dw black=r20q_make(uintBitsToFloat(0x354436e8u),uintBitsToFloat(0x2869e7c3u));\n" \
-  "        r20q_dw ratio=r20q_divide(r20q_sub(r20q_F(e),black),black);\n" \
-  "        r20q_dw h=eqExpm1(r20q_mul(eqLog1p(ratio),r20q_i_m2()));\n" \
-  "        n=r20q_mul(r20q_F(.8359375),h);\n" \
-  "        d=r20q_sub(r20q_F(3.22998046875),r20q_mul(r20q_F(18.6875),n));\n" \
-  "    }\n" \
-  "    r20q_dw z=r20q_add(r20q_make(uintBitsToFloat(0x41135d8eu),uintBitsToFloat(0xb409555du)),r20q_mul(eqLog(r20q_divide(n,d)),r20q_i_m1()));\n" \
-  "    return eqPackedExp(z,margin);\n" \
+  "// The scalar EOTF's three input ranges (above 1, ordinary, next to black) differ only in the\n" \
+  "// operands of the same operations, so each lane selects its operands and the series run once.\n" \
+  "uvec3 eqFinite(uvec3 key) {\n" \
+  "    bvec3 zero=r20q_or(notEqual(key>>31u,uvec3(0u)),lessThan(key,uvec3(0x35443723u)));\n" \
+  "    bvec3 pole=greaterThanEqual(key,uvec3(0x3ffefbaeu));\n" \
+  "    bvec3 unit=equal(key,uvec3(0x3f800000u));\n" \
+  "    vec3 e=mix(uintBitsToFloat(key),vec3(.5),r20q_or(zero,r20q_or(pole,unit)));\n" \
+  "    bvec3 high=greaterThanEqual(e,vec3(1.0));\n" \
+  "    bvec3 mid=r20q_and(not(high),greaterThanEqual(e,vec3(.0012)));\n" \
+  "    bvec3 dark=not(r20q_or(high,mid));\n" \
+  "    r20q_dw ref=r20q_sel(high,r20q_C(0x3ffefbd3u,0x328e7b3eu),r20q_C(0x354436e8u,0x2869e7c3u));\n" \
+  "    r20q_dw diff=r20q_sub(r20q_F(e),ref);\n" \
+  "    diff=r20q_sel(high,r20q_sub(diff,r20q_K(uintBitsToFloat(0x2615be9bu))),diff);\n" \
+  "    r20q_dw h=eqExpm1(r20q_mul(eqLogSel(r20q_sel(mid,r20q_F(e),r20q_divide(diff,ref)),mid),r20q_i_m2()));\n" \
+  "    r20q_dw c=r20q_C(0x3f811faeu,0xb2c6a2adu);\n" \
+  "    r20q_dw g=r20q_mul(r20q_sel(high,c,r20q_K(.8359375)),h);\n" \
+  "    r20q_dw n=r20q_sel(dark,g,r20q_add(r20q_sel(high,r20q_sub(c,r20q_K(.8359375)),r20q_K(.1640625)),r20q_sel(high,g,h)));\n" \
+  "    r20q_dw s=r20q_mul(r20q_sel(high,r20q_K(-18.8515625),r20q_K(18.6875)),r20q_sel(dark,n,h));\n" \
+  "    r20q_dw d=r20q_sel(high,s,r20q_sub(r20q_sel(mid,r20q_K(.1640625),r20q_K(3.22998046875)),s));\n" \
+  "    r20q_dw z=r20q_add(r20q_C(0x41135d8eu,0xb409555du),r20q_mul(eqLogSel(r20q_divide(n,d),bvec3(true)),r20q_i_m1()));\n" \
+  "    return mix(mix(mix(eqPackedExp(z),uvec3(0x461c4000u),unit),uvec3(0x7f800000u),pole),uvec3(0u),zero);\n" \
   "}\n" \
-  "float dfi_eq_finish_eotf(float e) {\n" \
-  "    uint key=floatBitsToUint(e);\n" \
-  "    if((key&0x7fffffffu)>=0x7f800000u)return pq_eotf_ext(e);\n" \
-  "    float ignoredMargin;\n" \
-  "    return uintBitsToFloat(eqFinite(key,ignoredMargin));\n" \
+  "vec3 dfi_eq_finish_eotf(vec3 e) {\n" \
+  "    uvec3 key=floatBitsToUint(e);\n" \
+  "    return mix(uintBitsToFloat(eqFinite(key)),vec3(pq_eotf_ext(e.x),pq_eotf_ext(e.y),pq_eotf_ext(e.z)),greaterThanEqual(key&0x7fffffffu,uvec3(0x7f800000u)));\n" \
   "}\n" \
   "r20q_dw eqpq_odd_log_luminance(r20q_dw u) {\n" \
   "    r20q_dw z=r20q_mul(u,u);\n" \
-  "    r20q_dw p=r20q_make(uintBitsToFloat(0x3d579436u),uintBitsToFloat(0xafd79436u));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d70f0f1u),uintBitsToFloat(0xaf70f0f1u)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d888889u),uintBitsToFloat(0xb16eeeefu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d9d89d9u),uintBitsToFloat(0xb144ec4fu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3dba2e8cu),uintBitsToFloat(0xb13a2e8cu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3de38e39u),uintBitsToFloat(0xb0638e39u)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e124925u),uintBitsToFloat(0xb1db6db7u)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e4ccccdu),uintBitsToFloat(0xb14ccccdu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3eaaaaabu),uintBitsToFloat(0xb22aaaabu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(z,p));\n" \
-  "    return r20q_scale(r20q_mul(u,p),1);\n" \
+  "    r20q_dw p=eqOddSeries(z,1);\n" \
+  "    return r20q_scale(r20q_mul(u,p),ivec3(1));\n" \
   "}\n" \
   "r20q_dw eqpq_odd_log_ratio(r20q_dw u) {\n" \
   "    r20q_dw z=r20q_mul(u,u);\n" \
-  "    r20q_dw p=r20q_make(uintBitsToFloat(0x3d888889u),uintBitsToFloat(0xb16eeeefu));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d9d89d9u),uintBitsToFloat(0xb144ec4fu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3dba2e8cu),uintBitsToFloat(0xb13a2e8cu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3de38e39u),uintBitsToFloat(0xb0638e39u)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e124925u),uintBitsToFloat(0xb1db6db7u)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e4ccccdu),uintBitsToFloat(0xb14ccccdu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3eaaaaabu),uintBitsToFloat(0xb22aaaabu)),r20q_mul(z,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(z,p));\n" \
-  "    return r20q_scale(r20q_mul(u,p),1);\n" \
+  "    r20q_dw p=eqOddSeries(z,3);\n" \
+  "    return r20q_scale(r20q_mul(u,p),ivec3(1));\n" \
   "}\n" \
-  "r20q_dw eqpq_log_luminance(uint w) {\n" \
-  "    int e=int(w>>23u)-127;\n" \
-  "    uint m=w&0x007fffffu;\n" \
-  "    if(e==-127){\n" \
-  "        int top=findMSB(m);\n" \
-  "        e=top-149;\n" \
-  "        m=(m<<uint(23-top))&0x007fffffu;\n" \
-  "    }\n" \
-  "    precise float v=uintBitsToFloat(0x3f800000u|m);\n" \
-  "    if(v>uintBitsToFloat(0x3fb504f3u)){v=v*0.5;e++;}\n" \
-  "    r20q_dw t=r20q_divide(r20q_sub(r20q_F(v),r20q_F(1.0)),r20q_add(r20q_F(v),r20q_F(1.0)));\n" \
-  "    return r20q_add(r20q_mul(r20q_F(float(e)),r20q_ln2()),eqpq_odd_log_luminance(t));\n" \
+  "r20q_dw eqpq_log_luminance(uvec3 w) {\n" \
+  "    ivec3 e=ivec3(w>>23u)-127;\n" \
+  "    uvec3 m=w&0x007fffffu;\n" \
+  "    bvec3 subnormal=equal(e,ivec3(-127));\n" \
+  "    ivec3 top=findMSB(m);\n" \
+  "    e=mix(e,top-149,subnormal);\n" \
+  "    m=mix(m,(m<<uvec3(23-top))&0x007fffffu,subnormal);\n" \
+  "    precise vec3 v=uintBitsToFloat(0x3f800000u|m);\n" \
+  "    bvec3 upper=greaterThan(v,vec3(uintBitsToFloat(0x3fb504f3u)));\n" \
+  "    precise vec3 halved=v*0.5;\n" \
+  "    v=mix(v,halved,upper); e+=ivec3(upper);\n" \
+  "    r20q_dw t=r20q_divide(r20q_sub(r20q_F(v),r20q_K(1.0)),r20q_add(r20q_F(v),r20q_K(1.0)));\n" \
+  "    return r20q_add(r20q_mul(r20q_F(vec3(e)),r20q_ln2()),eqpq_odd_log_luminance(t));\n" \
   "}\n" \
   "r20q_dw eqpq_exp(r20q_dw x) {\n" \
-  "    precise float scaled=x.hi*uintBitsToFloat(0x3fb8aa3bu);\n" \
-  "    int k=int(roundEven(scaled));\n" \
-  "    r20q_dw r=r20q_sub(x,r20q_mul(r20q_F(float(k)),r20q_ln2()));\n" \
-  "    r20q_dw p=r20q_make(uintBitsToFloat(0x2f309231u),uintBitsToFloat(0xa2c5792fu));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x310f76c7u),uintBitsToFloat(0x24ff8d89u)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x32d7322bu),uintBitsToFloat(0x25fea89cu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3493f27eu),uintBitsToFloat(0xa808760au)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3638ef1du),uintBitsToFloat(0x292ad8e6u)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x37d00d01u),uintBitsToFloat(0xaabfcbfdu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x39500d01u),uintBitsToFloat(0xac3fcbfdu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3ab60b61u),uintBitsToFloat(0xae13e93fu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3c088889u),uintBitsToFloat(0xafeeeeefu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d2aaaabu),uintBitsToFloat(0xb0aaaaabu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e2aaaabu),uintBitsToFloat(0xb1aaaaabu)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f000000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
-  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
+  "    precise vec3 scaled=x.hi*uintBitsToFloat(0x3fb8aa3bu);\n" \
+  "    ivec3 k=ivec3(roundEven(scaled));\n" \
+  "    r20q_dw r=r20q_sub(x,r20q_mul(r20q_F(vec3(k)),r20q_ln2()));\n" \
+  "    r20q_dw p=eqExpSeries(r,1,14);\n" \
   "    return r20q_scale(p,k);\n" \
   "}\n" \
-  "float eqpq_oetf(float y) {\n" \
-  "    uint w=floatBitsToUint(y);\n" \
-  "    if((w&0x7fffffffu)>0x7f800000u)return pq_oetf(y);\n" \
-  "    if(w==0u || (w>>31u)!=0u)return uintBitsToFloat(0x354436e8u);\n" \
-  "    if(w>=0x461c4000u)return 1.0;\n" \
-  "    r20q_dw z=r20q_mul(r20q_F(0.1593017578125),r20q_sub(eqpq_log_luminance(w),r20q_make(uintBitsToFloat(0x41135d8eu),uintBitsToFloat(0xb409555du))));\n" \
+  "vec3 eqpq_oetf3(vec3 y) {\n" \
+  "    uvec3 w=floatBitsToUint(y);\n" \
+  "    bvec3 nan=greaterThan(w&0x7fffffffu,uvec3(0x7f800000u));\n" \
+  "    bvec3 black=r20q_or(equal(w,uvec3(0u)),notEqual(w>>31u,uvec3(0u)));\n" \
+  "    bvec3 white=greaterThanEqual(w,uvec3(0x461c4000u));\n" \
+  "    w=mix(w,uvec3(0x3f800000u),r20q_or(nan,r20q_or(black,white)));\n" \
+  "    r20q_dw z=r20q_mul(r20q_K(0.1593017578125),r20q_sub(eqpq_log_luminance(w),r20q_C(0x41135d8eu,0xb409555du)));\n" \
   "    r20q_dw t=eqpq_exp(z);\n" \
-  "    r20q_dw h=r20q_divide(r20q_mul(r20q_F(0.1640625),r20q_sub(t,r20q_F(1.0))),r20q_add(r20q_F(1.0),r20q_mul(r20q_F(18.6875),t)));\n" \
-  "    r20q_dw g=eqpq_odd_log_ratio(r20q_divide(h,r20q_add(r20q_F(2.0),h)));\n" \
-  "    return eqpq_exp(r20q_mul(r20q_F(78.84375),g)).hi;\n" \
-  "}\n" \
-  "vec3 eqpq_oetf3(vec3 v) { return vec3(eqpq_oetf(v.x),eqpq_oetf(v.y),eqpq_oetf(v.z)); }\n"
+  "    r20q_dw h=r20q_divide(r20q_mul(r20q_K(0.1640625),r20q_sub(t,r20q_K(1.0))),r20q_add(r20q_K(1.0),r20q_mul(r20q_K(18.6875),t)));\n" \
+  "    r20q_dw g=eqpq_odd_log_ratio(r20q_divide(h,r20q_add(r20q_K(2.0),h)));\n" \
+  "    vec3 r=mix(mix(eqpq_exp(r20q_mul(r20q_K(78.84375),g)).hi,vec3(1.0),white),vec3(uintBitsToFloat(0x354436e8u)),black);\n" \
+  "    return mix(r,vec3(pq_oetf(y.x),pq_oetf(y.y),pq_oetf(y.z)),nan);\n" \
+  "}\n"
 
-#define DV_DM_GLSL_CM4_FINISH(EOTF, OETF) \
+#define DV_DM_GLSL_CM4_FINISH(LMS, OETF) \
   "vec3 c4finish(vec3 o){\n" \
-  " vec3 lmsp=o*I2L_T; vec3 lms=vec3(" EOTF "(lmsp.x)," EOTF "(lmsp.y)," EOTF "(lmsp.z));\n" \
+  " vec3 lmsp=o*I2L_T; vec3 lms=" LMS ";\n" \
   " vec3 lin=lms*L2R_T; vec3 lt=clamp(mrow(u[11],u[12],u[13],lin),vec3(u[5].x),vec3(u[5].y));\n" \
   " lin=mrow(u[14],u[15],u[16],lt); return " OETF "(max(lin,vec3(0.0))); }\n"
 
 static const char dv_dm_glsl_common[] =
-  DV_DM_GLSL_BASE DV_DM_GLSL_ICTCP_LEGACY DV_DM_GLSL_CM4_CURVE
-  DV_DM_GLSL_CM4_FINISH("pq_eotf_ext", "pq_oetf3") DV_DM_GLSL_CM29_SPATIAL;
+  DV_DM_GLSL_BASE DV_DM_GLSL_ICTCP_LEGACY DV_DM_GLSL_CM4_CURVE(DV_DM_GLSL_CM4_POINT_LEGACY)
+  DV_DM_GLSL_CM4_FINISH("vec3(pq_eotf_ext(lmsp.x),pq_eotf_ext(lmsp.y),pq_eotf_ext(lmsp.z))", "pq_oetf3")
+  DV_DM_GLSL_CM29_SPATIAL DV_DM_GLSL_KERNELS;
 static const char dv_dm_glsl_cm4_point[] =
-  DV_DM_GLSL_BASE DV_DM_GLSL_CM4_PQ DV_DM_GLSL_ICTCP_CM4 DV_DM_GLSL_CM4_CURVE
-  DV_DM_GLSL_CM4_FINISH("pq_eotf_ext", "pq_oetf3") DV_DM_GLSL_CM29_SPATIAL;
+  DV_DM_GLSL_BASE DV_DM_GLSL_CM4_PQ DV_DM_GLSL_ICTCP_CM4 DV_DM_GLSL_CM4_CURVE(DV_DM_GLSL_CM4_POINT_IC);
 static const char dv_dm_glsl_cm4_final[] =
-  DV_DM_GLSL_BASE
-  "float dfi_eq_finish_eotf(float e);\nvec3 eqpq_oetf3(vec3 v);\n"
-  DV_DM_GLSL_ICTCP_CM4 DV_DM_GLSL_CM4_CURVE DV_DM_GLSL_CM4_PQ
-  DV_DM_GLSL_CM4_FINISH("dfi_eq_finish_eotf", "eqpq_oetf3") DV_DM_GLSL_CM29_SPATIAL;
+  DV_DM_GLSL_BASE DV_DM_GLSL_CM4_PQ DV_DM_GLSL_ICTCP_CM4 DV_DM_GLSL_CM4_CURVE(DV_DM_GLSL_CM4_POINT_IC)
+  DV_DM_GLSL_CM4_FINISH("dfi_eq_finish_eotf(lmsp)", "eqpq_oetf3") DV_DM_GLSL_KERNELS;
 
 #undef DV_DM_GLSL_BASE
 #undef DV_DM_GLSL_ICTCP_LEGACY
 #undef DV_DM_GLSL_ICTCP_CM4
+#undef DV_DM_GLSL_CM4_POINT_LEGACY
+#undef DV_DM_GLSL_CM4_POINT_IC
 #undef DV_DM_GLSL_CM4_CURVE
 #undef DV_DM_GLSL_CM29_SPATIAL
+#undef DV_DM_GLSL_KERNELS
 #undef DV_DM_GLSL_CM4_PQ
 #undef DV_DM_GLSL_CM4_FINISH
 
+// The header a pass compiles against is part of its definition: dv_dm_render names it for
+// every pass, so a new body cannot pick one up by default.
+typedef enum { DV_DM_HEADER_LEGACY, DV_DM_HEADER_CM4_POINT, DV_DM_HEADER_CM4_FINAL } dv_dm_header;
+static inline const char *dv_dm_header_glsl(dv_dm_header header) {
+  switch (header) {
+    case DV_DM_HEADER_LEGACY: return dv_dm_glsl_common;
+    case DV_DM_HEADER_CM4_POINT: return dv_dm_glsl_cm4_point;
+    case DV_DM_HEADER_CM4_FINAL: return dv_dm_glsl_cm4_final;
+  }
+  return NULL;   // an unknown header refuses the pass
+}
+
 // Each method's passes are separate shaders: one shader holding both methods' code spills
 // registers on some GPUs (Intel Arc), which slows both.
+// The CM4 final passes take the detail difference D from an ictcp(rgb) of its own, not from the
+// one c4point_ic was given. The arithmetic after the transfer helpers is not `precise`, and a
+// compiler free to rewrite it (lavapipe does) evaluates D-B1 differently when the intensity has
+// other uses: sharing it moved a fifth of a real crop's pixels by up to 23 float32 steps there,
+// to what `precise float D` gives. Removing that instance is a change of output, not a refactor.
 static const char dv_dm_body_point_cm4[] =   // pass 1: D (x: base/intensity)
   "vec3 rgb=texelFetch(master,ivec2(gl_FragCoord.xy),0).rgb;\n"
-  "vec3 ic=ictcp(rgb); vec3 o=c4point(rgb); color=vec4(ic.x-o.x,0.0,0.0,1.0);\n";
+  "vec3 ic=ictcp(rgb); vec3 o=c4point_ic(ic); color=vec4(ic.x-o.x,0.0,0.0,1.0);\n";
 static const char dv_dm_body_point_cm29[] =  // pass 1: D (x: base/intensity, y: chroma-weighted)
   "vec3 rgb=texelFetch(master,ivec2(gl_FragCoord.xy),0).rgb;\n"
   "vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); color=vec4(I-b.x,I-b.y,0.0,1.0);\n";
@@ -740,22 +719,22 @@ static const char dv_dm_body_final_cm4[] =   // pass 3: vertical, detail, finish
   "if(wgt>-1.0){ int h=textureSize(hpass,0).y;\n"
   " for(int j=-2;j<=2;j++){ int y=clamp(q.y-j,0,h-1); vec4 t=texelFetch(hpass,ivec2(q.x,y),0); float g=GY[j+2], dg=-float(j)*g;\n"
   "  B1+=g*t.x; dx1+=g*t.y; dy1+=dg*t.x; B2+=g*t.z; dx2+=g*t.w; dy2+=dg*t.z; } }\n"
-  " vec3 ic=ictcp(rgb); vec3 o=c4point(rgb);\n"
-  " if(wgt>-1.0){ float D=ic.x-o.x; float r=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); o.x=o.x+r*(D-B1); }\n"
+  " vec3 o=c4point_ic(ictcp(rgb));\n"
+  " if(wgt>-1.0){ float D=ictcp(rgb).x-o.x; float r=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); o.x=o.x+r*(D-B1); }\n"
   " vec3 res=c4finish(o); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
   ;
-// Only partial CM4 active areas use this shader; full-frame bodies stay literal-identical.
+// Only partial CM4 active areas use this shader. Bars take the pointwise mapping alone;
+// bars and active picture share the one conversion and the one finish.
 static const char dv_dm_body_final_active_cm4[] =   // pass 3: vertical, detail, finish
   "ivec2 q=ivec2(gl_FragCoord.xy); vec3 rgb=texelFetch(master,q,0).rgb; float wgt=u[18].y;\n"
   "ivec4 a=ivec4(u[20]);\n"
-  "if(q.x<a.x || q.y<a.y || q.x>=a.z || q.y>=a.w){ vec3 res=c4finish(c4point(rgb)); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0); }else{\n"
-  "float B1=0.0,dx1=0.0,dy1=0.0,B2=0.0,dx2=0.0,dy2=0.0;\n"
-  "if(wgt>-1.0){\n"
+  "vec3 o=c4point_ic(ictcp(rgb));\n"
+  "if(wgt>-1.0 && q.x>=a.x && q.y>=a.y && q.x<a.z && q.y<a.w){\n"
+  " float B1=0.0,dx1=0.0,dy1=0.0;\n"
   " for(int j=-2;j<=2;j++){ int y=clamp(q.y-j,a.y,a.w-1); vec4 t=texelFetch(hpass,ivec2(q.x,y),0); float g=GY[j+2], dg=-float(j)*g;\n"
-  "  B1+=g*t.x; dx1+=g*t.y; dy1+=dg*t.x; B2+=g*t.z; dx2+=g*t.w; dy2+=dg*t.z; } }\n"
-  " vec3 ic=ictcp(rgb); vec3 o=c4point(rgb);\n"
-  " if(wgt>-1.0){ float D=ic.x-o.x; float r=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); o.x=o.x+r*(D-B1); }\n"
-  " vec3 res=c4finish(o); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0); }\n"
+  "  B1+=g*t.x; dx1+=g*t.y; dy1+=dg*t.x; }\n"
+  " float D=ictcp(rgb).x-o.x; float r=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); o.x=o.x+r*(D-B1); }\n"
+  "vec3 res=c4finish(o); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
   ;
 static const char dv_dm_body_final_cm29[] =  // pass 3: vertical, detail, finish
   "ivec2 q=ivec2(gl_FragCoord.xy); vec3 rgb=texelFetch(master,q,0).rgb; float wgt=u[18].y;\n"
@@ -781,7 +760,8 @@ static inline pl_tex dv_dm_tex(pl_gpu gpu, pl_tex *t, int w, int h) {
   }
   return *t;
 }
-static inline bool dv_dm_pass(pl_shader sh, const char *desc, const char *body, pl_tex in, const char *in_name,
+static inline bool dv_dm_pass(pl_shader sh, const char *desc, dv_dm_header header_id, const char *body,
+                              pl_tex in, const char *in_name,
                               pl_tex in2, const char *in2_name, pl_tex in3, const char *in3_name,
                               float (*u)[4], int w, int h) {
   struct pl_shader_desc d[3] = {
@@ -796,9 +776,8 @@ static inline bool dv_dm_pass(pl_shader sh, const char *desc, const char *body, 
   struct pl_shader_var v = {.var = var, .data = u, .dynamic = true};
   // Only CM4 point and final passes use precise transfer math. In particular,
   // horizontal and CM2.9/lattice headers remain the legacy literal expansion.
-  const char *header = body == dv_dm_body_point_cm4 ? dv_dm_glsl_cm4_point :
-      (body == dv_dm_body_final_cm4 || body == dv_dm_body_final_active_cm4) ?
-      dv_dm_glsl_cm4_final : dv_dm_glsl_common;
+  const char *header = dv_dm_header_glsl(header_id);
+  if (!header) return false;
   return pl_shader_custom(sh, &(struct pl_custom_shader){
       .description = desc, .header = header, .body = body,
       .input = PL_SHADER_SIG_NONE, .output = PL_SHADER_SIG_COLOR,
@@ -834,22 +813,25 @@ static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_f
     dv_dm_put(f->u[18], 29, f->weight, r, nc);
     if (!(lattice = dv_dm_tex(gpu, &dv_dm_gpu.ltex, DV_DM_LATTICE_X * nc, nc))) return NULL;
     sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
-    if (!dv_dm_pass(sh, desc, dv_dm_body_lattice, source, "master", NULL, "unused", NULL, "unused2", f->u,
+    if (!dv_dm_pass(sh, desc, DV_DM_HEADER_LEGACY, dv_dm_body_lattice, source, "master", NULL, "unused", NULL, "unused2", f->u,
                     DV_DM_LATTICE_X * nc, nc) ||
         !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = lattice))) return NULL;
   }
   if (f->weight > -1.0) {
     sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
-    if (!dv_dm_pass(sh, desc, f->algo == 4 ? dv_dm_body_point_cm4 : dv_dm_body_point_cm29, source, "master", NULL, "unused", NULL, "unused2", f->u, w, h) ||
+    bool ok = f->algo == 4 ?
+        dv_dm_pass(sh, desc, DV_DM_HEADER_CM4_POINT, dv_dm_body_point_cm4, source, "master", NULL, "unused", NULL, "unused2", f->u, w, h) :
+        dv_dm_pass(sh, desc, DV_DM_HEADER_LEGACY, dv_dm_body_point_cm29, source, "master", NULL, "unused", NULL, "unused2", f->u, w, h);
+    if (!ok ||
         !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.dtex))) return NULL;
     sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
-    if (!dv_dm_pass(sh, desc, active_cm4 ? dv_dm_body_h_active_cm4 : dv_dm_body_h, dv_dm_gpu.dtex, "dpass", NULL, "unused", NULL, "unused2", f->u, w, h) ||
+    if (!dv_dm_pass(sh, desc, DV_DM_HEADER_LEGACY, active_cm4 ? dv_dm_body_h_active_cm4 : dv_dm_body_h, dv_dm_gpu.dtex, "dpass", NULL, "unused", NULL, "unused2", f->u, w, h) ||
         !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.htex))) return NULL;
   }
   sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
   const char *final_body = f->algo == 4 ?
       (active_cm4 ? dv_dm_body_final_active_cm4 : dv_dm_body_final_cm4) : dv_dm_body_final_cm29;
-  if (!dv_dm_pass(sh, desc, final_body, source, "master", dv_dm_gpu.htex, "hpass", lattice, "lpass", f->u, w, h) ||
+  if (!dv_dm_pass(sh, desc, f->algo == 4 ? DV_DM_HEADER_CM4_FINAL : DV_DM_HEADER_LEGACY, final_body, source, "master", dv_dm_gpu.htex, "hpass", lattice, "lpass", f->u, w, h) ||
       !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.out))) return NULL;
   return dv_dm_gpu.out;
 }

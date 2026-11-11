@@ -1,9 +1,19 @@
-"""Exercise the production GLSL PQ functions as float32 C against the double reference.
+"""Exercise the production GLSL PQ functions on the CPU against exact references.
 
-GLSL has no log1p/expm1. Extract its scalar functions from dv_dm.h and map
-only GLSL builtins/literals to float C; this catches cancellation returning
-when the shader source changes. Actual shader compilation and driver parity
-remain the job of controls/run_dm_parity.py.
+GLSL has no log1p/expm1. Extract the legacy scalar functions (pq_*) from
+dv_dm.h and map only GLSL builtins/literals to float C; this catches
+cancellation returning when the shader source changes.
+
+The precise CM4 helpers (dfi_eq_finish_eotf, eqpq_oetf3 and the r20q_*/eq*
+split-float functions under them) are three channels wide, so their GLSL is
+compiled unchanged as C++ against a small vec3 shim
+(controls/pq_helper_port.py). With a fused fma and no reassociation they must
+return the correctly rounded float32 of the exact ST 2084 functions on every
+sample; with fma as a*b+c, or compiled as if `precise` were absent, they must
+not, which is what makes the same check meaningful on a GPU.
+
+Actual shader compilation and driver behaviour remain the job of
+controls/run_dm_parity.py and controls/run_pq_helper_exact.py.
 """
 import ast
 import ctypes
@@ -13,11 +23,14 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "tools/dv_processing/dv_dm.h"
+sys.path.insert(0, str(ROOT / "tools/dv_processing/controls"))
+import pq_helper_port  # noqa: E402
 
 
 def scalar_pq_source(header):
@@ -143,6 +156,53 @@ class ShaderPQPrecision(unittest.TestCase):
             actual = self.lib.pq_eotf_ext(code)
             self.assertTrue(math.isfinite(actual))
             self.assertAlmostEqual(actual / expected, 1, delta=1e-4)
+
+
+class PreciseHelperExactness(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.ports = {mode: pq_helper_port.build(cls.scratch.name, mode) for mode in pq_helper_port.MODES}
+        cls.samples = {}
+        for helper, (inputs, exact) in pq_helper_port.HELPERS.items():
+            xs = inputs()
+            cls.samples[helper] = (xs, [exact(x) for x in xs])
+
+    def wrong(self, mode, helper):
+        xs, want = self.samples[helper]
+        return pq_helper_port.compare(xs, self.ports[mode].run(helper, xs), want)
+
+    def test_precise_helpers_are_correctly_rounded(self):
+        for helper in pq_helper_port.HELPERS:
+            with self.subTest(helper=helper):
+                self.assertGreater(len(self.samples[helper][0]), 9000)
+                self.assertEqual(self.wrong("fused", helper), (0, 0, None))
+
+    def test_precise_helpers_need_a_fused_fma(self):
+        # The product's error term is fma(a,b,-a*b): unfused it is zero and the low words are lost.
+        for helper in pq_helper_port.HELPERS:
+            with self.subTest(helper=helper):
+                count, worst, _ = self.wrong("unfused-fma", helper)
+                self.assertGreater(count, len(self.samples[helper][0]) // 2)
+                self.assertGreater(worst, 8)
+
+    def test_precise_helpers_need_precise(self):
+        # Free to reassociate, a compiler cancels the error-free sums: (a+b)-a becomes b.
+        for helper in pq_helper_port.HELPERS:
+            with self.subTest(helper=helper):
+                self.assertGreater(self.wrong("no-precise", helper)[0], len(self.samples[helper][0]) // 2)
+
+    def test_precise_helper_edges(self):
+        port, bits = self.ports["fused"], pq_helper_port.bits
+        inf = float("inf")
+        # Black and below, the unit code, the pole of the extended EOTF and beyond.
+        self.assertEqual(port.run("eotf", [0.0, -1.0, 7e-7, 1.0, 1.9921, 3.0]),
+                         [0, 0, 0, bits(10000.0), bits(inf), bits(inf)])
+        # No light and below, the peak and beyond.
+        black = pq_helper_port.exact_oetf(0.0)
+        self.assertEqual(port.run("oetf", [0.0, -5.0, 10000.0, 20000.0, inf, 10000.0]),
+                         [black, black, bits(1.0), bits(1.0), bits(1.0), bits(1.0)])
 
 
 class SyntheticChannelTolerance(unittest.TestCase):
