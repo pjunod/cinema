@@ -2919,6 +2919,10 @@ fn production() { let _ = "SELECT $1 FROM b"; }
 /// or for a `WITHOUT ROWID` table, so on a table the applied mark counts
 /// either would change rows without moving its revision, and an applied view
 /// would keep answering from a memo the replica no longer matches.
+///
+/// It reads string literals, so SQL assembled with `format!` is invisible
+/// to it, and it covers this binary only: an entry an older binary wrote is
+/// applied as written (PLAYBACK-START-E1-BUILD.md §4.1).
 #[test]
 fn applied_view_tables_never_escape_the_update_hook() {
     let mut offenders = Vec::new();
@@ -2948,13 +2952,26 @@ fn applied_view_tables_never_escape_the_update_hook() {
                             .find(&format!(" {delete}"))
                             .map(|at| &statement[at + delete.len() + 1..])
                     }) {
-                        scanned += 1;
+                        let rest_untrimmed = rest;
                         let rest = rest.trim_start();
-                        let next_is_word = rest
+                        // `delete from media_sessions_x`: another table.
+                        if rest_untrimmed
                             .chars()
                             .next()
-                            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-                        if !next_is_word && !rest.starts_with("where") || rest.is_empty() {
+                            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                        {
+                            continue;
+                        }
+                        scanned += 1;
+                        // Qualified means the next token is WHERE: an alias,
+                        // RETURNING or the end of the statement is not.
+                        let qualified = rest.strip_prefix("where").is_some_and(|after| {
+                            !after
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                        });
+                        if !qualified {
                             offenders.push(format!(
                                 "{name}:{}: unqualified DELETE on {table}",
                                 literal.line

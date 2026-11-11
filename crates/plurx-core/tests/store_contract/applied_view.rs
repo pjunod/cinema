@@ -43,8 +43,8 @@ async fn applied_view_on_sqlite_forwards_to_the_only_copy() {
     );
     assert!(view.switch("e1.absent", true).await.expect("view read"));
     // The store is the only copy: every floor is met, even one in the future.
-    view.note_fact(AppliedTable::Settings, std::time::Instant::now());
-    assert!(view.floor_met(std::time::Instant::now() + Duration::from_secs(60)));
+    let fact = view.note_fact(AppliedTable::Settings);
+    assert!(view.floor_met(fact));
     assert_eq!(
         view.settings(&["e1.left"]).await.expect("view read").source,
         ViewSource::View
@@ -58,7 +58,7 @@ async fn applied_view_on_sqlite_forwards_to_the_only_copy() {
     let remote = AppliedView::remote_authority(Arc::clone(&store));
     let read = remote.settings(&["e1.left"]).await.expect("view read");
     assert_eq!(read.source, ViewSource::Authority);
-    assert!(!remote.floor_met(std::time::Instant::now() - Duration::from_secs(60)));
+    assert!(!remote.floor_met(remote.note_fact(AppliedTable::Settings)));
     assert_eq!(
         remote.observation().last_fallback,
         Some(ViewFallback::NoProof)
@@ -227,7 +227,7 @@ async fn applied_view_floor_holds_authority_until_the_replica_contains_the_fact(
         .put_setting("e1.saved", "first")
         .await
         .expect("save");
-    view.note_fact(AppliedTable::Settings, std::time::Instant::now());
+    view.note_fact(AppliedTable::Settings);
     node.store.validation_reset_operation_counts();
     assert_eq!(
         view.setting("e1.saved")
@@ -267,7 +267,7 @@ async fn applied_view_floor_holds_authority_until_the_replica_contains_the_fact(
         .put_setting("e1.saved", "second")
         .await
         .expect("save again");
-    view.note_fact(AppliedTable::Settings, std::time::Instant::now());
+    let second = view.note_fact(AppliedTable::Settings);
     metrics.validation_confirm_now(node.applied_index() + 1_000);
     node.store.validation_reset_operation_counts();
     assert_eq!(
@@ -284,7 +284,7 @@ async fn applied_view_floor_holds_authority_until_the_replica_contains_the_fact(
         1
     );
     assert_eq!(view.observation().last_fallback, Some(ViewFallback::Floor));
-    assert!(!view.floor_met(std::time::Instant::now()));
+    assert!(!view.floor_met(second));
     // The stamp check agrees: the view is closed for the settings table.
     assert_eq!(
         view.check(&read.stamp.expect("a view answer is stamped")),
@@ -353,4 +353,74 @@ async fn applied_view_stamp_moves_with_its_own_table_only() {
         view.setting("e1.k").await.expect("view read").as_deref(),
         Some("v2")
     );
+}
+
+/// A replica that is really behind its own commit: the singleton's writer
+/// holds a committed settings entry before it applies (the instance-local
+/// precommit hold). While held, the mark and the view still show the applied
+/// image (stamp current, old value, no consistent read: the bounded staleness
+/// of §4.2 "Bound"); the moment the entry applies the stamp is stale, with no
+/// clock advance, and the view answers the new value.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn applied_view_stamp_goes_stale_the_moment_a_held_entry_applies() {
+    const HELD: &str = "UPDATE settings SET value = 'v2' WHERE key = 'e1.held'";
+    let node = EmbeddedSingleton::start().await;
+    node.store.put_setting("e1.held", "v1").await.expect("seed");
+    let applied = node.applied_index();
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(applied);
+    let view = node.view(metrics.clone());
+    metrics.validation_confirm_now(applied);
+    let stamp = view
+        .settings(&["e1.held"])
+        .await
+        .expect("view read")
+        .stamp
+        .expect("a view answer is stamped");
+
+    let (entered, release) = node
+        .client
+        .validation_hold_transaction_before_commit(
+            HELD.to_owned(),
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .await
+        .expect("register the precommit hold");
+    let client = node.client.clone();
+    let write = tokio::spawn(async move { client.txn([(HELD, hiqlite::params!())]).await });
+    entered.await.expect("the writer holds the committed entry");
+
+    assert_eq!(node.applied_index(), applied, "held: not applied here yet");
+    assert_eq!(view.check(&stamp), StampCheck::Current);
+    node.store.validation_reset_operation_counts();
+    assert_eq!(
+        view.setting("e1.held").await.expect("view read").as_deref(),
+        Some("v1"),
+        "the view serves what this replica has applied"
+    );
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        0
+    );
+
+    release.send(()).expect("release the writer");
+    write
+        .await
+        .expect("join the held write")
+        .expect("held write")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit the held write");
+    assert!(node.applied_index() > applied);
+    assert_eq!(
+        view.check(&stamp),
+        StampCheck::Stale,
+        "stale the moment the entry applies, with no clock advance"
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    let read = view.settings(&["e1.held"]).await.expect("view read");
+    assert_eq!(read.source, ViewSource::View);
+    assert_eq!(read.values.get("e1.held").map(String::as_str), Some("v2"));
 }

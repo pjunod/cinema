@@ -414,6 +414,20 @@ impl Replicated {
     }
 }
 
+/// The monotonic instant a fact became known to this process, taken by
+/// [`AppliedView::note_fact`] after the acknowledgement. There is no other
+/// constructor, so a caller cannot hand the floor an earlier instant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FactInstant(Instant);
+
+/// Why a local read did not answer.
+enum LocalFailure {
+    /// The view may not answer; Authority does, once.
+    Authority(ViewFallback),
+    /// The only copy failed (SQLite): there is nothing else to ask.
+    Store(StoreError),
+}
+
 /// Whether an entry stamped by an earlier view read may still answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StampCheck {
@@ -535,29 +549,46 @@ impl AppliedView {
         }
     }
 
-    /// Record a fact this process learned at `at` (an acknowledged write to
-    /// the table, or a quorum read of it): the view stays closed for that
-    /// table until the replica is proven to contain it.
-    pub fn note_fact(&self, table: AppliedTable, at: Instant) {
+    /// Record that this process now holds a fact about `table` that the
+    /// replica may not: call it **after** the write was acknowledged, or
+    /// after the quorum read returned, and before the result is used.
+    ///
+    /// The instant is taken here, not by the caller, because the floor is
+    /// only sound for an instant no earlier than the acknowledgement: a
+    /// watermark confirmation that started between an earlier instant and
+    /// the commit may carry a read index below the write. The view stays
+    /// closed for `table` until a confirmation started after the returned
+    /// instant has been applied here; the returned [`FactInstant`] is what an
+    /// E1c `Observed` cache entry keeps to ask [`Self::floor_met`].
+    pub fn note_fact(&self, table: AppliedTable) -> FactInstant {
+        let at = Instant::now();
         self.floors.raise(table, at);
+        FactInstant(at)
     }
 
-    /// Whether this replica is proven to contain every fact this process
-    /// learned at `at`. Always on SQLite, never on a remote-authority process.
+    /// Whether the view may answer for a fact noted at `fact`: the image is
+    /// stable, a serving proof is held (so the watermark is from the current
+    /// leader, term and protocol) and a confirmation started after `fact` is
+    /// applied here. Always on SQLite, never on a remote-authority process.
     #[must_use]
-    pub fn floor_met(&self, at: Instant) -> bool {
+    pub fn floor_met(&self, fact: FactInstant) -> bool {
         match &self.mode {
             Mode::Standalone => true,
             Mode::RemoteAuthority => false,
             #[cfg(feature = "hiqlite-store")]
             Mode::Replicated(replicated) => {
-                replicated.mark.generation() & 1 == 0 && replicated.floor_met(at)
+                replicated.mark.generation() & 1 == 0
+                    && replicated.metrics.eligible_serving_proof().is_some()
+                    && replicated.floor_met(fact.0)
             }
         }
     }
 
     /// Whether an entry made from an earlier view answer may still answer.
-    /// Standalone and remote-authority views hand out no stamps.
+    /// Standalone and remote-authority views hand out no stamps: on SQLite
+    /// every view read goes to the store, which is the only copy and a local
+    /// read (§4.2 "Standalone"), so nothing is cached that a write would
+    /// have to invalidate.
     #[must_use]
     pub fn check(&self, stamp: &ViewStamp) -> StampCheck {
         match &self.mode {
@@ -579,7 +610,7 @@ impl AppliedView {
         &self,
         table: AppliedTable,
         local: F,
-    ) -> Result<(T, Option<ViewStamp>), ViewFallback>
+    ) -> Result<(T, Option<ViewStamp>), LocalFailure>
     where
         F: FnOnce(LocalReader) -> Fut,
         Fut: std::future::Future<Output = Result<T, StoreError>>,
@@ -588,15 +619,16 @@ impl AppliedView {
             Mode::Standalone => local(LocalReader::Standalone(Arc::clone(&self.authority)))
                 .await
                 .map(|value| (value, None))
-                .map_err(|_| ViewFallback::LocalError),
-            Mode::RemoteAuthority => Err(ViewFallback::NoProof),
+                .map_err(LocalFailure::Store),
+            Mode::RemoteAuthority => Err(LocalFailure::Authority(ViewFallback::NoProof)),
             #[cfg(feature = "hiqlite-store")]
             Mode::Replicated(replicated) => replicated
                 .read(table, self.floors.get(table), |store| {
                     local(LocalReader::Replica(store))
                 })
                 .await
-                .map(|(value, stamp)| (value, Some(stamp))),
+                .map(|(value, stamp)| (value, Some(stamp)))
+                .map_err(LocalFailure::Authority),
         }
     }
 
@@ -631,7 +663,9 @@ impl AppliedView {
                     stamp,
                 })
             }
-            Err(reason) => {
+            // SQLite: the store is the only copy; asking it again is a retry.
+            Err(LocalFailure::Store(error)) => Err(error),
+            Err(LocalFailure::Authority(reason)) => {
                 self.counters.authority(table, reason);
                 let values = self.authority.get_settings(keys).await?;
                 Ok(AppliedSettings {
@@ -782,6 +816,24 @@ mod tests {
             SettingsDigest::of(&["a"], &values),
             SettingsDigest::of(&["a"], &BTreeMap::from([("a".to_owned(), "1".to_owned())]))
         );
+    }
+
+    /// The floor's instant is taken by `note_fact` itself, after the call
+    /// begins: a caller cannot backdate it to before its acknowledgement.
+    #[test]
+    fn a_fact_is_stamped_when_it_is_noted() {
+        let store: Arc<dyn Store> =
+            Arc::new(crate::store::SqliteStore::open_in_memory().expect("store"));
+        let view = AppliedView::authority(store);
+        let before = Instant::now();
+        let fact = view.note_fact(AppliedTable::Settings);
+        let after = Instant::now();
+        assert!(
+            before <= fact.0 && fact.0 <= after,
+            "{before:?} {fact:?} {after:?}"
+        );
+        assert_eq!(view.floors.get(AppliedTable::Settings), Some(fact.0));
+        assert_eq!(view.floors.get(AppliedTable::MediaSessions), None);
     }
 
     #[test]
