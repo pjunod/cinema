@@ -72,9 +72,14 @@ def qp_group(lines, label):
 
 recipe = json.loads(Path(str(base) + '-recipe.json').read_text())
 assert recipe['status'] == 'encoded' and recipe.get('qg_size', 32) == a.qg_size and recipe['variant'] == variant
-# Native cadence of the encode (24000/1001 for the Michael windows, 24/1 for Beekeeper).
-TS, TICK = (int(x) for x in recipe['cadence'].split('/'))
-assert (TS, TICK) in {(24000, 1001), (24, 1)}
+# Native cadence of the encode (24000/1001 for the Michael windows, 24/1 for Beekeeper). The MP4
+# muxer may raise a small timescale (1/24 -> 1/12288), so the author's clock comes from the track.
+num, den = (int(x) for x in recipe['cadence'].split('/'))
+assert (num, den) in {(24000, 1001), (24, 1)}
+_tp = json.loads(subprocess.check_output([FFPROBE, '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=time_base:packet=duration',
+                                         '-of', 'json', str(Path(str(base) + '-hdr.mp4'))]))
+TS = int(_tp['streams'][0]['time_base'].split('/')[1]); TICK = int(_tp['packets'][0]['duration'])
+assert {int(x['duration']) for x in _tp['packets']} == {TICK} and TICK * num == TS * den, ('track clock', TS, TICK, num, den)
 input_mp4 = Path(str(base) + '-hdr.mp4'); output = Path(str(base) + '-rust-p81.mp4')
 assert sha(input_mp4) == recipe['sha256']
 log = Path(str(base) + '-encode.log').read_text()
