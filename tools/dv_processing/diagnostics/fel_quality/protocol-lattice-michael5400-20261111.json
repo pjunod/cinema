@@ -10,9 +10,9 @@
   ],
   "active_roi_xyxy": [
     0,
-    42,
+    32,
     3840,
-    2118
+    2128
   ],
   "fixed_lattice": {
     "stride": 8,
@@ -82,5 +82,6 @@
   },
   "written_utc": "2026-11-11T17:30:00Z",
   "author": "Claude Opus 5.5, session_01BCWLA1yYosvau4xhfH6R4S",
-  "status": "Fixed before any M5400 all-48 lattice output"
+  "status": "Fixed before any M5400 all-48 lattice output",
+  "roi_correction": "Copied M1800 ROI [0,42,3840,2118] was refused by the evaluator before any output; replaced with this fixture active ROI from its bound selected-frame request (same ROI as the retained 0/24 audit)."
 }
