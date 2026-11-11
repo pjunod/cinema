@@ -6,8 +6,8 @@ prefixes. Usage: portable_lattice.py REPORT.json OUT.json PRIVATE_ROOT
 """
 import json,hashlib,sys
 from pathlib import Path
-RR=sys.argv[3];H='/Users/pjunod/.local/state/plurx-fel-quality/'
-P={RR:'$FEL_ROI_ROOT',H+'20261111-qg8-relocated':'$FEL_QG8_ROOT',H+'20261026-shadow-followup':'$FEL_SHADOW_ROOT',H+'20261026-measurement-calibration':'$FEL_CAL_ROOT','/Users/pjunod':'$HOME'}
+RR=sys.argv[3];HOME=str(Path.home());H=HOME+'/.local/state/plurx-fel-quality/'
+P={RR:'$FEL_ROI_ROOT',H+'20261111-qg8-relocated':'$FEL_QG8_ROOT',H+'20261026-shadow-followup':'$FEL_SHADOW_ROOT',H+'20261026-measurement-calibration':'$FEL_CAL_ROOT',HOME:'$HOME'}
 def neut(v):
   if isinstance(v,str):
     for k,r in P.items():v=v.replace(k,r)

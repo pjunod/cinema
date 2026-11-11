@@ -387,8 +387,9 @@ same dark selection and −3 QP. Every other block gets
 +min(3, 3c/(1−c)) QP, where c is that frame's dark fraction, so the frame
 mean offset is zero, like x265's own AQ. The positive offset came out at
 +1.16 to +1.69 QP on the selected frames. The rebuilt harness binary was re-gated (no-ROI byte identity on
-Michael5400) before its results were used. The all-zero-ROI path and the
-Michael1800 no-ROI gate were re-run on it during review.
+Michael5400) before its results were used. Its all-zero-ROI gate and Michael1800
+no-ROI gate are still owed. The M3 that holds the evidence went offline
+during review.
 
 | ModelB (base / S / Z, F) | Shadow mean | Shadow p99 | Full mean | Authored Mb/s (Z) |
 |---|---|---|---|---:|
@@ -484,7 +485,7 @@ Z:
 - the 100–1000 nit band +0.04 to +0.15;
 - full maximum up to +1.5.
 
-The Michael1800 all-48 lattice for Z6 is reported under Resuming.
+Z6 has no Michael1800 all-48 lattice yet; see Resuming.
 
 What the evidence supports: the remaining FEL shadow loss is a dark-block
 allocation shortfall, in both luma and chroma, that x265's default policy
@@ -553,6 +554,12 @@ packaging change, and packaging as a separate workstream.
   - The dose choice, which trades shadow error against bright-content
     error and is the owner's decision.
   - Two marginal Michael5400 frames (5 and 6).
+  - Owed on the M3, which went offline during review:
+    - the `roi_encode-v6` all-zero-ROI and Michael1800 no-ROI gates;
+    - the Michael1800 all-48 lattice for Z6;
+    - a first run of the new per-frame metadata checks on both fixtures;
+    - committing the private Michael1800 lattice protocol and a binary↔source
+      binding receipt for each harness build.
   - Any production implementation.
 
 ### Evidence and tools
