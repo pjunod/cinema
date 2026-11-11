@@ -2085,6 +2085,14 @@ jobs:
               exit 1
             }
           done
+      # Dockerfile.release starts FROM the private, digest-pinned media
+      # runtime; its builder needs the same fleet credential the publishers use.
+      - name: Authenticate the runtime build to the private media-runtime registry
+        uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Build the runtime from only the verified binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
