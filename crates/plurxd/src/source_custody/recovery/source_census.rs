@@ -265,6 +265,7 @@ fn read_proofs() -> io::Result<Vec<Proof>> {
     names.sort();
     let mut proofs = Vec::new();
     for name in names {
+        // Temporary `.census-*` files and anything else are not proofs.
         let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
             continue;
         };
@@ -272,11 +273,13 @@ fn read_proofs() -> io::Result<Vec<Proof>> {
             continue;
         }
         let name = CString::new(format!("{stem}.json")).map_err(io::Error::other)?;
-        let bytes = physical_stop::read_admin_file(&directory, &name)?;
-        match serde_json::from_slice::<Proof>(&bytes) {
+        // One untrusted or invalid proof never blocks the others.
+        match physical_stop::read_admin_file(&directory, &name)
+            .and_then(|bytes| serde_json::from_slice::<Proof>(&bytes).map_err(io::Error::other))
+        {
             Ok(proof) if proof.owner.custody_id == stem => proofs.push(proof),
             Ok(_) => tracing::warn!(stem, "host source census names another custody"),
-            Err(error) => tracing::warn!(%error, stem, "invalid host source census retained"),
+            Err(error) => tracing::warn!(%error, stem, "host source census refused"),
         }
     }
     Ok(proofs)
@@ -293,7 +296,9 @@ pub(super) async fn replay(
         return Ok(());
     }
     let kernel = reader::kernel_instance().ok_or("source census kernel identity unavailable")?;
-    let started = process_started_ms().ok_or("daemon process start time unavailable")?;
+    let started = crate::source_custody::process_started_ms()
+        .or_else(process_started_ms)
+        .ok_or("daemon process start time unavailable")?;
     let mut result = Ok(());
     for proof in proofs {
         let applied = apply(
@@ -429,6 +434,14 @@ pub(super) async fn apply(
         // The daemon's own view of the same physical file: inode, size and
         // mtime, on a superblock the census actually counted.
         let seen = std::fs::metadata(&file.path).map_err(|e| e.to_string())?;
+        if witness.source.is_some_and(|(device, inode)| {
+            seen.dev() != device
+                || seen.ino() != inode
+                || inode != proof.source.inode
+                || !proof.census_devices().any(|counted| counted == device)
+        }) {
+            return Err("census source is not the inode the owner opened".into());
+        }
         if file.size != size
             || file.mtime != mtime
             || proof.source.size != size

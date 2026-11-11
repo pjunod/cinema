@@ -21,17 +21,34 @@ pub(super) fn declared_background_spawn<T>(
 ) -> T {
     reader::declared_background_spawn(receipt, spawn)
 }
-pub(super) fn live_background_join_allowed(
+pub(super) fn record_background_source(
     store: &Arc<dyn Store>,
     receipt: &BackgroundSourceCustodyToken,
-) -> bool {
-    context_snapshot(store)
-        .ok()
-        .flatten()
-        .filter(|context| context.authoritative)
-        .is_some_and(|context| {
-            reader::live_background_join_allowed(&context.dir.with_file_name("v2"), receipt)
-        })
+    source: &std::fs::File,
+) -> Result<(), String> {
+    let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
+        return Ok(());
+    };
+    reader::record_source(&context.dir.with_file_name("v2"), receipt, source)
+}
+
+pub(super) fn live_background_join(
+    store: &Arc<dyn Store>,
+    receipt: &BackgroundSourceCustodyToken,
+) -> super::LiveJoin {
+    let context = match context_snapshot(store) {
+        Ok(context) => context,
+        Err(_) => return super::LiveJoin::Refused("source recovery context unavailable"),
+    };
+    // Without an authoritative backend no witness exists or ever existed.
+    let Some(context) = context.filter(|context| context.authoritative) else {
+        return super::LiveJoin::Unwitnessed;
+    };
+    match reader::live_background_escape(&context.dir.with_file_name("v2"), receipt) {
+        None => super::LiveJoin::Refused("authoritative reader witness missing"),
+        Some(None) => super::LiveJoin::Clean,
+        Some(Some(tick)) => super::LiveJoin::EscapedSince(tick),
+    }
 }
 
 const MAX_BYTES: u64 = 1_048_576;

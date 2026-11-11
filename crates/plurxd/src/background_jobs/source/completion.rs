@@ -16,6 +16,7 @@ struct State {
 }
 pub(crate) struct Completion {
     receipt: BackgroundSourceCustodyToken,
+    store: Arc<dyn Store>,
     state: Mutex<State>,
     changed: tokio::sync::Notify,
     /// Closes registration (the owner's loss token).
@@ -23,6 +24,9 @@ pub(crate) struct Completion {
     /// The exact owner finished and retired its claim. Without it (a dropped
     /// owner) the ledger never publishes proof, matching the legacy join.
     authorize: CancellationToken,
+    /// Boot tick when the owner's ledger started; no child launched before it
+    /// can have received this owner's source.
+    started_tick: u64,
 }
 pub(crate) struct Operation(Arc<Completion>);
 pub(crate) struct Holder(Arc<Completion>);
@@ -39,10 +43,12 @@ impl Completion {
     ) -> Arc<Self> {
         let owner = Arc::new(Self {
             receipt,
+            store: Arc::clone(&store),
             state: Mutex::new(State::default()),
             changed: tokio::sync::Notify::new(),
             cancel,
             authorize,
+            started_tick: crate::source_custody::boot_tick(),
         });
         let driving = Arc::clone(&owner);
         tokio::spawn(async move { driving.drive(store).await });
@@ -56,10 +62,21 @@ impl Completion {
         if state.closed || self.cancel.is_cancelled() {
             return Err("source completion registration closed".into());
         }
+        let first = !state.enrolled;
         state.enrolled = true;
         state.operations += 1;
         if !state.files.iter().any(|held| Arc::ptr_eq(held, &file)) {
-            state.files.push(file);
+            state.files.push(Arc::clone(&file));
+        }
+        drop(state);
+        if first {
+            if let Err(error) =
+                crate::source_custody::record_background_source(&self.store, &self.receipt, &file)
+            {
+                // Only weakens a later dead-owner census, never live proof.
+                tracing::warn!(custody_id = %self.receipt.custody_id, %error,
+                    "opened source identity not recorded beside its witness");
+            }
         }
         Ok(Operation(Arc::clone(self)))
     }
@@ -84,9 +101,6 @@ impl Completion {
         if state.closed || self.cancel.is_cancelled() {
             return Err("source completion registration closed".into());
         }
-        if !state.enrolled {
-            return Ok(None);
-        }
         state.holders += 1;
         Ok(Some(Holder(Arc::clone(self))))
     }
@@ -98,9 +112,6 @@ impl Completion {
             .map_err(|_| "source completion poisoned")?;
         if state.closed || self.cancel.is_cancelled() {
             return Err("source completion registration closed".into());
-        }
-        if !state.enrolled {
-            return Ok(None);
         }
         state.raw += 1;
         Ok(Some(RawRetirement {
@@ -132,14 +143,27 @@ impl Completion {
             .veto = true;
         self.changed.notify_one();
     }
+    /// Resolves once nothing but this actor references the ledger: the owner
+    /// was dropped without `finish`, which never settles custody.
+    async fn abandoned(self: &Arc<Self>) {
+        while Arc::strong_count(self) > 1 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
     async fn drive(self: Arc<Self>, store: Arc<dyn Store>) {
-        self.cancel.cancelled().await;
+        tokio::select! {
+            () = self.cancel.cancelled() => {}
+            () = self.abandoned() => return,
+        }
         if !self.owns_settlement() {
             return;
         }
         // Physical closure alone is not enough: the owner retires its claim
         // first, exactly as the legacy explicit join did.
-        self.authorize.cancelled().await;
+        tokio::select! {
+            () = self.authorize.cancelled() => {}
+            () = self.abandoned() => return,
+        }
         loop {
             let ready = {
                 let mut state = self
@@ -147,7 +171,9 @@ impl Completion {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state.closed = true;
-                if state.veto || !state.enrolled {
+                if state.veto {
+                    tracing::warn!(custody_id = %self.receipt.custody_id,
+                        "untracked source capability: live completion refuses; custody stays charged");
                     return;
                 }
                 let ready = state.operations == 0
@@ -161,21 +187,65 @@ impl Completion {
                 ready
             };
             if ready {
-                // An OWNED anchor is not a media capability. Require THIS boot's
-                // exact witness and reject every unknown escape. Missing state
-                // (including after restart) can never establish live proof.
-                if crate::source_custody::live_background_join_allowed(&store, &self.receipt) {
-                    crate::background_jobs::settle_joined_source_custody(
-                        &store,
-                        self.receipt.clone(),
-                    )
-                    .await;
-                }
-                return;
+                break;
             }
             // Arc<File> holders do not issue notifications when they close.
             tokio::select! { () = self.changed.notified() => {}, () = tokio::time::sleep(Duration::from_millis(25)) => {} }
         }
+        // Every registered in-process holder is closed. An unknown launch (any
+        // unmediated daemon child, or none tracked at all on this backend)
+        // could still have handed a child this source, so wait until every
+        // daemon descendant started since then has physically exited.
+        let since = match crate::source_custody::live_background_join(&store, &self.receipt) {
+            crate::source_custody::LiveJoin::Clean => None,
+            crate::source_custody::LiveJoin::EscapedSince(tick) => Some(tick),
+            crate::source_custody::LiveJoin::Unwitnessed => Some(self.started_tick),
+            crate::source_custody::LiveJoin::Refused(reason) => {
+                tracing::warn!(custody_id = %self.receipt.custody_id, reason,
+                    "live source completion refused; custody stays charged");
+                return;
+            }
+        };
+        if let Some(since) = since {
+            if !self.descendants_exited(since).await {
+                return;
+            }
+        }
+        crate::background_jobs::settle_joined_source_custody(&store, self.receipt.clone()).await;
+    }
+    #[cfg(target_os = "linux")]
+    async fn descendants_exited(&self, since: u64) -> bool {
+        if !crate::source_custody::process_tree_complete() {
+            tracing::warn!(custody_id = %self.receipt.custody_id,
+                "daemon is neither PID 1 nor a subreaper; launched children cannot be proven exited");
+            return false;
+        }
+        let waiting = tokio::time::Instant::now();
+        let mut reported = false;
+        loop {
+            match crate::source_custody::live_descendants_since(since) {
+                Ok(live) if live.is_empty() => return true,
+                Ok(live) if !reported && waiting.elapsed() >= Duration::from_secs(60) => {
+                    reported = true;
+                    tracing::warn!(custody_id = %self.receipt.custody_id, ?live,
+                        "source custody waits for children launched while it was live");
+                }
+                Ok(_) => {}
+                Err(error) if !reported => {
+                    reported = true;
+                    tracing::warn!(custody_id = %self.receipt.custody_id, %error,
+                        "descendant census unavailable; source custody stays charged");
+                }
+                Err(_) => {}
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    async fn descendants_exited(&self, _since: u64) -> bool {
+        tracing::warn!(custody_id = %self.receipt.custody_id,
+            "launched children cannot be proven exited on this platform");
+        false
     }
 }
 impl Drop for Operation {

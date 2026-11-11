@@ -160,36 +160,76 @@ async fn dead_owner_source_census_releases_only_exact_quiescent_custody() {
     let started = dead.lease + 500;
     assert_eq!(dead.held(), 1, "dead owner's custody is still charged");
 
+    let refused = |result: Result<(), String>, reason: &str| {
+        let error = result.expect_err(reason);
+        assert!(error.contains(reason), "expected {reason:?}, got {error:?}");
+    };
     // Any open file description on any counted superblock refuses.
-    assert!(dead.apply(&dead.proof(1), started).await.is_err());
+    refused(
+        dead.apply(&dead.proof(1), started).await,
+        "stale, partial or nonzero",
+    );
     // A lease that had not ended before this process started may be ours.
-    assert!(dead.apply(&dead.proof(0), dead.lease - 1).await.is_err());
+    refused(
+        dead.apply(&dead.proof(0), dead.lease - 1).await,
+        "exact dead-owner witness differ",
+    );
     // A census of another inode is not this job's source.
     let mut foreign = dead.proof(0);
     foreign.source.inode += 1;
     for pass in &mut foreign.passes {
         pass.superblocks[0].inode += 1;
     }
-    assert!(dead.apply(&foreign, started).await.is_err());
-    // A stale census, or passes too close together, refuses.
+    refused(
+        dead.apply(&foreign, started).await,
+        "differs from the job's exact source",
+    );
+    // Passes too close together refuse.
     let mut close = dead.proof(0);
     close.passes[1].at_ms = close.passes[0].at_ms + 1;
-    assert!(dead.apply(&close, started).await.is_err());
+    refused(
+        dead.apply(&close, started).await,
+        "stale, partial or nonzero",
+    );
     // The anchor must be unchanged since the census observed it.
     let mut touched = dead.proof(0);
     touched.anchor.ctime.1 ^= 1;
-    assert!(dead.apply(&touched, started).await.is_err());
+    refused(dead.apply(&touched, started).await, "anchor changed");
     // The daemon's own anchor observation: another lock holder refuses.
     let holder = std::fs::File::open(&dead.anchor).expect("anchor");
     holder.try_lock().expect("foreign lock holder");
-    assert!(dead.apply(&dead.proof(0), started).await.is_err());
+    refused(
+        dead.apply(&dead.proof(0), started).await,
+        "still holds the anchor lock",
+    );
     drop(holder);
+    // The owner recorded the inode it opened; a path naming another refuses.
+    let sidecar = dead
+        .witnesses
+        .join(format!("background-{}.source", dead.token.custody_id));
+    private(
+        &sidecar,
+        format!("{} {}", dead.source.dev(), dead.source.ino() + 1).as_bytes(),
+    );
+    refused(
+        dead.apply(&dead.proof(0), started).await,
+        "not the inode the owner opened",
+    );
+    std::fs::remove_file(&sidecar).expect("remove sidecar");
+    private(
+        &sidecar,
+        format!("{} {}", dead.source.dev(), dead.source.ino()).as_bytes(),
+    );
     assert_eq!(dead.held(), 1, "every refusal keeps the custody");
 
     dead.apply(&dead.proof(0), started)
         .await
         .expect("exact quiescent census releases");
     assert_eq!(dead.held(), 0);
+    assert!(
+        !sidecar.exists(),
+        "the source identity leaves with its witness"
+    );
     assert!(
         !dead.anchor.exists()
             && !dead

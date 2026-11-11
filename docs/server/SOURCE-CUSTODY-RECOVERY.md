@@ -115,6 +115,32 @@ Linux executable-handle case passes. Both Linux Store refusal/release cases
 pass. Helper publication and fleet recovery are pending. No service has
 been stopped and no old reservation has been released by this continuation.
 
+### 1.2a A live owner settles through its completion ledger
+
+On Linux every job custody has an in-memory completion ledger. It counts
+InputState holders and declared raw children from the moment the job starts.
+An enrolled brokered preparation also hands it the original File Arcs.
+`ActiveBackgroundJob::finish` retires the claim and then authorizes the
+ledger; an unenrolled job keeps the explicit join. Dropping a job without
+`finish` never settles.
+
+Once every holder has retired, the ledger publishes the joined proof:
+
+- **at once** if the witness saw no unknown launch;
+- **after an unknown launch** (any unmediated daemon child, including
+  another owner's), only once every live daemon descendant started at or
+  after that launch's boot tick has exited. Those are the only processes that
+  could have received or reopened the source. The daemon is PID 1 (or a
+  subreaper), so orphans stay in its tree; otherwise it refuses with a warning;
+- **on a backend without witnesses** (non-replicated Store), treating the
+  ledger's own start as the escape tick.
+
+A dropped, unjoined raw declaration vetoes live proof, as does a capability
+the ledger cannot track. Both log a warning; neither falls back to the
+legacy join. At enrollment the owner writes the opened source's
+`dev ino` beside its witness (`.source`). A later dead-owner census must
+count exactly that inode.
+
 ### 1.3 A dead owner's poisoned witness uses a host source-open census
 
 Any unmediated child launch poisons every armed anchor (`!` nonce, new
@@ -154,6 +180,13 @@ The daemon (Linux, every scheduler tick) trusts only the counts. It requires:
   daemon's own `stat` of that path matching inode, size and mtime on a
   superblock the census counted;
 - a census at most fifteen minutes old.
+
+When the owner recorded its opened source (`.source`), the census and the
+daemon both require that exact inode. A path re-copied with identical size and
+mtime therefore refuses. Superblocks are found by the file's NFS handle
+(`open_by_handle_at`), not by mount-source strings. Records without a
+`.source` (the 2026-11-09 one predates it) fall back to the Store's size/mtime
+plus the daemon's own stat.
 
 It then uses the ordinary typed settlement and clears only its own witness.
 The operator removes the proof file after release. The model never repairs a

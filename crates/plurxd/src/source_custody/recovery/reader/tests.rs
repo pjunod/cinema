@@ -1050,7 +1050,8 @@ fn run_packet_probe(config: &Configuration) {
 /// File clone and a declared raw child are still alive. Only the completion
 /// ledger may publish the joined proof, after each physically retires.
 /// Unenrolled jobs keep the explicit legacy join; a vetoed ledger never falls
-/// back to it.
+/// back to it; an unknown launch waits for the children launched since; a
+/// non-authoritative backend still settles.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn finish_during_blocked_enrolled_read_leaves_settlement_to_the_ledger() {
@@ -1152,6 +1153,63 @@ async fn finish_during_blocked_enrolled_read_leaves_settlement_to_the_ledger() {
     active.finish().await;
     quiet().await;
     assert_eq!(held(&fixture), 1, "unknown escape vetoes joined proof");
+
+    // Another owner's (or any) unmediated launch is not a veto. It holds
+    // this custody exactly until every daemon descendant started since then
+    // has exited: the only processes that could have received the source.
+    // SAFETY: prctl with integer arguments; the fixture process adopts orphans
+    // exactly as PID 1 does in the container.
+    assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+    let (fixture, active) = started().await;
+    let budget = active.fence().source_budget();
+    let operation = budget
+        .enroll_preparation(original(&fixture))
+        .expect("enrollment")
+        .expect("Linux completion ledger");
+    observe_children(false).expect("foreign unmediated launch");
+    #[allow(clippy::disallowed_methods)] // The fixture owns and reaps this exact child.
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "read line"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("child launched after the escape");
+    drop(operation);
+    active.finish().await;
+    quiet().await;
+    assert_eq!(held(&fixture), 1, "a live post-escape child keeps custody");
+    drop(child.stdin.take());
+    assert!(child.wait().expect("reap child").success());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while held(&fixture) != 0 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("custody settles once that child has exited");
+
+    // A backend without witnesses (non-replicated Store) still settles once
+    // every holder and every child launched since the owner started is gone.
+    let (store, _, active) = crate::background_jobs::tests::active().await;
+    let token = crate::background_jobs::tests::source_custody(&active).expect("custody");
+    let budget = active.fence().source_budget();
+    let operation = budget
+        .enroll_preparation(original(&fixture))
+        .expect("enrollment")
+        .expect("Linux completion ledger");
+    drop(operation);
+    active.finish().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while store
+            .resolve_background_source_custody(token.clone())
+            .await
+            .expect("resolve")
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("unwitnessed enrolled custody settles");
 }
 
 /// Real File/InputState/read-worker ownership, not recovery-anchor Arc counts.
@@ -1290,13 +1348,17 @@ async fn live_completion_waits_for_read_original_clones_and_explicit_raw_retirem
             .expect("physical source read");
     });
     let directory = fixture.dir.with_file_name("v2");
-    assert!(live_background_join_allowed(
-        &directory,
-        match &record {
-            Record::Background { token } => token,
-            _ => unreachable!(),
-        }
-    ));
+    assert_eq!(
+        live_background_escape(
+            &directory,
+            match &record {
+                Record::Background { token } => token,
+                _ => unreachable!(),
+            }
+        ),
+        Some(None),
+        "declared raw launch is no unknown escape"
+    );
     replay_at(&fixture.store, &directory, &fixture.dir, NODE)
         .await
         .expect("invalidated replay remains conservative");
@@ -1313,8 +1375,11 @@ async fn live_completion_waits_for_read_original_clones_and_explicit_raw_retirem
     retirement.joined();
     released(&fixture, &record).await;
 
-    // Unknown escape and dropped/unjoined declaration independently veto live
-    // proof. Neither can turn an invalidated restart record into joined proof.
+    // A dropped/unjoined declaration vetoes live proof. An unknown escape
+    // instead waits for every descendant launched since it (none here). Neither
+    // can turn an invalidated restart record into joined proof.
+    // SAFETY: prctl with integer arguments, as the container's PID 1 adopts.
+    assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
     for unknown in [false, true] {
         let (fixture, record, budget, cancel, source) = started().await;
         let operation = budget
@@ -1343,6 +1408,15 @@ async fn live_completion_waits_for_read_original_clones_and_explicit_raw_retirem
         )
         .await
         .expect("raw restart replay");
-        assert_eq!(count(&fixture, &record), 1);
+        if unknown {
+            released(&fixture, &record).await;
+        } else {
+            quiet_for_veto().await;
+            assert_eq!(count(&fixture, &record), 1, "unjoined declaration vetoes");
+        }
     }
+}
+
+async fn quiet_for_veto() {
+    tokio::time::sleep(Duration::from_millis(250)).await;
 }

@@ -16,7 +16,7 @@ daemon, which independently re-verifies owner, lease, anchor and source before
 using its ordinary settlement. Remove the proof after the custody is released.
 """
 from __future__ import annotations
-import argparse, json, os, stat, subprocess, sys, tempfile, time, uuid
+import argparse, ctypes, json, os, re, stat, subprocess, sys, tempfile, time, uuid
 from pathlib import Path
 
 MODEL = "source_open_census_v1"
@@ -33,15 +33,19 @@ def require(ok, why):
         raise Refused(why)
 
 
+def _unescape(raw: bytes) -> str:
+    # mountinfo escapes space, tab, newline and backslash as \ooo octal on bytes.
+    return re.sub(rb"\\([0-7]{3})", lambda m: bytes([int(m.group(1), 8)]), raw).decode("utf-8", "surrogateescape")
+
+
 def mountinfo(pid="self"):
     rows = []
-    for line in Path(f"/proc/{pid}/mountinfo").read_text().splitlines():
-        left, right = line.split(" - ", 1)
+    for line in Path(f"/proc/{pid}/mountinfo").read_bytes().splitlines():
+        left, right = line.split(b" - ", 1)
         fields = left.split()
-        fstype, source = right.split()[:2]
-        unescape = lambda value: value.encode().decode("unicode_escape")
-        rows.append({"dev": fields[2], "root": unescape(fields[3]), "point": unescape(fields[4]),
-                     "fstype": fstype, "source": source})
+        fstype = right.split()[0].decode()
+        rows.append({"dev": fields[2].decode(), "root": _unescape(fields[3]),
+                     "point": _unescape(fields[4]), "fstype": fstype})
     return rows
 
 
@@ -56,66 +60,85 @@ def owning_mount(path: Path):
     return best
 
 
-def superblock_paths(path: Path):
-    """Every reachable path to the same file on any mount of its export."""
-    home = owning_mount(path)
-    relative = os.path.relpath(path, home["point"])
-    in_fs = os.path.normpath(os.path.join(home["root"], relative))
-    seen, paths = set(), []
+class FileHandle(ctypes.Structure):
+    _fields_ = [("handle_bytes", ctypes.c_uint), ("handle_type", ctypes.c_int),
+                ("f_handle", ctypes.c_ubyte * 128)]
+
+
+LIBC = ctypes.CDLL(None, use_errno=True)
+
+
+def superblock_fds(path: Path):
+    """O_PATH handles on the source in every superblock of its filesystem.
+
+    The file handle names the server file itself, so mounts of the same
+    filesystem through another export path or server name are found too.
+    """
+    handle, mount_id = FileHandle(handle_bytes=128), ctypes.c_int()
+    require(LIBC.name_to_handle_at(-100, os.fsencode(path), ctypes.byref(handle),
+                                   ctypes.byref(mount_id), 0) == 0,
+            "source has no exportable file handle: " + os.strerror(ctypes.get_errno()))
+    fstype = owning_mount(path)["fstype"]
+    fds, seen = [], set()
+    home = os.open(path, os.O_PATH | os.O_CLOEXEC)
+    fds.append(home)
+    seen.add(os.fstat(home).st_dev)
     for pid in sorted(int(p) for p in os.listdir("/proc") if p.isdigit()):
         try:
             rows = mountinfo(pid)
-        except (FileNotFoundError, ProcessLookupError, PermissionError):
+        except OSError:
             continue
         for row in rows:
-            if row["source"] != home["source"] or row["fstype"] != home["fstype"]:
+            major, minor = map(int, row["dev"].split(":"))
+            if row["fstype"] != fstype or os.makedev(major, minor) in seen:
                 continue
-            root = row["root"].rstrip("/") or "/"
-            if not (in_fs == root or in_fs.startswith(root.rstrip("/") + "/")):
-                continue
-            candidate = Path(f"/proc/{pid}/root") / row["point"].lstrip("/") / os.path.relpath(in_fs, root)
             try:
-                st = os.stat(candidate)
+                mount = os.open(f"/proc/{pid}/root/{row['point'].lstrip('/')}",
+                                os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
             except OSError:
                 continue
-            if (st.st_dev, st.st_ino) not in seen:
-                seen.add((st.st_dev, st.st_ino))
-                paths.append(candidate)
-    require(paths, "no superblock reaches the source")
-    return paths
+            try:
+                if os.fstat(mount).st_dev != os.makedev(major, minor):
+                    continue
+                fd = LIBC.open_by_handle_at(mount, ctypes.byref(handle), os.O_PATH | os.O_CLOEXEC)
+                if fd >= 0:
+                    st = os.fstat(fd)
+                    if st.st_dev in seen:
+                        os.close(fd)
+                    else:
+                        seen.add(st.st_dev)
+                        fds.append(fd)
+                # ESTALE: the file is not reachable through that superblock.
+            finally:
+                os.close(mount)
+    return fds
 
 
-def kernel_counts(paths):
+def kernel_counts(fds):
     """i_readcount/i_writecount per in-core inode, read through O_PATH handles."""
-    fds = [os.open(p, os.O_PATH | os.O_CLOEXEC) for p in paths]
-    try:
-        filt = " || ".join(f"ctx->fd == {fd}" for fd in fds)
-        program = ("iter:task_file /ctx->task->tgid == %d && (%s)/ { printf(\"%%d %%u %%lu %%d %%d\\n\", "
-                   "ctx->fd, ctx->file->f_inode->i_sb->s_dev, ctx->file->f_inode->i_ino, "
-                   "ctx->file->f_inode->i_readcount.counter, ctx->file->f_inode->i_writecount.counter); }"
-                   % (os.getpid(), filt))
-        out = subprocess.run(["bpftrace", "-q", "-e", program], capture_output=True, text=True,
-                             timeout=60, pass_fds=fds)
-        require(out.returncode == 0, "bpftrace census failed: " + out.stderr.strip()[-300:])
-        rows = {}
-        for line in out.stdout.split("\n"):
-            parts = line.split()
-            if len(parts) == 5:
-                fd, sdev, ino, readers, writers = map(int, parts)
-                rows[fd] = (sdev, ino, readers, writers)
-        require(sorted(rows) == sorted(fds), "kernel census did not report every superblock")
-        result = []
-        for fd in fds:
-            sdev, ino, readers, writers = rows[fd]
-            st = os.fstat(fd)
-            # The kernel's s_dev encoding differs from userspace dev_t.
-            require(st.st_ino == ino and os.major(st.st_dev) == sdev >> 20
-                    and os.minor(st.st_dev) == sdev & 0xFFFFF, "census handle identity changed")
-            result.append({"device": st.st_dev, "inode": ino, "readers": readers, "writers": writers})
-        return result
-    finally:
-        for fd in fds:
-            os.close(fd)
+    filt = " || ".join(f"ctx->fd == {fd}" for fd in fds)
+    program = ("iter:task_file /ctx->task->tgid == %d && (%s)/ { printf(\"%%d %%u %%lu %%d %%d\\n\", "
+               "ctx->fd, ctx->file->f_inode->i_sb->s_dev, ctx->file->f_inode->i_ino, "
+               "ctx->file->f_inode->i_readcount.counter, ctx->file->f_inode->i_writecount.counter); }"
+               % (os.getpid(), filt))
+    out = subprocess.run(["bpftrace", "-q", "-e", program], capture_output=True, text=True, timeout=60)
+    require(out.returncode == 0, "bpftrace census failed: " + out.stderr.strip()[-300:])
+    rows = {}
+    for line in out.stdout.split("\n"):
+        parts = line.split()
+        if len(parts) == 5:
+            fd, sdev, ino, readers, writers = map(int, parts)
+            rows[fd] = (sdev, ino, readers, writers)
+    require(sorted(rows) == sorted(fds), "kernel census did not report every superblock")
+    result = []
+    for fd in fds:
+        sdev, ino, readers, writers = rows[fd]
+        st = os.fstat(fd)
+        # The kernel's s_dev encoding (major << 20 | minor) differs from dev_t.
+        require(st.st_ino == ino and os.major(st.st_dev) == sdev >> 20
+                and os.minor(st.st_dev) == sdev & 0xFFFFF, "census handle identity changed")
+        result.append({"device": st.st_dev, "inode": ino, "readers": readers, "writers": writers})
+    return result
 
 
 def anchor_locks(st):
@@ -146,8 +169,12 @@ def path_references(name: bytes):
 
 def census(source: Path, anchor: Path):
     st = os.stat(source)
-    paths = superblock_paths(source)
-    counted = kernel_counts(paths)
+    fds = superblock_fds(source)
+    try:
+        counted = kernel_counts(fds)
+    finally:
+        for fd in fds:
+            os.close(fd)
     return st, {
         "at_ms": int(time.time() * 1000),
         "superblocks": counted,
@@ -184,6 +211,14 @@ def main():
     require(stat.S_ISREG(anchor_st.st_mode) and anchor_st.st_nlink == 1
             and anchor_st.st_dev == evidence["anchor_device"]
             and anchor_st.st_ino == evidence["anchor_inode"], "anchor is not the witness's inode")
+    # The inode the owner actually opened, recorded at enrollment. A replaced
+    # path with matching size and mtime is not the source the owner read.
+    opened = witnesses / f"background-{args.custody}.source"
+    if opened.exists():
+        device, inode = map(int, opened.read_text().split())
+        current = os.stat(args.source)
+        require((current.st_dev, current.st_ino) == (device, inode),
+                "source path no longer names the inode the owner opened")
     first_st, first = census(args.source, anchor)
     time.sleep(GAP_SECONDS)
     second_st, second = census(args.source, anchor)
