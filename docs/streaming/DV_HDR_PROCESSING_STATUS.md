@@ -2,7 +2,7 @@
 
 **Status:** built for supported bounded routes and merged to `main`; full-suite
 qualification, broader reference and hardware acceptance open ·
-**Updated:** 2026-10-15 · **Integration:** merged to `main` as `c96142ac` (#968)
+**Updated:** 2026-11-09 (America/New_York) · **Integration:** merged to `main` as `c96142ac` (#968)
 
 Companion to the [build handoff](DV_HDR_PROCESSING_BUILD.md) and
 [source feasibility findings](DV_HDR_PROCESSING_FEASIBILITY.md). This is the
@@ -11,6 +11,30 @@ remaining milestones stay in the build handoff. The
 [project backlog](../features/PROJECT-BACKLOG.md) points here for progress.
 
 ## 1. Current boundary
+
+**CM4 active-area repair candidate (2026-11-09):** source inspection and a
+24-point offline model isolate a missing L5 boundary in the spatial filter.
+The measured horizontal stage reproduces the native edge error in binary64;
+clamping its vertical neighbors to the source active rows matches all 54
+sampled active RGB codes from the separately labeled licensed expanded-XML
+render. This does not qualify a whole frame or replace the frozen P7/P8
+references. The candidate carries checked L5 offsets through the shared DM
+header and filters inside the uncropped native active rectangle. Pixels
+outside it keep their source content and take the pointwise mapping without
+the detail pass (revised 2026-11-11 after adversarial review): writing PQ
+black there would have erased burned-in subtitles in the bars and real
+picture under a stale or wrong L5, and put bars below the target floor that
+in-picture black reaches. C/native compilation and three crop-domain CPU
+controls pass on this header; the bar oracle is the pointwise map of the
+uncropped frame. No-L5, zero/full-frame L5 and CM v2.9 retain the original
+shader literals byte for byte (`dv_dm_active_cm4` owns that selection and is
+tested); the PQ equations remain unchanged. `run_dm_parity.py` gains L5 GPU
+cases. Native-GPU parity and full picture/display/performance acceptance
+remain open.
+
+The preceding source-budget correction merged in PR #1477 at `49c4ec103` after
+all applicable current-head fast-lane jobs passed. Its bitrate, level and
+qualification fixes do not close picture, display or performance acceptance.
 
 The reviewed proposal landed in documentation PR #919, the comparator in
 PR #920, and the initial backend controls in PR #924. PR #928 merged at

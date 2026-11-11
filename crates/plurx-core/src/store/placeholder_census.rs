@@ -1065,6 +1065,177 @@ fn library_path_call(expression: &str) -> Option<String> {
     Some(super::library_paths_are_sql(&arguments[1], &arguments[2]))
 }
 
+/// Resolve production queue and health SQL helpers through their real
+/// constructors so census validates the expanded SQL and placeholder order.
+fn store_sql_helper_call(expression: &str) -> Option<String> {
+    let expression = expression.trim();
+    if let Some(value) = library_path_call(expression) {
+        return Some(value);
+    }
+    let name = expression
+        .rsplit("::")
+        .next()
+        .and_then(|tail| tail.split_once('(').map(|(name, _)| name.trim()))?;
+    match name {
+        "analysis_request_stranded_sql" => {
+            static CALL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            let call = CALL.get_or_init(|| {
+                regex::Regex::new(r#"^(?:[A-Za-z_][A-Za-z0-9_]*::)*analysis_request_stranded_sql\(\s*"([?$][1-9][0-9]*)"\s*\)$"#)
+                    .expect("stranded SQL helper grammar")
+            });
+            let captures = call
+                .captures(expression)
+                .expect("stranded SQL helper takes one literal placeholder");
+            Some(super::fragment_index_cluster::analysis_request_stranded_sql(&captures[1]))
+        }
+        "analysis_source_capacity_clause"
+        | "analysis_live_viewer_clause"
+        | "analysis_cross_node_clause" => {
+            static CALL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            let call = CALL.get_or_init(|| {
+                regex::Regex::new(r#"^(?:[A-Za-z_][A-Za-z0-9_]*::)*(analysis_source_capacity_clause|analysis_live_viewer_clause|analysis_cross_node_clause)\(\s*"([?$][1-9][0-9]*)"\s*\)$"#)
+                    .expect("analysis claim predicate helper grammar")
+            });
+            let captures = call
+                .captures(expression)
+                .expect("analysis claim predicate helper takes one literal placeholder");
+            Some(match &captures[1] {
+                "analysis_source_capacity_clause" => {
+                    super::fragment_index_cluster::analysis_source_capacity_clause(&captures[2])
+                }
+                "analysis_live_viewer_clause" => {
+                    super::fragment_index_cluster::analysis_live_viewer_clause(&captures[2])
+                }
+                "analysis_cross_node_clause" => {
+                    super::fragment_index_cluster::analysis_cross_node_clause(&captures[2])
+                }
+                _ => unreachable!("reviewed analysis claim predicate"),
+            })
+        }
+        "analysis_executor_exclusion_clause" => {
+            static CALL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            let call = CALL.get_or_init(|| {
+                regex::Regex::new(r#"^(?:[A-Za-z_][A-Za-z0-9_]*::)*analysis_executor_exclusion_clause\(\s*"([?$][1-9][0-9]*)"\s*,\s*"([?$][1-9][0-9]*)"\s*,?\s*\)$"#)
+                    .expect("analysis executor exclusion helper grammar")
+            });
+            let captures = call
+                .captures(expression)
+                .expect("analysis executor exclusion helper takes two literal placeholders");
+            Some(
+                super::fragment_index_cluster::analysis_executor_exclusion_clause(
+                    &captures[1],
+                    &captures[2],
+                ),
+            )
+        }
+        "analysis_claim_order" => {
+            static CALL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            let call = CALL.get_or_init(|| {
+                regex::Regex::new(r#"^(?:[A-Za-z_][A-Za-z0-9_]*::)*analysis_claim_order\(\s*"([?$][1-9][0-9]*)"\s*,\s*"([?$][1-9][0-9]*)"\s*,\s*"([?$][1-9][0-9]*)"\s*\)$"#)
+                    .expect("analysis order helper grammar")
+            });
+            let captures = call
+                .captures(expression)
+                .expect("analysis order helper takes three literal placeholders");
+            Some(super::fragment_index_cluster::analysis_claim_order(
+                &captures[1],
+                &captures[2],
+                &captures[3],
+            ))
+        }
+        "analysis_request_health_sql" => {
+            static CALL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            let call = CALL.get_or_init(|| {
+                regex::Regex::new(r#"^(?:[A-Za-z_][A-Za-z0-9_]*::)*analysis_request_health_sql\(\s*"([?$][1-9][0-9]*)"\s*,\s*"([?$][1-9][0-9]*)"\s*\)$"#)
+                    .expect("analysis health helper grammar")
+            });
+            let captures = call
+                .captures(expression)
+                .expect("analysis health helper takes two literal placeholders");
+            Some(super::analysis_request_health_sql(
+                &captures[1],
+                &captures[2],
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Enumerate the two observed conditional claim predicates, including their
+/// literal disabled arms. All enabled SQL comes from the real constructors.
+fn store_sql_helper_variants(expression: &str) -> Option<Vec<String>> {
+    let expression = expression.trim();
+    // Preserve the path-set constructor's fail-closed grammar for wrappers.
+    if let Some(value) = library_path_call(expression) {
+        return Some(vec![value]);
+    }
+    if !expression.starts_with("if ") {
+        return store_sql_helper_call(expression).map(|value| vec![value]);
+    }
+    static CONDITIONAL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let conditional = CONDITIONAL.get_or_init(|| {
+        regex::Regex::new(r#"^if\s+(viewer_only|cross_node\s*&&\s*pipeline_version\.is_some\(\))\s*\{\s*((?:[A-Za-z_][A-Za-z0-9_]*::)*(analysis_live_viewer_clause|analysis_cross_node_clause)\(\s*"[?$][1-9][0-9]*"\s*\))\s*\}\s*else\s*\{\s*"([01])"\.to_owned\(\)\s*\}$"#)
+            .expect("conditional analysis claim predicate grammar")
+    });
+    let captures = conditional.captures(expression)?;
+    let condition = captures[1].split_whitespace().collect::<String>();
+    assert!(
+        matches!(
+            (condition.as_str(), &captures[3], &captures[4]),
+            ("viewer_only", "analysis_live_viewer_clause", "1")
+                | (
+                    "cross_node&&pipeline_version.is_some()",
+                    "analysis_cross_node_clause",
+                    "0"
+                )
+        ),
+        "conditional analysis predicate must use its reviewed condition and disabled arm"
+    );
+    Some(vec![
+        store_sql_helper_call(&captures[2]).expect("literal conditional constructor"),
+        captures[4].to_owned(),
+    ])
+}
+
+/// Include the named SQL piece in the same statement when production builds a
+/// query with `String::from(prefix) + &fragment + suffix`.
+fn concatenated_binding_after(
+    source: &str,
+    literal: &Literal,
+    name: &str,
+    is_code: &[bool],
+) -> bool {
+    let tail = source[literal.end..].trim_start();
+    let Some(after_close) = tail.strip_prefix(')') else {
+        return false;
+    };
+    let after_close = after_close.trim_start();
+    let Some(after_plus) = after_close.strip_prefix('+') else {
+        return false;
+    };
+    let after_plus = after_plus.trim_start();
+    let Some(after_ref) = after_plus.strip_prefix('&') else {
+        return false;
+    };
+    let Some(rest) = after_ref.strip_prefix(name) else {
+        return false;
+    };
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|value| value.is_ascii_alphanumeric() || value == '_')
+    {
+        return false;
+    }
+    let Some(suffix) = rest.trim_start().strip_prefix('+') else {
+        return false;
+    };
+    let close = source[literal.end..]
+        .find(')')
+        .map(|offset| literal.end + offset);
+    close.is_some_and(|at| is_code.get(at).copied().unwrap_or(false)) && !suffix.trim().is_empty()
+}
+
 /// The observed publication wrapper returns result counts after executing its
 /// explicit SQL/params tuples. Only a helper inside an independently modeled
 /// SQL format is admitted; helpers in routing, parameters or unknown wrappers
@@ -1272,7 +1443,7 @@ fn library_path_template(
     if formatted {
         let helper_arguments = arguments
             .iter()
-            .map(|expression| library_path_call(expression))
+            .map(|expression| store_sql_helper_call(expression))
             .collect::<Vec<_>>();
         let positions = template
             .match_indices("{}")
@@ -1369,7 +1540,16 @@ fn library_path_template(
         ) {
             continue;
         }
-        if let Some(value) = library_path_call(&capture[2]) {
+        if let Some(values) = store_sql_helper_variants(&capture[2]) {
+            let strict_library_path = library_path_call(&capture[2]).is_some();
+            let interpolated = template.contains(&format!("{{{}}}", &capture[1]));
+            let concatenated = concatenated_binding_after(source, literal, &capture[1], is_code);
+            // Queue/health fragments are ordinary immutable Strings: production
+            // reuses them in several statements and captures them in closures.
+            // Keep the stricter single-use, same-block path-set contract intact.
+            if !strict_library_path && !interpolated && !concatenated {
+                continue;
+            }
             assert_eq!(
                 declarations
                     .iter()
@@ -1393,10 +1573,12 @@ fn library_path_template(
                             .is_none_or(|c| !c.is_alphanumeric() && c != '_')
                 })
                 .count();
-            assert_eq!(
-                mentions, 1,
-                "library path SQL binding cannot be shadowed, reassigned or indirectly used"
-            );
+            if strict_library_path {
+                assert_eq!(
+                    mentions, 1,
+                    "library path SQL binding cannot be shadowed, reassigned or indirectly used"
+                );
+            }
             let declaration = capture.get(0).expect("binding declaration").as_str();
             let header = declaration
                 .split_once('=')
@@ -1410,20 +1592,37 @@ fn library_path_template(
                 format!("let {}", &capture[1]),
                 "library path SQL requires one immutable direct untyped binding"
             );
-            if !template.contains(&format!("{{{}}}", &capture[1])) {
+            if !interpolated && !concatenated {
                 continue;
             }
-            assert_eq!(
-                block_at(at),
-                block_at(literal.start),
-                "library path SQL binding must belong to the enclosing live lexical block"
-            );
+            let declaration_blocks = block_at(at);
+            let statement_blocks = block_at(literal.start);
+            if strict_library_path {
+                assert_eq!(
+                    declaration_blocks, statement_blocks,
+                    "library path SQL binding must belong to the enclosing live lexical block"
+                );
+            } else {
+                assert!(
+                    statement_blocks.starts_with(&declaration_blocks),
+                    "queue SQL helper binding must belong to a live enclosing lexical block"
+                );
+            }
             assert!(
                 arguments.is_empty(),
                 "library path SQL local binding cannot have explicit format arguments"
             );
             bindings.retain(|(name, _)| name != &capture[1]);
-            bindings.push((capture[1].to_owned(), vec![value]));
+            if concatenated {
+                assert_eq!(
+                    values.len(),
+                    1,
+                    "concatenated SQL helper must have one direct constructor"
+                );
+                template.push_str(&values[0]);
+            } else {
+                bindings.push((capture[1].to_owned(), values));
+            }
             resolved = true;
         }
     }
@@ -1877,6 +2076,95 @@ fn same_statement_binding_arity(
     None
 }
 
+/// Follow a direct immutable `let name = format!("SQL");` binding to its
+/// sole `execute(&name, params![...])` use in a live enclosing scope. Other
+/// construction, aliasing and reuse shapes remain statically unchecked.
+fn named_sql_binding_arity(source: &str, literal: &Literal, is_code: &[bool]) -> Option<usize> {
+    let function_start = source[..literal.start]
+        .match_indices("fn ")
+        .filter(|(at, _)| is_code[*at])
+        .map(|(at, _)| at)
+        .last()?;
+    static DECLARATION: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let declaration = DECLARATION.get_or_init(|| {
+        regex::Regex::new(r"\blet\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*format!\(\s*$")
+            .expect("direct immutable SQL binding grammar")
+    });
+    let binding = declaration.captures(&source[function_start..literal.start])?;
+    let declaration_at = function_start + binding.get(0)?.start();
+    if !is_code[declaration_at] || !source[literal.end..].trim_start().starts_with(");") {
+        return None;
+    }
+    let mut depth = 0_usize;
+    let mut opened = false;
+    let mut function_end = None;
+    for (at, byte) in source.as_bytes().iter().enumerate().skip(function_start) {
+        if !is_code[at] {
+            continue;
+        }
+        match byte {
+            b'{' => {
+                depth += 1;
+                opened = true;
+            }
+            b'}' if opened => {
+                depth -= 1;
+                if depth == 0 {
+                    function_end = Some(at);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let function_end = function_end?;
+    let name = regex::escape(&binding[1]);
+    let mentions = regex::Regex::new(&format!(r"\b{name}\b"))
+        .ok()?
+        .find_iter(&source[function_start..function_end])
+        .filter(|found| is_code[function_start + found.start()])
+        .count();
+    if mentions != 2 {
+        return None;
+    }
+    let execute =
+        regex::Regex::new(&format!(r"\.\s*execute\s*\(\s*&{name}\s*,\s*params!\[")).ok()?;
+    let uses = execute
+        .find_iter(&source[literal.end..function_end])
+        .filter(|found| is_code[literal.end + found.start()])
+        .collect::<Vec<_>>();
+    if uses.len() != 1 {
+        return None;
+    }
+    let use_at = literal.end + uses[0].start();
+    let blocks_at = |end: usize| {
+        let mut blocks = Vec::new();
+        for (at, byte) in source
+            .as_bytes()
+            .iter()
+            .enumerate()
+            .take(end)
+            .skip(function_start)
+        {
+            if !is_code[at] {
+                continue;
+            }
+            match byte {
+                b'{' => blocks.push(at),
+                b'}' => {
+                    blocks.pop();
+                }
+                _ => {}
+            }
+        }
+        blocks
+    };
+    if !blocks_at(use_at).starts_with(&blocks_at(declaration_at)) {
+        return None;
+    }
+    same_statement_binding_arity(source, is_code, use_at)
+}
+
 fn is_sqlite_candidate(text: &str) -> bool {
     text.contains('?') && is_sql_shaped(text)
 }
@@ -1979,7 +2267,13 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // (?1..?4), and JSON-filtered membership (?1..?3). Each binds exactly those
 // values in the following query_map call; registering this previously omitted
 // source expands coverage without exempting any SQL or changing scanner rules.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 107;
+// Generic single-use named-SQL tracking proves two formerly separate binds:
+// fragment_index_cluster::enqueue_or_promote_subtitle_source_with constructs
+// its INSERT before with_conn and executes it once with twelve values;
+// retire_subtitle_source_ready constructs its UPDATE beside its one five-value
+// execute. The former moved out of line in ee47539ed without updating the old
+// 107 inventory, so the observed 108-site set falls to 106 with both checked.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 106;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
@@ -2010,6 +2304,7 @@ fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
                     Ok(max) if max > 0 => {
                         if let Some(arity) =
                             same_statement_binding_arity(source, &is_code, literal.end)
+                                .or_else(|| named_sql_binding_arity(source, literal, &is_code))
                         {
                             if arity != max {
                                 offenders.push(format!(
@@ -2237,9 +2532,9 @@ fn the_census_covers_every_slice_exactly_once() {
 mod scanner {
     use super::{
         composed_library_path_candidate, is_sql_candidate, is_sql_shaped, is_statement,
-        literals_and_code_mask, positional_format_arguments, principal_templates, resolve_template,
-        same_statement_binding_arity, string_bindings, string_constants, test_item_ranges,
-        validate_sql, validate_sqlite_placeholders,
+        literals_and_code_mask, named_sql_binding_arity, positional_format_arguments,
+        principal_templates, resolve_template, same_statement_binding_arity, string_bindings,
+        string_constants, test_item_ranges, validate_sql, validate_sqlite_placeholders,
     };
 
     #[test]
@@ -2283,6 +2578,220 @@ mod scanner {
             assert_eq!(variants.len(), 1);
             assert!(variants[0].contains(&crate::store::library_paths_are_sql("$1", paths)));
             assert_eq!(validate_sql(&variants[0]).is_ok(), valid);
+        }
+    }
+
+    #[test]
+    fn queue_helpers_are_expanded_before_placeholder_and_arity_checks() {
+        let source = r#"fn enqueue() {
+            let stranded = super::super::fragment_index_cluster::analysis_request_stranded_sql("?18");
+            let earlier = format!("UPDATE demo SET x = {stranded}");
+            self.with_conn(move |conn| {
+                conn.query_row(&format!("SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17 WHERE NOT {stranded} AND ?19"),
+                    params![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19], |row| row.get(0));
+            });
+        }"#;
+        let (literals, mask) = literals_and_code_mask(source);
+        let sql = literals
+            .iter()
+            .find(|value| value.text.starts_with("SELECT"))
+            .expect("queue statement fixture");
+        let variants = principal_templates(
+            "fragment_index_cluster.rs",
+            source,
+            sql,
+            &literals,
+            &mask,
+            &[],
+        );
+        assert_eq!(variants.len(), 1);
+        let expected = super::super::fragment_index_cluster::analysis_request_stranded_sql("?18");
+        assert!(variants[0].contains(&expected));
+        assert_eq!(validate_sqlite_placeholders(&variants[0]), Ok(19));
+        assert_eq!(
+            same_statement_binding_arity(source, &mask, sql.end),
+            Some(19)
+        );
+    }
+
+    #[test]
+    fn claim_order_and_metrics_health_helpers_keep_real_parameter_slots() {
+        let claim_source = r#"fn claim() {
+            let order = super::fragment_index_cluster::analysis_claim_order("$1", "$3", "$4");
+            let sql = format!("SELECT $1, $2, $3 ORDER BY {order}");
+        }"#;
+        let (literals, mask) = literals_and_code_mask(claim_source);
+        let sql = literals
+            .iter()
+            .find(|value| value.text.starts_with("SELECT"))
+            .expect("claim statement fixture");
+        let variants = principal_templates(
+            "fragment_index_cluster.rs",
+            claim_source,
+            sql,
+            &literals,
+            &mask,
+            &[],
+        );
+        let expected = super::super::fragment_index_cluster::analysis_claim_order("$1", "$3", "$4");
+        assert!(variants[0].contains(&expected));
+        assert!(validate_sql(&variants[0]).is_ok());
+
+        let health_source = r#"fn metrics() {
+            let request_health = super::analysis_request_health_sql("?2", "?3");
+            conn.query_row(&(String::from("SELECT ?1, ?2, ") + &request_health + " FROM demo"),
+                params![1, 2, 3], |row| row.get(0));
+        }"#;
+        let (literals, mask) = literals_and_code_mask(health_source);
+        let sql = literals
+            .iter()
+            .find(|value| value.text.starts_with("SELECT"))
+            .expect("metrics statement fixture");
+        let variants = principal_templates("mod.rs", health_source, sql, &literals, &mask, &[]);
+        let expected = super::super::analysis_request_health_sql("?2", "?3");
+        assert!(variants[0].contains(&expected));
+        assert_eq!(validate_sqlite_placeholders(&variants[0]), Ok(3));
+        assert_eq!(
+            same_statement_binding_arity(health_source, &mask, sql.end),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn named_sql_binding_tracks_single_execute_and_refuses_indirect_reuse() {
+        for (bindings, arity) in [
+            (
+                "1,2,3,4,5,6,if foreground { 7 } else { 8 },8,9,10,11,12",
+                12,
+            ),
+            ("1,2,3,4,5,6,if foreground { 7 } else { 8 },8,9,10,11", 11),
+        ] {
+            let source = format!(
+                r#"async fn write_pending_record(&self) {{
+                let stranded = super::fragment_index_cluster::analysis_request_stranded_sql("?11");
+                let request_sql = format!("INSERT INTO demo SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?12 WHERE NOT {{stranded}}");
+                self.with_conn(move |conn| {{
+                    let tx = conn.unchecked_transaction()?;
+                    tx.execute("SELECT ?1", params![unrelated]);
+                    tx.execute(&request_sql, params![{bindings}])?;
+                }}).await
+            }}"#
+            );
+            let (literals, mask) = literals_and_code_mask(&source);
+            let sql = literals
+                .iter()
+                .find(|value| value.text.starts_with("INSERT"))
+                .expect("separately constructed enqueue fixture");
+            let variants = principal_templates(
+                "fragment_index_cluster.rs",
+                &source,
+                sql,
+                &literals,
+                &mask,
+                &[],
+            );
+            assert_eq!(validate_sqlite_placeholders(&variants[0]), Ok(12));
+            assert_eq!(same_statement_binding_arity(&source, &mask, sql.end), None);
+            assert_eq!(named_sql_binding_arity(&source, sql, &mask), Some(arity));
+            assert_eq!(
+                arity == 12,
+                bindings.ends_with(",12"),
+                "a short binding list remains detectable"
+            );
+            let reused = source.replace(
+                "tx.execute(&request_sql,",
+                "let alias = &request_sql; tx.execute(&request_sql,",
+            );
+            let (literals, mask) = literals_and_code_mask(&reused);
+            let sql = literals
+                .iter()
+                .find(|value| value.text.starts_with("INSERT"))
+                .expect("reused fixture");
+            assert_eq!(
+                named_sql_binding_arity(&reused, sql, &mask),
+                None,
+                "a second/indirect SQL use must not borrow the direct execution's arity"
+            );
+        }
+    }
+
+    #[test]
+    fn full_analysis_claim_expands_all_predicates_and_preserves_six_slots() {
+        for (backend, pipeline, exclusion, boost) in [("$", 4, 5, 6), ("?", 5, 6, 4)] {
+            let source = format!(
+                r#"fn claim() {{
+                let capacity = super::fragment_index_cluster::analysis_source_capacity_clause("{backend}3");
+                let viewer = if viewer_only {{
+                    super::fragment_index_cluster::analysis_live_viewer_clause("{backend}3")
+                }} else {{ "1".to_owned() }};
+                let cross = if cross_node && pipeline_version.is_some() {{
+                    super::fragment_index_cluster::analysis_cross_node_clause("{backend}1")
+                }} else {{ "0".to_owned() }};
+                let exclusion = super::fragment_index_cluster::analysis_executor_exclusion_clause(
+                    "{backend}1", "{backend}{exclusion}",
+                );
+                let order = super::fragment_index_cluster::analysis_claim_order("{backend}1", "{backend}3", "{backend}{boost}");
+                conn.query_row(&format!("SELECT {backend}1 FROM analysis_requests WHERE attempts < {backend}2
+                    AND not_before_ms <= {backend}3 AND pipeline_version = {backend}{pipeline}
+                    AND {{cross}} AND {{capacity}} AND {{viewer}} AND {{exclusion}} ORDER BY {{order}}"),
+                    params![1, 2, 3, 4, 5, 6], |row| row.get(0));
+            }}"#
+            );
+            let (literals, mask) = literals_and_code_mask(&source);
+            let sql = literals
+                .iter()
+                .find(|value| value.text.starts_with("SELECT"))
+                .expect("full claim statement fixture");
+            let variants = principal_templates(
+                "fragment_index_cluster.rs",
+                &source,
+                sql,
+                &literals,
+                &mask,
+                &[],
+            );
+            assert_eq!(
+                variants.len(),
+                4,
+                "both conditional predicates have two arms"
+            );
+            let parameter = |slot| format!("{backend}{slot}");
+            let capacity = super::super::fragment_index_cluster::analysis_source_capacity_clause(
+                &parameter(3),
+            );
+            let viewer =
+                super::super::fragment_index_cluster::analysis_live_viewer_clause(&parameter(3));
+            let cross =
+                super::super::fragment_index_cluster::analysis_cross_node_clause(&parameter(1));
+            let exclusion =
+                super::super::fragment_index_cluster::analysis_executor_exclusion_clause(
+                    &parameter(1),
+                    &parameter(exclusion),
+                );
+            let order = super::super::fragment_index_cluster::analysis_claim_order(
+                &parameter(1),
+                &parameter(3),
+                &parameter(boost),
+            );
+            assert!(variants
+                .iter()
+                .any(|sql| sql.contains(&viewer) && sql.contains(&cross)));
+            for variant in variants {
+                assert!(
+                    variant.contains(&capacity)
+                        && variant.contains(&exclusion)
+                        && variant.contains(&order)
+                );
+                if backend == "$" {
+                    assert!(validate_sql(&variant).is_ok(), "{variant}");
+                } else {
+                    assert_eq!(validate_sqlite_placeholders(&variant), Ok(6));
+                }
+            }
+            assert_eq!(
+                same_statement_binding_arity(&source, &mask, sql.end),
+                Some(6)
+            );
         }
     }
 

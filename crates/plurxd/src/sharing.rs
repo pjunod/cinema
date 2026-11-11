@@ -443,7 +443,8 @@ impl SharingManager {
             receiver_recovery: Mutex::new(ReceiverRecoveryStatus::default()),
         }
     }
-    #[cfg(all(test, target_os = "linux"))]
+    // Read by the scope-saturation test, which runs on every platform.
+    #[cfg(test)]
     pub(crate) fn scope_control_available(&self) -> usize {
         self.scope_control.available_permits()
     }
