@@ -799,7 +799,7 @@ WITH input AS (SELECT json($1) AS body), snapshot AS (
   AND job.revision=json_extract(body,'$.token.revision') AND job.lease_expires_ms=json_extract(body,'$.token.lease_expires_ms')
   AND job.lease_expires_ms>json_extract(body,'$.now_ms') AND job.revision<9223372036854775807
   AND (job.retry_deadline_ms=0 OR job.retry_deadline_ms>json_extract(body,'$.now_ms'))
-  AND job.target_node_id=json_extract(body,'$.source.origin_node_id') AND job.target_node_id=job.owner_node_id
+  AND json_extract(job.payload_json,'$.origin_node_id')=json_extract(body,'$.source.origin_node_id') AND job.owner_node_id=json_extract(body,'$.source.origin_node_id')
   AND NOT EXISTS(SELECT 1 FROM settings WHERE key='internal.cluster_job_owner_removed.'||job.owner_node_id)
   AND EXISTS(SELECT 1 FROM background_job_attempts attempt WHERE attempt.job_id=job.id AND attempt.fence=job.fence
    AND attempt.claim_id=job.claim_id AND attempt.owner_node_id=job.owner_node_id AND attempt.owner_boot_id=job.owner_boot_id
