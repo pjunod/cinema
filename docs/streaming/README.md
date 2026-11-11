@@ -11,8 +11,9 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 | File | Answers | |
 |---|---|---|
-| [Claude handoff](FEL-CLAUDE-HANDOFF.md) | Claude continuation: artifacts, commands and pending tests. | open |
-| [FEL quality](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL findings, evidence and packaging cause. | open |
+| [FEL handoff](FEL-CLAUDE-HANDOFF.md) | Resume. | open |
+| [FEL quality](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL findings and packaging cause. | open |
+| [FEL shadow](FEL-SHADOW-ALLOCATION.md) | Shadow-loss cause. | open |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Which playback files share `cache.max_gb`, how concurrent writes reserve capacity, and how global eviction protects readers and free disk space. | built |
 | [WEB-PREPARED-SEEK-INCIDENT.md](WEB-PREPARED-SEEK-INCIDENT.md) | October 20 ROG backward-seek failure: subtitle reattachment cancelled the Auto request before commit; underlying repair, recovery ownership, quality indicators and remaining live qualification. | open |
 | [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Close/Resume HDR downgrade, lost DV cancellation, Safari startup intent corruption, lifecycle ownership and remaining stale-session evidence. | open |
