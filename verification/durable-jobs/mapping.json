@@ -505,7 +505,7 @@
       },
       {
         "anchor": "struct JobFence",
-        "sha256": "9b7ead4a6d5d4f3b749b55941c7b049d79909f015b6c63c75abbec53c2719816",
+        "sha256": "0d8f5d8b081108d053ceedad17242c217d7914fbe21bc1735821a3a4ffba44f7",
         "source": "crates/plurxd/src/background_jobs.rs",
         "table": "proposal \u00a74.1 runtime fence"
       },
@@ -571,13 +571,13 @@
       },
       {
         "anchor": "pub async fn produce(",
-        "sha256": "4933252039b886729e992ea58ae857f42bc838dc62a3d30602f8623ba92132c8",
+        "sha256": "707a0645008a18d6f5da930bab07a0b1c0c794b59c0fabcc9a03232550e30791",
         "source": "crates/plurxd/src/transcode/manager/produce.rs",
         "table": "review \u00a73 artifact producer caller"
       },
       {
         "anchor": "            true\n        } else if let Some(fence) = publication_fence {\n            PublicationStore::fenced(self.store.as_ref(), fence.clone())",
-        "sha256": "4933252039b886729e992ea58ae857f42bc838dc62a3d30602f8623ba92132c8",
+        "sha256": "707a0645008a18d6f5da930bab07a0b1c0c794b59c0fabcc9a03232550e30791",
         "source": "crates/plurxd/src/transcode/manager/produce.rs",
         "table": "review \u00a73 citation crates/plurxd/src/transcode/manager/produce.rs:2083"
       },
@@ -721,13 +721,13 @@
       },
       {
         "anchor": "pub(crate) async fn activate_background_with_journal(",
-        "sha256": "8ab10a046a2eded649af5286c0e7602f9eeff78db2fc371ce17540b7941f921f",
+        "sha256": "c364421f3298c5243e93bab48631ccbc1941434bee0b672528eb9d54065587fc",
         "source": "crates/plurxd/src/source_custody.rs",
         "table": "recovery dependency outside model: custody activation and cleanup"
       },
       {
         "anchor": "pub(super) fn configure_backend(",
-        "sha256": "a5603d4a16f89b1aac3efb9fc5068c64825629d55c2fd977c4376b66093b7fac",
+        "sha256": "8d1d5c725e5d107fef4d612f807181c8e81e4506afb3a45e58220698b601269b",
         "source": "crates/plurxd/src/source_custody/recovery.rs",
         "table": "recovery dependency outside model: exact-Store verified boot replay"
       },
@@ -739,7 +739,7 @@
       },
       {
         "anchor": "crate::source_custody::configure_recovery_backend(",
-        "sha256": "bf80d42087d763f8ec46f18a365f4837caed2ac6e3d81ea5511899a5f25864fc",
+        "sha256": "e0cc39699dfea66db9fe3666e0685a141be4f2e65d5475a7c5513775b12949ba",
         "source": "crates/plurxd/src/main.rs",
         "table": "recovery dependency outside model: startup before source producers"
       }
