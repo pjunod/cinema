@@ -5,7 +5,8 @@ Runs dm_shader_control for each case; prints max |GPU-CPU| (PQ) and mean/max dE_
 usage: run_dm_parity.py DM_SHADER_CONTROL SCRATCH_DIR SRC_F32 [CASE ...]
 SRC_F32: at least five 3840x2160 frames of float32 BT.2020/PQ RGB (the decoded master).
 Optional CASE names rerun only those cases; unknown names fail.
-Real crops (real pixels, real or synthetic metadata) must match to dE_ITP max 0.05 and 2e-4 PQ.
+Real crops (real pixels, real or synthetic metadata) must match to dE_ITP max 0.05 and 2e-4 PQ;
+CM4 real crops, which use the precise ST 2084 helpers, must match to 1.5e-6 PQ (a tenth of a 16-bit code).
 The synthetic raster is a 9^3 lattice reaching 10000-nit fully saturated BT.2020 corners, where the
 shader's float32 arithmetic loses digits against the double reference; it must match to dE_ITP mean
 0.02 and max 0.5 (well under one JND). Each synthetic channel must differ by less than
@@ -55,8 +56,14 @@ def run(name, params, rgb, w, h, synthetic=False):
         lg, lc = eotf(g), eotf(c)
         print('  max linear channel error / target peak %.3e' % (np.abs(lg - lc).max() / target_peak))
         return e.mean() < 0.02 and e.max() < 0.5 and np.all(synthetic_channel_ok(g, c, lg, lc, target_peak))
+    # CM4 point/final passes use the precise ST 2084 helpers: on real pixels the shader must agree with
+    # the double reference to a tenth of a 16-bit code. The legacy float expansion missed by 2-3e-6.
+    if name.startswith('cm4_') and name != 'cm4_black_1000_p1' and d >= PRECISE_CM4_PQ:
+        print('  FAIL: CM4 real-pixel PQ error %.2e is not within %.1e' % (d, PRECISE_CM4_PQ))
+        return False
     return e.max() < 0.05 and d < 2e-4
 
+PRECISE_CM4_PQ = 1.5e-6
 W, H = 512, 256
 frames = []
 n4k = 3840 * 2160 * 3

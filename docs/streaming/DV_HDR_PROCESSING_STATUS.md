@@ -32,6 +32,24 @@ tested); the PQ equations remain unchanged. `run_dm_parity.py` gains L5 GPU
 cases. Native-GPU parity and full picture/display/performance acceptance
 remain open.
 
+**CM4 transfer precision (2026-11-11):** CM4 point and final passes now use
+the normative ST 2084 helpers (candidate C: precise split-float PQ OETF/EOTF,
+analytical black, exact 10000-nit white); CM v2.9, lattice and horizontal
+passes keep the legacy literal header byte for byte. On SourceB frame16
+(1000-nit P3/.005 target, 7,971,840 active pixels) the qualified native C
+capture is worse than unenhanced P8 at 0 pixels under both licensed
+references (5 equal, both zero error); the previous enhanced renderer was
+worse at 3. Local losses remain visible: against the previous enhanced
+renderer C is worse at 47,038 pixels and better at 579,677; against B
+(frozen-black EOTF) all 30,121 differences are single 16-bit codes (16,977
+worse, 13,144 better), with no near-black or spatial pattern. The frame peaks
+at 124 nits, so the bright-content difference between B and C (exact white)
+is not yet measured: that needs a bound clip from a 4000-nit title and a
+frame-parameterized diagnostic build. The historical P7 audit stays separate
+(C 10 pixels worse than P8, as B). GPU-versus-double parity on CM4 real
+crops tightened from 2-3e-6 to under 7e-7 PQ; `test_dm_precision.py`
+enforces 1.5e-6. One frame is not whole-title or performance acceptance.
+
 The preceding source-budget correction merged in PR #1477 at `49c4ec103` after
 all applicable current-head fast-lane jobs passed. Its bitrate, level and
 qualification fixes do not close picture, display or performance acceptance.

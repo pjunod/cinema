@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- CM4 display mapping evaluates the ST 2084 transfer functions in its point and
+  final passes with precise split-float helpers and the normative black and
+  white endpoints. On the measured Source16 frame no enhanced pixel is farther
+  from the licensed reference than the unenhanced picture; before, three were.
 - CM4 display mapping uses the RPU's active picture boundary for spatial
   filtering, keeping letterbox bars from brightening the first and last
   active rows or side edges. Pixels outside the boundary are still mapped,

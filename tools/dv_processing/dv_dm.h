@@ -319,125 +319,395 @@ enum { DV_DM_LATTICE_X = 66 };
 // Chroma reach the table covers (IPT P/T); vertices beyond it are evaluated per pixel.
 #define DV_DM_LATTICE_CHROMA 0.6
 #define DV_DM_LATTICE_MAX_R 120
-static const char dv_dm_glsl_common[] =
-  "#define DV_DM_LATTICE_X 66.0\n"
-  "const mat3 R2L_T = mat3(vec3(0.412109375,0.5239257812,0.06396484375), vec3(0.1667480469,0.7204589844,0.1127929688), vec3(0.02416992188,0.07543945312,0.900390625));\n"
-  "const mat3 L2R_T = mat3(vec3(3.436606694,-2.506452119,0.06984542432), vec3(-0.7913295556,1.983600452,-0.1922708962), vec3(-0.02594989969,-0.09891371471,1.124863614));\n"
-  "const mat3 L2I_T = mat3(vec3(0.5,0.5,0.0), vec3(1.613769531,-3.323486328,1.709716797), vec3(4.378173828,-4.245605469,-0.1325683594));\n"
-  "const mat3 I2L_T = mat3(vec3(1.0,0.008609037038,0.111029625), vec3(1.0,-0.008609037038,-0.111029625), vec3(1.0,0.5600313357,-0.320627175));\n"
-  "const mat3 IPT_T = mat3(vec3(0.4,0.4,0.2), vec3(4.455,-4.851,0.396), vec3(0.8056,0.3572,-1.1628));\n"
-  "const mat3 IPTI_T = mat3(vec3(1.0,0.09756893051,0.2052264332), vec3(1.0,-0.1138764855,0.1332171584), vec3(1.0,0.03261510992,-0.6768871831));\n"
-  // Stable ST 2084 intermediates. The OETF argument lies in [-21/128,0].
-  // The EOTF series covers normalized signals and the adjoining extended range.
-  // Retain the extended-domain expression beyond the series bound.
-  "float pq_log1p(float x){\n"
-  " float p=-1.0/12.0;\n"
-  " p=1.0/11.0 + x*p;\n"
-  " p=-1.0/10.0 + x*p;\n"
-  " p=1.0/9.0 + x*p;\n"
-  " p=-1.0/8.0 + x*p;\n"
-  " p=1.0/7.0 + x*p;\n"
-  " p=-1.0/6.0 + x*p;\n"
-  " p=1.0/5.0 + x*p;\n"
-  " p=-1.0/4.0 + x*p;\n"
-  " p=1.0/3.0 + x*p;\n"
-  " p=-1.0/2.0 + x*p;\n"
-  " p=1.0 + x*p;\n"
-  " return x*p;\n"
-  "}\n"
-  "float pq_expm1(float x){\n"
-  " if(x>=0.0 && x<=0.25){\n"
-  "  float p=1.0/3628800.0;\n"
-  "  p=1.0/362880.0 + x*p;\n"
-  "  p=1.0/40320.0 + x*p;\n"
-  "  p=1.0/5040.0 + x*p;\n"
-  "  p=1.0/720.0 + x*p;\n"
-  "  p=1.0/120.0 + x*p;\n"
-  "  p=1.0/24.0 + x*p;\n"
-  "  p=1.0/6.0 + x*p;\n"
-  "  p=1.0/2.0 + x*p;\n"
-  "  p=1.0 + x*p;\n"
-  "  return x*p;\n"
-  " }\n"
-  " float u=exp(x),l=log(u); return u==1.0 || l==0.0 ? x : (u-1.0)*x/l; }\n"
-  "float pq_eotf_ext(float e){ e=max(e,0.0); float x=log(max(e/7.309559025783966e-7,1.0))/78.84375; float d=0.8359375*pq_expm1(x); return 10000.0*pow(d/max(3.22998046875-18.6875*d,1e-12),1.0/0.1593017578125); }\n"
-  "float pq_eotf(float e){ return pq_eotf_ext(clamp(e,0.0,1.0)); }\n"
-  "float pq_oetf(float y){ y=clamp(y/10000.0,0.0,1.0); float t=pow(y,0.1593017578125); return exp(78.84375*pq_log1p(-0.1640625*(1.0-t)/(1.0+18.6875*t))); }\n"
-  "vec3 pq_eotf3(vec3 e){ return vec3(pq_eotf(e.x),pq_eotf(e.y),pq_eotf(e.z)); }\n"
-  "vec3 pq_oetf3(vec3 y){ return vec3(pq_oetf(y.x),pq_oetf(y.y),pq_oetf(y.z)); }\n"
+// Keep the legacy header expanded byte-for-byte for CM2.9, the lattice and
+// horizontal passes. CM4 point/final headers share one precise PQ definition.
+// Compile-time concatenation retains each pass's declaration order without
+// allocations or a second independently maintained colour implementation.
+#define DV_DM_GLSL_BASE \
+  "#define DV_DM_LATTICE_X 66.0\n" \
+  "const mat3 R2L_T = mat3(vec3(0.412109375,0.5239257812,0.06396484375), vec3(0.1667480469,0.7204589844,0.1127929688), vec3(0.02416992188,0.07543945312,0.900390625));\n" \
+  "const mat3 L2R_T = mat3(vec3(3.436606694,-2.506452119,0.06984542432), vec3(-0.7913295556,1.983600452,-0.1922708962), vec3(-0.02594989969,-0.09891371471,1.124863614));\n" \
+  "const mat3 L2I_T = mat3(vec3(0.5,0.5,0.0), vec3(1.613769531,-3.323486328,1.709716797), vec3(4.378173828,-4.245605469,-0.1325683594));\n" \
+  "const mat3 I2L_T = mat3(vec3(1.0,0.008609037038,0.111029625), vec3(1.0,-0.008609037038,-0.111029625), vec3(1.0,0.5600313357,-0.320627175));\n" \
+  "const mat3 IPT_T = mat3(vec3(0.4,0.4,0.2), vec3(4.455,-4.851,0.396), vec3(0.8056,0.3572,-1.1628));\n" \
+  "const mat3 IPTI_T = mat3(vec3(1.0,0.09756893051,0.2052264332), vec3(1.0,-0.1138764855,0.1332171584), vec3(1.0,0.03261510992,-0.6768871831));\n" \
+  "float pq_log1p(float x){\n" \
+  " float p=-1.0/12.0;\n" \
+  " p=1.0/11.0 + x*p;\n" \
+  " p=-1.0/10.0 + x*p;\n" \
+  " p=1.0/9.0 + x*p;\n" \
+  " p=-1.0/8.0 + x*p;\n" \
+  " p=1.0/7.0 + x*p;\n" \
+  " p=-1.0/6.0 + x*p;\n" \
+  " p=1.0/5.0 + x*p;\n" \
+  " p=-1.0/4.0 + x*p;\n" \
+  " p=1.0/3.0 + x*p;\n" \
+  " p=-1.0/2.0 + x*p;\n" \
+  " p=1.0 + x*p;\n" \
+  " return x*p;\n" \
+  "}\n" \
+  "float pq_expm1(float x){\n" \
+  " if(x>=0.0 && x<=0.25){\n" \
+  "  float p=1.0/3628800.0;\n" \
+  "  p=1.0/362880.0 + x*p;\n" \
+  "  p=1.0/40320.0 + x*p;\n" \
+  "  p=1.0/5040.0 + x*p;\n" \
+  "  p=1.0/720.0 + x*p;\n" \
+  "  p=1.0/120.0 + x*p;\n" \
+  "  p=1.0/24.0 + x*p;\n" \
+  "  p=1.0/6.0 + x*p;\n" \
+  "  p=1.0/2.0 + x*p;\n" \
+  "  p=1.0 + x*p;\n" \
+  "  return x*p;\n" \
+  " }\n" \
+  " float u=exp(x),l=log(u); return u==1.0 || l==0.0 ? x : (u-1.0)*x/l; }\n" \
+  "float pq_eotf_ext(float e){ e=max(e,0.0); float x=log(max(e/7.309559025783966e-7,1.0))/78.84375; float d=0.8359375*pq_expm1(x); return 10000.0*pow(d/max(3.22998046875-18.6875*d,1e-12),1.0/0.1593017578125); }\n" \
+  "float pq_eotf(float e){ return pq_eotf_ext(clamp(e,0.0,1.0)); }\n" \
+  "float pq_oetf(float y){ y=clamp(y/10000.0,0.0,1.0); float t=pow(y,0.1593017578125); return exp(78.84375*pq_log1p(-0.1640625*(1.0-t)/(1.0+18.6875*t))); }\n" \
+  "vec3 pq_eotf3(vec3 e){ return vec3(pq_eotf(e.x),pq_eotf(e.y),pq_eotf(e.z)); }\n" \
+  "vec3 pq_oetf3(vec3 y){ return vec3(pq_oetf(y.x),pq_oetf(y.y),pq_oetf(y.z)); }\n" \
   "vec3 mrow(vec4 r0, vec4 r1, vec4 r2, vec3 v){ return vec3(dot(r0.xyz,v),dot(r1.xyz,v),dot(r2.xyz,v)); }\n"
+
+#define DV_DM_GLSL_ICTCP_LEGACY \
   "vec3 ictcp(vec3 rgb){ vec3 lms=pq_eotf3(rgb)*R2L_T; return pq_oetf3(lms)*L2I_T; }\n"
-  // ---------------------------------------------------------- CM4
-  "float herm(float T,float y1,float y2,float s1,float s2,float dx){ float T2=T*T,T3=T2*T; return (2.0*T3-3.0*T2+1.0)*y1+(T3-2.0*T2+T)*dx*s1+(-2.0*T3+3.0*T2)*y2+(T3-T2)*dx*s2; }\n"
-  "float c4curve(float x){\n"
-  " float SMin=u[0].x,SMid=u[0].y,SMax=u[0].z,TMin=u[1].y,TMid=u[1].z,TMX=u[1].w,sMin=u[2].x,sMid=u[2].y,sMax=u[2].z;\n"
-  " if(x<SMin) return TMin+(x-SMin)*sMin;\n"
-  " if(x<=SMid) return herm((x-SMin)/(SMid-SMin),TMin,TMid,sMin,sMid,SMid-SMin);\n"
-  " if(x<=SMax) return herm((x-SMid)/(SMax-SMid),TMid,TMX,sMid,sMax,SMax-SMid);\n"
-  " return TMX+(x-SMax)*sMax; }\n"
-  "float c4sop(float v){ if(u[17].x<0.5) return v; float Tmin=u[0].w,Tmax=u[1].x,L=u[3].x,g=u[3].y,G=u[3].z;\n"
-  " float n=(v-Tmin)/(Tmax-Tmin); n=max((1.0+g)*n+L*(1.0+g/2.0)*(1.0-n),0.0); n=pow(n,(2.0-G)/(2.0+G)); return n*(Tmax-Tmin)+Tmin; }\n"
-  "float satscale(float Io,float Ii){ float a=Io-1.0,b=Ii-1.0; return (a*a*a+1.0)/(b*b*b+1.0); }\n"
-  "float c4meso(float I){ float t=clamp(1.0-(I*4095.0-25.0)/875.0,0.0,1.0); return 1.0-t*t; }\n"
-  "float anc(int k){ return k<4 ? u[6][k] : u[7][k-4]; }\n"
-  "float sixsat(int k){ return k<4 ? u[8][k] : u[9][k-4]; }\n"
-  "float sixhue(int k){ return k<2 ? u[9][k+2] : u[10][k-2]; }\n"
-  "vec3 c4point(vec3 rgb){\n"
-  " vec3 ic=ictcp(rgb); float I=ic.x, S=sqrt(0.25*ic.y*ic.y+ic.z*ic.z);\n"
-  " float m=min(S,u[4].z), S3=m*m*m, cw=u[3].w;\n"
-  " float Ip=c4sop(c4curve(I));\n"
-  " vec3 o; o.x=Ip*(1.0+u[4].x*S3)*(1.0+2.0*cw*S);\n"
-  " float ss=satscale(Ip,I); float sI=max(min(1.0,ss),ss*c4meso(I));\n"
-  " if(u[17].y>0.5){ float c1=clamp((Ip-u[0].w)/(u[0].w-u[0].x),0.0,1.0); sI*=1.0-(1.0-c1)*(1.0-c1); }\n"
-  " float f=sI*u[2].w*(1.0+1.5*cw*S)*(1.0+u[4].y*S3); o.y=ic.y*f; o.z=ic.z*f;\n"
-  " if(u[4].w>0.5){\n"
-  "  float h=degrees(atan(o.z,o.y/2.0)); if(h<0.0) h+=360.0;\n"
-  "  float smh=1.0, r1=0.0;\n"
-  "  for(int k=0;k<6;k++){ int j=(k+1)%6; float span=mod(anc(j)-anc(k)+720.0,360.0), dd=mod(h-anc(k)+720.0,360.0);\n"
-  "   if(dd>=360.0-1e-4&&span>0.0) dd=0.0;\n"
-  "   if(dd<span){ float t=dd/span; smh+=(1.0-t)*sixsat(k)+t*sixsat(j); r1+=(1.0-t)*sixhue(k)+t*sixhue(j); break; } }\n"
-  "  r1*=0.5; float r2=1.0-r1*r1/2.0, T=o.y/2.0, P=o.z; o.y=2.0*smh*(T*r2-P*r1); o.z=smh*(T*r1+P*r2); }\n"
+
+#define DV_DM_GLSL_ICTCP_CM4 \
+  "vec3 ictcp(vec3 rgb){ vec3 lms=vec3(dfi_eq_finish_eotf(clamp(rgb.x,0.0,1.0)),dfi_eq_finish_eotf(clamp(rgb.y,0.0,1.0)),dfi_eq_finish_eotf(clamp(rgb.z,0.0,1.0)))*R2L_T; return eqpq_oetf3(lms)*L2I_T; }\n"
+
+#define DV_DM_GLSL_CM4_CURVE \
+  "float herm(float T,float y1,float y2,float s1,float s2,float dx){ float T2=T*T,T3=T2*T; return (2.0*T3-3.0*T2+1.0)*y1+(T3-2.0*T2+T)*dx*s1+(-2.0*T3+3.0*T2)*y2+(T3-T2)*dx*s2; }\n" \
+  "float c4curve(float x){\n" \
+  " float SMin=u[0].x,SMid=u[0].y,SMax=u[0].z,TMin=u[1].y,TMid=u[1].z,TMX=u[1].w,sMin=u[2].x,sMid=u[2].y,sMax=u[2].z;\n" \
+  " if(x<SMin) return TMin+(x-SMin)*sMin;\n" \
+  " if(x<=SMid) return herm((x-SMin)/(SMid-SMin),TMin,TMid,sMin,sMid,SMid-SMin);\n" \
+  " if(x<=SMax) return herm((x-SMid)/(SMax-SMid),TMid,TMX,sMid,sMax,SMax-SMid);\n" \
+  " return TMX+(x-SMax)*sMax; }\n" \
+  "float c4sop(float v){ if(u[17].x<0.5) return v; float Tmin=u[0].w,Tmax=u[1].x,L=u[3].x,g=u[3].y,G=u[3].z;\n" \
+  " float n=(v-Tmin)/(Tmax-Tmin); n=max((1.0+g)*n+L*(1.0+g/2.0)*(1.0-n),0.0); n=pow(n,(2.0-G)/(2.0+G)); return n*(Tmax-Tmin)+Tmin; }\n" \
+  "float satscale(float Io,float Ii){ float a=Io-1.0,b=Ii-1.0; return (a*a*a+1.0)/(b*b*b+1.0); }\n" \
+  "float c4meso(float I){ float t=clamp(1.0-(I*4095.0-25.0)/875.0,0.0,1.0); return 1.0-t*t; }\n" \
+  "float anc(int k){ return k<4 ? u[6][k] : u[7][k-4]; }\n" \
+  "float sixsat(int k){ return k<4 ? u[8][k] : u[9][k-4]; }\n" \
+  "float sixhue(int k){ return k<2 ? u[9][k+2] : u[10][k-2]; }\n" \
+  "vec3 c4point(vec3 rgb){\n" \
+  " vec3 ic=ictcp(rgb); float I=ic.x, S=sqrt(0.25*ic.y*ic.y+ic.z*ic.z);\n" \
+  " float m=min(S,u[4].z), S3=m*m*m, cw=u[3].w;\n" \
+  " float Ip=c4sop(c4curve(I));\n" \
+  " vec3 o; o.x=Ip*(1.0+u[4].x*S3)*(1.0+2.0*cw*S);\n" \
+  " float ss=satscale(Ip,I); float sI=max(min(1.0,ss),ss*c4meso(I));\n" \
+  " if(u[17].y>0.5){ float c1=clamp((Ip-u[0].w)/(u[0].w-u[0].x),0.0,1.0); sI*=1.0-(1.0-c1)*(1.0-c1); }\n" \
+  " float f=sI*u[2].w*(1.0+1.5*cw*S)*(1.0+u[4].y*S3); o.y=ic.y*f; o.z=ic.z*f;\n" \
+  " if(u[4].w>0.5){\n" \
+  "  float h=degrees(atan(o.z,o.y/2.0)); if(h<0.0) h+=360.0;\n" \
+  "  float smh=1.0, r1=0.0;\n" \
+  "  for(int k=0;k<6;k++){ int j=(k+1)%6; float span=mod(anc(j)-anc(k)+720.0,360.0), dd=mod(h-anc(k)+720.0,360.0);\n" \
+  "   if(dd>=360.0-1e-4&&span>0.0) dd=0.0;\n" \
+  "   if(dd<span){ float t=dd/span; smh+=(1.0-t)*sixsat(k)+t*sixsat(j); r1+=(1.0-t)*sixhue(k)+t*sixhue(j); break; } }\n" \
+  "  r1*=0.5; float r2=1.0-r1*r1/2.0, T=o.y/2.0, P=o.z; o.y=2.0*smh*(T*r2-P*r1); o.z=smh*(T*r1+P*r2); }\n" \
   " return o; }\n"
-  "vec3 c4finish(vec3 o){\n"
-  " vec3 lmsp=o*I2L_T; vec3 lms=vec3(pq_eotf_ext(lmsp.x),pq_eotf_ext(lmsp.y),pq_eotf_ext(lmsp.z));\n"
-  " vec3 lin=lms*L2R_T; vec3 lt=clamp(mrow(u[11],u[12],u[13],lin),vec3(u[5].x),vec3(u[5].y));\n"
-  " lin=mrow(u[14],u[15],u[16],lt); return pq_oetf3(max(lin,vec3(0.0))); }\n"
-  // ---------------------------------------------------------- CM2.9
-  "float c29curve(float x){ float xn=pow(max(x,0.0),u[0].w); float v=pow(max((u[0].x+u[0].y*xn)/(1.0+u[0].z*xn),0.0),1.0/3.0); return clamp(v,u[1].x,u[1].y); }\n"
-  "float c29sop(float y){ if(u[17].x<0.5) return y; float L=u[2].x,g=u[2].y,G=u[2].z;\n"
-  " return clamp(pow(max((1.0+g/2.0)*((1.0-L/2.0)*y+L/2.0),0.0),2.0/(2.0+G)),u[1].x,u[1].y); }\n"
-  "vec3 ipt(vec3 rgb){ vec3 lms=max(mrow(u[4],u[5],u[6],pq_eotf3(rgb)),vec3(0.0)); return pq_oetf3(lms)*IPT_T; }\n"
-  "vec2 c29point(vec3 p, out float I){ I=p.x; float C=length(p.yz); float Ib=c29sop(c29curve(I));\n"
-  " float Io=u[17].y>0.5 ? c29sop(c29curve(I+0.5*u[2].w*C)) : Ib; return vec2(Ib,Io); }\n"
-  "vec3 c29vertex(vec3 q){\n"
-  " if(q.x<=u[10].x) return vec3(0.0);\n"
-  " vec3 lmsp=clamp(q*IPTI_T,0.0,1.0);\n"
-  " vec3 lin=mrow(u[7],u[8],u[9],pq_eotf3(lmsp));\n"
-  " vec3 lt=clamp(mrow(u[11],u[12],u[13],lin),vec3(u[1].z),vec3(u[1].w));\n"
-  " return u[3].w>0.5 ? (pow(lt,vec3(1.0/2.4))-vec3(u[10].y))/u[10].z : pq_oetf3(lt); }\n"
-  "// Lattice vertex idx (integer-valued; x 0..64, y/z centred on 0): the per-frame table when idx is\n"
-  "// inside it (u[18].z: its chroma offset R, u[18].w: its chroma size), otherwise evaluated here.\n"
-  "vec3 c29corner(sampler2D lat, vec3 origin, vec3 step, vec3 idx){\n"
-  " float R=u[18].z, nc=u[18].w;\n"
-  " if(idx.x>=0.0&&idx.x<DV_DM_LATTICE_X&&idx.y>=-R&&idx.y<nc-R&&idx.z>=-R&&idx.z<nc-R)\n"
-  "  return texelFetch(lat,ivec2(int(idx.x)+int(DV_DM_LATTICE_X)*int(idx.y+R),int(idx.z+R)),0).rgb;\n"
-  " return c29vertex(origin+idx*step); }\n"
-  "vec3 c29finish(sampler2D lat, vec3 p, float Ib, float Io){\n"
-  " Ib=max(Ib,0.0); Io=max(Io,0.0); float Ii=max(p.x,1e-6);\n"
-  " float sc=clamp((Ib/Ii)*(2.0+Ii)/(2.0+Ib),0.5,2.0)*(1.0+0.5*u[3].x);\n"
-  " vec3 q=vec3(Io,p.y*sc,p.z*sc), origin=vec3(u[10].x,0.0,0.0);\n"
-  " vec3 step=vec3(u[1].y/64.0,u[1].y/32.0,u[1].y/32.0);\n"
-  " vec3 pos=(q-origin)/step, base=floor(pos), f=pos-base, acc=vec3(0.0);\n"
-  " for(int bits=0;bits<8;bits++){\n"
-  "  vec3 b=vec3(float(bits&1),float((bits>>1)&1),float((bits>>2)&1));\n"
-  "  vec3 w=mix(vec3(1.0)-f,f,b);\n"
-  "  acc+=c29corner(lat,origin,step,base+b)*(w.x*w.y*w.z); }\n"
-  " vec3 lt=u[3].w>0.5 ? pow(acc*u[19].y+vec3(u[19].x),vec3(2.4)) : pq_eotf3(acc);\n"
-  " vec3 lin=mrow(u[14],u[15],u[16],lt);\n"
-  " return max(pq_oetf3(clamp(lin,0.0,u[1].w)),vec3(u[3].z)); }\n"
-  // ---------------------------------------------------------- spatial kernels
-  "const float GX[11]=float[11](0.008812229293,0.02714357714,0.0651140566,0.121649073,0.1769983568,0.2005654142,0.1769983568,0.121649073,0.0651140566,0.02714357714,0.008812229293);\n"
-  "const float GY[5]=float[5](0.05448868455,0.244201342,0.4026199469,0.244201342,0.05448868455);\n";
+
+#define DV_DM_GLSL_CM29_SPATIAL \
+  "float c29curve(float x){ float xn=pow(max(x,0.0),u[0].w); float v=pow(max((u[0].x+u[0].y*xn)/(1.0+u[0].z*xn),0.0),1.0/3.0); return clamp(v,u[1].x,u[1].y); }\n" \
+  "float c29sop(float y){ if(u[17].x<0.5) return y; float L=u[2].x,g=u[2].y,G=u[2].z;\n" \
+  " return clamp(pow(max((1.0+g/2.0)*((1.0-L/2.0)*y+L/2.0),0.0),2.0/(2.0+G)),u[1].x,u[1].y); }\n" \
+  "vec3 ipt(vec3 rgb){ vec3 lms=max(mrow(u[4],u[5],u[6],pq_eotf3(rgb)),vec3(0.0)); return pq_oetf3(lms)*IPT_T; }\n" \
+  "vec2 c29point(vec3 p, out float I){ I=p.x; float C=length(p.yz); float Ib=c29sop(c29curve(I));\n" \
+  " float Io=u[17].y>0.5 ? c29sop(c29curve(I+0.5*u[2].w*C)) : Ib; return vec2(Ib,Io); }\n" \
+  "vec3 c29vertex(vec3 q){\n" \
+  " if(q.x<=u[10].x) return vec3(0.0);\n" \
+  " vec3 lmsp=clamp(q*IPTI_T,0.0,1.0);\n" \
+  " vec3 lin=mrow(u[7],u[8],u[9],pq_eotf3(lmsp));\n" \
+  " vec3 lt=clamp(mrow(u[11],u[12],u[13],lin),vec3(u[1].z),vec3(u[1].w));\n" \
+  " return u[3].w>0.5 ? (pow(lt,vec3(1.0/2.4))-vec3(u[10].y))/u[10].z : pq_oetf3(lt); }\n" \
+  "// Lattice vertex idx (integer-valued; x 0..64, y/z centred on 0): the per-frame table when idx is\n" \
+  "// inside it (u[18].z: its chroma offset R, u[18].w: its chroma size), otherwise evaluated here.\n" \
+  "vec3 c29corner(sampler2D lat, vec3 origin, vec3 step, vec3 idx){\n" \
+  " float R=u[18].z, nc=u[18].w;\n" \
+  " if(idx.x>=0.0&&idx.x<DV_DM_LATTICE_X&&idx.y>=-R&&idx.y<nc-R&&idx.z>=-R&&idx.z<nc-R)\n" \
+  "  return texelFetch(lat,ivec2(int(idx.x)+int(DV_DM_LATTICE_X)*int(idx.y+R),int(idx.z+R)),0).rgb;\n" \
+  " return c29vertex(origin+idx*step); }\n" \
+  "vec3 c29finish(sampler2D lat, vec3 p, float Ib, float Io){\n" \
+  " Ib=max(Ib,0.0); Io=max(Io,0.0); float Ii=max(p.x,1e-6);\n" \
+  " float sc=clamp((Ib/Ii)*(2.0+Ii)/(2.0+Ib),0.5,2.0)*(1.0+0.5*u[3].x);\n" \
+  " vec3 q=vec3(Io,p.y*sc,p.z*sc), origin=vec3(u[10].x,0.0,0.0);\n" \
+  " vec3 step=vec3(u[1].y/64.0,u[1].y/32.0,u[1].y/32.0);\n" \
+  " vec3 pos=(q-origin)/step, base=floor(pos), f=pos-base, acc=vec3(0.0);\n" \
+  " for(int bits=0;bits<8;bits++){\n" \
+  "  vec3 b=vec3(float(bits&1),float((bits>>1)&1),float((bits>>2)&1));\n" \
+  "  vec3 w=mix(vec3(1.0)-f,f,b);\n" \
+  "  acc+=c29corner(lat,origin,step,base+b)*(w.x*w.y*w.z); }\n" \
+  " vec3 lt=u[3].w>0.5 ? pow(acc*u[19].y+vec3(u[19].x),vec3(2.4)) : pq_eotf3(acc);\n" \
+  " vec3 lin=mrow(u[14],u[15],u[16],lt);\n" \
+  " return max(pq_oetf3(clamp(lin,0.0,u[1].w)),vec3(u[3].z)); }\n" \
+  "const float GX[11]=float[11](0.008812229293,0.02714357714,0.0651140566,0.121649073,0.1769983568,0.2005654142,0.1769983568,0.121649073,0.0651140566,0.02714357714,0.008812229293);\n" \
+  "const float GY[5]=float[5](0.05448868455,0.244201342,0.4026199469,0.244201342,0.05448868455);\n"
+
+#define DV_DM_GLSL_CM4_PQ \
+  "struct r20q_dw { float hi; float lo; };\n" \
+  "r20q_dw r20q_make(float hi,float lo) {\n" \
+  "    r20q_dw result;\n" \
+  "    result.hi=hi; result.lo=lo;\n" \
+  "    return result;\n" \
+  "}\n" \
+  "r20q_dw r20q_F(float a) { return r20q_make(a,0.0); }\n" \
+  "r20q_dw r20q_ln2() { return r20q_make(uintBitsToFloat(0x3f317218u),uintBitsToFloat(0xb102e308u)); }\n" \
+  "r20q_dw r20q_i_m1() { return r20q_make(uintBitsToFloat(0x40c8e06bu),uintBitsToFloat(0xb4118e9du)); }\n" \
+  "r20q_dw r20q_i_m2() { return r20q_make(uintBitsToFloat(0x3c4fcdacu),uintBitsToFloat(0x2f413136u)); }\n" \
+  "r20q_dw r20q_ts(float a,float b) {\n" \
+  "    precise float sum=a+b;\n" \
+  "    precise float v=sum-a;\n" \
+  "    precise float left=sum-v;\n" \
+  "    precise float da=a-left;\n" \
+  "    precise float db=b-v;\n" \
+  "    precise float error=da+db;\n" \
+  "    return r20q_make(sum,error);\n" \
+  "}\n" \
+  "r20q_dw r20q_add(r20q_dw a,r20q_dw b) {\n" \
+  "    r20q_dw p=r20q_ts(a.hi,b.hi);\n" \
+  "    r20q_dw q=r20q_ts(a.lo,b.lo);\n" \
+  "    precise float center=p.lo+q.hi;\n" \
+  "    r20q_dw r=r20q_ts(p.hi,center);\n" \
+  "    precise float tail=r.lo+q.lo;\n" \
+  "    return r20q_ts(r.hi,tail);\n" \
+  "}\n" \
+  "r20q_dw r20q_neg(r20q_dw a) {\n" \
+  "    precise float hi=-a.hi;\n" \
+  "    precise float lo=-a.lo;\n" \
+  "    return r20q_make(hi,lo);\n" \
+  "}\n" \
+  "r20q_dw r20q_sub(r20q_dw a,r20q_dw b) { return r20q_add(a,r20q_neg(b)); }\n" \
+  "r20q_dw r20q_mul(r20q_dw a,r20q_dw b) {\n" \
+  "    precise float product=a.hi*b.hi;\n" \
+  "    precise float negative_product=-product;\n" \
+  "    precise float error=fma(a.hi,b.hi,negative_product);\n" \
+  "    precise float cross0=a.hi*b.lo;\n" \
+  "    error=error+cross0;\n" \
+  "    precise float cross1=a.lo*b.hi;\n" \
+  "    error=error+cross1;\n" \
+  "    precise float cross2=a.lo*b.lo;\n" \
+  "    error=error+cross2;\n" \
+  "    return r20q_ts(product,error);\n" \
+  "}\n" \
+  "r20q_dw r20q_divide(r20q_dw a,r20q_dw b) {\n" \
+  "    precise float q=a.hi/b.hi;\n" \
+  "    r20q_dw r=r20q_sub(a,r20q_mul(b,r20q_F(q)));\n" \
+  "    precise float residual=r.hi+r.lo;\n" \
+  "    precise float low=residual/b.hi;\n" \
+  "    return r20q_ts(q,low);\n" \
+  "}\n" \
+  "r20q_dw r20q_scale(r20q_dw a,int k) {\n" \
+  "    precise float hi=ldexp(a.hi,k);\n" \
+  "    precise float lo=ldexp(a.lo,k);\n" \
+  "    return r20q_make(hi,lo);\n" \
+  "}\n" \
+  "\n" \
+  "r20q_dw eqAtanh(r20q_dw t) {\n" \
+  "    r20q_dw z=r20q_mul(t,t);\n" \
+  "    r20q_dw p=r20q_make(uintBitsToFloat(0x3d430c31u),uintBitsToFloat(0xb073cf3du));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d579436u),uintBitsToFloat(0xafd79436u)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d70f0f1u),uintBitsToFloat(0xaf70f0f1u)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d888889u),uintBitsToFloat(0xb16eeeefu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d9d89d9u),uintBitsToFloat(0xb144ec4fu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3dba2e8cu),uintBitsToFloat(0xb13a2e8cu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3de38e39u),uintBitsToFloat(0xb0638e39u)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e124925u),uintBitsToFloat(0xb1db6db7u)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e4ccccdu),uintBitsToFloat(0xb14ccccdu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3eaaaaabu),uintBitsToFloat(0xb22aaaabu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(z,p));\n" \
+  "    return r20q_scale(r20q_mul(t,p),1);\n" \
+  "}\n" \
+  "r20q_dw eqLog(r20q_dw a) {\n" \
+  "    int k=0;\n" \
+  "    precise float q=frexp(a.hi,k);\n" \
+  "    if(q<uintBitsToFloat(0x3f3504f3u))k--;\n" \
+  "    r20q_dw v=r20q_scale(a,-k);\n" \
+  "    r20q_dw t=r20q_divide(r20q_sub(v,r20q_F(1.0)),r20q_add(v,r20q_F(1.0)));\n" \
+  "    return r20q_add(r20q_mul(r20q_ln2(),r20q_F(float(k))),eqAtanh(t));\n" \
+  "}\n" \
+  "r20q_dw eqLog1p(r20q_dw x) {\n" \
+  "    if(abs(x.hi)<.125)return eqAtanh(r20q_divide(x,r20q_add(r20q_F(2.0),x)));\n" \
+  "    return eqLog(r20q_add(r20q_F(1.0),x));\n" \
+  "}\n" \
+  "r20q_dw eqExpm1(r20q_dw x) {\n" \
+  "    r20q_dw p=r20q_make(uintBitsToFloat(0x310f76c7u),uintBitsToFloat(0x24ff8d89u));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x32d7322bu),uintBitsToFloat(0x25fea89cu)),r20q_mul(x,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3493f27eu),uintBitsToFloat(0xa808760au)),r20q_mul(x,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3638ef1du),uintBitsToFloat(0x292ad8e6u)),r20q_mul(x,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x37d00d01u),uintBitsToFloat(0xaabfcbfdu)),r20q_mul(x,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x39500d01u),uintBitsToFloat(0xac3fcbfdu)),r20q_mul(x,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3ab60b61u),uintBitsToFloat(0xae13e93fu)),r20q_mul(x,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3c088889u),uintBitsToFloat(0xafeeeeefu)),r20q_mul(x,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d2aaaabu),uintBitsToFloat(0xb0aaaaabu)),r20q_mul(x,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e2aaaabu),uintBitsToFloat(0xb1aaaaabu)),r20q_mul(x,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f000000u),uintBitsToFloat(0x00000000u)),r20q_mul(x,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(x,p));\n" \
+  "    return r20q_mul(x,p);\n" \
+  "}\n" \
+  "uint eqInteger(r20q_dw x,out float margin) {\n" \
+  "    int anchor=int(roundEven(x.hi));\n" \
+  "    r20q_dw r=r20q_sub(x,r20q_F(float(anchor)));\n" \
+  "    if(r.hi>.5 || (r.hi==.5 && (r.lo>0.0 || (r.lo==0.0 && (anchor&1)!=0))))anchor++;\n" \
+  "    if(r.hi<-.5 || (r.hi==-.5 && (r.lo<0.0 || (r.lo==0.0 && (anchor&1)!=0))))anchor--;\n" \
+  "    r20q_dw q=r20q_sub(x,r20q_F(float(anchor)));\n" \
+  "    precise float a=.5-abs(q.hi);\n" \
+  "    precise float b=q.hi<0.0?q.lo:-q.lo;\n" \
+  "    precise float distance=a+b;\n" \
+  "    margin=distance;\n" \
+  "    return uint(anchor);\n" \
+  "}\n" \
+  "uint eqPackedExp(r20q_dw z,out float margin) {\n" \
+  "    precise float scaled=z.hi*uintBitsToFloat(0x3fb8aa3bu);\n" \
+  "    int k=int(roundEven(scaled));\n" \
+  "    r20q_dw r=r20q_sub(z,r20q_mul(r20q_F(float(k)),r20q_ln2()));\n" \
+  "    r20q_dw p=r20q_make(uintBitsToFloat(0x2d49cba5u),uintBitsToFloat(0x208c07cau));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x2f309231u),uintBitsToFloat(0xa2c5792fu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x310f76c7u),uintBitsToFloat(0x24ff8d89u)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x32d7322bu),uintBitsToFloat(0x25fea89cu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3493f27eu),uintBitsToFloat(0xa808760au)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3638ef1du),uintBitsToFloat(0x292ad8e6u)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x37d00d01u),uintBitsToFloat(0xaabfcbfdu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x39500d01u),uintBitsToFloat(0xac3fcbfdu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3ab60b61u),uintBitsToFloat(0xae13e93fu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3c088889u),uintBitsToFloat(0xafeeeeefu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d2aaaabu),uintBitsToFloat(0xb0aaaaabu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e2aaaabu),uintBitsToFloat(0xb1aaaaabu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f000000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
+  "    if(p.hi<1.0 || (p.hi==1.0 && p.lo<0.0)){p=r20q_scale(p,1);k--;}\n" \
+  "    if(k < -126)return eqInteger(r20q_scale(p,k+149),margin);\n" \
+  "    uint sig=eqInteger(r20q_scale(p,23),margin);\n" \
+  "    return uint(k+126)*0x800000u+sig;\n" \
+  "}\n" \
+  "uint eqFinite(uint key,out float margin) {\n" \
+  "    margin=1.0;\n" \
+  "    if((key>>31u)!=0u || key<0x35443723u)return 0u;\n" \
+  "    if(key>=0x3ffefbaeu)return 0x7f800000u;\n" \
+  "    if(key==0x3f800000u)return 0x461c4000u;\n" \
+  "    float e=uintBitsToFloat(key);r20q_dw n,d;\n" \
+  "    if(e>=1.0){\n" \
+  "        r20q_dw diff=r20q_sub(r20q_sub(r20q_F(e),r20q_make(uintBitsToFloat(0x3ffefbd3u),uintBitsToFloat(0x328e7b3eu))),r20q_F(uintBitsToFloat(0x2615be9bu)));\n" \
+  "        r20q_dw x=r20q_mul(eqLog1p(r20q_divide(diff,r20q_make(uintBitsToFloat(0x3ffefbd3u),uintBitsToFloat(0x328e7b3eu)))),r20q_i_m2());\n" \
+  "        r20q_dw h=eqExpm1(x);\n" \
+  "        n=r20q_add(r20q_sub(r20q_make(uintBitsToFloat(0x3f811faeu),uintBitsToFloat(0xb2c6a2adu)),r20q_F(.8359375)),r20q_mul(r20q_make(uintBitsToFloat(0x3f811faeu),uintBitsToFloat(0xb2c6a2adu)),h));\n" \
+  "        d=r20q_mul(r20q_F(-18.8515625),h);\n" \
+  "    } else if(e>=.0012){\n" \
+  "        r20q_dw h=eqExpm1(r20q_mul(eqLog(r20q_F(e)),r20q_i_m2()));\n" \
+  "        n=r20q_add(r20q_F(.1640625),h);\n" \
+  "        d=r20q_sub(r20q_F(.1640625),r20q_mul(r20q_F(18.6875),h));\n" \
+  "    } else {\n" \
+  "        r20q_dw black=r20q_make(uintBitsToFloat(0x354436e8u),uintBitsToFloat(0x2869e7c3u));\n" \
+  "        r20q_dw ratio=r20q_divide(r20q_sub(r20q_F(e),black),black);\n" \
+  "        r20q_dw h=eqExpm1(r20q_mul(eqLog1p(ratio),r20q_i_m2()));\n" \
+  "        n=r20q_mul(r20q_F(.8359375),h);\n" \
+  "        d=r20q_sub(r20q_F(3.22998046875),r20q_mul(r20q_F(18.6875),n));\n" \
+  "    }\n" \
+  "    r20q_dw z=r20q_add(r20q_make(uintBitsToFloat(0x41135d8eu),uintBitsToFloat(0xb409555du)),r20q_mul(eqLog(r20q_divide(n,d)),r20q_i_m1()));\n" \
+  "    return eqPackedExp(z,margin);\n" \
+  "}\n" \
+  "float dfi_eq_finish_eotf(float e) {\n" \
+  "    uint key=floatBitsToUint(e);\n" \
+  "    if((key&0x7fffffffu)>=0x7f800000u)return pq_eotf_ext(e);\n" \
+  "    float ignoredMargin;\n" \
+  "    return uintBitsToFloat(eqFinite(key,ignoredMargin));\n" \
+  "}\n" \
+  "r20q_dw eqpq_odd_log_luminance(r20q_dw u) {\n" \
+  "    r20q_dw z=r20q_mul(u,u);\n" \
+  "    r20q_dw p=r20q_make(uintBitsToFloat(0x3d579436u),uintBitsToFloat(0xafd79436u));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d70f0f1u),uintBitsToFloat(0xaf70f0f1u)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d888889u),uintBitsToFloat(0xb16eeeefu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d9d89d9u),uintBitsToFloat(0xb144ec4fu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3dba2e8cu),uintBitsToFloat(0xb13a2e8cu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3de38e39u),uintBitsToFloat(0xb0638e39u)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e124925u),uintBitsToFloat(0xb1db6db7u)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e4ccccdu),uintBitsToFloat(0xb14ccccdu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3eaaaaabu),uintBitsToFloat(0xb22aaaabu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(z,p));\n" \
+  "    return r20q_scale(r20q_mul(u,p),1);\n" \
+  "}\n" \
+  "r20q_dw eqpq_odd_log_ratio(r20q_dw u) {\n" \
+  "    r20q_dw z=r20q_mul(u,u);\n" \
+  "    r20q_dw p=r20q_make(uintBitsToFloat(0x3d888889u),uintBitsToFloat(0xb16eeeefu));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d9d89d9u),uintBitsToFloat(0xb144ec4fu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3dba2e8cu),uintBitsToFloat(0xb13a2e8cu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3de38e39u),uintBitsToFloat(0xb0638e39u)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e124925u),uintBitsToFloat(0xb1db6db7u)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e4ccccdu),uintBitsToFloat(0xb14ccccdu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3eaaaaabu),uintBitsToFloat(0xb22aaaabu)),r20q_mul(z,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(z,p));\n" \
+  "    return r20q_scale(r20q_mul(u,p),1);\n" \
+  "}\n" \
+  "r20q_dw eqpq_log_luminance(uint w) {\n" \
+  "    int e=int(w>>23u)-127;\n" \
+  "    uint m=w&0x007fffffu;\n" \
+  "    if(e==-127){\n" \
+  "        int top=findMSB(m);\n" \
+  "        e=top-149;\n" \
+  "        m=(m<<uint(23-top))&0x007fffffu;\n" \
+  "    }\n" \
+  "    precise float v=uintBitsToFloat(0x3f800000u|m);\n" \
+  "    if(v>uintBitsToFloat(0x3fb504f3u)){v=v*0.5;e++;}\n" \
+  "    r20q_dw t=r20q_divide(r20q_sub(r20q_F(v),r20q_F(1.0)),r20q_add(r20q_F(v),r20q_F(1.0)));\n" \
+  "    return r20q_add(r20q_mul(r20q_F(float(e)),r20q_ln2()),eqpq_odd_log_luminance(t));\n" \
+  "}\n" \
+  "r20q_dw eqpq_exp(r20q_dw x) {\n" \
+  "    precise float scaled=x.hi*uintBitsToFloat(0x3fb8aa3bu);\n" \
+  "    int k=int(roundEven(scaled));\n" \
+  "    r20q_dw r=r20q_sub(x,r20q_mul(r20q_F(float(k)),r20q_ln2()));\n" \
+  "    r20q_dw p=r20q_make(uintBitsToFloat(0x2f309231u),uintBitsToFloat(0xa2c5792fu));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x310f76c7u),uintBitsToFloat(0x24ff8d89u)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x32d7322bu),uintBitsToFloat(0x25fea89cu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3493f27eu),uintBitsToFloat(0xa808760au)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3638ef1du),uintBitsToFloat(0x292ad8e6u)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x37d00d01u),uintBitsToFloat(0xaabfcbfdu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x39500d01u),uintBitsToFloat(0xac3fcbfdu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3ab60b61u),uintBitsToFloat(0xae13e93fu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3c088889u),uintBitsToFloat(0xafeeeeefu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3d2aaaabu),uintBitsToFloat(0xb0aaaaabu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3e2aaaabu),uintBitsToFloat(0xb1aaaaabu)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f000000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
+  "    p=r20q_add(r20q_make(uintBitsToFloat(0x3f800000u),uintBitsToFloat(0x00000000u)),r20q_mul(r,p));\n" \
+  "    return r20q_scale(p,k);\n" \
+  "}\n" \
+  "float eqpq_oetf(float y) {\n" \
+  "    uint w=floatBitsToUint(y);\n" \
+  "    if((w&0x7fffffffu)>0x7f800000u)return pq_oetf(y);\n" \
+  "    if(w==0u || (w>>31u)!=0u)return uintBitsToFloat(0x354436e8u);\n" \
+  "    if(w>=0x461c4000u)return 1.0;\n" \
+  "    r20q_dw z=r20q_mul(r20q_F(0.1593017578125),r20q_sub(eqpq_log_luminance(w),r20q_make(uintBitsToFloat(0x41135d8eu),uintBitsToFloat(0xb409555du))));\n" \
+  "    r20q_dw t=eqpq_exp(z);\n" \
+  "    r20q_dw h=r20q_divide(r20q_mul(r20q_F(0.1640625),r20q_sub(t,r20q_F(1.0))),r20q_add(r20q_F(1.0),r20q_mul(r20q_F(18.6875),t)));\n" \
+  "    r20q_dw g=eqpq_odd_log_ratio(r20q_divide(h,r20q_add(r20q_F(2.0),h)));\n" \
+  "    return eqpq_exp(r20q_mul(r20q_F(78.84375),g)).hi;\n" \
+  "}\n" \
+  "vec3 eqpq_oetf3(vec3 v) { return vec3(eqpq_oetf(v.x),eqpq_oetf(v.y),eqpq_oetf(v.z)); }\n"
+
+#define DV_DM_GLSL_CM4_FINISH(EOTF, OETF) \
+  "vec3 c4finish(vec3 o){\n" \
+  " vec3 lmsp=o*I2L_T; vec3 lms=vec3(" EOTF "(lmsp.x)," EOTF "(lmsp.y)," EOTF "(lmsp.z));\n" \
+  " vec3 lin=lms*L2R_T; vec3 lt=clamp(mrow(u[11],u[12],u[13],lin),vec3(u[5].x),vec3(u[5].y));\n" \
+  " lin=mrow(u[14],u[15],u[16],lt); return " OETF "(max(lin,vec3(0.0))); }\n"
+
+static const char dv_dm_glsl_common[] =
+  DV_DM_GLSL_BASE DV_DM_GLSL_ICTCP_LEGACY DV_DM_GLSL_CM4_CURVE
+  DV_DM_GLSL_CM4_FINISH("pq_eotf_ext", "pq_oetf3") DV_DM_GLSL_CM29_SPATIAL;
+static const char dv_dm_glsl_cm4_point[] =
+  DV_DM_GLSL_BASE DV_DM_GLSL_CM4_PQ DV_DM_GLSL_ICTCP_CM4 DV_DM_GLSL_CM4_CURVE
+  DV_DM_GLSL_CM4_FINISH("pq_eotf_ext", "pq_oetf3") DV_DM_GLSL_CM29_SPATIAL;
+static const char dv_dm_glsl_cm4_final[] =
+  DV_DM_GLSL_BASE
+  "float dfi_eq_finish_eotf(float e);\nvec3 eqpq_oetf3(vec3 v);\n"
+  DV_DM_GLSL_ICTCP_CM4 DV_DM_GLSL_CM4_CURVE DV_DM_GLSL_CM4_PQ
+  DV_DM_GLSL_CM4_FINISH("dfi_eq_finish_eotf", "eqpq_oetf3") DV_DM_GLSL_CM29_SPATIAL;
+
+#undef DV_DM_GLSL_BASE
+#undef DV_DM_GLSL_ICTCP_LEGACY
+#undef DV_DM_GLSL_ICTCP_CM4
+#undef DV_DM_GLSL_CM4_CURVE
+#undef DV_DM_GLSL_CM29_SPATIAL
+#undef DV_DM_GLSL_CM4_PQ
+#undef DV_DM_GLSL_CM4_FINISH
 
 // Each method's passes are separate shaders: one shader holding both methods' code spills
 // registers on some GPUs (Intel Arc), which slows both.
@@ -524,8 +794,13 @@ static inline bool dv_dm_pass(pl_shader sh, const char *desc, const char *body, 
   };
   struct pl_var var = pl_var_vec4("u"); var.dim_a = DV_DM_U;
   struct pl_shader_var v = {.var = var, .data = u, .dynamic = true};
+  // Only CM4 point and final passes use precise transfer math. In particular,
+  // horizontal and CM2.9/lattice headers remain the legacy literal expansion.
+  const char *header = body == dv_dm_body_point_cm4 ? dv_dm_glsl_cm4_point :
+      (body == dv_dm_body_final_cm4 || body == dv_dm_body_final_active_cm4) ?
+      dv_dm_glsl_cm4_final : dv_dm_glsl_common;
   return pl_shader_custom(sh, &(struct pl_custom_shader){
-      .description = desc, .header = dv_dm_glsl_common, .body = body,
+      .description = desc, .header = header, .body = body,
       .input = PL_SHADER_SIG_NONE, .output = PL_SHADER_SIG_COLOR,
       .descriptors = d, .num_descriptors = in3 ? 3 : in2 ? 2 : 1, .variables = &v, .num_variables = 1,
       .output_w = w, .output_h = h});
