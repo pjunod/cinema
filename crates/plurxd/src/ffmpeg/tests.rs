@@ -630,7 +630,10 @@ fn every_graft_the_application_writes_is_in_its_namespace() {
         plurx_core::transcode::dv_fel_qualification::PROBE_KEY,
         plurx_core::transcode::dv_fel_qualification::REQUESTS_KEY,
     ] {
-        assert!(is_application_graft(key), "{key} is outside the application namespace");
+        assert!(
+            is_application_graft(key),
+            "{key} is outside the application namespace"
+        );
     }
     assert!(!is_application_graft(REPORTER_FIELD));
     for ffprobe_owned in ["format", "streams", "chapters", "programs", "stream_groups"] {
