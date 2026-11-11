@@ -68,6 +68,8 @@ jobs:
           lane: dv-gpu-qualification
       - name: Build the daemon test ELF and run the named regressions once
         shell: bash
+        env:
+          SELECTED_TESTS: ${{ inputs.tests }}
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/dv-gpu-qualification"; mkdir -p "$out"
@@ -78,8 +80,10 @@ jobs:
           cp "$elf" "$out/plurxd-tests"; sha256sum "$out/plurxd-tests" | tee "$out/plurxd-tests.sha256"
           rm -f "$out/build.json"
           failed=0
-          selected="${{ inputs.tests }}"
+          selected="$SELECTED_TESTS"
+          known=" "
           while read -r name; do
+            [ -n "$name" ] && known="$known$name "
             case " ${selected:-$name} " in *" $name "*) ;; *) continue ;; esac
             [ -n "$name" ] || continue
             if "$out/plurxd-tests" "$name" --test-threads=1 > "$out/test-$name.log" 2>&1; then
@@ -117,6 +121,9 @@ jobs:
           finish_during_blocked_enrolled_read_leaves_settlement_to_the_ledger
           dead_owner_source_census_releases_only_exact_quiescent_custody
           NAMES
+          for name in $selected; do
+            case "$known" in *" $name "*) ;; *) echo "$name: not a named regression" >&2; failed=1 ;; esac
+          done
           printf '{"sha":"%s","elf_sha256":"%s","failed":%s}\n' "$GITHUB_SHA" "$(cut -d' ' -f1 "$out/plurxd-tests.sha256")" "$failed" > "$out/receipt.json"
           exit $failed
       - name: Retain the ELF, receipt and logs
