@@ -11,6 +11,8 @@ use std::io::Read;
 #[cfg(target_os = "linux")]
 mod physical_stop;
 mod reader;
+#[cfg(target_os = "linux")]
+mod source_census;
 pub(super) use reader::Witness;
 
 pub(super) fn declared_background_spawn<T>(
@@ -513,6 +515,10 @@ pub(super) async fn replay(store: &Arc<dyn Store>, node: &str) -> Result<(), Str
     };
     #[cfg(target_os = "linux")]
     let legacy_result = legacy_result.and(physical_stop::replay(store, &context.dir, node).await);
+    #[cfg(target_os = "linux")]
+    let legacy_result = legacy_result.and(
+        source_census::replay(store, &context.dir.with_file_name("v2"), &context.dir, node).await,
+    );
     reader_result.and(legacy_result)
 }
 

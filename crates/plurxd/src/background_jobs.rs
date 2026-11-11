@@ -3548,6 +3548,14 @@ pub(crate) mod tests {
         (store, id, active)
     }
 
+    /// The exact source custody a fixture job registered.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn source_custody(
+        active: &ActiveBackgroundJob,
+    ) -> Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken> {
+        active.fence.0.source_custody.clone()
+    }
+
     /// A real claimed job on a caller-configured Store (e.g. one whose exact
     /// source-custody backend is enabled).
     #[cfg(target_os = "linux")]

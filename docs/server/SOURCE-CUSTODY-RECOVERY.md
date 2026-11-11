@@ -1,6 +1,6 @@
 # Source custody recovery — settle abandoned readers with physical proof
 
-**Status:** open · reboot-free macOS/Linux witnesses qualified; legacy fleet acceptance pending · **Updated:** 2026-11-08
+**Status:** open · reboot-free macOS/Linux witnesses qualified; legacy fleet acceptance pending · **Updated:** 2026-11-11
 
 Executes the first independently useful recovery portion of
 [P42's RCA and proposed fix](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). That document
@@ -114,6 +114,62 @@ folder; ordinary v2 recovery needs no such mount.
 Linux executable-handle case passes. Both Linux Store refusal/release cases
 pass. Helper publication and fleet recovery are pending. No service has
 been stopped and no old reservation has been released by this continuation.
+
+### 1.3 A dead owner's poisoned witness uses a host source-open census
+
+Any unmediated child launch poisons every armed anchor (`!` nonce, new
+ctime): the anchor lock can no longer stand for every holder of the source.
+The live owner still settles normally through its explicit join. If the owner
+process dies first, its custody has no live owner and no replayable witness,
+and its expired row holds the shared storage fence. The first such record was
+a cancelled SDR `transcode_prepare` on a learner (custody `4170fe8e…`,
+activated 2026-11-09T19:51:33.759Z); its anchor was poisoned 176 ms after
+activation, so by a launch at job start. It blocked AMD title measurement
+for another title in the same storage domain.
+
+Model `source_open_census_v1` proves closure from the source capability
+instead of from the reader's executable history. The
+[host helper](../../scripts/source-custody-source-census) runs as root on the
+owner host. Twice, at least three seconds apart, it reads the kernel's
+`i_readcount`/`i_writecount` for the exact source inode, through `O_PATH`
+handles on every superblock that reaches the file (any mount namespace). It
+also records locks on the anchor inode, NFS silly-renamed `.nfs*` entries
+beside the source, and tasks outside its own ancestry naming the source in
+argv. The kernel counts include inherited, mmapped and SCM_RIGHTS in-flight
+descriptors. Any nonzero or unstable value refuses. `--publish` writes
+`/run/plurx-physical-stop/source-census-v1/<custody>.json`, root-owned and
+read-only to the worker.
+
+The daemon (Linux, every scheduler tick) trusts only the counts. It requires:
+
+- the poisoned v2 witness for that custody, from this kernel instance and node;
+- the exact job owner token, with a lease that ended before the first pass
+  **and before this daemon process started**. A token whose claim predates
+  the process was issued to an earlier process, and the data-directory
+  daemon lock this process holds excludes that process still running;
+- the witness's anchor inode, with the ctime the census saw, unlocked by any
+  other open file description (the daemon takes its own non-blocking lock and
+  holds it through settlement);
+- the job payload's exact source: Store file row, payload size/mtime, and the
+  daemon's own `stat` of that path matching inode, size and mtime on a
+  superblock the census counted;
+- a census at most fifteen minutes old.
+
+It then uses the ordinary typed settlement and clears only its own witness.
+The operator removes the proof file after release. The model never repairs a
+nonce, rewrites a witness or treats lease expiry as stop evidence. A future
+unmediated launch still poisons live witnesses; reducing those launches
+(brokered producer handoff, declared raw retirement) is the root-cause work.
+
+```bash
+# On the owner host, as root. Check first; publishes nothing.
+sudo scripts/source-custody-source-census --custody <uuid> --source <host path>
+sudo scripts/source-custody-source-census --custody <uuid> --source <host path> --publish
+# After the daemon logs the release:
+sudo rm /run/plurx-physical-stop/source-census-v1/<uuid>.json
+```
+
+The container needs the existing read-only bind of `/run/plurx-physical-stop`.
 
 ## 2. The journal never impersonates an activation or completed join
 
@@ -313,3 +369,5 @@ neither receives an invented successful join or retrospective witness.
 | 2026-11-08 | New in-place anchor restore regression passed on native macOS; the original five passes were retained. | Kernel change-time correction is independently exercised. Bounded inventory, FEL transport and finite legacy migration await Linux execution. |
 
 | 2026-11-08 | Seven macOS reader cases, eleven composed Linux recovery/FEL cases, fifteen helper controls and the Linux executable-handle case passed. Both native workspace Clippy checks pass. | The first Linux batch retained ten passes; only its failed fixture was corrected and retried. Production acceptance remains open. The gate's upstream formal JAR timeout is addressed with the existing private cache and unchanged toolchain pins. |
+
+| 2026-11-11 | `source_open_census_v1` consumer and helper. Live check on the learner against custody `4170fe8e…`: two passes, readers/writers 0, no anchor lock, no silly-rename or argv reference. Positive control with one read-only descriptor held: readers 1, argv 1, refused. | Rust regression awaits the task CI run. Nothing published or released yet. |

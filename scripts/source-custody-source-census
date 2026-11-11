@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Census one dead owner's exact source on its Linux host; never stops anything.
+
+Run as root on the custody's owner host. It reads the worker's poisoned v2
+witness, then twice (>= 3 s apart) records the kernel's open counts for the
+exact source inode on every NFS/local superblock that reaches it, plus anchor
+locks, NFS silly-renames and argv references. Every open file description is
+counted, including inherited, mmapped and SCM_RIGHTS in-flight descriptors.
+Any nonzero or unstable observation refuses.
+
+    source-custody-source-census --custody <uuid> --source <host path>           # check only
+    source-custody-source-census --custody <uuid> --source <host path> --publish
+
+--publish writes /run/plurx-physical-stop/source-census-v1/<uuid>.json for the
+daemon, which independently re-verifies owner, lease, anchor and source before
+using its ordinary settlement. Remove the proof after the custody is released.
+"""
+from __future__ import annotations
+import argparse, json, os, stat, subprocess, sys, tempfile, time, uuid
+from pathlib import Path
+
+MODEL = "source_open_census_v1"
+PROOF_DIR = Path("/run/plurx-physical-stop/source-census-v1")
+GAP_SECONDS = 3
+
+
+class Refused(Exception):
+    pass
+
+
+def require(ok, why):
+    if not ok:
+        raise Refused(why)
+
+
+def mountinfo(pid="self"):
+    rows = []
+    for line in Path(f"/proc/{pid}/mountinfo").read_text().splitlines():
+        left, right = line.split(" - ", 1)
+        fields = left.split()
+        fstype, source = right.split()[:2]
+        unescape = lambda value: value.encode().decode("unicode_escape")
+        rows.append({"dev": fields[2], "root": unescape(fields[3]), "point": unescape(fields[4]),
+                     "fstype": fstype, "source": source})
+    return rows
+
+
+def owning_mount(path: Path):
+    best = None
+    for row in mountinfo():
+        point = row["point"].rstrip("/") or "/"
+        if str(path) == point or str(path).startswith(point.rstrip("/") + "/"):
+            if best is None or len(point) > len(best["point"]):
+                best = row
+    require(best is not None, "source has no mount")
+    return best
+
+
+def superblock_paths(path: Path):
+    """Every reachable path to the same file on any mount of its export."""
+    home = owning_mount(path)
+    relative = os.path.relpath(path, home["point"])
+    in_fs = os.path.normpath(os.path.join(home["root"], relative))
+    seen, paths = set(), []
+    for pid in sorted(int(p) for p in os.listdir("/proc") if p.isdigit()):
+        try:
+            rows = mountinfo(pid)
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        for row in rows:
+            if row["source"] != home["source"] or row["fstype"] != home["fstype"]:
+                continue
+            root = row["root"].rstrip("/") or "/"
+            if not (in_fs == root or in_fs.startswith(root.rstrip("/") + "/")):
+                continue
+            candidate = Path(f"/proc/{pid}/root") / row["point"].lstrip("/") / os.path.relpath(in_fs, root)
+            try:
+                st = os.stat(candidate)
+            except OSError:
+                continue
+            if (st.st_dev, st.st_ino) not in seen:
+                seen.add((st.st_dev, st.st_ino))
+                paths.append(candidate)
+    require(paths, "no superblock reaches the source")
+    return paths
+
+
+def kernel_counts(paths):
+    """i_readcount/i_writecount per in-core inode, read through O_PATH handles."""
+    fds = [os.open(p, os.O_PATH | os.O_CLOEXEC) for p in paths]
+    try:
+        filt = " || ".join(f"ctx->fd == {fd}" for fd in fds)
+        program = ("iter:task_file /ctx->task->tgid == %d && (%s)/ { printf(\"%%d %%u %%lu %%d %%d\\n\", "
+                   "ctx->fd, ctx->file->f_inode->i_sb->s_dev, ctx->file->f_inode->i_ino, "
+                   "ctx->file->f_inode->i_readcount.counter, ctx->file->f_inode->i_writecount.counter); }"
+                   % (os.getpid(), filt))
+        out = subprocess.run(["bpftrace", "-q", "-e", program], capture_output=True, text=True,
+                             timeout=60, pass_fds=fds)
+        require(out.returncode == 0, "bpftrace census failed: " + out.stderr.strip()[-300:])
+        rows = {}
+        for line in out.stdout.split("\n"):
+            parts = line.split()
+            if len(parts) == 5:
+                fd, sdev, ino, readers, writers = map(int, parts)
+                rows[fd] = (sdev, ino, readers, writers)
+        require(sorted(rows) == sorted(fds), "kernel census did not report every superblock")
+        result = []
+        for fd in fds:
+            sdev, ino, readers, writers = rows[fd]
+            st = os.fstat(fd)
+            # The kernel's s_dev encoding differs from userspace dev_t.
+            require(st.st_ino == ino and os.major(st.st_dev) == sdev >> 20
+                    and os.minor(st.st_dev) == sdev & 0xFFFFF, "census handle identity changed")
+            result.append({"device": st.st_dev, "inode": ino, "readers": readers, "writers": writers})
+        return result
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def anchor_locks(st):
+    key = "%02x:%02x:%d" % (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
+    return sum(1 for line in Path("/proc/locks").read_text().splitlines() if key in line.split())
+
+
+def ancestry():
+    pids, pid = set(), os.getpid()
+    while pid > 1:
+        pids.add(pid)
+        pid = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+    return pids
+
+
+def path_references(name: bytes):
+    mine, count = ancestry(), 0
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) in mine:
+            continue
+        try:
+            if name in Path(f"/proc/{entry}/cmdline").read_bytes():
+                count += 1
+        except OSError:
+            continue
+    return count
+
+
+def census(source: Path, anchor: Path):
+    st = os.stat(source)
+    paths = superblock_paths(source)
+    counted = kernel_counts(paths)
+    return st, {
+        "at_ms": int(time.time() * 1000),
+        "superblocks": counted,
+        "anchor_locks": anchor_locks(os.stat(anchor)),
+        "silly_renames": sum(1 for n in os.listdir(source.parent) if n.startswith(".nfs")),
+        "path_references": path_references(source.name.encode()),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--custody", required=True)
+    parser.add_argument("--source", required=True, type=Path, help="the source's path on this host")
+    parser.add_argument("--data-dir", default="/srv/plurx", type=Path)
+    parser.add_argument("--publish", action="store_true")
+    args = parser.parse_args()
+    require(os.geteuid() == 0, "run as root on the owner host")
+    require(str(uuid.UUID(args.custody)) == args.custody, "custody must be a canonical UUID")
+    witnesses = args.data_dir / "source-custody-recovery" / "v2"
+    evidence = json.loads((witnesses / f"background-{args.custody}.json").read_text())
+    require(evidence.get("version") == 2 and evidence.get("reader_model") == "daemon_mediated_v1",
+            "unsupported witness")
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    require(evidence["kernel_instance"] == f"linux:{boot}", "witness is from another kernel boot")
+    token = evidence["record"]["token"]
+    require(token["custody_id"] == args.custody and token["owner"]["kind"] == "job",
+            "witness owner is not this custody's job")
+    job = token["owner"]["token"]
+    require(job["lease_expires_ms"] < time.time() * 1000, "owner lease has not expired")
+    anchor = witnesses / f"background-{args.custody}.anchor"
+    anchor_st = os.stat(anchor, follow_symlinks=False)
+    # Poisoning rewrites the anchor, so its ctime differs from the witness;
+    # the inode is the identity. The daemon requires this ctime unchanged.
+    require(stat.S_ISREG(anchor_st.st_mode) and anchor_st.st_nlink == 1
+            and anchor_st.st_dev == evidence["anchor_device"]
+            and anchor_st.st_ino == evidence["anchor_inode"], "anchor is not the witness's inode")
+    first_st, first = census(args.source, anchor)
+    time.sleep(GAP_SECONDS)
+    second_st, second = census(args.source, anchor)
+    require(os.stat(anchor).st_ctime_ns == anchor_st.st_ctime_ns, "anchor changed during the census")
+    for a, b in zip(first["superblocks"], second["superblocks"]):
+        require((a["device"], a["inode"]) == (b["device"], b["inode"]), "superblock set changed")
+    require(len(first["superblocks"]) == len(second["superblocks"]), "superblock set changed")
+    require((first_st.st_ino, first_st.st_size, first_st.st_mtime_ns)
+            == (second_st.st_ino, second_st.st_size, second_st.st_mtime_ns), "source changed")
+    proof = {
+        "version": 1, "model": MODEL, "kernel_instance": evidence["kernel_instance"],
+        "owner": {"custody_id": args.custody, "job_id": job["job_id"], "node_id": job["node_id"],
+                  "boot_id": job["boot_id"], "claim_id": job["claim_id"], "fence": job["fence"]},
+        "anchor": {"device": anchor_st.st_dev, "inode": anchor_st.st_ino,
+                   "ctime": [anchor_st.st_ctime_ns // 10**9, anchor_st.st_ctime_ns % 10**9]},
+        "source": {"path": str(args.source), "inode": second_st.st_ino, "size": second_st.st_size,
+                   "mtime": int(second_st.st_mtime)},
+        "passes": [first, second],
+    }
+    quiet = all(sb["readers"] == 0 and sb["writers"] == 0 for p in proof["passes"] for sb in p["superblocks"]) \
+        and all(p[k] == 0 for p in proof["passes"] for k in ("anchor_locks", "silly_renames", "path_references"))
+    print(json.dumps({"quiescent": quiet, "proof": proof}, indent=1))
+    require(quiet, "source is not quiescent; nothing published")
+    if args.publish:
+        for directory in (PROOF_DIR.parent, PROOF_DIR):
+            directory.mkdir(mode=0o755, exist_ok=True)
+            st = os.stat(directory, follow_symlinks=False)
+            require(stat.S_ISDIR(st.st_mode) and st.st_uid == 0 and st.st_mode & 0o022 == 0,
+                    f"{directory} is not root-owned and private to writes")
+        handle, temporary = tempfile.mkstemp(dir=PROOF_DIR, prefix=".census-")
+        with os.fdopen(handle, "w") as stream:
+            json.dump(proof, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, PROOF_DIR / f"{args.custody}.json")
+        print(f"published {PROOF_DIR / (args.custody + '.json')}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Refused as refusal:
+        sys.exit(f"refused: {refusal}")

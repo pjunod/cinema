@@ -1,0 +1,205 @@
+//! A dead owner's poisoned witness, its real Store custody and job source.
+use super::*;
+use std::os::unix::fs::PermissionsExt;
+
+const KERNEL: &str = "linux:source-census-test";
+
+struct Dead {
+    _root: tempfile::TempDir,
+    database: std::path::PathBuf,
+    store: Arc<dyn Store>,
+    witnesses: std::path::PathBuf,
+    legacy: std::path::PathBuf,
+    token: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+    lease: i64,
+    source: std::fs::Metadata,
+    anchor: std::path::PathBuf,
+}
+
+fn private(path: &Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).expect("private evidence");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("0600");
+}
+
+async fn dead_owner() -> Dead {
+    let root = tempfile::tempdir().expect("census fixture");
+    let database = root.path().join("plurx.db");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open(&database).expect("fixture Store"));
+    let (_, active) = crate::background_jobs::tests::active_on(Arc::clone(&store)).await;
+    let token = crate::background_jobs::tests::source_custody(&active).expect("exact custody");
+    // The owner dies without its explicit join: Drop never settles custody.
+    drop(active);
+    let BackgroundSourceOwner::Job { token: job } = &token.owner else {
+        unreachable!()
+    };
+    let lease = job.lease_expires_ms;
+    // Bind the fixture payload's (size 100, mtime 1) source to a real file.
+    let path = root.path().join("movie.mkv");
+    std::fs::write(&path, [7u8; 100]).expect("source");
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .and_then(|file| {
+            file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        })
+        .expect("source mtime");
+    rusqlite::Connection::open(&database)
+        .expect("fixture connection")
+        .execute(
+            "UPDATE files SET path=?1 WHERE path='/worker-fault/movie.mkv'",
+            [path.to_str().expect("utf-8 path")],
+        )
+        .expect("bind fixture source path");
+    let source = std::fs::metadata(&path).expect("source identity");
+    let recovery = root.path().join("source-custody-recovery");
+    let witnesses = recovery.join("v2");
+    let legacy = recovery.join("v1");
+    std::fs::create_dir_all(&witnesses).expect("v2");
+    std::fs::create_dir_all(&legacy).expect("v1");
+    let name = format!("background-{}", token.custody_id);
+    let anchor = witnesses.join(format!("{name}.anchor"));
+    let nonce = uuid::Uuid::new_v4().to_string();
+    private(&anchor, nonce.as_bytes());
+    let metadata = std::fs::metadata(&anchor).expect("anchor identity");
+    let activation = uuid::Uuid::new_v4().to_string();
+    private(
+        &witnesses.join(format!("{name}.armed")),
+        activation.as_bytes(),
+    );
+    let evidence = serde_json::json!({
+        "version": 2, "reader_model": "daemon_mediated_v1", "kernel_instance": KERNEL,
+        "activation_id": activation, "node_id": job.node_id, "anchor_nonce": nonce,
+        "anchor_device": metadata.dev(), "anchor_inode": metadata.ino(),
+        "anchor_ctime": reader::anchor_ctime(&metadata),
+        "record": Record::Background { token: token.clone() },
+    });
+    private(
+        &witnesses.join(format!("{name}.json")),
+        serde_json::to_vec(&evidence).expect("evidence").as_slice(),
+    );
+    // Poisoning rewrites the anchor after its witness, changing its ctime;
+    // the ordinary replay can never accept it.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&anchor, format!("!{}", &nonce[1..])).expect("poison anchor");
+    assert_ne!(
+        reader::anchor_ctime(&std::fs::metadata(&anchor).expect("anchor")),
+        reader::anchor_ctime(&metadata)
+    );
+    Dead {
+        _root: root,
+        database,
+        store,
+        witnesses,
+        legacy,
+        token,
+        lease,
+        source,
+        anchor,
+    }
+}
+
+impl Dead {
+    fn held(&self) -> i64 {
+        rusqlite::Connection::open(&self.database)
+            .expect("fixture connection")
+            .query_row(
+                "SELECT COUNT(*) FROM background_source_custody",
+                [],
+                |row| row.get(0),
+            )
+            .expect("custody count")
+    }
+    fn job(&self) -> &JobToken {
+        match &self.token.owner {
+            BackgroundSourceOwner::Job { token } => token,
+            _ => unreachable!(),
+        }
+    }
+    fn proof(&self, readers: i64) -> Proof {
+        let anchor = std::fs::metadata(&self.anchor).expect("anchor identity");
+        let job = self.job();
+        let pass = |at_ms| {
+            serde_json::json!({"at_ms": at_ms, "anchor_locks": 0, "silly_renames": 0,
+                "path_references": 0, "superblocks": [{"device": self.source.dev(),
+                "inode": self.source.ino(), "readers": readers, "writers": 0}]})
+        };
+        serde_json::from_value(serde_json::json!({
+            "version": 1, "model": MODEL, "kernel_instance": KERNEL,
+            "owner": {"custody_id": self.token.custody_id, "job_id": job.job_id,
+                "node_id": job.node_id, "boot_id": job.boot_id, "claim_id": job.claim_id,
+                "fence": job.fence},
+            "anchor": {"device": anchor.dev(), "inode": anchor.ino(),
+                "ctime": reader::anchor_ctime(&anchor)},
+            "source": {"path": "/host/movie.mkv", "inode": self.source.ino(),
+                "size": 100, "mtime": 1},
+            "passes": [pass(self.lease + 1_000), pass(self.lease + 4_000)],
+        }))
+        .expect("proof shape")
+    }
+    async fn apply(&self, proof: &Proof, process_started_ms: i64) -> Result<(), String> {
+        apply(
+            &self.store,
+            &self.witnesses,
+            &self.legacy,
+            &self.job().node_id,
+            &Context {
+                kernel: KERNEL,
+                process_started_ms,
+                now_ms: self.lease + 5_000,
+            },
+            proof,
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn dead_owner_source_census_releases_only_exact_quiescent_custody() {
+    let dead = dead_owner().await;
+    let started = dead.lease + 500;
+    assert_eq!(dead.held(), 1, "dead owner's custody is still charged");
+
+    // Any open file description on any counted superblock refuses.
+    assert!(dead.apply(&dead.proof(1), started).await.is_err());
+    // A lease that had not ended before this process started may be ours.
+    assert!(dead.apply(&dead.proof(0), dead.lease - 1).await.is_err());
+    // A census of another inode is not this job's source.
+    let mut foreign = dead.proof(0);
+    foreign.source.inode += 1;
+    for pass in &mut foreign.passes {
+        pass.superblocks[0].inode += 1;
+    }
+    assert!(dead.apply(&foreign, started).await.is_err());
+    // A stale census, or passes too close together, refuses.
+    let mut close = dead.proof(0);
+    close.passes[1].at_ms = close.passes[0].at_ms + 1;
+    assert!(dead.apply(&close, started).await.is_err());
+    // The anchor must be unchanged since the census observed it.
+    let mut touched = dead.proof(0);
+    touched.anchor.ctime.1 ^= 1;
+    assert!(dead.apply(&touched, started).await.is_err());
+    // The daemon's own anchor observation: another lock holder refuses.
+    let holder = std::fs::File::open(&dead.anchor).expect("anchor");
+    holder.try_lock().expect("foreign lock holder");
+    assert!(dead.apply(&dead.proof(0), started).await.is_err());
+    drop(holder);
+    assert_eq!(dead.held(), 1, "every refusal keeps the custody");
+
+    dead.apply(&dead.proof(0), started)
+        .await
+        .expect("exact quiescent census releases");
+    assert_eq!(dead.held(), 0);
+    assert!(
+        !dead.anchor.exists()
+            && !dead
+                .witnesses
+                .join(format!("background-{}.json", dead.token.custody_id))
+                .exists(),
+        "the worker clears only its own witness"
+    );
+    // Replay after release is a no-op until the operator removes the proof.
+    dead.apply(&dead.proof(0), started)
+        .await
+        .expect("idempotent replay");
+}

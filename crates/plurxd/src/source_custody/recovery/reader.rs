@@ -115,7 +115,7 @@ impl Witness {
 }
 
 #[cfg(unix)]
-fn anchor_ctime(metadata: &std::fs::Metadata) -> (i64, i64) {
+pub(super) fn anchor_ctime(metadata: &std::fs::Metadata) -> (i64, i64) {
     use std::os::unix::fs::MetadataExt;
     (metadata.ctime(), metadata.ctime_nsec())
 }
@@ -594,6 +594,41 @@ pub(super) async fn replay_at(
         }
         Ok(())
     }
+}
+
+/// The worker-written witness fields a host census must match. Only a
+/// witness the ordinary replay refuses (a poisoned anchor) needs one.
+#[cfg(target_os = "linux")]
+pub(super) struct CensusWitness {
+    pub(super) kernel_instance: String,
+    pub(super) node_id: String,
+    pub(super) anchor_device: u64,
+    pub(super) anchor_inode: u64,
+    pub(super) anchor_ctime: Option<(i64, i64)>,
+    pub(super) record: Record,
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn census_witness(
+    directory: &Path,
+    custody_id: &str,
+) -> Result<Option<CensusWitness>, String> {
+    let path = directory.join(format!("background-{custody_id}.json"));
+    if !path.try_exists().map_err(|error| error.to_string())? {
+        return Ok(None);
+    }
+    let evidence: Evidence = read_private_json(&path)?;
+    if evidence.version != 2 || evidence.reader_model != "daemon_mediated_v1" {
+        return Err("unsupported reader witness for a host source census".into());
+    }
+    Ok(Some(CensusWitness {
+        kernel_instance: evidence.kernel_instance,
+        node_id: evidence.node_id,
+        anchor_device: evidence.anchor_device,
+        anchor_inode: evidence.anchor_inode,
+        anchor_ctime: evidence.anchor_ctime,
+        record: evidence.record,
+    }))
 }
 
 fn read_private_text(path: &Path, limit: u64) -> Result<String, String> {
