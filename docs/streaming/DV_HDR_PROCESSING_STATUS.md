@@ -53,7 +53,24 @@ with Horner loops, so a CM4 shader compiles in about 2.4 s on lavapipe
 instead of 33-47 s (first proposal), with every parity output bit-identical.
 Correct rounding needs fused `fma`: lavapipe does not fuse, so
 `run_pq_helper_exact.py` accepts its unfused result there and
-`PLURX_DM_REQUIRE_FUSED_FMA=1` demands correct rounding on real GPUs. One frame is not whole-title or performance acceptance.
+`PLURX_DM_REQUIRE_FUSED_FMA=1` demands correct rounding on real GPUs.
+On real GPUs both lab6's AMD (RADV) and ROG's NVIDIA fuse `fma` and the
+helpers are correctly rounded on every sampled input. The shrunk build is
+bit-identical to the first precise build on AMD; on NVIDIA ten parity cases
+that carry L8 hue/saturation vectors move by at most 6 ULP on real pixels,
+with GPU-versus-double error unchanged. A CM4 case compiles in 2.1 s on AMD
+and 4.1 s on NVIDIA, down from 23.5 s and 31.6 s.
+
+**Integrated acceptance (2026-11-11):** a native NVIDIA capture of the
+production header (L5 active area, normative CM4 helpers, shrunk helpers)
+is worse than unenhanced P8 at 0 of 7,971,840 Source16 pixels under both
+licensed references. On SourceA frame16 (1000-nit master; licensed 999/1001-nit
+proxies, because the licensed tool refuses an equal-peak target) the
+boundary-row losses of the earlier renderers are gone against the L5-aware
+reference; 239 and 47 interior pixels remain worse than P8, by at most
+0.0156 ΔE ITP, as for B and C. Its interior differs from the qualified C
+capture at 3-4 pixels by one code. Two frames are not whole-title, HDR10-E
+or performance acceptance. One frame is not whole-title or performance acceptance.
 
 The preceding source-budget correction merged in PR #1477 at `49c4ec103` after
 all applicable current-head fast-lane jobs passed. Its bitrate, level and
