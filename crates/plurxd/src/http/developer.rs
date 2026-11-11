@@ -1149,7 +1149,7 @@ pub(crate) fn applied_view(
             Unmet,
             if observation.failed_replacements > 0 {
                 format!(
-                    "Image generation {generation}: {} snapshot restore(s) did not complete, so the view stays closed until this node restarts.",
+                    "Image generation {generation}: {} snapshot restore(s) did not complete in this process. Either one left the image closed, or a later install is in progress; reads use quorum until a restore completes or this node restarts.",
                     observation.failed_replacements
                 )
             } else {
@@ -4005,8 +4005,8 @@ mod tests {
     }
 
     /// E1a: the Applied view row reports what the observation says, with a
-    /// failed restore named as closed until restart and no readers named as
-    /// such.
+    /// failed restore named as closed until a restore completes or a restart,
+    /// and no readers named as such.
     #[test]
     fn applied_view_rows_name_proof_image_and_readers() {
         let store: std::sync::Arc<dyn plurx_core::store::Store> =
@@ -4049,6 +4049,6 @@ mod tests {
         );
         let (image, evidence) = status(&item, "applied_view_image");
         assert_eq!(image, super::RequirementStatus::Unmet);
-        assert!(evidence.contains("until this node restarts"), "{evidence}");
+        assert!(evidence.contains("or this node restarts"), "{evidence}");
     }
 }

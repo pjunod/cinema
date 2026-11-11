@@ -354,7 +354,7 @@ function indexingWhileServingCard(readiness){
 function appliedViewCard(readiness){
   return setCard(`${cardHead("Applied view","Settings and playback routes read from this node's own replica when a current quorum proof covers it, and from a quorum read when it does not.",'<span class="pill">no readers yet</span>')}
     ${devReq(readiness,"applied_view","applied_view_proof","Replica proof present","A quorum-confirmed commit index this node has applied, inside its one-second lease. Without it every view read is a quorum read.")}
-    ${devReq(readiness,"applied_view","applied_view_image","Replica image stable","Closed while a snapshot is installed, and until restart if a restore failed.")}
+    ${devReq(readiness,"applied_view","applied_view_image","Replica image stable","Closed while a snapshot is installed, and after a failed restore until a later one completes or the node restarts.")}
     ${devReq(readiness,"applied_view","applied_view_reads","Reads through the view","View and quorum reads since this node started, and the last reason a read fell back.")}
     <p class="hint">Advisory: nothing here switches anything on or off, and fences never read the view.</p>
     ${devGraduation("settings (E1b) and media-session routes (E1c) read through the view and the fleet's authority-read rate per request drops as the E1 contract measures it.","this card goes; reading the applied replica is simply how settings and routes are served.")}`,{id:"applied-view-card"});

@@ -6279,7 +6279,7 @@ fn render_applied_view_metrics(
         ));
     }
     out.push_str(
-        "# HELP plurx_applied_view_reloads_total Memo or route-cache reloads caused by an applied-view stamp that no longer matched, by view.\n\
+        "# HELP plurx_applied_view_reloads_total Memo or route-cache reloads caused by an applied-view stamp that no longer matched, by view. Zero until the settings memo (E1b) and route cache (E1c) read through the view; until then plurx_applied_view_table_changes_total is the upper bound per-table invalidation would reload at.\n\
          # TYPE plurx_applied_view_reloads_total counter\n",
     );
     for (view, count) in &observation.reloads {
