@@ -206,14 +206,14 @@ fn owned_reap(
     hooks: Arc<dyn ProducerReapHooks>,
     inner: Weak<Mutex<Inner>>,
     next: Producer,
-    kill: bool,
+    kill_first: bool,
 ) -> Arc<ReapOperation> {
     let operation = Arc::new(ReapOperation {
         finished: AtomicBool::new(false),
         changed: Notify::new(),
     });
     let completed = Arc::clone(&operation);
-    if kill {
+    if kill_first {
         if let Some(generation) = generation.as_ref() {
             generation.0.retirement.cancel();
         }
@@ -224,7 +224,7 @@ fn owned_reap(
             // One owned task retains admission and descendant ownership across
             // retries and cancellation. Errors never mint a reap receipt.
             let mut failures=0u64;
-            let mut force_kill=kill;
+            let mut force_kill=kill_first;
             let exit_status=loop {
                 let outcome=if !force_kill {
                     if let Some(generation)=generation.as_ref() {
