@@ -265,36 +265,25 @@ async fn publish_source(
         Err(attempt) => {
             if !lost.is_cancelled() {
                 let now = crate::state::clock_ms();
-                let _ = match &attempt {
-                    // Nothing this coordinator can do will seal these rows;
-                    // a later observation starts a new request and role.
-                    Attempt::Discard(_) => {
-                        context
-                            .store
-                            .fail_analysis_request(
-                                &claimed.request_id,
-                                &claimed.owner_node_id,
-                                claimed.fence,
-                                "copy_observation_refused",
-                                now,
-                            )
-                            .await
-                    }
-                    // Busy is not charged; a failed step is, so a persistent
-                    // fault reaches the attempt limit instead of looping.
-                    other => {
-                        context
-                            .store
-                            .retry_analysis_request(
-                                &claimed,
-                                "copy_publication_retry",
-                                now,
-                                now.saturating_add(context.retry_ms),
-                                matches!(other, Attempt::Retry(_)),
-                            )
-                            .await
-                    }
+                // A generation is used once (enqueue refuses a second request
+                // for it), so a refused seal is retried under the same request.
+                // Busy is not charged; a failed or refused step is, so a
+                // persistent fault reaches the existing attempt limit and the
+                // request becomes terminal, as a legacy index build does.
+                let code = match &attempt {
+                    Attempt::Discard(_) => "copy_observation_refused",
+                    _ => "copy_publication_retry",
                 };
+                let _ = context
+                    .store
+                    .retry_analysis_request(
+                        &claimed,
+                        code,
+                        now,
+                        now.saturating_add(context.retry_ms),
+                        !matches!(attempt, Attempt::Busy),
+                    )
+                    .await;
             }
             attempt
         }

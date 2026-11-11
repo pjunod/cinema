@@ -456,37 +456,6 @@ async fn publication_refuses_a_changed_source_file() {
 }
 
 #[tokio::test]
-async fn a_failed_coordinator_never_captures_its_source() {
-    let mut fixture = fixture(true).await;
-    // The first coordinator fails terminally while holding no physical phase.
-    assert!(fixture
-        .store
-        .fail_analysis_request(
-            &fixture.claim.request_id,
-            NODE,
-            fixture.claim.fence,
-            "copy_observation_refused",
-            NOW + 5,
-        )
-        .await
-        .expect("fail first coordinator"));
-    // A new request for the same exact source gets its own role (asserted in
-    // `coordinate`) and can publish; it does not rendezvous with the dead one.
-    fixture.claim = coordinate(&fixture.store, &fixture.source, NOW + 10).await;
-    let artifact = artifact('a', '1');
-    let token = publisher(&fixture, &artifact).await;
-    let outcome = fixture
-        .store
-        .publish_copy_index_v3(publish(&fixture, &token, &artifact, NOW + 11))
-        .await
-        .expect("publication");
-    assert!(
-        matches!(outcome, JobPublishOutcome::Published { .. }),
-        "{outcome:?}"
-    );
-}
-
-#[tokio::test]
 async fn a_quarantined_head_adopts_a_new_variant_but_never_the_quarantined_blob() {
     let mut fixture = fixture(true).await;
     let bad = artifact('a', '1');
