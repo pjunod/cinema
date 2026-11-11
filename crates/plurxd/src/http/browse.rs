@@ -1934,9 +1934,25 @@ mod tests {
     /// web more than 60 s after a write) each watch read stays Authority by
     /// design (§3.3), so those counts are asserted as they stand, for the §7
     /// Q1 ruling rather than as a regression.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn browse_routes_meet_the_k04_authority_bar_on_a_replicated_voter() {
-        Box::pin(browse_routes_k04_bar()).await;
+    #[test]
+    fn browse_routes_meet_the_k04_authority_bar_on_a_replicated_voter() {
+        // The replicated voter fixture overflows tokio's 2 MiB worker stack in
+        // a debug build, so run it on 8 MiB threads like the other voter tests.
+        let worker = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("browse fixture runtime")
+                    .block_on(Box::pin(browse_routes_k04_bar()));
+            })
+            .expect("browse fixture thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     async fn browse_routes_k04_bar() {

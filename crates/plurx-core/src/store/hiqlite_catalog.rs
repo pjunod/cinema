@@ -486,6 +486,35 @@ impl LibraryStore for HiqliteAuthStore {
         row.try_into()
     }
 
+    async fn create_library_with_scan_interval(
+        &self,
+        library: &NewLibrary,
+        scan_interval_mins: i64,
+    ) -> Result<Library, StoreError> {
+        let now = self.now()?;
+        let paths = paths_json(&library.paths)?;
+        let sql = format!(
+            "INSERT INTO libraries (name, kind, paths, anime, created_at, scan_interval_mins) \
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING {LIB_COLS}"
+        );
+        validate_sql(&sql)?;
+        let row = self
+            .client()
+            .execute_returning_map_one::<_, LibraryRow>(
+                sql,
+                params!(
+                    library.name.as_str(),
+                    library.kind.as_str(),
+                    paths,
+                    library.anime,
+                    now,
+                    scan_interval_mins.max(0)
+                ),
+            )
+            .await?;
+        row.try_into()
+    }
+
     async fn update_library(
         &self,
         id: i64,

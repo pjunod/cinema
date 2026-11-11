@@ -647,8 +647,9 @@ pub(crate) struct FragmentAdmission {
     /// job's own capacity, so the idle check counts it as the job's.
     pub(super) extension: std::sync::Mutex<Option<FragmentExtension>>,
     // Release resources before handing the shared gate to the next waiter.
-    pub(super) _permit: crate::admission::TranscodePermit,
-    pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,
+    // Both are absent only for a probe admission.
+    pub(super) _permit: Option<crate::admission::TranscodePermit>,
+    pub(super) _heavy: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 pub(crate) struct FragmentExtension {
@@ -658,6 +659,25 @@ pub(crate) struct FragmentExtension {
 }
 
 impl FragmentAdmission {
+    /// The admission a targeted library request runs under: `stat` and
+    /// `ffprobe` on the files a caller named, holding no heavy-lane permit
+    /// and no CPU or GPU reservation, so it is never refused because the
+    /// heavy lane is busy and dropping it releases nothing. Fragment index,
+    /// Dolby Vision title scan and cache work for what it places still queue
+    /// on the heavy lane as before.
+    pub(crate) fn probe_only() -> Self {
+        Self {
+            threads: 1,
+            extension: std::sync::Mutex::new(None),
+            _permit: None,
+            _heavy: None,
+        }
+    }
+
+    pub(crate) fn is_probe_only(&self) -> bool {
+        self._heavy.is_none()
+    }
+
     /// A batch shares the already-reserved CPU budget and heavy permit.
     pub(crate) fn probe_parallelism(&self) -> usize {
         self.threads.clamp(1, 2)

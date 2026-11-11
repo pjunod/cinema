@@ -153,6 +153,14 @@ request that never returns holds the library's scan job on that node with
 a healthy lease until restart; other nodes see the job as owned and
 requeue (`state.rs:5130-5147`).
 
+**Library job generations.** Targeted scan requests (pipeline contract v2)
+run as their own job but keep the `library_scan` kind, told apart by the
+payload generation: `library-work-v1` for whole-library scans and refreshes,
+`library-targeted-v1` for targeted work. Any new logic that keys on
+`kind == library_scan` — a claimer, a metric, a resource rule — must check
+`generation` too, and a claimer must skip a generation it does not know
+(`claim_library_leaves_an_unknown_library_scan_generation_queued`).
+
 ### 2.4 `post_join_request`
 
 `crates/plurx-core/src/cluster/migration.rs:868-897`:
