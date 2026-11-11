@@ -293,6 +293,17 @@ impl Client {
         })
     }
 
+    /// Plurx patch 27: this node's applied mark — image generation, applied
+    /// index and one revision per registered table. Remote clients return an
+    /// error; this method never performs IO and has no HTTP fallback.
+    #[cfg(feature = "sqlite")]
+    pub fn local_db_applied_mark(&self) -> Result<crate::AppliedMarkHandle, Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("the local applied mark requires a local node client".to_owned())
+        })?;
+        Ok(state.raft_db.applied_mark.handle())
+    }
+
     /// The same caller-owned admission installed before listeners. Remote or
     /// unguarded local clients cannot manufacture a replacement context.
     pub fn local_membership_admission(
@@ -1149,8 +1160,8 @@ async fn request_snapshot_transport_status_sqlite(
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::{
-        request_snapshot_transport_status_sqlite, snapshot_transport_peer_from_current_membership,
         RAFT_SHUTDOWN_TIMEOUT, SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES,
+        request_snapshot_transport_status_sqlite, snapshot_transport_peer_from_current_membership,
     };
     use crate::Node;
     use openraft::{Membership, RaftMetrics, StoredMembership};
@@ -1256,15 +1267,12 @@ mod tests {
             addr_api: address,
             ..peer
         };
-        assert!(request_snapshot_transport_status_sqlite(
-            &client,
-            "exact-test-secret",
-            false,
-            &peer,
-        )
-        .await
-        .expect("404 is compatible")
-        .is_none());
+        assert!(
+            request_snapshot_transport_status_sqlite(&client, "exact-test-secret", false, &peer,)
+                .await
+                .expect("404 is compatible")
+                .is_none()
+        );
         server.await.expect("join 404 server");
     }
 
@@ -1423,6 +1431,23 @@ mod tests {
     }
 
     #[test]
+    fn local_applied_mark_accessor_has_no_remote_fallback() {
+        let source = include_str!("mgmt.rs");
+        let accessor = source
+            .split_once("pub fn local_db_applied_mark")
+            .expect("applied mark accessor")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of applied mark accessor")
+            .0;
+        assert!(accessor.contains("self.inner.state.as_ref().ok_or_else"));
+        assert!(!accessor.contains("build_addr"));
+        assert!(!accessor.contains("get_metrics_remote"));
+        assert!(!accessor.contains("send_with_retry"));
+        assert!(!accessor.contains(".await"));
+    }
+
+    #[test]
     fn quorum_watermark_reuses_the_existing_consistent_query_wire_variant() {
         let source = include_str!("mgmt.rs");
         let accessor = source
@@ -1511,9 +1536,11 @@ mod tests {
         .into_db_quorum_watermark()
         .expect_err("a malformed advertised protocol is not an old leader");
 
-        assert!(error
-            .to_string()
-            .contains("invalid local_read_protocol_version"));
+        assert!(
+            error
+                .to_string()
+                .contains("invalid local_read_protocol_version")
+        );
     }
 
     #[tokio::test]
@@ -1564,25 +1591,33 @@ mod tests {
             .await
             .expect("remote shutdown deadline")
             .expect("remote shutdown");
-        assert!(operation
-            .await
-            .expect("stream operation did not panic")
-            .is_err());
-        assert!(db_rate
-            .await
-            .expect("DB rate waiter did not panic")
-            .is_err());
+        assert!(
+            operation
+                .await
+                .expect("stream operation did not panic")
+                .is_err()
+        );
+        assert!(
+            db_rate
+                .await
+                .expect("DB rate waiter did not panic")
+                .is_err()
+        );
         #[cfg(feature = "cache")]
-        assert!(cache_rate
-            .await
-            .expect("cache rate waiter did not panic")
-            .is_err());
+        assert!(
+            cache_rate
+                .await
+                .expect("cache rate waiter did not panic")
+                .is_err()
+        );
         assert!(*client.inner.stream_shutdown.borrow());
-        assert!(client
-            .inner
-            .background_handles
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty());
+        assert!(
+            client
+                .inner
+                .background_handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
     }
 }
