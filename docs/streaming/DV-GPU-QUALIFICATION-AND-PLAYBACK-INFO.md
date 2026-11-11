@@ -166,3 +166,36 @@ the owner host shows no open file description, lock, silly-rename or argv
 reference for its exact source. The new
 [source-open census model](../server/SOURCE-CUSTODY-RECOVERY.md#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census)
 releases it once deployed and published; nothing has been released yet.
+
+### Hardware qualification, 2026-11-11
+
+All runs used one bookworm test ELF built from production code identical to
+the merge candidate (`9fdbd8690`, ELF sha256 `44544c24…`). Each ran in an
+isolated, network-less proof container on the shipping image, with the
+production container's render group and driver capabilities. Eight
+measured windows each; rule unchanged (mean ≥10 % better, served p99 ≤
+EL-dropped p99).
+
+| Title | Host / encoder | Served mean / p99 | EL-dropped mean / p99 | Verdict |
+|---|---|---|---|---|
+| Avatar: Fire and Ash | AMD VA-API (radeonsi) | 4.646 / 14.66 | 1.240 / 5.14 | refused |
+| Avatar: Fire and Ash | Intel VA-API | 4.221 / 13.61 | 1.516 / 5.28 | refused |
+| Avatar: Fire and Ash | NVIDIA NVENC | 4.059 / 12.44 | 1.516 / 5.28 | refused |
+| Twilight (2008) | AMD VA-API (radeonsi) | 4.724 / 13.35 | 7.445 / 24.59 | **admitted** (36.6 %) |
+| Twilight (2008) | Intel VA-API | 4.156 / 12.11 | 7.393 / 24.56 | **admitted** (43.8 %) |
+| Twilight (2008) | NVIDIA NVENC | 4.014 / 11.29 | 7.393 / 24.56 | **admitted** (45.7 %) |
+
+Every Avatar window is uniformly worse on all three vendors. Its FEL adds
+less than one hardware re-encode generation costs, so DYN-only is its
+truthful best and Playback Info now says why. Twilight's FEL carries enough
+of the picture that every vendor's reconstruction beats dropping it. The
+EL-dropped column differs slightly by host: the AMD hybrid VA-API decode
+yields a different base-layer reference than software decode. Intel's VA-API
+HEVC decode probe crashes (SIGSEGV) in the shipping image, so Intel
+measurement used software decode; that is charged and identity-bound.
+
+The proof harness had never executed. Three gaps were fixed in the task
+copy (not product code): new volumes are root-owned while the image runs as
+`plurx`; the render group was not passed; restaging must replace the
+read-only test binary. The ignored serving check also had an invalid 8.1
+copy contract in its fixture (corrected in this PR).
