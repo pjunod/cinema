@@ -128,7 +128,7 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 | A3 | — | 3 | unclaimed | — |
 | B1 | — | 3 | unclaimed (design with A1) | artifacts matched across a deploy → |
 | D3 | — | 3 | unclaimed | create elapsed p99 → |
-| E1 | — | 3 | unclaimed | settings/playback authority reads per request → |
+| E1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | claimed 2026-11-11: design + build contract [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) (Fable 5.2), adversarial design review in progress | settings/playback authority reads per request → |
 | F1 | — | 3 | unclaimed | retries per attempt; overshoot → |
 
 ## 7. Reviews applied
