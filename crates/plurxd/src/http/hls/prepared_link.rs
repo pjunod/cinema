@@ -356,7 +356,7 @@ impl PreparedProof {
         }
         let Ok(Some(route)) = crate::media_sessions::read_media_session_route(
             &*state.store,
-            crate::media_sessions::RouteReadSite::Receipt,
+            crate::media_sessions::RouteReadSite::ReceiptCandidate,
             session,
         )
         .await
@@ -431,7 +431,7 @@ impl PreparedProof {
         };
         let Ok(Some(current_route)) = crate::media_sessions::read_media_session_route(
             &*state.store,
-            crate::media_sessions::RouteReadSite::Receipt,
+            crate::media_sessions::RouteReadSite::ReceiptFence,
             session,
         )
         .await

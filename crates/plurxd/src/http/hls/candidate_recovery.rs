@@ -85,7 +85,7 @@ pub(crate) async fn accept_sample(
         let session = session?;
         let route = crate::media_sessions::read_media_session_route(
             &*state.store,
-            crate::media_sessions::RouteReadSite::Receipt,
+            crate::media_sessions::RouteReadSite::ReceiptFence,
             session,
         )
         .await

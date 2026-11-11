@@ -491,7 +491,7 @@ impl LinkReceipts {
             let file = state.store.get_file(value.binding.file_id).await.ok()??;
             let route = crate::media_sessions::read_media_session_route(
                 &*state.store,
-                crate::media_sessions::RouteReadSite::Receipt,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
                 session,
             )
             .await
@@ -613,7 +613,7 @@ impl LinkReceipts {
             };
             let route = crate::media_sessions::read_media_session_route(
                 &*state.store,
-                crate::media_sessions::RouteReadSite::Receipt,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
                 &captured.session,
             )
             .await
@@ -632,7 +632,7 @@ impl LinkReceipts {
             }
             let current_route = crate::media_sessions::read_media_session_route(
                 &*state.store,
-                crate::media_sessions::RouteReadSite::Receipt,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
                 &captured.session,
             )
             .await
@@ -956,7 +956,7 @@ impl LinkReceipts {
             Duration::from_secs(1),
             crate::media_sessions::read_media_session_route(
                 &*state.store,
-                crate::media_sessions::RouteReadSite::Receipt,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
                 &captured.session,
             ),
         )
@@ -1027,7 +1027,7 @@ impl LinkReceipts {
         let route = tokio::time::timeout(Duration::from_secs(1), async {
             let route = crate::media_sessions::read_media_session_route(
                 &*state.store,
-                crate::media_sessions::RouteReadSite::Receipt,
+                crate::media_sessions::RouteReadSite::ReceiptFence,
                 &captured.session,
             )
             .await;

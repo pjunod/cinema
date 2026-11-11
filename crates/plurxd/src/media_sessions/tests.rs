@@ -4452,7 +4452,13 @@ fn every_session_keyed_route_read_names_its_site() {
             .expect("under src")
             .to_string_lossy()
             .replace('\\', "/");
-        if relative.contains("test") || relative.contains("fixture") {
+        let file = relative.rsplit('/').next().unwrap_or_default();
+        if relative.contains("/tests/")
+            || relative.starts_with("tests/")
+            || file == "tests.rs"
+            || file.ends_with("_tests.rs")
+            || relative.contains("fixture")
+        {
             continue;
         }
         let source = std::fs::read_to_string(&path).expect("read source");
@@ -4475,18 +4481,39 @@ fn every_session_keyed_route_read_names_its_site() {
         .split_once("\n}\n")
         .expect("end of the counted read")
         .0;
-    assert!(helper.contains("ROUTE_READS[site as usize][0].fetch_add(1, Ordering::Relaxed);"));
+    assert!(helper.contains("ROUTE_READS[site.index()][0].fetch_add(1, Ordering::Relaxed);"));
     assert!(helper.contains("store.media_session_route(session_id).await"));
 }
 
 #[test]
 fn route_reads_are_exposed_for_every_site_and_source() {
-    crate::media_sessions::ROUTE_READS[RouteReadSite::Receipt as usize][0]
+    // Each variant owns its own label and its own counter row.
+    let labels: Vec<&str> = RouteReadSite::ALL.iter().map(|site| site.label()).collect();
+    for (position, site) in RouteReadSite::ALL.iter().enumerate() {
+        assert_eq!(site.index(), position, "{site:?} indexes its own row");
+    }
+    let mut unique = labels.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        labels.len(),
+        "labels are distinct: {labels:?}"
+    );
+    crate::media_sessions::ROUTE_READS[RouteReadSite::ReceiptFence.index()][0]
         .fetch_add(1, Ordering::Relaxed);
     let exposition = crate::media_sessions::prometheus();
     assert!(exposition.contains("# TYPE plurx_media_session_route_reads_total counter\n"));
     for site in [
-        "routing", "status", "control", "verdict", "receipt", "observer",
+        "routing",
+        "status_first",
+        "status_bracket",
+        "status_reclassify",
+        "control",
+        "verdict",
+        "receipt_fence",
+        "receipt_candidate",
+        "observer",
     ] {
         for source in ["authority", "view"] {
             assert!(
@@ -4498,6 +4525,6 @@ fn route_reads_are_exposed_for_every_site_and_source() {
         }
     }
     assert!(!exposition.contains(
-        "plurx_media_session_route_reads_total{site=\"receipt\",source=\"authority\"} 0\n"
+        "plurx_media_session_route_reads_total{site=\"receipt_fence\",source=\"authority\"} 0\n"
     ));
 }
