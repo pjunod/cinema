@@ -341,12 +341,15 @@ kept as an invalid test, not as a quality result.
 
 The [ROI protocol](../../tools/dv_processing/diagnostics/fel_quality/protocol-roi-20261111.json)
 was committed before any map output. It defines one arm. Each 16x16 block of
-the encoder's own input whose mean Y' decodes below 1 nit gets −3 QP, passed
-as `AVRegionOfInterest` side data. No reference, F or error image enters the
+the encoder's own input whose mean Y' decodes below 1 nit is given a
+requested −3 QP offset, passed as `AVRegionOfInterest` side data. At qg32,
+x265 averages these offsets over each 32×32 quantization group, so an
+isolated dark block receives only part of it. Black letterbox rows count
+as dark blocks. No reference, F or error image enters the
 map. The [harness](../../tools/dv_processing/diagnostics/fel_quality/roi_encode.c)
 first had to reproduce the retained single-pass115 CLI encode byte-for-byte,
-both without ROI and with an all-zero ROI. It passed for both fixtures on
-attempt 5. Attempts 1–4 are kept: each one was a harness mismatch, and the
+without ROI on both fixtures and with an all-zero ROI on Michael5400. It
+passed on attempt 5. Attempts 1–4 are kept: each one was a harness mismatch, and the
 gate caught all of them. The mismatches were global headers, x265's
 log-level in the info SEI and a stale file sync.
 
@@ -360,19 +363,21 @@ The map covers 31% (M5400) and 39% (M1800) of blocks on average.
 | M1800 f24 | 0.934→0.909 (1.717) | 2.237→2.115 (3.164) | 1.357→1.376 | 130.374 |
 
 All 16 rows pass every quality criterion, including the M5400 frame-24
-shadow p99 that every earlier encoder control failed. Bands from 1 to
-1000 nits lose 0.03–0.07 ΔITP and remain far ahead of F. Michael1800's
+shadow p99 that every earlier encoder control failed. The 1–10 and
+10–100 nit bands lose 0.03–0.07 ΔITP and the 100–1000 nit band
+0.004–0.04; all remain far ahead of F. Michael1800's
 authored packet average is 130.374 Mb/s, which misses the unchanged
 130 Mb/s screen, so under the fixed bar the arm is **not admitted**.
 The map's net QP offset is negative and raises rate. The baseline
 already ran at 129.7 Mb/s on that fixture.
 [Portable results](../../tools/dv_processing/diagnostics/fel_quality/results/roi-20261111.json).
 
-This is the first direct, source-derived evidence for the cause. The tail
-is an allocation loss in dark blocks. x265 AQ2 sets block QP from texture
-energy alone, the PPS chroma offset is one global value, and Main10 has
-no per-CU chroma offset. Lowering block QP lowers QpC with it, and that
-removes the tail.
+This shows that lowering dark-block QP, derived from the source alone, is
+enough to remove the tail. It is not an iso-rate test: the arm also spent
+about 3.7 Mb/s more on M5400. The earlier rate ladder bounds how much of
+the gain that explains. Raising the baseline target from 110 to 115
+(+3.7 Mb/s) moved frame-24 shadow p99 only from 4.455 to 4.340, while
+this arm moved it from 4.340 to 3.995.
 
 ## Zero-mean redistribution passes the fixed bar on the selected frames
 
@@ -381,8 +386,9 @@ was committed after arm S and before any of its own output. It keeps the
 same dark selection and −3 QP. Every other block gets
 +min(3, 3c/(1−c)) QP, where c is that frame's dark fraction, so the frame
 mean offset is zero, like x265's own AQ. The positive offset came out at
-+1.16 to +1.69 QP on the selected frames. The new harness binary passed
-the byte-identity gate again before its results were used.
++1.16 to +1.69 QP on the selected frames. The rebuilt harness binary was re-gated (no-ROI byte identity on
+Michael5400) before its results were used. The all-zero-ROI path and the
+Michael1800 no-ROI gate were re-run on it during review.
 
 | ModelB (base / S / Z, F) | Shadow mean | Shadow p99 | Full mean | Authored Mb/s (Z) |
 |---|---|---|---|---:|
@@ -394,8 +400,10 @@ the byte-identity gate again before its results were used.
 **All 16 rows pass the strict quality bar and the 130 Mb/s screen.** This
 is the first candidate admitted under the fixed rule. The cost lands in
 brighter content. The 1–10 nit band rises by 0.05–0.10 ΔITP and the 10–100
-nit band by 0.05–0.09. Full active p99 rises by up to 0.20 (M1800 f24) and
-the full maximum by up to 2.7 (M5400 f24). All remain far better than F.
+nit band by 0.05–0.09. Full active p99 rises by up to 0.21 (M1800 f24)
+and stays 1.6–3.3 below F. The full-frame maximum rises by up to 2.8 and,
+on Michael5400, exceeds F's maximum in all eight rows, as the retained
+baseline's maximum already did.
 Rate is still above the retained baseline on M5400 (127.3 vs 123.7 Mb/s),
 so zero mean QP offset is not rate-neutral.
 [Portable results](../../tools/dv_processing/diagnostics/fel_quality/results/roi-zeromean-20261111.json).
@@ -427,7 +435,7 @@ Frames, out of 48, where the sampled shadow (<0.1 nit) p99 beats F, ModelB:
 | Arm | Michael1800 | Michael5400 | M5400 pooled shadow p99 (F 4.313) |
 |---|---:|---:|---:|
 | Retained single-pass115 | 48 | 17 | 4.392 |
-| ROI arm S (−3, all negative) | 48 | 29 | 4.069 |
+| ROI arm S (−3, all negative) | 48 | 29 | 4.0685 |
 | ROI arm Z (−3, zero-mean) | 48 | 38 | 3.959 |
 
 Models A/C/D agree (Z: 43/39/37). Every arm beats F on the full mean in
@@ -435,13 +443,19 @@ all 48 frames. The ten Z misses are frames 6, 12, 18, 20, 21, 29, 34,
 35, 38 and 43, by at most 0.234. On every one of them, exact UV with
 Z's luma, or exact luma with Z's UV, beats F (48/48 for both swaps).
 After the redistribution, the remaining loss is joint Y+UV coding error
-in the same dark blocks. That points to too small a dose, not a
-different mechanism. [M1800](../../tools/dv_processing/diagnostics/fel_quality/results/lattice-michael1800-20261111.json),
+in the same dark blocks. Pooled, exact luma helps slightly more than exact
+UV (shadow p99 3.390 vs 3.534, against Z 3.959). That is the reverse of
+the pre-ROI selected-frame swaps, which were UV-dominated. It points to
+too small a dose, not a different mechanism. The swap test was a
+diagnostic added after Z's readout, not a predeclared arm. The committed
+[`make_component_swaps.py`](../../tools/dv_processing/diagnostics/fel_quality/make_component_swaps.py)
+builds its inputs, and [`portable_lattice.py`](../../tools/dv_processing/diagnostics/fel_quality/portable_lattice.py)
+reduces each private lattice report to the committed JSON. [M1800](../../tools/dv_processing/diagnostics/fel_quality/results/lattice-michael1800-20261111.json),
 [M5400](../../tools/dv_processing/diagnostics/fel_quality/results/lattice-michael5400-20261111.json)
 and [swap](../../tools/dv_processing/diagnostics/fel_quality/results/lattice-michael5400-swaps-20261111.json)
 results.
 
-## Dose–response confirms the cause: −6 QP zero-mean reaches 46/48
+## Dose–response: −6 QP zero-mean reaches 46/48
 
 The [last arm](../../tools/dv_processing/diagnostics/fel_quality/protocol-roi-zeromean-qpm6-20261111.json)
 was fixed after the residual swap test. It doubles the dark reduction to
@@ -458,14 +472,33 @@ readout.
 | Authored Mb/s M5400 / M1800 | 123.7 / 129.7 | 127.3 / 128.0 | 129.1 / 128.4 | — |
 
 Z6 passes the fixed selected-frame bar on both fixtures (16/16 rows) and
-the rate screen. Models A/C/D give 47/46/46 frames. The two misses, frames
-5 and 6, miss by 0.047 and 0.016. The improvement is monotonic in dose,
-the component swaps close every residual frame, and the map is computed
-from the encoder input alone. Together these concretely identify the
-cause. The remaining FEL shadow loss is x265 under-allocating dark blocks,
-in luma and especially in chroma, because AQ sees only texture energy and
-Main10 offers only a global chroma offset. The cost of correcting it
-moves into brighter content, which stays far ahead of fallback.
+the rate screen, 0.9 Mb/s under it on Michael5400. Models A/C/D give
+47/46/46 frames. The two misses, frames 5 and 6, miss by 0.047 and 0.016.
+The frame counts rise with dose, but not frame by frame: frame 5 passes
+under Z and fails under Z6 in all four models.
+
+The selected-frame cost against the retained baseline is larger than for
+Z:
+- full active p99 +0.14 to +0.63, still 1.3–3.0 below F;
+- the 1–10 and 10–100 nit bands +0.15 to +0.26 ΔITP;
+- the 100–1000 nit band +0.04 to +0.15;
+- full maximum up to +1.5.
+
+The Michael1800 all-48 lattice for Z6 is reported under Resuming.
+
+What the evidence supports: the remaining FEL shadow loss is a dark-block
+allocation shortfall, in both luma and chroma, that x265's default policy
+leaves in place. Three things point there:
+- a QP reduction computed from the encoder input alone removes it;
+- more of it removes more, by frame count;
+- swapping in either exact component closes every residual frame.
+
+Two candidate explanations fit: AQ2 sets block QP from texture energy
+alone, and the PPS chroma offset is global (Main10 has no per-CU chroma
+offset). These experiments do not separate those two causes, because a
+QP offset moves luma and chroma together. Nor are they iso-rate: every
+arm spent more bits than the baseline. The 110→115 Mb/s rung shows that
+rate alone buys far less of the shadow tail.
 [Selected-frame](../../tools/dv_processing/diagnostics/fel_quality/results/roi-zeromean-qpm6-20261111.json)
 and [all-48](../../tools/dv_processing/diagnostics/fel_quality/results/lattice-michael5400-qpm6-20261111.json)
 results.
@@ -499,14 +532,16 @@ packaging change, and packaging as a separate workstream.
 
 ### Where it stands
 
-- **Cause, concretely identified.** x265 under-allocates dark blocks in luma
-  and especially chroma. AQ2 sets block QP from texture energy alone, the
-  PPS chroma offset is one global value, and Main10 has no per-CU chroma
-  offset. The evidence for this chain:
+- **Cause, as far as these tests separate it.** x265 leaves dark blocks
+  under-allocated in both luma and chroma. The evidence:
   - Component swaps isolate the loss to coding in those blocks.
   - A source-derived dark-block QP reduction removes the tail.
-  - The effect is monotonic in dose (all-48 Michael5400 frames beating F:
-    17 → 38 → 46).
+  - More reduction fixes more frames (all-48 Michael5400 frames beating F:
+    17 → 38 → 46), though not frame by frame.
+  - The earlier rate rung shows that extra bits alone buy far less.
+
+  AQ2's texture-only rule and the global chroma offset are the candidate
+  mechanisms; a QP map cannot separate them, and no arm is iso-rate.
 - **Candidate.** Encode with a zero-mean per-frame quantOffsets map built
   from the encoder's own input. Each 16×16 block whose mean Y' decodes
   below 1 nit gets −3 or −6 QP, and every other block gets the balancing
@@ -526,7 +561,7 @@ Committed tools and portable results live under
 `tools/dv_processing/diagnostics/fel_quality/`, indexed in its README and
 `evidence-index.json`. Media, decoded planes and binaries are private.
 
-| Private root (on the M3 MacBook, `pauls-macbook-pro-3.local`) | Contents |
+| Private root (on the second MacBook, `macb`) | Contents |
 |---|---|
 | `~/.local/state/plurx-fel-quality/20261026-shadow-rate-control` | Sealed GPT archive; never modified |
 | `~/.local/state/plurx-fel-quality/20261111-qg8-relocated` | APFS clone of the archive; qg8 qualification/scoring (`RELOCATION-20261111.json`) |
@@ -554,6 +589,22 @@ never edited. Refused attempts are kept under each root's `logs/`.
    and review.
 
 ### Validation limits
+
+Audit notes from the adversarial review (2026-11-11):
+- **Protocol timestamps.** The `written_utc` fields inside the four
+  2026-11-11 protocols were typed by hand and run 5–10 minutes later than
+  their commits. The commit timestamps are authoritative, and every
+  protocol commit precedes its results commit. The files are hash-bound by
+  the recipes, so they are left unchanged.
+- **Merge commit.** `7883062d0` merged main and also folded the handoff and
+  shadow notes into this ledger. Review that commit's ledger diff, not only
+  the non-merge commits.
+- **Since the review:** the encode driver refuses a luma arm unless it has
+  passing `none` and `zero` gate receipts from the same harness binary and
+  arguments that match the protocol. A failed gate now ends as
+  `gate_failed`, never `encoded`. The lattice evaluator also checks every
+  frame's header, mapping and NLQ fields. Runs recorded above used the
+  earlier tool versions, whose hashes are in their receipts.
 
 Selected-frame scores are full resolution. All-48 scores are on a sampled
 lattice whose frames 0/24 equal the retained full-resolution RGB exactly.

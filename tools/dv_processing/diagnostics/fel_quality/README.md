@@ -21,6 +21,8 @@ locations. Media, decoded frames and binaries stay outside Git.
 | `audit_picture_payload.py` | Check all 48 coded-picture NAL sequences and clocks survive authoring; no presentation claim. |
 | `qualify_spatial_control.py` | Author, VCL/RPU/clock, native-frame and colour checks for a finished control, plus the AQ log tuple and SPS/PPS-derived effective QP-group receipts. |
 | `lattice_eval.py` | All-48-frame stride-8 lattice scoring on the imported frozen operators; gates on exact 0/24 equality with retained full-resolution RGB before scoring. |
+| `make_component_swaps.py` | Builds luma/chroma swap counterfactual YUV for the lattice evaluator; diagnostic only. |
+| `portable_lattice.py` | Reduces a private lattice report to the committed portable JSON with neutral path prefixes. |
 | `roi_encode.c` | In-process libavcodec/libx265 encode carrying a per-frame quantOffsets map as ROI side data; options pass verbatim as one dictionary. |
 | `encode_roi_control.py` | Translates a retained CLI recipe into the ROI harness, runs the byte-identity gates and the predeclared source-luma map arm. |
 | `encode_spatial_control.py` | Fixed qg-size8 spatial-allocation control at the retained single-pass115/125 budget. |

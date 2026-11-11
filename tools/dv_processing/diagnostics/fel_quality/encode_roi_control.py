@@ -15,7 +15,7 @@ Writes <prefix>-hdr.mp4, -recipe.json, -encode.log, -map.json into
 packaging or deployment change.
 """
 from pathlib import Path
-import argparse, hashlib, json, subprocess, time
+import argparse, hashlib, json, re, subprocess, time
 
 FFMPEG = '/opt/homebrew/bin/ffmpeg'
 VF = ('setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,'
@@ -86,6 +86,9 @@ p.add_argument('--grid', type=int, default=16)
 p.add_argument('--threshold-nits', type=float, default=0.0)
 p.add_argument('--qp-offset', type=int, default=0)
 p.add_argument('--protocol', type=Path)
+p.add_argument('--harness-source', type=Path, help='roi_encode.c the harness binary was built from (bound by hash)')
+p.add_argument('--gate-receipt', type=Path, action='append', default=[],
+               help='luma modes: passing none/zero gate recipe(s) produced by this same harness binary')
 a = p.parse_args()
 
 base = json.loads(a.baseline_recipe.read_text())
@@ -98,6 +101,22 @@ assert sha(src) == base['source_sha256'], 'source hash mismatch'
 assert pos['rate'] == (24000, 1001) and pos['tb_den'] == 24000 and pos['frames'] == 48
 if a.mode in ('luma', 'lumazm'):
     assert a.protocol and a.threshold_nits > 0 and a.qp_offset != 0, 'luma map needs a committed protocol and nonzero settings'
+    own = text = a.protocol.read_text()
+    # A protocol may declare itself identical to an earlier one in the same directory; include those.
+    for ref in sorted(set(re.findall(r'protocol-[\w-]+\.json', text)) - {a.protocol.name}):
+        if (a.protocol.parent / ref).exists():
+            text += (a.protocol.parent / ref).read_text()
+    # The arguments must be the ones the committed protocol declares.
+    assert f'{a.qp_offset}/63' in own, 'qp offset not declared by this protocol itself'
+    assert f'< {a.threshold_nits} nit' in text, 'threshold not declared by the protocol'
+    assert (a.mode == 'lumazm') == ('zero-mean' in text or 'zero frame mean' in text), 'zero-mean mode does not match the protocol'
+    assert a.gate_receipt, 'refused: luma modes need a passing gate receipt from this harness binary'
+    modes = set()
+    for g in a.gate_receipt:
+        gr = json.loads(g.read_text())
+        assert gr.get('equivalence_gate') == 'pass' and gr['harness']['sha256'] == sha(a.harness), f'refused: {g} is not a passing gate for this binary'
+        modes.add(gr['mode'])
+    assert modes >= {'none', 'zero'}, 'refused: need both the none and the zero gate for this binary'
 grid = 8 if ':qg-size=8' in opts['x265-params'] else 16
 assert a.grid == grid, f'grid must follow libx265.c ({grid} for this qg-size)'
 
@@ -115,12 +134,13 @@ record = {'variant': 'hdr-off-chroma9', 'fixture': a.prefix.split('-')[0], 'mode
           'threshold_nits': a.threshold_nits, 'qp_offset': a.qp_offset, 'qg_size': 8 if grid == 8 else 32,
           'cadence': '24000/1001', 'source': str(src), 'source_sha256': base['source_sha256'],
           'baseline_recipe': {'path': str(a.baseline_recipe), 'sha256': sha(a.baseline_recipe)},
-          'baseline_mp4_sha256': base['sha256'], 'harness': {'path': str(a.harness), 'sha256': sha(a.harness)},
+          'baseline_mp4_sha256': base['sha256'], 'harness': {'path': str(a.harness), 'sha256': sha(a.harness),
+                      'source': {'path': str(a.harness_source), 'sha256': sha(a.harness_source)} if a.harness_source else None},
+          'gate_receipts': [{'path': str(g), 'sha256': sha(g)} for g in a.gate_receipt],
           'driver': {'path': str(Path(__file__).resolve()), 'sha256': sha(Path(__file__).resolve())},
           'protocol': {'path': str(a.protocol), 'sha256': sha(a.protocol)} if a.protocol else None,
           'encoder_dictionary': opts, 'argv': argv, 'exit_code': r.returncode, 'elapsed_seconds': time.monotonic() - t,
           'scope': 'offline encoder control; no playback/deployment/packaging change'}
-import re
 cli_unused = sorted(set(re.findall(r'Codec AVOption (\S+) \(', Path(str(a.baseline_recipe).replace('-recipe.json', '-encode.log')).read_text())))
 harness_unused = sorted(set(re.findall(r'roi_encode: unused option ([^=\s]+)=', log.read_text())))
 record['unused_encoder_options'] = {'cli_baseline': cli_unused, 'harness': harness_unused, 'equal': cli_unused == harness_unused}
@@ -133,6 +153,8 @@ if record['status'] == 'encoded':
     record['elementary_stream'] = {'candidate_sha256': eb, 'baseline_sha256': bb, 'identical_to_baseline': eb == bb}
     if a.mode in ('none', 'zero'):
         record['equivalence_gate'] = 'pass' if eb == bb else 'FAIL'
+        if eb != bb:
+            record['status'] = 'gate_failed'  # an invalid harness, never an encoded candidate
     Path(f'{stem}-annexb.hevc').unlink(); bb_path.unlink()  # hashes retained; bytes reproducible from the mp4s
 with Path(f'{stem}-recipe.json').open('x') as f:
     f.write(json.dumps(record, indent=2) + '\n')

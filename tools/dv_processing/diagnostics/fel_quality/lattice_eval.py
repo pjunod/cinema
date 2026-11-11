@@ -82,8 +82,17 @@ for o in observed:
     assert [x[0] for x in c['ycc_to_rgb_matrix']] == matrix.ravel().tolist() and all(x[1] == 8192 for x in c['ycc_to_rgb_matrix'])
     assert [x[0] for x in c['ycc_to_rgb_offset']] == offsets.tolist() and all(x[1] == 2 ** 28 for x in c['ycc_to_rgb_offset'])
     assert [x[0] for x in c['rgb_to_lms_matrix']] == meta[0][3]['rgb_to_lms_rawQ14'] and all(x[1] == 16384 for x in c['rgb_to_lms_matrix'])
-    for curve in o['mapping']['curves']:
-        assert curve['pieces'] == [{'mapping_idc': 0, 'poly_order': 1, 'poly_coef': [0, 8388608, 0]}] and curve['nlq_offset'] == 512
+    # Every field fixture_metadata() asserts for frames 0/24, checked per frame here.
+    hd = o['header']
+    assert (hd['coef_data_type'], hd['coef_log2_denom'], hd['bl_bit_depth'], hd['el_bit_depth'], hd['vdr_bit_depth'],
+            hd['disable_residual_flag']) == (0, 23, 10, 10, 12, 0), ('header', o['frame'])
+    mp = o['mapping']
+    assert (mp['color_space'], mp['chroma_format_idc'], mp['nlq_method_idc'], mp['num_x_partitions'], mp['num_y_partitions'],
+            len(mp['curves'])) == (0, 0, 0, 1, 1, 3), ('mapping', o['frame'])
+    assert (c['signal_bit_depth'], c['signal_color_space'], c['signal_chroma_format'], c['signal_full_range_flag']) == (12, 0, 0, 1)
+    for curve in mp['curves']:
+        assert curve['pivots'] == [0, 1023] and curve['pieces'] == [{'mapping_idc': 0, 'poly_order': 1, 'poly_coef': [0, 8388608, 0]}]
+        assert (curve['nlq_offset'], curve['vdr_in_max'], curve['slope'], curve['threshold']) == (512, 1048576, 2048, 0), ('nlq', o['frame'])
 
 cands = {}
 for spec_ in a.candidate:
@@ -189,7 +198,7 @@ report = {'scope': protocol['scope'] + '. Sampled lattice statistics; not full-r
           'inputs': {'bl': {'path': str(a.bl), 'sha256': sha(a.bl)}, 'el': {'path': str(a.el), 'sha256': sha(a.el)},
                      'metadata_jsonl': {'path': str(a.metadata_jsonl), 'sha256': sha(a.metadata_jsonl)}},
           'candidates': {k: v[1] for k, v in cands.items()},
-          'gates': {'frozen_sources': True, 'bl_el_0_24_bound': True, 'metadata_all48_equal_retained_0_24_numerators': True,
+          'gates': {'frozen_sources': True, 'bl_el_0_24_bound': True, 'metadata_all48_equal_retained_0_24_numerators': True, 'metadata_all48_header_mapping_nlq_fields': True,
                     'candidates_0_24_bound_to_qualified_native': True, 'lattice_equals_retained_full_RGB': exact},
           'per_frame_wins_vs_F_sampled': comparisons, 'pooled_all48': summary, 'frames': frames_out}
 with a.output.open('x') as f:

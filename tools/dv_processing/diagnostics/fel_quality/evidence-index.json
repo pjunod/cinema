@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "frozen_source": "087e836d369eb2b8f94ec1d0454ea6c157612df9",
-  "status": "Cause identified: dark-block under-allocation (Y and especially UV). Zero-mean source-luma quantOffsets meets the fixed selected-frame bar; -6 QP reaches 46/48 M5400 frames on the sampled lattice. Held-out scene and dose choice pending; no runtime change.",
+  "status": "Dark-block under-allocation (luma and chroma) identified as the lever; zero-mean source-luma quantOffsets meets the fixed selected-frame bar; -6 QP reaches 46/48 M5400 sampled frames. Not iso-rate; held-out scene and dose choice pending; no runtime change.",
   "private_evidence_parent": "~/.local/state/plurx-fel-quality",
   "prior_calibration": {
     "directory": "20261026-measurement-calibration",
