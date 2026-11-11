@@ -97,6 +97,8 @@ p.add_argument('--harness-source', type=Path, help='roi_encode.c the harness bin
 p.add_argument('--override', action='append', default=[],
                help='KEY=VALUE replaces an encoder dictionary entry; KEY+=VALUE appends ":VALUE" (x265-params)')
 p.add_argument('--timeout', type=int, default=1800, help='encode timeout in seconds')
+p.add_argument('--source', type=Path, help='encode this input instead of the baseline source (e.g. a plane-domain export)')
+p.add_argument('--source-sha256', help='required with --source')
 p.add_argument('--gate-receipt', type=Path, action='append', default=[],
                help='luma modes: passing none/zero gate recipe(s) produced by this same harness binary')
 a = p.parse_args()
@@ -114,11 +116,14 @@ for o in a.override:
         opts[k] = v
     overrides.append(o)
 # A gate is a none/zero run on the unmodified baseline options; with overrides it is an ordinary encode.
-is_gate = a.mode in ('none', 'zero') and not overrides
+is_gate = a.mode in ('none', 'zero') and not overrides and not a.source
 src = Path(pos['input'])
 if not src.exists():
     src = a.baseline_input_root / src.name
 assert sha(src) == base['source_sha256'], 'source hash mismatch'
+if a.source:
+    assert a.source_sha256 and sha(a.source) == a.source_sha256, 'source override hash mismatch'
+    src = a.source.resolve()
 num, den = pos['rate']
 assert pos['frames'] == 48
 if a.mode in ('luma', 'lumazm'):
@@ -154,7 +159,7 @@ with log.open('xb') as f:
     r = subprocess.run(['nice', '-n', '15', *argv], stdout=f, stderr=subprocess.STDOUT, timeout=a.timeout)
 record = {'variant': 'hdr-off-chroma9', 'fixture': a.prefix.split('-')[0], 'mode': a.mode, 'grid': a.grid,
           'threshold_nits': a.threshold_nits, 'qp_offset': a.qp_offset, 'qg_size': 8 if grid == 8 else 32,
-          'cadence': f'{num}/{den}', 'source': str(src), 'source_sha256': base['source_sha256'],
+          'cadence': f'{num}/{den}', 'source': str(src), 'source_sha256': sha(src), 'baseline_source_sha256': base['source_sha256'],
           'baseline_recipe': {'path': str(a.baseline_recipe), 'sha256': sha(a.baseline_recipe)},
           'baseline_mp4_sha256': base['sha256'], 'harness': {'path': str(a.harness), 'sha256': sha(a.harness),
                       'source': {'path': str(a.harness_source), 'sha256': sha(a.harness_source)} if a.harness_source else None},
