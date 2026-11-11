@@ -41,6 +41,10 @@ FILTERS = [
     "a_viewer_change_cancels_a_pending_receipt_check_before_it_can_resume",
     "a_resumed_quality_mode_uses_its_fresh_auto_policy_and_accepted_owner_epoch",
     "an_ordinary_fallback_reports_the_reason_without_private_qualification_data",
+    "live_completion_waits_for_read_original_clones_and_explicit_raw_retirement",
+    "tracked_raw_probe_retirement_survives_timeout_and_abandoned_collector",
+    "reader_recovery_refuses_unarmed_unmediated_foreign_kernel_and_replaced_inode",
+    "finish_during_blocked_enrolled_read_leaves_settlement_to_the_ledger",
 ]
 CAPS = ["--memory", "20g", "--memory-swap", "20g", "--cpus", "4", "--cpuset-cpus", "0-3", "--pids-limit", "4096", "--cgroup-parent", "plurx-heavy.slice", "--cgroupns", "host", "--mount", "type=bind,src=/sys/fs/cgroup" + AGGREGATE + ",dst=/aggregate,readonly"]
 
