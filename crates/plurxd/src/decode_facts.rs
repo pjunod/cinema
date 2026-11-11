@@ -93,6 +93,26 @@ const IDENTITY_DEADLINE: Duration = Duration::from_secs(10);
 const PROBE_REVALIDATION_INTERVAL: Duration = Duration::from_secs(30);
 const VERSION_DEADLINE: Duration = Duration::from_secs(5);
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
+/// Every strict parser read is metered in whole source-service quanta and a
+/// single `read()` above one quantum is refused (`E2BIG`). FFmpeg's file
+/// protocol otherwise issues one direct read per large packet (a 2160p remux
+/// keyframe exceeds 1 MiB), so cap its block size at exactly one quantum.
+const STRICT_BLOCKSIZE: &str = "1048576";
+const _: () = assert!(source_reads::MAX_READ == 1_048_576);
+
+/// The strict parser's source input: one-quantum reads, then the held fd.
+#[cfg(unix)]
+fn strict_source_input() -> [OsString; 3] {
+    [
+        OsString::from("-blocksize"),
+        OsString::from(STRICT_BLOCKSIZE),
+        OsString::from("/dev/fd/3"),
+    ]
+}
+
+fn idet_filter(input_video_stream: impl std::fmt::Display) -> String {
+    format!("movie=/dev/fd/3:format_opts=blocksize={STRICT_BLOCKSIZE}:si={input_video_stream},trim=duration={IDET_MEDIA_SECONDS},idet")
+}
 const IDET_MEDIA_SECONDS: u8 = 10;
 const MAX_CACHE_ENTRIES: usize = 256;
 const DECODE_FACT_PHASE_BUCKETS: &[(u64, &str)] = &[
@@ -5237,8 +5257,7 @@ async fn collect_idet_verdict(
     cancelled: Option<&tokio_util::sync::CancellationToken>,
     work: crate::process_control::ChildWork,
 ) -> Result<InterlaceVerdict, DecodeFactError> {
-    let filter =
-        format!("movie=/dev/fd/3:si={input_video_stream},trim=duration={IDET_MEDIA_SECONDS},idet");
+    let filter = idet_filter(input_video_stream);
     let arguments = vec![
         OsString::from("-hide_banner"),
         OsString::from("-v"),
@@ -5444,10 +5463,10 @@ async fn refine_scan_type(
             "-show_data",
             "-of",
             "json",
-            "/dev/fd/3",
         ]
         .into_iter()
         .map(OsString::from)
+        .chain(strict_source_input())
         .collect();
         match collect_refinement_output(probe, source_fd, arguments, deadline, cancelled, work)
             .await
@@ -5609,7 +5628,7 @@ async fn collect_platform(
     #[cfg(target_os = "macos")]
     if probe.launch_mode.is_production() {
         let mut args = projection.arguments();
-        args.push("/dev/fd/3".into());
+        args.extend(strict_source_input().map(|arg| arg.into_string().expect("ASCII argument")));
         let output = run_macos_parser(
             &probe.executable_snapshot,
             Some(duplicate_macos_source(source_fd)?),
@@ -5652,7 +5671,7 @@ async fn collect_platform(
         .into_iter()
         .map(OsString::from)
         .collect::<Vec<_>>();
-    arguments.push(OsString::from("/dev/fd/3"));
+    arguments.extend(strict_source_input());
     let mut command = tokio::process::Command::new(probe_launch_path(
         &probe.executable_snapshot,
         probe.launch_mode,

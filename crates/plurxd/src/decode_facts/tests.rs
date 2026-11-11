@@ -3577,6 +3577,25 @@ async fn strict_native_group_hold_never_excludes_outstanding_daemon_read_time() 
     strict_quota_stopped_thread_fixture(true).await;
 }
 
+/// The strict supervisor refuses any single read() above one service quantum,
+/// and FFmpeg's file protocol otherwise reads a whole large packet at once.
+#[test]
+fn strict_parser_reads_are_capped_to_one_service_quantum() {
+    let input = strict_source_input();
+    assert_eq!(input[0], "-blocksize");
+    assert_eq!(
+        input[1]
+            .to_str()
+            .and_then(|value| value.parse::<usize>().ok()),
+        Some(source_reads::MAX_READ)
+    );
+    assert_eq!(input[2], "/dev/fd/3", "the cap precedes the held input");
+    assert!(idet_filter(0).starts_with(&format!(
+        "movie=/dev/fd/3:format_opts=blocksize={}:",
+        source_reads::MAX_READ
+    )));
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "requires exact packaged static parser PLURX_TEST_STRICT_FFPROBE and generated PLURX_TEST_STRICT_MEDIA"]
