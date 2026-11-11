@@ -62,10 +62,10 @@ clippy `-D warnings`, rustc 1.97.1):
   Analysis and settles job and waiters, and rolls back on a pointer mismatch.
   Real-SQLite regressions in `copy_index_v3_tests.rs`.
 
-Not yet built: background gap filling through the common engine (an index
-publishes today only when playback itself covered the whole title), a v3
-consumer and peer hydration, discrepancy quarantine, and local-playback
-observations. A sealed observation index must not be bridged into the legacy
+Not yet built, planned in [A1/B1 next](PLAYBACK-START-A1-NEXT.md): background
+gap filling through the common engine (an index publishes today only when
+playback itself covered the whole title), a v3 consumer and peer hydration,
+discrepancy quarantine, and local-playback observations. A sealed observation index must not be bridged into the legacy
 local index store: its head-census promotion lacks the whole-title HDR10
 metadata the legacy key promises. Daemon test compilation exceeds the 8 GiB
 voter cap, so it runs on the nonvoter effort compile gate. No unit suite has
