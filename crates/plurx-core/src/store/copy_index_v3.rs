@@ -379,6 +379,10 @@ mod tests {
     use super::*;
     use rusqlite::{params, Connection};
 
+    /// The publication trigger's target table, which every real schema
+    /// creates long before v125.
+    const COMMAND_ENVELOPE: &str = "CREATE TABLE background_job_commands(id TEXT PRIMARY KEY,operation TEXT,request_json TEXT,result_json TEXT);";
+
     fn source() -> AnalysisCoordinationSource {
         AnalysisCoordinationSource {
             file_id: 1,
@@ -477,6 +481,8 @@ mod tests {
     #[test]
     fn schema_keeps_engine_blob_variants_immutable_and_heads_explicitly_healthy() {
         let conn = Connection::open_in_memory().expect("SQLite");
+        conn.execute_batch(COMMAND_ENVELOPE)
+            .expect("command envelope");
         conn.execute_batch(include_str!("copy_index_v3.sql"))
             .expect("mechanical v3 schema");
         let first = "1".repeat(64);
@@ -589,6 +595,8 @@ mod tests {
         value["sample_sha256"] = "c".repeat(64).into();
         assert!(serde_json::from_value::<CopyIndexSourceAttestation>(value).is_err());
         let conn = Connection::open_in_memory().expect("SQLite");
+        conn.execute_batch(COMMAND_ENVELOPE)
+            .expect("command envelope");
         conn.execute_batch(include_str!("copy_index_v3.sql"))
             .expect("v3 schema");
         let insert = |regime: i64| {
