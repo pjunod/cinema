@@ -1125,7 +1125,15 @@ also_in = ["crates/plurxd/src/transcode"]
 # Playback start Phase 1: the create-time processed credit D1 left unreachable is
 # removed (PreparedCandidateOnce, session_request.rs). -1: its expiry task, which
 # dropped an unconsumed credit at its deadline.
-expected_occurrences = 120
+# S5 review fix 21493f2fe: net +1. source_subtitles.rs drops the old detached
+# whole-track extraction tokio::spawn (-1, replaced by an awaited spawn_blocking
+# parser job). SourceViewerActor::start_native_window_work adds one shipped task
+# (+1) that owns a cloned SourceResourceReadCustody, bounded internally by the
+# caption deadline; source_control.rs observes its JoinHandle only until
+# observe_until, and an observer timeout leaves the task holding the counted
+# guard so Source retirement waits for real child/reader settlement. It decides
+# no recovery and retries nothing. +1 joined test caller in tests/source_actor.rs.
+expected_occurrences = 121
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -1276,7 +1284,13 @@ also_in = ["crates/plurxd/src/transcode"]
 # fixtures under a paused clock; one in publication.rs is a source-pin
 # string (`match_indices`) proving the 100 ms init poll is the only sleep in
 # both pre-object wait branches. No shipped sleep is added.
-expected_occurrences = 88
+# S5 custody fixtures: +3 test-only sleeps in transcode/tests/source_actor.rs.
+# The 100 ms and 50 ms waits follow request_retirement() and assert the actual
+# child/reader/control guard still holds retirement (a negative assertion; real
+# settlement is then awaited). The 5100 ms wait holds mode 25 paused before the
+# native spawn past five seconds, so the window must use fresh current authority.
+# None is shipped; none certifies settlement or retries anything.
+expected_occurrences = 91
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -2208,7 +2222,9 @@ pattern = "publication_ready_at_ms"
 # sentinel. None moves a shipped fence.
 # #978: +2, test-only. The create.rs epoch-fence regression builds a blocked
 # activation and then the confirmed row a takeover produces.
-expected_occurrences = 162
+# S5 custody fixtures: +1 test-only assertion that a Source route's
+# publication_ready_at_ms stays at the 0 sentinel; no shipped fence moves.
+expected_occurrences = 163
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -3832,7 +3848,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # `http::cluster_operations::worker_status_cache_loop`, a read-only refresh of local worker
 # capacity for Activity. It owns no child or source, and returns on `background_shutdown`, the
 # same cancellation as its sibling peer-status loop.
-expected_occurrences = 1121
+# S5 review fix 21493f2fe: +1 is the start_native_window_work custody task
+# described under all-detached-tokio-tasks; the subtitle parser spawn_blocking
+# moves inside its owning helper (zero net).
+expected_occurrences = 1122
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5641,7 +5660,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # (`foreground_admission_tests`). Three are Jellyfin native-HLS test retries (d25a35ea3,
 # 9fde9d148, 55f84b0e8): 250 ms and 1 s sleeps while a fixture response is `503` pending.
 # No production producer, child or detached owner is added.
-expected_occurrences = 2164
+# S5 review fix 21493f2fe: +4 awaited deadline shapes. source_control.rs adds
+# two timeout_at bounds on control observation (the caption work keeps custody
+# past them); source_resource.rs adds one sleep_until that returns a typed
+# Deadline; tests/source_actor.rs adds one 50 ms fixture wait. None retries.
+expected_occurrences = 2168
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6825,7 +6848,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +3 in `http/jellyfin/tests.rs` (d25a35ea3, 9fde9d148, 55f84b0e8): HTTP
 # `response.status()` reads in the pending-segment retry loops above. They match the
 # `.status(` shape but launch no process.
-expected_occurrences = 913
+# S5 Source503 counterfactual e5ad9e66b: +1 `ended.status()` HTTP response
+# read in shared_source_playback/tests.rs; it launches no process.
+expected_occurrences = 914
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
