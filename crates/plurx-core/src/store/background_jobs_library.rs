@@ -18,6 +18,21 @@ pub(crate) const SCHEMA: &str = include_str!("background_jobs_library.sql");
 pub const SQLITE_INTRODUCED_SCHEMA: i64 = 73;
 pub const MAX_LIBRARY_REQUESTS: usize = 256;
 pub const MAX_LIBRARY_RESULT_BYTES: usize = 64 * 1024;
+/// The executable generation of whole-library work (scheduled, startup and
+/// manual scans and metadata refreshes), dedupe key `library:scan:{id}` /
+/// `library:metadata:{id}`.
+pub const LIBRARY_WORK_GENERATION: &str = "library-work-v1";
+/// Targeted requests are their own job, `library:targeted:{id}` (contract v2
+/// §5.1): claimed with a probe admission and no background source reader,
+/// ahead of a pending full scan. Its only wait is the per-library
+/// `scan:library:{id}` fence, which serialises it against a running scan of
+/// its own library; a scan of another library on the same volume does not
+/// hold it. It keeps the `library_scan` kind so the fence binding, the
+/// provider reservations and every older node's decoder accept the row; the
+/// managed resource view (v5, SQLite v126) drops its source-I/O requirement
+/// by this generation. An older node does not claim it, because its claimer
+/// runs only [`LIBRARY_WORK_GENERATION`].
+pub const LIBRARY_TARGETED_GENERATION: &str = "library-targeted-v1";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -120,8 +135,30 @@ pub(super) async fn enqueue<T: QueueSql>(
     store: &T,
     input: NewLibraryWork,
 ) -> Result<EnqueueOutcome, StoreError> {
+    enqueue_with(store, input, None).await
+}
+
+/// `seed` carries the contract v2 sidecar into the admission transaction
+/// (`scan_request_v2.sql`); it is refused for anything but targeted work.
+pub(super) async fn enqueue_with<T: QueueSql>(
+    store: &T,
+    input: NewLibraryWork,
+    seed: Option<super::scan_request_v2::ScanRequestV2Seed>,
+) -> Result<EnqueueOutcome, StoreError> {
+    if let Some(seed) = seed.as_ref() {
+        seed.validate()?;
+        if !matches!(input.input, LibraryWorkInput::Targeted { .. }) {
+            return Err(StoreError::Task(
+                "only targeted library work carries a scan request sidecar".into(),
+            ));
+        }
+    }
     let refresh = matches!(input.input, LibraryWorkInput::Full { refresh: true, .. });
+    let targeted = matches!(input.input, LibraryWorkInput::Targeted { .. });
+    // Higher is claimed first. A targeted request is a file someone just
+    // imported and may be about to watch: it outranks every pending full scan.
     let priority = match input.input {
+        LibraryWorkInput::Targeted { .. } => 3,
         LibraryWorkInput::Full {
             trigger: LibraryTrigger::Scheduled,
             ..
@@ -130,14 +167,19 @@ pub(super) async fn enqueue<T: QueueSql>(
             trigger: LibraryTrigger::Startup,
             ..
         } => 1,
-        _ => 2,
+        LibraryWorkInput::Full { .. } => 2,
     };
     let input_json = encode(&input.input)?;
     if input_json.len() > 16 * 1024 {
         return Err(StoreError::Task("library request exceeds 16 KiB".into()));
     }
     let digest = hex::encode(Sha256::digest(format!("{}:{input_json}", input.library_id)));
-    let generation = "library-work-v1".to_owned();
+    let generation = if targeted {
+        LIBRARY_TARGETED_GENERATION
+    } else {
+        LIBRARY_WORK_GENERATION
+    }
+    .to_owned();
     let payload = if refresh {
         JobPayload::MetadataRefresh {
             library_id: input.library_id,
@@ -154,7 +196,13 @@ pub(super) async fn enqueue<T: QueueSql>(
         payload,
         dedupe_key: format!(
             "library:{}:{}",
-            if refresh { "metadata" } else { "scan" },
+            if targeted {
+                "targeted"
+            } else if refresh {
+                "metadata"
+            } else {
+                "scan"
+            },
             input.library_id
         ),
         priority,
@@ -175,6 +223,10 @@ pub(super) async fn enqueue<T: QueueSql>(
     let mut body = enqueue_body(store, &request).await?;
     body["library_request"] =
         serde_json::from_str(&input_json).map_err(|error| StoreError::Task(error.to_string()))?;
+    if let Some(seed) = seed {
+        body["scan_request_v2"] =
+            serde_json::to_value(&seed).map_err(|error| StoreError::Task(error.to_string()))?;
+    }
     let rows = store
         .queue_sql(ENQUEUE_SQL.into(), encode(&body)?, true, true)
         .await?;

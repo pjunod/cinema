@@ -1798,6 +1798,38 @@ test("a library row reports; its drawer configures; only one drawer is open", ()
     "anime has a provider (AniList), so Refresh art stays live");
 });
 
+test("a library at Never says what it costs and opts in to the six-hourly reconcile in one click", async () => {
+  const fields = new Function(
+    "esc", "agoLabel", "everySelect", "SCAN_EVERY", "REFRESH_EVERY",
+    `${shippedSource("libScheduleFields")} return libScheduleFields;`,
+  )(esc, () => "an hour ago", (id) => `<select id="${id}"></select>`, [], []);
+  const notice = "Never: a missed Curator notification is found only by a manual scan, or at startup if 'Scan every library at startup' is on (it is off by default).";
+  const never = fields({ id: 4, scan_interval_mins: 0, refresh_interval_mins: 10080 });
+  assert.ok(never.includes(esc(notice)), `the exact notice: ${never}`);
+  assert.match(never, />Enable 6-hourly reconcile<\/button>/);
+  assert.match(never, /onclick="enableReconcile\(4,this\)"/);
+  const scheduled = fields({ id: 5, scan_interval_mins: 360, refresh_interval_mins: 0 });
+  assert.ok(!scheduled.includes("Enable 6-hourly reconcile"), "a scheduled library offers nothing");
+  assert.ok(!scheduled.includes("missed Curator notification"));
+
+  const calls = [];
+  const err = { textContent: "" };
+  const enable = new Function(
+    "api", "document", "invalidateLibs", "toast", "viewSettings",
+    `${shippedSource("enableReconcile")} return enableReconcile;`,
+  )(
+    async (path, opts) => { calls.push([opts.method, path, opts.body]); return {}; },
+    { getElementById: (id) => (id === "ele-4" ? err : id === "sched-ref-4" ? { value: "10080" } : null) },
+    () => calls.push(["invalidate"]), () => {}, () => calls.push(["view"]),
+  );
+  const btn = { disabled: false };
+  await enable(4, btn);
+  assert.deepEqual(calls, [
+    ["PUT", "/libraries/4/schedule", { scan_interval_mins: 360, refresh_interval_mins: 10080 }],
+    ["invalidate"], ["view"],
+  ], "only the schedule moves; the refresh interval is kept");
+});
+
 test("the drawer's Save writes identity then schedule, and stops on the first refusal", async () => {
   const calls = [];
   let fail = false;
