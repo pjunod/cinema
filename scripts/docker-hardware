@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a per-invocation Compose GPU overlay without editing host config."""
+"""Generate a per-invocation Compose hardware/HTTPS overlay without editing host config."""
 
 from __future__ import annotations
 
@@ -11,10 +11,14 @@ import importlib.util
 import os
 from pathlib import Path
 import platform
+import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
+
+
+HTTPS = runpy.run_path(str(Path(__file__).with_name("docker-https-ports.py")))
 
 
 class HardwareError(ValueError):
@@ -24,6 +28,17 @@ class HardwareError(ValueError):
 def run(*args: str) -> str:
     result = subprocess.run(args, capture_output=True, text=True, timeout=20)
     if result.returncode:
+        inputs = HTTPS["INPUTS"]
+        if ("--environment" in args and "--no-consistency" not in args
+                and inputs["missing_memory_alias_error"](result.stderr)):
+            # This reads interpolation inputs only. The JSON resolution below
+            # repairs the alias and validates the entire project before use.
+            return run(*args, "--no-consistency")
+        if "--format" in args and inputs["missing_memory_alias_error"](result.stderr):
+            try:
+                return inputs["resolve_missing_memory_alias"](list(args)).strip()
+            except ValueError as error:
+                raise HardwareError(str(error)) from error
         raise HardwareError(f"{' '.join(args)} failed: {result.stderr.strip()}")
     return result.stdout.strip()
 
@@ -168,6 +183,13 @@ def gpu_overlay(service: dict, *, dri: Path, nvidia: bool) -> dict:
                 }
             }
         }
+        # Compose compares these aliases once a reservations block exists,
+        # even when the new block only requests GPU devices. Retain the host's
+        # memory reservation so automatic NVIDIA setup stays mergeable.
+        if service.get("mem_reservation") is not None:
+            additions["deploy"]["resources"]["reservations"]["memory"] = service[
+                "mem_reservation"
+            ]
         nvidia_requested = True
     if nvidia_requested:
         capabilities = (service.get("environment") or {}).get(
@@ -262,6 +284,7 @@ def resolved_compose_inputs() -> tuple[dict[str, str], dict]:
                         "COMPOSE_FILE": "${COMPOSE_FILE:-}",
                         "COMPOSE_PATH_SEPARATOR": "${COMPOSE_PATH_SEPARATOR:-}",
                         "PLURX_DOCKER_GPU": "${PLURX_DOCKER_GPU:-auto}",
+                        "PLURX_HTTPS_HOST_PORT": "${PLURX_HTTPS_HOST_PORT:-}",
                     },
                 }
             }
@@ -335,6 +358,19 @@ def prepare(output: Path, prepare_pi: bool = False) -> str:
             "docker hardware: using existing configuration (manual mode or non-local/native-Linux engine)",
             file=sys.stderr,
         )
+    # Retain the missing alias repaired during input resolution, including
+    # explicit host GPU selections and manual/non-local hardware modes.
+    reservations = service.get("deploy", {}).get("resources", {}).get("reservations")
+    if service.get("mem_reservation") is not None and isinstance(reservations, dict):
+        additions = overlay["services"]["plurxd"]
+        additions.setdefault("deploy", {}).setdefault("resources", {}).setdefault(
+            "reservations", {}
+        )["memory"] = service["mem_reservation"]
+    https_overlay = HTTPS["https_port_overlay"](document, environment)
+    https_environment = https_overlay.pop("environment", {})
+    if https_environment:
+        overlay["services"]["plurxd"].setdefault("environment", {}).update(https_environment)
+    overlay["services"]["plurxd"].update(https_overlay)
     output.write_text(json.dumps(overlay) + "\n", encoding="utf-8")
     files.append(os.path.abspath(output))
     if any(os.pathsep in name for name in files):
@@ -349,7 +385,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         print(prepare(args.output, args.prepare_pi))
-    except (HardwareError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+    except (HardwareError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(
             f"docker hardware preparation failed; this helper did not start Compose: {error}",
             file=sys.stderr,

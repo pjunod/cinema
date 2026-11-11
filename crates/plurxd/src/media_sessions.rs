@@ -1646,6 +1646,74 @@ pub(crate) enum RemoteSessionStartOwnership {
     LegacyAmbiguous,
 }
 
+/// Why a remote start produced no session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteStartFailure {
+    /// The worker answered 503: it cannot take this start now.
+    Unavailable,
+    /// The worker answered 503 naming a terminal capacity code: no retry of
+    /// this start can succeed there.
+    Terminal(&'static str),
+    /// No usable answer arrived; the worker may or may not hold a session.
+    Transport(PeerTransportError),
+}
+
+/// Ask one worker to start, and when no usable answer arrived ask that same
+/// worker once more inside `deadline`.
+///
+/// A reply lost in transit leaves the worker holding a session keyed by the
+/// request's incarnation; the second ask finds it and answers `Recovered`, so
+/// the start keeps one producer. A definitive answer (a start, a refusal) is
+/// never asked twice. A loss that persists through the re-ask is returned as
+/// it is, and the caller moves on to its next candidate: whatever the first
+/// worker may hold then retires on its own confirmation watcher as soon as
+/// another owner's activation of the incarnation is visible, or at its
+/// confirmation window when none comes (PLAYBACK-START-PLAN §8).
+pub(crate) async fn start_remote_recovering_lost_reply<F, Fut>(
+    deadline: tokio::time::Instant,
+    mut ask: F,
+) -> Result<RemoteSessionStart, RemoteStartFailure>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<RemoteSessionStart, RemoteStartFailure>>,
+{
+    let first = ask().await;
+    if matches!(
+        first,
+        Err(RemoteStartFailure::Transport(
+            PeerTransportError::Unreachable | PeerTransportError::TimedOut
+        ))
+    ) && tokio::time::Instant::now() < deadline
+    {
+        return ask().await;
+    }
+    first
+}
+
+impl From<PeerTransportError> for RemoteStartFailure {
+    fn from(error: PeerTransportError) -> Self {
+        Self::Transport(error)
+    }
+}
+
+/// A worker's 503 start answer: terminal when its body names a terminal
+/// capacity code, waitable otherwise — including the bodiless 503 an older
+/// worker answers for every refusal.
+fn remote_start_refusal(body: &[u8]) -> RemoteStartFailure {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .and_then(crate::transcode::terminal_capacity_code)
+        })
+        .map_or(
+            RemoteStartFailure::Unavailable,
+            RemoteStartFailure::Terminal,
+        )
+}
+
 fn decode_remote_start_response(
     response: crate::http::peer_transport::PeerResponse,
 ) -> Result<RemoteSessionStart, PeerTransportError> {
@@ -3164,13 +3232,13 @@ impl MediaSessionCoordinator {
         owner_node_id: &str,
         request: &RemoteStartRequest,
         deadline: tokio::time::Instant,
-    ) -> Result<RemoteSessionStart, PeerTransportError> {
+    ) -> Result<RemoteSessionStart, RemoteStartFailure> {
         let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
         if body.len() > MAX_CONTROL_REQUEST_BYTES {
-            return Err(PeerTransportError::InvalidResponse);
+            return Err(PeerTransportError::InvalidResponse.into());
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(PeerTransportError::TimedOut);
+            return Err(PeerTransportError::TimedOut.into());
         }
         let base = self.peer_base(owner_node_id, deadline).await?;
         let response = self
@@ -3187,9 +3255,15 @@ impl MediaSessionCoordinator {
                 (REMOTE_START_OWNERSHIP_HEADER, REMOTE_START_OWNERSHIP_V1),
             )
             .await?;
+        // The worker's own word that it cannot take this start now: the
+        // status its start route answers for a capacity refusal, a serving
+        // fence or start infrastructure, each of which a retry can outlive.
+        if response.status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Err(remote_start_refusal(&response.body));
+        }
         let started = decode_remote_start_response(response)?;
         if request.retained_output_receiver != Some(1) && started.info.retained_output.is_some() {
-            return Err(PeerTransportError::InvalidResponse);
+            return Err(PeerTransportError::InvalidResponse.into());
         }
         Ok(started)
     }
@@ -4732,7 +4806,7 @@ pub(crate) async fn lease_loop(state: AppState) {
                     // End.
                     attempt_state
                         .transcode
-                        .begin_session_publication_fence(&attempt_session)
+                        .begin_session_release_fence(&attempt_session, intent.terminal)
                         .await;
                     // This one-shot owner has no request deadline. Awaiting
                     // the mutation to a definitive result is required because
@@ -6808,6 +6882,10 @@ fn take_stale_settlement_candidates(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "media_sessions/cleanup_tests.rs"]
+mod cleanup_tests;
 
 /// K-03: the takeover loop's switch reads, on a virtual clock.
 #[cfg(test)]

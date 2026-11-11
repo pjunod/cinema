@@ -991,7 +991,10 @@ async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
     file.dolby_vision.profile = Some(8);
     file.path = testfixtures::source("closed-gop");
     file.duration_ms = Some(12_000);
-    let videos = video_identities(&file, None, true, false);
+    // The budget is independent of the optional dovi_rpu filter. The CI
+    // FFmpeg 6 build has filter_units but not dovi_rpu; claiming the latter
+    // makes the child exit before the paced input can reach its deadline.
+    let videos = video_identities(&file, None, false, false);
     assert_eq!(videos.len(), 2);
     let mut pass = shared_index_pass(
         &file,
@@ -1031,7 +1034,11 @@ async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
         let IndexOutcome::Failed(failure) = build.outcome else {
             panic!("{:?}", build.outcome);
         };
-        assert_eq!(failure.code, IndexFailureCode::IndexBudgetExceeded);
+        assert_eq!(
+            failure.code,
+            IndexFailureCode::IndexBudgetExceeded,
+            "the paced shared pass must hit its budget: {failure:?}"
+        );
     }
 }
 
@@ -1982,6 +1989,254 @@ async fn a_landing_in_a_real_index_resolves_uniquely() {
             segplan::match_landing(&index, &observed, start),
             Ok(start),
             "a real fixture's fragment byte counts must place a landing"
+        );
+    }
+}
+
+#[cfg(unix)]
+mod dv_title_companion {
+    use super::*;
+
+    fn output(code: i32, stdout: &str, stderr: &str) -> plurx_core::process::bounded::Output {
+        use std::os::unix::process::ExitStatusExt;
+        plurx_core::process::bounded::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    const AGGREGATE: &str = r#"{"schema":1,"complete":true,"decoded_frames":3,"valid_l1_frames":3,"missing_l1_frames":0,"invalid_l1_frames":0,"max_l1_pq":3000,"mastering_luminance":{"state":"unknown"},"mastering_primaries":{"state":"unknown"}}"#;
+
+    /// The companion scan is judged as the title job judges its own: a
+    /// refusal, a scanner that changed under the pass, or an incomplete or
+    /// inconsistent aggregate keeps nothing.
+    #[test]
+    fn the_companion_scan_is_judged_like_the_title_job() {
+        let stats = dv_title_aggregate(&output(0, AGGREGATE, ""), true).expect("complete");
+        assert_eq!(stats.decoded_frames, 3);
+        assert_eq!(stats.max_l1_pq, Some(3000));
+        assert!(dv_title_aggregate(&output(0, AGGREGATE, ""), false).is_err());
+        let refused = dv_title_aggregate(
+            &output(
+                1,
+                "",
+                "DV title scan refused: contiguous decoded title coverage\n",
+            ),
+            true,
+        )
+        .expect_err("refused");
+        assert!(
+            refused.contains("contiguous decoded title coverage"),
+            "{refused}"
+        );
+        let incomplete = AGGREGATE.replace(r#""complete":true"#, r#""complete":false"#);
+        assert!(dv_title_aggregate(&output(0, &incomplete, ""), true).is_err());
+        assert!(dv_title_aggregate(&output(0, "{}", ""), true).is_err());
+    }
+
+    /// The scan never enters the pass: same argv, same descriptors, so a scan
+    /// that fails cannot fail or slow the index.
+    #[test]
+    fn the_companion_scan_leaves_the_index_pass_untouched() {
+        let source = include_str!("../fragindex.rs");
+        let pass_start = source.find("fn shared_index_pass(").expect("pass");
+        let pass_end = pass_start + source[pass_start..].find("\n}\n").expect("end");
+        assert!(
+            !source[pass_start..pass_end].contains("dv_title"),
+            "argv carries no scan"
+        );
+        let spawn = source
+            .find("Some(ride) => ride.spawn(source, budget)")
+            .expect("spawn");
+        let finish = source
+            .find("let pending = ride.finish(file.id, task, lead_built, wait).await;")
+            .expect("finish");
+        let build = source
+            .find("let built = build_with_args_shared(")
+            .expect("build");
+        assert!(
+            spawn < build && build < finish,
+            "spawned before the pass, judged after it"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn budgeted_companion_inherits_no_raw_source_and_refused_pass_joins_its_input() {
+        use plurx_core::transcode::dv_processing::{DvBackendIdentity, DvDigest};
+        use std::os::unix::fs::PermissionsExt;
+        let directory = crate::test_tempdir().expect("companion custody fixture");
+        let scanner = directory.path().join("scanner");
+        std::fs::write(
+            &scanner,
+            r#"#!/bin/sh
+set -eu
+case "$1" in http://127.0.0.1:*/*) ;; *) exit 91 ;; esac
+test "$2" = 0
+test ! -e /proc/self/fd/3
+printf '%s' "$1" > "${0%/*}/scanner.input"
+printf '%s' "$$" > "${0%/*}/scanner.pid"
+exec /bin/sleep 60
+"#,
+        )
+        .expect("write capability-checking scanner");
+        std::fs::set_permissions(&scanner, std::fs::Permissions::from_mode(0o700))
+            .expect("executable scanner fixture");
+        let digest = || DvDigest::new("a".repeat(64)).expect("fixture digest");
+        let identity = DvBackendIdentity::new(digest(), digest(), digest(), digest(), 1, digest())
+            .expect("fixture backend identity");
+        let tools = crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture_with_scanner(
+            identity, scanner,
+        )
+        .expect("identity-bound scanner fixture");
+        let ride = DvTitleRide {
+            tools: Arc::new(tools),
+            stream_index: 0,
+        };
+        let source_path = directory.path().join("original.mkv");
+        std::fs::write(&source_path, b"original media capability").expect("held source fixture");
+        let source = std::fs::File::open(source_path).expect("source descriptor");
+        let (_store, _job, active) = crate::background_jobs::tests::active().await;
+        let task = crate::background_jobs::budgeted(active.fence().source_budget(), async {
+            ride.spawn(&source, Duration::from_secs(60))
+                .expect("owned companion")
+        })
+        .await;
+        let pid_path = directory.path().join("scanner.pid");
+        let pid: i32 = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(pid) = tokio::fs::read_to_string(&pid_path).await {
+                    if let Ok(pid) = pid.parse() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("scanner accepted URL and no inherited source FD");
+        let url = tokio::fs::read_to_string(directory.path().join("scanner.input"))
+            .await
+            .expect("actual private input URL");
+        assert!(
+            ride.finish(1, task, false, Duration::from_secs(1))
+                .await
+                .is_none(),
+            "a refused index pass keeps no title aggregate"
+        );
+        // SAFETY: zero observes only this fixture's already-joined process.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "refusal returns only after scanner reap"
+        );
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("local capability client");
+        assert!(
+            client.get(url).send().await.is_err(),
+            "companion source listener is revoked and joined before return"
+        );
+        active.finish().await;
+    }
+
+    /// The daemon's own index pass on a real title, with an installed
+    /// processing bundle, yields the aggregate the standalone scan published.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "physical: a processing bundle (PLURX_DV_PROCESSING_DIR), a Dolby Vision title and its standalone aggregate"]
+    async fn physical_the_index_pass_reads_the_standalone_title_aggregate() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+        use plurx_core::store::{SqliteStore, Store};
+        let source = std::path::PathBuf::from(
+            std::env::var("PLURX_DV_RIDE_SOURCE").expect("PLURX_DV_RIDE_SOURCE"),
+        );
+        let expected: plurx_core::scan::dv_title::DvTitleStats = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::env::var("PLURX_DV_RIDE_EXPECTED").expect("PLURX_DV_RIDE_EXPECTED"),
+            )
+            .expect("expected aggregate"),
+        )
+        .expect("aggregate");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "ride".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![source.parent().expect("parent").into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "ride".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let probe = plurx_core::scan::probe::probe(&source)
+            .await
+            .expect("probe");
+        let metadata = std::fs::metadata(&source).expect("metadata");
+        let mtime = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs() as i64;
+        let id = store
+            .upsert_file(
+                item,
+                source.to_str().expect("path"),
+                metadata.len() as i64,
+                mtime,
+                &probe,
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("file").expect("file");
+        let tools = crate::vodencode::dv_runtime::ToolSet::capture()
+            .await
+            .expect("bundle")
+            .expect("bundle installed");
+        let videos = video_identities(&file, None, true, false);
+        let cache = crate::test_tempdir().expect("cache");
+        let started = Instant::now();
+        let builds = build_riding_shared(
+            &file,
+            &videos,
+            cache.path(),
+            Duration::from_secs(7200),
+            None,
+            None,
+        )
+        .await;
+        let lead = builds.into_iter().next().expect("lead");
+        assert!(
+            matches!(lead.outcome, IndexOutcome::Built(_)),
+            "{:?}",
+            lead.outcome
+        );
+        let pending = lead
+            .dv_title
+            .expect("the companion scan kept its aggregate");
+        assert_eq!(pending.stats, expected);
+        assert_eq!(pending.scanner_digest, tools.title_scanner_digest());
+        println!(
+            "companion scan on {}: {} identities, {} s, {} pictures",
+            source.display(),
+            videos.len(),
+            started.elapsed().as_secs(),
+            pending.stats.decoded_frames
         );
     }
 }

@@ -631,11 +631,43 @@ pub struct DownloadedSubtitle {
     /// Local generation has no provider identity; zero is reserved for this provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcription: Option<SubtitleTranscription>,
+    /// Existing-caption translation retains its own input/model provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_translation: Option<SubtitleTextTranslation>,
     pub language: String,
     pub title: String,
     pub hearing_impaired: bool,
     pub forced: bool,
     pub vtt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubtitleTextTranslation {
+    pub artifact_key: String,
+    pub subtitle_index: i64,
+    pub input_sha256: String,
+    pub source_language: String,
+    pub target_language: String,
+    pub model_id: String,
+    pub model_sha256: String,
+    pub adapter_contract: String,
+    pub engine_sha256: String,
+    pub generated_at_ms: i64,
+}
+
+impl DownloadedSubtitle {
+    /// Stable within a source revision; unlike its current display ordinal,
+    /// this identity survives other downloaded tracks being added or removed.
+    pub fn stable_id(&self) -> String {
+        if let Some(origin) = &self.text_translation {
+            return origin.artifact_key.clone();
+        }
+        if let Some(origin) = &self.transcription {
+            return origin.artifact_key.clone();
+        }
+        format!("provider:{}", self.provider_file_id)
+    }
 }
 
 /// Offline machine-generated caption provenance, distinct from provider downloads.
@@ -1169,6 +1201,16 @@ pub enum MediaSessionRequestClaim {
     Resolved(Box<MediaSessionRoute>),
     Conflict,
     Overloaded,
+}
+
+/// A request claim's row as it stands, read without maintenance or a write:
+/// what a retry that joined a still-starting owner polls between claims.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionRequestProgress {
+    /// `starting`, `resolved` or `failed`.
+    pub state: String,
+    pub incarnation_id: String,
+    pub claim_expires_at_ms: i64,
 }
 
 /// Inputs committed when a selected worker has created the local session.
@@ -1977,7 +2019,13 @@ pub struct PlaybackEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaybackEventQuery {
     pub since_ms: Option<i64>,
+    /// Exclusive upper bound on `at_unix_ms`: the cursor of a newest-first
+    /// page is the oldest time of the page before it.
+    pub before_ms: Option<i64>,
     pub event: Option<String>,
+    /// When non-empty, the row's event must be one of these (and `event`, if
+    /// also set, must match as well).
+    pub events: Vec<String>,
     pub limit: i64,
 }
 

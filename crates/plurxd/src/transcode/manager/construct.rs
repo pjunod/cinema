@@ -1,5 +1,13 @@
 use super::*;
 
+struct LibraryTurnWait<'a>(&'a tokio::sync::watch::Sender<usize>);
+
+impl Drop for LibraryTurnWait<'_> {
+    fn drop(&mut self) {
+        self.0.send_modify(|waiters| *waiters -= 1);
+    }
+}
+
 impl TranscodeManager {
     pub(crate) fn candidate_production_proof(&self, recipe: [u8; 32]) -> Option<u32> {
         self.candidate_production_proofs
@@ -45,6 +53,7 @@ impl TranscodeManager {
             runtime_cache.clone(),
         ));
         TranscodeManager {
+            source_identity: None,
             source_workers: source_actor::SourceWorkerRegistry::default(),
             source_http_starts: crate::http::shared_source_playback::SourceStartRegistry::default(),
             vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
@@ -87,8 +96,17 @@ impl TranscodeManager {
             ),
             #[cfg(target_os = "linux")]
             processed_preparation_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            processed_upgrade_roots: Arc::default(),
             #[cfg(target_os = "linux")]
             processed_instance_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            #[cfg(target_os = "linux")]
+            processed_reconstruction_slots: Arc::new(tokio::sync::Semaphore::new(
+                super::LIVE_RECONSTRUCTION_SLOTS,
+            )),
+            #[cfg(target_os = "linux")]
+            reconstruction_qualification: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(target_os = "linux")]
+            fel_requalification_requests: std::sync::Mutex::new(std::collections::HashMap::new()),
             pipeline,
             encoder_override: None,
             admissions: Admissions::new(),
@@ -114,12 +132,17 @@ impl TranscodeManager {
             serving_authority: crate::serving_fence::ServingAuthority::always_ready(),
             serving_ready: AtomicBool::new(true),
             serving_loss_generation: AtomicU64::new(0),
+            outage_resolution: tokio::sync::watch::Sender::new(
+                crate::serving_fence::OutageResolution::initial(),
+            ),
+            outage_owner_active: AtomicBool::new(false),
             active_session_count: Arc::new(AtomicUsize::new(0)),
             codec_qualification: Arc::new(CodecQualificationMetrics::default()),
             requests: std::sync::Mutex::new(HashMap::new()),
             producer: ProducerTuning::default(),
             background_producer: Mutex::new(()),
             background_heavy: Arc::new(tokio::sync::Semaphore::new(BACKGROUND_HEAVY_LIMIT)),
+            interactive_library_waiters: tokio::sync::watch::Sender::new(0),
             offline_waiting: AtomicBool::new(false),
             dv_strippable: false,
             dv_convertible: false,
@@ -354,6 +377,9 @@ impl TranscodeManager {
                 "could not create ffmpeg runtime cache: {err}"
             );
         }
+        if let Some(identity) = &self.source_identity {
+            self.vod.set_source_identity(identity.clone());
+        }
         self.cache = Some(CacheConfig {
             dir: cache_dir,
             ffmpeg_build,
@@ -362,8 +388,33 @@ impl TranscodeManager {
         self
     }
 
+    pub(crate) fn with_source_identity(mut self, node_id: String, boot_id: uuid::Uuid) -> Self {
+        let identity = crate::source_custody::SourceIdentity { node_id, boot_id };
+        self.vod.set_source_identity(identity.clone());
+        if let Some(jobs) = &self.subtitle_jobs {
+            jobs.configure_source_identity(identity.clone());
+        }
+        self.source_identity = Some(identity);
+        self
+    }
+
+    pub(crate) fn foreground_source_request(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        lifetime: &str,
+        incarnation: uuid::Uuid,
+        policy: plurx_core::store::background_jobs_resources::ForegroundSourcePolicy,
+    ) -> Option<crate::source_custody::SourceRequest> {
+        self.source_identity.as_ref().map(|identity| {
+            identity.request(Arc::clone(&self.store), file, lifetime, incarnation, policy)
+        })
+    }
+
     pub(crate) fn with_subtitle_jobs(mut self, jobs: Arc<crate::state::JobManager>) -> Self {
         jobs.share_subtitle_admissions(self.admissions.clone());
+        if let Some(identity) = &self.source_identity {
+            jobs.configure_source_identity(identity.clone());
+        }
         self.subtitle_jobs = Some(jobs);
         self
     }
@@ -1187,9 +1238,221 @@ impl TranscodeManager {
             }))
     }
 
+    /// Source read attestation has no producer/job authority. It consumes one
+    /// ordinary speculative CPU slot and never uses the oversized exception.
+    pub(crate) async fn read_attestation_limits(&self) -> (usize, usize) {
+        (self.max_hw_sessions().await, self.software_budget().await)
+    }
+    pub(crate) fn admit_read_attestation(
+        &self,
+        limits: (usize, usize),
+    ) -> Option<crate::admission::TranscodePermit> {
+        if self.admissions.live_is_waiting()
+            || self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+            || self.admissions.software_in_use().checked_add(1)? > limits.1
+        {
+            return None;
+        }
+        self.admissions.try_admit_bundle(
+            limits.0,
+            limits.1,
+            &TranscodeResourceEstimate {
+                hardware_slot: false,
+                cpu_threads: 1,
+                decoder_threads: None,
+            },
+            Priority::Speculative,
+        )
+    }
+
+    /// Caption inference supports the current playback using two bounded CPU
+    /// threads. It shares the heavy lane and the normal resource pool, but an
+    /// already-running hardware/video session does not make spare CPU unusable.
+    pub(crate) async fn admit_speech(&self) -> Option<FragmentAdmission> {
+        if self.admissions.live_is_waiting()
+            || self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        let heavy = Arc::clone(&self.background_heavy)
+            .try_acquire_owned()
+            .ok()?;
+        self.admit_speech_with_heavy(heavy).await
+    }
+
+    /// A currently demanded progressive caption operation asks background work
+    /// to yield, while retaining the ordinary two-thread and heavy-lane bounds.
+    /// Model installation and self-tests continue to use speculative admission.
+    pub(crate) async fn admit_progressive_speech(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Option<FragmentAdmission> {
+        // Resolve the same configured budget as ordinary speech admission
+        // before starting the bounded resource wait.
+        let budget = self.software_budget().await;
+        if budget < 2 {
+            return None;
+        }
+        let mut waiting = self.admissions.software_pool().queue_for_capacity();
+        let deadline = tokio::time::Instant::now() + crate::admission::QUEUE_WAIT;
+        loop {
+            if cancel.is_cancelled()
+                || self
+                    .offline_waiting
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return None;
+            }
+            if let Ok(heavy) = Arc::clone(&self.background_heavy).try_acquire_owned() {
+                // Never use the lone-job oversized exception for inference.
+                if self.admissions.software_in_use().checked_add(2)? <= budget {
+                    if let Some(permit) = self.admissions.try_admit_bundle(
+                        0,
+                        budget,
+                        &TranscodeResourceEstimate {
+                            hardware_slot: false,
+                            cpu_threads: 2,
+                            decoder_threads: None,
+                        },
+                        Priority::Live,
+                    ) {
+                        let admission = FragmentAdmission {
+                            _heavy: heavy,
+                            threads: 2,
+                            _permit: permit,
+                            extension: std::sync::Mutex::new(None),
+                        };
+                        // Our registration may not reject its own reservation.
+                        // A remaining viewer/offline waiter still takes priority.
+                        drop(waiting);
+                        return (!cancel.is_cancelled()
+                            && self.speech_capacity_available(&admission))
+                        .then_some(admission);
+                    }
+                }
+            }
+            waiting.mark_capacity_blocked();
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return None,
+                () = tokio::time::sleep(crate::transcode::ADMISSION_POLL.min(deadline - now)) => {}
+            }
+        }
+    }
+
+    pub(crate) async fn admit_speech_queued(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Option<FragmentAdmission> {
+        let heavy = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return None,
+            permit = self.queued_maintenance_turn() => permit?,
+        };
+        if cancel.is_cancelled() {
+            return None;
+        }
+        self.admit_speech_with_heavy(heavy).await
+    }
+
+    async fn admit_speech_with_heavy(
+        &self,
+        heavy: tokio::sync::OwnedSemaphorePermit,
+    ) -> Option<FragmentAdmission> {
+        let threads = 2;
+        let budget = self.software_budget().await;
+        // This work may never use the pool's lone-job oversized exception.
+        if self.admissions.software_in_use().checked_add(threads)? > budget
+            || self.admissions.live_is_waiting()
+            || self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        self.admissions
+            .try_admit_bundle(
+                self.max_hw_sessions().await,
+                budget,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: threads,
+                    decoder_threads: None,
+                },
+                Priority::Speculative,
+            )
+            .map(|permit| FragmentAdmission {
+                _heavy: heavy,
+                threads,
+                _permit: permit,
+                extension: std::sync::Mutex::new(None),
+            })
+    }
+
+    pub(crate) async fn speech_capacity_observation(&self) -> (usize, usize, bool) {
+        let budget = self.software_budget().await;
+        let used = self.admissions.software_in_use();
+        let available = used.checked_add(2).is_some_and(|total| total <= budget)
+            && !self.admissions.live_is_waiting()
+            && !self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+            && self.background_heavy.available_permits() > 0;
+        (budget, used, available)
+    }
+
+    pub(crate) fn speech_capacity_available(&self, admission: &FragmentAdmission) -> bool {
+        admission.threads == 2
+            && !self.admissions.live_is_waiting()
+            && !self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {
         self.admit_source_work(self.software_budget().await.max(1))
             .await
+    }
+
+    /// Queue for the next safe heavy turn after the Store verifies interactive
+    /// interest. Awaiting this permit holds no CPU, GPU or source reservation.
+    pub(crate) async fn admit_interactive_library(&self) -> Option<FragmentAdmission> {
+        if self.background_yield_reason().is_some() {
+            return None;
+        }
+        self.interactive_library_waiters.send_modify(|n| *n += 1);
+        let waiting = LibraryTurnWait(&self.interactive_library_waiters);
+        let heavy = Arc::clone(&self.background_heavy)
+            .acquire_owned()
+            .await
+            .ok()?;
+        drop(waiting);
+        self.admit_source_work_with_heavy(self.software_budget().await.max(1), heavy)
+            .await
+    }
+
+    /// Ordinary FIFO waiters already in the semaphore queue can be woken
+    /// first. Pass the empty lane to a waiting manual scan before reserving CPU.
+    async fn queued_maintenance_turn(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let mut waiters = self.interactive_library_waiters.subscribe();
+        loop {
+            waiters.wait_for(|n| *n == 0).await.ok()?;
+            let heavy = Arc::clone(&self.background_heavy)
+                .acquire_owned()
+                .await
+                .ok()?;
+            if *waiters.borrow() == 0 {
+                return Some(heavy);
+            }
+        }
     }
 
     /// The title scanner has one software decoder thread and never uses a GPU.
@@ -1198,22 +1461,15 @@ impl TranscodeManager {
         self.admit_source_work(1).await
     }
 
-    /// A claimed, cancellable operation keeps its FIFO place behind the
-    /// current heavy worker instead of losing every try-acquire race. CPU
-    /// capacity is reserved only after this same shared gate is acquired;
-    /// foreground work still wins the normal admission checks.
-    pub(crate) async fn admit_fragment_queued(
-        &self,
-        cancel: &tokio_util::sync::CancellationToken,
-    ) -> Option<FragmentAdmission> {
-        let heavy = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return None,
-            permit = Arc::clone(&self.background_heavy).acquire_owned() => permit.ok()?,
-        };
-        if cancel.is_cancelled() {
-            return None;
-        }
+    /// The node-local fragment index pass's queued turn on the heavy lane.
+    /// It waits in the lane's FIFO queue behind the holder (a Dolby Vision
+    /// title scan) and any earlier waiter (a speech pass), and is still
+    /// refused when foreground work holds the pool once its turn comes.
+    /// Workers that only try-acquire never get ahead of a waiter, so the
+    /// pass takes this once per pass and uses [`Self::admit_fragment`] for
+    /// the rest of it. Dropping the future leaves the queue.
+    pub(crate) async fn admit_fragment_queued(&self) -> Option<FragmentAdmission> {
+        let heavy = self.queued_maintenance_turn().await?;
         self.admit_source_work_with_heavy(self.software_budget().await.max(1), heavy)
             .await
     }
@@ -1250,8 +1506,41 @@ impl TranscodeManager {
             .map(|permit| FragmentAdmission {
                 _heavy: heavy,
                 threads,
+                extension: std::sync::Mutex::new(None),
                 _permit: permit,
             })
+    }
+
+    /// Admit a heavier bundle for a step of the background job that holds
+    /// `admission` (the FEL qualification's GPU graph inside a title scan),
+    /// as a claim on that admission: [`Self::fragment_worker_idle`] counts it
+    /// as the job's own capacity, so the job does not read its own step as
+    /// foreground pressure. Released by [`FragmentAdmission::release_extension`]
+    /// or with the admission.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn extend_fragment_admission(
+        &self,
+        admission: &FragmentAdmission,
+        resources: &TranscodeResourceEstimate,
+        software_threads: Option<u32>,
+    ) -> Result<(), String> {
+        if !self.fragment_worker_idle(admission) {
+            return Err("foreground work is waiting for this node's capacity".into());
+        }
+        let permit = crate::vodencode::try_admit_frozen_bundle(
+            &self.admissions,
+            self.max_hw_sessions().await,
+            self.software_budget().await,
+            resources,
+            software_threads,
+            Priority::Background,
+            None,
+        )
+        .map_err(|_| "the GPU slot or CPU this step needs is in use".to_owned())?;
+        if !admission.install_extension(permit) {
+            return Err("this job already holds an extended admission".into());
+        }
+        Ok(())
     }
 
     /// Own the existing heavy-worker lane, not an encoder estimate invented
@@ -1270,12 +1559,27 @@ impl TranscodeManager {
     }
 
     pub(crate) fn fragment_worker_idle(&self, admission: &FragmentAdmission) -> bool {
+        let (hardware, threads) = admission.claimed();
         !self.admissions.live_is_waiting()
-            && self.admissions.in_use() == 0
-            && self.admissions.software_in_use() <= admission.threads
+            && self.admissions.in_use() <= hardware
+            && self.admissions.software_in_use() <= threads
             && !self
                 .offline_waiting
                 .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether background work holding `admission` must yield now: a viewer
+    /// waits or holds capacity beyond the admission's own claim. The job's
+    /// own reservation is not competing work.
+    pub(crate) fn fragment_must_yield(&self, admission: &FragmentAdmission) -> bool {
+        !self.fragment_worker_idle(admission) || self.admissions.background_must_yield()
+    }
+
+    /// Why background work that holds no admission should not start now:
+    /// foreground demand or an offline download, but not another
+    /// background job, which it queues behind instead.
+    pub(crate) fn background_yield_reason(&self) -> Option<&'static str> {
+        self.pretranscode_publication_yield_reason()
     }
 
     /// What the Developer card reports about rolling retention on this node:

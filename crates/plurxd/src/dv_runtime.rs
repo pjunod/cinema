@@ -12,6 +12,13 @@ use std::{
 #[cfg(target_os = "linux")]
 type RegistrationHook = Box<dyn FnOnce(&crate::prodrun::ProducerRegistration) + Send>;
 
+#[cfg(target_os = "linux")]
+fn trace_window_stage(entry: u32, stage: &'static str, since: &mut std::time::Instant) {
+    tracing::debug!(target: "plurxd::dv", entry, stage,
+        elapsed_us = since.elapsed().as_micros() as u64, "processed window stage completed");
+    *since = std::time::Instant::now();
+}
+
 #[derive(Debug)]
 pub(crate) enum WindowOutcome<T> {
     Completed(T),
@@ -64,11 +71,28 @@ pub(crate) struct ToolSet {
     pub(crate) scanner: PathBuf,
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
     pub(crate) identity: DvBackendIdentity,
+    /// The scanner executable's own digest. It is statically linked, so this
+    /// is everything that decides a complete-title aggregate.
+    scanner_sha256: String,
     artifacts: Arc<Vec<(PathBuf, String)>>,
 }
 
 #[cfg(all(test, target_os = "linux"))]
 impl ToolSet {
+    /// An explicitly controlled scanner result with the ordinary executable
+    /// artifact-current check, used only by admitted lifecycle fixtures.
+    pub(crate) fn lifecycle_fixture_with_scanner(
+        identity: DvBackendIdentity,
+        scanner: PathBuf,
+    ) -> Result<Self, String> {
+        let digest = hash_file(&scanner)?;
+        let mut tools = Self::lifecycle_fixture(identity);
+        tools.scanner = scanner.clone();
+        tools.scanner_sha256 = digest.clone();
+        tools.artifacts = Arc::new(vec![(scanner, digest)]);
+        Ok(tools)
+    }
+
     /// Lifecycle fixtures never launch this renderer: they hold the exclusive
     /// worker claim while exercising attachment of a checked completed plan.
     pub(crate) fn lifecycle_fixture(identity: DvBackendIdentity) -> Self {
@@ -77,6 +101,7 @@ impl ToolSet {
             scanner: PathBuf::from("/bin/false"),
             renderer_env: Vec::new(),
             identity,
+            scanner_sha256: hash(b"/bin/false"),
             artifacts: Arc::new(Vec::new()),
         }
     }
@@ -85,7 +110,11 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 15] = [
+    let inputs: [(&str, &[u8]); 18] = [
+        (
+            "author_p81.c",
+            include_bytes!("../../../tools/dv_processing/author_p81.c"),
+        ),
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -119,6 +148,10 @@ fn renderer_source_identity() -> String {
             include_bytes!("../../../tools/dv_processing/hevc-rasl-frame-thread.patch"),
         ),
         (
+            "movie_source_io.h",
+            include_bytes!("../../../tools/dv_processing/movie_source_io.h"),
+        ),
+        (
             "nlq_clipping.h",
             include_bytes!("../../../tools/dv_processing/nlq_clipping.h"),
         ),
@@ -137,6 +170,10 @@ fn renderer_source_identity() -> String {
         (
             "segment_decode_render.c",
             include_bytes!("../../../tools/dv_processing/segment_decode_render.c"),
+        ),
+        (
+            "source_reader.h",
+            include_bytes!("../../../tools/dv_processing/source_reader.h"),
         ),
         (
             "title_constants.h",
@@ -160,7 +197,7 @@ fn renderer_source_identity() -> String {
 /// picture costs more than decoding it in software. The VA-API runtime and
 /// drivers are the media runtime's (the same ones the encoder uses), so its
 /// library directory follows the bundle's own on the search path.
-fn gpu_decode_environment(
+pub(crate) fn gpu_decode_environment(
     environment: &mut Vec<(String, std::ffi::OsString)>,
     device: &str,
     ffmpeg: &str,
@@ -248,9 +285,19 @@ fn contained(root: &Path, path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 impl ToolSet {
+    /// The whole processing backend: renderer, libraries, parser and helper
+    /// sources. FEL verdicts are measurements of that renderer, so they are
+    /// keyed by it.
     #[cfg(unix)]
-    pub(crate) fn scanner_digest(&self) -> String {
+    pub(crate) fn backend_digest(&self) -> String {
         hash(&serde_json::to_vec(&self.identity).expect("validated backend identity serializes"))
+    }
+    /// What a complete-title aggregate depends on: the scanner executable and
+    /// nothing else. Binding title demand to the whole backend re-queued every
+    /// Dolby Vision title whenever the renderer, a shader or libplacebo changed.
+    #[cfg(unix)]
+    pub(crate) fn title_scanner_digest(&self) -> String {
+        hash(format!("plurx-dv-title-scanner-v1\0{}", self.scanner_sha256).as_bytes())
     }
     /// Configuration is captured by the worker, never supplied by a playback
     /// request. Absence preserves ordinary output and the saved preference.
@@ -258,6 +305,12 @@ impl ToolSet {
         let root = std::env::var_os("PLURX_DV_PROCESSING_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/usr/lib/plurx/dv-processing".into());
+        Self::capture_at(root).await
+    }
+
+    // Keep the manifest-validation boundary identical for production discovery
+    // and fixture bundles without mutating process-global configuration.
+    async fn capture_at(root: PathBuf) -> Result<Option<Arc<Self>>, String> {
         tokio::task::spawn_blocking(move || {
             let manifest_path = root.join("build-identity.json");
             let bytes = match std::fs::read(&manifest_path) {
@@ -358,11 +411,18 @@ impl ToolSet {
             )
             .map_err(|e| e.to_string())?;
             artifacts.push((root.join("build-identity.json"), hash(&bytes)));
+            let scanner_sha256 = manifest
+                .tools
+                .get("scanner")
+                .ok_or("missing scanner")?
+                .sha256
+                .clone();
             Ok(Some(Arc::new(Self {
                 renderer: tools.remove("renderer").ok_or("missing renderer")?,
                 scanner: tools.remove("scanner").ok_or("missing scanner")?,
                 renderer_env: environment,
                 identity,
+                scanner_sha256,
                 artifacts: Arc::new(artifacts),
             })))
         })
@@ -410,16 +470,17 @@ impl PrivateWindow {
     pub(crate) async fn finalize(
         self,
         observed: ObservedWindow,
+        entry_index: u32,
         grid: plurx_core::transcode::VodFrameGrid,
         first_global_frame: u64,
         raster: (u32, u32),
         destination: plurx_core::transcode::dv_processing::DvDestination,
-        source_level: Option<u8>,
+        envelope: Option<plurx_core::transcode::EnhancementRateEnvelope>,
         runtime_cache: &Path,
         audio_channels: Option<u32>,
     ) -> Result<VerifiedWindow, String> {
         use plurx_core::transcode::dv_processing::{
-            dv_author_profile81_window, dv_validate_encoded_window, DvDestination,
+            dv_author_profile81_window_with_envelope, dv_validate_encoded_window, DvDestination,
         };
         if self
             .display_target
@@ -428,6 +489,7 @@ impl PrivateWindow {
         {
             return Err("display target and output grade differ".into());
         }
+        let mut stage_started = std::time::Instant::now();
         let rpus: Vec<_> = observed
             .pictures
             .iter()
@@ -436,6 +498,14 @@ impl PrivateWindow {
         let origin =
             plurx_core::transcode::vod_reconstructed_video_origin(grid, first_global_frame)
                 .map_err(str::to_owned)?;
+        if let Some(envelope) = envelope {
+            let signalled_hrd = plurx_core::transcode::validate_encoded_enhancement_envelope(
+                &self.encoded,
+                envelope,
+            )
+            .map_err(str::to_owned)?;
+            tracing::debug!(target: "plurxd::dv", signalled_hrd, envelope = %envelope.identity(), "observed completed enhancement coded envelope");
+        }
         let bytes = match destination {
             DvDestination::Sdr => {
                 plurx_core::transcode::dv_processing::dv_author_sdr_window(&self.encoded)
@@ -454,14 +524,14 @@ impl PrivateWindow {
                 }
                 None => self.encoded,
             },
-            DvDestination::Profile81 => dv_author_profile81_window(
+            DvDestination::Profile81 => dv_author_profile81_window_with_envelope(
                 &self.encoded,
                 raster,
                 grid.numerator,
                 origin,
                 grid.denominator,
                 &rpus,
-                source_level.ok_or("held source has no DV level")?,
+                envelope.ok_or("frozen P81 rate envelope absent")?,
             )
             .map_err(|e| e.to_string())?,
         };
@@ -475,6 +545,11 @@ impl PrivateWindow {
             destination,
         )
         .map_err(|e| e.to_string())?;
+        trace_window_stage(
+            entry_index,
+            "finalize.encoded_validation",
+            &mut stage_started,
+        );
         let cache = runtime_cache.to_owned();
         let (bytes, held) = tokio::task::spawn_blocking(move || {
             let held = crate::ffmpeg::stage_completed_probe_file(&bytes, &cache)
@@ -489,7 +564,7 @@ impl PrivateWindow {
         let reporter =
             crate::ffmpeg::EncodedExecutable::capture_program(&crate::ffmpeg::ffprobe_bin())
                 .await?;
-        let document = crate::ffmpeg::held_source_probe_json_bound(
+        let document = crate::ffmpeg::held_artifact_probe_json_bound(
             held.as_file(),
             crate::process_control::ChildWork::realtime("DV completed output header probe"),
             &reporter,
@@ -497,6 +572,7 @@ impl PrivateWindow {
         .await?;
         let document: serde_json::Value =
             serde_json::from_str(&document).map_err(|e| e.to_string())?;
+        trace_window_stage(entry_index, "finalize.header_probe", &mut stage_started);
         let streams = document
             .get("streams")
             .and_then(serde_json::Value::as_array)
@@ -596,204 +672,11 @@ pub(crate) fn completed_window_encoder(
     }
 }
 
-/// SDR consumes only the selected stream's mastering minimum. Missing HDR
-/// primaries do not invalidate this independent floor fact or invent BT.2020.
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn source_mastering_minimum(stream: &serde_json::Value) -> Result<Option<u32>, String> {
-    let invalid = || "targeted SDR source MDCV minimum malformed or conflicting".to_owned();
-    let Some(records) = stream.get("side_data_list") else {
-        return Ok(None);
-    };
-    let records = records.as_array().ok_or_else(invalid)?;
-    let mut result = None;
-    for record in records.iter().filter(|record| {
-        record
-            .get("side_data_type")
-            .and_then(serde_json::Value::as_str)
-            == Some("Mastering display metadata")
-    }) {
-        let Some(value) = record.get("min_luminance") else {
-            continue;
-        };
-        let text = value.as_str().ok_or_else(invalid)?;
-        let (numerator, denominator) = text.split_once('/').ok_or_else(invalid)?;
-        let numerator = numerator.parse::<u64>().map_err(|_| invalid())?;
-        let denominator = denominator.parse::<u64>().map_err(|_| invalid())?;
-        if denominator == 0 {
-            return Err(invalid());
-        }
-        let scaled = (u128::from(numerator) * 10_000 + u128::from(denominator / 2))
-            / u128::from(denominator);
-        let minimum = u32::try_from(scaled).map_err(|_| invalid())?;
-        if minimum > 10_000 || result.is_some_and(|old| old != minimum) {
-            return Err(invalid());
-        }
-        result = Some(minimum);
-    }
-    Ok(result)
-}
-
-/// Parse only the already-attested selected video stream, never a container or
-/// another track. FFprobe's rational values are converted with integer rounding
-/// to ST 2086 units. A missing record differs from malformed/conflicting data.
-#[cfg(any(target_os = "linux", test))]
-fn source_mastering_metadata_details(
-    stream: &serde_json::Value,
-) -> Result<Option<ValidatedSourceMastering>, String> {
-    use plurx_core::transcode::dv_processing::DvSourceMastering;
-    let invalid = || "targeted HDR10 source MDCV malformed or conflicting".to_owned();
-    let Some(records) = stream.get("side_data_list") else {
-        return Ok(None);
-    };
-    let records = records.as_array().ok_or_else(invalid)?;
-    fn scaled(record: &serde_json::Value, field: &str, scale: u64) -> Option<u64> {
-        let text = record.get(field)?.as_str()?;
-        let (numerator, denominator) = text.split_once('/')?;
-        let numerator = numerator.parse::<u64>().ok()?;
-        let denominator = denominator.parse::<u64>().ok()?;
-        if denominator == 0 {
-            return None;
-        }
-        let value = u128::from(numerator) * u128::from(scale);
-        u64::try_from((value + u128::from(denominator / 2)) / u128::from(denominator)).ok()
-    }
-    let mut result = None;
-    for record in records.iter().filter(|record| {
-        record
-            .get("side_data_type")
-            .and_then(serde_json::Value::as_str)
-            == Some("Mastering display metadata")
-    }) {
-        let mut xy = [0; 8];
-        for (at, name) in [
-            "red_x",
-            "red_y",
-            "green_x",
-            "green_y",
-            "blue_x",
-            "blue_y",
-            "white_point_x",
-            "white_point_y",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            xy[at] = scaled(record, name, 50_000)
-                .and_then(|v| u16::try_from(v).ok())
-                .ok_or_else(invalid)?;
-        }
-        let minimum = scaled(record, "min_luminance", 10_000)
-            .and_then(|v| u32::try_from(v).ok())
-            .ok_or_else(invalid)?;
-        let maximum = scaled(record, "max_luminance", 10_000).ok_or_else(invalid)?;
-        if maximum == 0 || maximum > 100_000_000 || u64::from(minimum) >= maximum {
-            return Err(invalid());
-        }
-        plurx_core::fmp4::Hdr10OutputMetadata::new(xy, 10_000, minimum, 0)
-            .map_err(|_| invalid())?;
-        let next = DvSourceMastering {
-            primaries_rgbw: xy,
-            min_1e4_nits: minimum,
-        };
-        let next = ValidatedSourceMastering {
-            mastering: next,
-            max_1e4_nits: maximum,
-        };
-        if result.is_some_and(|old| old != next) {
-            return Err(invalid());
-        }
-        result = Some(next);
-    }
-    Ok(result)
-}
-
-#[cfg(any(target_os = "linux", test))]
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct ValidatedSourceMastering {
-    mastering: plurx_core::transcode::dv_processing::DvSourceMastering,
-    max_1e4_nits: u64,
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn source_mastering_metadata(
-    stream: &serde_json::Value,
-) -> Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String> {
-    source_mastering_metadata_details(stream).map(|value| value.map(|value| value.mastering))
-}
-
-/// The frame projection is a separate observation of the same held object.
-/// Require its absolute stream index on every frame and compare complete MDCV,
-/// including maximum luminance, before projecting the fields mapping consumes.
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn source_mastering_from_frames(
-    stream: &serde_json::Value,
-    document: &serde_json::Value,
-    absolute_stream: u32,
-) -> Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String> {
-    let invalid = || "targeted HDR10 source frame MDCV malformed or conflicting".to_owned();
-    let frames = source_frame_records(document, absolute_stream, "HDR10")?;
-    let mut observed = source_mastering_metadata_details(stream)?;
-    for frame in frames {
-        if let Some(next) = source_mastering_metadata_details(frame).map_err(|_| invalid())? {
-            if observed.is_some_and(|old| old != next) {
-                return Err(invalid());
-            }
-            observed = Some(next);
-        }
-    }
-    Ok(observed.map(|value| value.mastering))
-}
-
-/// Both mastering projections require the same bounded absolute-stream fence.
-#[cfg(any(target_os = "linux", test))]
-fn source_frame_records<'a>(
-    document: &'a serde_json::Value,
-    absolute_stream: u32,
-    destination: &str,
-) -> Result<&'a [serde_json::Value], String> {
-    let invalid = || format!("targeted {destination} source frame MDCV malformed or conflicting");
-    let frames = document
-        .get("frames")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(invalid)?;
-    if frames.len() > 3 {
-        return Err(invalid());
-    }
-    for frame in frames {
-        if frame
-            .get("stream_index")
-            .and_then(serde_json::Value::as_u64)
-            != Some(u64::from(absolute_stream))
-        {
-            return Err(format!(
-                "targeted {destination} source frame MDCV selected stream differs"
-            ));
-        }
-    }
-    Ok(frames)
-}
-
-/// SDR consumes only actual minima; unrelated/absent coordinates and maxima
-/// cannot invalidate that floor or become invented HDR mastering authority.
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn source_mastering_minimum_from_frames(
-    stream: &serde_json::Value,
-    document: &serde_json::Value,
-    absolute_stream: u32,
-) -> Result<Option<u32>, String> {
-    let mut observed = source_mastering_minimum(stream)?;
-    for frame in source_frame_records(document, absolute_stream, "SDR")? {
-        if let Some(next) = source_mastering_minimum(frame)? {
-            if observed.is_some_and(|old| old != next) {
-                return Err(
-                    "targeted SDR source frame MDCV minimum malformed or conflicting".into(),
-                );
-            }
-            observed = Some(next);
-        }
-    }
-    Ok(observed)
-}
+pub(crate) use crate::decode_facts::mastering::{
+    source_mastering_from_frames, source_mastering_minimum_from_frames,
+};
+#[cfg(test)]
+use crate::decode_facts::mastering::{source_mastering_metadata, source_mastering_minimum};
 
 #[cfg(target_os = "linux")]
 pub(crate) async fn held_source_minimum(
@@ -864,6 +747,18 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) display_target_note: Option<String>,
     pub(crate) destination: plurx_core::transcode::dv_processing::DvDestination,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    /// Where the renderer was admitted to decode; it sized the graph's CPU debit.
+    pub(crate) decode: crate::dv_segment::RendererDecode,
+    /// The node's live FEL reconstruction slot, held for this graph's life
+    /// when it composes the enhancement layer.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "held for the graph's lifetime; dropping it frees the slot"
+        )
+    )]
+    pub(crate) reconstruction_slot: Option<tokio::sync::OwnedSemaphorePermit>,
     pub(crate) encoder: plurx_core::transcode::Encoder,
     pub(crate) vaapi_hdr_policy: Option<plurx_core::transcode::VaapiHdrPolicy>,
     pub(crate) runtime_cache: PathBuf,
@@ -883,6 +778,45 @@ pub(crate) struct RuntimeRecipe {
 
 #[cfg(target_os = "linux")]
 impl RuntimeRecipe {
+    /// The cache key and the window encoder must use the same destination and driver policy.
+    fn completed_output_for<'a>(
+        &self,
+        source: &'a plurx_core::transcode::ResolvedTranscode,
+    ) -> Option<plurx_core::transcode::CompletedReconstructedOutputPlan<'a>> {
+        use plurx_core::transcode::dv_processing::DvDestination;
+        let output = source
+            .completed_reconstructed_output(self.encoder)?
+            .with_vaapi_hdr_policy(self.vaapi_hdr_policy);
+        Some(match self.destination {
+            DvDestination::Hdr10 => output,
+            DvDestination::Profile81 => output.with_reconstructed_profile81(),
+            DvDestination::Sdr => output.with_sdr_output(),
+        })
+    }
+
+    pub(crate) fn window_encoder_args(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        execution: &plurx_core::transcode::TranscodeExecution,
+        grid: plurx_core::transcode::VodFrameGrid,
+        end_seconds: f64,
+    ) -> Result<Vec<String>, &'static str> {
+        let output = self
+            .completed_output_for(plan)
+            .ok_or("unsupported reconstructed output encoder")?;
+        plurx_core::transcode::vod_completed_reconstructed_pipe_args(
+            file,
+            &output,
+            execution,
+            grid,
+            end_seconds,
+            "/proc/self/fd/3",
+            "/proc/self/fd/4",
+            self.source_clock,
+        )
+    }
+
     /// Physical/internal callers resolve before constructing the export policy;
     /// a frozen live target is rechecked and cannot acquire another floor.
     pub(crate) async fn resolve_display_target(
@@ -957,7 +891,7 @@ impl RuntimeRecipe {
         if owners.mark_report_logged(physical_owner, &generation) {
             tracing::info!(target: "plurxd::vodserve",
                 effective_processing = %serde_json::to_string(&report).expect("bounded processing report"),
-                "accepted HDR10 processing report");
+                "accepted DV processing report");
         }
         Some(report)
     }
@@ -1041,7 +975,7 @@ impl RuntimeRecipe {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn execute(
+    pub(crate) async fn execute_with_source_input(
         &self,
         file: &plurx_core::domain::MediaFile,
         plan: &plurx_core::transcode::ResolvedTranscode,
@@ -1053,42 +987,7 @@ impl RuntimeRecipe {
         producer: Arc<crate::prodrun::ProducerSlot>,
         cancel: tokio_util::sync::CancellationToken,
         registration_hook: Option<RegistrationHook>,
-    ) -> Result<
-        WindowOutcome<(
-            VerifiedWindow,
-            plurx_core::transcode::dv_processing::DvProcessingPlan,
-        )>,
-        String,
-    > {
-        self.execute_until(
-            file,
-            plan,
-            options,
-            grid,
-            entry,
-            encoder,
-            admission,
-            producer,
-            cancel,
-            registration_hook,
-            None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn execute_until(
-        &self,
-        file: &plurx_core::domain::MediaFile,
-        plan: &plurx_core::transcode::ResolvedTranscode,
-        options: &plurx_core::transcode::TranscodeOptions,
-        grid: plurx_core::transcode::VodFrameGrid,
-        entry: &plurx_core::segplan::PlanEntry,
-        encoder: &Path,
-        admission: crate::dv_segment::SegmentAdmission,
-        producer: Arc<crate::prodrun::ProducerSlot>,
-        cancel: tokio_util::sync::CancellationToken,
-        registration_hook: Option<RegistrationHook>,
+        source_input: crate::source_input::SourceInput,
         absolute_deadline: Option<tokio::time::Instant>,
     ) -> Result<
         WindowOutcome<(
@@ -1097,26 +996,41 @@ impl RuntimeRecipe {
         )>,
         String,
     > {
-        self.execute_policy_until(
-            file,
-            plan,
-            options,
-            grid,
-            entry,
-            encoder,
-            admission,
-            producer,
-            cancel,
-            registration_hook,
-            absolute_deadline,
-            self.display_target,
-        )
-        .await
+        let source_input =
+            crate::dv_segment::SourceInputLease::new(source_input.without_prefetch());
+        let result = self
+            .execute_policy_until_with_source(
+                file,
+                plan,
+                options,
+                grid,
+                entry,
+                encoder,
+                admission,
+                producer,
+                cancel,
+                registration_hook,
+                absolute_deadline,
+                self.display_target,
+                Arc::clone(&source_input),
+            )
+            .await;
+        // Early validation/spawn failures and every terminal graph result use
+        // this same join. Physical Resources retain their input use through
+        // helper and encoder reap; no caller can release it by returning early.
+        source_input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("DV original source cleanup: {error}"))?;
+        result
     }
 
     /// Explicit immutable policy; live preparation freezes the title-qualified
     /// target, ordinary VOD/pre-encode recipes retain None. No per-window
     /// environment/caps/settings selection occurs here.
+    // Explicit fixture/custom qualification control. Ordinary original-media
+    // production can enter only execute_with_source_input with owned service.
+    #[cfg(any(test, plurx_dv_segment_probe))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_policy_until(
         &self,
@@ -1132,6 +1046,56 @@ impl RuntimeRecipe {
         registration_hook: Option<RegistrationHook>,
         absolute_deadline: Option<tokio::time::Instant>,
         display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+        source_input: crate::source_input::SourceInput,
+    ) -> Result<
+        WindowOutcome<(
+            VerifiedWindow,
+            plurx_core::transcode::dv_processing::DvProcessingPlan,
+        )>,
+        String,
+    > {
+        let source_input =
+            crate::dv_segment::SourceInputLease::new(source_input.without_prefetch());
+        let result = self
+            .execute_policy_until_with_source(
+                file,
+                plan,
+                options,
+                grid,
+                entry,
+                encoder,
+                admission,
+                producer,
+                cancel,
+                registration_hook,
+                absolute_deadline,
+                display_target,
+                Arc::clone(&source_input),
+            )
+            .await;
+        source_input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("DV qualification source cleanup: {error}"))?;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_policy_until_with_source(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        options: &plurx_core::transcode::TranscodeOptions,
+        grid: plurx_core::transcode::VodFrameGrid,
+        entry: &plurx_core::segplan::PlanEntry,
+        encoder: &Path,
+        admission: crate::dv_segment::SegmentAdmission,
+        producer: Arc<crate::prodrun::ProducerSlot>,
+        cancel: tokio_util::sync::CancellationToken,
+        registration_hook: Option<RegistrationHook>,
+        absolute_deadline: Option<tokio::time::Instant>,
+        display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+        source_input: Arc<crate::dv_segment::SourceInputLease>,
     ) -> Result<
         WindowOutcome<(
             VerifiedWindow,
@@ -1158,6 +1122,7 @@ impl RuntimeRecipe {
         };
         let cancellation = cancel.clone();
         let result: Result<_, String> = async {
+            let mut stage_started = std::time::Instant::now();
             use plurx_core::transcode::dv_processing::{
                 dv_plan_completed_window, DvCompletedWindowInput, DvPlaneRepresentation,
                 DvPlaneShape, DvRpuState, DvSourceCoverage, DvSourceFacts,
@@ -1179,6 +1144,7 @@ impl RuntimeRecipe {
                 return Err("source/backend/window changed before processing".into());
             }
             let window = self.window(entry, grid)?;
+            trace_window_stage(entry.index, "source_and_backend", &mut stage_started);
             let start_seconds = entry.start_ticks as f64 / f64::from(grid.numerator);
             let end_seconds =
                 (entry.start_ticks + entry.duration_ticks) as f64 / f64::from(grid.numerator);
@@ -1189,13 +1155,6 @@ impl RuntimeRecipe {
             let execution =
                 TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
                     .map_err(|e| e.to_string())?;
-            let mut output = plan
-                .completed_reconstructed_output(self.encoder)
-                .ok_or("unsupported reconstructed output encoder")?
-                .with_vaapi_hdr_policy(self.vaapi_hdr_policy);
-            if self.destination == DvDestination::Sdr {
-                output = output.with_sdr_output();
-            }
             let raster = plan
                 .output_contract()
                 .effective_width()
@@ -1211,17 +1170,9 @@ impl RuntimeRecipe {
             let export_raster = export_policy
                 .raster(self.native_bl)
                 .map_err(|e| e.to_string())?;
-            let args = plurx_core::transcode::vod_completed_reconstructed_pipe_args(
-                file,
-                &output,
-                &execution,
-                grid,
-                end_seconds,
-                "/proc/self/fd/3",
-                "/proc/self/fd/4",
-                self.source_clock,
-            )
-            .map_err(str::to_owned)?;
+            let args = self
+                .window_encoder_args(file, plan, &execution, grid, end_seconds)
+                .map_err(str::to_owned)?;
             tracing::debug!(target: "plurxd::dv", entry = entry.index, encoder = ?args,
                 "processed window encoder recipe");
             let deadline = crate::media_pool::create_stage_deadline(self.preparation_budget);
@@ -1241,9 +1192,11 @@ impl RuntimeRecipe {
             );
             let request = crate::dv_segment::StreamingSegmentRequest {
                 mode: self.mode,
+                decode: self.decode,
                 export_raster: Some(export_raster),
                 display_target: export_policy.display_target(),
                 request: crate::dv_segment::SegmentRequest {
+                    source_input: Some(source_input),
                     renderer: self.tools.renderer.clone(),
                     renderer_env,
                     muxer: self.tools.renderer.clone(),
@@ -1273,168 +1226,204 @@ impl RuntimeRecipe {
                 WindowOutcome::Completed(private) => private,
                 WindowOutcome::Cancelled => return Ok(WindowOutcome::Cancelled),
             };
-            let first_frame = entry.start_ticks / u64::from(grid.denominator);
-            let observed = private.observe(
-                &window,
-                self.source_origin,
-                plan.decode().input_video_stream(),
-                0,
-                grid,
-                first_frame,
-                frames,
-                self.mode,
-                export_raster,
-            )?;
-            if observed.source_tick != self.source_tick
-                || observed
-                    .pictures
-                    .iter()
-                    .any(|picture| picture.bl_shape != self.native_bl)
-            {
-                return Err(
-                    "renderer source clock or native geometry differs from held probe".into(),
-                );
-            }
-            let backend = self
-                .tools
-                .identity
-                .with_completed_encoder_policy(self.encoder, self.vaapi_hdr_policy)
-                .with_runtime_device(&observed.runtime_device);
-            let source_keys: Vec<_> = observed
-                .pictures
-                .iter()
-                .map(|picture| picture.key.clone())
-                .collect();
-            let source_rpus: Vec<_> = observed
-                .pictures
-                .iter()
-                .map(|picture| picture.rpu.clone())
-                .collect();
-            let el = observed
-                .pictures
-                .first()
-                .ok_or("no rendered picture")?
-                .el_shape;
-            if observed
-                .pictures
-                .iter()
-                .any(|picture| picture.el_shape != el)
-            {
-                return Err("native EL shape changes within window".into());
-            }
-            let first = observed
-                .pictures
-                .first()
-                .ok_or("no observed source frame")?;
-            if observed.pictures.iter().any(|picture| {
-                picture.profile != first.profile || picture.source_el_kind != first.source_el_kind
-            }) {
-                return Err("source RPU profile or EL kind changes within the window".into());
-            }
-            let full_fel = self.mode == plurx_core::transcode::dv_processing::DvProcessingMode::Fel;
-            let source = DvSourceFacts::new(
-                file.dolby_vision,
-                plan.decode().input_video_stream(),
-                plan.observed_source_identity().clone(),
-                plan.cache_identity().clone(),
-                plan.source_binding(),
-                backend.parser_identity().clone(),
-                DvRpuState::ValidatedFresh,
-                first.source_el_kind,
-                Some(DvSourceCoverage::sampled(0, source_keys.clone()).map_err(|e| e.to_string())?),
-                Some(
-                    DvPlaneShape::new(
-                        self.native_bl.0,
-                        self.native_bl.1,
-                        if full_fel {
-                            DvPlaneRepresentation::P7BaseYuv420P10Limited
-                        } else if first.profile == 5 {
-                            DvPlaneRepresentation::DoviBaseP10Full
-                        } else {
-                            DvPlaneRepresentation::DoviBaseP10Limited
-                        },
-                    )
-                    .map_err(|e| e.to_string())?,
-                ),
-                if full_fel {
-                    Some(
-                        DvPlaneShape::new(el.0, el.1, DvPlaneRepresentation::P7ElYuv420P10Residual)
-                            .map_err(|e| e.to_string())?,
-                    )
-                } else {
-                    None
-                },
-            )
-            .map_err(|e| e.to_string())?;
-            let raster = plan
-                .output_contract()
-                .effective_width()
-                .zip(plan.output_contract().effective_height())
-                .ok_or("no immutable output raster")?;
-            let trace = observed.source_trace.clone();
-            let decoder = observed.decoder;
-            let mut verified = private
-                .finalize(
-                    observed,
+            trace_window_stage(entry.index, "render_and_encode", &mut stage_started);
+            // Both children are reaped. Start an optional inventory while all
+            // existing private-window checks run; none of these bytes can be
+            // published until verification and the later ordinary reservation.
+            let verification = async {
+                let first_frame = entry.start_ticks / u64::from(grid.denominator);
+                let observed = private.observe(
+                    &window,
+                    self.source_origin,
+                    plan.decode().input_video_stream(),
+                    0,
                     grid,
                     first_frame,
+                    frames,
+                    self.mode,
+                    export_raster,
+                )?;
+                trace_window_stage(entry.index, "renderer_observations", &mut stage_started);
+                if observed.source_tick != self.source_tick
+                    || observed
+                        .pictures
+                        .iter()
+                        .any(|picture| picture.bl_shape != self.native_bl)
+                {
+                    return Err(
+                        "renderer source clock or native geometry differs from held probe".into(),
+                    );
+                }
+                // The graph's CPU debit assumed the GPU decodes. A renderer that
+                // opened its decoders in software spent threads nobody reserved;
+                // its window is not served.
+                if self.decode == crate::dv_segment::RendererDecode::Gpu
+                    && observed.software_frame_workers
+                {
+                    return Err(
+                        "the renderer decoded in software, but this graph was admitted \
+                     for GPU decode and holds no CPU for software decoders"
+                            .into(),
+                    );
+                }
+                let backend = self
+                    .tools
+                    .identity
+                    .with_completed_encoder_policy(self.encoder, self.vaapi_hdr_policy)
+                    .with_runtime_device(&observed.runtime_device);
+                let source_keys: Vec<_> = observed
+                    .pictures
+                    .iter()
+                    .map(|picture| picture.key.clone())
+                    .collect();
+                let source_rpus: Vec<_> = observed
+                    .pictures
+                    .iter()
+                    .map(|picture| picture.rpu.clone())
+                    .collect();
+                let el = observed
+                    .pictures
+                    .first()
+                    .ok_or("no rendered picture")?
+                    .el_shape;
+                if observed
+                    .pictures
+                    .iter()
+                    .any(|picture| picture.el_shape != el)
+                {
+                    return Err("native EL shape changes within window".into());
+                }
+                let first = observed
+                    .pictures
+                    .first()
+                    .ok_or("no observed source frame")?;
+                if observed.pictures.iter().any(|picture| {
+                    picture.profile != first.profile
+                        || picture.source_el_kind != first.source_el_kind
+                }) {
+                    return Err("source RPU profile or EL kind changes within the window".into());
+                }
+                let full_fel =
+                    self.mode == plurx_core::transcode::dv_processing::DvProcessingMode::Fel;
+                let source = DvSourceFacts::new(
+                    file.dolby_vision,
+                    plan.decode().input_video_stream(),
+                    plan.observed_source_identity().clone(),
+                    plan.cache_identity().clone(),
+                    plan.source_binding(),
+                    backend.parser_identity().clone(),
+                    DvRpuState::ValidatedFresh,
+                    first.source_el_kind,
+                    Some(
+                        DvSourceCoverage::sampled(0, source_keys.clone())
+                            .map_err(|e| e.to_string())?,
+                    ),
+                    Some(
+                        DvPlaneShape::new(
+                            self.native_bl.0,
+                            self.native_bl.1,
+                            if full_fel {
+                                DvPlaneRepresentation::P7BaseYuv420P10Limited
+                            } else if first.profile == 5 {
+                                DvPlaneRepresentation::DoviBaseP10Full
+                            } else {
+                                DvPlaneRepresentation::DoviBaseP10Limited
+                            },
+                        )
+                        .map_err(|e| e.to_string())?,
+                    ),
+                    if full_fel {
+                        Some(
+                            DvPlaneShape::new(
+                                el.0,
+                                el.1,
+                                DvPlaneRepresentation::P7ElYuv420P10Residual,
+                            )
+                            .map_err(|e| e.to_string())?,
+                        )
+                    } else {
+                        None
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                let raster = plan
+                    .output_contract()
+                    .effective_width()
+                    .zip(plan.output_contract().effective_height())
+                    .ok_or("no immutable output raster")?;
+                let trace = observed.source_trace.clone();
+                let decoder = observed.decoder;
+                let mut verified = private
+                    .finalize(
+                        observed,
+                        entry.index,
+                        grid,
+                        first_frame,
+                        raster,
+                        self.destination,
+                        plan.enhancement_rate_envelope(),
+                        &self.runtime_cache,
+                        plan.options()
+                            .input_has_audio
+                            .then_some(plan.options().audio_channels),
+                    )
+                    .await?;
+                if !self.source.unchanged() || !self.tools.is_current().await {
+                    return Err("source/backend changed before publication validation".into());
+                }
+                trace_window_stage(entry.index, "finalize_and_backend", &mut stage_started);
+                let selected = dv_plan_completed_window(DvCompletedWindowInput {
+                    source,
+                    preferences: self.preferences,
+                    backend,
+                    destination: self.destination,
+                    encoder: self.encoder,
+                    mode: self.mode,
+                    source_keys: &source_keys,
+                    source_rpus: &source_rpus,
+                    source_tick: self.source_tick,
+                    source_origin: self.source_origin,
+                    grid,
+                    first_global_frame: first_frame,
+                    encoded: &verified.bytes,
                     raster,
-                    self.destination,
-                    file.dolby_vision
-                        .level
-                        .and_then(|level| u8::try_from(level).ok()),
-                    &self.runtime_cache,
-                    plan.options()
-                        .input_has_audio
-                        .then_some(plan.options().audio_channels),
-                )
-                .await?;
-            if !self.source.unchanged() || !self.tools.is_current().await {
-                return Err("source/backend changed before publication validation".into());
-            }
-            let selected = dv_plan_completed_window(DvCompletedWindowInput {
-                source,
-                preferences: self.preferences,
-                backend,
-                destination: self.destination,
-                encoder: self.encoder,
-                mode: self.mode,
-                source_keys: &source_keys,
-                source_rpus: &source_rpus,
-                source_tick: self.source_tick,
-                source_origin: self.source_origin,
-                grid,
-                first_global_frame: first_frame,
-                encoded: &verified.bytes,
-                raster,
-                export_policy,
-                source_trace: trace,
-                decoder,
-                observed_at: i64::try_from(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_err(|e| e.to_string())?
-                        .as_secs(),
-                )
-                .map_err(|_| "runtime clock overflow")?,
-            })
-            .map_err(|e| e.to_string())?;
-            let durations: Vec<_> = verified
-                .observed
-                .pictures
-                .iter()
-                .map(|picture| picture.duration)
-                .collect();
-            verified.receipt = Some(
-                plurx_core::transcode::dv_processing::dv_receipt_completed_window(
-                    &selected,
-                    &source_keys,
-                    &durations,
-                    &source_rpus,
-                )
-                .map_err(|e| e.to_string())?,
+                    export_policy,
+                    source_trace: trace,
+                    decoder,
+                    observed_at: i64::try_from(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_err(|e| e.to_string())?
+                            .as_secs(),
+                    )
+                    .map_err(|_| "runtime clock overflow")?,
+                })
+                .map_err(|e| e.to_string())?;
+                trace_window_stage(entry.index, "completed_plan", &mut stage_started);
+                let durations: Vec<_> = verified
+                    .observed
+                    .pictures
+                    .iter()
+                    .map(|picture| picture.duration)
+                    .collect();
+                verified.receipt = Some(
+                    plurx_core::transcode::dv_processing::dv_receipt_completed_window(
+                        &selected,
+                        &source_keys,
+                        &durations,
+                        &source_rpus,
+                    )
+                    .map_err(|e| e.to_string())?,
+                );
+                trace_window_stage(entry.index, "receipt", &mut stage_started);
+                Ok(WindowOutcome::Completed((verified, selected)))
+            };
+            let (_, verified) = tokio::join!(biased;
+                crate::playback_cache::warm_inventory(&self.runtime_cache),
+                verification,
             );
-            Ok(WindowOutcome::Completed((verified, selected)))
+            trace_window_stage(entry.index, "inventory_join", &mut stage_started);
+            verified
         }
         .await;
         // Return observations to the owner. Only its current generation or
@@ -1452,7 +1441,7 @@ impl RuntimeRecipe {
 /// owned-job retirement have all been observed. Cancellation drops the pipe
 /// owner and retires the same registered process, never a replacement PID.
 #[cfg(target_os = "linux")]
-pub(crate) async fn run_private_window(
+async fn run_private_window(
     mut request: crate::dv_segment::StreamingSegmentRequest,
     registration_hook: Option<RegistrationHook>,
 ) -> Result<WindowOutcome<PrivateWindow>, String> {
@@ -1463,36 +1452,44 @@ pub(crate) async fn run_private_window(
     let deadline = request.renderer_deadline;
     let display_target = request.display_target;
     let mut producer = crate::dv_segment::spawn_streaming(request).await?;
-    let evidence = producer
-        .take_evidence()
-        .ok_or("missing owned renderer evidence")?;
-    let helper = producer
-        .take_helper_completion()
-        .ok_or("missing helper completion")?;
-    let (registration, writers, stdout, stderr) = producer.into_parts();
-    if let Some(registered) = registration_hook {
-        registered(&registration);
+    let source_settlement = producer.take_source_settlement();
+    let result = async {
+        let evidence = producer
+            .take_evidence()
+            .ok_or("missing owned renderer evidence")?;
+        let helper = producer
+            .take_helper_completion()
+            .ok_or("missing helper completion")?;
+        let (registration, writers, stdout, stderr) = producer.into_parts();
+        if let Some(registered) = registration_hook {
+            registered(&registration);
+        }
+        match capture_private_output(
+            &slot,
+            &registration,
+            writers,
+            stdout,
+            stderr,
+            helper,
+            &cancel,
+            deadline,
+        )
+        .await?
+        {
+            WindowOutcome::Completed(encoded) => Ok(WindowOutcome::Completed(PrivateWindow {
+                encoded,
+                evidence,
+                registration,
+                display_target,
+            })),
+            WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
+        }
     }
-    match capture_private_output(
-        &slot,
-        &registration,
-        writers,
-        stdout,
-        stderr,
-        helper,
-        &cancel,
-        deadline,
-    )
-    .await?
-    {
-        WindowOutcome::Completed(encoded) => Ok(WindowOutcome::Completed(PrivateWindow {
-            encoded,
-            evidence,
-            registration,
-            display_target,
-        })),
-        WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
+    .await;
+    if let Some(source) = source_settlement {
+        source.settle().await?;
     }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1620,7 +1617,7 @@ fn private_window_outcome(
 /// for a log/plan note.
 #[cfg(any(target_os = "linux", test))]
 fn encoder_diagnostic_tail(diagnostic: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(diagnostic);
+    let text = crate::scratch_put::redact(&String::from_utf8_lossy(diagnostic));
     let line = text.lines().rev().map(str::trim).find(|line| {
         !line.is_empty()
             && !line.split_once('=').is_some_and(|(key, _)| {
@@ -1787,14 +1784,19 @@ pub(crate) struct ObservedWindow {
     pub(crate) runtime_device: DvDigest,
     /// The helper's own account of how it decoded the source pictures.
     pub(crate) decoder: plurx_core::transcode::DecodeBackend,
+    /// The helper opened its decoders without a VA-API device, so each layer
+    /// ran four software frame workers (`segment_decode_render.c`
+    /// `open_layer`). A per-frame GPU fallback keeps one thread per layer and
+    /// is not this.
+    pub(crate) software_frame_workers: bool,
 }
 /// Read the helper's decoder report. A GPU decode that fell back (no device,
 /// no HEVC Main10 decode, surfaces the Vulkan device could not import) is
 /// still a valid window; the reason is logged so the fallback is visible.
 #[cfg(target_os = "linux")]
-fn helper_decoder(
+pub(crate) fn helper_decoder(
     value: &serde_json::Value,
-) -> Result<plurx_core::transcode::DecodeBackend, String> {
+) -> Result<(plurx_core::transcode::DecodeBackend, bool), String> {
     use plurx_core::transcode::DecodeBackend;
     let mode = value
         .get("mode")
@@ -1812,7 +1814,7 @@ fn helper_decoder(
     if mode != "vaapi" && reason != "no-decode-device" {
         tracing::debug!(target: "plurxd::dv", mode, reason, "processed window decoder fallback");
     }
-    Ok(backend)
+    Ok((backend, mode == "software"))
 }
 #[cfg(target_os = "linux")]
 fn rational(value: &str) -> Result<(i64, u32), String> {
@@ -1965,7 +1967,7 @@ impl PrivateWindow {
         }
         let complete = complete.ok_or("no source window completion")?;
         let segment = segment.ok_or("no renderer completion")?;
-        let decoder = decoder.ok_or("no decoder report")?;
+        let (decoder, software_frame_workers) = decoder.ok_or("no decoder report")?;
         if mode == DvProcessingMode::BaseRpu {
             let base = base_complete
                 .as_ref()
@@ -2210,6 +2212,14 @@ impl PrivateWindow {
         let source_keys: Vec<_> = pictures.iter().map(|frame| frame.key.clone()).collect();
         dv_map_source_to_output_grid(&source_keys, tick, source_origin, grid, first_frame, frames)
             .map_err(|e| e.to_string())?;
+        tracing::debug!(target: "plurxd::dv",
+            window_start = %complete.requested_start, window_end = %complete.requested_end,
+            frames, preroll_pairs = complete.preroll_pairs,
+            paired_pictures = complete.paired_pictures,
+            source_bytes_read = complete.source_bytes_read,
+            renderer_device_type = gpu.device_type, renderer_vendor_id = gpu.vendor_id,
+            decoder = ?decoder, software_frame_workers,
+            "processed window source coverage validated");
         Ok(ObservedWindow {
             pictures,
             #[cfg(test)]
@@ -2218,6 +2228,7 @@ impl PrivateWindow {
             source_tick: tick,
             runtime_device,
             decoder,
+            software_frame_workers,
         })
     }
 }
@@ -2244,6 +2255,10 @@ mod fel_mapping_tests {
         assert!(row.validate_fel_curves(&[], (64, 64)).is_err());
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "dv_runtime/observe_tests.rs"]
+mod observe_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod source_origin_tests {
@@ -2465,14 +2480,16 @@ mod helper_decoder_tests {
 
     #[test]
     fn the_helper_decoder_report_names_the_backend() {
-        for (mode, backend) in [
-            ("vaapi", DecodeBackend::Vaapi),
-            ("vaapi-host-copy", DecodeBackend::Vaapi),
-            ("vaapi-software-fallback", DecodeBackend::Software),
-            ("software", DecodeBackend::Software),
+        // Only a helper that opened without a device runs software frame
+        // workers; that is what a GPU-decode admission did not debit.
+        for (mode, backend, workers) in [
+            ("vaapi", DecodeBackend::Vaapi, false),
+            ("vaapi-host-copy", DecodeBackend::Vaapi, false),
+            ("vaapi-software-fallback", DecodeBackend::Software, false),
+            ("software", DecodeBackend::Software, true),
         ] {
             let row = serde_json::json!({"kind": "decoder", "mode": mode, "reason": ""});
-            assert_eq!(helper_decoder(&row), Ok(backend), "{mode}");
+            assert_eq!(helper_decoder(&row), Ok((backend, workers)), "{mode}");
         }
         assert!(helper_decoder(&serde_json::json!({"kind": "decoder"})).is_err());
         assert!(helper_decoder(&serde_json::json!({"kind": "decoder", "mode": "cuda"})).is_err());
@@ -2735,13 +2752,17 @@ mod processed_selection_has_no_software_gates {
     /// once the Developer setting is on and the first window verifies. These
     /// were silent gates (720p clamp, speed qualification, Auto only) that
     /// kept HDR10-E from ever playing; they must not return.
+    ///
+    /// Since plan ruling 3 the entry point is the post-first-frame upgrade:
+    /// its request-only gates (`processed_upgrade_gates`, which the create
+    /// also runs) and its trial (`prepare_processed_upgrade`).
     fn entry_body() -> &'static str {
         let source = include_str!("transcode/manager/create.rs");
         source
-            .split_once("pub(crate) async fn prepare_processed_hdr10(")
-            .expect("processed HDR10 entry point")
+            .split_once("pub(crate) fn processed_upgrade_gates(")
+            .expect("processed upgrade gates")
             .1
-            .split_once("pub(super) async fn prepare_vod_encoding_with_preference(")
+            .split_once("pub(crate) fn hold_processed_upgrade_root(")
             .expect("entry point end")
             .0
     }
@@ -2760,11 +2781,22 @@ mod processed_selection_has_no_software_gates {
         );
         // Every decline after the setting check, to the end of the entry
         // point, is reported, never silent.
-        let after_setting = body
+        let (gates, trial) = body
+            .split_once("pub(crate) async fn prepare_processed_upgrade(")
+            .expect("the trial follows its gates");
+        let after_setting = gates
             .split_once("// The setting is on for a DV source")
             .expect("setting check")
             .1;
         assert!(!after_setting.contains("Ok(None)"), "{after_setting}");
+        let after_gates = trial
+            .split_once("Self::processed_upgrade_gates(request, &planning, hdr10_intent)?")
+            .expect("the trial reruns the gates")
+            .1
+            .split_once("else {\n                return Ok(None);\n            };")
+            .expect("the gates' own silent answer")
+            .1;
+        assert!(!after_gates.contains("Ok(None)"), "{after_gates}");
     }
 
     /// A Dolby Vision display's converted Profile 7 copy never reached the
@@ -2791,10 +2823,12 @@ mod processed_selection_has_no_software_gates {
     fn every_catalog_start_is_offered_processing() {
         let source = include_str!("http/hls/create.rs");
         let guard = source
-            .split_once(".prepare_processed_hdr10(")
-            .expect("processed call")
+            .split_once("let processed_upgrade_applies = if")
+            .expect("processed upgrade guard")
+            .1
+            .split_once("processed_upgrade_gates(")
+            .expect("processed gates call")
             .0;
-        let guard = &guard[guard.rfind("    if ").expect("call guard")..];
         assert!(!guard.contains("candidate_auto_policy"), "{guard}");
         assert!(!guard.contains("continuous.is_none()"), "{guard}");
     }
@@ -3141,5 +3175,187 @@ mod sdr_floor_tests {
             source_mastering_minimum(&serde_json::json!({})).expect("unknown"),
             None
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod title_scanner_identity_tests {
+    use super::*;
+
+    fn backend(renderer: &[u8]) -> DvBackendIdentity {
+        let digest = |bytes: &[u8]| DvDigest::new(hash(bytes)).expect("digest");
+        DvBackendIdentity::new(
+            digest(renderer),
+            digest(b"libraries"),
+            digest(b"parser"),
+            digest(b"sources"),
+            1,
+            digest(b"manifest"),
+        )
+        .expect("backend")
+    }
+
+    fn scanner(directory: &tempfile::TempDir, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = directory.path().join(name);
+        std::fs::write(&path, bytes).expect("scanner");
+        path
+    }
+
+    /// A renderer, shader or libplacebo change must not re-queue every title;
+    /// only a different scanner may.
+    #[test]
+    fn title_demand_is_keyed_by_the_scanner_alone() {
+        let directory = tempfile::tempdir().expect("scratch");
+        let first = scanner(&directory, "first", b"scanner one");
+        let second = scanner(&directory, "second", b"scanner two");
+        let before =
+            ToolSet::lifecycle_fixture_with_scanner(backend(b"renderer one"), first.clone())
+                .expect("tools");
+        let new_renderer = ToolSet::lifecycle_fixture_with_scanner(backend(b"renderer two"), first)
+            .expect("tools");
+        let new_scanner = ToolSet::lifecycle_fixture_with_scanner(backend(b"renderer one"), second)
+            .expect("tools");
+        assert_ne!(before.backend_digest(), new_renderer.backend_digest());
+        assert_eq!(
+            before.title_scanner_digest(),
+            new_renderer.title_scanner_digest()
+        );
+        assert_eq!(before.backend_digest(), new_scanner.backend_digest());
+        assert_ne!(
+            before.title_scanner_digest(),
+            new_scanner.title_scanner_digest()
+        );
+    }
+
+    /// Every title-demand reader and writer uses the scanner key; FEL verdicts
+    /// keep the backend key because they measure the renderer.
+    #[test]
+    fn title_demand_call_sites_use_the_scanner_key() {
+        for (name, source) in [
+            ("title_work.rs", include_str!("source_probe/title_work.rs")),
+            ("dv_title.rs", include_str!("source_probe/dv_title.rs")),
+        ] {
+            assert!(source.contains("title_scanner_digest()"), "{name}");
+            // The backend key appears only as the FEL identity it measures.
+            assert_eq!(
+                source.matches("backend_digest()").count(),
+                source
+                    .matches("fel_identity(&tools.backend_digest())")
+                    .count(),
+                "{name}"
+            );
+        }
+        let create = include_str!("transcode/manager/create.rs");
+        assert!(create.contains("self.fel_identity(&tools.backend_digest())"));
+        assert!(create.contains(
+            "planning.probe_json.as_deref(),\n            &tools.title_scanner_digest(),"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod bundle_capture_tests {
+    use super::*;
+
+    /// Generate the actual installer's manifest and enter the same capture
+    /// boundary as production. Stub artifacts are never executed.
+    #[tokio::test]
+    async fn revised_bundle_capture_accepts_current_sources_and_rejects_stale_or_incomplete_identity(
+    ) {
+        let fixture = tempfile::tempdir().expect("bundle fixture");
+        let root = fixture.path().join("bundle");
+        for directory in ["bin", "lib", "sources"] {
+            std::fs::create_dir_all(root.join(directory)).expect("fixture directory");
+        }
+        for name in [
+            "segment_decode_render",
+            "mux_rgb",
+            "author_p81",
+            "scan_title",
+        ] {
+            std::fs::write(root.join("bin").join(name), name).expect("stub helper");
+        }
+        std::fs::write(root.join("lib/libplacebo.so.374"), b"fixture placebo")
+            .expect("write stub placebo library");
+        std::fs::write(root.join("sources/libdovi.a"), b"fixture parser")
+            .expect("write stub parser library");
+        std::fs::write(
+            root.join("sources/abi.json"),
+            br#"{"libplacebo":374,"avcodec":62,"avformat":62,"avutil":60}"#,
+        )
+        .expect("write fixture ABI");
+        let source = fixture.path().join("source");
+        std::fs::create_dir(&source).expect("create copied-source directory");
+        let actual_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/dv_processing");
+        for entry in std::fs::read_dir(&actual_source).expect("enumerate actual helper sources") {
+            let entry = entry.expect("read source entry");
+            if entry
+                .file_type()
+                .expect("inspect source entry type")
+                .is_file()
+            {
+                std::fs::copy(entry.path(), source.join(entry.file_name()))
+                    .expect("copy manifest source input");
+            }
+        }
+        let installer = include_str!("../../../tools/dv_processing/bundle-manifest.py");
+        let generate = |script: &str| {
+            let result = std::process::Command::new("python3")
+                .args(["-c", script])
+                .arg(&source)
+                .arg(&root)
+                .output()
+                .expect("run installed manifest generator");
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        generate(installer);
+        let tools = ToolSet::capture_at(root.clone())
+            .await
+            .expect("validate current installer bundle")
+            .expect("current bundle accepted");
+        assert!(tools.is_current().await);
+        assert_eq!(
+            tools.renderer,
+            root.join("bin/segment_decode_render")
+                .canonicalize()
+                .expect("canonical fixture renderer")
+        );
+        for missing in ["author_p81.c", "movie_source_io.h", "source_reader.h"] {
+            // Exercise the producer's actual INPUTS, independently of source
+            // formatting or quote style. The final generated manifest is
+            // internally consistent but incomplete for this daemon.
+            let incomplete = format!(
+                "{installer}\nimport sys\nomitted = {missing:?}\nassert omitted in INPUTS\n\
+                 INPUTS = tuple(name for name in INPUTS if name != omitted)\n\
+                 build(Path(sys.argv[1]), Path(sys.argv[2]))\n"
+            );
+            generate(&incomplete);
+            assert!(
+                matches!(ToolSet::capture_at(root.clone()).await, Err(error) if error == "unsupported DV build identity"),
+                "capture rejects a manifest missing {missing}"
+            );
+        }
+        // Self-consistent stale source bytes still cannot authorize this daemon.
+        for stale in ["author_p81.c", "movie_source_io.h", "source_reader.h"] {
+            let path = source.join(stale);
+            let original = std::fs::read(&path).expect("read current fixture source");
+            std::fs::write(&path, b"deliberately stale fixture source")
+                .expect("write stale fixture source");
+            generate(installer);
+            assert!(
+                matches!(ToolSet::capture_at(root.clone()).await, Err(error) if error == "unsupported DV build identity"),
+                "capture rejects stale {stale}"
+            );
+            std::fs::write(path, original).expect("restore current fixture source");
+        }
+        generate(installer);
+        assert!(ToolSet::capture_at(root)
+            .await
+            .expect("validate restored current bundle")
+            .is_some());
     }
 }

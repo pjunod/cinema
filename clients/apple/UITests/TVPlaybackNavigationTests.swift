@@ -129,6 +129,56 @@ final class TVPlaybackNavigationTests: TVNavigationTestCase {
         add(capture)
     }
 
+    func testLocalMovieTimelineHoldKeepsPreviewMovingUntilRelease() throws {
+        let server = try TVNavigationServer(playableTitles: true)
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = openLibrary(origin: origin)
+        defer { app.terminate() }
+        let movie = app.buttons["item:1"]
+        reachForSetup(movie, in: app, limit: 8)
+        remote.press(.select)
+        let play = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", "Play")).firstMatch
+        reachForSetup(play, in: app, limit: 8)
+        remote.press(.select)
+        let pause = app.buttons["player-play-pause"]
+        XCTAssertTrue(pause.waitForExistence(timeout: 20), app.debugDescription)
+        reachForSetup(pause, in: app, limit: 8)
+        remote.press(.select)
+        waitUntil("Pause before held preview", app: app, timeout: 5) { pause.label == "Play" }
+        remote.press(.up)
+        let timeline = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@ AND hasFocus == true", "Playback position")).firstMatch
+        assertFocus(timeline, in: app, context: "Held seek owns the timeline")
+        let position = app.staticTexts["player-position"]
+        let initial = try timelineSeconds(position)
+        let decisions = server.requestCount("/api/v1/files/1/decision")
+
+        remote.press(.right, forDuration: 1.2)
+        let forward = try timelineSeconds(position)
+        XCTAssertGreaterThanOrEqual(forward, initial + 40, "a held direction keeps moving beyond one preview step")
+        XCTAssertTrue((timeline.value as? String)?.hasPrefix("Previewing ") == true)
+        let unexpectedAdvance = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (try? self.timelineSeconds(position)) != forward
+        }, object: nil)
+        unexpectedAdvance.isInverted = true
+        wait(for: [unexpectedAdvance], timeout: 0.6)
+        XCTAssertEqual(try timelineSeconds(position), forward, accuracy: 1, "release stops the preview")
+        XCTAssertEqual(server.requestCount("/api/v1/files/1/decision"), decisions, "a hold previews without opening another stream")
+
+        remote.press(.left, forDuration: 0.8)
+        let backward = try timelineSeconds(position)
+        XCTAssertLessThanOrEqual(backward, forward - 20)
+        remote.press(.select)
+        waitUntil("Select commits held preview", app: app, timeout: 5) { timeline.value as? String == "Timeline" }
+        XCTAssertEqual(try timelineSeconds(position), backward, accuracy: 1)
+        XCTAssertEqual(pause.label, "Play", "held seek preserves paused playback")
+        remote.press(.right, forDuration: 0.5)
+        remote.press(.menu)
+        waitUntil("Back cancels held preview", app: app, timeout: 5) { timeline.value as? String == "Timeline" }
+        XCTAssertEqual(try timelineSeconds(position), backward, accuracy: 1)
+    }
+
     private func timelineSeconds(_ element: XCUIElement) throws -> Double {
         let label = element.label
         let parts = label.split(separator: ":").compactMap { Double($0) }

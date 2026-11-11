@@ -79,7 +79,7 @@ async fn encoded_preparation_consumer(with_live_pressure: bool) {
     };
     let active = crate::background_jobs::ActiveBackgroundJob::start(Arc::clone(&store), Arc::new(CopyPreparationAuthority),
         claimed.token.clone().expect("token"), tokio::time::Instant::now() + Duration::from_secs(45),
-        JobKind::EncodedOutputPrepare).expect("owner");
+        JobKind::EncodedOutputPrepare).await.expect("owner");
     let heavy = manager.admit_encoded_preparation().expect("existing heavy lane");
     let observation = manager.copy_preparation_attachment_observation();
     assert!(manager.produce_encoded_output_job(&file, &claimed, active.fence(),
@@ -329,7 +329,7 @@ async fn automatic_encoded_canonical_carrier_survives_claim_completion_and_new_a
         claimed.token.clone().expect("token"),
         tokio::time::Instant::now() + Duration::from_secs(45),
         JobKind::EncodedOutputPrepare,
-    )
+    ).await
     .expect("owner");
     let heavy = manager
         .admit_encoded_preparation()

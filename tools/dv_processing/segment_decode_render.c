@@ -42,16 +42,13 @@ struct rational {
 static struct rational window_start, window_end;
 static int64_t first_emitted_pts = AV_NOPTS_VALUE,
                last_emitted_end = AV_NOPTS_VALUE, boundary_pts = AV_NOPTS_VALUE;
-struct budget_io {
-  int fd;
-  uint64_t bytes;
-  bool exhausted;
-};
-static struct budget_io movie_io;
+#include "movie_source_io.h"
+#include "source_reader.h"
+static struct budget_io movie_io = {.fd = -1, .upstream = -1};
 static AVIOContext *movie_avio;
-#ifndef WINDOW_READ_LIMIT
-#define WINDOW_READ_LIMIT (128ULL * 1024 * 1024)
-#endif
+static struct source_reader movie_reader = SOURCE_READER_INITIALIZER;
+static struct movie_source_interrupt movie_interrupt = {.read_fd = -1, .write_fd = -1};
+static bool movie_interrupt_initialized;
 
 static FILE *rgb_output, *timing_output;
 static AVFormatContext *nut_output;
@@ -108,7 +105,12 @@ static int video_duration_ns(const char *text, int64_t *duration) {
 static void need(int ok, const char *reason) {
   if (!ok) {
     fprintf(stderr, "Segment refused: %s\n", reason);
-    dv_exit(1);
+    // A refusal invalidates every output. Terminate threads together rather
+    // than closing a source/driver descriptor underneath an active reader.
+    // The parent still requires actual reap and SourceInput settlement.
+    fflush(stdout);
+    fflush(stderr);
+    _exit(1);
   }
 }
 static struct rational rational(const char *text) {
@@ -163,47 +165,61 @@ static int compare_window(int64_t pts, struct rational value) {
   return av_compare_ts(pts, source_time_base, value.num,
                        (AVRational){1, value.den});
 }
-static int movie_read(void *opaque, uint8_t *buffer, int size) {
-  struct budget_io *io = opaque;
-  if (io->bytes >= WINDOW_READ_LIMIT) {
-    io->exhausted = true;
-    return AVERROR(ENOSPC);
-  }
-  size_t available = (size_t)(WINDOW_READ_LIMIT - io->bytes);
-  if ((size_t)size > available)
-    size = (int)available;
-  ssize_t n;
-  do {
-    n = read(io->fd, buffer, (size_t)size);
-  } while (n < 0 && errno == EINTR);
-  if (n < 0)
-    return AVERROR(errno);
-  if (n == 0)
-    return AVERROR_EOF;
-  io->bytes += (uint64_t)n;
-  return (int)n;
+static ssize_t movie_reader_raw_read(void *opaque, uint8_t *buffer, size_t size) {
+  int result = movie_read(opaque, buffer, (int)size);
+  return result == AVERROR_EOF ? 0 : result;
 }
-static int64_t movie_seek(void *opaque, int64_t offset, int whence) {
+static int64_t movie_reader_raw_seek(void *opaque, int64_t offset, int whence) {
+  return movie_seek(opaque, offset, whence);
+}
+static uint64_t movie_reader_charged(void *opaque) {
   struct budget_io *io = opaque;
-  if (whence & AVSEEK_SIZE) {
-    struct stat st;
-    return fstat(io->fd, &st) == 0 ? st.st_size : AVERROR(errno);
+  return io->remote ? io->requested_bytes : io->bytes;
+}
+static int movie_reader_prepare(void *opaque) {
+  struct budget_io *io = opaque;
+  if (!movie_interrupt_initialized) {
+    int result = movie_source_interrupt_init(&movie_interrupt);
+    if (result < 0) return result;
+    movie_interrupt_initialized = true;
   }
-  off_t result = lseek(io->fd, (off_t)offset, whence & ~AVSEEK_FORCE);
-  return result < 0 ? AVERROR(errno) : (int64_t)result;
+  io->interrupt = &movie_interrupt;
+  return movie_source_interrupt_reset(&movie_interrupt);
+}
+static void movie_reader_interrupt(void *opaque) {
+  struct budget_io *io = opaque;
+  if (io->interrupt) movie_source_interrupt_stop(io->interrupt);
+}
+static const struct source_reader_io movie_reader_source = {
+  .context = &movie_io, .read = movie_reader_raw_read, .seek = movie_reader_raw_seek,
+  .charged = movie_reader_charged, .limit = WINDOW_READ_LIMIT,
+  .exhausted = &movie_io.exhausted, .prepare = movie_reader_prepare,
+  .interrupt = movie_reader_interrupt,
+};
+static int queued_movie_read(void *opaque, uint8_t *buffer, int size) {
+  if (size <= 0) return AVERROR(EINVAL);
+  if (!movie_reader.active) return movie_read(opaque, buffer, size);
+  ssize_t result = source_reader_read(&movie_reader, buffer, (size_t)size);
+  return result == 0 ? AVERROR_EOF : (int)result;
+}
+static int64_t queued_movie_seek(void *opaque, int64_t offset, int whence) {
+  if ((whence & AVSEEK_SIZE) || !movie_reader.active)
+    return movie_seek(opaque, offset, whence);
+  return source_reader_seek(&movie_reader, &movie_reader_source,
+                            offset, whence & ~AVSEEK_FORCE);
 }
 static void open_movie_io(AVFormatContext *input, const char *source) {
-  movie_io.fd = open(source, O_RDONLY | O_CLOEXEC);
-  struct stat st;
-  need(movie_io.fd >= 0 && fstat(movie_io.fd, &st) == 0 && S_ISREG(st.st_mode),
-       "held seekable regular movie source");
+  need(movie_source_open(&movie_io, source) >= 0,
+       "held seekable movie source or private source capability");
   uint8_t *buffer = av_malloc(65536);
   need(buffer != NULL, "bounded movie IO buffer");
-  movie_avio = avio_alloc_context(buffer, 65536, 0, &movie_io, movie_read, NULL,
-                                  movie_seek);
+  movie_avio = avio_alloc_context(buffer, 65536, 0, &movie_io, queued_movie_read, NULL,
+                                  queued_movie_seek);
+  if (!movie_avio) av_free(buffer);
   need(movie_avio != NULL, "movie IO context");
   input->pb = movie_avio;
   input->flags |= AVFMT_FLAG_CUSTOM_IO;
+  need(movie_source_bind_demuxer(input) >= 0, "closed demux protocol authority");
 }
 // A queued export may still be sampling the decoded surfaces of the frame
 // just rendered; references held here keep the decoder from reusing them
@@ -297,9 +313,9 @@ static void write_rgb(const uint8_t *rgb, size_t bytes, void *unused) {
     writer_wait_idle();
 }
 static void writer_start(void) {
+  dv_threads_live = true;
   need(pthread_create(&writer_thread, NULL, writer_main, NULL) == 0,
        "export writer thread");
-  dv_threads_live = true;
 }
 static void writer_finish(void) {
   pthread_mutex_lock(&writer_lock);
@@ -972,6 +988,11 @@ int main(int argc, char **argv) {
     need(avformat_seek_file(input, stream_index, INT64_MIN, target, target,
                             AVSEEK_FLAG_BACKWARD) >= 0,
          "keyframe seek before exact window start");
+    // require() refusals in shared renderer code must also avoid destructors
+    // throughout the reader-only interval before the export writer starts.
+    dv_threads_live = true;
+    need(source_reader_start(&movie_reader, &movie_reader_source) == 0,
+         "start owned source reader");
   }
   if (streaming)
     open_nut(argv[11]);
@@ -1012,6 +1033,7 @@ int main(int argc, char **argv) {
     if (window_done)
       break;
   }
+  need(source_reader_stop(&movie_reader) == 0, "stop and join owned source reader");
   need(!movie_io.exhausted, "window source read budget exhausted");
   source_eof = result == AVERROR_EOF;
   need(window_done || source_eof, "complete bounded source read");
@@ -1101,8 +1123,10 @@ int main(int argc, char **argv) {
   if (movie_avio) {
     av_freep(&movie_avio->buffer);
     avio_context_free(&movie_avio);
-    need(close(movie_io.fd) == 0, "close held movie IO");
+    movie_source_close(&movie_io);
   }
+  source_reader_destroy(&movie_reader);
+  if (movie_interrupt_initialized) movie_source_interrupt_destroy(&movie_interrupt);
   if (window_mode) {
     printf("{\"kind\":\"window_complete\",\"requested_start\":\"%lld/"
            "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"%lld/"

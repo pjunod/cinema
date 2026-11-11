@@ -644,6 +644,31 @@ pub struct VodActivityObservation {
     pub producer_hold: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_target: Option<DisplayTargetActivity>,
+    /// The Dolby Vision processing this session's GPU is doing, and why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processing: Option<ProcessingActivity>,
+}
+
+/// What a processed rendition spends the node's hardware on, in an
+/// operator's words: the delivered picture, the work, and the reason it was
+/// chosen. Stopping the session (Activity → Stop playback) ends the graph.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessingActivity {
+    pub delivered: String,
+    pub work: String,
+    pub reason: String,
+    /// The served base layer is the FEL-composed picture.
+    pub fel_composed: bool,
+    pub live_rendering: bool,
+}
+
+impl ProcessingActivity {
+    pub(crate) const MAX_TEXT: usize = 256;
+    pub(crate) fn bounded(&self) -> bool {
+        [&self.delivered, &self.work, &self.reason]
+            .iter()
+            .all(|text| text.len() <= Self::MAX_TEXT)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -657,21 +682,25 @@ pub struct DisplayTargetActivity {
 
 impl VodActivityObservation {
     pub(crate) fn bounded(&self) -> bool {
-        self.display_target.as_ref().is_none_or(|target| {
-            target.note.len() <= 512
-                && target.bucket_nits.is_none_or(|nits| {
-                    nits == 100
-                        || plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS
-                            .contains(&nits)
-                })
-        }) && [
-            &self.control_demand,
-            &self.render_state,
-            &self.producer_state,
-            &self.producer_hold,
-        ]
-        .iter()
-        .all(|value| value.as_ref().is_none_or(|text| text.len() <= 32))
+        self.processing
+            .as_ref()
+            .is_none_or(ProcessingActivity::bounded)
+            && self.display_target.as_ref().is_none_or(|target| {
+                target.note.len() <= 512
+                    && target.bucket_nits.is_none_or(|nits| {
+                        nits == 100
+                            || plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS
+                                .contains(&nits)
+                    })
+            })
+            && [
+                &self.control_demand,
+                &self.render_state,
+                &self.producer_state,
+                &self.producer_hold,
+            ]
+            .iter()
+            .all(|value| value.as_ref().is_none_or(|text| text.len() <= 32))
     }
     pub(crate) fn demand(&self) -> Option<&'static str> {
         match self.control_demand.as_deref() {
@@ -742,6 +771,7 @@ pub struct VodStart {
 
 /// Actual init-verified media and exact catalog provenance for one parent.
 pub(crate) struct VerifiedContinuousFamily {
+    pub versioned: bool,
     pub controlled: bool,
     pub family: plurx_core::transcode::VodPresentationFamily,
     pub video_budgets: Vec<plurx_core::transcode::VodRenditionBandwidth>,
@@ -750,9 +780,9 @@ pub(crate) struct VerifiedContinuousFamily {
 }
 
 impl VerifiedContinuousFamily {
-    /// The durable descriptor bound to the session. Its bytes are compared
-    /// exactly on every re-bind and parsed by older nodes during a rolling
-    /// deploy, so it never carries the link rates.
+    /// The durable descriptor bound to the session. V1 is immutable; negotiated
+    /// V2 may add the original companion under the same primary/audio anchor.
+    /// Link rates remain recomputed client metadata, outside durable identity.
     pub(crate) fn description(&self) -> Result<Vec<u8>, VodError> {
         self.description_with(false)
     }
@@ -810,11 +840,15 @@ impl VerifiedContinuousFamily {
             );
             row
         });
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "version": 1, "family_id": self.family.id(),
+        let mut description = serde_json::json!({
+            "version": if self.versioned { 2 } else { 1 }, "family_id": self.family.id(),
             "mode": if self.controlled { "controlled" } else { "autonomous_reserved" }, "master": "master.m3u8", "video": video, "audio": audio,
-        }))
-        .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
+        });
+        if self.versioned {
+            description["family_revision"] = self.family.video().rungs().len().into();
+        }
+        let bytes = serde_json::to_vec(&description)
+            .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
         if bytes.len() > 32 * 1024 {
             return Err(VodError::ProducerFailed(
                 "family description exceeds its bound".into(),
@@ -1160,6 +1194,7 @@ pub(crate) use session::*;
 /// Everything the tasks share. `VodServe` is a thin handle over this so the
 /// per-rendition driver and generation tasks can be `'static`.
 struct Shared {
+    source_identity: StdMutex<Option<crate::source_custody::SourceIdentity>>,
     base: PathBuf,
     runtime_cache: PathBuf,
     store: Arc<dyn Store>,
@@ -1225,6 +1260,14 @@ struct Shared {
 /// is the struct and the set of await points, not scheduling. `Any` is a
 /// supertrait only so a test can reach the test hooks behind the registry.
 pub(crate) trait VodSharedHooks: std::any::Any + Send + Sync {
+    /// Production starts its ordinary driver. Custody controls can retain a
+    /// scoped worker claim without qualifying normal producer scheduling.
+    fn controlled_driver(
+        &self,
+        _encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None
+    }
     fn private_cleanup_failure(&self, _phase: &str) -> bool {
         false
     }
@@ -1341,6 +1384,13 @@ pub(crate) struct VodSharedTestHooks {
 
 #[cfg(test)]
 impl VodSharedHooks for VodSharedTestHooks {
+    fn controlled_driver(
+        &self,
+        encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        driver::controlled_driver::spawn(encoding)
+    }
+
     fn private_cleanup_failure_for(&self, phase: &str, key: &str) -> bool {
         let failures = self.private_failures.lock().expect("private failures");
         failures.contains(phase) || failures.contains(&format!("{phase}:{key}"))

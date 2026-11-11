@@ -286,6 +286,8 @@ private struct PlaybackSurfaceContractFixture: Decodable {
         let intentSettled: String?
         let intentSuperseded: String?
         let ownerSuccess: String?
+        let observationUnavailable: String?
+        let observationOwner: String?
         let userAction: String?
         let playbackRequested: Bool?
         let systemPaused: Bool?
@@ -300,6 +302,8 @@ private struct PlaybackSurfaceContractFixture: Decodable {
             case intentSettled = "intent_settled"
             case intentSuperseded = "intent_superseded"
             case ownerSuccess = "owner_success"
+            case observationUnavailable = "observation_unavailable"
+            case observationOwner = "observation_owner"
             case userAction = "user_action"
             case playbackRequested = "playback_requested"
             case systemPaused = "system_paused"
@@ -3076,6 +3080,10 @@ final class AppleClientTests: XCTestCase {
         if let presenting = raw.presenting {
             return .presenting(presenting, attached: ids.id(raw.attached))
         }
+        if let owner = raw.observationUnavailable {
+            return .observationUnavailable(owner: owner, attached: ids.id(raw.attached),
+                                           intent: raw.intent == nil ? nil : ids.id(raw.intent))
+        }
         if let source = raw.raise {
             return PlaybackSurfaceModel.raise(
                 source: source,
@@ -3086,7 +3094,8 @@ final class AppleClientTests: XCTestCase {
                 actions: (raw.actions ?? []).compactMap { PlaybackFault.Action(rawValue: $0) },
                 positionMs: raw.positionMs,
                 title: raw.title,
-                detail: raw.detail
+                detail: raw.detail,
+                observationOwner: raw.observationOwner
             )
         }
         if let settled = raw.intentSettled { return .intentSettled(ids.id(settled)) }
@@ -12641,5 +12650,15 @@ final class ServerLabelTests: XCTestCase {
         XCTAssertEqual(serverSettingsLabel(name: "Living Room", hostname: "lab6"), "Living Room · lab6")
         XCTAssertEqual(serverSettingsLabel(name: nil, hostname: "lab6"), "lab6")
         XCTAssertEqual(serverSettingsLabel(name: "Living Room", hostname: nil), "Living Room")
+    }
+}
+
+extension AppleClientTests {
+    func testMultiAudioInitialAttachmentBindsActualOrdinalBeforeCaptionChoice() {
+        XCTAssertFalse(PlayerController.needsOrdinalBoundAudioSession(audioTrackCount: 1, explicitAudio: nil))
+        XCTAssertTrue(PlayerController.needsOrdinalBoundAudioSession(audioTrackCount: 2, explicitAudio: nil))
+        XCTAssertTrue(PlayerController.needsOrdinalBoundAudioSession(audioTrackCount: 1, explicitAudio: 0))
+        XCTAssertEqual(PlayerController.sessionAudioIndex(explicit: nil, plan: 2, selected: 0), 2)
+        XCTAssertEqual(PlayerController.sessionAudioIndex(explicit: 1, plan: 2, selected: 0), 1)
     }
 }

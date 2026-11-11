@@ -193,6 +193,7 @@ graduates in this change; **(c)** unclear, stays and is listed for Paul.
 
 | Card (web Developer unless marked) | Switch | Owner row / plan | Owner status | Evidence still owed | Decision |
 |---|---|---|---|---|---|
+| HTTPS | Node-local `server.https.enabled` | [HTTPS build](../server/HTTPS-BUILD.md) | cohesive PR #1118 implementation locally verified; integration and fresh final-head gate pending | Browser/native trust installation, real media/cluster and physical-device qualification; Windows qualification remains unclaimed | (a) stays → Settings → System after acceptance; HTTP retained and restart required, readiness does not veto the saved choice |
 | Enable Live TV (web, and native Developer on Android, iOS and tvOS) | `live_tv_enabled` | L-02, L-03 ([HDHOMERUN-LIVE-TV-PLAN](HDHOMERUN-LIVE-TV-PLAN.md)) | merged: code; acceptance open | L-02's leader-restart, cold/warm-start (L6) and scratch-fault (L9) fleet prompts; L-03 M2 capacity offer and caption-positive M4 | (a) stays → Settings → Live TV; the native cards print the web's line word for word and, like the web card, draw every `/live-tv/readiness` row as Met / Not met beside the switch, advisory only → **graduated 2026-10-10** to Settings → Live TV (web, Android, iOS and tvOS; first card) |
 | Durable cluster work | `vod_index_cluster_cache`, `cache_produce_mins` | [DURABLE-WORK-QUEUE-STATUS](../cluster/DURABLE-WORK-QUEUE-STATUS.md) | merged M1–M3, E0–E3 (`82df7f59e`); deployed in `55aa430fd` to all four nodes on 2026-09-27 | none: the plan calls the queue infrastructure and OPERATIONS says there is no fleet receipt to obtain | **(b) graduated: card removed.** Its two switches were copies of the permanent ones in Analysis (`an-enabled`) and Maintenance (pre-transcoding cadence) |
 | Cinema shared libraries | `sharing_enabled` | [SHARED-LIBRARIES-IMPLEMENTATION](SHARED-LIBRARIES-IMPLEMENTATION.md), S2–S8 | S2–S7 implementation integrated in effort; [completion batch](SHARED-LIBRARIES-STATUS.md) open | two-NAT/Serve/Docker and cluster lifecycle qualification; physical native playback and burn/HDR qualification; S8 qualification receipt | (a) stays → Settings → Sharing after S3–S8 acceptance; readiness never vetoes Save |
@@ -304,7 +305,7 @@ The server's Live TV refusal now reads *"Live TV is disabled; an
 administrator can enable it in Settings → Live TV"* (it named Settings →
 Developer before).
 
-Still in web Developer: Jellyfin client compatibility, Cinema shared
+Still in web Developer: HTTPS, Jellyfin client compatibility, Cinema shared
 libraries, Cinema remote control, Cinema background invitations, Adaptive
 Auto quality, Fit Auto to display, Network priors, Dolby Vision for HDR
 output, FEL preservation, Measured per-title encoding, Reordered VOD frames,

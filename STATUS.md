@@ -1,9 +1,44 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-26 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
-- **2026-10-25 · Progressive subtitle setup repair:** [live status](docs/features/SUBTITLE-SETUP-REPAIR-STATUS.md). Owner Codex /root; [#1283](http://forge.lan:3000/noirr/plurx/pulls/1283) batches `codex/subtitle-setup-repair` to `main`. Install response and setup UX fixes are built locally; FIFO model-test admission is built locally. Adversarial review found no actionable issues; qualification and landing are tracked on the PR.
+
+## 2026-11-09 · Cinema uses the system renderer
+
+0.5.0 source selects system mpv and packages only Python/Lua Cinema controls.
+CLI/environment overrides, isolated config and scoped session ownership remain.
+Code, package and system-renderer interface qualification passed; coordinated
+installation and physical acceptance pending;
+[canonical ledger](docs/clients/LINUX-PLAYER-CINEMA-UI.md).
+
+
+- **2026-11-09 · HDR enhancement source budget:** [scope and validation](docs/streaming/HDR-ENHANCEMENT-SOURCE-BUDGET.md). Owner Codex. Independent current-main port preserves measured Original video budgets and exact backend-bound FEL recipes while retaining current source custody and post-first-frame upgrades. Fresh compiler checks and all 39 focused Rust regressions pass; current-head CI remains pending. Picture fidelity and deployment remain open.
+
+## 2026-11-07 · Pipeline contract v2 (cinema slice)
+
+Owner Claude (claude-opus-5-5, session 01BCWL9z). Curator→plurx scan seam per [the contract](docs/features/PIPELINE-CONTRACT.md) §4–§6. M0 (this entry, the contract copy, index and backlog rows, the `INTEGRATION.md` banner and its two corrections) goes to `main` as a docs-only task PR. M5 builds on `effort/pipeline-v2` as six task PRs `claude/pipeline-v2-m5-<task>`: T1 request sidecar store, T2 targeted job (`library_scan` kind, generation `library-targeted-v1`, dedupe `library:targeted:{id}`), T3 handler (`request_key`, `wait_ms`, `expected_files`, typed outcomes), T4 creating-key status read, T5 `probe_paths` and scan-interval default, T6 Jobs panel and docs. Not deployed.
+- **Decision for Paul:** existing libraries at `scan_interval_mins = 0` are preserved; Settings offers a one-click opt-in to six-hourly and states what "Never" costs. New libraries default to 360 minutes.
+
+## 2026-11-07 · Playback start: one engine, index by first play, one clock
+
+Owner Claude (claude-fable-5-1, session 01BCWLA2SJPLAmibeaz9L5xb). [End-to-end review](docs/reviews/CINEMA-END-TO-END-REVIEW-2026-11-07.md) merged as #1400; [plan and lane status](docs/streaming/PLAYBACK-START-PLAN.md). On the fleet most starts fall to the rolling engine for `vod_index_pending` (18 of 29 since the last deploy) because the fragment-index queue is starved (13.6k published, 7.7k failed, 3.9k retry-wait, 16 claims in 2.7 days) and engine-keyed; the 16 s first-publication gate is the slow start. Paul ruled 2026-11-07: one copy engine with the first play building the index; source-keyed index; processed DV as an upgrade after the first frame; learners and idle voters index. Plan revision 3 (Fable adversarial review and Astra independent review applied) is the first revision build agents may claim; Phase 1 order H2 → C2 → C3 → C1 → D2 → G1 → R1/H1 → D1 on `effort/playback-start`; the processed-DV switch mechanism is the M6 prepared replacement (Paul, 2026-11-07). Phase 1 build contract: [PLAYBACK-START-BUILD.md](docs/streaming/PLAYBACK-START-BUILD.md). Nothing deployed.
+
+## 2026-11-03 · Playback publication and Resume overlay
+
+Codex/root repaired initial playlist consumption accounting and destination-owned web wait retirement ([PR #1376](http://forge.lan:3000/noirr/plurx/pulls/1376), merged as `edf6d08fa`); deployed 2026-11-07 to media1, lab4 and lab6 (media1 and lab6 on build `4ddbf1229`, which contains it; lab4 on `edf6d08fa`). [Live implementation, review and merge status](docs/streaming/PLAYBACK-PUBLICATION-OVERLAY-STATUS.md).
+- **2026-11-03 · Enhanced playback preparation and web recovery:** [incident and acceptance ledger](docs/streaming/HDR10E-PREPARATION-AND-WEB-RECOVERY.md). Owner Codex; branch `codex/m6-hdr10e-preparation`. Bounded owned-source read-ahead and cache inventory overlap retain all checks. Balanced 32-window controls pass: reader waits average 1.60 s, maximum 1.76 s for two-second media. Partial rewatch resume passes. Current-main integration, compiler/CLI gates and live acceptance remain open; its schema upgrade prevents old-image rollback after activation. Merged as [PR #1374](http://forge.lan:3000/noirr/plurx/pulls/1374) and deployed 2026-11-07 to media1, lab4 and lab6 (builds `4ddbf1229` and `edf6d08fa`, both contain it), so old-image rollback no longer applies on those nodes.
+- **2026-11-02 · Playback startup, Resume and native callbacks:** Owner Codex/root; [delivery ledger](docs/streaming/PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md). Astra closed all seven source findings; narrow test-phase corrections are recorded in the delivery ledger. All 86 focused Rust cases pass with successful cases retained and failures retried only. C controls, Apple (1) and Android (10) tests pass on matching inputs. Pinned compiler checks pass. [PR #1366](http://forge.lan:3000/noirr/plurx/pulls/1366) records the live main-lane checks and landing. Deployed 2026-11-07 to media1, lab4 and lab6 (media1 and lab6 on build `4ddbf1229`, lab4 on `edf6d08fa`; #1366 is in both); runtime cold-start acceptance is not yet measured.
+
+- **2026-11-02 · Library worker driver; async Store refinement proof parked:** [parked proof ledger](docs/cluster/ASYNC-STORE-REFINEMENT-STATUS.md). Owner Claude (claude-opus-5-5, session 01BCWL9x). Library workers now run through one shared driver, so ready work beats pressure ticks while queue and domain loss keep priority; carved from PR #1263 without its proof machinery. The exhaustive refinement proof is parked: its state space did not close in an offline census (about 5M products per context and still growing), far beyond what paged sessions can qualify. The proof work is preserved under tag `archive/async-store-refinement-2026-11-02` and a bundle on #1263; restarting needs a reduced model first.
+- **2026-11-01 · CI fleet visibility (ci-fleet):** [repository, plan and usage](http://forge.lan:3000/noirr/ci-fleet) (moved out of plurx into its own repository after merging here). Owner Claude (claude-opus-5-5, session 01BCWL9y); [PR #1344](http://forge.lan:3000/noirr/plurx/pulls/1344). The forge records no placement and shows a job whose labels no runner carries as waiting forever: four Apple jobs asked for `xcode-27.1` after macb re-registered as `xcode-27.2`, and `general · ffmpeg-6` had 0 of 3 runners online. ci-fleet classifies every waiting job, shows pools, drift, placement (from line 1 of each job log) and per-host usage, and routes Drain/Start VM through the runner watchdog and Apple standby. Not deployed: Paul installs the collector on lab3 and the agents.
+- **2026-11-01 · Shared libraries across Tailscale accounts:** [operating guide](docs/features/SHARED-LIBRARIES-OPERATIONS.md#reading-connection-status). Owner Claude (claude-opus-5-5, session 01BCWL9y); [PR #1339](http://forge.lan:3000/noirr/plurx/pulls/1339). Root cause on the Mac: the LaunchAgent's Tailscale CLI calls were answered by the Tailscale GUI, so host setup was `unavailable` and outbound sharing dials had no source address; fixed with `TAILSCALE_BE_CLI=1` (verified on the Mac under launchd). Second cause: the fleet's Tailscale share was never accepted by the receiving account (root2you). Settings → Sharing now shows a connection checklist with the host account and failing step, per-connection reachability and diagnosis, Tailscale share acceptance, and a sharing activity log. Not deployed: Paul deploys plurxd to the fleet and the Mac app.
+- **2026-10-31 · Subtitles come and go:** [RCA](docs/clients/SUBTITLE-CUE-INDEX-RCA.md). Owner Claude (session 01BCWL9x). Every subtitle reader demuxed the picture, so a 4K window took 25–186 s and whole tracks hit the 30-minute pass deadline; Matroska tracks whose cues provably cover every frame are now read block by block. Branch `claude/subtitle-cue-index`.
+- **2026-10-28 · Dolby Vision title scan without decoding:** [how it runs](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md); [PR #1301](http://forge.lan:3000/noirr/plurx/pulls/1301). Owner Codex (resumed Claude session 01BCWL9z). `scan_title` parses RPUs without decoding pictures, and title demand is keyed by the scanner alone so renderer changes do not re-queue every title. During content analysis the scanner runs beside the index pass on a duplicate of the same held source; measured storage reads total one file copy. Adversarial review addressed; parity, mutation checks and final landing are tracked on the PR. Not deployed: Paul deploys plurxd, rebuilding the DV bundle; avoid mixed-version nodes during rollout.
+- **2026-10-27 · VOD index recovery:** Owner Claude (Linux Dolby Vision session); [#1299](http://forge.lan:3000/noirr/plurx/pulls/1299). Large remuxes never got a VOD index, so every play fell back to live HLS: the index read's time budget ignored file size and a timed-out build was never retried yet reported "pending" forever (77 files on lab5), the local pass quit whenever a DV title scan held the background lane, and in the cluster a learner never resolved requests aimed at it while viewer requests were refused at the 4096-row queue cap. Fixed with a size- and rate-based budget, due/waiting/terminal outcomes with a distinct `vod_index_unavailable` reason, a queued local pass, and learner/viewer/removed-node queue handling; adversarial review's 12 findings fixed. Known limit: copy/VOD viewers without an admission do not preempt an index read. Deployed 2026-11-07 to media1, lab4 and lab6 (builds `4ddbf1229` and `edf6d08fa`, both contain it).
+- **2026-10-26 · Subtitle completion:** [live status](docs/features/SUBTITLE-COMPLETION-STATUS.md). Owner Codex /root; [PR #1292](http://forge.lan:3000/noirr/plurx/pulls/1292) batches all caption operations and native delivery. Review and moving-runtime qualification pass; useful captions at 13.3/14.6s on two CPUs. Final gate and landing are tracked on the PR. Paul deploys.
+- **2026-10-26 · Linux player (Dolby Vision through plurx):** [plan and milestones](docs/clients/LINUX-PLAYER-PLAN.md). Owner Claude (Linux Dolby Vision session). M1–M5 (#1285, #1288, #1290, #1291) merged to `main` by [#1295](http://forge.lan:3000/noirr/plurx/pulls/1295); not deployed. Package 0.3.0 verified in a fresh container and rebuilds byte-identical; on the ROG (CI runners paused) both the RTX and the Arc iGPU play 4K CM v4.0, CM v2.9 and FEL clips without dropped frames. Paul's first real playback (Avatar, from the web app) found four faults, fixed in 0.3.1 ([#1297](http://forge.lan:3000/noirr/plurx/pulls/1297)): no display from the portal, the NVIDIA driver's colour surface closing the window, control capabilities missing (400/409), and copies narrowing Profile 7 to HDR10 for a client that names it (server). Deployed 2026-10-27; Avatar and Twilight now play in Dolby Vision from the web app. 0.3.2 ([#1298](http://forge.lan:3000/noirr/plurx/pulls/1298)) adds the Profile 7 enhancement layer over HLS (mpv's lavf demuxer path never split it), the whole film on the seek bar of a live session (mpv patch 0005), and a package build that survives snapshot.ubuntu.com outages. Next: M6 acceptance on the ROG.
 - **2026-10-26 · CM29 analytic gamut reconstruction:** [current rendering ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Owner Codex chat 01a17554. Standard IPT D65, the published colorfulness equation, analytic gamut interpolation and separate stock SDR/output blacks replace fitted gains; method v5 invalidates older targeted renditions. Selected-frame comparisons improve across all four titles, including Smile’s dark band. Adversarial review approved; native parity passed. [PR #1289](http://forge.lan:3000/noirr/plurx/pulls/1289) records final fast-lane qualification and landing. Private raw evidence is retained. No deployment: Paul deploys.
+- **2026-10-25 · Progressive subtitle setup repair:** [live status](docs/features/SUBTITLE-SETUP-REPAIR-STATUS.md). Owner Codex /root; [#1283](http://forge.lan:3000/noirr/plurx/pulls/1283) batches `codex/subtitle-setup-repair` to `main`. Install response and setup UX fixes are built locally; FIFO model-test admission is built locally. Adversarial review found no actionable issues; qualification and landing are tracked on the PR.
 - **2026-10-25 · Display-targeted DV creative trims (Phase E finish):** [build plan, phase 2](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md#phase-2-closed-form-dolby-display-management-l1-l3-l2-l8). PR #1276 serves the CM v4 L8 and CM v2.9 L2 trims (L2 interpolated linearly in target PQ, measured on the reference), accepted by pixel comparison on eight real titles: CM v4 mean ΔE_ITP ≤ 0.011, CM v2.9 0.14–0.46 (untrimmed was 4.9–14). Playback reports `creative_trims_applied` per session; Apple 275, Android 181. Owner Claude; merged as 072d0f65 after two review rounds and one green fast lane. Not deployed: Paul deploys #1275 and #1276 together, then a GPT physical-display check.
 - **2026-10-25 · Display-targeted DV Phase E (closed-form Dolby display management):** [build plan, phase 2](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md#phase-2-closed-form-dolby-display-management-l1-l3-l2-l8). PR #1275 replaces the Annex B.2 curve with our own CM v4 / CM v2.9 equations, checked privately against the licensed reference (CM v4 real P8 title mean ≤ 0.007 at 100 nits, ≤ 0.001 at 300–1600). Merged as 489e86e4 with served trims off; the trims PR #1276 turns them on. Paul deploys.
 - **2026-10-23 · Display-targeted HDR10-E:** [A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Owner direct GPT/root; #1216 and batched#1269 merged into the effort, latest3cc264068; main unchanged. Compile-only gate5889 all8 PASS, Rust382/C384/trim393 compile passes; earlier behavior/media/client evidence retains source attribution. Final integrated adoption, completed-candidate review and qualification remain. Root delivery decision covers HDR/SDR with E explicitly unfinished and truthful L1-only reporting; no full A–F completion. Promotion-test policy awaits user reconciliation; physical acceptance and the excluded full-app FEL EOF lane remain separate.
@@ -57,56 +92,14 @@ rev 6.
   - the two-build B-M4 measurement (§9.1).
 - **Waiting on those:** Part A's A-M1/A-M2 waits on B, and C-M2/C-M3 wait on R2.
 
-## HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity
-
-**Branch `effort/macos-gpu-tonemap-parity`.** An Apple M4 node's Transcoding
-backend row read "CPU tone-map — fell back" over a Vulkan `Cannot allocate
-memory` and an OpenCL graph 59 levels from the CPU picture. Causes, each
-reproduced on that node's Jellyfin FFmpeg 8.1.3: the macOS build has no
-Vulkan compiled in, and the probe ran the graph anyway; the OpenCL graph
-named `hable` but left Jellyfin's `tonemap_mode=auto` and desaturation on;
-and the probe never tried the native Metal graph, whose BT.2390/ITP spelling
-the Mac processing context used without any CPU comparison (29.5 levels
-away). Now: the probe reads the build's device types and filters and reports
-what it cannot express as not available; CUDA, OpenCL and Metal-on-PQ take
-the CPU chain's operator from one source that also keys plan identity; the
-Metal graph is the first VideoToolbox candidate (≈2.2× the CPU chain within
-10.3 levels), and a pass ends the race with node routing left on the CPU
-chain; and the Mac context offers its HDR10 Metal graphs only when that
-parity passed. GPU graphs now get the CPU chain's peak. HLG through Metal is
-unchanged. Use still goes through Mac video processing in Developer. Plan
-identity gains the curve terms, so CUDA HDR and Mac Metal renditions (HLG
-included) are made once more under new keys.
-
-## Live TV station logos on Apple TV, iOS and Android
-
-**Branch `fix/live-tv-station-logos-native`, issue
-[#815](http://forge.lan:3000/noirr/plurx/issues/815).** Paul reported
-2026-10-04 that the Apple TV Live TV guide has no station logos while the web
-guide does. Cause: #755 put the rule that picks a channel's logo in the web
-page (`pages/live-tv.js`) instead of the shared guide reducer and
-`tests/playback/live-tv-guide-cases.json` — the one contract all three guides
-reproduce — so the native clients, which already decode `image_url`, were
-never asked to draw it and no suite could see the gap. The rule is now
-`station_logo` in that fixture (lineup-id match, cold guide, 38 address
-cases; a textual `https://` + plain-host rule so three languages agree),
-answered by `PlurxLiveTv.stationLogoUrl`, Apple's and Android's
-`LiveTvGuideReducer`. Apple (build 209) and Android (versionCode 146) draw it
-in list rows, grid headers, programme details, the picture badge and the
-fullscreen identity, with the callsign until the image decodes. Native
-artwork loads on its own connection with no bearer, cookies or HTTPS→HTTP
-redirects (Android's app-wide Coil loader adds the bearer to every host).
-Adversarial review: no blockers; its five should-fix findings are
-addressed (scheme respelled for Coil, Android failure backoff, Apple lock
-kept off suspension points, grid headers keep their width without artwork,
-wiring pinned by source tests). Not yet on hardware.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17 and 2026-10-19 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19, 2026-10-26 and 2026-11-07 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-10-10 | HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
+| 2026-10-04 | Live TV station logos on Apple TV, iOS and Android | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
 | 2026-10-17 | Agent efficiency: smaller searches, a docs router, paperwork first | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-10-04 | A leader restart no longer ends progressive or Live TV playback | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-05 | Main-merge defects D1–D7 and the red gates: one batched PR | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |

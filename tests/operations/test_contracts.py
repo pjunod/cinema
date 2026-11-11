@@ -13,6 +13,8 @@ import tomllib
 import unittest
 from unittest import mock
 
+from validation import runner_fleet as runner_fleet_module
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -116,19 +118,13 @@ def runner_fleet() -> dict:
 
 
 def rostered_runners() -> tuple[tuple[str, frozenset[str]], ...]:
-    """Each rostered runner and every label GitHub would match it against.
+    """Each rostered runner and every label the forge would match it against.
 
     `self-hosted` and the operating-system and architecture labels are added by
-    GitHub, never by the ansible inventory, so the roster derives them here
-    rather than repeating five read-only strings on every runner.
+    the forge, never by the ansible inventory; `validation.runner_fleet`
+    derives them (ci-fleet carries a copy of the same module).
     """
-    return tuple(
-        (
-            runner["name"],
-            frozenset(runner["labels"]) | {"self-hosted", runner["os"], runner["arch"]},
-        )
-        for runner in runner_fleet()["runners"]
-    )
+    return runner_fleet_module.rostered_runners(runner_fleet())
 
 
 def store_shard_count() -> int:
@@ -142,21 +138,8 @@ def store_shard_count() -> int:
 
 
 def self_hosted_label_sets(block: str) -> list[tuple[str, ...]]:
-    """Every self-hosted label set a job's `runs-on` can resolve to.
-
-    A job either names the local labels as a YAML flow sequence or reads the
-    same sequence from a matrix key. Parse the arrays that are actually there
-    instead of matching label strings this test already knows.
-    """
-    direct = [
-        tuple(part.strip().strip('"\'') for part in literal.split(","))
-        for literal in re.findall(r"(?m)^ +runs-on: \[([^]]+)\]$", block)
-    ]
-    matrix = [
-        tuple(json.loads(literal))
-        for literal in re.findall(r"(?m)^ +runs_on: '(\[[^']*\])'$", block)
-    ]
-    return [labels for labels in (*direct, *matrix) if "self-hosted" in labels]
+    """Every self-hosted label set a job's `runs-on` can resolve to."""
+    return runner_fleet_module.self_hosted_label_sets(block)
 
 
 def workflow_step_literal(step: str, key: str) -> list[str]:
@@ -276,6 +259,86 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn(".env_clear()", command)
         self.assertIn('.env("LC_ALL", "C")', command)
 
+    def test_live_tv_browser_fixture_traverses_master_and_recovers_exact_request(self):
+        import ast
+        from types import SimpleNamespace
+        from urllib.parse import urlsplit
+
+        tree = ast.parse(read("scripts/live-tv-browser"))
+        intercept = next(node for node in ast.walk(tree)
+                         if isinstance(node, ast.FunctionDef) and node.name == "intercept")
+        with tempfile.TemporaryDirectory() as temporary:
+            media = Path(temporary)
+            (media / "0.ts").write_bytes(b"synthetic transport stream")
+            sessions = {"fixture-1": {"opened": 0, "closed": False}}
+            violations = []
+            namespace = {"re": re, "urlsplit": urlsplit, "media": media,
+                         "time": SimpleNamespace(monotonic=lambda: 0),
+                         "sessions": sessions, "violations": violations,
+                         "host": SimpleNamespace(token="fixture-token"),
+                         "channels": [{"id": "one"}], "events": [],
+                         "mode": {"next": "normal"}, "starts_by_id": {},
+                         "start_requests": [], "resumes": [], "retirements": []}
+            namespace["active"] = lambda: [key for key, value in sessions.items() if not value["closed"]]
+            exec(compile(ast.Module(body=[intercept], type_ignores=[]),
+                         "scripts/live-tv-browser", "exec"), namespace)
+
+            def request(path, method="GET", headers=None, body=None):
+                response = {}
+                incoming = SimpleNamespace(
+                    url="http://fixture.invalid/api/v1/live-tv/" + path,
+                    method=method, headers=headers or {}, post_data_json=body)
+                namespace["intercept"](SimpleNamespace(
+                    request=incoming, fulfill=lambda **value: response.update(value)))
+                return response
+
+            def get(suffix, headers=None):
+                return request("sessions/fixture-1/" + suffix, headers=headers)
+
+            master = get("master.m3u8")
+            self.assertEqual(master["content_type"], "application/vnd.apple.mpegurl")
+            variants = [line for line in master["body"].splitlines()
+                        if line and not line.startswith("#")]
+            self.assertEqual(variants, ["index.m3u8"])
+            self.assertIn("#EXT-X-STREAM-INF:", master["body"])
+            playlist = get(variants[0])
+            segments = [line for line in playlist["body"].splitlines()
+                        if line and not line.startswith("#")]
+            self.assertEqual(segments[0], "0.ts")
+            self.assertEqual(get(segments[0])["body"], b"synthetic transport stream")
+            self.assertEqual(violations, [])
+            with self.assertRaises(AssertionError):
+                get("unexpected.m3u8")
+            get("master.m3u8", {"authorization": "Bearer fixture-only"})
+            self.assertEqual(len(violations), 1, "capability reads still flag account credentials")
+            sessions["fixture-1"]["closed"] = True
+            self.assertEqual(get("master.m3u8")["status"], 410)
+
+            auth = {"authorization": "Bearer fixture-token"}
+            request_id = "a" * 32
+            path = "starts/" + request_id
+            activation = request("channels/one/sessions", "POST", auth,
+                                 {"request_id": request_id})["json"]
+            self.assertEqual(namespace["starts_by_id"][request_id], activation["session_id"])
+            self.assertEqual(request("channels/one/sessions", "POST", auth,
+                                     {"request_id": request_id})["json"], activation)
+            self.assertEqual(len(sessions), 2, "replay must not allocate another capability")
+            self.assertEqual(request(path + "/resume", "POST")["status"], 401)
+            self.assertEqual(request(path, "DELETE")["status"], 401)
+            self.assertFalse(sessions[activation["session_id"]]["closed"])
+            self.assertEqual(request("starts/" + "b" * 32 + "/resume", "POST", auth)["status"], 404)
+            resumed = request(path + "/resume", "POST", auth)["json"]
+            self.assertEqual(resumed, {"outcome": "live", "session": activation})
+            self.assertEqual(namespace["resumes"], [request_id])
+            self.assertEqual(len(sessions), 2, "resume must not tune")
+            self.assertEqual(request(path, "DELETE", auth)["json"], {"outcome": "retired"})
+            self.assertEqual(request(path + "/resume", "POST", auth)["json"], {"outcome": "ended"})
+            self.assertEqual(request(path, "DELETE", auth)["json"], {"outcome": "retired"})
+            self.assertEqual(namespace["events"], ["start:fixture-2", "release:fixture-2"])
+            self.assertEqual(request("channels/one/sessions", "POST", auth,
+                                     {"request_id": ""})["status"], 400)
+            self.assertEqual(len(sessions), 2)
+
     def test_private_origin_fetches_use_only_step_scoped_credentials(self):
         checked = 0
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
@@ -305,6 +368,35 @@ class OperationsContractCase(unittest.TestCase):
                 script = read(path)
                 self.assertIn('"--mute-audio"', script)
                 self.assertIn("HardwareMediaKeyHandling", script)
+
+    def test_ui_baseline_waits_for_current_boot_caption_probe_and_registered_children(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        harness = runpy.run_path(str(ROOT / "scripts/ui-baseline"), run_name="caption_fixture_contract")
+        wait = harness["SelfHost"].wait_for_caption_probe
+        source = read("scripts/ui-baseline")
+        self.assertIn("probe_log_offset = self.log.stat().st_size\n        self.spawn()\n        self.wait_for_caption_probe(probe_log_offset)", source)
+        self.assertIn("self.require_jellyfin_listener()", source)
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "daemon.log"
+            old = b"caption graph probe complete\n"
+            log.write_bytes(old + b"new boot\n")
+            fixture = SimpleNamespace(log=log, proc=SimpleNamespace(poll=lambda: None),
+                                      base_url="http://fixture.invalid", token="fixture-only")
+            def observe(read_processes, read_boot_log, alive, **clock):
+                self.assertEqual(read_boot_log(), "new boot\n")
+                self.assertTrue(alive())
+                self.assertEqual(read_processes(3), [{"pid": 123}])
+                self.assertIn("now", clock)
+                self.assertIn("sleep", clock)
+            with patch.dict(wait.__globals__, {"wait_for_fixture_idle": observe,
+                    "api": lambda *args, **kwargs: {"processes": [{"pid": 123}]}}):
+                wait(fixture, len(old))
+            with patch.dict(wait.__globals__, {"wait_for_fixture_idle": observe,
+                    "api": lambda *args, **kwargs: {}}):
+                with self.assertRaises(harness["Fail"]):
+                    wait(fixture, len(old))
 
     def test_ui_baseline_starts_poll_observation_after_route_settles(self):
         script = read("scripts/ui-baseline")
@@ -1179,7 +1271,7 @@ assert.equal(context.ACT_TIMER, null);
         the static probe's `config.log` and (across days) the account's
         last-change day. Each is either removed or given a fixed input.
         """
-        dockerfile = read("Dockerfile")
+        dockerfile = read("Dockerfile.media-runtime")
         assets = dockerfile.split(" AS runtime-assets\n", 1)[1].split("\nFROM ", 1)[0]
         run = assets[assets.index("\nRUN ") :]
         removal = run.index("rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache")
@@ -1285,10 +1377,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('std::env::var("SOURCE_DATE_EPOCH")', build_rs)
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
-        dockerfile = read("Dockerfile")
+        dockerfile = read("Dockerfile.media-runtime")
         # Only the shipped media installer owns these two cache-clean points.
         # The CI tooling stage cleans its independently installed build tools.
-        dockerfile = dockerfile.split("FROM runtime-assets AS ci", 1)[0]
+        dockerfile = dockerfile.split("FROM runtime-assets AS linux-dolby-package-build", 1)[0]
         distro_install = dockerfile.index("intel-media-va-driver-non-free")
         first_clean = dockerfile.index("apt-get clean", distro_install)
         jellyfin_verify = dockerfile.index("sha256sum -c -", first_clean)
@@ -1306,7 +1398,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(dockerfile.count("&& apt-get clean"), 2)
 
     def test_docker_build_requires_the_profile5_renderer_used_at_runtime(self):
-        dockerfile = read("Dockerfile")
+        dockerfile = read("Dockerfile.media-runtime")
         self.assertIn("-h filter=tonemapx", dockerfile)
         self.assertIn(
             "grep -q '^[[:space:]]*apply_dovi[[:space:]]'",
@@ -1316,7 +1408,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("apply_dolbyvision", dockerfile)
 
     def test_docker_build_requires_the_atsc3_audio_decoder(self):
-        dockerfile = read("Dockerfile")
+        dockerfile = read("Dockerfile.media-runtime")
         self.assertIn("jellyfin-ffmpeg8", dockerfile)
         self.assertIn("-decoders", dockerfile)
         self.assertIn("AC-4 decoder", dockerfile)
@@ -1333,7 +1425,7 @@ assert.equal(context.ACT_TIMER, null);
         #
         # Digests are index digests (multi-platform), because the image is
         # built for amd64 and arm64 from the same `FROM`.
-        dockerfile = read("Dockerfile")
+        dockerfile = read("Dockerfile") + "\n" + read("Dockerfile.media-runtime")
         registry_bases = re.findall(
             r"(?m)^FROM\s+(\S+)\s+AS\s+(\S+)",
             dockerfile,
@@ -1383,21 +1475,22 @@ assert.equal(context.ACT_TIMER, null);
         self.assertTrue((ROOT / "scripts/image-base-drift").exists())
 
     def test_docker_build_pins_and_verifies_disk_conversion_tools(self):
+        media = read("Dockerfile.media-runtime")
         dockerfile = read("Dockerfile")
-        self.assertIn("ARG DOVI_TOOL_VERSION=2.3.3", dockerfile)
-        self.assertIn("ARG MKVTOOLNIX_VERSION=74.0.0-1", dockerfile)
-        self.assertIn('"mkvtoolnix=${MKVTOOLNIX_VERSION}"', dockerfile)
+        self.assertIn("ARG DOVI_TOOL_VERSION=2.3.3", media)
+        self.assertIn("ARG MKVTOOLNIX_VERSION=74.0.0-1", media)
+        self.assertIn('"mkvtoolnix=${MKVTOOLNIX_VERSION}"', media)
         self.assertIn(
             "dovi_sha=5dae82cb2becd3b9fd726127f936a8d32635e60746d16238fdfded12aa05988c",
-            dockerfile,
+            media,
         )
         self.assertIn(
             "dovi_sha=daf538c275f4e702219ce8eb61db28382193ac9d0126e1ef4185a88303af4485",
-            dockerfile,
+            media,
         )
-        self.assertIn('sha256sum -c -', dockerfile)
-        self.assertIn('dovi_tool --version | grep -F "${DOVI_TOOL_VERSION}"', dockerfile)
-        self.assertIn('mkvmerge --version | grep -F "mkvmerge v74.0.0"', dockerfile)
+        self.assertIn('sha256sum -c -', media)
+        self.assertIn('dovi_tool --version | grep -F "${DOVI_TOOL_VERSION}"', media)
+        self.assertIn('mkvmerge --version | grep -F "mkvmerge v74.0.0"', media)
         self.assertIn("PLURX_DOVI_TOOL=/usr/local/bin/dovi_tool", dockerfile)
         self.assertIn("PLURX_MKVMERGE=/usr/bin/mkvmerge", dockerfile)
 
@@ -1426,9 +1519,7 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertLess(runtime_assets, runtime_image)
         self.assertLess(runtime_image, binary_copy)
-        runtime_assets_stage = dockerfile.split(runtime_assets_marker, 1)[1].split(
-            runtime_image_marker, 1
-        )[0]
+        runtime_assets_stage = media.split(runtime_assets_marker, 1)[1].split("\nFROM ", 1)[0]
         for assertion in (
             "dovi_sha=daf538c275f4e702219ce8eb61db28382193ac9d0126e1ef4185a88303af4485",
             "sha256sum -c -",
@@ -1574,6 +1665,69 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--dry-run", result.stdout)
         self.assertIn("--allow-unknown", result.stdout)
 
+    def test_ship_physical_preserves_adb_serials_with_spaces(self):
+        script = read("scripts/ship-physical")
+        android = script.split('if [[ $DO_ANDROID -eq 1 ]]; then\n  log ', 1)[1]
+        android = 'if [[ $DO_ANDROID -eq 1 ]]; then\n  log ' + android.split(
+            "# Summary", 1
+        )[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            adb = Path(tmp) / "adb"
+            adb.write_text(textwrap.dedent("""\
+                #!/bin/bash
+                case "$1" in
+                  start-server) exit 0 ;;
+                  devices)
+                    printf 'List of devices attached\\n'
+                    printf 'adb-device (2)._adb-tls-connect._tcp\\tdevice\\n'
+                    printf 'offline-device\\toffline\\n'
+                    printf 'emulator-5554\\tdevice\\n'
+                    printf 'plain-device\\tdevice\\n'
+                    ;;
+                  -s)
+                    case "$3" in
+                      shell)
+                        cat >/dev/null
+                        case "$4" in
+                          getprop) printf 'Fixture Device\\n' ;;
+                          dumpsys) printf 'versionCode=1\\n' ;;
+                        esac
+                        ;;
+                      install) printf 'Success\\n' ;;
+                    esac
+                    ;;
+                esac
+                """))
+            adb.chmod(0o755)
+            harness = textwrap.dedent("""\
+                set -euo pipefail
+                ADB=$1
+                DO_ANDROID=1
+                ALLOW_UNKNOWN=1
+                KNOWN_ANDROID_PATTERNS=(fixture)
+                ANDROID_PACKAGE=fixture.app
+                ANDROID_CODE=2
+                VERSION=fixture
+                APK=fixture.apk
+                log() { :; }
+                warn() { :; }
+                record_installed() { printf '%s\\n' "$1"; }
+                record_skipped() { :; }
+                record_failed() { exit 1; }
+                """) + android
+            result = subprocess.run(
+                ["bash", "-c", harness, "fixture", str(adb)],
+                input="",
+                text=True,
+                check=True,
+                stdout=subprocess.PIPE,
+                timeout=10,
+            )
+        self.assertEqual(result.stdout.splitlines(), [
+            "Fixture_Device [adb-device (2)._adb-tls-connect._tcp] → fixture (2)",
+            "Fixture_Device [plain-device] → fixture (2)",
+        ])
+
     def test_apple_developer_team_is_injected_instead_of_tracked(self):
         script = read("scripts/ship-physical")
         project = read("clients/apple/project.yml")
@@ -1636,10 +1790,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("/Applications/Xcode.app/Contents/Developer", workflow)
         self.assertNotIn("/Applications/Xcode_27.app/Contents/Developer", workflow)
         self.assertNotIn("brew install xcodegen", workflow)
-        self.assertIn('grep -Fxq "Xcode 27.1"', workflow)
-        self.assertIn('grep -Fxq "Build version 27A9275"', workflow)
-        self.assertIn('test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.1"', workflow)
-        self.assertIn('test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.0"', workflow)
+        self.assertIn('grep -Fxq "Xcode 27.2"', workflow)
+        self.assertIn('grep -Fxq "Build version 27B52"', workflow)
+        self.assertIn('test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.2"', workflow)
+        self.assertIn('test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.2"', workflow)
         self.assertIn('= "Version: 2.46.0"', workflow)
         self.assertIn('iOS 26.5 (26.5 - 23F77)', workflow)
         self.assertIn('tvOS 26.5 (26.5 - 23L470)', workflow)
@@ -1685,10 +1839,10 @@ assert.equal(context.ACT_TIMER, null);
             apple_target.index("test-without-building"),
         )
         self.assertEqual(apple_target.count('-derivedDataPath "$(APPLE_DERIVED_DATA)"'), 5)
-        # The DerivedData cache in ci.yml must point at the same directory the
-        # Makefile builds into, or it silently caches nothing.
+        # DerivedData is reused by build/test destinations within this job only;
+        # whole build state must not transfer between checkout roots.
         self.assertIn("APPLE_DERIVED_DATA := build/DerivedData", makefile)
-        self.assertIn("path: clients/apple/build/DerivedData", workflow)
+        self.assertNotIn("path: clients/apple/build/DerivedData", workflow)
 
     def test_validation_workflows_do_not_compile_or_gate_windows(self):
         from validation.qualification import REQUIRED_JOBS
@@ -1739,17 +1893,20 @@ assert.equal(context.ACT_TIMER, null);
             "\n  cluster_store_legacy:", 1
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
-        self.assertIn("timeout-minutes: 20", fast_rust)
+        self.assertIn("timeout-minutes: 60", fast_rust)
+        compiler_pool = "runs-on: [ci-nonvoter-heavy-amd64]"
         for compiler_job in (
             metadata_jobs["rust_compile"],
+            workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
+        ):
+            compiler_header = compiler_job.split("    steps:", 1)[0]
+            self.assertIn(compiler_pool, compiler_header)
+        for compiler_job in (
+            fast_rust,
             metadata_jobs["cluster_wal"],
             workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
         ):
             compiler_header = compiler_job.split("    steps:", 1)[0]
-            self.assertIn(
-                "runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]",
-                compiler_header,
-            )
             self.assertRegex(
                 compiler_header,
                 r'(?m)^      CARGO_BUILD_JOBS: "1"$',
@@ -1915,8 +2072,6 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertNotIn("../badges-ci/ci.svg", readme)
         self.assertNotIn("../badges-lint/lint.svg", readme)
-        self.assertIn("Coverage refreshes automatically on pushes to `main`", readme)
-        self.assertIn("measurement date (UTC)", readme)
         self.assertNotIn("docs/img/badges/", readme)
         self.assertNotRegex(
             readme,
@@ -2005,9 +2160,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(workflow_step_literal(operations_run, "run"), [
             'if [ "$RETAIN_OPERATIONS_UNITS" = true ]; then',
             '  echo "Adopted authenticated complete operations unit discovery"',
+            'elif [ -n "$PYTHON_SELECTION_SHA256" ]; then',
+            '  python3 -m validation.native_python_execute operations',
             "else", "  make operations-check", "fi",
         ])
         self.assertIn("RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}", operations_run)
+        self.assertIn("PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}", operations_run)
         effort_preflight = workflow_job_blocks(".github/workflows/effort-ci.yml")[
             "preflight"
         ]
@@ -2024,8 +2182,7 @@ assert.equal(context.ACT_TIMER, null);
                 "49933ea5288caeca8642d1e84afbd3f7d6820020",
                 contract_preflight,
             )
-            self.assertIn('node-version: "22.23.2"' if workflow == "main-fast-lane"
-                          else 'node-version: "22"', contract_preflight)
+            self.assertIn('node-version: "22.23.4"', contract_preflight)
             self.assertLess(
                 contract_preflight.index(
                     "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
@@ -2131,12 +2288,8 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("persist-credentials: false", coverage)
         self.assertIn("components: llvm-tools-preview", coverage)
         self.assertIn("lane: coverage", coverage)
-        self.assertIn('major: "6"', coverage)
-        self.assertIn(
-            "cargo llvm-cov --workspace --locked --exclude plurx-cluster-check",
-            coverage,
-        )
-        self.assertIn("--failure-mode all", coverage)
+        self.assertIn("scripts/unit-coverage --image", coverage)
+        self.assertIn('cp -- "$output/cov.json" cov.json', coverage)
         steps = workflow_step_blocks(coverage)
         publish = steps["Publish the unit coverage badge"]
         self.assertNotIn("continue-on-error", publish)
@@ -2144,7 +2297,9 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("scripts/publish-badge", publish)
         self.assertIn("--branch badges", publish)
         self.assertIn("--alias codex/badges", publish)
-        self.assertIn("date -u +%F", publish)
+        self.assertIn("measured_at_utc", publish)
+        self.assertIn("astimezone(timezone.utc)", publish)
+        self.assertIn('--receipt "$receipt"', publish)
         self.assertIn('--message "${msg}% · ${measured_on} UTC"', publish)
         self.assertLess(
             coverage.index("Measure line coverage"),
@@ -2156,33 +2311,57 @@ assert.equal(context.ACT_TIMER, null);
                 self.assertNotIn("--filename coverage", path.read_text())
 
     def test_coverage_uses_general_runner_with_pinned_ffmpeg_container(self):
-        # Retain this historical regression anchor after reserving its pool.
+        # Retain this historical regression anchor through the host-wrapper move.
         coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
-        self.assertIn(
-            "runs-on: [self-hosted, Linux, X64, lab, ci-coverage]\n",
-            coverage,
-        )
-        self.assertIn("image: ubuntu:24.04", coverage)
-        self.assertIn("options: --cpus 2 --memory 6g --memory-swap 10g", coverage)
+        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]\n", coverage)
+        self.assertNotIn("    container:", coverage)
+        self.assertIn("timeout-minutes: 240", coverage)
         self.assertIn('CARGO_BUILD_JOBS: "1"', coverage)
         self.assertIn('RUST_TEST_THREADS: "2"', coverage)
-        steps = workflow_step_blocks(coverage)
-        install = steps["Install coverage prerequisites"]
-        for package in ("git", "jq", "nodejs", "python3", "build-essential", "clang"):
-            self.assertRegex(install, rf"\b{package}\b")
-        self.assertLess(
-            coverage.index("Install coverage prerequisites"),
-            coverage.index("actions/checkout@"),
-        )
-        self.assertIn('major: "6"', coverage)
-        self.assertLess(
-            coverage.index("./.github/actions/ffmpeg"),
-            coverage.index("Measure line coverage"),
-        )
-        cleanup = steps["Restore persistent runner workspace ownership"]
-        self.assertIn("if: always()", cleanup)
-        self.assertIn('chown -R "$owner" "$GITHUB_WORKSPACE"', cleanup)
+        self.assertRegex(coverage, r"COVERAGE_IMAGE: ubuntu@sha256:[0-9a-f]{64}")
+        measure = workflow_step_blocks(coverage)["Measure line coverage"]
+        self.assertIn('--cache-root "${{ steps.cargo-cache.outputs.cache-root }}"', measure)
+        wrapper = read("scripts/unit-coverage")
+        for package in ("libssl-dev", "libgtk-4-dev", "libdbus-1-dev", "ffmpeg"):
+            self.assertIn(package, wrapper)
+        for resource in ("--cpus", "--memory", "--memory-swap", "--pids-limit"):
+            self.assertIn(resource, wrapper)
+        campaign = read("scripts/unit_coverage/campaign.py")
+        self.assertIn("LLVM_COV = '0.9.1'", campaign)
+        self.assertIn("ffmpeg version n?6", campaign)
+        self.assertIn("'--no-fail-fast'", campaign)
+        self.assertIn("PLURX_SHARING_FIXTURE_IP", campaign)
+        self.assertIn("cluster-integration-tests", campaign)
+        self.assertIn("objects-default", campaign)
 
+    def test_manual_qualification_dispatch_inputs_have_explicit_string_types(self):
+        dispatch = read(".github/workflows/ci.yml").split(
+            "  workflow_dispatch:\n", 1
+        )[1].split("\nenv:", 1)[0]
+        self.assertTrue(dispatch.startswith("    inputs:\n"))
+        starts = list(re.finditer(r"(?m)^      ([a-z_][a-z0-9_]*):\n", dispatch))
+        descriptions = {
+            "retained_units_sha256": "Authenticated digest-addressed retained unit proof; no suite replay",
+            "retained_units_attachment_id": "Private promotion PR evidence attachment ID",
+            "retained_units_attachment_uuid": "Private promotion PR evidence attachment UUID",
+            "workspace_rust_evidence": "Optional authenticated partial workspace test evidence descriptor",
+            "python_unit_evidence": "Authenticated prior preflight and reviewed Python source coverage",
+            "promotion_pr": "Optional open same-repo effort/integration promotion PR to main",
+            "promotion_head_sha": "Immutable promotion head SHA; dispatch on that head branch",
+            "promotion_base_sha": "Immutable current main SHA already merged into the promotion head",
+        }
+        self.assertEqual([entry.group(1) for entry in starts], list(descriptions))
+        for index, entry in enumerate(starts):
+            with self.subTest(input=entry.group(1)):
+                end = starts[index + 1].start() if index + 1 < len(starts) else len(dispatch)
+                fields = re.findall(r"(?m)^        ([a-z_]+): (.+)$", dispatch[entry.end():end])
+                self.assertEqual(len(fields), 4, "dispatch inputs require exactly one explicit renderer type")
+                self.assertEqual(dict(fields), {
+                    "type": "string",
+                    "description": '"' + descriptions[entry.group(1)] + '"',
+                    "required": "false",
+                    "default": '""',
+                })
     def test_effort_compile_only_policy_preserves_required_checks_and_claims_no_units(self):
         workflow = read(".github/workflows/effort-ci.yml")
         inputs = workflow.split("    inputs:\n", 1)[1].split("\nenv:\n", 1)[0]
@@ -2209,11 +2388,13 @@ assert.equal(context.ACT_TIMER, null);
             self.assertNotIn("compile_only", read(path), "main qualification has no task-unit bypass")
 
     def test_native_macos_tray_is_independent_of_retained_mobile_evidence(self):
-        def enabled(expression, *, apple, desktop, retained):
+        def enabled(expression, *, apple, desktop, retained, tv_adopted=False):
             values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained}
             expression = re.sub(
+                r"(steps\.native_receipts\.outputs\.tv_navigation != 'true')|"
                 r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple) (==|!=) 'true'",
-                lambda match: str(values[match[1]] if match[2] == "==" else not values[match[1]]),
+                lambda match: str(not tv_adopted) if match[1] else
+                str(values[match[2]] if match[3] == "==" else not values[match[2]]),
                 expression)
             expression = expression.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
             self.assertRegex(expression, r"^[ ()TrueFalsandor]+$")
@@ -2233,7 +2414,8 @@ assert.equal(context.ACT_TIMER, null);
                 desktop_name = ("Compile native macOS server tray" if "effort-ci" in path
                                 else "Build and test native macOS server tray")
                 desktop = steps[desktop_name]
-                # Even retained mobile units must never suppress a selected tray check.
+                # Retained mobile evidence never suppresses the independent tray step.
+                # Only its own authenticated native proof can adopt tray operations.
                 self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True))
                 self.assertTrue(enabled(workflow_step_scalar(desktop, "if"),
                                         apple=False, desktop=True, retained=True))
@@ -2241,21 +2423,80 @@ assert.equal(context.ACT_TIMER, null);
                 self.assertTrue(enabled(condition, apple=True, desktop=False, retained=False))
                 self.assertFalse(enabled(workflow_step_scalar(desktop, "if"),
                                          apple=True, desktop=False, retained=False))
+                if path.endswith("main-fast-lane.yml"):
+                    receipts = steps["Authenticate compatible original native test receipts"]
+                    self.assertNotIn("if:", receipts)
+                    self.assertIn("run: python3 -m validation.native_receipts", receipts)
+                    adoption = steps["Preserve native adoption provenance"]
+                    self.assertEqual(workflow_step_scalar(adoption, "if"), "always()")
+                    self.assertIn("path: .main-preflight-receipts/native/receipt.json", adoption)
+                    self.assertIn("name: native-adoption-${{ github.run_id }}-${{ github.run_attempt }}", adoption)
+                    tv_step = steps["Require native TV navigation journeys"]
+                    tv_guard = workflow_step_scalar(tv_step, "if")
+                    self.assertTrue(enabled(tv_guard, apple=True, desktop=False, retained=False,
+                                            tv_adopted=False))
+                    self.assertFalse(enabled(tv_guard, apple=True, desktop=False, retained=False,
+                                             tv_adopted=True))
+                    tv_artifact = steps["Preserve TV navigation evidence including failures"]
+                    tv_artifact_guard = workflow_step_scalar(tv_artifact, "if")
+                    self.assertTrue(enabled(tv_artifact_guard, apple=True, desktop=False, retained=False,
+                                            tv_adopted=False))
+                    self.assertFalse(enabled(tv_artifact_guard, apple=True, desktop=False, retained=False,
+                                             tv_adopted=True))
+                    # Reauthentication validates retained originals immediately
+                    # before pending TV cases run; it executes no mobile tests.
+                    reauthentication_name = "Reauthenticate original native cases before executing the pending selection"
+                    reauthentication = steps[reauthentication_name]
+                    self.assertEqual(workflow_step_scalar(reauthentication, "run"),
+                                     "python3 -m validation.native_receipts --verify-tv-plan")
+                    self.assertIn("GITHUB_TOKEN: ${{ github.token }}", reauthentication)
+                    step_order = list(steps)
+                    self.assertLess(step_order.index("Compile iOS and tvOS without running simulator tests"),
+                                    step_order.index(reauthentication_name))
+                    self.assertLess(step_order.index(reauthentication_name),
+                                    step_order.index("Require native TV navigation journeys"))
                 self.assertNotIn("xcodegen", steps["Verify the pinned Apple toolchain"])
                 for name, step in steps.items():
+                    if path.endswith("main-fast-lane.yml") and name in {
+                        "Authenticate compatible original native test receipts",
+                        "Preserve native adoption provenance",
+                    }:
+                        continue
+                    if path.endswith("main-fast-lane.yml") and name in {
+                        "Compile iOS and tvOS without running simulator tests",
+                        "Reauthenticate original native cases before executing the pending selection",
+                        "Require native TV navigation journeys",
+                        "Preserve TV navigation evidence including failures",
+                    }:
+                        guard = workflow_step_scalar(step, "if")
+                        for tv_adopted in (False, True):
+                            self.assertFalse(enabled(guard, apple=False, desktop=True, retained=True,
+                                                     tv_adopted=tv_adopted), name)
+                        self.assertTrue(enabled(guard, apple=True, desktop=False, retained=False,
+                                                tv_adopted=False), name)
+                        self.assertFalse(enabled(guard, apple=True, desktop=False, retained=False,
+                                                 tv_adopted=True), name)
+                        continue
                     if name == "Preserve native macOS server tray check output":
                         self.assertTrue(enabled(workflow_step_scalar(step, "if"),
                                                 apple=False, desktop=True, retained=True))
                         self.assertFalse(enabled(workflow_step_scalar(step, "if"),
                                                  apple=True, desktop=False, retained=False))
                         continue
-                    if name in {"Verify the pinned Apple toolchain", desktop_name}:
+                    if name == "Verify the pinned Apple toolchain":
+                        self.assertNotIn("if:", step)
+                        self.assertIn('grep -Fxq "Build version 27B52"', step)
+                        continue
+                    if name == desktop_name:
                         continue
                     # Existing mobile work and its always-run artifacts/cleanup are
                     # conditional, so a tray-only selection creates no simulators.
                     guard = workflow_step_scalar(step, "if")
                     self.assertFalse(enabled(guard, apple=False, desktop=True, retained=True), name)
                     self.assertTrue(enabled(guard, apple=True, desktop=False, retained=False), name)
+                    if path.endswith("main-fast-lane.yml"):
+                        self.assertTrue(enabled(guard, apple=True, desktop=False, retained=False,
+                                                tv_adopted=True), name)
                     if path.endswith("/ci.yml"):
                         self.assertFalse(enabled(guard, apple=True, desktop=True, retained=True), name)
 
@@ -2265,26 +2506,51 @@ assert.equal(context.ACT_TIMER, null);
                            (".github/workflows/ci.yml", "apple")):
             step = workflow_step_blocks(workflow_job_blocks(path)[name])[
                 "Build and test native macOS server tray"]
-            commands = "\n".join(workflow_step_literal(step, "run"))
-            for status in (0, 7):
-                with self.subTest(path=path, status=status), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
-                    fake_make = root / "make"
-                    fake_make.write_text("#!/bin/sh\nprintf '%s\\n' \"" + case_line +
-                                         "\"\nexit \"$NATIVE_TRAY_FAKE_EXIT\"\n", encoding="utf-8")
-                    fake_make.chmod(0o755)
-                    completed = subprocess.run(
-                        ["/bin/sh", "-eu", "-c", commands], cwd=root,
-                        env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
-                             "NATIVE_TRAY_FAKE_EXIT": str(status)},
-                        capture_output=True, text=True, check=False)
-                    self.assertEqual(completed.returncode, status)
-                    self.assertNotIn("Test Case", completed.stdout + completed.stderr)
-                    self.assertEqual((root / "target/validation/desktop-macos-check.log").read_text().strip(), case_line)
-                    if status == 0:
-                        self.assertIn("checks passed", completed.stdout)
-                    else:
-                        self.assertNotIn("checks passed", completed.stdout)
+            raw_commands = "\n".join(workflow_step_literal(step, "run"))
+            adoption_modes = (False, True) if path.endswith("main-fast-lane.yml") else (False,)
+            for adopted in adoption_modes:
+                commands = raw_commands.replace(
+                    "${{ steps.native_receipts.outputs.desktop_macos }}", str(adopted).lower())
+                for status in (0, 7):
+                    with self.subTest(path=path, adopted=adopted, status=status), tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        fake_make = root / "make"
+                        args_file = root / "make-args"
+                        fake_make.write_text(
+                            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$NATIVE_TRAY_ARGS\"\nprintf '%s\\n' \"" +
+                            case_line + "\"\nexit \"$NATIVE_TRAY_FAKE_EXIT\"\n", encoding="utf-8")
+                        fake_make.chmod(0o755)
+                        log = root / "target/validation/desktop-macos-check.log"
+                        log.parent.mkdir(parents=True)
+                        log.write_text("Test Suite 'All tests' passed\nExecuted 61 tests, with 0 failures (0 unexpected)\n")
+                        completed = subprocess.run(
+                            ["/bin/sh", "-eu", "-c", commands], cwd=root,
+                            env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                                 "NATIVE_TRAY_FAKE_EXIT": str(status),
+                                 "NATIVE_TRAY_ARGS": str(args_file)},
+                            capture_output=True, text=True, check=False)
+                        self.assertEqual(completed.returncode, 0 if adopted else status)
+                        self.assertNotIn("Test Case", completed.stdout + completed.stderr)
+                        log = root / "target/validation/desktop-macos-check.log"
+                        if adopted:
+                            self.assertFalse(args_file.exists(), "adopted builds and tests invoke no make target")
+                            self.assertIn("builds and tests adopted", log.read_text())
+                            self.assertIn("native-adoption artifact", log.read_text())
+                            self.assertNotIn("Test Suite", log.read_text())
+                            self.assertNotIn("Test Case", log.read_text())
+                            from validation.native_receipts import verify_desktop
+                            from validation.python_unit_receipts import ReceiptError
+                            with self.assertRaises(ReceiptError):
+                                verify_desktop(log.read_bytes())
+                            self.assertIn("builds and tests adopted", completed.stdout)
+                        else:
+                            self.assertEqual(args_file.read_text().strip(), "desktop-macos-check")
+                            self.assertEqual(log.read_text().strip(), case_line)
+                        if not adopted and status == 0:
+                            self.assertIn("checks passed", completed.stdout)
+                        elif not adopted:
+                            self.assertNotIn("tests adopted", completed.stdout)
+                            self.assertNotIn("checks passed", completed.stdout)
 
     def test_effort_native_macos_tray_compiles_without_running_units(self):
         effort = workflow_job_blocks(".github/workflows/effort-ci.yml")["apple_compile"]
@@ -2313,7 +2579,17 @@ assert.equal(context.ACT_TIMER, null);
             steps = workflow_step_blocks(workflow_job_blocks(path)[name])
             desktop = steps["Build and test native macOS server tray"]
             commands = workflow_step_literal(desktop, "run")
-            self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
+            commands = [line.strip() for line in commands if line.strip()]
+            if path.endswith("main-fast-lane.yml"):
+                self.assertIn('if [ "${{ steps.native_receipts.outputs.desktop_macos }}" = "true" ]; then', commands)
+                self.assertFalse(any("make desktop-macos-build" in command for command in commands))
+                self.assertTrue(any("builds and tests adopted" in command and "> target/validation/desktop-macos-check.log" in command for command in commands))
+                self.assertIn("else", commands)
+                self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
+                self.assertTrue(any("tests adopted" in line for line in commands))
+                self.assertTrue(any("checks passed" in line for line in commands))
+            else:
+                self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
             self.assertFalse(any("tee " in command or "cat " in command for command in commands),
                              "desktop XCTest records must not enter the mobile receipt log")
             artifact = steps["Preserve native macOS server tray check output"]
@@ -2326,12 +2602,33 @@ assert.equal(context.ACT_TIMER, null);
         effort = read(".github/workflows/effort-ci.yml")
         effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
+        # Whole-job budget includes checkout/toolchain/cache setup plus the
+        # unchanged all-target compile and vendored denied-warning Clippy.
+        full_jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        for lane, rust_job, minutes in (
+            ("effort", effort_jobs["rust_compile"], 60),
+            ("full compiler", full_jobs["rust_compile"], 60),
+        ):
+            with self.subTest(lane=lane):
+                self.assertRegex(rust_job, rf"(?m)^    timeout-minutes: {minutes}$")
+                rust_env = re.search(r"(?ms)^    env:\n(.*?)(?=^    \S)", rust_job)
+                self.assertIsNotNone(rust_env, "bound Cargo concurrency at job scope")
+                self.assertEqual(
+                    [line.strip() for line in rust_env.group(1).splitlines()
+                     if line.strip() and not line.strip().startswith("#")],
+                    ['CARGO_BUILD_JOBS: "1"'],
+                )
+        full_compile_steps = workflow_step_blocks(full_jobs["rust_compile"])
+        self.assertEqual(workflow_step_scalar(
+            full_compile_steps["Compile every Rust target without executing tests"], "run"
+        ), "make effort-rust-check")
+        self.assertRegex(full_jobs["check"], r"(?m)^    timeout-minutes: 120$")
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
-        # Both receipt-producing preflights retain a finite fifteen-minute
-        # budget so the full history/contracts can publish their evidence.
-        self.assertIn("timeout-minutes: 15", fast_jobs["preflight"])
+        # Main must also finish the cold full-unit fallback when prior receipts
+        # cannot authenticate; effort retains its separate finite budget.
+        self.assertIn("timeout-minutes: 30", fast_jobs["preflight"])
         self.assertIn("timeout-minutes: 15", effort_jobs["preflight"])
-        self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 60", effort_jobs["rust_compile"])
         effort_rust_header = effort_jobs["rust_compile"].split("\n    steps:", 1)[0]
         self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"', effort_rust_header)
         self.assertEqual(
@@ -2370,6 +2667,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(
             list(effort_rust_steps),
             [
+                "Verify effective nonvoter resource bounds",
                 "Install Rust gate prerequisites",
                 "Check out the candidate",
                 "Install the pinned Rust toolchain",
@@ -2397,6 +2695,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(
             list(fast_rust_steps),
             [
+                "Verify effective nonvoter resource bounds",
                 "Install Rust gate prerequisites",
                 "Check out the candidate",
                 "Install the pinned Rust toolchain",
@@ -2408,12 +2707,13 @@ assert.equal(context.ACT_TIMER, null);
                 "Restore persistent runner workspace ownership",
             ],
         )
-        self.assertIn("container: ubuntu:24.04", fast_jobs["rust_compile"])
+        self.assertIn("      image: ubuntu:24.04", fast_jobs["rust_compile"])
         prerequisites = workflow_step_literal(
             fast_rust_steps["Install Rust gate prerequisites"], "run"
         )
         self.assertTrue(any("python3" in line for line in prerequisites))
-        self.assertTrue(any("nodejs" in line for line in prerequisites))
+        self.assertTrue(any("xz-utils" in line for line in prerequisites))
+        self.assertIn("node --version | grep -Fx 'v22.23.4'", fast_jobs["rust_compile"])
         self.assertEqual(
             workflow_step_literal(fast_rust_steps["Lint the workspace"], "run"),
             ["make lint"],
@@ -3040,6 +3340,121 @@ assert.equal(context.ACT_TIMER, null);
             makefile,
         )
 
+    def test_full_unit_suite_has_dedicated_bounded_resident_capacity(self):
+        job = workflow_job_blocks(".github/workflows/ci.yml")["check"]
+        header = job.split("    steps:\n", 1)[0]
+        self.assertIn(
+            "    runs-on: [ci-nonvoter-heavy-amd64]\n",
+            header,
+        )
+        self.assertIn(
+            "      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096\n",
+            header,
+        )
+        self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"\n      RUST_TEST_THREADS: "2"\n', header)
+        self.assertRegex(header, r"(?m)^    timeout-minutes: 120$")
+        self.assertIn(
+            FLEET_REGISTRY_EXPR + "/noirr/plurx-ci@sha256:"
+            "3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855",
+            header,
+        )
+        self.assertEqual(
+            workflow_step_scalar(workflow_step_blocks(job)[
+                "Run format, Clippy, unit, and SQLite contracts"], "run"),
+            "make ci-rust-gate",
+        )
+        self.assertNotIn("codegen-units", job)
+        self.assertNotIn("CARGO_PROFILE_", job)
+        self.assertNotIn("continue-on-error", job)
+        fleet = runner_fleet()
+        carriers = [row for row in fleet["runners"] if "ci-nonvoter-heavy-amd64" in row["labels"]]
+        self.assertEqual(len(carriers), 1, "the complete suite has one native build slot")
+        self.assertNotIn(carriers[0]["host"], fleet["voter_hosts"])
+        store = [row for row in fleet["runners"] if "ci-nonvoter-store" in row["labels"]]
+        self.assertEqual(len(store), 2, "two actual nonvoter Store carriers are required")
+        self.assertIn(carriers[0], store, "one capacity-one worker must share heavy and Store roles")
+        self.assertEqual(carriers[0]["host"], "lab1", "the heavy alias is bound to its verified physical nonvoter")
+        self.assertEqual({row["host"] for row in store}, {"lab1", "lab2"})
+        self.assertEqual(len({row["host"] for row in store}), 2)
+        self.assertTrue(all(row["host"] not in fleet["voter_hosts"] for row in store))
+        self.assertEqual({label for label in carriers[0]["labels"] if label.startswith("ci-")},
+                         {"ci-nonvoter-heavy-amd64", "ci-nonvoter-store"})
+        self.assertIs(carriers[0].get("implicit_labels"), False)
+        self.assertEqual(set(carriers[0]["labels"]), {"ci-nonvoter-heavy-amd64", "ci-nonvoter-store", "incus"})
+        self.assertTrue(all((row["os"], row["arch"]) == ("Linux", "X64") for row in store))
+
+    def test_new_role_carriers_reject_singleton_voter_and_swapped_physical_owners(self):
+        # Unit fixtures exercise the new aliases' affirmative host boundary;
+        # they are not enrollment evidence for an actually registered worker.
+        heavy = {"name": "fixture-heavy", "host": "lab1", "os": "Linux", "arch": "X64",
+                 "labels": ["ci-nonvoter-heavy-amd64", "ci-nonvoter-store", "incus"],
+                 "implicit_labels": False}
+        store = {"name": "fixture-store", "host": "lab2", "os": "Linux", "arch": "X64",
+                 "labels": ["ci-nonvoter-store"]}
+        protected = ["media1", "lab3", "lab4", "lab6"]
+        def check_carriers(first, second):
+            fixture = {"voter_hosts": protected, "runners": [first, second]}
+            with mock.patch(__name__ + ".runner_fleet", return_value=fixture):
+                self.test_full_unit_suite_has_dedicated_bounded_resident_capacity()
+        check_carriers(heavy, store)
+        for first, second in (({**heavy, "host": "lab5"}, store),
+                              (heavy, {**store, "host": "lab5"}),
+                              ({**heavy, "host": "lab2"}, {**store, "host": "lab1"}),
+                              (heavy, {**store, "host": "lab1"})):
+            with self.subTest(heavy=first["host"], store=second["host"]), self.assertRaises(AssertionError):
+                check_carriers(first, second)
+
+    def test_web_layout_budget_covers_cold_build_and_all_browser_stages(self):
+        job = workflow_job_blocks(".github/workflows/ci.yml")["web_layout"]
+        self.assertRegex(job, r"(?m)^    timeout-minutes: 45$")
+        steps = workflow_step_blocks(job)
+        required = (
+            ("Check every affected web layout", "make ui-check"),
+            ("Run the playback-control reporter in a real browser", "make control-browser-check"),
+            ("Test Cinema remote browser contracts", "make cinema-remote-browser-check"),
+            ("Test grouped library rows in a real browser", "make library-rows-browser-check"),
+            ("Test subtitle model setup and generated-caption completion in a real browser", "make subtitle-generation-browser-check"),
+        )
+        positions = []
+        for name, command in required:
+            self.assertEqual(workflow_step_scalar(steps[name], "run"), command)
+            positions.append(list(steps).index(name))
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("continue-on-error", job)
+        ui = read("Makefile").split("ui-check:", 1)[1].split(".PHONY:", 1)[0]
+        self.assertIn("scripts/ui-baseline --self-host --check", ui)
+        self.assertIn("python3 scripts/live-tv-browser --self-host --out target/live-tv-browser", ui)
+        capture = read("scripts/ui-baseline")
+        self.assertIn('p.add_argument("--timeout", type=int, default=45000,', capture)
+        self.assertRegex(capture, r"(?m)^                attempts = 2$")
+
+    def test_full_runtime_job_allowances_preserve_the_existing_suites(self):
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        for name, minutes in (("check", 120), ("cluster_store_legacy", 95), ("cluster_wal", 60)):
+            with self.subTest(job=name):
+                self.assertRegex(jobs[name], rf"(?m)^    timeout-minutes: {minutes}$")
+                # The serial Store suite is not a compiler lane; the full unit
+                # and WAL compilers bound Cargo concurrency on their queues.
+                if name == "cluster_store_legacy":
+                    self.assertNotIn("CARGO_BUILD_JOBS", jobs[name])
+        unit = workflow_step_blocks(jobs["check"])
+        self.assertEqual(workflow_step_scalar(
+            unit["Run format, Clippy, unit, and SQLite contracts"], "run"), "make ci-rust-gate")
+        store = workflow_step_blocks(jobs["cluster_store_legacy"])
+        # The unretained branch still runs the complete Store suite; main's
+        # retained-unit continuation branch is pinned by its own contract.
+        self.assertIn(
+            "make cluster-store-check 2>&1 | tee target/validation/cluster-store.log",
+            "\n".join(workflow_step_literal(store["Run replicated Store contracts"], "run")),
+        )
+        wal = workflow_step_blocks(jobs["cluster_wal"])
+        self.assertIn("make cluster-wal-check", "\n".join(workflow_step_literal(
+            wal["Run exact Hiqlite and WAL recovery regressions"], "run")))
+        self.assertIn("execution_mode != 'accelerated'", jobs["cluster_store_legacy"])
+        makefile = read("Makefile")
+        self.assertIn("--test store_contract -- --test-threads=1", makefile)
+        self.assertIn("--features cluster-read-cost-validation,hiqlite-contract-tests", makefile)
+
     def test_store_shards_are_dynamic_disjoint_and_roll_out_behind_one_verdict(self):
         workflow = read(".github/workflows/ci.yml")
         shards = read(".github/workflows/store-shards.yml")
@@ -3090,7 +3505,7 @@ assert.equal(context.ACT_TIMER, null);
         # would have queued every pull request forever the moment this path
         # became required.
         self.assertEqual(
-            [("self-hosted", "Linux", "X64", "lab", "ci-store")],
+            [("ci-nonvoter-store",)],
             self_hosted_label_sets(shard),
         )
         self.assertIn("fail-fast: false", shard)
@@ -3214,7 +3629,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertNotIn("schedule:", workflow)
         self.assertIn("workflow_dispatch:", workflow)
-        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-store]", job)
+        self.assertIn("runs-on: [ci-nonvoter-store]", job)
         self.assertIn(
             "uses: https://github.com/dtolnay/rust-toolchain@"
             "4716b85f2fac3e324e64fa2810f6b5c3905760a5",
@@ -3232,6 +3647,109 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn(
             "if: always() && steps.store_backstop.outcome != 'success'", job
         )
+
+    def test_amd_publisher_bounds_and_binds_all_four_actual_builds(self):
+        publisher = workflow_job_blocks(".github/workflows/publish-release.yml")["image"]
+        header, steps = publisher.split("    steps:\n", 1)
+        self.assertIn('runs_on: \'["ci-nonvoter-heavy-amd64"]\'', header)
+        self.assertIn('runs_on: \'["self-hosted", "Linux", "ARM64", "lab", "release-arm64"]\'', header)
+        self.assertTrue(steps.startswith("      - name: Verify effective nonvoter resource bounds\n"))
+        guard = workflow_step_blocks(publisher)["Bound the AMD publisher builder before compilation"]
+        self.assertEqual(workflow_step_scalar(guard, "if"), "matrix.arch == 'amd64'")
+        self.assertNotIn("continue-on-error:", guard)
+        self.assertIn("BUILDER: ${{ steps.release-builder.outputs.name }}", guard)
+        self.assertIn("      - id: release-builder\n        uses: https://github.com/docker/setup-buildx-action@", publisher)
+        self.assertIn("          name: plurx-publish-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}\n", publisher)
+        self.assertLess(publisher.index("- id: release-builder"), publisher.index(guard))
+        builds = [step for step in workflow_step_blocks(publisher).values()
+                  if "uses: https://github.com/docker/build-push-action@" in step]
+        self.assertEqual(len(builds), 4)
+        for build in builds:
+            self.assertLess(publisher.index(guard), publisher.index(build))
+            self.assertEqual(re.findall(r"(?m)^          builder: ([^\n]+)$", build),
+                             ["${{ steps.release-builder.outputs.name }}"])
+        package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        package_guard = workflow_step_blocks(package)["Bound the AMD package builder before compilation"]
+        self.assertEqual(re.split(r"(?m)^      - ", guard.split("        run: |\n", 1)[1], maxsplit=1)[0],
+                         package_guard.split("        run: |\n", 1)[1])
+
+    def test_amd_media_runtime_bounds_and_binds_both_actual_builds(self):
+        publisher = workflow_job_blocks(".github/workflows/media-runtime.yml")["platform"]
+        header, steps = publisher.split("    steps:\n", 1)
+        self.assertIn('runs_on: \'["ci-nonvoter-heavy-amd64"]\'', header)
+        self.assertIn('runs_on: \'["self-hosted", "Linux", "ARM64", "lab", "release-arm64"]\'', header)
+        self.assertTrue(steps.startswith("      - name: Verify effective nonvoter resource bounds\n"))
+        guard = workflow_step_blocks(publisher)["Bound the AMD media builder before compilation"]
+        self.assertEqual(workflow_step_scalar(guard, "if"), "matrix.arch == 'amd64'")
+        self.assertNotIn("continue-on-error:", guard)
+        self.assertIn("BUILDER: ${{ steps.media-builder.outputs.name }}", guard)
+        self.assertIn("      - id: media-builder\n        uses: https://github.com/docker/setup-buildx-action@", publisher)
+        self.assertIn("          name: plurx-media-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}\n", publisher)
+        self.assertLess(publisher.index("- id: media-builder"), publisher.index(guard))
+        builds = [step for step in workflow_step_blocks(publisher).values()
+                  if "uses: https://github.com/docker/build-push-action@" in step]
+        self.assertEqual(len(builds), 2)
+        for build in builds:
+            self.assertLess(publisher.index(guard), publisher.index(build))
+            self.assertEqual(re.findall(r"(?m)^          builder: ([^\n]+)$", build),
+                             ["${{ steps.media-builder.outputs.name }}"])
+        package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        package_guard = workflow_step_blocks(package)["Bound the AMD package builder before compilation"]
+        self.assertEqual(re.split(r"(?m)^      - ", guard.split("        run: |\n", 1)[1], maxsplit=1)[0],
+                         package_guard.split("        run: |\n", 1)[1])
+
+    def test_manual_main_publisher_binds_its_actual_docker_build(self):
+        publisher = workflow_job_blocks(".github/workflows/ci.yml")["publish_main"]
+        self.assertIn("    runs-on: [ci-nonvoter-heavy-amd64]", publisher)
+        self.assertTrue(publisher.split("    steps:\n", 1)[1].startswith(
+            "      - name: Verify effective nonvoter resource bounds\n"))
+        guard = workflow_step_blocks(publisher)["Bound the main publisher builder before compilation"]
+        self.assertNotIn("        if:", guard)
+        self.assertNotIn("continue-on-error:", guard)
+        self.assertIn("BUILDER: ${{ steps.main-builder.outputs.name }}", guard)
+        self.assertIn("      - id: main-builder\n        uses: https://github.com/docker/setup-buildx-action@", publisher)
+        self.assertIn("          name: plurx-main-${{ github.run_id }}-${{ github.run_attempt }}\n", publisher)
+        self.assertIn("          driver-opts: default-load=true\n", publisher)
+        self.assertIn("          BUILDX_BUILDER: ${{ steps.main-builder.outputs.name }}\n", publisher)
+        self.assertLess(publisher.index("- id: main-builder"), publisher.index(guard))
+        self.assertLess(publisher.index(guard), publisher.index("run: scripts/registry-push"))
+        self.assertIn("    docker build ", read("scripts/registry-push"))
+        package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        package_guard = workflow_step_blocks(package)["Bound the AMD package builder before compilation"]
+        self.assertEqual(re.split(r"(?m)^      - ", guard.split("        run: |\n", 1)[1], maxsplit=1)[0],
+                         package_guard.split("        run: |\n", 1)[1])
+
+    def test_amd_package_bounds_its_active_builder_before_building(self):
+        package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        guard = workflow_step_blocks(package)["Bound the AMD package builder before compilation"]
+        self.assertLess(package.index("uses: ./.github/actions/buildx-cache"), package.index(guard))
+        self.assertLess(package.index(guard), package.index("uses: https://github.com/docker/build-push-action@"))
+        self.assertEqual(workflow_step_scalar(guard, "if"), "matrix.arch == 'amd64'")
+        self.assertNotIn("continue-on-error:", guard)
+        for required in (
+            "BUILDER: ${{ steps.buildx-cache.outputs.builder-name }}",
+            "set -euo pipefail",
+            '[[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]]',
+            'docker buildx inspect "$BUILDER"',
+            'data = sys.stdin.buffer.read(65537)',
+            'len(data) <= 65536 or sys.exit("Buildx inspection exceeds 64 KiB")',
+            'names != 1 || drivers != 1 || !nodes || invalid',
+            'if (value != expected) invalid = 1',
+            'if (value != "docker-container") invalid = 1',
+            'container="buildx_buildkit_${BUILDER}0"',
+            'test "$(docker inspect --format \'{{.Name}}\' "$container")" = "/$container"',
+            'docker update --memory 20g --memory-swap 20g --pids-limit 4096 --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"',
+            "{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}} {{.HostConfig.PidsLimit}}",
+            "= '21474836480 21474836480 400000 100000 0-3 4096'",
+        ):
+            self.assertIn(required, guard)
+        self.assertNotIn("docker buildx inspect --format", guard)
+        build_steps = [step for step in workflow_step_blocks(package).values()
+                       if "uses: https://github.com/docker/build-push-action@" in step]
+        self.assertEqual(len(build_steps), 2)
+        for step in build_steps:
+            self.assertEqual(re.findall(r"(?m)^          builder: ([^\n]+)$", step),
+                             ["${{ steps.buildx-cache.outputs.builder-name }}"])
 
     def test_required_arm_package_is_native_and_serialized_with_apple(self):
         workflow = read(".github/workflows/ci.yml")
@@ -3257,7 +3775,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("docker_machine: x86_64", amd64)
         self.assertIn(
             "runs_on: "
-            "'[\"self-hosted\",\"Linux\",\"X64\",\"lab\",\"general\",\"high-cpu\"]'",
+            "'[\"ci-nonvoter-heavy-amd64\"]'",
             amd64,
         )
         self.assertIn("target: aarch64-unknown-linux-gnu", arm64)
@@ -3361,7 +3879,7 @@ assert.equal(context.ACT_TIMER, null);
             ),
             2,
         )
-        self.assertIn('node-version: "24"', android_device)
+        self.assertIn('node-version: "24.22.1"', android_device)
         self.assertIn("npm ci --prefix .github/actions/android-emulator-ready --ignore-scripts --omit=dev", android_device)
         provenance = read(".github/actions/android-emulator-ready/upstream.json")
         self.assertIn("4c44018e59b437e86cdfc41da381398f93ed8808", provenance)
@@ -3535,7 +4053,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 7)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=72", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=76", contract_commands[1])
         self.assertIn("PLURX_EXPECT_TEST_NAMES=", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
@@ -3613,7 +4131,7 @@ assert.equal(context.ACT_TIMER, null);
         for job in (contracts, voter, learner, recovery):
             self.assertIn("needs.scope.outputs.cluster_auth == 'true'", job)
             self.assertIn(
-                "runs-on: [self-hosted, Linux, X64, lab, ci-topology]", job
+                "runs-on: [ci-nonvoter-store]", job
             )
             self.assertIn("rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5", job)
             self.assertNotIn("persistent-eligible", job)
@@ -3963,7 +4481,7 @@ assert.equal(context.ACT_TIMER, null);
         # job itself is pinned in tests/operations/test_release_cut.py.
         self.assertIn('  schedule:\n    - cron: "0 6 * * 1"\n', readiness)
         self.assertIn("workflow_dispatch:", readiness)
-        self.assertIn("run: make release-check", readiness)
+        self.assertIn('run: python3 "$RUNNER_TEMP/release-readiness" make release-check', readiness)
         self.assertIn("fetch-depth: 0", readiness)
 
     def test_effort_web_lints_source_without_provisioning_behavior_browser(self):
@@ -3978,7 +4496,7 @@ assert.equal(context.ACT_TIMER, null);
                 preflight = workflow_job_blocks(
                     f".github/workflows/{workflow}.yml"
                 )["preflight"]
-                budget = 10 if workflow == "ci" else 15
+                budget = {"ci": 10, "effort-ci": 15, "main-fast-lane": 30}[workflow]
                 self.assertIn(f"timeout-minutes: {budget}", preflight)
                 for command in (
                     "make history-check",
@@ -4065,9 +4583,35 @@ assert.equal(context.ACT_TIMER, null);
         for path in paths:
             if path.relative_to(ROOT).as_posix() in GITHUB_ONLY_WORKFLOWS:
                 continue  # GitHub honours permissions; the GitHub-only contract scopes them
+            if path.relative_to(ROOT).as_posix() == ".github/workflows/media-runtime-public.yml":
+                self.test_public_media_copy_scopes_github_permissions_to_its_manual_trusted_job()
+                continue
             with self.subTest(path=path.relative_to(ROOT)):
                 workflow = path.read_text(encoding="utf-8")
                 self.assertNotRegex(workflow, r"(?m)^\s*permissions:\s*$")
+
+    def test_public_media_copy_scopes_github_permissions_to_its_manual_trusted_job(self):
+        path = ".github/workflows/media-runtime-public.yml"
+        workflow = read(path)
+        code = "\n".join(line for line in workflow.splitlines()
+                         if not line.lstrip().startswith("#")) + "\n"
+        triggers = re.search(r"(?m)^on:\n((?:(?:  .*)?\n)*)", code)
+        self.assertIsNotNone(triggers)
+        self.assertEqual(re.findall(r"(?m)^  ([a-z_]+):", triggers.group(1)), ["workflow_dispatch"])
+        scopes = re.search(r"(?m)^permissions:\n((?:  .+\n)+)", code)
+        self.assertIsNotNone(scopes)
+        self.assertEqual(scopes.group(1), "  contents: read\n  packages: write\n")
+        jobs = workflow_job_blocks(path)
+        self.assertEqual(set(jobs), {"copy"})
+        job = jobs["copy"]
+        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", job), ["github.server_url == 'https://github.com'"])
+        self.assertEqual(self_hosted_label_sets(job), [("self-hosted", "Linux", "X64", "lab", "general")])
+        self.assertNotRegex(job, r"(?m)^    permissions:")
+        self.assertIn("copy --all --preserve-digests", job)
+        self.assertIn('test "sha256:$actual" = "$digest"', job)
+        self.assertRegex(job, r"quay\.io/skopeo/stable@sha256:[a-f0-9]{64}")
+        for compiler in ("docker build", "build-push-action", "cargo ", "actions/checkout"):
+            self.assertNotIn(compiler, job)
 
     def test_rust_audit_can_report_informational_advisories(self):
         workflow = read(".github/workflows/rust-audit.yml")
@@ -4105,8 +4649,8 @@ assert.equal(context.ACT_TIMER, null);
             "Linux", "X64", "lab", "general", "high-cpu", "ffmpeg-6"
         )
         android = local("Linux", "X64", "lab", "android-kvm")
-        apple = local("macOS", "ARM64", "lab", "apple", "xcode-27.1")
-        ci_store = local("Linux", "X64", "lab", "ci-store")
+        apple = local("macOS", "ARM64", "lab", "apple", "xcode-27.2")
+        ci_store = "    runs-on: [ci-nonvoter-store]"
         ci_topology = local("Linux", "X64", "lab", "ci-topology")
         release_general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
         release_high_cpu = (
@@ -4138,24 +4682,24 @@ assert.equal(context.ACT_TIMER, null);
                     and name == "apple_compile"
                 ):
                     expected = apple
-                elif path == ".github/workflows/ci.yml" and name in {
-                    "check",
-                    "cluster_daemon",
-                }:
-                    # The pinned private CI image supplies shipped FFmpeg 8;
-                    # host trust labels remain unchanged, without a FFmpeg-6
-                    # installation requirement on these image-owned jobs.
-                    expected = high_cpu
+                elif path == ".github/workflows/release-readiness.yml" and name == "release-check":
+                    expected = local("Linux", "X64", "lab", "unit-memory-16g")
+                elif path == ".github/workflows/ci.yml" and name == "check":
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
+                elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
+                    # The pinned image retains shipped FFmpeg 8; placement is
+                    # the same bounded nonvoter daemon compiler slot.
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name in {
                     "web_layout", "vod_web"
                 }:
-                    expected = general
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/coverage.yml" and name == "coverage":
-                    expected = local("Linux", "X64", "lab", "ci-coverage")
+                    expected = local("Linux", "X64", "lab", "unit-memory-16g")
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
                 elif path == ".github/workflows/ci.yml" and name == "publish_main":
-                    expected = high_cpu
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif (
                     path == ".github/workflows/ci.yml"
                     and name == "cluster_store_legacy"
@@ -4182,9 +4726,9 @@ assert.equal(context.ACT_TIMER, null);
                     "cluster_transport_recovery_learner",
                     "cluster_transport_recovery",
                 }:
-                    expected = ci_topology
+                    expected = ci_store
                 elif path == ".github/workflows/ci.yml" and name == "cluster_wal":
-                    expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif (
                     path in {
                         ".github/workflows/ci.yml",
@@ -4192,7 +4736,7 @@ assert.equal(context.ACT_TIMER, null);
                     }
                     and name == "rust_compile"
                 ):
-                    expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
                     "android_device",
@@ -4203,6 +4747,11 @@ assert.equal(context.ACT_TIMER, null);
                     and name == "android_compile"
                 ):
                     expected = android
+                elif (
+                    path == ".github/workflows/validation-nightly.yml"
+                    and name in {"deep-validation", "mutation"}
+                ):
+                    expected = "    runs-on: [incus, ci-nonvoter-heavy-amd64]"
                 elif (
                     path == ".github/workflows/validation-nightly.yml"
                     and name == "ffmpeg8-pacing"
@@ -4218,11 +4767,11 @@ assert.equal(context.ACT_TIMER, null);
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             self.assertNotIn("CI_RUNNER_MODE", path.read_text(encoding="utf-8"))
 
-        for path in (".github/workflows/publish-release.yml",):
+        for path in (".github/workflows/publish-release.yml", ".github/workflows/media-runtime.yml"):
             for name, block in workflow_job_blocks(path).items():
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{path}:{name} has no runner")
-                if name == "image":
+                if name in {"image", "platform"}:
                     # Each architecture builds natively on its own runner:
                     # never arm64 under QEMU on an X64 host (v0.7.0, #1163).
                     self.assertEqual(
@@ -4232,14 +4781,14 @@ assert.equal(context.ACT_TIMER, null);
                     )
                     self.assertEqual(
                         {
-                            ("self-hosted", "Linux", "X64", "lab", "general", "high-cpu"),
+                            ("ci-nonvoter-heavy-amd64",),
                             ("self-hosted", "Linux", "ARM64", "lab", "release-arm64"),
                         },
                         set(self_hosted_label_sets(block)),
                         f"{path}:{name} must build each architecture on its own runner",
                     )
                     continue
-                expected = release_general if name == "resolve" else release_high_cpu
+                expected = release_general if name in {"resolve", "index"} else release_high_cpu
                 self.assertEqual(expected, runs_on.group(0), f"{path}:{name}")
 
         for name, block in workflow_job_blocks(
@@ -4251,6 +4800,47 @@ assert.equal(context.ACT_TIMER, null);
                 block,
                 f"rust-audit:{name} does not provision the pinned Cargo toolchain",
             )
+
+    def test_linux_rust_compilers_use_native_bootstrap_on_the_shared_pool(self):
+        checksums = {
+            "amd64": ("x64", "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce"),
+            "arm64": ("arm64", "6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b"),
+        }
+        for workflow in ("ci", "effort-ci", "main-fast-lane"):
+            job = workflow_job_blocks(f".github/workflows/{workflow}.yml")["rust_compile"]
+            self.assertEqual(self_hosted_label_sets(job), [("ci-nonvoter-heavy-amd64",)])
+            bootstrap = workflow_step_blocks(job)["Install Rust gate prerequisites"]
+            selector = re.search(r'(?ms)^          case "\$\(dpkg --print-architecture\)" in.*?^          esac$', bootstrap)
+            self.assertIsNotNone(selector)
+            for arch, (node_arch, digest) in checksums.items():
+                with self.subTest(workflow=workflow, architecture=arch):
+                    command = ('dpkg() { echo "$DEB_ARCH"; }\n' + selector.group(0)
+                               + '\nprintf "%s %s" "$node_arch" "$node_sha"')
+                    selected = subprocess.check_output(["bash", "-ec", command], text=True,
+                                                       env={**os.environ, "DEB_ARCH": arch})
+                    self.assertEqual(selected, f"{node_arch} {digest}")
+            self.assertIn('node-v22.23.4-linux-${node_arch}.tar.xz', bootstrap)
+            self.assertIn('echo "$node_sha  $node_tmp/node.tar.xz" | sha256sum --check --strict', bootstrap)
+
+    def test_native_arm_release_and_ci_have_separate_rostered_eligibility(self):
+        # Recovering the release VM must not silently admit it to CI packaging.
+        runners = rostered_runners()
+        common = {"self-hosted", "Linux", "ARM64", "lab"}
+        release = {name for name, labels in runners if common | {"release-arm64"} <= labels}
+        ci = {name for name, labels in runners if common | {"ci-arm64"} <= labels}
+        self.assertEqual(release, {"gha-maca-linux-arm-01"})
+        self.assertEqual(ci, {"gha-maca-linux-arm-02", "gha-macb-linux-arm-01"})
+        self.assertFalse(release & ci, "CI fallback requires workload qualification")
+
+    def test_reserved_async_proof_label_has_one_existing_nonvoter_owner(self):
+        # The branch consumer is absent from main; retain its provisioned route
+        # without duplicating that branch's admission or qualification metadata.
+        roster = runner_fleet()
+        owners = [runner for runner in roster["runners"]
+                  if "async-proof-owned" in runner["labels"]]
+        self.assertEqual([runner["name"] for runner in owners], ["gha-lab5-general-03"])
+        self.assertNotIn(owners[0]["host"], roster["voter_hosts"])
+        self.assertTrue({"general", "high-cpu"} <= set(owners[0]["labels"]))
 
     def test_every_self_hosted_runs_on_is_satisfiable_by_a_rostered_runner(self):
         # A `runs-on` naming a label nothing carries is not an error GitHub
@@ -4310,7 +4900,8 @@ assert.equal(context.ACT_TIMER, null);
             for declaration in re.findall(r"(?m)^ +runs-on: (.+)$", read(path)):
                 self.assertTrue(
                     declaration.startswith("[self-hosted, ")
-                    or declaration == "${{ fromJSON(matrix.runs_on) }}",
+                    or declaration == "${{ fromJSON(matrix.runs_on) }}"
+                    or bool(self_hosted_label_sets("    runs-on: " + declaration + "\n")),
                     f"{path} has a non-local runner declaration: {declaration}",
                 )
         # Guard against the parser silently matching nothing at all and the
@@ -4371,9 +4962,9 @@ assert.equal(context.ACT_TIMER, null);
         # matrix on 2026-09-02 after `gha-lab2-android-01` lost `ci-store` for
         # failing the lane on an unwritable Cargo home.
         self.assertGreaterEqual(
-            len([r for r in runners if "ci-store" in r["labels"]]),
+            len([r for r in runners if "ci-nonvoter-store" in r["labels"]]),
             store_shard_count(),
-            "the Store shard count exceeds the number of ci-store slots",
+            "the Store shard count exceeds the number of ci-nonvoter-store slots",
         )
 
     def test_root_job_containers_restore_persistent_workspace_ownership(self):
@@ -4385,7 +4976,7 @@ assert.equal(context.ACT_TIMER, null);
                     continue
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{relative}:{name} has no runner")
-                self.assertIn("self-hosted", runs_on.group(0))
+                self.assertTrue(self_hosted_label_sets(runs_on.group(0) + "\n"))
                 self.assertIn(
                     "Restore persistent runner workspace ownership",
                     block,
@@ -4462,12 +5053,18 @@ assert.equal(context.ACT_TIMER, null);
                     # environment or requests owner signing credentials.
                     expected_gate = gate
                     if path == ".github/workflows/github-release.yml":
-                        if name in ("desktop_signing", "publish"):
+                        if name == "desktop_signing":
+                            expected_gate += " && needs.resolve.outputs.mode == 'release' && needs.resolve.outputs.publish_updates == 'true'"
+                        elif name == "publish":
+                            expected_gate += " && !cancelled() && !failure() && needs.resolve.outputs.mode == 'release'"
+                        elif name == "macos_signing":
                             expected_gate += " && needs.resolve.outputs.mode == 'release'"
+                        elif name == "desktop_metadata":
+                            expected_gate += " && !cancelled() && !failure() && needs.resolve.outputs.mode != 'qualification'"
                         elif name == "desktop_qualification":
                             expected_gate += " && needs.resolve.outputs.mode == 'qualification'"
                         elif name != "resolve":
-                            self.assertIn(name, {"linux", "macos_build", "macos", "windows", "windows_smoke", "desktop_metadata"})
+                            self.assertIn(name, {"linux", "macos_source_parser", "macos_build", "macos", "windows", "windows_smoke", "desktop_metadata"})
                             expected_gate += " && needs.resolve.outputs.mode != 'qualification'"
                     self.assertEqual([expected_gate], conditions, f"{path}:{name}")
                     if path == ".github/workflows/github-release.yml" and name == "desktop_qualification":
@@ -4605,7 +5202,7 @@ assert.equal(context.ACT_TIMER, null);
                      ".github/workflows/main-fast-lane.yml"):
             with self.subTest(workflow=path):
                 job = workflow_job_blocks(path)["rust_compile"]
-                self.assertIn("container: ubuntu:24.04", job)
+                self.assertIn("      image: ubuntu:24.04", job)
                 steps = workflow_step_blocks(job)
                 setup = steps["Install Rust gate prerequisites"]
                 self.assertIn("libgtk-4-dev libdbus-1-dev", setup)
@@ -4708,15 +5305,15 @@ assert.equal(context.ACT_TIMER, null);
         fast = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
             "rust_compile"
         ]
-        self.assertIn("container: ubuntu:24.04", fast)
+        self.assertIn("      image: ubuntu:24.04", fast)
         self.assertIn('major: "6"', fast)
         self.assertIn("make effort-rust-check", fast)
         self.assertNotIn("make unit", fast)
         coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
-        self.assertIn("image: ubuntu:24.04", coverage)
-        self.assertIn('major: "6"', coverage)
+        self.assertRegex(coverage, r"COVERAGE_IMAGE: ubuntu@sha256:[0-9a-f]{64}")
+        self.assertIn("ffmpeg version n?6", read("scripts/unit_coverage/campaign.py"))
         self.assertNotIn("plurx-ci@sha256:", coverage)
-        self.assertIn("cargo llvm-cov --workspace --locked --exclude plurx-cluster-check", coverage)
+        self.assertIn("scripts/unit-coverage --image", coverage)
         action = read(".github/actions/ffmpeg/action.yml")
         self.assertIn('if [ -n "$WANT_BINARY" ]', action)
 

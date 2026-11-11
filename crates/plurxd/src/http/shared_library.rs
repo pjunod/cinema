@@ -356,15 +356,23 @@ async fn item(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
     let (hash, grant) = authority(&state, &headers).await?;
+    // Older receivers reject unknown response fields. They must keep receiving
+    // the original closed shape; an upgraded receiver explicitly opts in.
+    let presentation = match query.as_deref() {
+        None => false,
+        Some("presentation=1") => true,
+        Some(_) => return Err(invalid()),
+    };
     use plurx_core::{
         sharing_catalogue_details::{CatalogueRevisionKey, SourceItemDetails},
         store::sharing_catalogue_details::SourceDetailsRead,
     };
     let snapshot = match state
         .store
-        .source_item_details_snapshot(&hash, grant, source_id(&id)?)
+        .source_item_details_snapshot_with_presentation(&hash, grant, source_id(&id)?, presentation)
         .await
         .map_err(unavailable)?
     {
@@ -422,7 +430,11 @@ async fn item(
         .await?
         .pop()
         .ok_or_else(missing)?;
-    let details = SourceItemDetails { item, files };
+    let details = SourceItemDetails {
+        item,
+        files,
+        presentation: snapshot.presentation.map(Box::new),
+    };
     details.validate().map_err(unavailable)?;
     let mut response = source_json(
         &state,
@@ -919,6 +931,74 @@ async fn receiver_login_current(
         }
     }
 }
+/// How long a poster waits for Source scope-check capacity before being told
+/// to come back. A grid burst can exceed the 32 concurrent scope checks; each
+/// takes milliseconds, so a short bounded wait absorbs the burst.
+const ART_SCOPE_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// What the loader is told when scope-check capacity is exhausted. It is not
+/// a refusal: nothing was found revoked, and the proof never started.
+const ART_SCOPE_RETRY_AFTER_SECS: u64 = 1;
+fn art_scope_busy() -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "sharing_art_scope_busy",
+        message: "sharing art scope proof busy".into(),
+        retry_after_seconds: ART_SCOPE_RETRY_AFTER_SECS,
+    }
+}
+/// The live revocation proof for one artwork body, same checks as
+/// [`receiver_content_current`] (nothing cached, a fresh Source scope request
+/// per response). It differs only in how it fails: no capacity permit within
+/// the admission wait, or a Source that itself answers 429, is a typed 429 the
+/// loader retries; a refused, timed-out or unreachable proof stays 503
+/// `sharing_body_authority_unavailable`, since a retry hint would mislead.
+async fn receiver_art_content_current(
+    state: &AppState,
+    authority: &ReceiverContentAuthority,
+) -> Result<(), ApiError> {
+    use crate::sharing_client::PeerError;
+    let refused = || {
+        fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_body_authority_unavailable",
+        )
+    };
+    let [source] = authority.sources.as_slice() else {
+        return Err(refused());
+    };
+    if !crate::sharing::enabled(state.store.as_ref())
+        .await
+        .unwrap_or(false)
+        || receiver_login_current(state, authority).await != Some(true)
+    {
+        return Err(refused());
+    }
+    let permit = state
+        .sharing
+        .scope_permit_within(ART_SCOPE_ADMISSION_WAIT)
+        .await
+        .ok_or_else(art_scope_busy)?;
+    match state
+        .sharing
+        .scope_proof(
+            state,
+            permit,
+            &source.scope,
+            source.items.clone(),
+            source.files.clone(),
+        )
+        .await
+    {
+        Ok(true) => {}
+        Err(PeerError::Busy { .. }) => return Err(art_scope_busy()),
+        _ => return Err(refused()),
+    }
+    // Local login/assignment may change during the remote check.
+    if receiver_login_current(state, authority).await != Some(true) {
+        return Err(refused());
+    }
+    Ok(())
+}
 async fn receiver_content_current(state: &AppState, authority: &ReceiverContentAuthority) -> bool {
     use futures_util::{stream, StreamExt};
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -1063,12 +1143,7 @@ pub(super) async fn attach_receiver_art_authority(
         scopes: vec![source.scope.clone()],
         sources: vec![source],
     };
-    if !receiver_content_current(state, &authority).await {
-        return Err(fail(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "sharing_body_authority_unavailable",
-        ));
-    }
+    receiver_art_content_current(state, &authority).await?;
     response.extensions_mut().insert(authority);
     Ok(())
 }
@@ -1727,6 +1802,7 @@ async fn viewer_item(
             .collect(),
     )?;
     let metadata = details.item;
+    let presentation = details.presentation;
     let files = details
         .files
         .into_iter()
@@ -1754,8 +1830,12 @@ async fn viewer_item(
     } else {
         "unavailable"
     };
+    let mut item = shared_item(&summary, metadata, user.id, art_key.as_ref());
+    if let Some(presentation) = presentation {
+        item["presentation"] = json!(presentation);
+    }
     receiver_json(&state,&token,user.id,vec![scope],
-        json!({"item":shared_item(&summary,metadata,user.id,art_key.as_ref()),"files":files,"lifecycle_generation":summary.lifecycle_generation,"watch":progress,"delivery_status":delivery_status})).await
+        json!({"item":item,"files":files,"lifecycle_generation":summary.lifecycle_generation,"watch":progress,"delivery_status":delivery_status})).await
 }
 async fn viewer_progress(
     State(state): State<AppState>,

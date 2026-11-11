@@ -13,7 +13,7 @@
 // same `tests/web/shell-source.js` every other web gate uses.
 //
 // Left out on purpose, and declared in types/globals.d.ts instead: the UMD
-// sidecars and the vendored hls.min.js. TypeScript reads a UMD file as a
+// sidecars and the vendored codec bundles. TypeScript reads a UMD file as a
 // CommonJS module and hides the global it assigns.
 //
 // A `files` list is not a load order — `tests/web/asset-order.test.js` still
@@ -29,7 +29,7 @@ const {shellSource, WEB} = require("../tests/web/shell-source.js");
 const OUT = path.join(WEB, "jsconfig.json");
 
 // Body rows that are not ours to type: vendored, minified upstream code.
-const NOT_CHECKED = Object.freeze(["hls.min.js"]);
+const NOT_CHECKED = Object.freeze(["hls.min.js", "vendor/qrcodegen.js", "vendor/jsQR.js"]);
 
 // The checker's settings. `moduleDetection: "legacy"` is what makes a file
 // with no import/export a *script* whose top-level declarations are global —

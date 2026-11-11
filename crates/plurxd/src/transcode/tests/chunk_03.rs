@@ -552,83 +552,279 @@
     }
 
     #[test]
-    fn rolling_transport_does_not_admit_unqualified_short_bootstrap() {
+    fn rolling_bootstrap_is_bound_to_the_native_presentation_contract() {
         for transport in [None, Some("native"), Some("hlsjs"), Some("unknown")] {
             let mut clock = RollingPublicationClock::default();
             clock.bind_startup_transport(transport);
-            assert_eq!(clock.startup_policy, RollingStartupPolicy::Conservative);
-            assert!(!clock.startup_policy.uses_small_bootstrap());
+            let hlsjs = transport == Some("hlsjs");
+            let policy = if hlsjs {
+                RollingStartupPolicy::FirstReloadWindow
+            } else {
+                RollingStartupPolicy::NativePresentationWindow
+            };
+            assert_eq!(clock.startup_policy, policy);
+            assert_eq!(clock.startup_policy.uses_small_bootstrap(), hlsjs);
             for rate in [0.25, 1.0, 4.0] {
-                assert_eq!(
-                    clock.startup_policy.bootstrap_ms(rate),
+                let expected = if hlsjs {
+                    ((16_000.0_f64 * rate).ceil() as i64).clamp(16_000, ROLLING_RESERVE_MAX_MS)
+                } else {
                     rolling_initial_runway_ms(rate)
-                );
+                };
+                assert_eq!(clock.startup_policy.bootstrap_ms(rate), expected);
             }
-            // Production admission is frozen across replacement/clear, and
-            // even the test-lab setter cannot opt an admitted attempt in.
             clock.reset_for_attempt(1);
             clock.reset_for_attempt(2);
             clock.clear_attempt();
-            clock.bind_startup_candidate_for_test(RollingStartupPolicy::WebFixedHlsV1);
-            assert_eq!(clock.startup_policy, RollingStartupPolicy::Conservative);
+            clock.bind_startup_transport(if hlsjs { Some("native") } else { Some("hlsjs") });
+            assert_eq!(clock.startup_policy, policy, "reattachment cannot change the admitted contract");
         }
     }
 
     #[tokio::test]
-    async fn rolling_unqualified_web_waits_for_conservative_first_snapshot() {
+    async fn rolling_first_complete_cut_is_published_and_replenished_before_steady_cadence() {
         for transport in ["native", "hlsjs"] {
-            let directory = crate::test_tempdir().expect("unqualified web bootstrap");
+            let directory = crate::test_tempdir().expect("short bootstrap");
             let session = test_session(directory.path().to_path_buf());
+            session.publication.lock().await.bind_startup_candidate_for_test(RollingStartupPolicy::FirstCompleteSegment);
+            let _ = transport; // Same controlled short-arm proof for each transport label.
+            accept_rolling_publication_demand(
+                &session, 1, 0, 1.0,
+                crate::playback_control::PlaybackDemand::Active,
+                crate::playback_control::RenderState::Starting,
+            ).await;
+            tokio::fs::write(directory.path().join("index.m3u8"), rolling_playlist(&[2.002], false)).await.expect("first cut");
+            session.publication_cycle("short-bootstrap").await.expect("first publication");
+            {
+                let clock = session.publication.lock().await;
+                assert_eq!(clock.served.as_ref().expect("first snapshot").end_ms, 2_002);
+                assert_ne!(clock.reserve_phase, RollingReservePhase::Steady);
+            }
+            tokio::fs::write(directory.path().join("index.m3u8"), rolling_playlist(&[2.002; 3], false)).await.expect("next cuts");
+            // Use the policy clock to exercise a replenishment before the 16s
+            // steady cycle. No sleep and no altered producer/capacity budget.
+            let due = session
+                .publication
+                .lock()
+                .await
+                .served
+                .as_ref()
+                .expect("first short cut is served before refill")
+                .available_at
+                + Duration::from_secs(2);
+            session.publication_cycle_at("short-bootstrap-refill", due).await.expect("replenishment");
+            let clock = session.publication.lock().await;
+            assert_eq!(clock.served.as_ref().expect("replenished").end_ms, 6_006);
+            assert!(
+                clock
+                    .served
+                    .as_ref()
+                    .expect("replenished short cut remains served")
+                    .end_ms
+                    < 48_000
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gran_turismo_safari_startup_requires_a_native_playable_first_snapshot() {
+        let case: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/playback/fixtures/gran-turismo-safari-startup.json"
+        ))).expect("shared Safari acceptance case");
+        let durations: Vec<f64> = case["segment_durations_ms"].as_array().expect("fixture segment durations").iter()
+            .map(|ms| ms.as_i64().expect("fixture duration milliseconds") as f64 / 1_000.0).collect();
+        let first_count = case["candidate_first_segment_count"].as_u64().expect("fixture first segment count") as usize;
+        for transport in [None, Some("native"), Some("future-native")] {
+            for explicit in [false, true] {
+                let directory = crate::test_tempdir().expect("Gran Turismo native start");
+                let session = test_session(directory.path().to_path_buf());
+                session.publication.lock().await.bind_startup_transport(transport);
+                if explicit {
+                    accept_rolling_publication_demand(&session, 1, 0, 1.0,
+                        crate::playback_control::PlaybackDemand::Active,
+                        crate::playback_control::RenderState::Starting).await;
+                }
+                for count in [3, 5, 6, first_count] {
+                    tokio::fs::write(directory.path().join("index.m3u8"),
+                        rolling_playlist(&durations[..count], false)
+                            .replace("#EXTM3U\n", "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"init.mp4\"\n")
+                            .replace(".ts\n", ".m4s\n")).await.expect("publication operation");
+                    session.publication_cycle("gran-turismo-safari").await.expect("publication operation");
+                    let clock = session.publication.lock().await;
+                    if count < first_count {
+                        assert!(clock.served.is_none(),
+                            "the 21.897 s Safari failure and intermediate windows must stay staged");
+                    } else {
+                        let served = clock.served.as_ref().expect("native admission");
+                        let text = String::from_utf8_lossy(&served.raw);
+                        assert_eq!(text, case["candidate_first_playlist"].as_str().expect("fixture native first playlist"),
+                            "native replay consumes the exact production snapshot bytes");
+                        assert!(!text.contains("PLAYLIST-TYPE"));
+                        assert!(!text.contains("ENDLIST"));
+                        let advertised = parse_playlist(&text);
+                        assert_eq!(advertised.len(), first_count);
+                        assert_eq!(advertised.last().expect("admitted final segment").end_ms, 53_220);
+                        assert!(served.duration_ms >= ROLLING_INITIAL_RUNWAY_MS);
+                        assert_eq!(served.first_segment, 0);
+                    }
+                }
+                if !explicit {
+                    let lease = session.control.snapshot().await;
+                    let attempt = session.control.current_producer_attempt();
+                    let mut clock = session.publication.lock().await;
+                    let budget = clock.publication_budget_at(Instant::now(), attempt,
+                        lease.as_ref(), 0, 0);
+                    assert_eq!(budget.allowed_end_ms, ROLLING_INITIAL_RUNWAY_MS,
+                        "after bootstrap the legacy fetch frontier owns the cap again");
+                }
+            }
+        }
+        // The qualified JS transport still owns its smaller reload bootstrap.
+        let directory = crate::test_tempdir().expect("publication directory");
+        let session = test_session(directory.path().to_path_buf());
+        session.publication.lock().await.bind_startup_transport(Some("hlsjs"));
+        tokio::fs::write(directory.path().join("index.m3u8"),
+            rolling_playlist(&durations[..3], false)).await.expect("publication operation");
+        session.publication_cycle("gran-turismo-hlsjs").await.expect("publication operation");
+        assert_eq!(session.publication.lock().await.served.as_ref().expect("served JS snapshot").end_ms, 21_897);
+    }
+
+    #[tokio::test]
+    async fn native_bootstrap_finishes_short_titles_without_waiting_for_a_live_window() {
+        for durations in [&[1.25][..], &[4.380, 8.758, 8.759][..]] {
+            let directory = crate::test_tempdir().expect("publication directory");
+            let session = test_session(directory.path().to_path_buf());
+            session.publication.lock().await.bind_startup_transport(Some("native"));
+            tokio::fs::write(directory.path().join("index.m3u8"),
+                rolling_playlist(durations, true)).await.expect("publication operation");
+            session.publication_cycle("native-short-endlist").await.expect("publication operation");
+            let clock = session.publication.lock().await;
+            let served = clock.served.as_ref().expect("completed title is immediately playable");
+            assert!(served.end_list);
+            assert!(String::from_utf8_lossy(&served.raw).contains("#EXT-X-ENDLIST"));
+            assert_eq!(parse_playlist(&String::from_utf8_lossy(&served.raw)).len(), durations.len());
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_production_bootstrap_does_not_charge_unpublished_time_or_seek_lead() {
+        for explicit in [false, true] {
+            let directory = crate::test_tempdir().expect("fixed first publication");
+            let mut session = test_session(directory.path().to_path_buf());
+            session.start_seconds = 2_000.0;
+            session.media_origin_seconds = 1_999.258;
             session
                 .publication
                 .lock()
                 .await
-                .bind_startup_transport(Some(transport));
-            accept_rolling_publication_demand(
-                &session,
-                1,
-                0,
-                1.0,
-                crate::playback_control::PlaybackDemand::Active,
-                crate::playback_control::RenderState::Starting,
-            )
-            .await;
+                .bind_startup_transport(Some("native"));
+            if explicit {
+                accept_rolling_publication_demand(
+                    &session,
+                    1,
+                    2_000_000,
+                    1.0,
+                    crate::playback_control::PlaybackDemand::Active,
+                    crate::playback_control::RenderState::Rendering,
+                )
+                .await;
+            }
+            let started = Instant::now();
             tokio::fs::write(
                 directory.path().join("index.m3u8"),
-                rolling_playlist(&[8.0; 4], false),
+                rolling_playlist(&[2.002; 24], false),
             )
             .await
-            .expect("short writer inventory");
+            .expect("forty-eight seconds before requested position");
             session
-                .publication_cycle("unqualified-web")
+                .publication_cycle_at("fixed-first-frontier", started)
                 .await
-                .expect("wait for runway");
+                .expect("stage short prefix");
             assert!(
                 session.publication.lock().await.served.is_none(),
-                "transport alone must not release the 32-second candidate"
+                "seek pullback cannot pay the requested position's reload window"
             );
             tokio::fs::write(
                 directory.path().join("index.m3u8"),
-                rolling_playlist(&[8.0; 6], false),
+                rolling_playlist(&[2.002; 25], false),
             )
             .await
-            .expect("conservative writer inventory");
+            .expect("complete post-position reload coverage");
             session
-                .publication_cycle("unqualified-web")
+                .publication_cycle_at("fixed-first-frontier", started + Duration::from_secs(7))
                 .await
-                .expect("qualified runway");
+                .expect("publish without fictitious consumption");
+            let clock = session.publication.lock().await;
+            let served = clock
+                .served
+                .as_ref()
+                .expect("unpublished elapsed time cannot move the first frontier");
+            assert_eq!(served.end_ms, 50_050);
+            assert!(served.end_ms - 742 >= ROLLING_INITIAL_RUNWAY_MS);
+            assert!(String::from_utf8_lossy(&served.raw).contains("#EXT-X-TARGETDURATION:16"));
             assert_eq!(
-                session
-                    .publication
-                    .lock()
-                    .await
-                    .served
-                    .as_ref()
-                    .expect("snapshot")
-                    .end_ms,
-                48_000
+                clock.reserve_phase,
+                RollingReservePhase::AwaitingPresentation
             );
         }
+    }
+
+    #[tokio::test]
+    async fn rolling_explicit_publication_ages_only_after_actual_presentation() {
+        let directory = crate::test_tempdir().expect("presentation clock");
+        let mut session = test_session(directory.path().to_path_buf());
+        session.start_seconds = 2_000.0;
+        session.media_origin_seconds = 1_999.258;
+        session
+            .publication
+            .lock()
+            .await
+            .bind_startup_transport(Some("native"));
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            2_000_000,
+            1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Rendering,
+        )
+        .await;
+        let mut lease = session.control.snapshot().await.expect("explicit lease");
+        lease.demand_observation_age = Some(Duration::from_secs(7));
+        let attempt = session.control.current_producer_attempt();
+        let now = Instant::now();
+        {
+            let mut clock = session.publication.lock().await;
+            clock.reset_for_attempt(attempt);
+            let budget = clock.publication_budget_at(now, attempt, Some(&lease), 1_999_258, 2_000_000);
+            assert_eq!(
+                budget.consumed_end_ms, 742,
+                "pre-attach Rendering cannot spend unpublished time"
+            );
+        }
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[2.002; 25], false),
+        )
+        .await
+        .expect("first prefix");
+        session
+            .publication_cycle("presentation-clock")
+            .await
+            .expect("publish first prefix");
+        let mut clock = session.publication.lock().await;
+        assert!(clock.served.is_some());
+        let budget = clock.publication_budget_at(now, attempt, Some(&lease), 1_999_258, 2_000_000);
+        assert_eq!(
+            budget.consumed_end_ms, 742,
+            "availability alone is not presentation"
+        );
+        lease.startup.phase = crate::playback_control::RollingStartupPhase::Presented;
+        let budget = clock.publication_budget_at(now, attempt, Some(&lease), 1_999_258, 2_000_000);
+        assert_eq!(
+            budget.consumed_end_ms, 7_742,
+            "accepted presentation owns its subsequent observation age"
+        );
     }
 
     #[test]
@@ -648,7 +844,7 @@
         assert_eq!(clock.startup_policy, RollingStartupPolicy::WebFixedHlsV1);
         let mut unknown = RollingPublicationClock::default();
         unknown.bind_startup_transport(Some("other"));
-        assert_eq!(unknown.startup_policy.bootstrap_ms(1.0), 48_000);
+        assert_eq!(unknown.startup_policy.bootstrap_ms(1.0), ROLLING_INITIAL_RUNWAY_MS);
     }
 
     #[tokio::test]
@@ -763,7 +959,7 @@
         session.progress.recent_milli.store(900, Relaxed);
         tokio::fs::write(
             directory.path().join("index.m3u8"),
-            rolling_playlist(&[8.0; 4], false),
+            rolling_playlist(&[8.0; 6], false),
         )
         .await
         .expect("writer inventory");
@@ -1306,7 +1502,7 @@
         session
             .publication_cycle_at(
                 "rolling_publication_budget_legacy",
-                started + ROLLING_PUBLICATION_TARGET,
+                session.control.snapshot().await.expect("delivered lease").delivery.first_media_committed_at.expect("first body commit") + ROLLING_PUBLICATION_TARGET,
             )
             .await
             .expect("bounded legacy publication");
@@ -1366,7 +1562,7 @@
         session
             .publication_cycle_at(
                 "rolling_publication_budget_legacy_variable",
-                started + ROLLING_PUBLICATION_TARGET,
+                session.control.snapshot().await.expect("delivered lease").delivery.first_media_committed_at.expect("first body commit") + ROLLING_PUBLICATION_TARGET,
             )
             .await
             .expect("paced legacy publication");
@@ -1452,7 +1648,10 @@
     #[tokio::test]
     async fn rolling_publication_budget_eof_keeps_the_slow_viewers_protected_tail() {
         let directory = crate::test_tempdir().expect("EOF publication budget");
-        let session = test_session(directory.path().to_path_buf());
+        let mut session = test_session(directory.path().to_path_buf());
+        // The first snapshot is for this requested Resume. Prepublication
+        // Rendering telemetry alone cannot establish a different playhead.
+        session.start_seconds = 360.0;
         accept_rolling_publication_demand(
             &session,
             1,
@@ -1501,11 +1700,11 @@
         min_late_runway_ms: i64,
         /// Largest produced lead over the viewer once playback began.
         max_produced_lead_ms: i64,
-        /// Largest `produced end - allowed_end_ms` seen on any poll.
-        max_produced_over_allowed_ms: i64,
-        /// Polls on which a producer with a whole staged batch was released
-        /// at or beyond the clock's `allowed_end_ms`.
-        releases_beyond_allowance: Vec<(i64, i64, i64)>,
+        /// Advertised media may never spend the private source-read bank.
+        max_published_over_allowed_ms: i64,
+        /// Polls releasing a fully staged producer past its private bank,
+        /// including the one complete-cut envelope.
+        releases_beyond_private_bank: Vec<(i64, i64, i64)>,
         /// Polls on which the flow controller held the producer.
         held_polls: usize,
     }
@@ -1517,6 +1716,23 @@
                 .filter(|(at, media)| *at > wall_ms && *media <= 2_000)
                 .count()
         }
+    }
+
+    fn rolling_test_private_bank_ceiling_ms(rate: f64) -> i64 {
+        let high = rolling_source_watermarks(rate).1 as i64;
+        let guard = ((ROLLING_PUBLICATION_GUARD_MS as f64) * rate).ceil() as i64;
+        // At 1x: 80s private bank + 10s exchange guard + one 2s cut.
+        // At 2x: the reserve ceiling caps it at 124s + one 2s cut.
+        high.saturating_add(guard).min(ROLLING_RESERVE_MAX_MS).saturating_add(2_000)
+    }
+
+    fn assert_rolling_test_frontiers(run: &HeldRollingProducerRun, rate: f64) {
+        assert!(run.max_published_over_allowed_ms <= 0,
+            "private media escaped the advertised allowance: {run:?}");
+        assert!(run.max_produced_lead_ms <= rolling_test_private_bank_ceiling_ms(rate),
+            "physical production escaped its bounded private bank: {run:?}");
+        assert!(run.releases_beyond_private_bank.is_empty(),
+            "producer released beyond its private bank: {run:?}");
     }
 
     /// Drive the rolling publication clock and the flow controller together,
@@ -1545,6 +1761,9 @@
         const SEGMENT_MS: i64 = 2_000;
         let directory = crate::test_tempdir().expect("held rolling producer");
         let session = test_session(directory.path().to_path_buf());
+        session.control.bind_response_publication_contract(
+            "held-rolling-presentation".to_owned(), Arc::clone(&session.failed),
+        ).await.expect("bind simulated presentation");
         let poll_ms = i64::try_from(poll.as_millis()).expect("poll");
         let consumed_per_poll_ms = ((poll_ms as f64) * playback_rate).round() as i64;
         let exchange_ms = i64::from(crate::playback_control::NEXT_EXCHANGE_MS);
@@ -1553,7 +1772,7 @@
         let mut run = HeldRollingProducerRun {
             min_runway_ms: i64::MAX,
             min_late_runway_ms: i64::MAX,
-            max_produced_over_allowed_ms: i64::MIN,
+            max_published_over_allowed_ms: i64::MIN,
             ..HeldRollingProducerRun::default()
         };
         let mut segments = 0_usize;
@@ -1663,6 +1882,15 @@
                 }
             }
             if published.is_some() && !playing {
+                // The simulated viewer actually receives the video playlist.
+                // Subsequent advancing reports must pass the same actor
+                // admission as production before either clock extrapolates.
+                session.control.authorize_response_publication(
+                    crate::playback_control::RollingResponsePublication::attempt_media(
+                        crate::playback_control::RollingResponseObject::VideoMediaPlaylist,
+                        session.control.current_producer_attempt(), None,
+                    ), None, now + Duration::from_secs(1),
+                ).await.expect("simulated video playlist response");
                 playing = true;
             }
             served_end_ms = published;
@@ -1677,10 +1905,9 @@
                     .max_produced_lead_ms
                     .max(produced_end_ms.saturating_sub(position_ms));
             }
-            if let Some(allowed_end_ms) = allowed_end_ms {
-                run.max_produced_over_allowed_ms = run
-                    .max_produced_over_allowed_ms
-                    .max(produced_end_ms.saturating_sub(allowed_end_ms));
+            if let (Some(published), Some(allowed_end_ms)) = (published, allowed_end_ms) {
+                run.max_published_over_allowed_ms = run.max_published_over_allowed_ms
+                    .max(published.saturating_sub(allowed_end_ms));
             }
 
             // The flow controller, fed exactly as `apply_ahead_window` feeds
@@ -1697,7 +1924,7 @@
                 physical_ahead: None,
                 produced_end_ms: (segments > 0).then_some(produced_end_ms),
                 staged_publication_seconds,
-                startup_protected: false,
+                startup_protected: lease.startup.protects_from_time_hold(),
                 media_origin_ms: 0,
                 lease_mode: lease.mode,
                 demand: lease.demand.as_ref(),
@@ -1715,15 +1942,14 @@
             held = evaluation.hold.is_some();
             if held {
                 run.held_polls += 1;
-            } else if let (Some(staged), Some(allowed_end_ms)) =
-                (staged_publication_seconds, allowed_end_ms)
-            {
-                // A whole batch is staged, so only the next-publication rule
-                // can have released this producer; it must stop inside the
-                // clock's own allowance.
-                if staged.saturating_mul(1_000) >= batch_ms && produced_end_ms >= allowed_end_ms {
-                    run.releases_beyond_allowance
-                        .push((elapsed_ms, produced_end_ms, allowed_end_ms));
+            } else if let Some(staged) = staged_publication_seconds {
+                // The private source bank amortizes physical reads; it is
+                // intentionally distinct from the advertised allowance.
+                let private_end_ms = position_ms.saturating_add(
+                    rolling_test_private_bank_ceiling_ms(playback_rate));
+                if !lease.startup.protects_from_time_hold()
+                    && staged.saturating_mul(1_000) >= batch_ms && produced_end_ms > private_end_ms {
+                    run.releases_beyond_private_bank.push((elapsed_ms, produced_end_ms, private_end_ms));
                 }
             }
 
@@ -1772,11 +1998,7 @@
             "the published runway must not drain: {run:?}"
         );
         assert!(run.held_polls > 0, "the producer is still paced: {run:?}");
-        assert!(run.releases_beyond_allowance.is_empty(), "{run:?}");
-        assert!(
-            run.max_produced_over_allowed_ms <= 2_000,
-            "produced media stays within one segment of allowed_end_ms: {run:?}"
-        );
+        assert_rolling_test_frontiers(&run, 1.0);
     }
 
     /// A realistic producer only 10% faster than playback. It reaches the
@@ -1786,8 +2008,8 @@
     /// must not happen is the permanent trap. The thresholds are therefore:
     /// no stall, at most that one short cycle and none after the first
     /// minute, a runway never below one batch, recovered in the final third
-    /// to within one batch and one guard of the initial runway, and produced
-    /// media within one segment of `allowed_end_ms`.
+    /// to within one batch and one guard of the initial runway, with separate
+    /// bounds for advertised media and the private physical-read bank.
     #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_barely_faster_producer_recovers_from_late_cycles() {
         let wall = Duration::from_secs(600);
@@ -1812,20 +2034,11 @@
                 >= ROLLING_INITIAL_RUNWAY_MS - ROLLING_SEGMENT_MAX_MS - ROLLING_PUBLICATION_GUARD_MS,
             "runway recovers: {run:?}"
         );
-        assert!(run.releases_beyond_allowance.is_empty(), "{run:?}");
-        assert!(run.max_produced_over_allowed_ms <= 2_000, "{run:?}");
+        assert_rolling_test_frontiers(&run, 1.0);
     }
 
-    /// At 2x playback the next-publication release is capped at the clock's
-    /// `allowed_end_ms`: its guard scales with rate, the allowance's rounding
-    /// segment does not. The producer must never be released with a whole
-    /// batch staged at or beyond that allowance.
-    ///
-    /// Produced media can still pass `allowed_end_ms` here, through the
-    /// pre-existing one-batch staging rule rather than this release: at 2x a
-    /// batch is 32 s past the published end while the allowance rounds by an
-    /// unscaled 16 s. That excess is bounded by the difference plus one
-    /// segment (measured 6 s) and is asserted as such.
+    /// At 2x, the private bank is capped by the physical reserve ceiling.
+    /// Advertisement remains limited by the separate publication allowance.
     #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_double_rate_release_stays_inside_the_allowance() {
         let run = simulate_held_rolling_producer(
@@ -1838,15 +2051,7 @@
         .await;
         assert_eq!(run.stalled_ms, 0, "{run:?}");
         assert_eq!(run.single_segment_batches_after(0), 0, "{run:?}");
-        assert!(
-            run.releases_beyond_allowance.is_empty(),
-            "released beyond allowed_end_ms: {run:?}"
-        );
-        assert!(
-            run.max_produced_over_allowed_ms
-                <= rolling_publication_batch_ms(2.0) - ROLLING_SEGMENT_MAX_MS + 2_000,
-            "{run:?}"
-        );
+        assert_rolling_test_frontiers(&run, 2.0);
         assert!(
             run.min_runway_ms >= rolling_initial_runway_ms(2.0) - rolling_publication_batch_ms(2.0),
             "{run:?}"
@@ -1880,20 +2085,13 @@
             run.held_polls * 3 >= run.batches.len() * 16,
             "the producer spends a real part of each cycle time-held: {run:?}"
         );
-        assert!(
-            run.max_produced_lead_ms <= ROLLING_INITIAL_RUNWAY_MS + 2 * ROLLING_SEGMENT_MAX_MS,
-            "produced inventory stays inside the publication allowance plus one batch: {run:?}"
-        );
-        assert!(run.max_produced_over_allowed_ms <= 2_000, "{run:?}");
+        assert_rolling_test_frontiers(&run, 1.0);
     }
 
-    /// The next-publication release target is the clock's own desired end
-    /// plus a rate-scaled guard, capped at the clock's `allowed_end_ms`. At
-    /// every rate a producer that has reached `allowed_end_ms` with a batch
-    /// staged is held; at 1x one that is a batch past publication but still
-    /// short of `desired + guard` keeps producing.
+    /// Private production banks a bounded shared-read turn while advertised
+    /// publication continues to obey its separate allowance.
     #[test]
-    fn rolling_flow_release_target_is_capped_by_the_publication_allowance() {
+    fn rolling_flow_release_target_keeps_the_bounded_private_source_bank() {
         let limits = AheadLimits {
             max_secs: HLS_AHEAD_MAX_SECS_DEFAULT,
             max_bytes: HLS_AHEAD_MAX_BYTES_DEFAULT,
@@ -1920,42 +2118,27 @@
             .hold
             .map(|hold| hold.reason)
         };
-        for rate in [1.0, 1.6, 2.0, 4.0] {
+        // At 1x the private bank is 80s plus the 10s exchange guard.
+        // Faster play reaches the common 124s physical reserve ceiling.
+        // Advertised publication limits are checked independently above.
+        for (rate, bank_ms) in [(1.0, 90_000), (1.6, 124_000), (2.0, 124_000), (4.0, 124_000)] {
             let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Web,
             );
             demand.playback_rate = rate;
             let age = Duration::from_secs(3);
-            let ends = rolling_explicit_publication_ends(&demand, age, 5_000);
+            let consumed = 10_000 + ((3_000.0 * rate) as i64) - 5_000;
             assert_eq!(
-                ends.consumed_end_ms,
-                10_000 + ((3_000.0 * rate) as i64) - 5_000,
-                "the flow reads the clock's projected position at {rate}x"
-            );
-            assert_eq!(
-                evaluate(&demand, age, ends.allowed_end_ms),
+                evaluate(&demand, age, consumed + bank_ms),
                 Some(AheadHoldReason::Time),
-                "held at allowed_end_ms at {rate}x"
+                "hold at the bounded private bank at {rate}x"
             );
             assert_eq!(
-                evaluate(&demand, age, ends.allowed_end_ms - 1_000),
-                (rate < 1.6).then_some(AheadHoldReason::Time),
-                "one second short of allowed_end_ms at {rate}x"
+                evaluate(&demand, age, consumed + bank_ms - 1_000),
+                None,
+                "finish the private read turn before yielding at {rate}x"
             );
         }
-        let demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
-            crate::playback_control::ClientPlatform::Web,
-        );
-        let ends = rolling_explicit_publication_ends(&demand, Duration::ZERO, 5_000);
-        assert_eq!(
-            evaluate(&demand, Duration::ZERO, ends.desired_end_ms + 9_000),
-            None,
-            "short of desired + guard at 1x the producer keeps producing"
-        );
-        assert_eq!(
-            evaluate(&demand, Duration::ZERO, ends.desired_end_ms + 10_000),
-            Some(AheadHoldReason::Time)
-        );
     }
 
     #[test]
@@ -2247,7 +2430,10 @@
     async fn scratch_hold_publication_deadline_prepublication_capacity_waits_out_a_global_scratch_hold(
     ) {
         let directory = crate::test_tempdir().expect("publication deadline");
-        let session = test_session(directory.path().to_path_buf());
+        let mut session = test_session(directory.path().to_path_buf());
+        session.start_seconds = 10.0;
+        session.publication.lock().await
+            .bind_startup_candidate_for_test(RollingStartupPolicy::Conservative);
         let started = Instant::now();
         // Even a slow producer is not judged below the fixed initial runway.
         session.progress.recent_milli.store(500, Relaxed);
@@ -3248,12 +3434,54 @@
             "a full scratch budget is temporary contention, not a server fault: {refusal}"
         );
         assert!(
+            matches!(
+                capacity_refusal(&refusal),
+                Some((CapacityRefusal::Waitable { .. }, _))
+            ),
+            "a full budget frees when a session ends, so it is a wait: {refusal}"
+        );
+        assert!(
             refusal.contains(&reservation.to_string()),
             "the operator needs the figures to tell a full budget from a stuck cleanup: {refusal}"
         );
         assert_eq!(
             crate::http::hls::session_start_error_status_for_test(7, refusal),
             axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// D2 item 2: a full budget is a wait, but one start's grant above the
+    /// whole ceiling waits for nothing — no other session ending makes room.
+    /// The real admission path classifies the two apart.
+    #[tokio::test]
+    async fn scratch_grant_above_the_ceiling_is_a_terminal_refusal() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let per_session = 100_i64;
+        let reservation = per_session + ROLLING_SCRATCH_IN_FLIGHT_BYTES;
+        store
+            .put_setting(keys::HLS_AHEAD_MAX_BYTES, &per_session.to_string())
+            .await
+            .expect("per-session ceiling");
+        store
+            .put_setting(keys::HLS_SCRATCH_MAX_BYTES, &(reservation - 1).to_string())
+            .await
+            .expect("global ceiling below one grant");
+        let refusal = mgr
+            .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
+            .await
+            .expect_err("a grant above the ceiling is refused on an empty ledger");
+        assert_eq!(
+            capacity_refusal(&refusal).map(|(class, _)| class),
+            Some(CapacityRefusal::Terminal(TRANSCODE_SCRATCH_EXHAUSTED)),
+            "{refusal}"
         );
     }
 
@@ -3553,7 +3781,10 @@
                     seconds: 60,
                     bytes: 1_000,
                 }),
-                produced_end_ms: Some(80_000),
+                produced_end_ms: Some(
+                    20_000 + rolling_source_bank_target_ms(1.0, false)
+                        + ROLLING_PUBLICATION_GUARD_MS,
+                ),
                 staged_publication_seconds: Some(16),
                 // Pre-existing coverage: the startup grant is already spent, so
                 // these assertions are about steady-state flow control.
@@ -3641,7 +3872,7 @@
                 seconds: 60,
                 bytes: 1_000,
             }),
-            produced_end_ms: Some(80_000),
+            produced_end_ms: Some(20_000 + rolling_source_bank_target_ms(1.0, false) + ROLLING_PUBLICATION_GUARD_MS),
             staged_publication_seconds: Some(16),
             startup_protected: false,
             media_origin_ms: 100_000,

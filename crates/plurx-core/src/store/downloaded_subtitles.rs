@@ -96,9 +96,9 @@ pub(crate) fn encode(track: &DownloadedSubtitle) -> Result<String, StoreError> {
 }
 
 fn valid_identity(track: &DownloadedSubtitle) -> bool {
-    match &track.transcription {
-        None => track.provider_file_id > 0,
-        Some(origin) => {
+    match (&track.transcription, &track.text_translation) {
+        (None, None) => track.provider_file_id > 0,
+        (Some(origin), None) => {
             track.provider_file_id == 0
                 && origin.audio_index >= 0
                 && super::background_jobs::digest(&origin.artifact_key)
@@ -108,6 +108,22 @@ fn valid_identity(track: &DownloadedSubtitle) -> bool {
                     || valid_managed_provenance(origin))
                 && origin.generated_at_ms >= 0
         }
+        (None, Some(origin)) => {
+            track.provider_file_id == 0
+                && origin.subtitle_index >= 0
+                && super::background_jobs::digest(&origin.artifact_key)
+                && super::background_jobs::digest(&origin.input_sha256)
+                && super::background_jobs::digest(&origin.model_sha256)
+                && super::background_jobs::digest(&origin.engine_sha256)
+                && origin.model_id == "opus-mt-mul-en"
+                && origin.adapter_contract == "candle-marian-0.11-v1"
+                && super::background_jobs_transcription::valid_language(&origin.source_language)
+                && origin.source_language != "en"
+                && origin.target_language == "en"
+                && track.language == "en"
+                && origin.generated_at_ms >= 0
+        }
+        _ => false,
     }
 }
 

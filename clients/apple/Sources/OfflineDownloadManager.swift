@@ -383,6 +383,11 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
             }
         }
 
+        // Background downloads outlive the foreground app and its loopback
+        // listener. Never persist an ephemeral bridge URL in a system task.
+        guard !ServerTrust.shared.requiresMediaProxy(for: manifest) else {
+            throw APIError.transport("Offline video downloads from servers with private certificates are not supported yet. Streaming is available.")
+        }
         let asset = AVURLAsset(url: manifest)
         let preferred = try await asset.load(.preferredMediaSelection)
         guard let selection = preferred.mutableCopy() as? AVMutableMediaSelection else {
@@ -497,7 +502,7 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
         guard let path, let url = Session.shared.url(path) else { return nil }
         var request = URLRequest(url: url)
         Session.shared.authorize(&request)
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await ServerTrust.session.data(for: request),
               (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) != false,
               !data.isEmpty
         else { return nil }
@@ -550,6 +555,15 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
 }
 
 extension OfflineDownloadManager: AVAssetDownloadDelegate {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let decision = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(decision.0, decision.1)
+    }
+
     func urlSession(
         _ session: URLSession,
         assetDownloadTask: AVAssetDownloadTask,

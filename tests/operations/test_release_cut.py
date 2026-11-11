@@ -462,7 +462,7 @@ class WeeklyTagWorkflowCase(unittest.TestCase):
         self.assertIn("needs.release-check.outputs.pending == 'true'", condition)
         # The gate for a pending release is the whole of `make release-check`.
         self.assertIn(
-            "        if: steps.release.outputs.pending == 'true'\n        run: make release-check",
+            "        if: steps.release.outputs.pending == 'true'\n        run: python3 \"$RUNNER_TEMP/release-readiness\" make release-check",
             self.check,
         )
 
@@ -482,7 +482,10 @@ class WeeklyTagWorkflowCase(unittest.TestCase):
             "          RELEASE_SHA: ${{ steps.release.outputs.sha }}\n"
             '        run: git checkout -q --detach "$RELEASE_SHA"\n'
         )
-        self.assertLess(checkout, self.check.index("run: make release-check"))
+        self.assertLess(
+            checkout,
+            self.check.index('run: python3 "$RUNNER_TEMP/release-readiness" make release-check'),
+        )
         self.assertIn("sha: ${{ steps.release.outputs.sha }}", self.check)
         # A refusal from `--pending` fails the step instead of vanishing into a pipe.
         find = self.check.split("id: release\n", 1)[1].split("      - name:", 1)[0]

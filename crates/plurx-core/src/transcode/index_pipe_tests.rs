@@ -35,6 +35,66 @@ fn hevc_dv() -> MediaFile {
     }
 }
 
+#[test]
+fn retained_parameter_sets_keep_hls_sample_entries_and_preserve_needed_updates() {
+    for (hdr, label, compatibility, preserve, sample_entry) in [
+        (None, None, None, false, "hvc1"),
+        (
+            Some("dolby_vision"),
+            Some("Profile 5"),
+            Some(0),
+            true,
+            "dvh1",
+        ),
+        (
+            Some("dolby_vision"),
+            Some("Profile 5"),
+            Some(0),
+            false,
+            "hvc1",
+        ),
+        (
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 8.1 (HDR10-compatible)"),
+            Some(1),
+            true,
+            "hvc1",
+        ),
+    ] {
+        let mut file = hevc_dv();
+        file.hdr = hdr.map(str::to_owned);
+        file.hdr_format = label.map(str::to_owned);
+        file.dolby_vision.bl_compat_id = compatibility;
+        file.dolby_vision.profile = compatibility.map(|compat| if compat == 0 { 5 } else { 8 });
+        let ordinary = CopyVideoOptions::new(false, preserve);
+        let retained = ordinary.with_parameter_set_retention(true);
+        let ordinary_args = copy_video_args(&file, ordinary);
+        assert!(
+            contains_run(&ordinary_args, &["-tag:v".to_owned(), sample_entry.to_owned()]),
+            "ordinary sample entry follows the source's authoritative compatibility {compatibility:?}: {ordinary_args:?}"
+        );
+        for args in [
+            copy_video_args(&file, retained),
+            copy_index_pipe_args(&file, retained),
+            copy_pipe_args_with_dolby_vision(&file, 0.0, None, true, Pacing::unpaced(), retained),
+        ] {
+            assert!(
+                contains_run(&args, &["-tag:v".to_owned(), sample_entry.to_owned()]),
+                "retention cannot silently change the HLS sample-entry promise: {args:?}"
+            );
+            assert!(
+                !args.iter().any(|arg| arg.contains("remove_types=32-34")),
+                "retention must preserve the updates required to decode the original pixels: {args:?}"
+            );
+        }
+        assert_ne!(
+            crate::segplan::argv_fingerprint(&ordinary_args),
+            crate::segplan::argv_fingerprint(&copy_video_args(&file, retained)),
+            "a retaining recipe cannot alias destructive header stripping"
+        );
+    }
+}
+
 /// The index and the production pipe must agree about the video, because
 /// the index is a list of output byte counts and the landing matcher
 /// compares them. A drift here is not a stale index, it is a wrong one.
@@ -647,7 +707,6 @@ fn frozen_copy_index_pipe_args_with_input(
     );
     if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         args[2] = "info".to_owned();
-        args.insert(3, "-xerror".to_owned());
         if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
             args[index + 1] = format!("trace_headers,{}", args[index + 1]);
         } else {
@@ -746,6 +805,123 @@ fn a_shared_index_pass_is_one_input_then_each_identitys_own_block() {
                 "one trace, on the lead"
             );
             assert_eq!(shared.iter().filter(|arg| *arg == "-i").count(), 1);
+        }
+    }
+}
+
+/// The HEVC index pass must not carry `-xerror`: FFmpeg's global flag turns
+/// the mp4 muxer's correctable `Non-monotonic DTS` at a reordered head into
+/// a fatal exit, which left 262 fleet titles unindexable while rolling copy
+/// (no `-xerror`) played them. What the header proof must refuse is refused
+/// by the trace parser, which this test also runs on the real stderr.
+#[test]
+fn the_hevc_index_pass_survives_a_correctable_dts_head_and_still_proves_the_trace() {
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let base = dir.path().join("base.mkv");
+    let head = dir.path().join("reordered-head.mkv");
+    let ffmpeg = |args: &[&str]| {
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args(args)
+            .output()
+            .expect("ffmpeg must be installed to run this test");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x240:rate=25",
+        "-t",
+        "3",
+        "-c:v",
+        "libx265",
+        "-x265-params",
+        "bframes=4:keyint=50:log-level=error",
+        "-pix_fmt",
+        "yuv420p",
+        base.to_str().expect("UTF-8 base fixture path"),
+    ]);
+    // The first packet is stamped after its successors: a head that the mp4
+    // muxer corrects when asked to and aborts on only under `-xerror`.
+    ffmpeg(&[
+        "-i",
+        base.to_str().expect("UTF-8 base fixture path"),
+        "-c",
+        "copy",
+        "-bsf:v",
+        "setts=pts=if(eq(PTS\\,0)\\,2000\\,PTS)",
+        head.to_str().expect("UTF-8 corrected-head fixture path"),
+    ]);
+
+    let mut source = hevc_dv();
+    source.hdr = None;
+    source.hdr_format = None;
+    source.video_profile = Some("Main".into());
+    source.bit_depth = Some(8);
+    let argv = copy_index_pipe_args_with_input(
+        &source,
+        head.to_str().expect("UTF-8 corrected-head fixture path"),
+        CopyVideoOptions::new(false, false),
+    );
+    assert!(!argv.iter().any(|arg| arg == "-xerror"), "{argv:?}");
+
+    let run = |argv: &[String]| {
+        Command::new("ffmpeg")
+            .args(argv)
+            .stdout(Stdio::null())
+            .output()
+            .expect("ffmpeg")
+    };
+    let out = run(&argv);
+    assert!(
+        out.status.success(),
+        "index pass must survive the corrected head: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut trace = crate::hevc_configuration::Trace::default();
+    trace.feed(&out.stderr);
+    assert_eq!(
+        trace.source_fault(),
+        None,
+        "a correctable DTS head is not a damaged source: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        trace.finish("source".into(), 0).permits("source"),
+        "a clean trace must still be proven"
+    );
+
+    // Control: the old argv aborts on this very file.
+    let mut strict = argv.clone();
+    strict.insert(3, "-xerror".into());
+    assert!(!run(&strict).status.success(), "fixture must trip -xerror");
+}
+
+#[test]
+fn index_pipe_allows_timestamp_repair_and_keeps_the_hevc_header_proof() {
+    for codec in ["hevc", "h265"] {
+        let mut file = hevc_dv();
+        file.video_codec = Some(codec.to_owned());
+        for video in every_copy_option() {
+            let args = copy_index_pipe_args(&file, video);
+            assert!(
+                !args.iter().any(|arg| arg == "-xerror"),
+                "the muxer must be able to correct a reordered DTS head: {args:?}"
+            );
+            assert!(
+                args.windows(2).any(|pair| {
+                    pair[0] == "-bsf:v"
+                        && pair[1].split(',').any(|filter| filter == "trace_headers")
+                }),
+                "timestamp repair must not remove the HEVC proof: {args:?}"
+            );
         }
     }
 }

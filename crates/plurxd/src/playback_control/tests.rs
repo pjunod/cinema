@@ -1398,7 +1398,7 @@ fn every_hold_reason_has_its_own_counter_slot() {
     // The withheld exposition indexes the same discriminant, so it moves
     // with the same variants and is pinned by the same assertion.
     assert_eq!(CONTROL_RECOVERY_WITHHELD.len(), 7);
-    assert_eq!(CONTROL_RECOVERY_WITHHELD[0].len(), 3);
+    assert_eq!(CONTROL_RECOVERY_WITHHELD[0].len(), CLIENT_PLATFORMS);
 }
 
 #[test]
@@ -6198,7 +6198,9 @@ async fn terminal_commands_claim_due_expiry_before_end_or_authority_fence() {
             RollingTerminalCause::AuthorityFence => handle.authority_fence().await,
             RollingTerminalCause::LeaseExpired
             | RollingTerminalCause::StartupExpired
-            | RollingTerminalCause::PauseExpired => {
+            | RollingTerminalCause::PauseExpired
+            | RollingTerminalCause::Released
+            | RollingTerminalCause::Stopped => {
                 unreachable!()
             }
         }
@@ -8280,6 +8282,81 @@ fn exit_seals_preceding_progress_and_later_progress_stays_terminal() {
 }
 
 #[test]
+fn rolling_first_media_clock_requires_an_exact_attempt_body_commit() {
+    let started = Instant::now();
+    let mut actor =
+        RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+    let attempt = actor
+        .begin_producer_attempt_at(started)
+        .expect("first attempt");
+    assert!(actor.observe_publication_at(started, publication(attempt, true, 2, 48_000, None)));
+    assert!(actor.commit_media_at(
+        started + Duration::from_secs(1),
+        "init",
+        attempt,
+        None,
+        None
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at, None,
+        "metadata and publication are not media consumption"
+    );
+    let first = started + Duration::from_secs(2);
+    assert!(actor.commit_media_at(first, "segment", attempt, Some(0), Some(16_000)));
+    assert!(actor.commit_media_at(
+        started + Duration::from_secs(3),
+        "segment",
+        attempt,
+        Some(1),
+        Some(32_000)
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at,
+        Some(first),
+        "downloads cannot continually restart the consumption clock"
+    );
+}
+
+#[test]
+fn rolling_first_media_clock_resets_with_a_prepublication_attempt() {
+    let started = Instant::now();
+    let mut actor =
+        RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+    let attempt = actor
+        .begin_producer_attempt_at(started)
+        .expect("unpublished first attempt");
+    let replacement = actor
+        .begin_producer_attempt_at(started + Duration::from_secs(4))
+        .expect("unpublished replacement attempt");
+    assert_eq!(actor.delivery.first_media_committed_at, None);
+    assert!(!actor.commit_media_at(
+        started + Duration::from_secs(5),
+        "segment",
+        attempt,
+        Some(2),
+        Some(48_000)
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at, None,
+        "predecessor delivery cannot start the replacement clock"
+    );
+    assert!(actor.observe_publication_at(
+        started + Duration::from_secs(5),
+        publication(replacement, true, 0, 16_000, None)
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at, None,
+        "replacement publication cannot start consumption"
+    );
+    let next = started + Duration::from_secs(6);
+    assert!(actor.commit_media_at(next, "segment", replacement, Some(0), Some(16_000)));
+    assert_eq!(
+        actor.snapshot_at(next).delivery.first_media_committed_at,
+        Some(next)
+    );
+}
+
+#[test]
 fn rolling_equal_fetch_resolves_its_pending_end() {
     let started = Instant::now();
     let mut actor =
@@ -9163,7 +9240,7 @@ fn the_shadow_decision_metric_publishes_every_axis_and_outcome() {
         "plurx_playback_preparation_decisions_total",
         "plurx_playback_preparation_counterfactual_total",
     ] {
-        for platform in ["web", "apple", "android"] {
+        for platform in CLIENT_PLATFORM_LABELS {
             for axis in [
                 PreparationAxis::ResolutionOrBitrate,
                 PreparationAxis::AudioTrackOrOffset,
@@ -9194,7 +9271,12 @@ fn the_shadow_decision_metric_publishes_every_axis_and_outcome() {
             .filter(|(_, line)| line.starts_with(&format!("{name}{{")))
             .map(|(index, _)| index)
             .collect();
-        assert_eq!(samples.len(), 30, "{name}");
+        // Every platform × five axes × two outcomes.
+        assert_eq!(
+            samples.len(),
+            CLIENT_PLATFORM_LABELS.len() * 5 * 2,
+            "{name}"
+        );
         assert_eq!(
             samples.last().expect("samples") - samples[0],
             samples.len() - 1,
@@ -9456,7 +9538,7 @@ fn metrics_expose_bounded_platform_and_relay_dimensions() {
         "working_set",
         "no_room",
     ] {
-        for platform in ["web", "apple", "android"] {
+        for platform in CLIENT_PLATFORM_LABELS {
             assert!(
                 metrics.contains(&format!(
                     "plurx_playback_control_recovery_withheld_total{{reason=\"{reason}\",platform=\"{platform}\"}}"
@@ -10006,6 +10088,7 @@ fn every_axis_is_prepared_and_names_itself() {
 
 fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -10040,6 +10123,7 @@ fn converting_copy() -> crate::transcode::SessionRequest {
         aac: false,
         preserve_dolby_vision: true,
         convert_dolby_vision: true,
+        dual_layer_as_copied: false,
     })
 }
 
@@ -10282,6 +10366,7 @@ fn a_rung_a_copy_cannot_serve_becomes_a_transcode() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     });
     let plain_candidate = candidate_request(
         &plain,
@@ -10622,6 +10707,7 @@ fn a_grade_intent_comes_off_the_request() {
 
     fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
         SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -10665,6 +10751,7 @@ fn a_grade_intent_comes_off_the_request() {
                 aac: true,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: true,
+                dual_layer_as_copied: false,
             },
             false,
         )),
@@ -10683,6 +10770,7 @@ fn a_grade_intent_comes_off_the_request() {
                 aac: false,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             },
             false,
         )),
@@ -10691,6 +10779,7 @@ fn a_grade_intent_comes_off_the_request() {
                 aac: false,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: true,
+                dual_layer_as_copied: false,
             },
             false,
         )),
@@ -17442,5 +17531,311 @@ fn accept_step_retires_outstanding_fences_only_on_adoption() {
     assert!(
         !latest.still_live(),
         "the fence is still attached to the adopted state's token"
+    );
+}
+
+/// plurx Player's first control exchange, as its own test suite pins it
+/// (`clients/linux-player/tests/test_launcher.py::ControlContract`). The
+/// launcher once sent no capabilities: the server answered its first exchange
+/// 400 and every later one 409, so the control plane never saw it play.
+#[test]
+fn the_linux_player_first_exchange_is_a_valid_v1_request() {
+    let request: ControlRequestV1 = serde_json::from_str(include_str!(
+        "../../../../clients/linux-player/tests/fixtures/control-request-v1.json"
+    ))
+    .expect("the launcher's control body parses as a v1 request");
+    assert_eq!(request.sequence, 1);
+    assert_eq!(
+        request.capabilities.as_ref().map(|caps| caps.platform),
+        Some(ClientPlatform::Linux)
+    );
+    assert_eq!(request.validate(Some(7_200_000), 6_000), Ok(()));
+}
+
+/// C5 (M5): a failure of the current attempt before first-media publication
+/// fails a wait bound to that attempt, with the retained decision's reason.
+#[test]
+fn a_prepublication_failure_fails_a_wait_bound_to_that_exact_attempt() {
+    let started = Instant::now();
+    let mut actor = registered_prepublication_actor(started);
+    assert_eq!(
+        actor.begin_initial_producer_attempt_at(
+            started,
+            hardware_policy("presentation-c5", "recipe-c5"),
+        ),
+        Ok(1)
+    );
+    let running = actor.producer_operational_snapshot_at(started);
+    assert_eq!(
+        classify_prepublication_attempt(&running, 1, 1),
+        PrepublicationAttemptOutcome::Waiting,
+        "a running attempt keeps its waiters"
+    );
+    actor.mark_executor_lost(started + Duration::from_secs(1));
+    let failed = actor.producer_operational_snapshot_at(started + Duration::from_secs(1));
+    assert_eq!(
+        failed.failed_attempt_decision,
+        Some(FailedAttemptDecision {
+            failed_attempt: 1,
+            retry: false,
+            reason: "executor_lost",
+        })
+    );
+    assert_eq!(
+        failed.terminal_prepublication_failure,
+        Some("executor_lost")
+    );
+    assert_eq!(
+        classify_prepublication_attempt(&failed, 1, 1),
+        PrepublicationAttemptOutcome::Failed("executor_lost".to_owned())
+    );
+}
+
+/// C5 (M5), Fable's re-check condition 1: an executor loss while a retry is
+/// retained leaves only a Retry decision, yet the attempt can never be
+/// retried. The terminal flag alone has to fail the wait.
+#[test]
+fn an_executor_loss_with_only_a_retry_retained_still_fails_the_wait() {
+    let started = Instant::now();
+    let mut actor = registered_prepublication_actor(started);
+    assert_eq!(
+        actor.begin_initial_producer_attempt_at(
+            started,
+            hardware_policy("presentation-c5-lost", "recipe-c5-lost"),
+        ),
+        Ok(1)
+    );
+    let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+    assert!(actor.settle_due_deadlines_at(deadline).is_some());
+    actor.mark_executor_lost(deadline + Duration::from_nanos(1));
+    let snapshot = actor.producer_operational_snapshot_at(deadline + Duration::from_nanos(1));
+    assert!(
+        snapshot
+            .failed_attempt_decision
+            .is_some_and(|decision| decision.retry && decision.failed_attempt == 1),
+        "only the retry is retained: {:?}",
+        snapshot.failed_attempt_decision
+    );
+    assert_eq!(
+        snapshot.terminal_prepublication_failure,
+        Some("executor_lost")
+    );
+    assert_eq!(
+        classify_prepublication_attempt(&snapshot, 1, 1),
+        PrepublicationAttemptOutcome::Failed("executor_lost".to_owned())
+    );
+}
+
+/// C5 (M5): a retry keeps the predecessor-bound wait alive, the installed
+/// replacement is waited for normally, and the predecessor's decision never
+/// fails a wait bound to the successor.
+#[test]
+fn a_retry_keeps_waiting_and_a_predecessor_never_fails_its_successor() {
+    let started = Instant::now();
+    let mut actor = registered_prepublication_actor(started);
+    assert_eq!(
+        actor.begin_initial_producer_attempt_at(
+            started,
+            hardware_policy("presentation-c5-retry", "recipe-c5-retry"),
+        ),
+        Ok(1)
+    );
+    let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+    assert!(actor.settle_due_deadlines_at(deadline).is_some());
+    let decided = actor.producer_operational_snapshot_at(deadline);
+    assert_eq!(
+        classify_prepublication_attempt(&decided, 1, 1),
+        PrepublicationAttemptOutcome::Waiting,
+        "a retry means a successor is coming"
+    );
+    let decision = actor
+        .pending_decision
+        .clone()
+        .expect("the hardware deadline retains a retry");
+    let installed = actor
+        .admit_producer_retry_at(
+            deadline + Duration::from_millis(1),
+            decision.decision_sequence(),
+            "recipe-c5-retry",
+        )
+        .expect("the retry is admitted");
+    assert!(installed > 1);
+    let replaced = actor.producer_operational_snapshot_at(deadline + Duration::from_millis(1));
+    assert_eq!(
+        classify_prepublication_attempt(&replaced, installed, 1),
+        PrepublicationAttemptOutcome::Superseded,
+        "the predecessor-bound request is left to the owner transition"
+    );
+    assert_eq!(
+        classify_prepublication_attempt(&replaced, installed, installed),
+        PrepublicationAttemptOutcome::Waiting,
+        "the healthy replacement is waited for"
+    );
+    // Even a Fail decision naming the predecessor does not touch the
+    // successor's waiters.
+    let mut predecessor_failed = replaced.clone();
+    predecessor_failed.failed_attempt_decision = Some(FailedAttemptDecision {
+        failed_attempt: 1,
+        retry: false,
+        reason: "startup_deadline",
+    });
+    assert_eq!(
+        classify_prepublication_attempt(&predecessor_failed, installed, installed),
+        PrepublicationAttemptOutcome::Waiting
+    );
+}
+
+/// C5 (M5): once first media has been published the pre-publication flag is
+/// clear, so this check leaves already-published objects to their existing
+/// serving rules.
+#[test]
+fn a_published_attempt_is_not_failed_by_the_prepublication_check() {
+    let started = Instant::now();
+    let mut actor = registered_prepublication_actor(started);
+    assert_eq!(
+        actor.begin_initial_producer_attempt_at(
+            started,
+            hardware_policy("presentation-c5-pub", "recipe-c5-pub"),
+        ),
+        Ok(1)
+    );
+    actor
+        .prepublication
+        .as_mut()
+        .expect("pre-publication state")
+        .producer_media_published = true;
+    actor.executor_lost = true;
+    let snapshot = actor.producer_operational_snapshot_at(started);
+    assert_eq!(snapshot.terminal_prepublication_failure, None);
+    assert_eq!(
+        classify_prepublication_attempt(&snapshot, 1, 1),
+        PrepublicationAttemptOutcome::Waiting
+    );
+}
+
+#[test]
+fn rolling_seek_projection_uses_the_explicit_target_instead_of_the_predecessor_clock() {
+    let mut demand = PlaybackDemandSnapshot::test_default(ClientPlatform::Web);
+    demand.position_ms = 1_417_211;
+    demand.seek_target_ms = Some(1_234_749);
+    demand.render_state = RenderState::Seeking;
+    demand.demand = PlaybackDemand::Active;
+    assert_eq!(
+        rolling_estimated_position_ms(&demand, Duration::from_secs(30)),
+        1_234_749
+    );
+    demand.demand = PlaybackDemand::Hold;
+    assert_eq!(
+        rolling_estimated_position_ms(&demand, Duration::from_secs(30)),
+        1_234_749
+    );
+    demand.seek_target_ms = None;
+    assert_eq!(
+        rolling_estimated_position_ms(&demand, Duration::ZERO),
+        1_417_211
+    );
+}
+
+/// R1: the two lifecycle causes are wire-visible through `status()`, but the
+/// HTTP 410 body keeps an existing durable reason so older clients decode it.
+#[test]
+fn release_and_stop_causes_keep_existing_durable_reasons() {
+    use crate::vodserve::Terminal;
+
+    assert_eq!(
+        [
+            RollingTerminalCause::Released,
+            RollingTerminalCause::Stopped
+        ]
+        .map(RollingTerminalCause::status),
+        ["released", "stopped"]
+    );
+    assert_eq!(
+        RollingTerminalCause::Released.terminal_reason(),
+        Terminal::Deleted
+    );
+    assert_eq!(
+        RollingTerminalCause::Stopped.terminal_reason(),
+        Terminal::AdminStop
+    );
+    assert_eq!(
+        RollingTerminalCause::release_for(Terminal::Deleted),
+        Some(RollingTerminalCause::Released)
+    );
+    assert_eq!(
+        RollingTerminalCause::release_for(Terminal::AdminStop),
+        Some(RollingTerminalCause::Stopped)
+    );
+    for authority in [
+        Terminal::Superseded,
+        Terminal::Revoked,
+        Terminal::Replaced,
+        Terminal::AuthorityFenced,
+    ] {
+        assert_eq!(RollingTerminalCause::release_for(authority), None);
+    }
+    for cause in [
+        RollingTerminalCause::End,
+        RollingTerminalCause::AuthorityFence,
+        RollingTerminalCause::LeaseExpired,
+        RollingTerminalCause::StartupExpired,
+        RollingTerminalCause::PauseExpired,
+        RollingTerminalCause::Released,
+        RollingTerminalCause::Stopped,
+    ] {
+        assert_eq!(
+            RollingTerminalCause::from_projection(cause.projection()),
+            Some(cause)
+        );
+    }
+    let metrics = prometheus();
+    for event in ["released", "stopped"] {
+        for outcome in ["won", "already_terminal"] {
+            assert!(metrics.contains(&format!(
+                "plurx_playback_rolling_terminal_events_total{{event=\"{event}\",outcome=\"{outcome}\"}}"
+            )));
+        }
+    }
+}
+
+/// R1: a release projected on the handle is the actor's first terminal and
+/// keeps its cause; a fence or End that projected first keeps theirs.
+#[tokio::test]
+async fn release_projection_is_the_first_terminal_and_keeps_its_cause() {
+    let released = RollingControlHandle::spawn_for_test("session-start");
+    released.release_unavailable(RollingTerminalCause::Released);
+    assert!(released.is_retired());
+    assert_eq!(
+        released.projected_release(),
+        Some(RollingTerminalCause::Released)
+    );
+    released.fence_unavailable();
+    assert_eq!(
+        released.snapshot().await.expect("snapshot").terminal,
+        Some(RollingTerminalCause::Released),
+        "the actor imports the projected release, not the default fence"
+    );
+    assert_eq!(
+        released.end().await.expect("late end").cause(),
+        RollingTerminalCause::Released
+    );
+
+    let fenced = RollingControlHandle::spawn_for_test("session-start");
+    fenced.fence_unavailable();
+    fenced.release_unavailable(RollingTerminalCause::Stopped);
+    assert_eq!(fenced.projected_release(), None);
+    assert_eq!(
+        fenced.snapshot().await.expect("snapshot").terminal,
+        Some(RollingTerminalCause::AuthorityFence),
+        "a release cannot relabel an earlier serving fence"
+    );
+
+    let ended = RollingControlHandle::spawn_for_test("session-start");
+    assert!(ended.end().await.expect("end").won());
+    ended.release_unavailable(RollingTerminalCause::Released);
+    assert_eq!(ended.projected_release(), None);
+    assert_eq!(
+        ended.snapshot().await.expect("snapshot").terminal,
+        Some(RollingTerminalCause::End)
     );
 }

@@ -29,6 +29,130 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Main direct-push source drift — scoped review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed the authority-source drift that direct
+pushes left on main `ce11e8fd2`, against the last reviewed bytes. This is an
+author review awaiting an independent check, not execution evidence.
+
+| Changed source (commit) | Change | Model action or property | Still holds? |
+|---|---|---|---|
+| `plurxd/background_jobs.rs` (4f417e852) | Test-only: inside `#[cfg(test)] mod tests`, the fixture `lost_claim_acknowledgement_resolves_the_original_attempt` stops the heartbeat and settles joined source custody before reading the candidate | None; no production code changes. `ReplayClaim`/`ResolveClaim` correspondence and every claim/settlement body are unchanged | Yes |
+| `plurxd/main.rs` (d9a0ebc76) | `spawn_background_loops` also starts `worker_status_cache_loop`, a read-only, cancellable once-per-interval refresh of local worker capacity for Activity | None; the selected worker spawn, its wait/lock order and the queue/domain authority paths are unchanged | Yes |
+| `plurxd/transcode/manager/produce.rs` (0a33ddc02) | One `tracing::warn!` gains `target: "plurxd::transcode"` | None; no control flow change | Yes |
+
+No model, configuration or property changes; only whole-file pins are
+refreshed.
+
+## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` reviewed the frozen
+[library environment](../../crates/plurxd/src/library_work/env.rs) correction
+against `460d8e6d3ec494f2335ed4bbdfa6601f54bfa380`. All 13 prior environment
+fingerprints match the base, and retained anchors remain unique. Refresh those
+13 existing action/boundary source pins and the containing correspondence
+hash; retain all 57 actions, 18 boundaries, trust classifications and seven
+selected schedules. This is an authored audit, not independent review or an
+execution receipt.
+
+The extracted `probe_work` factory heap-pins `process_library_requests` before
+the generic scopes receive it. Direct await preserves task-local probe input,
+budget, cancellation and pause bindings. The existing outer work future still
+owns its publisher and domain reference; admission stays retained until joined
+work releases it. `CancelWork`, `JoinWork`, publisher drop, domain release,
+queue retirement, environment field order and shared driver bodies are
+unchanged. Heap allocation supplies no new authority transition or fairness.
+
+The related [canonical version-4 bootstrap correction](../durable-jobs/CONTRACT.md#scan-stack-and-canonical-bootstrap--scoped-source-audit-on-2026-11-04)
+preserves the existing exact DDL/marker validation and resource view. Startup
+and schema installation remain outside this closed worker correspondence.
+Neither native stack exhaustion nor heap allocation is modeled. The PR's
+future-size check and ordinary-stack empty scan are separate runtime evidence;
+they do not prove a full UI/media scan, whole-daemon progress, or source reboot
+recovery. Model, configuration, bounds, properties, fairness and historical
+receipts are unchanged; fresh static/TLC results remain separate evidence.
+
+## Verified host-reboot recovery — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` compared source `88fa37663` in
+[PR #1378](http://forge.lan:3000/noirr/plurx/pulls/1378) with
+`edf6d08faf549554b9892dee582406ff79af1c97`. The agent contributed recovery
+implementation/tests; this is an authored source audit, not independent
+review or execution. All 18 affected action/boundary source fingerprints
+match that base before refresh, and every retained anchor remains unique.
+
+The only selected-worker file delta is
+[queue ownership](../../crates/plurxd/src/background_jobs.rs) passing its
+exact Store to source-journal cleanup. Acquisition, claim/renewal, binding,
+token/publication locks, queue heartbeat join and retirement retain their
+implementations. The 57 actions, 18 boundaries, trust classifications and
+seven selected schedule definitions remain. `FinishRetire`'s gap now explicitly
+retains post-retirement physical settlement and journal cleanup outside the
+modeled transition and its liveness result.
+
+[Custody integration](../../crates/plurxd/src/source_custody.rs) and
+[recovery](../../crates/plurxd/src/source_custody/recovery.rs) additionally
+persist active-reader evidence, reconcile aborts against the exact Store,
+and settle only after independently verified host reboot. They are external
+source dependencies, not extra actions in this closed correspondence inventory.
+The [durable contract](../durable-jobs/CONTRACT.md#verified-host-reboot-recovery--scoped-source-audit-on-2026-11-04)
+and [operation wait map](../operation-progress/WAIT-MAP.md#verified-host-reboot-recovery--scoped-source-audit-on-2026-11-04)
+record the broader source audit and explicit dependency pins. Changed-boot
+proof, descendant termination, durable directory publication, fallback-Store
+isolation, legacy preparation and successful physical recovery are not proved
+by this model or its existing paired-worker schedule.
+
+Startup/scheduler recovery can wait on filesystem and Store work before a
+library worker is dispatched. An unchanged boot or missing evidence can keep
+source custody unavailable indefinitely. The model's external-return and
+fairness premises neither force a reboot nor prove those new paths terminate.
+The new crash/replay tests are runtime regressions, not additions to the seven
+mapped worker schedules or a refinement argument.
+
+Refresh only the 18 whole-file source pins and containing correspondence hash,
+plus the explicit `FinishRetire` gap. Model, configuration, bounds, properties,
+fairness, checker and historical receipt identities remain unchanged. Fresh
+static/TLC smoke and independent Astra review are separate evidence.
+
+## Playback startup custody — scoped source review on 2026-11-03
+
+Codex agent `/root/other_formal_correspondence` compared base
+`bd213c81942175f591912e4bb0a2cc10f2a7a195` with source candidate
+`594210a783986d4da5ec7184f0895433ffe98b90`. Every previous mapped source
+fingerprint matches the base. The detailed source audit and external waits
+are in the [operation-progress wait map](../operation-progress/WAIT-MAP.md#playback-startup-custody--scoped-source-review-on-2026-11-03).
+
+[Queue ownership](../../crates/plurxd/src/background_jobs.rs) adds custody
+registration/activation before heartbeat startup and joined-source settlement
+after heartbeat join and token retirement. Settlement awaits durable local
+journal persistence, replicated proof and exact custody deletion, retrying
+without a local completion bound. Thus `FinishRetire` retains its existing
+queue meaning; its source anchor also contains an additional unmodeled wait
+before `DropAdmission`. A model cleanup result does not prove this wait ends.
+
+[The environment](../../crates/plurxd/src/library_work/env.rs) retains the
+physical admission `Arc` in the awaited work future. Work join still precedes
+domain release, queue retirement and physical admission drop. Linux source
+pressure now uses verified pause and durable source-slot reacquisition inside
+that future; other-platform source pressure selects cancellation. These source
+slots are distinct from modeled physical admission. Custody, pause/resume,
+byte pacing, private input, process-group quiescence and settlement replay
+have no state/action/fairness mapping or schedule coverage in this package.
+Additional core claim eligibility and paused-reservation renewal states also
+remain outside the model. Neither selected lock facts nor existing filesystem,
+backend and runtime premises establish progress through these new mechanisms.
+
+[The library entry file](../../crates/plurxd/src/library_work.rs) only adds
+the probe-input module declaration; its selected bodies and test schedules
+are unchanged. [The storage schedules](../../crates/plurx-core/tests/store_contract/formal_publication.rs)
+only gate an `Arc` import by their existing feature. These source edits add
+no schedule execution evidence. Retain every action/boundary, exact anchor,
+trust classification, schedule and gap; refresh only their reviewed source
+fingerprints and the containing correspondence fingerprint. Model/configuration
+bytes and historical qualification identities remain unchanged. This authored
+audit supplies no independent review, new execution, simulation proof or
+custody/pause liveness guarantee.
+
 ## Selected source binding refresh — 2026-10-22
 
 The 16 `background_jobs.rs` bindings were compared from their exact prior

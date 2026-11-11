@@ -146,6 +146,76 @@ async fn source_unknown_local_register_actual_closure_and_exact_ack_clear_pendin
     Box::pin(source_copy_preadmission_fixture(55)).await;
 }
 async fn source_copy_preadmission_fixture(mode: u8) {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        mode,
+        SourceFixtureVideo::H264,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_actor_builds_cold_hdr10_hevc_index_and_serves_hdr10_bytes() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        5,
+        SourceFixtureVideo::Hdr10,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_cold_hdr10_index_survives_cancelled_waiter_and_settles_on_revoke() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        6,
+        SourceFixtureVideo::Hdr10,
+    ))
+    .await;
+}
+
+#[derive(Clone, Copy)]
+enum SourceFixtureVideo {
+    H264,
+    Hdr10,
+    Hdr10Promotion,
+    Hdr10Retention,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_cold_hdr10_index_matches_probe_selected_promotion_recipe() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        5,
+        SourceFixtureVideo::Hdr10Promotion,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_cold_hdr10_index_matches_probe_selected_retention_recipe() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        5,
+        SourceFixtureVideo::Hdr10Retention,
+    ))
+    .await;
+}
+
+async fn source_fixture_probe(file: &std::path::Path) -> std::process::Output {
+    tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
+        .args([
+            "-v",
+            "error",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            "-of",
+            "json",
+        ])
+        .arg(file)
+        .output()
+        .await
+        .expect("actual scan fixture probe")
+}
+
+async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixtureVideo) {
+    let hdr10 = !matches!(video, SourceFixtureVideo::H264);
     use crate::http::hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget};
     use plurx_core::{
         config::Config,
@@ -242,22 +312,20 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     } else {
         "source.mp4"
     });
-    let generated = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
-        .args([
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=s=128x72:r=24",
-            "-t",
-            "2",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-y",
-        ])
+    let mut generate = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+    generate.args(["-v", "error", "-f", "lavfi", "-i", "color=s=128x72:r=24"]);
+    if hdr10 {
+        generate.args([
+            "-f", "lavfi", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000", "-c:a", "eac3",
+            "-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
+            "-color_trc", "smpte2084", "-color_primaries", "bt2020", "-colorspace", "bt2020nc",
+            "-x265-params", "pools=1:frame-threads=1:wpp=0:repeat-headers=1:keyint=12:min-keyint=12:scenecut=0:bframes=0:colorprim=9:transfer=16:colormatrix=9:hdr10=1:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400",
+        ]);
+    } else {
+        generate.args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+    }
+    let generated = generate
+        .args(["-t", "2", "-y"])
         .arg(&file)
         .output()
         .await
@@ -301,23 +369,44 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_secs() as i64;
-    let probe = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
-        .args([
-            "-v",
-            "error",
-            "-show_format",
-            "-show_streams",
-            "-show_chapters",
-            "-of",
-            "json",
-        ])
-        .arg(&file)
-        .output()
-        .await
-        .expect("actual scan fixture probe");
+    let probe = source_fixture_probe(&file).await;
     assert!(probe.status.success());
-    let probe = String::from_utf8(probe.stdout).expect("actual scan JSON");
+    let mut probe = String::from_utf8(probe.stdout).expect("actual scan JSON");
+    if hdr10 {
+        let source_probe: serde_json::Value =
+            serde_json::from_str(&probe).expect("actual HDR10 scan");
+        let video = source_probe["streams"]
+            .as_array()
+            .expect("source streams")
+            .iter()
+            .find(|stream| stream["codec_type"] == "video")
+            .expect("source video");
+        assert_eq!(video["pix_fmt"], "yuv420p10le");
+        assert_eq!(video["color_primaries"], "bt2020");
+        assert_eq!(video["color_transfer"], "smpte2084");
+    }
+    // Exercise stored recipe selection independently of the tiny constant-
+    // configuration media. Both Source indexing and VOD must use these same
+    // persisted promotion/retention facts, not a plain-copy index identity.
+    if matches!(
+        video,
+        SourceFixtureVideo::Hdr10Promotion | SourceFixtureVideo::Hdr10Retention
+    ) {
+        let mut document: serde_json::Value = serde_json::from_str(&probe).expect("scan document");
+        if matches!(video, SourceFixtureVideo::Hdr10Promotion) {
+            document["streams"][0]["extradata_size"] = serde_json::json!(23);
+        } else {
+            document[plurx_core::transcode::hevc_census::PROBE_KEY] = serde_json::json!({
+                "revision":plurx_core::transcode::hevc_census::REVISION,
+                "verdict":"varying","size":metadata.len(),"mtime":mtime,"samples":1,"differing":1
+            });
+        }
+        probe = serde_json::to_string(&document).expect("stored recipe facts");
+    }
     client.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate,probe_json,scanned_at) VALUES(1,$1,$2,$3,$4,2000,'mp4','h264',128,72,8,100000,$5,$6)",hiqlite::params!(item,file.to_string_lossy().to_string(),metadata.len() as i64,mtime,probe,crate::fragment_index_cluster::unix_ms()/1000)).await.expect("actual file facts");
+    if hdr10 {
+        client.execute("UPDATE files SET video_codec='hevc',bit_depth=10,hdr='hdr10',audio_streams='[{\"index\":0,\"codec\":\"eac3\",\"channels\":6,\"default\":true}]' WHERE id=1", hiqlite::params!()).await.expect("actual HDR10 scan facts");
+    }
     if mode >= 21 {
         client
             .execute(
@@ -451,7 +540,11 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         .expect("actual planning read")
         .is_some());
     let mut body:CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"copy-source","request_id":"copy-source-request","copy":true,"height":72,"quality_auto":false,"presentation":"vod","caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}})).expect("actual Source request");
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
+    if hdr10 {
+        body.aac = Some(true);
+        body.caps = Some(serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"hevc","max_height":2160,"present":["pq","sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"progressive_hevc_sample_entries":["hvc1"]})).expect("HDR10 client"));
+    }
+    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
         body.copy = Some(false);
         body.height = Some(if mode == 31 { 144 } else { 36 });
     }
@@ -494,13 +587,49 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     } else {
         None
     };
+    let planning_probe = store
+        .get_file_probe_json(1)
+        .await
+        .expect("stored planning evidence");
     let preparation = Box::pin(prepare_source_playback(&state, &headers, target, body));
     eprintln!(
         "Source preparation future: {} bytes",
         std::mem::size_of_val(preparation.as_ref().get_ref())
     );
     let mut prepared = preparation.await.expect("actual Source engine preparation");
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
+    if hdr10 {
+        assert_eq!(
+            store
+                .get_file_probe_json(1)
+                .await
+                .expect("read-only Source planning"),
+            planning_probe,
+            "Source planning must not run a local census that invalidates its revision witness"
+        );
+        assert_eq!(
+            prepared.decision().decision.delivered_dynamic_range,
+            "hdr10"
+        );
+        assert!(matches!(
+            prepared.request().kind,
+            SessionKind::Copy { aac: true, .. }
+        ));
+        let options = plurx_core::transcode::CopyVideoOptions::from_probe(
+            prepared.file(),
+            planning_probe.as_deref(),
+            false,
+            false,
+        );
+        assert_eq!(
+            options.promotes_parameter_sets(),
+            matches!(video, SourceFixtureVideo::Hdr10Promotion)
+        );
+        assert_eq!(
+            options.retains_hevc_parameter_sets(),
+            matches!(video, SourceFixtureVideo::Hdr10Retention)
+        );
+    }
+    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
         assert!(
             matches!(prepared.request().kind, SessionKind::Transcode { .. }),
             "actual common preparation resolves an encoded recipe"
@@ -580,12 +709,21 @@ async fn source_copy_preadmission_fixture(mode: u8) {
             .expect("actual cold index read")
             .is_none());
     }
-    let manager = Arc::new(TranscodeManager::new(
+    let manager = TranscodeManager::new(
         Arc::clone(store),
         directory.path().join("workers"),
         EncoderCaps::default(),
         Pipeline::Cpu,
-    ));
+    );
+    let manager = Arc::new(if hdr10 {
+        manager.with_cache(
+            directory.path().join("cache"),
+            "fixture".into(),
+            state.node_id.clone(),
+        )
+    } else {
+        manager
+    });
     if let Some(mut second_prepared) = second_prepared {
         let now = crate::fragment_index_cluster::unix_ms();
         let SourceIntentRead::Ready(second_intent) = store
@@ -885,6 +1023,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
+        source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
@@ -906,6 +1045,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds: 0.0,
         audio_index: None,
@@ -971,11 +1111,13 @@ async fn source_actual_actor(
     mode: u8,
     client: hiqlite::Client,
 ) {
+    let hdr10 = prepared.file().hdr.as_deref() == Some("hdr10");
+    let delivered_fixture = prepared.file().path.with_extension("delivered.mp4");
     if mode == 55 {
         source_actual_unknown_register_reconciliation(state, manager, assignment).await;
         return;
     }
-    if matches!(mode, 3 | 19 | 28) {
+    if matches!(mode, 3 | 19) {
         state
             .store
             .put_setting(keys::SW_POOL_THREADS, "3")
@@ -1107,7 +1249,7 @@ async fn source_actual_actor(
         assert_eq!(manager.admissions.software_in_use(), 0);
         return;
     }
-    let index_pause = match mode {
+    let mut index_pause = match mode {
         6 => Some(manager.source_workers.index_hooks.pause_after_spawn()),
         7 | 9 | 10 | 11 => Some(manager.source_workers.index_hooks.pause_before_spawn()),
         8 => Some(
@@ -1126,7 +1268,9 @@ async fn source_actual_actor(
         ),
         20 => Some(manager.source_workers.probe_hooks.pause_after_evidence()),
         22 => Some(manager.source_workers.native_hooks.pause_after_spawn()),
-        23 | 25 | 26 | 27 => Some(manager.source_workers.native_hooks.pause_before_spawn()),
+        23 | 25 | 26 | 27 | 57 | 58 => {
+            Some(manager.source_workers.native_hooks.pause_before_spawn())
+        }
         24 => Some(
             manager
                 .source_workers
@@ -1135,6 +1279,45 @@ async fn source_actual_actor(
         ),
         _ => None,
     };
+    if mode == 58 {
+        // Native caption facts need no stored probe. The encoded video still
+        // must satisfy its independent stored-vs-held scan attestation.
+        let video_probe = state
+            .store
+            .get_file_probe_json(prepared.file().id)
+            .await
+            .expect("stored video scan evidence")
+            .expect("encoded fixture has its required video probe");
+        client
+            .execute(
+                "UPDATE files SET probe_json=NULL WHERE id=1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("isolate absent stored caption probe");
+        assert!(state
+            .store
+            .get_file_probe_json(prepared.file().id)
+            .await
+            .expect("probe absence")
+            .is_none());
+        let tracks = crate::transcode::source_subtitles::SourceNativeTracks::prepare(
+            prepared.file(),
+            &assignment,
+            prepared.native_subtitles().1,
+            state.subs_dir.clone(),
+        )
+        .expect("native track group uses only held track facts with no stored probe");
+        assert!(tracks.has_track(0));
+        assert_eq!(tracks.selected(), Some(0));
+        client
+            .execute(
+                "UPDATE files SET probe_json=$1 WHERE id=1",
+                hiqlite::params!(video_probe),
+            )
+            .await
+            .expect("restore independent video attestation before encoded Start");
+    }
     let actor = Box::pin(manager.start_source_worker(
         Arc::clone(&state),
         assignment.clone(),
@@ -1206,6 +1389,97 @@ async fn source_actual_actor(
         .lookup_source_worker(&assignment)
         .expect("full assignment lookup");
     assert!(Arc::ptr_eq(&actor.0, &joined.0));
+    if matches!(mode, 22..=27 | 57 | 58) {
+        // The hook is armed before Start. Publication must happen without
+        // reaching a native child, for both copy and encoded recipes.
+        actor
+            .wait_ready(Instant::now() + Duration::from_secs(15))
+            .await
+            .expect("native subtitle work cannot gate publication");
+        assert_eq!(manager.source_workers.native_hooks.spawned_pid(), 0);
+        let pause = index_pause.take().expect("native operation hook");
+        let owned = actor.clone();
+        let call = tokio::spawn(Box::pin(async move {
+            owned
+                .open_resource(
+                    &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("native segment"),
+                    Instant::now() + Duration::from_secs(15),
+                )
+                .await
+        }));
+        let held = pause.reached().await;
+        assert_eq!(
+            manager.admissions.software_in_use(),
+            4,
+            "real window work owns CPU admission"
+        );
+        let route = state
+            .store
+            .media_session_route_by_incarnation(&assignment.binding().incarnation_id().to_string())
+            .await
+            .expect("published route")
+            .expect("window work is post-publication");
+        assert_eq!(route.publication_ready_at_ms, 0);
+        assert!(actor.0.state.lock().expect("native body custody").bodies > 0);
+        if mode == 23 {
+            state
+                .store
+                .put_setting(keys::SHARING_ENABLED, "false")
+                .await
+                .expect("disable sharing before window spawn");
+        }
+        if mode == 26 {
+            let file = state.store.get_file(1).await.expect("file").expect("file");
+            std::fs::write(&file.path, b"changed native physical source").expect("physical drift");
+        }
+        if mode == 27 {
+            client
+                .execute(
+                    "DELETE FROM cluster_node_capabilities WHERE capability=$1",
+                    hiqlite::params!(
+                        plurx_core::cluster::membership::SHARING_PURPOSE_KEYS_CAPABILITY
+                    ),
+                )
+                .await
+                .expect("lost purpose floor");
+        }
+        if mode == 25 {
+            tokio::time::sleep(Duration::from_millis(5100)).await;
+        }
+        if matches!(mode, 22 | 24) {
+            call.abort();
+            assert!(matches!(call.await, Err(error) if error.is_cancelled()));
+            actor.request_retirement();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                actor.settlement_status().is_none(),
+                "actual child/readers retain Source retirement"
+            );
+            assert_eq!(manager.admissions.software_in_use(), 4);
+            drop(held);
+        } else {
+            drop(held);
+            let outcome = call.await.expect("native window waiter");
+            if matches!(mode, 25 | 57 | 58) {
+                let (payload, guard) = outcome.expect("fresh owned window authority").into_parts();
+                let SourceResourcePayload::SubtitleText(bytes) = payload else {
+                    panic!("actual caption bytes")
+                };
+                assert!(String::from_utf8_lossy(&bytes).contains("Actual Source caption"));
+                drop(guard);
+            } else {
+                assert!(outcome.is_err());
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(10), actor.retire())
+            .await
+            .expect("window physical settlement budget")
+            .expect("actual window settlement");
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(manager.lookup_source_worker(&assignment).is_none());
+        ingress_monitor.join().await;
+        return;
+    }
     if let Some(pause) = index_pause {
         let held = pause.reached().await;
         assert_eq!(
@@ -1221,7 +1495,7 @@ async fn source_actual_actor(
             .is_none());
         let pid = if mode >= 21 {
             manager.source_workers.native_hooks.spawned_pid()
-        } else if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
+        } else if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
             manager.source_workers.probe_hooks.spawned_pid()
         } else {
             manager.source_workers.index_hooks.spawned_pid()
@@ -1320,7 +1594,7 @@ async fn source_actual_actor(
         ingress_monitor.join().await;
         return;
     }
-    if matches!(mode, 3 | 19 | 28) {
+    if matches!(mode, 3 | 19) {
         assert!(actor
             .wait_ready(Instant::now() + Duration::from_secs(10))
             .await
@@ -1359,7 +1633,56 @@ async fn source_actual_actor(
         .await
         .expect("actual published actor");
     assert!(response.control.is_some());
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
+    if mode == 28 {
+        state
+            .store
+            .put_setting(keys::SW_POOL_THREADS, "3")
+            .await
+            .expect("remove window capacity after publication");
+        let busy = actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("native window"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            matches!(busy, Err(SourceWorkerError::Capacity)),
+            "caption capacity remains typed"
+        );
+        assert_eq!(manager.source_workers.native_hooks.spawned_pid(), 0);
+        let movie = actor
+            .open_resource(
+                &SharingHlsResource::parse("index.m3u8").expect("movie resource"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("movie survives caption capacity refusal");
+        let (_, guard) = movie.into_parts();
+        drop(guard);
+        state
+            .store
+            .put_setting(keys::SW_POOL_THREADS, "4")
+            .await
+            .expect("restore window capacity");
+        let caption = actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt")
+                    .expect("same-owner caption retry"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("same Source owner serves retried window");
+        let (payload, guard) = caption.into_parts();
+        assert!(
+            matches!(payload, SourceResourcePayload::SubtitleText(bytes) if String::from_utf8_lossy(&bytes).contains("Actual Source caption"))
+        );
+        drop(guard);
+        actor.retire().await.expect("no-child native retirement");
+        ingress_monitor.join().await;
+        return;
+    }
+
+    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
         let value = serde_json::to_value(&response).expect("complete encoded response");
         assert_eq!(value["height"], 72);
         assert_eq!(
@@ -1392,10 +1715,6 @@ async fn source_actual_actor(
             .source_workers
             .probe_hooks
             .assert_closed_parent_settlements(),
-        21 => manager
-            .source_workers
-            .native_hooks
-            .assert_closed_parent_settlements(),
         _ => {}
     }
 
@@ -1406,19 +1725,39 @@ async fn source_actual_actor(
             .await
             .expect("actual file")
             .expect("retained file");
+        let probe = state
+            .store
+            .get_file_probe_json(1)
+            .await
+            .expect("retained recipe facts");
+        let options = plurx_core::transcode::CopyVideoOptions::from_probe(
+            &file,
+            probe.as_deref(),
+            false,
+            false,
+        );
         let index = state
             .store
-            .fragment_index(
-                1,
-                &crate::fragindex::identity_for(
-                    &file,
-                    plurx_core::transcode::CopyVideoOptions::new(false, false),
-                ),
-            )
+            .fragment_index(1, &crate::fragindex::identity_for(&file, options))
             .await
             .expect("actual Source scan result")
             .expect("complete cold index retained");
         assert!(!index.rows.is_empty());
+        if hdr10 {
+            let object = crate::fragment_index_cluster::inspect_source(&file)
+                .await
+                .expect("actual source identity");
+            let proof = index
+                .promotion
+                .hevc_configuration
+                .as_ref()
+                .expect("original HEVC header proof");
+            assert!(proof.permits_on_node(&object, &state.node_id));
+            assert!(!proof.permits_on_node(&object, "another-node"));
+            assert!(!proof.permits_on_node("another-object", &state.node_id));
+            assert!(index.promotion.indexed_hdr10_metadata);
+            assert!(!index.promotion.hdr10_sei.is_empty());
+        }
     }
     let incarnation = assignment.binding().incarnation_id().to_string();
     let route = state
@@ -1434,13 +1773,418 @@ async fn source_actual_actor(
             .expect("actual retained DTO"),
         serde_json::to_value(&response).expect("actual complete DTO")
     );
-    if matches!(mode, 42..=44) {
-        let resource = SharingHlsResource::parse(if mode != 43 {
-            "init.mp4"
+    if mode == 62 || mode == 65 {
+        std::fs::create_dir_all(&state.subs_dir).expect("managed subtitle root");
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(
+            Arc::clone(&state.store),
+            vec![state.subs_dir.clone()],
+        );
+        budget.configure_for_test(0);
+        if mode == 65 {
+            let (_, guard) = actor
+                .open_start_response(Instant::now() + Duration::from_secs(5))
+                .await
+                .expect("actual Source custody");
+            let guard = Arc::new(guard);
+            let custody = resource::SourceResourceReadCustody::new(
+                Arc::clone(&guard),
+                Arc::clone(&actor.0.resource_hooks),
+            );
+            let native = actor
+                .0
+                .state
+                .lock()
+                .expect("native group")
+                .native
+                .clone()
+                .expect("native group");
+            assert!(
+                matches!(
+                    native
+                        .stage_sparse_input(
+                            vec![0; 4096],
+                            &custody,
+                            Instant::now() + Duration::from_secs(5)
+                        )
+                        .await,
+                    Err(SourceWorkerError::Capacity)
+                ),
+                "zero disk ceiling refuses before the sparse write"
+            );
+            assert_eq!(
+                std::fs::read_dir(&state.subs_dir)
+                    .expect("subtitle root")
+                    .count(),
+                0
+            );
+            budget.configure_for_test(1024 * 1024);
+            let directory_baseline = budget
+                .used_bytes()
+                .await
+                .expect("empty root allocation is part of managed usage");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(
+                    directory_baseline,
+                    std::fs::metadata(&state.subs_dir)
+                        .expect("empty sidecar root")
+                        .blocks()
+                        * 512
+                );
+            }
+            let input = native
+                .stage_sparse_input(
+                    vec![0; 4096],
+                    &custody,
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .expect("admitted sparse input");
+            assert_eq!(
+                budget.used_bytes().await.expect("held reservation"),
+                directory_baseline + 4096,
+                "the exact sparse input reservation is charged above directory allocation"
+            );
+            drop(input);
+            assert_eq!(
+                budget
+                    .used_bytes()
+                    .await
+                    .expect("closed input releases exact reservation"),
+                directory_baseline
+            );
+            assert_eq!(
+                std::fs::read_dir(&state.subs_dir)
+                    .expect("closed sparse staging root")
+                    .count(),
+                0,
+                "input closure leaves no named staging artifact"
+            );
+            drop(custody);
+            drop(guard);
         } else {
-            "seg00000.m4s"
-        })
-        .expect("actual closed Source media resource");
+            let caption = SharingHlsResource::parse("subs/0/seg00000.vtt").expect("caption demand");
+            assert!(
+                matches!(
+                    actor
+                        .open_resource(&caption, Instant::now() + Duration::from_secs(5))
+                        .await,
+                    Err(SourceWorkerError::Capacity)
+                ),
+                "managed zero cache ceiling is caption capacity"
+            );
+            let movie = actor
+                .open_resource(
+                    &SharingHlsResource::parse("index.m3u8").expect("movie playlist"),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .expect("same movie stays live");
+            drop(movie.into_parts());
+            budget.configure_for_test(64 * 1024 * 1024);
+            let opened = actor
+                .open_resource(&caption, Instant::now() + Duration::from_secs(5))
+                .await
+                .expect("same owner retries after cache pressure");
+            drop(opened.into_parts());
+            let native = actor
+                .0
+                .state
+                .lock()
+                .expect("native group")
+                .native
+                .clone()
+                .expect("native group");
+            let revision = native.take_held_revision_for_test();
+            let path = state.subs_dir.join(&revision);
+            let eviction = crate::playback_cache::begin_eviction(&path)
+                .expect("real managed eviction collision")
+                .expect("managed eviction owner");
+            let resource = SharingHlsResource::parse(&format!("subs/0/cached-{revision}"))
+                .expect("versioned source window");
+            assert!(matches!(
+                actor
+                    .open_resource(&resource, Instant::now() + Duration::from_secs(5))
+                    .await,
+                Err(SourceWorkerError::Capacity)
+            ));
+            drop(eviction);
+        }
+        actor
+            .retire()
+            .await
+            .expect("managed caption pressure retirement");
+        ingress_monitor.join().await;
+        return;
+    }
+    if mode == 63 {
+        let pause = manager.source_workers.native_hooks.pause_before_spawn();
+        let request = source_native_control_request(&response, 1);
+        let started = Instant::now();
+        let opened = actor
+            .control(request.clone(), Instant::now() + Duration::from_secs(4))
+            .await
+            .expect("control result has its own response budget");
+        let (answer, guard) = opened.into_response(&request);
+        assert_eq!(
+            answer
+                .expect("accepted control")
+                .delivery
+                .subtitle_readiness
+                .as_deref(),
+            Some("warming")
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "parked caption work cannot consume the control budget"
+        );
+        let held = pause.reached().await;
+        assert_eq!(
+            actor
+                .0
+                .state
+                .lock()
+                .expect("shared control work custody")
+                .bodies,
+            1,
+            "response and real work share one counted guard"
+        );
+        drop(guard);
+        actor.request_retirement();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            actor.settlement_status().is_none(),
+            "work retains the real control guard after its response"
+        );
+        drop(held);
+        actor
+            .retire()
+            .await
+            .expect("caption work really joins before Source settlement");
+        ingress_monitor.join().await;
+        return;
+    }
+    if mode == 61 {
+        let opened = actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("current native window"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("derive actual Source window");
+        let (_, guard) = opened.into_parts();
+        drop(guard);
+        let native = actor
+            .0
+            .state
+            .lock()
+            .expect("actual Source native group")
+            .native
+            .clone()
+            .expect("native group");
+        let revision = native.take_held_revision_for_test();
+        let path = state.subs_dir.join(&revision);
+        let resource = SharingHlsResource::parse(&format!("subs/0/cached-{revision}"))
+            .expect("current Source revision");
+        for invalid in [vec![b'x'; 2 * 1024 * 1024 + 1], vec![0xff, 0xfe, 0xfd]] {
+            std::fs::write(&path, invalid).expect("deterministically invalid cached caption bytes");
+            assert!(
+                matches!(
+                    actor
+                        .open_resource(&resource, Instant::now() + Duration::from_secs(5))
+                        .await,
+                    Err(SourceWorkerError::Unsupported)
+                ),
+                "caption data bounds are not transient capacity"
+            );
+        }
+        let stop = Instant::now() + Duration::from_secs(3);
+        let mut request = source_native_control_request(&response, 1);
+        loop {
+            let (answer, guard) = actor
+                .control(request.clone(), Instant::now() + Duration::from_secs(4))
+                .await
+                .expect("invalid caption does not hide accepted movie control")
+                .into_response(&request);
+            let unavailable = answer
+                .expect("accepted control")
+                .delivery
+                .subtitle_readiness
+                .as_deref()
+                == Some("unavailable");
+            drop(guard);
+            if unavailable {
+                break;
+            }
+            assert!(
+                Instant::now() < stop,
+                "unsupported caption cannot remain warming forever"
+            );
+            request.sequence += 1;
+            tokio::task::yield_now().await;
+        }
+        actor
+            .retire()
+            .await
+            .expect("invalid caption cache retirement");
+        ingress_monitor.join().await;
+        return;
+    }
+    if mode == 60 {
+        let opened = actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("native current window"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("actual current Source cues");
+        let (_, guard) = opened.into_parts();
+        let current_object = guard
+            .source
+            .as_ref()
+            .expect("current physical source")
+            .object_version()
+            .to_owned();
+        drop(guard);
+        let native = actor
+            .0
+            .state
+            .lock()
+            .expect("Source native group")
+            .native
+            .clone()
+            .expect("native group");
+        let revision = native.take_held_revision_for_test();
+        let file = state
+            .store
+            .get_file(1)
+            .await
+            .expect("current file")
+            .expect("file");
+        let other_path = file.path.with_extension("previous-object.mkv");
+        std::fs::copy(&file.path, &other_path).expect("same bytes, different physical inode");
+        let other = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&other_path)
+            .expect("old physical object");
+        let metadata = std::fs::metadata(&file.path).expect("current physical metadata");
+        other
+            .set_times(
+                std::fs::FileTimes::new().set_modified(metadata.modified().expect("current mtime")),
+            )
+            .expect("old object retains identical scanned mtime");
+        assert_eq!(other.metadata().expect("old size").len(), metadata.len());
+        assert_eq!(
+            other
+                .metadata()
+                .expect("old mtime")
+                .modified()
+                .expect("mtime"),
+            metadata.modified().expect("mtime")
+        );
+        let old_object = crate::fragment_index_cluster::SourceFence::clone_current_held(&other)
+            .expect("old physical identity");
+        assert_ne!(old_object.object_version(), current_object);
+        let stale_revision = native.revision_for_object_for_test(old_object.object_version());
+        assert_ne!(stale_revision, revision);
+        let stale_path = state.subs_dir.join(&stale_revision);
+        std::fs::write(
+            &stale_path,
+            b"WEBVTT\n\n00:00:00.200 --> 00:00:01.800\nSTALE OTHER PHYSICAL OBJECT\n",
+        )
+        .expect("real stale-object cached cues exist");
+        let generic = crate::subtitles::vtt_path(&state.subs_dir, &file, 0);
+        std::fs::write(
+            &generic,
+            b"WEBVTT\n\n00:00:00.200 --> 00:00:01.800\nUNATTESTED GENERIC CACHE\n",
+        )
+        .expect("generic cache has no physical provenance");
+        for requested in [
+            stale_revision,
+            generic
+                .file_name()
+                .expect("generic revision")
+                .to_str()
+                .expect("UTF8")
+                .to_owned(),
+        ] {
+            let opened = actor
+                .open_resource(
+                    &SharingHlsResource::parse(&format!("subs/0/cached-{requested}"))
+                        .expect("valid versioned cached resource"),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .expect("absent revision answer");
+            let (payload, guard) = opened.into_parts();
+            let SourceResourcePayload::CachedSubtitle {
+                bytes,
+                absent,
+                complete,
+            } = payload
+            else {
+                panic!("cached caption answer")
+            };
+            assert!(absent);
+            assert!(!complete);
+            assert!(bytes.is_empty());
+            drop(guard);
+        }
+        let opened = actor
+            .open_resource(
+                &SharingHlsResource::parse(&format!("subs/0/cached-{revision}"))
+                    .expect("current object revision"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("current object cache remains readable");
+        let (payload, guard) = opened.into_parts();
+        assert!(
+            matches!(payload, SourceResourcePayload::CachedSubtitle { absent: false, complete: false, bytes } if String::from_utf8_lossy(&bytes).contains("Actual Source caption"))
+        );
+        drop(guard);
+        actor
+            .retire()
+            .await
+            .expect("physical object cache retirement");
+        ingress_monitor.join().await;
+        return;
+    }
+    if matches!(mode, 42..=44 | 59) {
+        let native_cache_resource = if mode == 59 {
+            let opened = actor
+                .open_resource(
+                    &SharingHlsResource::parse("subs/0/seg00000.vtt")
+                        .expect("Source-derived window"),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .expect("derive from current held Source");
+            let (payload, guard) = opened.into_parts();
+            assert!(matches!(payload, SourceResourcePayload::SubtitleText(_)));
+            drop(guard);
+            let native = actor
+                .0
+                .state
+                .lock()
+                .expect("native cache witness")
+                .native
+                .clone()
+                .expect("native group");
+            let revision = native.take_held_revision_for_test();
+            Some(format!("subs/0/cached-{revision}"))
+        } else {
+            None
+        };
+        let resource =
+            SharingHlsResource::parse(native_cache_resource.as_deref().unwrap_or(if mode != 43 {
+                "init.mp4"
+            } else {
+                "seg00000.m4s"
+            }))
+            .expect("actual closed Source media resource");
         let activity = manager
             .vod
             .source_control_observation_for_test(&response.session_id)
@@ -1950,6 +2694,15 @@ async fn source_actual_actor(
             "capabilities":{"platform":"web","max_height":2160,"codecs":["h264"],"dynamic_ranges":["sdr"],"dual_player_preparation":false},
             "supported_actions":[],"intent":null
         })).expect("cached caption fixture");
+        let warmed = actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt")
+                    .expect("real control cache window"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("derive requested Source window");
+        drop(warmed.into_parts());
         let opened = actor
             .control(request.clone(), Instant::now() + Duration::from_secs(10))
             .await
@@ -1965,17 +2718,10 @@ async fn source_actual_actor(
             .subtitle_revision
             .expect("cached caption fixture");
         drop(guard);
-        let revision = actor
-            .0
-            .state
-            .lock()
-            .expect("cached caption fixture")
-            .native
-            .as_ref()
-            .expect("cached caption fixture")
-            .revision(0)
-            .expect("cached caption fixture");
-        assert_eq!(reported, revision);
+        let revision = reported;
+        assert!(revision.starts_with("f1-s0-"));
+        assert!(revision.contains("-o"));
+        assert!(revision.contains("-w0-"));
         for (requested, present) in [(revision, true), ("source-stale.vtt".to_owned(), false)] {
             let opened = actor
                 .open_resource(
@@ -1994,7 +2740,10 @@ async fn source_actual_actor(
             else {
                 panic!("cached caption payload");
             };
-            assert_eq!(complete, present);
+            assert!(
+                !complete,
+                "a requested window is not a whole-track revision"
+            );
             assert_eq!(absent, !present);
             assert_eq!(bytes.is_empty(), !present);
             if present {
@@ -2083,6 +2832,13 @@ async fn source_actual_actor(
     } else {
         None
     };
+    #[cfg(unix)]
+    if mode == 21 {
+        manager
+            .source_workers
+            .native_hooks
+            .assert_closed_parent_settlements();
+    }
     let (start_body, start_guard) = actor
         .open_start_response(Instant::now() + Duration::from_secs(5))
         .await
@@ -2111,10 +2867,85 @@ async fn source_actual_actor(
         .await
         .expect("actual verified open init");
     let (init_payload, init_guard) = init.into_parts();
-    let SourceResourcePayload::File(init_file) = init_payload else {
+    let SourceResourcePayload::File(mut init_file) = init_payload else {
         panic!("actual opened file")
     };
     assert!(init_file.len > 0);
+    if hdr10 {
+        use tokio::io::AsyncReadExt;
+        let mut bytes = Vec::new();
+        init_file
+            .file
+            .read_to_end(&mut bytes)
+            .await
+            .expect("read delivered HDR10 init");
+        let mut reader = plurx_core::fmp4::FragmentReader::new();
+        reader.push(&bytes);
+        let Some(plurx_core::fmp4::Unit::Init(init)) = reader.next_unit().expect("delivered init")
+        else {
+            panic!("HDR10 init must precede media");
+        };
+        plurx_core::fmp4::validate_hevc_decoder_configuration(&init)
+            .expect("delivered HEVC configuration");
+        let mut delivered = init.bytes.clone();
+        assert!(
+            init.bytes.windows(4).any(|bytes| bytes == b"mp4a"),
+            "EAC3 must be delivered as AAC beside copied HDR10 video"
+        );
+        assert!(init.bytes.windows(4).any(|bytes| bytes == b"mdcv"));
+        assert!(init.bytes.windows(4).any(|bytes| bytes == b"clli"));
+        let opened = actor
+            .open_resource(
+                &SharingHlsResource::parse("seg00000.m4s").expect("typed copied HDR10 segment"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("actual copied HDR10 segment");
+        let (payload, guard) = opened.into_parts();
+        let SourceResourcePayload::File(mut segment) = payload else {
+            panic!("copied media file")
+        };
+        let mut bytes = Vec::new();
+        segment
+            .file
+            .read_to_end(&mut bytes)
+            .await
+            .expect("read copied HDR10 segment");
+        reader.push(&bytes);
+        assert!(matches!(
+            reader.next_unit().expect("delivered media"),
+            Some(plurx_core::fmp4::Unit::Fragment(_))
+        ));
+        delivered.extend_from_slice(&bytes);
+        std::fs::write(&delivered_fixture, delivered).expect("delivered copy capture");
+        // Copy can signal color in the original SPS without an encoded
+        // rendition's mandatory colr box. Inspect the delivered media, not
+        // catalog tags or the encoder-only sample-entry contract.
+        let probe = source_fixture_probe(&delivered_fixture).await;
+        assert!(
+            probe.status.success(),
+            "{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let probe: serde_json::Value =
+            serde_json::from_slice(&probe.stdout).expect("delivered media probe");
+        let streams = probe["streams"].as_array().expect("delivered streams");
+        let video = streams
+            .iter()
+            .find(|stream| stream["codec_type"] == "video")
+            .expect("delivered video");
+        assert_eq!(video["codec_name"], "hevc");
+        assert_eq!(video["pix_fmt"], "yuv420p10le");
+        assert_eq!(video["color_transfer"], "smpte2084");
+        assert_eq!(video["color_primaries"], "bt2020");
+        assert_eq!(video["color_space"], "bt2020nc");
+        assert_eq!(video["width"], 128);
+        assert_eq!(video["height"], 72);
+        assert!(streams
+            .iter()
+            .any(|stream| stream["codec_type"] == "audio" && stream["codec_name"] == "aac"));
+        drop(guard);
+    }
     let file_id = assignment
         .binding()
         .file_id()
@@ -2279,7 +3110,7 @@ async fn source_native_retains_permit_through_actual_reap_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn source_native_refuses_expired_original_observation() {
+async fn source_native_refreshes_publication_observation_before_window_child() {
     Box::pin(source_copy_preadmission_fixture(25)).await;
 }
 
@@ -3035,4 +3866,57 @@ async fn source_fixture_monitor_join_propagates_task_failure() {
 async fn source_assigned_owner_cached_caption_revision_reads_retained_bytes_and_refuses_stale_identity(
 ) {
     Box::pin(source_copy_preadmission_fixture(56)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_copy_start_does_not_wait_for_requested_caption_work() {
+    Box::pin(source_copy_preadmission_fixture(57)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_encoded_start_needs_no_stored_caption_probe_and_does_not_wait_for_caption_work(
+) {
+    Box::pin(source_copy_preadmission_fixture(58)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_cached_read_holds_actual_filesystem_job_through_waiter_cancel_and_end() {
+    Box::pin(source_copy_preadmission_fixture(59)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_cached_revision_refuses_another_inode_with_same_file_id_size_and_mtime() {
+    Box::pin(source_copy_preadmission_fixture(60)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_oversized_and_non_utf8_cached_cues_are_unsupported_not_busy() {
+    Box::pin(source_copy_preadmission_fixture(61)).await;
+}
+
+fn source_native_control_request(
+    response: &crate::http::hls::StartResponse,
+    sequence: u64,
+) -> crate::playback_control::ControlRequestV1 {
+    let bootstrap = response.control.as_ref().expect("Source control bootstrap");
+    serde_json::from_value(serde_json::json!({
+        "protocol":crate::playback_control::PROTOCOL_V1,"generation":bootstrap.generation,"control_epoch":bootstrap.control_epoch,
+        "client_instance_id":uuid::Uuid::new_v4().to_string(),"sequence":sequence,"demand":"active",
+        "position_ms":0,"buffered_from_ms":0,"buffered_through_ms":1000,"playback_rate":1.0,
+        "render_state":"rendering","seek_target_ms":null,
+        "selection":{"quality":{"mode":"original"},"audio_track":null,"subtitle":{"mode":"native","track":0},"audio_offset_ms":0,"codec":"auto","dynamic_range":"auto"},
+        "capabilities":{"platform":"web","max_height":2160,"codecs":["h264"],"dynamic_ranges":["sdr"],"dual_player_preparation":false},
+        "supported_actions":[],"intent":null
+    })).expect("Source native control request")
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_managed_cache_pressure_preserves_movie_and_typed_retry() {
+    Box::pin(source_copy_preadmission_fixture(62)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_control_returns_while_parked_caption_work_retains_one_guard() {
+    Box::pin(source_copy_preadmission_fixture(63)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_sparse_input_reserves_before_write_and_releases_only_after_close() {
+    Box::pin(source_copy_preadmission_fixture(65)).await;
 }

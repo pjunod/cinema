@@ -18,6 +18,7 @@ using the Swift spelling. Types and bounds are each platform's own tests.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import unittest
@@ -578,6 +579,119 @@ class ControlRequestWireCase(unittest.TestCase):
                 server,
                 f"{label}: Android speaks a different vocabulary",
             )
+
+
+
+# The session create route's refusal codes and the surface contract the three
+# clients reproduce. A code the server answers a create with that no row and
+# no explicit entry names is the gap this closes: every client falls through
+# to its generic stop for it, so a waitable refusal never retries and a
+# terminal one has no row a client author can find.
+CREATE = ROOT / "crates/plurxd/src/http/hls/create.rs"
+TRANSCODE_ERRORS = ROOT / "crates/plurxd/src/transcode/errors.rs"
+SURFACE = ROOT / "tests/playback/playback-surface-contract.json"
+APPLE_CREATE_RETRY = ROOT / "clients/apple/Sources/PlayerControllerSupport.swift"
+APPLE_SURFACE = ROOT / "clients/apple/Sources/PlaybackSurfaceModel.swift"
+APPLE_REFUSAL = ROOT / "clients/apple/Sources/PlayerController.swift"
+ANDROID_PLAYER = ROOT / "clients/android/app/src/main/java/tv/plurx/app/player"
+ANDROID_CREATE_RETRY = ANDROID_PLAYER / "PlaybackPolicy.kt"
+ANDROID_SURFACE = ANDROID_PLAYER / "PlaybackSurface.kt"
+ANDROID_REFUSAL = ANDROID_PLAYER / "Controller.kt"
+
+# Where a create names a code: the typed constructors, a `code:` field of a
+# typed retry or detail, the `(status, "code")` mapping table of
+# `session_start_error`, and a `json!` body's `"code"`.
+CREATE_CODE_PATTERNS = (
+    r'ApiError::typed(?:_detail)?\(\s*StatusCode::[A-Z_]+,\s*"([a-z0-9_]+)"',
+    r'\bcode:\s*"([a-z0-9_]+)"',
+    r'\(\s*StatusCode::[A-Z_]+,\s*"([a-z0-9_]+)",?\s*\)',
+    r'"code":\s*"([a-z0-9_]+)"',
+)
+
+
+def terminal_capacity_codes(source: str) -> set[str]:
+    """The codes `TERMINAL_CAPACITY_CODES` lists, through their constants."""
+    match = re.search(
+        r"const TERMINAL_CAPACITY_CODES: \[&str; \d+\] = \[(.*?)\];", source, re.DOTALL
+    )
+    assert match, f"TERMINAL_CAPACITY_CODES is no longer a list in {TRANSCODE_ERRORS.name}"
+    codes = set()
+    for name in re.findall(r"[A-Z][A-Z0-9_]+", match.group(1)):
+        constant = re.search(r"const " + name + r': &str = "([a-z0-9_]+)";', source)
+        assert constant, f"{name} is no longer a string constant in {TRANSCODE_ERRORS.name}"
+        codes.add(constant.group(1))
+    return codes
+
+
+def emitted_create_codes(create: str, errors: str) -> set[str]:
+    codes = set()
+    for pattern in CREATE_CODE_PATTERNS:
+        codes.update(re.findall(pattern, create))
+    return codes | terminal_capacity_codes(errors)
+
+
+class CreateRefusalCodeCase(unittest.TestCase):
+    """Every code a create answers with is one the surface contract names."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.create = CREATE.read_text(encoding="utf-8")
+        cls.errors = TRANSCODE_ERRORS.read_text(encoding="utf-8")
+        cls.contract = json.loads(SURFACE.read_text(encoding="utf-8"))
+        cls.rows = {row["id"]: row for row in cls.contract["sources"]}
+        cls.emitted = emitted_create_codes(cls.create, cls.errors)
+
+    def test_every_code_a_create_answers_with_is_in_the_contract(self) -> None:
+        self.assertIn("startup_timeout", self.emitted, "the code scan found nothing")
+        named = set(self.contract["create_codes_outside_the_table"]["codes"])
+        for row in self.contract["sources"]:
+            named.add(row["id"])
+            named.update(row.get("codes", []))
+        self.assertEqual(
+            sorted(self.emitted - named),
+            [],
+            "the create answers with codes the surface contract does not name: add each "
+            "to its row (create_503_not_yet for a waitable one, create_capacity_terminal "
+            "or its own row for a terminal one) or to create_codes_outside_the_table",
+        )
+
+    def test_the_outside_list_names_only_codes_a_create_still_answers_with(self) -> None:
+        outside = set(self.contract["create_codes_outside_the_table"]["codes"])
+        self.assertEqual(sorted(outside - self.emitted), [], "stale entries")
+        in_rows = set()
+        for row in self.contract["sources"]:
+            in_rows.update(row.get("codes", []))
+        self.assertEqual(sorted(outside & in_rows), [], "a code is in a row and outside it")
+
+    def test_terminal_capacity_codes_are_the_terminal_row(self) -> None:
+        self.assertEqual(
+            set(self.rows["create_capacity_terminal"]["codes"]),
+            terminal_capacity_codes(self.errors),
+        )
+        self.assertFalse(
+            set(self.rows["create_capacity_terminal"]["codes"])
+            & set(self.rows["create_503_not_yet"]["codes"]),
+            "a terminal refusal is never on the retry ladder",
+        )
+
+    def test_every_client_retries_the_not_yet_codes_and_stops_on_the_terminal_ones(self) -> None:
+        not_yet = self.rows["create_503_not_yet"]["codes"]
+        terminal = self.rows["create_capacity_terminal"]["codes"]
+        for label, path, codes in (
+            ("Apple create retry", APPLE_CREATE_RETRY, not_yet),
+            ("Apple surface table", APPLE_SURFACE, not_yet + terminal),
+            ("Apple refusal mapping", APPLE_REFUSAL, terminal),
+            ("Android create retry", ANDROID_CREATE_RETRY, not_yet),
+            ("Android surface table", ANDROID_SURFACE, not_yet + terminal),
+        ):
+            text = path.read_text(encoding="utf-8")
+            for code in codes:
+                self.assertIn(f'"{code}"', text, f"{label} does not name {code}")
+        self.assertIn('"create_capacity_terminal"', APPLE_REFUSAL.read_text(encoding="utf-8"))
+        self.assertIn(
+            "SurfaceSources.CREATE_CAPACITY_TERMINAL",
+            ANDROID_REFUSAL.read_text(encoding="utf-8"),
+        )
 
 
 if __name__ == "__main__":

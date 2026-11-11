@@ -16,6 +16,7 @@ pub async fn start(
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
 ) -> Result<Json<StartResponse>, ApiError> {
     let legacy = CreateSession {
+        source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         intent: None,
         // No control exchange precedes a legacy start, so there is no
         // ordering for it to be stale against.
@@ -1079,6 +1080,12 @@ async fn settle_committed_preparation(
     state.media_sessions.cache_route(successor.clone()).await;
     if successor.owner_node_id == state.node_id {
         state.media_sessions.seed_owned_lease(&successor).await;
+        // The client commits only after the successor's own frame is on
+        // screen: this is the successor's first presented frame, and the
+        // processed upgrade its activation left waiting starts here.
+        if let Some(user_id) = successor.principal.local_user_id() {
+            super::processed_upgrade::note_presented(state, user_id, &successor.session_id);
+        }
     }
     if successor.publication_ready_at_ms == 0 {
         return;

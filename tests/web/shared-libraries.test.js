@@ -2,17 +2,25 @@
 const fs=require("node:fs"),vm=require("node:vm"),assert=require("node:assert/strict"),{test}=require("node:test");
 const artworkSource=fs.readFileSync("crates/plurxd/src/web/pages/shared-artwork.js","utf8");
 const source=fs.readFileSync("crates/plurxd/src/web/pages/shared-libraries.js","utf8");
+const preplaySource=fs.readFileSync("crates/plurxd/src/web/detail/preplay-selection.js","utf8");
+const resumeStart=preplaySource.indexOf("function playbackResumeMs(");
+const resumeSource=preplaySource.slice(resumeStart,preplaySource.indexOf("\n}",resumeStart)+2);
+const detailSources=["detail/helpers.js","detail/dynamic-range.js","detail/track-facts.js","detail/edit.js"].map(path=>fs.readFileSync("crates/plurxd/src/web/"+path,"utf8"));
+const hdrLabelSource=fs.readFileSync("crates/plurxd/src/web/player/stats.js","utf8").match(/^function hdrLabel\(.*$/m)[0];
 const ref={import_id:"11111111-1111-4111-8111-111111111111",server_id:"22222222-2222-4222-8222-222222222222",catalogue_epoch:"33333333-3333-4333-8333-333333333333",library_id:"9007199254740993",item_id:"9223372036854775807"};
 function harness(read){
  const elements=new Map(),requests=[];
  const context=vm.createContext({TextDecoder,Uint8Array,URLSearchParams,URL,AbortController,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"login-a",API:"/api/v1",location:{hash:"#/shared",href:"https://b.test/#/shared"},
   PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,HTMLButtonElement:class{},
-  esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),fmtDur:String,
+  esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),fmtDur:String,fmtSize:String,langName:String,
   api:async(path)=>{requests.push(path);const response=await read(path);Object.defineProperty(response,"url",{value:new URL("/api/v1"+path,"https://b.test").href});return response;},layoutChrome(){},setPagePhase(){},
-  document:{getElementById(id){if(!elements.has(id))elements.set(id,{innerHTML:"",more:null,querySelector(){return this.more;},querySelectorAll(){return [];},insertAdjacentHTML(where,html){this.innerHTML+=html;},appendChild(button){this.more=button;button.remove=()=>{this.more=null;};}});return elements.get(id);},createElement(){return {dataset:{}};}}
+  document:{getElementById(id){if(!elements.has(id))elements.set(id,{innerHTML:"",dataset:{},value:"",textContent:"",hidden:false,more:null,querySelector(){return this.more;},querySelectorAll(){return [];},insertAdjacentHTML(where,html){this.innerHTML+=html;},appendChild(button){this.more=button;button.remove=()=>{this.more=null;};}});return elements.get(id);},createElement(){return {dataset:{}};}}
  });
  vm.runInContext(artworkSource,context);
- vm.runInContext(source+"\nthis.shared={id:sharedCatalogueId,key:sharedCatalogueGroupKey,href:sharedCatalogueHref,route:sharedCatalogueRoute,item:sharedCatalogueItemHtml,read:sharedCatalogueRead,view:viewSharedCatalogue,page:sharedCatalogueLoadPage};",context);
+ for(const detailSource of detailSources)vm.runInContext(detailSource,context);
+ vm.runInContext(hdrLabelSource,context);
+ vm.runInContext(resumeSource,context);
+ vm.runInContext(source+"\nthis.shared={id:sharedCatalogueId,key:sharedCatalogueGroupKey,href:sharedCatalogueHref,route:sharedCatalogueRoute,item:sharedCatalogueItemHtml,detail:sharedCatalogueDetailHtml,read:sharedCatalogueRead,view:viewSharedCatalogue,page:sharedCatalogueLoadPage};",context);
  return {context,h:context.shared,elements,requests,capture(){return {generation:1,auth:1,token:"login-a",origin:"/api/v1",route:"#/shared"};}};
 }
 function reply(value){return new Response(JSON.stringify(value),{headers:{"content-type":"application/json"}});}
@@ -63,9 +71,9 @@ test("shared pagination encodes opaque cursors, keeps full-reference deduplicati
  const item={source:"shared",reference:ref,title:"One",kind:"movie"},cursor="opaque+/=cursor";
  let calls=0;const fixture=harness(async path=>{calls++;return reply({items:[item,item],next_cursor:calls<3?cursor:null});});
  await fixture.h.page("/shared/imports/"+ref.import_id+"/libraries/"+ref.library_id+"/items",ref,fixture.capture(),"rows","title+space");
- const rows=fixture.elements.get("rows");assert.equal((rows.innerHTML.match(/<strong>One/g)||[]).length,1);
+ const rows=fixture.elements.get("rows");assert.equal((rows.innerHTML.match(/<strong class="t">One/g)||[]).length,1);
  await rows.more.onclick();assert.equal(calls,2);assert.ok(fixture.requests[1].includes("cursor=opaque%2B%2F%3Dcursor"));
- assert.ok(fixture.requests[0].includes("q=title%2Bspace"));assert.equal((rows.innerHTML.match(/<strong>One/g)||[]).length,1);
+ assert.ok(fixture.requests[0].includes("q=title%2Bspace"));assert.equal((rows.innerHTML.match(/<strong class="t">One/g)||[]).length,1);
  fixture.context.AUTH_GENERATION++;await rows.more.onclick();assert.equal(calls,2,"old-account continuation cannot make another request");
 });
 test("Source metadata loads use at most four concurrent groups",async()=>{
@@ -87,8 +95,22 @@ test("Continue Watching unavailable groups never publish stale items or erase an
   if(path.includes("continue-watching"))return reply({...group,availability:group===ref?"unavailable":"online",items:group===ref?[]:[{item:{source:"shared",reference:other,title:"Current title",kind:"movie"}}]});
   return reply({...group,libraries:[{library_id:group.library_id,name:"Library"}]});
  });
- await fixture.h.view(1);assert.match(fixture.elements.get("shared-continue-0").innerHTML,/unavailable/);
+ await fixture.h.view(1);assert.match(fixture.elements.get("shared-history-status-0").textContent,/unavailable/);
  assert.match(fixture.elements.get("shared-continue-1").innerHTML,/Current title/);
+});
+test("the bounded hub rejects foreign history even beyond its poster budget",async()=>{
+ const fixture=harness(async path=>{
+  if(path==="/shared/libraries")return reply({libraries:[ref]});
+  if(path==="/shared/continue-watching?limit=200")return reply({groups:[ref]});
+  if(path.endsWith("/libraries"))return reply({...ref,libraries:[{library_id:ref.library_id,name:"Movies"}]});
+  const items=Array.from({length:41},(_,index)=>({item:{source:"shared",reference:{...ref,item_id:String(index+1)},title:`Title ${index+1}`,kind:"movie"}}));
+  items[40].item.reference.server_id="44444444-4444-4444-8444-444444444444";
+  return reply({...ref,availability:"online",items});
+ });
+ await fixture.h.view(1);
+ assert.equal(fixture.elements.get("shared-continue-0").innerHTML,"");
+ assert.match(fixture.elements.get("shared-history-status-0").textContent,/unavailable/);
+ assert.match(fixture.elements.get("shared-source-0").innerHTML,/Movies/,"invalid history does not erase the assigned library");
 });
 test("Continue Watching preserves two assigned libraries from the same Source",async()=>{
  const second={...ref,library_id:"7",item_id:"9"};
@@ -113,6 +135,21 @@ test("Shared launch refetches current delivery and retains string file identity 
  await assert.rejects(fixture.context.launch(ref,"9007199254740993",fixture.capture()));assert.equal(launches.length,1);
  fixture.context.AUTH_GENERATION++;await assert.rejects(fixture.context.launch(ref,"9007199254740993",fixture.capture()));assert.equal(launches.length,1);
 });
+test("Shared launch resumes a partial rewatch without clearing watched history",async()=>{
+ const fixture=harness(),launches=[],fileContext={source_file_id:"77"};
+ const watch={position_ms:45000,duration_ms:90000,watched:true};
+ fixture.context.SHARED_DECISION={details:async()=>({detail:{delivery_status:"available",item:{title:"Rewatch",reference:ref},watch},files:[{context:fileContext,file:{duration_ms:90000}}]})};
+ fixture.context.play=(...args)=>{launches.push(args);};
+ vm.runInContext("this.launch=sharedCataloguePlay",fixture.context);
+ await fixture.context.launch(ref,"77",fixture.capture());
+ assert.equal(launches[0][2],45000);assert.equal(watch.watched,true);
+ watch.position_ms=85500;
+ await fixture.context.launch(ref,"77",fixture.capture());
+ assert.equal(launches[1][2],0,"the 95% completion boundary still starts over");
+ watch.position_ms=-1;
+ await assert.rejects(fixture.context.launch(ref,"77",fixture.capture()),/Shared timeline unavailable/);
+ assert.equal(launches.length,2);
+});
 
 test("an expired or substituted Source cursor reopens the list once instead of retrying a dead cursor",async()=>{
  for(const code of ["sharing_cursor_expired","sharing_query_changed","sharing_cursor_invalid"]){
@@ -124,7 +161,7 @@ test("an expired or substituted Source cursor reopens the list once instead of r
   await fixture.h.page("/shared/imports/"+ref.import_id+"/libraries/"+ref.library_id+"/items",library,fixture.capture(),"rows");
   const rows=fixture.elements.get("rows");await rows.more.onclick();
   assert.equal(calls,3,code);assert.ok(fixture.requests[1].includes("cursor=opaque-1"));assert.ok(!fixture.requests[2].includes("cursor="),"fresh open");
-  assert.match(rows.innerHTML,/reopened from the start/);assert.equal((rows.innerHTML.match(/<strong>Item 1/g)||[]).length,1);
+  assert.match(rows.innerHTML,/reopened from the start/);assert.equal((rows.innerHTML.match(/<strong class="t">Item 1/g)||[]).length,1);
   assert.equal(rows.more,null,"the reopened list ended without another dead cursor");
  }
  // Other refusals keep the existing retry affordance and never reopen.
@@ -190,6 +227,16 @@ test("Shared movie detail formats milliseconds and does not request unsupported 
  const f=harness(path=>{assert.ok(!path.includes("/children"));return reply({item:{source:"shared",reference:ref,title:"Twelve minutes",kind:"movie"},delivery_status:"available",files:[{file_id:"1",reference:{item:ref,file_id:"1"},duration_ms:720000,video_codec:"h264"}]});});
  const durations=[];f.context.fmtDur=ms=>{durations.push(ms);return "12:00";};
  f.context.location.hash=f.h.href(ref);await f.h.view(1);
- assert.deepEqual(durations,[720000]);assert.match(f.elements.get("shared-catalogue").innerHTML,/12:00/);
+ assert.ok(durations.length>0);assert.ok(durations.every(ms=>ms===720000));assert.match(f.elements.get("shared-catalogue").innerHTML,/12:00/);
  assert.equal(f.requests.filter(path=>path.includes("/children")).length,0);
+});
+
+test("shared details render delivered enrichment and track facts without local item actions",()=>{
+ const f=harness(),file={file_id:"7",reference:{item:ref,file_id:"7"},video_codec:"hevc",width:3840,height:2160,bit_depth:10,hdr:"hdr10",duration_ms:8640000,container:"mkv",size:"9007199254740993",audio_streams:[{codec:"eac3",channels:8,language:"eng",title:"<Atmos>"}],subtitle_streams:[{codec:"subrip",language:"fra",forced:true,hearing_impaired:true,title:'<script>bad</script>'}]};
+ const html=f.h.detail({item:{source:"shared",reference:ref,title:"Film",kind:"movie",year:2016,genres:["Drama","<script>genre</script>"],presentation:{runtime_ms:8640000,air_date:"2016-01-15",ratings:[{source:"imdb",value:7.3,scale:10,votes:12000}]}},files:[file],delivery_status:"available"},ref,null);
+ for(const text of ["2016","Drama","2160p","3840×2160","HEVC","HDR10","7.1","fra","forced","SDH","IMDb","7.3","12,000","Released 2016-01-15"])assert.ok(html.includes(text),text);
+ assert.ok(!html.includes("<script>"));assert.match(html,/&lt;script>bad/);assert.match(html,/data-shared-play="0"/);
+ assert.ok(!html.includes("#/item/"));assert.ok(!html.includes("refreshMediaPreparation"));assert.ok(!html.includes("openEdit"));
+ assert.match(f.h.detail({item:{source:"shared",reference:ref,title:"Old source",kind:"movie"},files:[file],delivery_status:"unavailable"},ref,null),/data-shared-play="0" disabled/);
+ assert.throws(()=>f.h.detail({item:{source:"shared",reference:ref,title:"Bad",kind:"movie"},files:[{...file,reference:{item:{...ref,library_id:"9"},file_id:"7"}}]},ref,null),/Shared file changed/);
 });

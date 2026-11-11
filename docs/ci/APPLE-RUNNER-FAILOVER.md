@@ -1,6 +1,6 @@
 # Apple runners — the M4 primary and M3 Max standby
 
-**Status:** live · **Updated:** 2026-10-23
+**Status:** live · **Updated:** 2026-11-01
 
 Companion to [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) (what Apple
 CI verifies) and [RUNNER-DISK.md](RUNNER-DISK.md) (runner disk maintenance).
@@ -10,27 +10,66 @@ This document owns Apple runner preference, outage detection and installation.
 
 | Role | Forgejo runner | Host | Account | Toolchain |
 |---|---|---|---|---|
-| Primary | `gha-maca-apple-01` | M4 MacBook Air, `10.42.5.115` | `githubrunner` | Xcode 27.0, `27A266a`; awaiting 27.1 upgrade |
-| Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `pjunod` | Xcode 27.1, `27A9275` |
+| Primary | `gha-maca-apple-01` | M4 MacBook Air, `maca` | `githubrunner` | Xcode 27.2, `27B52`; two runner slots |
+| Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `pjunod` | Xcode 27.2, `27B52` |
 
-The toolchain pin is Xcode 27.1 (`27A9275`). The standby was observed on
-27.1 with iOS 27.1 and tvOS 27.0 SDKs on 2026-10-23; the primary still
-reports 27.0 and must match the pin before it can serve Apple jobs. This
-source change does not install or restart either runner.
+The toolchain pin is Xcode 27.2 (`27B52`). The standby's Xcode updated itself
+from 27.1 to 27.2 on 2026-10-30, which removed 27.1, so no runner matched the old
+pin and every Apple job failed its toolchain check. It was observed on 2026-11-01
+with the iOS 27.2 and tvOS 27.2 SDKs and the iOS 26.5 and tvOS 26.5 simulator
+runtimes (the navigation journeys use tvOS 26.5). The primary was brought to the same pin on 2026-11-01 and its idle daemon
+restarted with capacity two. Its v13.1 configuration uses `runner.labels` in
+the runner account's `~/forgejo-runner/config.yml` and keeps its existing
+registration file. The standby v13.2 labels live in its `server.connections`
+entry in `/opt/homebrew/etc/forgejo-runner/config.yaml`; creating a legacy
+`.runner` file there makes that daemon refuse to start. The standby's
+`xcode-27.1:host` label became `xcode-27.2:host` there on 2026-11-01, and its
+daemon was restarted while idle. This source change installs and restarts
+nothing.
 
-DerivedData cache keys and restore prefixes include the Xcode build and both
-mobile SDK versions. A different toolchain starts cold; its cache is saved only
-after success. The Effort Apple compile budget is 45 minutes because it also
+Apple jobs keep DerivedData inside their own checkout and reuse it between
+that job's build, unit-test and navigation steps. Whole DerivedData is neither
+restored nor uploaded by full, effort or main-fast CI: its build database
+contains absolute paths, while repeated Forgejo jobs have used different
+checkout roots. Path-specific keys would miss those jobs and still upload the
+cache. Existing Forgejo cache blobs, Rust caches and tool caches are unchanged.
+
+On 2026-11-01, Paul approved two concurrent fast-lane Apple jobs on the
+32 GiB M4 dedicated to CI, bounded by Forgejo runner capacity two. Fast-lane
+jobs have no repository-wide heavy-work lock: each owns its checkout,
+DerivedData, newly created simulator UUID and run/attempt evidence directory.
+The per-PR workflow lock still orders updates to the same pull request.
+Full CI and Lima ARM64 packaging retain `plurx-apple-silicon-heavy`; full Apple
+unit tests still use shared named simulator destinations. The source scheduling
+change neither updates runner services nor proves concurrent hardware execution.
+
+Generic iOS and tvOS simulator builds still cover arm64 and x86_64. Toolchain
+pins and promotion gates are unchanged by this cache boundary. This
+cache boundary does not establish the cause of a compiler failure or qualify a new
+candidate; the existing build and native test checks remain required.
+The [workflow regression](../../tests/operations/test_apple_tv_navigation_gate.py)
+rejects whole-DerivedData transfer in all three workflows and retains their
+build commands, pins and scheduling limits.
+
+The Effort Apple compile budget is 45 minutes because it also
 builds both macOS tray architectures before generic iOS and tvOS simulators.
 Run 5877 exhausted the old 10-minute budget during the first iOS cold build;
 that failure establishes neither iOS nor tvOS compilation. Full CI and main
-promotion retain their separate 60/120-minute Apple budgets.
+promotion each allow 120 minutes for the Apple job. Full CI runs iPhone,
+iPad and tvOS units before the mandatory 35 native journeys. The native XCTest
+summary for fast run 5967 (internal 5996) alone lasted 53 minutes 12 seconds
+(34 passes and one
+guide timeout); that failed-run timing establishes duration, not acceptance.
+Full run 5985 (internal 6014) had passed seven journeys, including the guide
+in 124.621 seconds, after its unit and build stages. That observation was made
+while the job was active, without a terminal outcome. The former
+60-minute full-job budget left insufficient room for this measured pipeline.
+The per-test 180/240-second limits and all unit/navigation gates remain.
 
 Both carry `self-hosted`, `macOS`, `ARM64`, `lab`, `apple`, and `xcode-27`.
 The primary also carries `primary`, and the backup carries `backup`.
-Apple workflows additionally require `xcode-27.1`. Only the backup currently
-provides that label; the primary must complete its Xcode upgrade before it
-can receive the label and resume Apple jobs. Forgejo matches labels; the role
+Apple workflows additionally require `xcode-27.2`. Both runners provide that label after the primary
+toolchain and runner-account checks on 2026-11-01. Forgejo matches labels; the role
 labels do not make its scheduler prefer one runner. The
 [standby controller](../../deploy/apple-runner/plurx-apple-standby) enforces
 preference by starting the backup daemon only during an outage. Apple jobs request the common labels plus the exact toolchain label.
@@ -58,6 +97,11 @@ before a new backup daemon starts.
  two consecutive successful probes     ──▶ M3 stops polling, finishes its job
  backup daemon exits                   ──▶ standby, or restart during outage
 ```
+
+An operator can take the backup out of the pool from
+[ci-fleet](http://forge.lan:3000/noirr/ci-fleet) (Drain): that writes the configuration's `pause_marker`,
+and while it exists the controller drains the backup the same way and offers no
+slot, even during an outage. Resume removes it.
 
 **Limits:** availability is observed from the M3, not from Forgejo's runner
 database. A network partition between the two Macs can enable both runners

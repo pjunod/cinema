@@ -111,6 +111,20 @@ pub(crate) fn inherit_raw_file_descriptors_with_cwd(
     descriptors: &[(std::os::fd::RawFd, i32)],
     cwd_target: Option<i32>,
 ) {
+    // No capability crosses exec when the broker replaced every descriptor.
+    if descriptors.is_empty() {
+        assert!(cwd_target.is_none());
+        return;
+    }
+    plurx_core::process::source_lifetime::tag_descriptor_handoff(command);
+    if let Err(error) = plurx_core::process::source_lifetime::unmediated_descriptor() {
+        let code = error.raw_os_error().unwrap_or(libc::EIO);
+        // SAFETY: the child performs only an allocation-free errno rejection.
+        unsafe {
+            command.pre_exec(move || Err(std::io::Error::from_raw_os_error(code)));
+        }
+    }
+
     assert!(
         descriptors.len() <= 7
             && descriptors
@@ -152,17 +166,29 @@ pub(crate) fn inherit_raw_file_descriptors_with_cwd(
 /// last 8 KiB, where encoder/filter failures normally explain their exit.
 pub(crate) async fn drain_diagnostics(mut input: impl AsyncRead + Unpin) -> String {
     const LIMIT: usize = 8 * 1024;
-    let mut tail = Vec::with_capacity(LIMIT);
+    // Retain one complete generated URL before truncating the public tail.
+    // Otherwise the byte boundary could discard its scheme/host while
+    // leaving the entire bearer nonce intact and invisible to the redactor.
+    const PRIVATE_URL_CONTEXT: usize = 128;
+    let mut tail = Vec::with_capacity(LIMIT + PRIVATE_URL_CONTEXT);
     let mut chunk = [0u8; 2048];
     while let Ok(read) = input.read(&mut chunk).await {
         if read == 0 {
             break;
         }
-        let discard = (tail.len() + read).saturating_sub(LIMIT);
+        let discard = (tail.len() + read).saturating_sub(LIMIT + PRIVATE_URL_CONTEXT);
         tail.drain(..discard);
         tail.extend_from_slice(&chunk[..read]);
     }
-    String::from_utf8_lossy(&tail).into_owned()
+    let mut text = crate::scratch_put::redact(&String::from_utf8_lossy(&tail));
+    if text.len() > LIMIT {
+        let mut start = text.len() - LIMIT;
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        text.drain(..start);
+    }
+    text
 }
 
 /// A producer's drained stderr tail, split into the lines an operator should
@@ -224,6 +250,7 @@ pub(crate) fn classify_diagnostic(tail: &str) -> ProducerDiagnostic {
 /// reader. Cancellation transfers the exact child to a reap owner, never a
 /// detached diagnostic reader. Used by whole-track burn extraction.
 pub(crate) struct BoundedDiagnosticChild {
+    source_input: Option<crate::source_input::SourceInput>,
     child: Option<tokio::process::Child>,
     child_job: Option<crate::process_control::ChildJob>,
     stdout: Option<tokio::process::ChildStdout>,
@@ -244,6 +271,7 @@ impl BoundedDiagnosticChild {
         let (mut child, child_job) = crate::process_control::spawn_job_owned(command, work)?;
         let stderr = child.stderr.take();
         Ok(Self {
+            source_input: None,
             child: Some(child),
             child_job: Some(child_job),
             stdout: None,
@@ -268,6 +296,7 @@ impl BoundedDiagnosticChild {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         Ok(Self {
+            source_input: None,
             child: Some(child),
             child_job: Some(child_job),
             stdout,
@@ -277,8 +306,58 @@ impl BoundedDiagnosticChild {
         })
     }
 
+    pub(crate) fn with_source_input(
+        mut self,
+        input: Option<crate::source_input::SourceInput>,
+    ) -> Self {
+        self.source_input = input;
+        self
+    }
+    pub(crate) async fn output_bytes_cancellable(
+        mut self,
+        max: usize,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> std::io::Result<(std::process::ExitStatus, Vec<u8>, String)> {
+        use tokio::io::AsyncReadExt;
+        let mut stdout = self
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("extractor stdout missing"))?;
+        let stderr = self
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::other("extractor stderr missing"))?;
+        let child = self.child.as_mut().expect("owned extraction child");
+        let read = async {
+            let mut kept = Vec::new();
+            let mut buffer = vec![0; 8192];
+            loop {
+                let count = stdout.read(&mut buffer).await?;
+                if count == 0 {
+                    break;
+                }
+                let keep = count.min(max.saturating_sub(kept.len()));
+                kept.extend_from_slice(&buffer[..keep]);
+            }
+            Ok::<_, std::io::Error>(kept)
+        };
+        let wait = async {
+            tokio::select! {biased;
+                ()=cancelled.cancelled()=>{let _=child.start_kill();child.wait().await},
+                status=child.wait()=>status,
+            }
+        };
+        let (status, bytes, diagnostics) = tokio::join!(wait, read, drain_diagnostics(stderr));
+        let status = status?;
+        self.child.take();
+        if let Some(input) = self.source_input.take() {
+            input.close_and_wait().await?;
+        }
+        self.child_job.take();
+        Ok((status, bytes?, diagnostics))
+    }
     pub async fn output(self) -> std::io::Result<(std::process::ExitStatus, String)> {
-        self.output_cancellable(&tokio_util::sync::CancellationToken::new())
+        self.output_cancellable(&plurx_core::process::bounded::cancellation().unwrap_or_default())
             .await
     }
 
@@ -306,6 +385,9 @@ impl BoundedDiagnosticChild {
         let (status, diagnostics) = tokio::join!(wait, drain_diagnostics(stderr));
         let status = status?;
         self.child.take(); // Successful wait, including nonzero exit, proves reap.
+        if let Some(input) = self.source_input.take() {
+            input.close_and_wait().await?;
+        }
         self.child_job.take();
         #[cfg(test)]
         if let Some(reaped) = self.reaped.take() {
@@ -326,7 +408,7 @@ impl BoundedDiagnosticChild {
         self.output_to_bounded_file_cancellable(
             path,
             max_bytes,
-            &tokio_util::sync::CancellationToken::new(),
+            &plurx_core::process::bounded::cancellation().unwrap_or_default(),
         )
         .await
     }
@@ -399,6 +481,9 @@ impl BoundedDiagnosticChild {
             .wait()
             .await?;
         self.child.take();
+        if let Some(input) = self.source_input.take() {
+            input.close_and_wait().await?;
+        }
         self.child_job.take();
         #[cfg(test)]
         if let Some(reaped) = self.reaped.take() {
@@ -420,12 +505,20 @@ impl Drop for BoundedDiagnosticChild {
             return;
         };
         let child_job = self.child_job.take();
+        let source_input = self.source_input.take();
         let _ = child.start_kill();
         #[cfg(test)]
         let reaped = self.reaped.take();
         tokio::spawn(async move {
             let _child_job = child_job;
             let result = child.wait().await;
+            if let Some(input) = source_input {
+                if result.is_ok() {
+                    let _ = input.close_and_wait().await;
+                } else {
+                    input.cleanup_pending();
+                }
+            }
             if let Err(ref error) = result {
                 tracing::warn!(%error, "reaping cancelled burn-track extraction failed");
             }
@@ -636,7 +729,10 @@ impl EncodedExecutable {
     /// is also pumping media bodies — the exact stall the batch exists to
     /// remove.
     pub fn attestation_object(&self) -> (std::path::PathBuf, String) {
-        (self.path.clone(), self.object_version.clone())
+        (
+            self.path.clone(),
+            pinned_engine_object_version(&self.object_version, &self.digest),
+        )
     }
 }
 
@@ -694,10 +790,52 @@ pub(crate) async fn held_source_probe_json_bound(
     work: crate::process_control::ChildWork,
     reporter: &EncodedExecutable,
 ) -> Result<String, String> {
+    held_probe_json_bound(source, work, reporter, true).await
+}
+
+/// The descriptor is already materialized output, never original media.
+/// Ambient original-read scopes must not charge a second source owner for it.
+#[cfg(target_os = "linux")]
+pub(crate) async fn held_artifact_probe_json_bound(
+    source: &std::fs::File,
+    work: crate::process_control::ChildWork,
+    reporter: &EncodedExecutable,
+) -> Result<String, String> {
+    held_probe_json_bound(source, work, reporter, false).await
+}
+
+async fn held_probe_json_bound(
+    source: &std::fs::File,
+    work: crate::process_control::ChildWork,
+    reporter: &EncodedExecutable,
+    original: bool,
+) -> Result<String, String> {
     if !reporter.is_current().await {
         return Err("held clock reporter changed before query".into());
     }
-    let command = source_held_probe_command(source, &reporter.path)?;
+    let input = if original {
+        crate::source_input::SourceInput::open_current_held(source, "held-bound-metadata").await?
+    } else {
+        None
+    };
+    let command = if let Some(input) = input.as_ref() {
+        let mut command = tokio::process::Command::new(&reporter.path);
+        command.args([
+            "-v",
+            "error",
+            "-threads",
+            "1",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            input.url(),
+        ]);
+        command
+    } else {
+        source_held_probe_command(source, &reporter.path)?
+    };
     let output = bounded_command_output_cancellable(
         command,
         ENGINE_PROBE_TIMEOUT,
@@ -706,7 +844,14 @@ pub(crate) async fn held_source_probe_json_bound(
         None,
         work,
     )
-    .await?;
+    .await;
+    if let Some(input) = input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("joining held bound probe source: {error}"))?;
+    }
+    let output = output?;
     if !reporter.is_current().await {
         return Err("held clock reporter changed during query".into());
     }
@@ -721,13 +866,23 @@ pub(crate) async fn held_source_probe_json_bound(
 /// parsed is handed back untouched: the comparison reports the parse failure,
 /// which is the honest answer, rather than a stamp over unreadable output.
 async fn stamped_with_this_reporter(document: String) -> String {
-    let Some(reporter) = plurx_core::scan::probe::reporter_identity_of(&ffprobe_bin()).await else {
-        return document;
-    };
     let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&document) else {
         return document;
     };
-    plurx_core::scan::probe::stamp_reporter(&mut parsed, reporter);
+    if let Some(filename) = parsed
+        .get_mut("format")
+        .and_then(|format| format.get_mut("filename"))
+    {
+        if let Some(value) = filename.as_str() {
+            let sanitized = crate::scratch_put::redact(value);
+            if sanitized != value {
+                *filename = serde_json::Value::String(sanitized);
+            }
+        }
+    }
+    if let Some(reporter) = plurx_core::scan::probe::reporter_identity_of(&ffprobe_bin()).await {
+        plurx_core::scan::probe::stamp_reporter(&mut parsed, reporter);
+    }
     serde_json::to_string(&parsed).unwrap_or(document)
 }
 
@@ -826,9 +981,24 @@ pub(crate) async fn held_source_packet_probe_json(
         (source_path, held_identity)
     };
 
+    let input = match crate::background_jobs::source_budget() {
+        Some(budget) => Some(
+            crate::source_input::SourceInput::open_background_held(
+                crate::fragment_index_cluster::SourceFence::clone_current_held(source)
+                    .map_err(HeldPacketProbeError::Source)?,
+                "application/octet-stream",
+                budget,
+            )
+            .await
+            .map_err(HeldPacketProbeError::Source)?,
+        ),
+        None => None,
+    };
     let mut command = tokio::process::Command::new(ffprobe_bin());
     #[cfg(unix)]
-    inherit_file_descriptors(&mut command, &[(source, 3)]);
+    if input.is_none() {
+        inherit_file_descriptors(&mut command, &[(source, 3)]);
+    }
     command.args([
         "-v",
         "error",
@@ -853,16 +1023,54 @@ pub(crate) async fn held_source_packet_probe_json(
     if let Some(interval) = interval {
         command.args(["-read_intervals", &interval]);
     }
-    #[cfg(unix)]
-    command.arg("/dev/fd/3");
-    #[cfg(windows)]
-    command.arg(&source_path);
+    if let Some(input) = input.as_ref() {
+        command.arg(input.url());
+    } else {
+        #[cfg(unix)]
+        command.arg("/dev/fd/3");
+        #[cfg(windows)]
+        command.arg(&source_path);
+    }
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
+    if let Some(input) = input {
+        let cap = usize::try_from(max_stdout_bytes.saturating_add(1))
+            .map_err(|error| HeldPacketProbeError::Process(error.to_string()))?;
+        let output = plurx_core::process::source_lifetime::mediated(
+            plurx_core::process::bounded::output_command(
+                &mut command,
+                timeout,
+                cap,
+                crate::process_control::ChildWork::background("fragment index packet probe"),
+            ),
+        )
+        .await;
+        input.close_and_wait().await.map_err(|error| {
+            HeldPacketProbeError::Source(format!("joining packet source input: {error}"))
+        })?;
+        let output = output.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                HeldPacketProbeError::Timeout
+            } else {
+                HeldPacketProbeError::Process(error.to_string())
+            }
+        })?;
+        if output.stdout.len() as u64 > max_stdout_bytes {
+            return Err(HeldPacketProbeError::OutputLimit);
+        }
+        if !output.status.success() {
+            return Err(HeldPacketProbeError::Process(format!(
+                "packet probe exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        return Ok(output.stdout);
+    }
     let (mut child, _child_job) = crate::process_control::spawn_job_owned(
         &mut command,
         crate::process_control::ChildWork::background("fragment index packet probe"),
@@ -1029,37 +1237,6 @@ pub(crate) fn source_burn_sidecar_command(
     Ok(command)
 }
 
-/// Build native text extraction without starting unowned subtitle work.
-pub(crate) fn source_native_text_command(
-    source: &std::fs::File,
-    ordinal: u16,
-) -> Result<tokio::process::Command, String> {
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    #[cfg(unix)]
-    inherit_file_descriptors(&mut command, &[(source, 3)]);
-    command.args(["-hide_banner", "-loglevel", "error", "-threads", "1", "-i"]);
-    #[cfg(unix)]
-    command.arg("/dev/fd/3");
-    #[cfg(windows)]
-    {
-        let path = windows_source_path(source)?;
-        verify_windows_source_path(source, &path)?;
-        command.arg(path);
-    }
-    command.args([
-        "-map",
-        &format!("0:s:{ordinal}"),
-        "-vn",
-        "-an",
-        "-threads",
-        "1",
-        "-f",
-        "webvtt",
-        "pipe:1",
-    ]);
-    Ok(command)
-}
-
 async fn held_source_probe_json_with_limits(
     source: &std::fs::File,
     timeout: Duration,
@@ -1068,6 +1245,35 @@ async fn held_source_probe_json_with_limits(
     work: crate::process_control::ChildWork,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<String, String> {
+    if let Some(budget) = crate::background_jobs::source_budget() {
+        let input = crate::source_input::SourceInput::open_background_held(
+            crate::fragment_index_cluster::SourceFence::clone_current_held(source)?,
+            "application/octet-stream",
+            budget,
+        )
+        .await?;
+        let mut command = tokio::process::Command::new(ffprobe_bin());
+        command.args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            input.url(),
+        ]);
+        let output =
+            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
+                .await;
+        input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("joining held probe source input: {error}"))?;
+        return String::from_utf8(output?.stdout)
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"));
+    }
+
     #[cfg(windows)]
     {
         let held_identity = plurx_core::fs_secure::std_file_identity(source)
@@ -1145,6 +1351,7 @@ fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
         document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
         document.remove(plurx_core::store::CONTENT_ENCODING_PROBE_KEY);
         document.remove(plurx_core::scan::dv_title::PROBE_FIELD);
+        document.remove(plurx_core::transcode::dv_fel_qualification::PROBE_KEY);
     }
     if let Some(format) = value
         .get_mut("format")
@@ -2020,6 +2227,26 @@ static HDR10_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::c
 static HDR10_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static HDR10_PASSTHROUGH_VAAPI: [tokio::sync::OnceCell<bool>; 2] =
     [const { tokio::sync::OnceCell::const_new() }; 2];
+/// What this process knows about the VA-API HEVC Main10 decode: proved (kept
+/// for the process), or failed `failures` times and next tried at `retry_at`.
+struct Main10DecodeProof {
+    proved: bool,
+    failures: u32,
+    retry_at: Option<std::time::Instant>,
+}
+static HEVC_MAIN10_VAAPI_DECODE: std::sync::Mutex<Main10DecodeProof> =
+    std::sync::Mutex::new(Main10DecodeProof {
+        proved: false,
+        failures: 0,
+        retry_at: None,
+    });
+/// One probe at a time; a caller that finds one running does not wait.
+static HEVC_MAIN10_VAAPI_PROBE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// A two-picture 256x144 HEVC Main10 clip (x265, `-bitexact`), so the probe
+/// needs no encoder of its own.
+const HEVC_MAIN10_PROBE_CLIP: &[u8] = include_bytes!("ffmpeg/hevc-main10-probe.mkv");
+/// Decoding two small pictures takes well under a second on a working device.
+const HEVC_MAIN10_PROBE_DEADLINE: Duration = Duration::from_secs(5);
 static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
     tokio::sync::OnceCell::const_new();
 static ENCODED_PROCESS_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -2736,8 +2963,11 @@ impl EncodedEngine {
         let mut objects = Vec::new();
         for path in paths {
             let (object_digest, version) = hash_engine_object(path).await?;
+            objects.push((
+                path.clone(),
+                pinned_engine_object_version(&version, &hex::encode(&object_digest)),
+            ));
             digest.update(object_digest);
-            objects.push((path.clone(), version));
         }
         Ok(Self {
             digest: hex::encode(digest.finalize()),
@@ -2796,12 +3026,96 @@ async fn fragment_index_engine_snapshot_is_current(engine: &FragmentIndexEngine)
     current
 }
 
+fn pinned_engine_object_version(version: &str, digest: &str) -> String {
+    format!("{version}|sha256:{digest}")
+}
+
+#[cfg(unix)]
+fn engine_metadata_has_settled(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(seconds), Ok(nanoseconds)) = (
+        u64::try_from(metadata.ctime()),
+        u32::try_from(metadata.ctime_nsec()),
+    ) else {
+        return false;
+    };
+    if nanoseconds >= 1_000_000_000 {
+        return false;
+    }
+    std::time::SystemTime::UNIX_EPOCH
+        .checked_add(Duration::new(seconds, nanoseconds))
+        .and_then(|stamp| std::time::SystemTime::now().duration_since(stamp).ok())
+        .is_some_and(|age| age >= Duration::from_secs(2))
+}
+
+#[cfg(not(unix))]
+fn engine_metadata_has_settled(_: &std::fs::Metadata) -> bool {
+    true
+}
+
+fn engine_object_is_current(path: &std::path::Path, expected: &str) -> bool {
+    let (version, digest) = expected
+        .split_once("|sha256:")
+        .map_or((expected, None), |(version, digest)| {
+            (version, Some(digest))
+        });
+    if engine_path_version(path).ok().as_deref() != Some(version) {
+        return false;
+    }
+    let Some(expected_digest) = digest else {
+        return true;
+    };
+    if let Some(cached) = cached_engine_digest(path, version) {
+        return hex::encode(cached) == expected_digest;
+    }
+    // Timestamp updates can be coalesced for a newly written object. Until
+    // a hash was taken outside that window, publication checks its pinned
+    // bytes as well as metadata. Installed, settled binaries keep the cheap
+    // metadata-only path.
+    let verify = || -> Option<bool> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).ok()?;
+        let before = file.metadata().ok()?;
+        let settled_before_read = engine_metadata_has_settled(&before);
+        if before.len() > ENGINE_OBJECT_MAX_BYTES {
+            return Some(false);
+        }
+        let mut hash = Sha256::new();
+        let mut buffer = [0_u8; 256 * 1024];
+        let mut count = 0_u64;
+        loop {
+            let read = file.read(&mut buffer).ok()?;
+            if read == 0 {
+                break;
+            }
+            count += read as u64;
+            if count > ENGINE_OBJECT_MAX_BYTES {
+                return Some(false);
+            }
+            hash.update(&buffer[..read]);
+        }
+        let after = file.metadata().ok()?;
+        if engine_path_version(path).ok().as_deref() != Some(version) {
+            return Some(false);
+        }
+        #[cfg(unix)]
+        if engine_object_version(&after).ok().as_deref() != Some(version) {
+            return Some(false);
+        }
+        let actual = hash.finalize().to_vec();
+        if hex::encode(&actual) != expected_digest {
+            return Some(false);
+        }
+        remember_engine_digest(path, version, &actual, settled_before_read);
+        Some(true)
+    };
+    verify().unwrap_or(false)
+}
+
 fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool {
-    objects.iter().all(|(path, expected)| {
-        engine_path_version(path)
-            .ok()
-            .is_some_and(|current| &current == expected)
-    })
+    objects
+        .iter()
+        .all(|(path, expected)| engine_object_is_current(path, expected))
 }
 
 /// Run the same fail-closed identity comparison away from runtime workers.
@@ -2828,10 +3142,7 @@ async fn engine_objects_are_current_batch_with_linux(
     let started = Instant::now();
     let current = tokio::task::spawn_blocking(move || {
         if let Some((path, expected)) = extra {
-            if !engine_path_version(&path)
-                .ok()
-                .is_some_and(|current| current == expected)
-            {
+            if !engine_object_is_current(&path, &expected) {
                 return false;
             }
         }
@@ -2984,8 +3295,11 @@ async fn fragment_index_engine_with_source(
     for path in dependency_paths {
         match hash_engine_object(&path).await {
             Ok((object_digest, version)) => {
+                objects.push((
+                    path,
+                    pinned_engine_object_version(&version, &hex::encode(&object_digest)),
+                ));
                 object_digests.push(object_digest);
-                objects.push((path, version));
             }
             Err(error) => {
                 #[cfg(target_os = "macos")]
@@ -3333,8 +3647,13 @@ pub(crate) async fn bounded_command_capture_cancellable(
             let status = status.map_err(|e| e.to_string())?;
             Ok(BoundedCommandOutcome {
                 status,
-                output: stdout
-                    .and_then(|stdout| stderr.map(|stderr| BoundedOutput { stdout, stderr })),
+                output: stdout.and_then(|stdout| {
+                    stderr.map(|stderr| BoundedOutput {
+                        stdout,
+                        stderr: crate::scratch_put::redact(&String::from_utf8_lossy(&stderr))
+                            .into_bytes(),
+                    })
+                }),
             })
         };
         tokio::pin!(collect);
@@ -3382,12 +3701,12 @@ async fn read_bounded_with_limit(
 /// Digests of engine objects keyed by path and the cheap object version
 /// (`engine_object_version`: device, inode, size, mtime and ctime). The same
 /// version identity already decides whether a hash raced a replacement, so a
-/// matching version proves the bytes are the ones hashed. A replaced or
-/// touched object has a new version and is hashed again. The key set is the
+/// settled version can reuse the hash. A newly changed file is rehashed until
+/// timestamp coalescing can no longer hide an immediate write. The key set is the
 /// resolved encoder and its loaded dependencies, so it stays small.
 /// Digest per engine object path, tagged with the object version it was taken at.
 type EngineObjectDigests =
-    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (String, Vec<u8>)>>;
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (String, Vec<u8>, bool)>>;
 static ENGINE_OBJECT_DIGESTS: std::sync::LazyLock<EngineObjectDigests> =
     std::sync::LazyLock::new(Default::default);
 
@@ -3396,15 +3715,18 @@ fn cached_engine_digest(path: &std::path::Path, version: &str) -> Option<Vec<u8>
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(path)
-        .filter(|(cached, _)| cached == version)
-        .map(|(_, digest)| digest.clone())
+        .filter(|(cached, _, settled)| *settled && cached == version)
+        .map(|(_, digest, _)| digest.clone())
 }
 
-fn remember_engine_digest(path: &std::path::Path, version: &str, digest: &[u8]) {
+fn remember_engine_digest(path: &std::path::Path, version: &str, digest: &[u8], settled: bool) {
     ENGINE_OBJECT_DIGESTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(path.to_owned(), (version.to_owned(), digest.to_vec()));
+        .insert(
+            path.to_owned(),
+            (version.to_owned(), digest.to_vec(), settled),
+        );
 }
 
 /// SHA-256 of one engine object plus its object version. Only the first
@@ -3440,6 +3762,7 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
     let version = engine_object_version(&metadata)?;
     #[cfg(windows)]
     let version = windows_engine_object_version(&source)?;
+    let settled_before_read = engine_metadata_has_settled(&metadata);
     if let Some(digest) = cached_engine_digest(path, &version) {
         return Ok((digest, version));
     }
@@ -3481,7 +3804,7 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
         ));
     }
     let digest = object.finalize().to_vec();
-    remember_engine_digest(path, &version, &digest);
+    remember_engine_digest(path, &version, &digest, settled_before_read);
     Ok((digest, version))
 }
 
@@ -4169,6 +4492,115 @@ pub async fn has_hdr10_passthrough_vaapi(
         .await
 }
 
+/// Does the VA-API render device decode HEVC Main10 into GPU surfaces?
+///
+/// The Dolby Vision renderer decodes its layers there when it can, and that
+/// decides the CPU it is debited (`dv_segment::RendererDecode`). The startup
+/// decoder inventory cannot answer it: it decodes an 8-bit clip and reads a
+/// `Reinit context` line FFmpeg's HEVC decoder never prints. Here a shipped
+/// Main10 clip is decoded with `-hwaccel_output_format vaapi` into
+/// `hwdownload`, which accepts only hardware frames, so success means the GPU
+/// decoded it.
+///
+/// A success is kept for the process. A failure is not: it may be a device
+/// still settling at boot, so the probe runs again on the next need after a
+/// backoff (30 s, doubling, at most an hour). Until proved, the answer is
+/// `false` and the renderer is debited its software shape. Warmed off the
+/// boot path at startup; the completed DV window stays the authority.
+pub async fn has_hevc_main10_vaapi_decode() -> bool {
+    let due = |proof: &Main10DecodeProof| {
+        !proof.proved
+            && proof
+                .retry_at
+                .is_none_or(|at| std::time::Instant::now() >= at)
+    };
+    {
+        let proof = HEVC_MAIN10_VAAPI_DECODE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if proof.proved || !due(&proof) {
+            return proof.proved;
+        }
+    }
+    let Ok(_probe) = HEVC_MAIN10_VAAPI_PROBE.try_lock() else {
+        return false;
+    };
+    {
+        let proof = HEVC_MAIN10_VAAPI_DECODE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !due(&proof) {
+            return proof.proved;
+        }
+    }
+    let proved = probe_hevc_main10_vaapi_decode().await;
+    let mut proof = HEVC_MAIN10_VAAPI_DECODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if proved {
+        proof.proved = true;
+        proof.retry_at = None;
+    } else {
+        proof.failures = proof.failures.saturating_add(1);
+        proof.retry_at = Some(std::time::Instant::now() + main10_probe_backoff(proof.failures));
+    }
+    proved
+}
+
+/// The wait before the `failures`th retry of a failed Main10 decode probe.
+fn main10_probe_backoff(failures: u32) -> Duration {
+    Duration::from_secs(30)
+        .saturating_mul(1 << failures.saturating_sub(1).min(7))
+        .min(Duration::from_secs(3600))
+}
+
+async fn probe_hevc_main10_vaapi_decode() -> bool {
+    let device = plurx_core::transcode::vaapi_device();
+    if !std::path::Path::new(&device).exists() {
+        return false;
+    }
+    let Ok(scratch) = tempfile::tempdir() else {
+        return false;
+    };
+    let clip = scratch.path().join("main10.mkv");
+    if tokio::fs::write(&clip, HEVC_MAIN10_PROBE_CLIP)
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let mut decode = tokio::process::Command::new(ffmpeg_bin());
+    decode
+        .args(["-hide_banner", "-loglevel", "error", "-hwaccel", "vaapi"])
+        .args([
+            "-hwaccel_device",
+            &device,
+            "-hwaccel_output_format",
+            "vaapi",
+            "-i",
+        ])
+        .arg(&clip)
+        .args([
+            "-vf",
+            "hwdownload,format=p010le",
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ])
+        .kill_on_drop(true);
+    tokio::time::timeout(
+        HEVC_MAIN10_PROBE_DEADLINE,
+        crate::process_control::status_job_owned(
+            &mut decode,
+            crate::process_control::ChildWork::background("HEVC Main10 VA-API decode probe"),
+        ),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok_and(|status| status.success()))
+}
+
 /// Can this node accept the software Dolby renderer's 10-bit frames and run
 /// the measured QSV Main10 encode graph?
 ///
@@ -4217,6 +4649,7 @@ async fn dovi_probe_output(
     file: &MediaFile,
     apply: bool,
     class: crate::process_control::ChildClass,
+    source: &std::fs::File,
 ) -> Result<Vec<String>, String> {
     let seek = file
         .duration_ms
@@ -4229,33 +4662,45 @@ async fn dovi_probe_output(
         .filters(Some(width), height, Some("dolby_vision"))
         .ok_or_else(|| "Dolby Vision renderer produced no filter graph".to_owned())?
         .replace("apply_dovi=1", &format!("apply_dovi={}", u8::from(apply)));
+    let input = crate::source_input::SourceInput::open_current_held(source, "dovi-pixel-probe")
+        .await?
+        .ok_or("Dolby Vision pixel probe has no original source read owner")?;
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     command
-        .kill_on_drop(true)
         .args(["-hide_banner", "-loglevel", "error"])
-        .args(["-ss", &format!("{seek:.3}"), "-i"])
-        .arg(&file.path)
+        .args(["-ss", &format!("{seek:.3}"), "-i", input.url()])
         .args(["-map", "0:v:0", "-frames:v", "3", "-an", "-vf"])
         .arg(filter)
         .args(["-f", "framemd5", "-"]);
-    let output = tokio::time::timeout(
-        Duration::from_secs(30),
-        crate::process_control::output_job_owned(
-            &mut command,
-            crate::process_control::ChildWork::new(class, "Dolby Vision pixel probe"),
-        ),
+    let child = BoundedDiagnosticChild::spawn_piped_output(
+        &mut command,
+        crate::process_control::ChildWork::new(class, "Dolby Vision pixel probe"),
     )
-    .await
-    .map_err(|_| "Dolby Vision pixel probe timed out".to_owned())?
-    .map_err(|error| format!("starting Dolby Vision pixel probe: {error}"))?;
-    if !output.status.success() {
+    .map_err(|error| format!("starting Dolby Vision pixel probe: {error}"))?
+    .with_source_input(Some(input));
+    let cancelled = plurx_core::process::bounded::cancellation()
+        .unwrap_or_default()
+        .child_token();
+    let output = child.output_bytes_cancellable(1024 * 1024, &cancelled);
+    tokio::pin!(output);
+    let (status, stdout, stderr) = tokio::select! {
+        result = &mut output => result.map_err(|error| error.to_string())?,
+        () = tokio::time::sleep(Duration::from_secs(30)) => {
+            cancelled.cancel();
+            // Expiry is not physical settlement: join the exact child and
+            // every mediated read before returning the probe outcome.
+            let _ = output.await;
+            return Err("Dolby Vision pixel probe timed out".into());
+        }
+    };
+    if !status.success() {
         return Err(format!(
             "Dolby Vision pixel probe exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            status,
+            stderr.trim()
         ));
     }
-    let frames: Vec<String> = String::from_utf8_lossy(&output.stdout)
+    let frames: Vec<String> = String::from_utf8_lossy(&stdout)
         .lines()
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .map(str::to_owned)
@@ -4276,8 +4721,12 @@ pub async fn dovi_reshape_changes_pixels(
     file: &MediaFile,
     class: crate::process_control::ChildClass,
 ) -> DoviPixelProof {
-    let enabled = dovi_probe_output(file, true, class).await;
-    let disabled = dovi_probe_output(file, false, class).await;
+    let source = match crate::fragment_index_cluster::open_source_fence(file, None).await {
+        Ok(source) => source,
+        Err(reason) => return DoviPixelProof::Inconclusive(reason),
+    };
+    let enabled = dovi_probe_output(file, true, class, &source.handle).await;
+    let disabled = dovi_probe_output(file, false, class, &source.handle).await;
     let proof = dovi_pixel_verdict(enabled, disabled);
     match &proof {
         DoviPixelProof::Proved => {}

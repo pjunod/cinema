@@ -14,6 +14,7 @@
     #[test]
     fn a_converting_copy_fingerprints_apart_from_the_copy_it_replaces() {
         let copy = |convert: bool| SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -34,6 +35,7 @@ quality_catalog: None,
                 aac: false,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: convert,
+                dual_layer_as_copied: false,
             },
             automatic: false,
             subtitle_burn: None,
@@ -59,6 +61,47 @@ quality_catalog: None,
             plain.intent_fingerprint("paul")
         );
         assert!(!plain.intent_fingerprint("paul").contains("p81"));
+
+        // A dual-layer source handed over as copied is different bytes from
+        // the base layer an unflagged copy narrows it to.
+        let mut dual_layer = copy(false);
+        if let SessionKind::Copy { dual_layer_as_copied, .. } = &mut dual_layer.kind {
+            *dual_layer_as_copied = true;
+        }
+        assert!(dual_layer.intent_fingerprint("paul").contains("c0d1+dl"));
+        assert_ne!(
+            plain.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }),
+            dual_layer.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 })
+        );
+        assert!(!plain.intent_fingerprint("paul").contains("+dl"));
+    }
+
+    /// `SessionKind` is `deny_unknown_fields` and crosses the cluster relay
+    /// and takeover: a copy without the dual-layer bit must serialise to
+    /// exactly the bytes an older binary wrote, and their bytes must parse.
+    #[test]
+    fn a_copy_without_the_dual_layer_bit_keeps_its_old_wire_form() {
+        let old = r#"{"kind":"copy","aac":false,"preserve_dolby_vision":true,"convert_dolby_vision":false}"#;
+        let parsed: SessionKind = serde_json::from_str(old).expect("an older binary's copy");
+        assert_eq!(
+            parsed,
+            SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: true,
+                convert_dolby_vision: false,
+                dual_layer_as_copied: false,
+            }
+        );
+        assert_eq!(serde_json::to_string(&parsed).expect("serialise"), old);
+        let dual = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: false,
+            dual_layer_as_copied: true,
+        };
+        let text = serde_json::to_string(&dual).expect("serialise");
+        assert!(text.contains(r#""dual_layer_as_copied":true"#));
+        assert_eq!(serde_json::from_str::<SessionKind>(&text).expect("round trip"), dual);
     }
 
     #[test]
@@ -84,7 +127,7 @@ quality_catalog: None,
             .find(|(key, _)| *key == "XDG_CACHE_HOME")
             .and_then(|(_, value)| value)
             .expect("XDG_CACHE_HOME");
-        assert_eq!(inherited, expected.as_os_str());
+        assert_eq!(inherited, expected.join("gpu-cache").as_os_str());
     }
 
     #[test]
@@ -2925,3 +2968,94 @@ quality_catalog: None,
             );
         }
     }
+
+#[tokio::test]
+async fn stale_offline_source_admission_yields_without_failing_the_durable_package() {
+    use plurx_core::domain::{NewOfflinePackage, OfflineCreateOutcome};
+    use plurx_core::store::SqliteStore;
+
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let user = store.create_user("paul", "hash", true).await.expect("user");
+    let file_id = seed_file(&store).await;
+    let mut file = store
+        .get_file(file_id)
+        .await
+        .expect("source row")
+        .expect("source");
+    file.hdr = Some("dolby_vision".into());
+    file.hdr_format = Some("Dolby Vision · Profile 5".into());
+    let (mgr, _work, _cache) = cached_manager(&store);
+    let mgr = mgr.with_dovi_reshape(true);
+    let package_id = "offline-deferred-source-proof";
+    let requested = NewOfflinePackage {
+        audio_recipe: None,
+        id: package_id.to_owned(),
+        request_id: "offline-deferred-source-proof-request".to_owned(),
+        user_id: user.id,
+        file_id,
+        node_id: NODE.to_owned(),
+        source_path: file.path.to_string_lossy().into_owned(),
+        source_size: file.size,
+        source_mtime: file.mtime,
+        effective_rate_control: "vbr".to_owned(),
+        target_height: 720,
+        output_width: Some(1280),
+        output_height: Some(720),
+        audio_index: None,
+        audio_offset_ms: 0,
+        subtitle_index: None,
+        subtitle_language: None,
+        subtitle_mode: "none".to_owned(),
+        estimated_bytes: 1_000_000,
+        reserved_bytes: 1_100_000,
+        expires_at: i64::MAX,
+    };
+    assert!(matches!(
+        store
+            .create_offline_package(&requested, 10, 10_000_000, 20_000_000)
+            .await
+            .expect("create package"),
+        OfflineCreateOutcome::Created(_)
+    ));
+    let claimed = store
+        .claim_next_offline_package(NODE)
+        .await
+        .expect("claim")
+        .expect("queued package");
+
+    let mut stale = claimed.clone();
+    stale.claim_generation += 1;
+    let spec = OfflineSpec {
+        audio_delivery: None,
+        target_height: 720,
+        audio_index: None,
+        subtitle: OfflineSubtitle::None,
+        effective_rate_control: EffectiveRateControl::Vbr,
+    };
+    let outcome = mgr
+        .ensure_offline(
+            &stale,
+            &file,
+            &spec,
+            Instant::now() + Duration::from_secs(5),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("deferred pass is resumable");
+    assert!(matches!(
+        outcome,
+        OfflineProduceOutcome::Yielded("source_proof_pending")
+    ));
+    let current = store
+        .offline_package_for_user(&claimed.id, user.id)
+        .await
+        .expect("queue state")
+        .expect("package retained");
+    assert_eq!(current.state, claimed.state);
+    assert_eq!(current.claim_generation, claimed.claim_generation);
+    assert_eq!(
+        mgr.dovi_proofs
+            .verdict(&TranscodeManager::dovi_proof_key(&file)),
+        None
+    );
+}

@@ -112,7 +112,7 @@ function settingsPanel(tab,d){
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="sharing")      return sharingManagementPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
-  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness)+cinemaRemoteLocalCards();
+  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness,httpsSettingsMount(d.https))+cinemaRemoteLocalCards();
   return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
 }
 // The section header: name, one line of summary, the section's bulk actions.
@@ -666,7 +666,7 @@ function playbackPanel(settings,readiness){
   // Chapter thumbnails and both decoder controls graduated from Developer on
   // 2026-09-28; quality switching, this browser's second player and the PGS
   // overlay on 2026-10-10 (Paul's Developer lifecycle). Each keeps its own Save.
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${subtitleTranslationCard()}${hdrDisplayPeakCard()}${local}${chapterThumbnailsCard(settings,readiness)}${preparedQualityCard(settings,readiness)}${preparedHandoffBrowserCard()}${pgsOverlayCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${subtitleTranslationCard()}${openInCard()}${hdrDisplayPeakCard()}${local}${chapterThumbnailsCard(settings,readiness)}${preparedQualityCard(settings,readiness)}${preparedHandoffBrowserCard()}${pgsOverlayCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
 }
 
 function searchSettingsCard(readiness){

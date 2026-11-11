@@ -17,6 +17,9 @@ use crate::domain::{
 };
 use crate::error::ProbeError;
 
+mod input;
+pub use input::{probe_input_provider, with_probe_inputs, ProbeInput, ProbeInputProvider};
+
 fn ffprobe_bin() -> String {
     crate::process::media_tool_bin("ffprobe", std::env::var("PLURX_FFPROBE").ok())
 }
@@ -294,11 +297,21 @@ async fn probe_with_threads(
     path: &Path,
     threads: Option<usize>,
 ) -> Result<ProbeResult, ProbeError> {
+    let input = input::prepare(path).await?;
+    let result = probe_with_input(path, input.location(), threads).await;
+    input.finish(result).await
+}
+
+async fn probe_with_input(
+    path: &Path,
+    input_path: &Path,
+    threads: Option<usize>,
+) -> Result<ProbeResult, ProbeError> {
     // `-v error` rather than `-v quiet`: on success stderr stays empty, and on
     // failure it holds the one thing worth reporting — *why* ffprobe refused.
     // "Permission denied" and "Invalid data found" are opposite problems with
     // opposite fixes, and an exit code alone tells them apart for nobody.
-    let mut invocation = probe_invocation(path);
+    let mut invocation = probe_invocation(input_path);
     if let Some(threads) = threads {
         invocation
             .args
@@ -343,6 +356,15 @@ async fn probe_with_threads(
     };
     let mut json: Value = serde_json::from_slice(&stdout)
         .map_err(|e| ProbeError::Parse(format!("ffprobe json: {e}")))?;
+    // The bridge is an input capability, not a catalog filename.
+    if input_path != path {
+        if let Some(format) = json.get_mut("format").and_then(Value::as_object_mut) {
+            format.insert(
+                "filename".into(),
+                Value::String(path.to_string_lossy().into_owned()),
+            );
+        }
+    }
     // Stamped before the document is retained, so a later comparison against a
     // fresh probe can tell an unchanged source from a changed reporter.
     if let Some(reporter_bin) = invocation.reporter {
@@ -367,7 +389,8 @@ async fn probe_with_threads(
         // or SDR for an unsignalled transfer): the scan's job is the stream
         // document, and a later probe document is what earns the file another
         // look.
-        if let Ok(frame) = probe_first_frame(path, threads, "library scan first-frame probe").await
+        if let Ok(frame) =
+            probe_first_frame(input_path, threads, "library scan first-frame probe").await
         {
             if transfer_unsignalled {
                 apply_frame_dynamic_range(&mut result, &json, &frame);
@@ -407,7 +430,7 @@ pub async fn first_frame_luminance(
     path: &Path,
     purpose: &'static str,
 ) -> Result<Option<FrameLuminance>, ProbeError> {
-    let document = probe_first_frame(path, Some(1), purpose).await?;
+    let document = first_frame_document(path, purpose).await?;
     Ok(frame_luminance_from(&document))
 }
 
@@ -461,7 +484,9 @@ pub fn classify_frame_dynamic_range(probe_json: &str, frame: &Value) -> Option<F
 /// ffprobe document for [`classify_frame_dynamic_range`]. `Err` means the
 /// read did not happen or ffprobe refused the file.
 pub async fn first_frame_document(path: &Path, purpose: &'static str) -> Result<Value, ProbeError> {
-    probe_first_frame(path, Some(1), purpose).await
+    let input = input::prepare(path).await?;
+    let result = probe_first_frame(input.location(), Some(1), purpose).await;
+    input.finish(result).await
 }
 
 fn frame_luminance_from(document: &Value) -> Option<FrameLuminance> {

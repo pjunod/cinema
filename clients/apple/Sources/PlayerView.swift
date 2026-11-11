@@ -372,6 +372,7 @@ enum PlayerNaturalEndAction: Equatable {
 @MainActor
 final class PlayerLifecycleCoordinator: ObservableObject {
     @Published private(set) var isTearingDown = false
+    private var isBackgrounded = false
 
     private var didTeardown = false
     private var didFinish = false
@@ -386,13 +387,36 @@ final class PlayerLifecycleCoordinator: ObservableObject {
 
     func finish(
         teardown cleanup: () -> Void,
+        backgroundCompletion: (@MainActor () -> Void)? = nil,
         completion: @escaping @MainActor () -> Void
     ) {
-        enqueueCompletion(completion)
+        enqueueCompletion {
+            if self.isBackgrounded, let backgroundCompletion {
+                backgroundCompletion()
+            } else {
+                completion()
+            }
+        }
         guard !didFinish else { return }
         didFinish = true
         isTearingDown = true
         teardown(cleanup)
+    }
+
+    /// tvOS suspension can outlive the attached stream's lease. Close while
+    /// the app still owns its player so wake returns to the title with a saved
+    /// position, rather than exposing a failed item. Inactive is also used for
+    /// temporary system UI and must keep the player; iOS keeps its PiP owner.
+    func sceneChanged(
+        to phase: ScenePhase,
+        teardown cleanup: () -> Void,
+        completion: @escaping @MainActor () -> Void
+    ) {
+        #if os(tvOS)
+        isBackgrounded = phase == .background
+        guard isBackgrounded, !didFinish else { return }
+        finish(teardown: cleanup, completion: completion)
+        #endif
     }
 
     /// Cleanup and the tearing-down state are write-once; completion ownership
@@ -683,6 +707,7 @@ struct PlayerView: View {
     @State private var remoteTrackMenu: CinemaRemoteTrackKind?
     @State private var networkPreview = RemotePreviewOwnership()
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     let itemId: Int
     let fileId: Int
@@ -721,6 +746,12 @@ struct PlayerView: View {
     @State private var scrubMs = 0.0
     @State private var pendingMs: Int?
     @State private var controlsVisible = true
+    @State private var showingCaptionTools = false
+    @State private var pendingCaptionTools = false
+    @State private var confirmingCaptionPiP = false
+    @State private var confirmingLocalCaptionOutput = false
+    @State private var pendingCaptionTask: CaptionTask?
+    @State private var pendingCaptionAsset: CaptionAsset?
     @State private var autoHideGeneration = 0
     #if os(iOS)
     @State private var activeOptionMenu: PlayerOptionMenu?
@@ -728,6 +759,7 @@ struct PlayerView: View {
     #if os(tvOS)
     @FocusState private var focusedControl: PlayerControl?
     @State private var lastFocusedControl: PlayerControl = .playPause
+    @StateObject private var timelineHold = PlayerTimelineHoldRepeater()
     @State private var repeatedInput: PlayerContractInput?
     @State private var repeatCount = 0
     @State private var lastMoveAt: TimeInterval = 0
@@ -746,6 +778,8 @@ struct PlayerView: View {
                 surfaceChanged: { surface, attached in controller.attachPlaybackSurface(surface, attached: attached) },
                 pictureInPicture: pictureInPicture,
                 pgsOverlay: controller.pgsOverlayWindow,
+                captionWindow: controller.progressiveCaptions.window,
+                allowsAutomaticPictureInPicture: !controller.progressiveCaptionOutputSelected,
                 allowsPictureInPicture: PlayerSurface.shouldAllowPictureInPicture(
                     isTearingDown: lifecycle.isTearingDown,
                     pgsOverlayIsActive: controller.pgsOverlayIsActive
@@ -886,7 +920,9 @@ struct PlayerView: View {
         .remoteScope(remoteScope)
         .background(RemoteOwnedPresentationProbe(navigation: remoteNavigation, token: remoteOwner, scope: remoteScope))
         .remoteRestricted(showStats && statsMode != .mini)
-        .remoteChoicePresentation(isPresented: Binding(get: { remoteTrackMenu != nil }, set: { if !$0 { remoteTrackMenu = nil } }), scope: remoteScope + ":tracks", backdrop: .video) {
+        .remoteChoicePresentation(isPresented: Binding(get: { remoteTrackMenu != nil }, set: { if !$0 { remoteTrackMenu = nil } }), scope: remoteScope + ":tracks", backdrop: .video, onDismiss: {
+            if pendingCaptionTools { pendingCaptionTools = false; showingCaptionTools = true }
+        }) {
             if let kind = remoteTrackMenu {
                 RemoteChoicePanel(scope: remoteScope + ":tracks", title: kind.rawValue.capitalized, choices: remoteChoices(kind))
             }
@@ -895,7 +931,8 @@ struct PlayerView: View {
         .playerRemoteAdapter(
             .root,
             state: inputState,
-            apply: applyPlayerInputOutcome
+            apply: applyPlayerInputOutcome,
+            timelineHold: timelineHold
         )
         #endif
         .task {
@@ -936,6 +973,13 @@ struct PlayerView: View {
             try? await Task.sleep(nanoseconds: 100_000_000)
             focusedControl = .playPause
             #endif
+        }
+        .onChange(of: scenePhase) { _, phase in
+            lifecycle.sceneChanged(
+                to: phase,
+                teardown: { teardownPlayback() },
+                completion: { dismiss() }
+            )
         }
         .onDisappear {
             remotePlayback.detach(remoteOwner)
@@ -990,6 +1034,27 @@ struct PlayerView: View {
                       tearingDown: lifecycle.isTearingDown
                   ) else { return }
             hideControls()
+        }
+        .sheet(isPresented: $showingCaptionTools) {
+            NavigationStack {
+                ProgressiveCaptionControls(session: controller.progressiveCaptions,
+                    request: { requestLocalCaptions(task: $0) }, select: { requestLocalCaptions(asset: $0) },
+                    textTranslation: controller.subtitleTextTranslation, useTextCaption: { controller.useTranslatedTextCaption($0) })
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { showingCaptionTools = false } } }
+                    .confirmationDialog("Return playback to this device for progressive captions?", isPresented: $confirmingLocalCaptionOutput, titleVisibility: .visible) {
+                        Button("Use captions on this device") {
+                            confirmingLocalCaptionOutput = false
+                            controller.useLocalCaptionOutput()
+                            if pictureInPicture.isActive { pictureInPicture.toggle() }
+                            applyPendingCaptionOutput()
+                        }
+                        Button("Keep current output", role: .cancel) { pendingCaptionTask = nil; pendingCaptionAsset = nil }
+                    } message: { Text("Progressive text is drawn locally. Original captions remain available for system playback outputs.") }
+            }
+        }
+        .onChange(of: pictureInPicture.isActive) { _, active in if !active { applyPendingCaptionOutput() } }
+        .onReceive(controller.player.publisher(for: \.isExternalPlaybackActive)) { active in
+            if !active { applyPendingCaptionOutput() }
         }
         .onChange(of: remoteTrackMenu) { _, _ in remoteNavigation.contextChanged() }
         .onChange(of: fileId) { _, _ in remoteNavigation.contextChanged(); attachRemotePlayback() }
@@ -1230,6 +1295,8 @@ struct PlayerView: View {
     ) {
         lifecycle.finish(teardown: {
             teardownPlayback(deactivateAudioSession: !continuingPlayback)
+        }, backgroundCompletion: {
+            dismiss()
         }) {
             if let completion {
                 completion()
@@ -1379,6 +1446,7 @@ struct PlayerView: View {
     ) -> Bool {
         #if os(tvOS)
         if input != .left && input != .right {
+            timelineHold.cancel()
             repeatedInput = nil
             repeatCount = 0
         }
@@ -2359,6 +2427,19 @@ struct PlayerView: View {
     }
     #endif
 
+    private func requestLocalCaptions(task: CaptionTask? = nil, asset: CaptionAsset? = nil) {
+        pendingCaptionTask = task; pendingCaptionAsset = asset
+        if pictureInPicture.isActive || controller.player.isExternalPlaybackActive {
+            confirmingLocalCaptionOutput = true
+        } else { applyPendingCaptionOutput() }
+    }
+    private func applyPendingCaptionOutput() {
+        guard !pictureInPicture.isActive, !controller.player.isExternalPlaybackActive,
+              !confirmingLocalCaptionOutput else { return }
+        if let task = pendingCaptionTask { pendingCaptionTask = nil; controller.selectProgressiveCaptions(task) }
+        if let asset = pendingCaptionAsset { pendingCaptionAsset = nil; controller.selectProgressiveAsset(asset) }
+    }
+
     private var transportControlGroup: some View {
         HStack(spacing: 8) {
             skipBack30Button
@@ -2372,7 +2453,7 @@ struct PlayerView: View {
     private var playbackOptionGroup: some View {
         HStack(spacing: 8) {
             if controller.audioTracks.count > 1 { audioMenu }
-            if !controller.subtitles.isEmpty { subtitleMenu }
+            subtitleMenu
             if !controller.qualityRungs.isEmpty { qualityMenu }
             settingsMenu
             if let returnToChannel { Button("Return to channel", action: returnToChannel) }
@@ -2499,6 +2580,10 @@ struct PlayerView: View {
     private var pictureInPictureButton: some View {
         let controlState = pictureInPicture.controlState
         return Button {
+            if controller.progressiveCaptionOutputSelected && !pictureInPicture.isActive {
+                confirmingCaptionPiP = true
+                return
+            }
             guard controller.allowsPictureInPictureCommand() else { return }
             pictureInPicture.toggle()
             revealControls()
@@ -2507,6 +2592,15 @@ struct PlayerView: View {
                 .foregroundStyle(pictureInPicture.isActive ? Palette.accent : .white)
         }
         .disabled(!controlState.isButtonEnabled)
+        .confirmationDialog("Progressive captions are displayed on this device.", isPresented: $confirmingCaptionPiP, titleVisibility: .visible) {
+            Button("Turn captions Off and start Picture in Picture") {
+                controller.selectSubtitle(nil)
+                pictureInPicture.toggle()
+            }
+            Button("Keep captions on this device", role: .cancel) { }
+        } message: {
+            Text("Published captions stay available. You can also choose an original caption track before starting Picture in Picture.")
+        }
         .accessibilityLabel(pictureInPicture.isActive
                             ? "Stop Picture in Picture"
                             : "Start Picture in Picture")
@@ -2639,7 +2733,8 @@ struct PlayerView: View {
         .playerRemoteAdapter(
             .timeline,
             state: inputState,
-            apply: applyPlayerInputOutcome
+            apply: applyPlayerInputOutcome,
+            timelineHold: timelineHold
         )
         .focused($focusedControl, equals: .progress)
         .remoteControl("player:timeline", label: "Playback position") {
@@ -2659,9 +2754,15 @@ struct PlayerView: View {
                 RemoteChoice(id: String(track.index), label: audioLabel(track), selected: controller.selectedAudio == track.index) { controller.selectAudio(track.index) }
             }
         case .subtitles:
-            return [RemoteChoice(id: "off", label: "Off", selected: controller.selectedSubtitle == nil) { controller.selectSubtitle(nil) }] + controller.subtitles.map { track in
+            return [RemoteChoice(id: "off", label: "Off", selected: controller.captionIntent == .off) { controller.selectSubtitle(nil) }] + controller.subtitles.map { track in
                 RemoteChoice(id: String(track.index), label: Self.subtitleLabel(track), selected: controller.selectedSubtitle == track.index) { controller.selectSubtitle(track.index) }
-            }
+            } + [RemoteChoice(id: "progressive", label: "Caption generation and translation", selected: controller.progressiveCaptions.selected) {
+                #if os(tvOS)
+                pendingCaptionTools = true
+                #else
+                showingCaptionTools = true
+                #endif
+            }]
         case .quality:
             return [RemoteChoice(id: "auto", label: "Auto", selected: controller.selectedHeight == nil && !controller.selectedQualityIsOriginal) { controller.selectQuality(nil) },
                     RemoteChoice(id: "original", label: "Original", selected: controller.selectedQualityIsOriginal) { controller.selectOriginalQuality() }] + controller.qualityRungs.map { rung in
@@ -2791,6 +2892,7 @@ struct PlayerView: View {
         .accessibilityLabel("Subtitles")
         .popover(isPresented: optionMenuBinding(.subtitles), arrowEdge: .bottom) {
             optionMenuPanel("Subtitles") { subtitleChoices }
+                .onDisappear { if pendingCaptionTools { pendingCaptionTools = false; showingCaptionTools = true } }
         }
         #else
         Button { openRemoteTracks(.subtitles) } label: {
@@ -2922,7 +3024,7 @@ struct PlayerView: View {
         } label: {
             Label(
                 "Off",
-                systemImage: controller.selectedSubtitle == nil
+                systemImage: controller.captionIntent == .off
                     ? "checkmark"
                     : "captions.bubble"
             )
@@ -2942,6 +3044,14 @@ struct PlayerView: View {
                         : "captions.bubble"
                 )
             }
+        }
+        Button("Caption generation and translation") {
+            #if os(iOS)
+            pendingCaptionTools = true
+            dismissOptionMenu()
+            #else
+            showingCaptionTools = true
+            #endif
         }
     }
 
@@ -3821,6 +3931,7 @@ struct SharedPlayerSessionView: View {
     @State private var sharedChromeVisible = true
     @State private var sharedMenuPresented = false
     @State private var sharedMorePresented = false
+    @State private var sharedCaptionsPresented = false
     @State private var lastSharedAction = "play"
     @State private var sharedChromeGeneration = 0
     @StateObject private var sharedPictureInPicture = PictureInPictureController()
@@ -3906,7 +4017,7 @@ struct SharedPlayerSessionView: View {
         ZStack(alignment: .bottom) {
             Color.black.ignoresSafeArea()
             PlayerSurface(player: controller.player, pictureInPicture: sharedPictureInPicture,
-                          pgsOverlay: nil, allowsPictureInPicture: false).ignoresSafeArea()
+                          pgsOverlay: nil, captionWindow: controller.captions.window, allowsPictureInPicture: false).ignoresSafeArea()
             #if os(tvOS)
             if !sharedChromeVisible && controller.failure == nil {
                 PlayerRevealSurface(state: sharedInputState, apply: applySharedInput, identifier: "shared-player-reveal")
@@ -3934,6 +4045,11 @@ struct SharedPlayerSessionView: View {
                     if findingNext { ProgressView("Finding the next episode") }
                     if controller.playback != nil, let current = controller.plan {
                         SharedPlayerControls(controller: controller, plan: current, showingSharedMore: $sharedMorePresented, onMenuChange: { sharedMenuPresented = $0; sharedChromeGeneration += 1 }, onInteraction: { sharedChromeGeneration += 1 }, restoreFocus: lastSharedAction, onFocus: { lastSharedAction = $0 })
+                    }
+                    if controller.playback != nil {
+                        Button("Published captions") { navigation.performPhysicalAction { sharedCaptionsPresented=true } }
+                            .accessibilityIdentifier("shared-published-captions")
+                            .remoteControl("shared:published-captions",label:"Published captions") { sharedCaptionsPresented=true }
                     }
                     Button("Close") { navigation.performPhysicalAction { controller.beginStop(); dismiss() } }
                         #if os(tvOS)
@@ -3967,6 +4083,7 @@ struct SharedPlayerSessionView: View {
         #endif
         .remoteScope(remoteScope)
         .background(RemoteOwnedPresentationProbe(navigation: navigation, token: remoteOwner, scope: remoteScope))
+        .sheet(isPresented:$sharedCaptionsPresented) { SharedCaptionReadControls(controller:controller,session:controller.captions) }
         .onAppear { attachRemoteOwner() }
         .task {
             controller.onNaturalEnd = { ended = true }
@@ -4070,11 +4187,11 @@ struct SharedPlayerControls: View {
             if !natives.isEmpty {
                 Menu("Subtitles") {
                     Button { navigation.performPhysicalAction { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(nil))) } } } label: {
-                        mark("Off", plan.rawSubtitleIndex == nil)
+                        mark("Off", plan.rawSubtitleIndex == nil && controller.captions.selected == nil)
                     }
                     ForEach(natives) { track in
                         Button { navigation.performPhysicalAction { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(track.index))) } } } label: {
-                            mark(Self.label(track.title, track.language, fallback: "Subtitle \(track.index)"), plan.rawSubtitleIndex == track.index)
+                            mark(Self.label(track.title, track.language, fallback: "Subtitle \(track.index)"), plan.rawSubtitleIndex == track.index && controller.captions.selected == nil)
                         }
                     }
                 }.accessibilityIdentifier("shared-subtitles")
@@ -4164,13 +4281,13 @@ struct SharedPlayerControls: View {
     }
     private func openSubtitleChoices() {
         let natives = (plan.decision.presentation.subtitles ?? []).filter(\.isNativeHLS)
-        let off = RemoteChoice(id: "off", label: "Off", selected: plan.rawSubtitleIndex == nil) {
+        let off = RemoteChoice(id: "off", label: "Off", selected: plan.rawSubtitleIndex == nil && controller.captions.selected == nil) {
             Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(nil))) }
         }
         openChoices("Subtitles", choices: [off] + natives.map { track in
             RemoteChoice(id: String(track.index),
                          label: Self.label(track.title, track.language, fallback: "Subtitle \(track.index)"),
-                         selected: plan.rawSubtitleIndex == track.index) {
+                         selected: plan.rawSubtitleIndex == track.index && controller.captions.selected == nil) {
                 Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(track.index))) }
             }
         })

@@ -633,6 +633,7 @@
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         // 2160 is what is being *delivered*; the source row's own height is
         // deliberately not required. `candidate_request` turns a copy into a

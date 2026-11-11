@@ -203,8 +203,23 @@ async function requestQualityChange(p,reason,fallback,autoMove,standingSelection
     const candidate=continuousQualityCandidate(p,selection);
     change.continuousOwner=p.continuousQuality;
     change.continuousAttachment=p.mediaAttachment;
-    const outcome=await p.continuousQuality.choose(candidate.id,()=>p.directedChange===change
-      &&(p.controlIntentGeneration||0)===change.intentGeneration);
+    change.discoveryAbort=new AbortController();
+    const discoveryDeadline=change.tappedAt+PREPARED_OFFER_BOUND_MS;
+    const discoveryTimer=setTimeout(()=>change.discoveryAbort.abort(),Math.max(0,discoveryDeadline-performance.now()));
+    let outcome;
+    try{
+      const pendingCompanion=p.continuousQuality.family.version===2
+        &&!p.continuousQuality.family.video.some(row=>row.candidate_id===candidate.id);
+      const wireSelection=pendingCompanion?playbackControlSelection(p,true):null;
+      const accepted=!pendingCompanion||(continuousQualityCandidate(p,wireSelection)?.id===candidate.id
+        &&await awaitContinuousSelectionAcceptance(p,change,wireSelection,discoveryDeadline));
+      outcome=accepted?await p.continuousQuality.choose(candidate.id,()=>p.directedChange===change
+        &&(p.controlIntentGeneration||0)===change.intentGeneration,
+        {signal:change.discoveryAbort.signal,deadlineMs:discoveryDeadline}):
+        p.directedChange===change?'retained_current':'superseded';
+    }finally{
+      clearTimeout(discoveryTimer);change.discoveryAbort.abort();change.discoveryAbort=null;
+    }
     if(p.directedChange!==change)return "superseded";
     if(outcome==="continuous"){
       change.outcome=outcome;change.outcomeAt=performance.now();
@@ -242,6 +257,32 @@ async function requestQualityChange(p,reason,fallback,autoMove,standingSelection
   if(outcome==="superseded"){ settleDirectedChange(p,change,"superseded"); return outcome; }
   fallBackDirectedChange(p,change,outcome);
   return outcome;
+}
+// A pending companion cannot discover its init while the primary source is
+// refilling. The accepted parent sequence first names the exact candidate;
+// only then may the existing family/Prepare path spend this same deadline.
+function awaitContinuousSelectionAcceptance(p,change,selection,deadlineMs){
+  const reporter=p?.controlReporter,signal=change?.discoveryAbort?.signal;
+  if(!reporter||reporter.stopped||!signal||signal.aborted||performance.now()>=deadlineMs)return Promise.resolve(false);
+  const minSequence=(Number(reporter.sequence)||0)+1;
+  const generation=reporter.bootstrap?.generation,controlEpoch=reporter.bootstrap?.control_epoch;
+  const trigger=notifyPlaybackControl();
+  if(!trigger)return Promise.resolve(false);
+  if(!p.controlWaiters)p.controlWaiters=[];
+  const waiters=p.controlWaiters;
+  return new Promise(resolve=>{
+    const waiter={kind:'continuous_selection',minSequence,generation,controlEpoch,
+      selection,intentGeneration:change.intentGeneration,change,settled:false,
+      settle:accepted=>{
+        if(waiter.settled)return;
+        waiter.settled=true;signal.removeEventListener('abort',abort);
+        const at=waiters.indexOf(waiter);if(at!==-1)waiters.splice(at,1);
+        resolve(accepted===true);
+      },extend:()=>{}};
+    const abort=()=>waiter.settle(false);
+    signal.addEventListener('abort',abort,{once:true});waiters.push(waiter);
+    if(reporter.stopped||signal.aborted)waiter.settle(false);
+  });
 }
 // The one reopen.
 //
@@ -439,6 +480,7 @@ function settleDirectedChange(p,change,why,detail){
   const owned=change||(p&&p.directedChange);
   if(!p||!owned||owned.settled||p.directedChange!==owned) return false;
   owned.settled=true;
+  owned.discoveryAbort?.abort();
   if(owned.commitTimer!=null){ clearTimeout(owned.commitTimer); owned.commitTimer=null; }
   owned.outcome=why;
   owned.outcomeAt=performance.now();
@@ -515,6 +557,14 @@ function settlePlaybackControlWaiters(p,request,response,error){
     // An offer waiter is settled by rule, never by arrival: the exchange that
     // answers a directed change is rarely the one that carried it.
     if(waiter.kind==="offer"){ settlePreparedOfferWaiter(p,waiter,mine,response,error); continue; }
+    if(waiter.kind==='continuous_selection'){
+      if(p.directedChange!==waiter.change||(p.controlIntentGeneration||0)!==waiter.intentGeneration){
+        waiter.settle(false);continue;
+      }
+      if(mine&&JSON.stringify(request.selection)===JSON.stringify(waiter.selection)
+        &&response?.accepted_sequence===request.sequence&&!error)waiter.settle(true);
+      continue;
+    }
     if(mine) waiter.settle(action); else waiter.extend();
   }
   // A stop that follows its own last exchange leaves a reporter that will never
@@ -713,7 +763,7 @@ function startPlaybackControl(v,p,bootstrap){
     // A prepared commit swaps the DOM video while retaining this reporter to
     // deliver the acknowledgement on the predecessor's control session.
     // Sample the visible successor after that swap, never the retired node.
-    const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p)
+    const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p,true)
       ?PlurxPlaybackControl.capture(playbackControlSnapshot(document.getElementById("video"),p),
         p.controlIntentGeneration||0,owner):null;
     // A Shared session also names B's successor transaction; dual-player
@@ -726,7 +776,7 @@ function startPlaybackControl(v,p,bootstrap){
         p.controlReporter===reporter&&p.mediaAttachment===attachment?candidateLinkReceipt(p,p.fileId):null),
       onExchange:({request,response,error,capture:captured})=>{
         if(continueStoppingPlaybackControl(p,reporter,v,request,response,captured)) return;
-        if(!playbackOwnsAttachedMedia(p)||p.controlReporter!==reporter
+        if(!playbackOwnsAttachedMedia(p,true)||p.controlReporter!==reporter
           ||p.mediaAttachment!==attachment||captured.owner.lifecycleId!==owner.lifecycleId
           ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
         if(captured.intentGeneration===(p.controlIntentGeneration||0)){
@@ -840,7 +890,7 @@ function startPlaybackControl(v,p,bootstrap){
 async function openSession(fileId, opts, signal=null, requestId=null, restartSessionId=null){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
-    {playback_id:PLAYBACK_ID,request_id:requestId||newRequestId()},contract.session);
+    {playback_id:PLAYBACK_ID,request_id:requestId||newRequestId(),source_telemetry:"film-v1"},contract.session);
   // The capabilities the plan was derived from, on the request that acts on
   // it. Without this the server has only the body's echo of its own decision
   // to go on, and an echo cannot carry `convert_dolby_vision` — no client has
@@ -872,6 +922,8 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
   }
   const fileContext=playbackFileContext(fileId);
   if(fileContext.source_ref.kind!=="local"){
+    // The same start clock a Local create sends; B carries it to the Source.
+    const startupRemainingMs=typeof preparationRemainingMs==='function'?preparationRemainingMs(signal):null;
     // Shared initial Start never inherits a Local control/recovery envelope.
     // Actual supplied unsupported fields are refused by the typed adapter.
     if(opts&&opts.presentation==="direct"){
@@ -879,7 +931,7 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
       // subtitle group exists for them, and the Source refuses a subtitle ask.
       body.presentation="direct";
       for(const field of ["block_budget_secs","transport","height","copy","native_subtitles","subtitle"]) delete body[field];
-      return SHARED_DECISION.start(fileContext,body,signal);
+      return SHARED_DECISION.start(fileContext,body,signal,startupRemainingMs);
     }
     const player=typeof PLAYER!=="undefined"?PLAYER:null;
     const natives=(player&&player.subs||[]).filter(sub=>sub.native===true);
@@ -887,7 +939,7 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
     const hevcCopy=!!body.copy&&["hevc","h265","hevc10"].includes(String(player&&player.source&&player.source.video_codec||"").toLowerCase());
     const transport=typeof plannedHlsTransport==="function"?plannedHlsTransport(hevcCopy):null;if(transport)body.transport=transport;
     if(body.height==null&&!Object.hasOwn(opts||{},"height"))delete body.height;
-    return SHARED_DECISION.start(fileContext,body,signal);
+    return SHARED_DECISION.start(fileContext,body,signal,startupRemainingMs);
   }
   // HLS sessions carry native WebVTT renditions whenever this server says a
   // track can become one. Publishing the group up front lets a later subtitle
@@ -960,7 +1012,11 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
     ?await openContinuousQualitySession(playbackFileContext(fileId).source_ref.file_id,body,player,signal,restartSessionId):null;
   if(continuous) return continuous;
   const linkReceipt=typeof candidateLinkReceipt==='function'?candidateLinkReceipt(player,fileId):null;
-  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal,linkReceipt});
+  // Every attempt, the first and each retry of the ladder, tells the server
+  // what this preparation still has, so the server answers inside it rather
+  // than on a 10 s guess.
+  const startupRemainingMs=typeof preparationRemainingMs==='function'?preparationRemainingMs(signal):null;
+  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal,linkReceipt,startupRemainingMs});
 }
 // A cancellable wait. The newer intent's abort is the same signal the create
 // itself is carrying, so a retry sleeping between attempts is cancelled by the
@@ -1142,7 +1198,7 @@ function attachSession(v, t, info, wantSec){
   stopPlaybackControl(t);
   t.controlRenderOverride=null;
   t.controlObservationOverride=null;
-  t.offset=info.start_seconds||0;
+  t.offset=Number.isSafeInteger(info.media_origin_ms)?info.media_origin_ms/1000:(Number.isFinite(info.start_seconds)?info.start_seconds:0);
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
   if(t.fileContext&&playbackFileContext(t.fileContext).source_ref.kind!=="local"){

@@ -13,6 +13,8 @@ pub(super) struct SourceRenditionOwners {
 }
 #[derive(Default)]
 struct SourceOwnersState {
+    telemetry_capable: bool,
+    source_observer: Option<(u64, crate::source_custody::SourceObserver)>,
     owners: Vec<Arc<SourceRenditionOwner>>,
     current: Option<ProducerRegistration>,
     pending_dispatches: usize,
@@ -49,6 +51,50 @@ impl SourceProducerAssociationsSettled {
 }
 
 impl SourceRenditionOwners {
+    pub(super) fn has_source_telemetry(&self) -> bool {
+        self.state
+            .lock()
+            .expect("Source rendition owners")
+            .telemetry_capable
+    }
+    pub(super) async fn declare_source_telemetry(&self) -> Result<(), String> {
+        let observer = {
+            let mut state = self.state.lock().expect("Source rendition owners");
+            state.telemetry_capable = true;
+            state
+                .source_observer
+                .as_ref()
+                .map(|(_, observer)| observer.clone())
+        };
+        if let Some(observer) = observer {
+            observer.declare_rolling_policy().await?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn set_source_observer(
+        &self,
+        epoch: u64,
+        observer: crate::source_custody::SourceObserver,
+    ) {
+        self.state
+            .lock()
+            .expect("Source rendition owners")
+            .source_observer = Some((epoch, observer));
+    }
+    pub(super) fn source_observer(
+        &self,
+        epoch: u64,
+    ) -> Option<crate::source_custody::SourceObserver> {
+        self.state
+            .lock()
+            .expect("Source rendition owners")
+            .source_observer
+            .as_ref()
+            .filter(|(current, _)| *current == epoch)
+            .map(|(_, observer)| observer.clone())
+    }
+
     pub(super) fn contains_live_assignment(&self, assignment: &SourceDispatchAssignment) -> bool {
         self.state
             .lock()

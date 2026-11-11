@@ -42,6 +42,7 @@ async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         MediaSessionRequestClaim::Acquired { .. }
     ));
     let request = crate::transcode::SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -207,6 +208,7 @@ async fn started_session_cleanup_shipped_shape() {
     let dir = crate::test_tempdir().expect("state dir");
     let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
     let request = crate::transcode::SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -505,6 +507,113 @@ async fn pre_worker_request_guard_releases_an_owned_claim_for_immediate_retry() 
         )
         .await
         .expect("settle retry claim"));
+}
+
+/// Review 1, B1: a create cancelled at its claim await, after the Store has
+/// committed the claim but before the create saw the answer, leaves that
+/// claim retryable within one settlement budget. Before the guard was armed
+/// ahead of the await, the cancelled create left a `starting` row that no
+/// guard, worker or owner would settle, and every re-post with the same
+/// `request_id` joined it until the claim expired a minute later.
+#[tokio::test]
+async fn a_create_cancelled_at_its_claim_await_leaves_the_claim_retryable() {
+    let (_app, state) = super::super::tests::test_app_with_state();
+    let user = state
+        .store
+        .create_user("claim-cancelled", "hash", false)
+        .await
+        .expect("create claim-cancelled user");
+    let principal =
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
+    let request_id = "claim-cancelled-attempt";
+    let player = "claim-cancelled-player";
+    let owner = uuid::Uuid::new_v4().to_string();
+    let retry = uuid::Uuid::new_v4().to_string();
+    let fingerprint = "d".repeat(64);
+    let now_ms = unix_ms();
+    let (committed, claim_committed) = tokio::sync::oneshot::channel::<()>();
+    let budget = crate::media_pool::CreateStartupBudget::new(10_000);
+    // The viewer's create, as `create_with_purpose` runs it: an owned task that
+    // is cancelled with its viewer until it owns its claim.
+    let create = crate::media_pool::OwnedCreate::spawn(&budget, {
+        let state = state.clone();
+        let principal = principal.clone();
+        let fingerprint = fingerprint.clone();
+        let owner = owner.clone();
+        budget.scope(async move {
+            let claim = async {
+                let claimed = state
+                    .store
+                    .claim_media_session_request(
+                        &principal,
+                        request_id,
+                        &fingerprint,
+                        player,
+                        &owner,
+                        now_ms,
+                        now_ms.saturating_add(60_000),
+                    )
+                    .await;
+                // Committed, and the create is not polled again before its
+                // viewer goes.
+                let _ = committed.send(());
+                std::future::pending::<()>().await;
+                claimed
+            };
+            let _ = MediaSessionRequestGuard::claim(
+                state.clone(),
+                principal.clone(),
+                request_id.to_owned(),
+                owner.clone(),
+                claim,
+            )
+            .await;
+        })
+    });
+    claim_committed.await.expect("the claim committed");
+    assert!(
+        matches!(
+            state
+                .store
+                .media_session_request_progress(&principal, request_id)
+                .await
+                .expect("read the claim"),
+            Some(progress) if progress.state == "starting" && progress.incarnation_id == owner
+        ),
+        "the committed claim belongs to the create that is about to be cancelled"
+    );
+    // The viewer goes before the create owned its claim.
+    drop(create);
+
+    let deadline = tokio::time::Instant::now() + REQUEST_CLAIM_SETTLEMENT_BUDGET;
+    loop {
+        // The original claim stays unexpired: only the cancelled create's own
+        // settlement, never claim expiry, may let this retry acquire it.
+        match state
+            .store
+            .claim_media_session_request(
+                &principal,
+                request_id,
+                &fingerprint,
+                player,
+                &retry,
+                now_ms,
+                now_ms.saturating_add(60_000),
+            )
+            .await
+            .expect("retry the claim")
+        {
+            MediaSessionRequestClaim::Acquired { incarnation_id } if incarnation_id == retry => {
+                break;
+            }
+            MediaSessionRequestClaim::InFlight { .. } if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            other => panic!(
+                "the cancelled create's claim was not retryable within one settlement budget: {other:?}"
+            ),
+        }
+    }
 }
 
 // ---- segment delivery, through the real response ------------------------
@@ -1892,6 +2001,11 @@ fn every_create_not_yet_answer_keeps_its_start_attempt_open() {
             42,
             crate::transcode::vod_refusal_error("vod_engine_unattested", "probing"),
         ),
+        session_start_error(
+            42,
+            "transcode capacity is temporarily unavailable: background encoding did not yield"
+                .to_owned(),
+        ),
         super::segment::media_owner_transition(),
     ];
     for error in &not_yet {
@@ -1929,11 +2043,7 @@ fn every_create_not_yet_answer_keeps_its_start_attempt_open() {
             42,
             crate::transcode::vod_refusal_error("vod_disabled", "off"),
         ),
-        session_start_error(
-            42,
-            "transcode capacity is temporarily unavailable: background encoding did not yield"
-                .to_owned(),
-        ),
+        session_start_error(42, crate::transcode::replacement_deadline_error()),
     ] {
         let ledger = crate::playstart::StartAttempts::new();
         ledger.refused(1, 42, None, error.code(), std::time::Instant::now());
@@ -1951,6 +2061,95 @@ fn bounded_admission_failure_is_a_retryable_503() {
         session_start_error(42, "ffmpeg failed".into()),
         ApiError::Internal(_)
     ));
+}
+
+/// D2 item 1: the create's allowance is the client's own remaining start
+/// time when it sends one; the 10 s default is only for a client that does
+/// not.
+#[test]
+fn create_allowance_is_the_clients_remaining_time() {
+    let mut headers = HeaderMap::new();
+    assert_eq!(startup_allowance_ms(&headers), 10_000);
+    headers.insert("x-plurx-startup-remaining-ms", "4200".parse().expect("value"));
+    assert_eq!(startup_allowance_ms(&headers), 4_200);
+    headers.insert("x-plurx-startup-remaining-ms", "0".parse().expect("value"));
+    assert_eq!(startup_allowance_ms(&headers), 0, "an exhausted client is not given 10 s");
+    headers.insert("x-plurx-startup-remaining-ms", "soon".parse().expect("value"));
+    assert_eq!(startup_allowance_ms(&headers), 10_000);
+}
+
+/// D2 item 2: every capacity refusal reaches the client with a code. The one
+/// failure a retry would cure — a slot, a CPU share, a queue position — is the
+/// `create_503_not_yet` code with a wait; each refusal no retry can cure names
+/// itself instead of hiding in a codeless 503.
+#[tokio::test]
+async fn every_capacity_refusal_class_carries_its_code() {
+    async fn answer(error: String) -> (StatusCode, Option<String>, serde_json::Value) {
+        let response = session_start_error(42, error).into_response();
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .map(|value| value.to_str().expect("ascii").to_owned());
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        (status, retry_after, serde_json::from_slice(&body).expect("json"))
+    }
+    // Waitable: the admission loop's slot/CPU refusals and the replacement
+    // gate registry, each with the class's own wait.
+    for (error, wait) in [
+        (
+            "transcode capacity is temporarily unavailable: all 2 hardware transcode slots are in use and the software CPU pool is spent (8 of 8 threads reserved); try again in a moment".to_owned(),
+            "2",
+        ),
+        (
+            "transcode capacity is temporarily unavailable: waiting for this player's previous start: held".to_owned(),
+            "3",
+        ),
+    ] {
+        let (status, retry_after, body) = answer(error.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
+        assert_eq!(body["code"], "transcode_capacity_pending", "{error}");
+        assert_eq!(retry_after.as_deref(), Some(wait), "{error}");
+        assert!(
+            crate::playstart::START_NOT_YET_CODES.contains(&body["code"].as_str().expect("code")),
+            "the waitable code is the one every client's create ladder retries"
+        );
+    }
+    // Terminal: each producer's class names its own code and no wait.
+    for (error, code) in [
+        (
+            crate::transcode::replacement_deadline_error(),
+            crate::transcode::REPLACEMENT_EXPIRED,
+        ),
+        (
+            crate::transcode::terminal_capacity_error_for_test(
+                crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE,
+                "the proved 4K HDR10 QuickSync slot is busy; retry at 1080p",
+            ),
+            crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE,
+        ),
+        (
+            crate::transcode::terminal_capacity_error_for_test(
+                crate::transcode::TRANSCODE_SCRATCH_EXHAUSTED,
+                "rolling scratch capacity unavailable: 0 bytes charged, 9 requested, 8 configured",
+            ),
+            crate::transcode::TRANSCODE_SCRATCH_EXHAUSTED,
+        ),
+    ] {
+        let (status, retry_after, body) = answer(error.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
+        assert_eq!(body["code"], code, "{error}");
+        assert_eq!(retry_after, None, "a terminal refusal asks for no wait: {error}");
+        assert!(
+            !crate::playstart::START_NOT_YET_CODES.contains(&code),
+            "a terminal code is never one a client re-posts unchanged"
+        );
+        let message = body["message"].as_str().expect("message");
+        assert!(!message.contains('['), "the class tag is not the viewer's sentence: {message}");
+        assert!(crate::transcode::is_retryable_capacity_error(&error), "still the capacity class server-side");
+    }
 }
 
 #[test]
@@ -2639,6 +2838,7 @@ fn a_sessions_badge_names_the_range_and_the_profile_it_actually_carries() {
         aac: false,
         preserve_dolby_vision: preserve,
         convert_dolby_vision: convert,
+        dual_layer_as_copied: false,
     };
     let badge = |kind: &SessionKind| {
         (
@@ -2680,6 +2880,7 @@ fn a_sessions_badge_names_the_range_and_the_profile_it_actually_carries() {
 /// A create body with nothing set, to be spread over.
 fn bare_create() -> CreateSession {
     CreateSession {
+        source_telemetry: None,
         intent: None,
         control_sequence: None,
         playback_id: String::new(),
@@ -2967,7 +3168,12 @@ async fn servable_state() -> (AppState, plurx_core::domain::User, i64) {
             item,
             source.to_str().expect("a utf-8 fixture path"),
             metadata.len() as i64,
-            1,
+            metadata
+                .modified()
+                .expect("fixture mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("fixture epoch")
+                .as_secs() as i64,
             &ProbeResult {
                 duration_ms: Some(12_000),
                 ..ProbeResult::default()
@@ -3406,6 +3612,95 @@ async fn negotiated_relay_uses_owner_local_acquisition_and_preserves_cached_mani
     assert_eq!(fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("unchanged"),baseline);
 }
 
+/// M2 truthfulness: the reconstructed 8.1 claims "FEL used" only from the
+/// served-window receipt or the selected plan, never from the source's tags;
+/// the plain conversion it falls back to says FEL is unused and why.
+#[cfg(target_os = "linux")]
+#[test]
+fn reconstructed_p81_claims_fel_only_from_processing_truth_and_its_fallback_says_why() {
+    use plurx_core::playback::enhancement::EnhancementBadge;
+    use plurx_core::transcode::dv_processing::DvEffectiveProcessingReport;
+    use plurx_core::transcode::OutputGrade;
+    let file = dolby_vision_p7_file();
+    let reconstructed = crate::transcode::SessionKind::Transcode { height: 2160 };
+    let fel_row = |shown: &plurx_core::playback::enhancement::PlaybackEnhancement| {
+        shown
+            .details
+            .iter()
+            .find(|row| row.badge == EnhancementBadge::Fel)
+            .cloned()
+            .expect("FEL row for a P7 FEL source")
+    };
+    // No plan or receipt fact: the P7 FEL source alone must not light FEL.
+    let unknown = session_enhancement(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8),
+        None, None, None, None).expect("DV source");
+    assert!(!fel_row(&unknown).active, "{:?}", unknown);
+    let generation = "00000000-0000-4000-8000-0000000000a1";
+    let report = |fel: bool| {
+        DvEffectiveProcessingReport::from_owner_wire(
+            serde_json::json!({"generation":generation,"hdr10_enhanced":false,
+                "profile81_reconstructed":true,"fel_contributed":fel,
+                "applied_operations":if fel {
+                    vec!["RpuColorConversion","TargetMapping","LinearNlqResidual"]
+                } else { vec!["RpuColorConversion","TargetMapping"] }})
+            .to_string()
+            .as_bytes(),
+            generation,
+            Some("dolby_vision"),
+        )
+        .expect("a reconstructed 8.1 report")
+    };
+    // The served-window receipt outranks the plan in both directions.
+    let receipt_no = session_enhancement(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8),
+        Some(true), Some(&report(false)), None, None).expect("DV source");
+    assert!(!fel_row(&receipt_no).active);
+    let receipt_yes = session_enhancement(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8),
+        Some(true), Some(&report(true)), None, None).expect("DV source");
+    assert!(fel_row(&receipt_yes).active);
+    assert_eq!(
+        receipt_yes.active,
+        [EnhancementBadge::Fel, EnhancementBadge::Rpu, EnhancementBadge::Dyn]
+    );
+    // The busy-slot decline reaches the converted fallback's FEL row.
+    let converted = crate::transcode::SessionKind::Copy {
+        convert_dolby_vision: true,
+        dual_layer_as_copied: false,
+        aac: false,
+        preserve_dolby_vision: true,
+    };
+    // The reason a real second reconstruction gets from the worker's slot.
+    let busy = {
+        use plurx_core::transcode::dv_processing::DvDestination;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let base = crate::test_tempdir().expect("runtime dir");
+        let manager = crate::transcode::TranscodeManager::new(
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store")),
+            base.path().join("runtime"),
+            plurx_core::transcode::EncoderCaps::default(),
+            plurx_core::transcode::Pipeline::Cpu,
+        );
+        rt.block_on(async {
+            let _held = manager
+                .acquire_reconstruction_slot(DvDestination::Profile81)
+                .await
+                .expect("first");
+            manager
+                .acquire_reconstruction_slot(DvDestination::Profile81)
+                .await
+                .expect_err("second live reconstruction")
+        })
+    };
+    let fallback = session_enhancement(Some(&file), &converted, OutputGrade::Hdr10, None, None,
+        None, None, Some(&busy)).expect("DV source");
+    let row = fel_row(&fallback);
+    assert!(!row.active);
+    assert!(row.text.contains(&busy), "{}", row.text);
+    assert_eq!(fallback.active, [EnhancementBadge::Dyn]);
+}
+
 /// The indicator's route comes from the selected processing plan, not from
 /// whether the first window's report has arrived: a create that beats its
 /// report must still describe HDR10-E, and a staged copy successor keeps the
@@ -3419,6 +3714,7 @@ fn a_reconstructed_profile81_copy_is_described_as_reconstructed() {
     let file = dolby_vision_p7_file();
     let converted = crate::transcode::SessionKind::Copy {
         convert_dolby_vision: true,
+        dual_layer_as_copied: false,
         aac: false,
         preserve_dolby_vision: true,
     };
@@ -3491,10 +3787,44 @@ fn the_enhancement_follows_the_selected_plan_before_any_report() {
     assert!(base.details.iter().all(|detail| !detail.text.contains("Settings")));
     let native = crate::transcode::SessionKind::Copy {
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
         aac: false,
         preserve_dolby_vision: true,
     };
     let kept = session_enhancement(Some(&file), &native, OutputGrade::Sdr, None, None, None, None, None)
         .expect("a Dolby Vision source");
     assert_eq!(kept.active, [EnhancementBadge::Dyn]);
+}
+
+#[test]
+fn source_telemetry_is_explicit_retained_and_independent_of_transport() {
+    use crate::transcode::{SessionRequest, SourceTelemetry};
+    let legacy: CreateSession = serde_json::from_value(serde_json::json!({
+        "playback_id": "legacy",
+        "transport": "hlsjs",
+    }))
+    .expect("deserialize legacy request without source telemetry");
+    let legacy = legacy.into_request(17, 720);
+    assert_eq!(legacy.source_telemetry, None, "transport is not a film-observation claim");
+    let modern: CreateSession = serde_json::from_value(serde_json::json!({
+        "playback_id": "legacy",
+        "source_telemetry": "film-v1",
+    }))
+    .expect("deserialize explicit source telemetry request");
+    let modern = modern.into_request(17, 720);
+    assert_eq!(modern.source_telemetry, Some(SourceTelemetry::FilmV1));
+    assert_eq!(modern.transport, None);
+    let encoded = serde_json::to_value(&modern).expect("serialize source telemetry request");
+    assert_eq!(encoded["source_telemetry"], "film-v1");
+    let replay: SessionRequest = serde_json::from_value(encoded)
+        .expect("deserialize encoded source telemetry request");
+    assert_eq!(replay.source_telemetry, modern.source_telemetry);
+    let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
+    assert_eq!(legacy.durable_intent_fingerprint(&principal), modern.durable_intent_fingerprint(&principal), "source service metadata is not media identity");
+    let unknown: CreateSession = serde_json::from_value(serde_json::json!({
+        "playback_id": "future",
+        "source_telemetry": "future-v2",
+    }))
+    .expect("deserialize unknown optional source telemetry request");
+    assert_eq!(unknown.into_request(17, 720).source_telemetry, None, "an unknown optional service declaration retains legacy playback");
 }

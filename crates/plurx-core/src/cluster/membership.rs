@@ -6913,10 +6913,10 @@ impl MembershipManager {
         }
         if maintenance_requested {
             statements.push((
-                "UPDATE cluster_node_maintenance SET acknowledged_at = COALESCE(acknowledged_at, $2) \
-                     WHERE node_id = $1"
+                "UPDATE cluster_node_maintenance SET acknowledged_at = COALESCE(acknowledged_at, $1) \
+                     WHERE node_id = $2"
                     .to_owned(),
-                params!(inner.identity.node_id.as_str(), now),
+                params!(now, inner.identity.node_id.as_str()),
             ));
         }
         statements.push((
@@ -8160,9 +8160,9 @@ impl MembershipManager {
                 ),
                 (
                     "INSERT INTO cluster_operation_lease_intents (claim_id) \
-                     SELECT $2 WHERE EXISTS (SELECT 1 FROM cluster_operation_leases lease \
-                       WHERE lease.singleton = 1 AND lease.node_id = $1 \
-                         AND lease.operation = 'maintenance' AND lease.claim_id = $2) \
+                     SELECT lease.claim_id FROM cluster_operation_leases lease \
+                     WHERE lease.singleton = 1 AND lease.node_id = $1 \
+                       AND lease.operation = 'maintenance' AND lease.claim_id = $2 \
                      ON CONFLICT(claim_id) DO NOTHING"
                         .to_owned(),
                     vec![
@@ -8172,9 +8172,9 @@ impl MembershipManager {
                 ),
                 (
                     "INSERT INTO cluster_operation_lease_releases (claim_id) \
-                     SELECT $2 WHERE EXISTS (SELECT 1 FROM cluster_operation_leases lease \
-                       WHERE lease.singleton = 1 AND lease.node_id = $1 \
-                         AND lease.operation = 'maintenance' AND lease.claim_id = $2) \
+                     SELECT lease.claim_id FROM cluster_operation_leases lease \
+                     WHERE lease.singleton = 1 AND lease.node_id = $1 \
+                       AND lease.operation = 'maintenance' AND lease.claim_id = $2 \
                      ON CONFLICT(claim_id) DO NOTHING"
                         .to_owned(),
                     vec![
@@ -8888,6 +8888,16 @@ impl MembershipManager {
     /// from this directory before owned work is settled, and the progress row
     /// keeps a lagged learner out even while its heartbeat is fresh.
     pub async fn media_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        self.media_peers_for_route(true).await
+    }
+
+    /// Ready media targets restricted by the caller's learner route policy.
+    /// Read admission role with the endpoint/progress row, rather than joining
+    /// an independently fetched status snapshot onto this directory.
+    pub async fn media_peers_for_route(
+        &self,
+        allow_learners: bool,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(Vec::new());
         };
@@ -8904,7 +8914,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<MediaPeerRow, _>(
-                "SELECT node.node_id, node.raft_id, node.last_seen_at, \
+                "SELECT node.node_id, node.raft_id, node.last_seen_at, node.role, \
                         http.public_http_url, \
                         COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
                         progress.observed_at \
@@ -8918,21 +8928,36 @@ impl MembershipManager {
                 params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
             )
             .await?;
-        Ok(rows
-            .into_iter()
-            .filter(|row| members.contains(&row.raft_id))
-            .filter(|row| {
-                row.bounded_read_ready
-                    && node_is_reachable(now, row.observed_at.unwrap_or_default())
-            })
-            .take(MAX_ACTIVITY_PEERS)
-            .map(|row| ActivityPeer {
+        Self::media_peer_directory(now, &members, rows, allow_learners)
+    }
+
+    fn media_peer_directory(
+        now: i64,
+        members: &BTreeSet<u64>,
+        rows: Vec<MediaPeerRow>,
+        allow_learners: bool,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
+        let mut peers = Vec::new();
+        for row in rows.into_iter().filter(|row| {
+            members.contains(&row.raft_id)
+                && row.bounded_read_ready
+                && node_is_reachable(now, row.observed_at.unwrap_or_default())
+        }) {
+            let role = ClusterRole::from_stored(row.admitted_role.as_deref())?;
+            if !allow_learners && role == ClusterRole::Learner {
+                continue;
+            }
+            peers.push(ActivityPeer {
                 http_base: row.http_base,
                 node_id: row.node_id,
                 raft_id: row.raft_id,
                 reachable: node_is_reachable(now, row.last_seen_at),
-            })
-            .collect())
+            });
+            if peers.len() == MAX_ACTIVITY_PEERS {
+                break;
+            }
+        }
+        Ok(peers)
     }
 
     /// Number of committed voters, including this node. Media rollout gates
@@ -9807,12 +9832,12 @@ impl MembershipManager {
                         maintenance.acknowledged_at AS maintenance_acknowledged_at, \
                         EXISTS (SELECT 1 FROM cluster_node_capabilities capability \
                           WHERE capability.node_id = n.node_id \
-                            AND capability.capability = $2 \
+                            AND capability.capability = $1 \
                             AND capability.last_seen_at = n.last_seen_at) AS maintenance_capable, \
                         (SELECT COUNT(*) FROM media_sessions session \
                           WHERE session.owner_node_id = n.node_id \
                             AND session.state = 'active' \
-                            AND session.lease_expires_at_ms > $1) AS active_media_sessions, \
+                            AND session.lease_expires_at_ms > $2) AS active_media_sessions, \
                         EXISTS (SELECT 1 FROM cluster_node_removals AS removal \
                           WHERE removal.node_id = n.node_id) AS removal_pending \
                  FROM cluster_nodes n \
@@ -9822,7 +9847,7 @@ impl MembershipManager {
                  WHERE n.removed_at IS NULL \
                    AND n.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each($3)) \
                  ORDER BY n.raft_id",
-                params!(now, NODE_MAINTENANCE_CAPABILITY, members_json.as_str()),
+                params!(NODE_MAINTENANCE_CAPABILITY, now, members_json.as_str()),
             )
             .await?;
         let protocol = self
@@ -12248,6 +12273,28 @@ impl MembershipManager {
         {
             // The pending-removal row remains the authoritative durable fence.
             tracing::error!(%error, %node_id, "could not materialize final node tombstone");
+            return;
+        }
+        // Nothing but the removed node claims the analysis requests targeted
+        // at it. Retire them once its tombstone is durable rather than leave
+        // them active, counted against the queue's ceiling, for good. The
+        // voters' settle pass retires any this misses.
+        match inner
+            .store
+            .retire_analysis_requests_for_node(node_id, unix_ms().unwrap_or(i64::MAX))
+            .await
+        {
+            Ok(0) => {}
+            Ok(retired) => {
+                tracing::info!(
+                    node_id,
+                    retired,
+                    "retired a removed node's analysis requests"
+                )
+            }
+            Err(error) => {
+                tracing::warn!(node_id, %error, "retiring a removed node's analysis requests")
+            }
         }
     }
 
@@ -13704,6 +13751,7 @@ impl From<&mut Row<'_>> for NodeHostnameRow {
 
 struct MediaPeerRow {
     node_id: String,
+    admitted_role: Option<String>,
     raft_id: u64,
     last_seen_at: i64,
     http_base: Option<String>,
@@ -13716,6 +13764,7 @@ impl From<&mut Row<'_>> for MediaPeerRow {
         let raft_id: i64 = row.get("raft_id");
         Self {
             node_id: row.get("node_id"),
+            admitted_role: row.get("role"),
             raft_id: u64::try_from(raft_id).unwrap_or_default(),
             last_seen_at: row.get("last_seen_at"),
             http_base: row.get("public_http_url"),

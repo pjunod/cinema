@@ -240,12 +240,12 @@ function toggleMobileSearch(){
 
 function cinemaSharingCard(settings,readiness){
   return setCard(`${cardHead("Cinema shared libraries","Invite another Cinema to selected libraries through your private Tailscale connection.",'<span class="pill">Qualification pending</span>')}
-    ${togRow("cinema-sharing-enabled","Enable shared libraries","The saved switch applies to this Cinema. Readiness observations never prevent saving.",!!settings.sharing_enabled)}
+    ${togRow("cinema-sharing-enabled","Enable shared libraries","Cinema prepares its private Tailscale connection automatically. Setup status is in Settings → Sharing. Your choice is saved even when setup needs attention.",!!settings.sharing_enabled)}
     ${devReq(readiness,"cinema_sharing","source_activation","Current Source activation","Source activation is pending during the rolling upgrade. It completes automatically once cluster compatibility and authority checks pass; a coordinated restart is not required. Readiness never changes your saved choice.")}
     ${devReq(readiness,"cinema_sharing","listener","Private sharing listener","A separate TLS listener serves only scoped peer requests inside this process or container. Listening here does not prove the host private network path is configured.")}
     ${devReq(readiness,"cinema_sharing","tls","Node certificate and pin","Keep the node key and verify the invitation pin through your trusted channel.")}
-    ${devReq(readiness,"cinema_sharing","endpoints","Configured private Sharing endpoints","Before creating an invitation, configure this Cinema’s private addresses and verified certificate pins in <a href=\"#/settings/sharing\">Settings → Sharing</a>. Saved endpoints do not prove connectivity.")}
-    ${devReq(readiness,"cinema_sharing","network","Tailscale reachability and access policy","Each serving host needs Tailscale installed and signed in, private TCP Serve forwarding from port 32443 to the internal TLS listener on 32444, a working Docker-to-host path, qualified egress and recipient access policy. A container cannot infer host installation or remote reachability; unverified means host setup must be checked.")}
+    ${devReq(readiness,"cinema_sharing","endpoints","Configured private Sharing endpoints","Cinema discovers this host’s private addresses and certificate automatically. Review status or Advanced addresses in <a href=\"#/settings/sharing\">Settings → Sharing</a>. Saved endpoints do not prove connectivity.")}
+    ${devReq(readiness,"cinema_sharing","network","Tailscale reachability and access policy","Native managed installations configure the private connection automatically. Docker uses its installed host component. Settings → Sharing reports sign-in, permission and setup problems. Pairing still verifies the other Cinema and its access policy.")}
     ${devReq(readiness,"cinema_sharing","qualification","Catalogue and client qualification","Shared catalogue and playback are implemented; private network, cluster recovery and device qualification remain in progress.")}
     ${devGraduation("S3–S8 shared catalogue, playback, private history and device qualification are complete.","sharing controls move to Settings → Sharing after S8 evidence and promotion.")}<div class="err" id="cinema-sharing-error" role="alert"></div>${setCardFoot("saveCinemaSharing")}`,{id:"cinema-sharing-settings"});
 }
@@ -337,7 +337,34 @@ async function saveCinemaRemoteInvitations(button){
 }
 
 function diagnosticDeveloperCard(){return setCard(`${cardHead("Diagnostic ZIP reports","Bounded local evidence for bug and issue attachments.",'<span class="pill">Qualification pending</span>')}<p>Help → Report a problem saves a ZIP with a readable summary and structured evidence. Attach it to an issue using your usual reporting channel. Web download and phone sharing are available. Native TVs offer a temporary local QR download on trusted Wi-Fi; physical-device sampling remains.</p>${devGraduation("archive export, privacy and recovery have applicable client and device receipts, including native TV file transfer.","this advisory card is removed; reporting remains in Help and the player.")}<button type="button" onclick="showDiagnostics()">Open reporting</button>`);}
-function developerPanel(settings,readiness){
+// C1 (playback start): the indexer no longer waits for an idle node. No
+// switch; the rows say what this node's indexer may do right now.
+function indexingWhileServingCard(readiness){
+  return setCard(`${cardHead("Indexing while serving","Content analysis keeps indexing while this node serves: a viewer waiting for an encoder still comes first, and an idle node takes other nodes' indexing.",'<span class="pill ok">automatic</span>')}
+    ${devReq(readiness,"indexing_while_serving","serving_live_waiters","No viewer queuing for an encoder","While a viewer waits for this node's encoder, analysis claims only requests a playback is waiting on.")}
+    ${devReq(readiness,"indexing_while_serving","serving_slots_in_use","Encoder slots in use","An encoder in use no longer stops analysis; the read holds a storage-domain reservation instead.")}
+    ${devReq(readiness,"indexing_while_serving","serving_domain_readers","Storage-domain reader slots","Two source readers per domain. The same rule is checked when a request is claimed, before its read, while it reads and before it is submitted.")}
+    ${devReq(readiness,"indexing_while_serving","serving_cross_node","Takes other nodes' indexing","An idle node with fragment-index authority builds other nodes' requests for its own engine; delivery copies the index to the node that asked.")}
+    <p class="hint">Advisory: nothing here switches anything on or off.</p>
+    ${devGraduation("after a deploy, idle nodes' analysis claims rise while another node serves, plurx_analysis_completed_total shows completions that reached their target, and no storage domain holds more than its two readers.","this card goes; indexing while serving is simply how analysis works.")}`,{id:"indexing-while-serving-card"});
+}
+// D1 (playback start, plan ruling 3): processed Dolby Vision / HDR10-E is an
+// upgrade after the first frame, switched in through the prepared
+// replacement. It always runs when Dolby Vision processing is on; the rows
+// say whether the switch is qualified on each platform and whether this node
+// can run one now. Nothing here switches anything.
+function processedDvUpgradeCard(readiness){
+  return setCard(`${cardHead("Processed DV upgrade","Playback starts ordinary; once the first frame is on screen this node may render processed Dolby Vision and offer it as a prepared switch. The switch is unqualified until each platform has measured twenty clean ones.",'<span class="pill">unqualified until measured</span>')}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_web","Web switches measured","Committed switches with complete ±2 s frame samples, zero dropped frames, observed audio continuity and no reopen, of twenty.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_apple","Apple switches measured","The same bar, from the Apple access log's dropped frames and stalls.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_android","Android switches measured","The same bar, from Media3 decoder counters and audio underruns.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_renderer","Renderer present","Without the processing helper a node's sessions start ordinary and stay so.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_slot","Slot free","One processed preparation per node; an upgrade that finds it busy declines and the session keeps playing.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_activity","Upgrades on this node","Scheduled, staged, declined and cancelled since this node started.")}
+    <p class="hint">Advisory: the upgrade runs whether or not these rows are met.</p>
+    ${devGraduation("each platform has recorded twenty measured switches with complete ±2 s frame samples, independently observed audio continuity and no reopen.","this card goes; the upgrade is simply how Dolby Vision processing plays.")}`,{id:"processed-dv-upgrade-card"});
+}
+function developerPanel(settings,readiness,httpsCard=""){
   // Only features that are not yet fully active or fully tested wait here,
   // each saying what it waits on (devGraduation). Everything that graduated
   // lives in its own section; the links below are the way back to them.
@@ -348,18 +375,19 @@ function developerPanel(settings,readiness){
     ${clustered?`<a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health, placement, clocks and backups</span></a>`:""}
   </nav>`;
   return `${setHead("Developer","Features still waiting on qualification. Each card says what it waits on; none of them is gated by it.")}
-      ${destinations}${diagnosticDeveloperCard()}
+      ${destinations}${httpsCard}${diagnosticDeveloperCard()}
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
-      <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}
+      <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}${processedDvUpgradeCard(readiness)}
       <div class="setsection" id="enable-display-target-hdr10"><h2>Display-targeted HDR10-E / SDR</h2><p>Per-shot L1 mapping for the viewer's reported HDR peak or explicit SDR capability. Readiness is advisory; the saved choice always applies to new playback.</p></div>${displayTargetHdr10Card(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
+      <div class="setsection" id="enable-indexing-while-serving"><h2>Indexing while serving</h2><p>Content analysis beside playback. Automatic; the rows are advisory.</p></div>${indexingWhileServingCard(readiness)}
       <div class="setsection" id="enable-macos-video"><h2>Mac video processing</h2><p>Worker-local compatibility and outstanding visual and streaming qualification.</p></div>${macosVideoProcessingCard(settings,readiness)}
       <div class="setsection" id="enable-macos-hevc"><h2>Mac HEVC output</h2><p>Independent output negotiation and HDR presentation qualification.</p></div>${macosHevcOutputCard(settings,readiness)}`;
 }
@@ -623,7 +651,9 @@ function dolbyVisionFelReencodeCard(settings,readiness){
   return setCard(`${cardHead("FEL preservation for Profile 8.1","Use the enhancement layer when making a new Profile 8.1 picture.","")}
     ${togRow("dv-fel-reencode","Preserve FEL when converting to Profile 8.1","Default off. Dolby Vision conversion must also be allowed.",!!settings.dolby_vision_fel_reencode)}
     <p class="hint">This preference never enables conversion by itself. New playback attempts FEL reconstruction for supported Profile 7 sources when the worker has the required tools and resources. Unsupported sources or processing failures keep the existing permitted conversion fallback. Native Dolby Vision is preserved. Readiness never prevents saving. A running movie is unchanged.</p>
-    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_backend_reference","Qualified backend and reference","Independently validate the reconstructed picture and converted output, including HDR10 compatibility.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_backend_reference","Qualified backend and reference","The processing helper on this node, the conversion permission the reconstructed 8.1 replaces, and the composition proof against the helper's FEL master render.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_worker_budget","Worker CPU budget for one live reconstruction","Where this node's renderer decodes, and whether one FEL compose + encode graph fits its software budget.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_live_slot","Live reconstruction slot","One live FEL reconstruction per worker; a play beyond it gets the plain conversion with the reason.")}
     ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_encoder_matrix","Production encoder matrix","Test reconstruction and conversion with the encoders used by playback workers.")}
     ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_bitrate_quality","Quality at delivery bitrates","Compare picture quality at delivery bitrates with the existing conversion.")}
     ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_physical_playback","Physical playback validation","Test Profile 8.1 output, startup, seeking, fallback and sustained playback on supported Dolby Vision devices.")}
@@ -704,11 +734,108 @@ async function saveSdrMasterCodecs(btn){
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }
 
+// Addressed-node HTTPS controls are independent of replicated /settings.
+function httpsSettingsMount(value,error){
+  return `<div id="settings-https">${httpsSettingsCard(value,error)}</div>`;
+}
+function httpsConnectionUrl(value,href=location.href){
+  const url=new URL(href);
+  if(!value?.active?.enabled) return null;
+  if(url.protocol!=="https:"){url.protocol="https:";url.port=String(value.active.port);}
+  url.username="";url.password="";url.pathname="/";url.search="";url.hash="";
+  return url.href;
+}
+function httpsSettingsCard(value,error){
+  if(!value) return setCard(`${cardHead("HTTPS","Connections to this node; HTTP app links forward to HTTPS while active.","")}
+    <p>${error?`HTTPS settings are unavailable: ${esc(error)}`:"Loading this node’s HTTPS settings…"}</p>
+    <button class="ghost sm" onclick="reloadHttpsSettings(this)">Reload this node</button>`);
+  const desired=value.desired,active=value.active,cert=value.certificate;
+  const fields=new Set(value.overrides||[]),locked=name=>fields.has(name)?" disabled":"";
+  const link=httpsConnectionUrl(value);
+  return setCard(`${cardHead("HTTPS","Connections to this node; HTTP app links forward to HTTPS while active.",`<span class="pill">${active.enabled?"Active":"Inactive"}</span>`)}
+    <p>Addressed node: <code>${esc(value.node_id)}</code> · revision <code>${esc(value.revision)}</code></p>
+    <p>${value.restart_required?"Saved changes require this node to restart.":"The desired configuration matches this process."} Save never restarts the server. For Docker, apply with <code>make docker-up</code> (source) or <code>make docker-image-up</code> (prebuilt) to update published ports; restarting an existing container cannot change its ports.</p>
+    <details><summary>Saved, desired and active configuration</summary><table><thead><tr><th>State</th><th>Enabled / port</th><th>Identity files or generated names</th></tr></thead><tbody>${[["Saved before environment",value.saved],["Desired next boot",desired],["Active process",active]].map(([label,config])=>`<tr><td>${label}</td><td>${config.enabled?"On":"Off"} / ${esc(config.port)}</td><td>${config.cert_file?`${esc(config.cert_file)}<br>${esc(config.key_file)}`:`Self-signed: ${esc(config.sans.join(", "))}`}</td></tr>`).join("")}</tbody></table></details>
+    <label class="chk"><input id="https-enabled" type="checkbox"${desired.enabled?" checked":""}${locked("enabled")}> Enable HTTPS after restart</label>
+    <div class="setrow"><label for="https-port">HTTPS port</label><input id="https-port" type="number" min="1" max="65535" value="${esc(desired.port)}"${locked("port")}></div>
+    <p>Leave both paths empty for a persistent self-signed identity. Supplied paths refer to files on the server or inside its container, never this browser’s computer.</p>
+    <div class="setrow"><label for="https-cert">Certificate chain PEM path</label><input id="https-cert" value="${esc(desired.cert_file)}"${locked("cert_file")}></div>
+    <div class="setrow"><label for="https-key">Private key PEM path</label><input id="https-key" value="${esc(desired.key_file)}"${locked("key_file")}></div>
+    <div class="setrow"><label for="https-sans">Self-signed DNS names and IP addresses (one per line)</label><textarea id="https-sans" rows="4"${locked("sans")}>${esc(desired.sans.join("\n"))}</textarea></div>
+    <p>Generated identities retain their key and certificate across restarts and disable/enable. Changing their names or replacing an expired identity requires explicit file replacement while stopped. Add every hostname or address clients will use before first enable.</p>
+    ${fields.size?`<p>Environment-controlled fields: ${esc([...fields].join(", "))}. Their saved underlying values are preserved.</p>`:""}
+    ${cert?`<p>Active identity: ${esc(cert.mode)} · expires ${esc(new Date(cert.expires_at_seconds*1000).toISOString())}<br>SHA-256 <code>${esc(cert.sha256)}</code><br>Names: ${esc(cert.sans.join(", "))}</p><button class="ghost sm" onclick="downloadHttpsCertificate(this)">Download active public certificate chain</button>`:"<p>No HTTPS identity is active in this process.</p>"}
+    ${link?`<p><a href="${esc(link)}" target="_blank" rel="noopener noreferrer">Open unverified HTTPS address</a> · This uses the browser’s current hostname and active port. Verify this node’s identity and trust first; the new origin needs its own sign-in.</p>`:""}
+    ${value.durability_confirmed===false?'<p class="err" role="alert">The settings were published, but directory sync could not confirm crash durability. This revision is current; reload before another save and check local storage.</p>':""}
+    ${devGraduation("browser and native client trust, streaming, cluster and physical-device qualification are recorded.","the permanent HTTPS controls move to Settings → System.")}
+    <div class="err" id="https-error" role="alert"></div><button onclick="saveHttpsSettings(this)">Save HTTPS settings</button> <button class="ghost" onclick="reloadHttpsSettings(this)">Reload this node</button>`);
+}
+function applyHttpsSettings(value,error){
+  const mount=document.getElementById("settings-https");
+  if(mount) mount.innerHTML=httpsSettingsCard(value,error);
+}
+async function loadHttpsCard(generation){
+  try{
+    const value=await loadSettingsKey("https",generation);
+    if(settingsCurrent(generation,"developer")) applyHttpsSettings(value);
+  }catch(error){
+    if(!error?.staleHttps&&settingsCurrent(generation,"developer")) applyHttpsSettings(null,error.message||"request failed");
+  }
+}
+async function reloadHttpsSettings(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  if(!settingsCurrent(generation,"developer")) return;
+  if(btn)btn.disabled=true;
+  SETTINGS_HTTPS_EPOCH++;SETTINGS_LOADED.delete("https");
+  await loadHttpsCard(generation);
+}
+async function saveHttpsSettings(btn){
+  const generation=PAGE_RENDER_GENERATION,mount=document.getElementById("settings-https"),snapshot=SETTINGS_DATA.https;
+  if(!snapshot||!settingsCurrent(generation,"developer")||!mount) return;
+  const err=document.getElementById("https-error"),desired={...snapshot.desired};
+  // Env-owned fields are sent unchanged, preserving their masked saved values.
+  const fields=new Set(snapshot.overrides||[]),read=(name,id,parse)=>{
+    if(!fields.has(name)) desired[name]=parse(document.getElementById(id));
+  };
+  read("enabled","https-enabled",node=>node.checked);
+  read("port","https-port",node=>Number(node.value));
+  read("cert_file","https-cert",node=>node.value.trim());read("key_file","https-key",node=>node.value.trim());
+  read("sans","https-sans",node=>node.value.split(/\r?\n/).map(name=>name.trim()).filter(Boolean));
+  const epoch=++SETTINGS_HTTPS_EPOCH;
+  if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const value=await api("/system/https",{method:"PUT",body:{node_id:snapshot.node_id,revision:snapshot.revision,desired}});
+    if(epoch!==SETTINGS_HTTPS_EPOCH||!settingsCurrent(generation,"developer")||document.getElementById("settings-https")!==mount) return;
+    SETTINGS_HTTPS_EPOCH++;
+    SETTINGS_DATA.https=value;SETTINGS_LOADED.add("https");applyHttpsSettings(value);
+    toast("HTTPS settings saved; restart this node to apply changes");
+  }catch(error){
+    if(epoch!==SETTINGS_HTTPS_EPOCH||!settingsCurrent(generation,"developer")||document.getElementById("settings-https")!==mount) return;
+    if(err)err.textContent=(error.message||"Save failed")+(error.status===409?" Reload this node before editing again.":"");
+    if(btn)btn.disabled=false;
+  }
+}
+async function downloadHttpsCertificate(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  if(btn)btn.disabled=true;
+  try{
+    const response=await api("/system/https/certificate",{raw:true}),blob=await response.blob();
+    if(!settingsCurrent(generation,"developer")) return;
+    const url=URL.createObjectURL(blob),link=document.createElement("a");
+    link.href=url;link.download="plurx-https-certificate.pem";link.click();URL.revokeObjectURL(url);
+  }catch(error){
+    if(settingsCurrent(generation,"developer")){
+      const err=document.getElementById("https-error");if(err)err.textContent=error.message||"Certificate download failed";
+    }
+  }finally{if(btn&&btn.isConnected)btn.disabled=false;}
+}
+
 function subtitleTranslationCard(){
-  return setCard(`${cardHead("English subtitle translation","Translate foreign speech while the movie keeps playing.",'<span class="pill">Experimental accuracy</span>')}
-    <p>Install a compatible multilingual model, then choose Translate to English in the player. Partial captions may lag or be wrong; original captions and Off remain available.</p>
-    <p class="hint">Supported on local web direct playback with one audio stream. Other delivery routes, multiple audio streams and native clients remain unsupported.</p>
-    <button type="button" class="sm" onclick="openTranslationSettings()">Configure English translation</button><div id="subtitle-translation-form"></div>`,{id:"enable-subtitle-translation"});
+  return setCard(`${cardHead("AI captions and subtitle translation","Generate captions from speech, translate speech to English, or translate an existing text subtitle.",'<span class="pill">Accuracy needs checking</span>')}
+    <p>Download and test the speech model on a worker, then choose Generate or translate speech in the player. A separate text model translates existing text subtitles. Each setup shows download progress, worker readiness and an explicit retry.</p>
+    <p class="hint">Web, iPhone and Apple TV use the selected audio track and the current playback timeline. Shared viewers can read committed AI captions; a Source administrator requests missing coverage. Partial captions may lag or be wrong. Original captions and Off remain available.</p>
+    <button type="button" class="sm" onclick="openTranslationSettings()">Set up speech captions</button><div id="subtitle-translation-form"></div>
+    <button type="button" class="sm" onclick="openTextTranslationSettings()">Set up subtitle text translation</button><div id="text-subtitle-translation-settings"></div>`,{id:"enable-subtitle-translation"});
 }
 
 function displayTargetHdr10Card(settings,readiness){

@@ -382,7 +382,7 @@ function beginPreparedReplacement(p,action,sharedContext=null){
     spare.style.zIndex="1";
     spare.style.display="";
     if(typeof spare.requestVideoFrameCallback==="function"){
-      try{ state.warmFrameCallbackId=spare.requestVideoFrameCallback(()=>{
+      try{ state.warmFrameCallbackId=requestPlaybackVideoFrame(spare,()=>{
         state.warmFrameCallbackId=null;
         if(preparedState(p)===state) state.warmFrameReady=true;
       }); }catch(e){}
@@ -905,8 +905,13 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     failPreparedReplacement(p,state,"no parallel video presentation proof");
     return false;
   }
-  if(!streamHasVideo(p,spare)||typeof spare.requestVideoFrameCallback!=="function")
+  if(!streamHasVideo(p,spare))
     return exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+  // No frame callbacks: the successor still has to show decoded frames at the
+  // aligned position before it takes the picture. `readyState` and a landed
+  // seek describe the element, not this position.
+  if(typeof spare.requestVideoFrameCallback!=="function")
+    return exposePreparedReplacementAfterDecodedFrames(p,state,v,spare);
   // Buffer readiness can precede the first warm callback. The aligned,
   // advancing frame proof below is the actual presentation evidence; rejecting
   // the handoff here would reopen an otherwise ready successor at the cliff.
@@ -922,14 +927,14 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     if(settled) return;
     settled=true;
     if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
-    if(state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
-      try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
+    if(state.exposeFrameCallbackId!=null)
+      try{ cancelPlaybackVideoFrame(spare,state.exposeFrameCallbackId); }catch(e){}
     state.exposeFrameCallbackId=null;
-    if(state.warmFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
-      try{ spare.cancelVideoFrameCallback(state.warmFrameCallbackId); }catch(e){}
+    if(state.warmFrameCallbackId!=null)
+      try{ cancelPlaybackVideoFrame(spare,state.warmFrameCallbackId); }catch(e){}
     state.warmFrameCallbackId=null;
-    if(state.handoffFrameCallbackId!=null&&typeof v.cancelVideoFrameCallback==="function")
-      try{ v.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
+    if(state.handoffFrameCallbackId!=null)
+      try{ cancelPlaybackVideoFrame(v,state.handoffFrameCallbackId); }catch(e){}
     state.handoffFrameCallbackId=null;
     if(!live()) return;
     if(voluntary&&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10
@@ -962,7 +967,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   };
   const requestFrame=()=>{
     if(settled) return;
-    try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
+    try{ state.exposeFrameCallbackId=requestPlaybackVideoFrame(spare,observe); }
     catch(e){ finish(false,"frame-callback-error"); }
   };
   const exposeAfterIncumbentFrame=()=>{
@@ -999,7 +1004,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   const requestIncumbentFrame=()=>{
     if(settled) return;
     try{
-      state.handoffFrameCallbackId=v.requestVideoFrameCallback((now,meta)=>{
+      state.handoffFrameCallbackId=requestPlaybackVideoFrame(v,(now,meta)=>{
         state.handoffFrameCallbackId=null;
         if(settled) return;
         if(!live()){ finish(false,"stale-owner"); return; }
@@ -1069,6 +1074,63 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     v.addEventListener(name,listener);
   state.exposeFrameTimer=setTimeout(()=>finish(false,"deadline"),PREPARED_FRAME_PROOF_MS);
   requestFrame();
+  return true;
+}
+// The decoded-frame counter (`getVideoPlaybackQuality().totalVideoFrames`, or
+// WebKit's `webkitDecodedFrameCount`), or null where the engine has neither.
+function preparedDecodedFrameCount(element){
+  try{
+    const quality=typeof element.getVideoPlaybackQuality==="function"
+      ?element.getVideoPlaybackQuality():null;
+    const count=Number(quality?.totalVideoFrames??element.webkitDecodedFrameCount);
+    return Number.isFinite(count)?count:null;
+  }catch(e){ return null; }
+}
+// The proof for an engine without `requestVideoFrameCallback`. A seek into a
+// buffer hole leaves `readyState` at HAVE_FUTURE_DATA about a range the
+// playhead is not in, so readiness was never evidence of a picture. Wait,
+// under the same bound as the callback proof, for the decoder to count
+// PREPARED_MONOTONIC_FRAME_STEPS new frames while the successor's clock
+// advances on the incumbent's second with runway in front of it. An engine
+// with no decoded-frame counter cannot prove a frame and is refused; the
+// incumbent is untouched either way.
+function exposePreparedReplacementAfterDecodedFrames(p,state,v,spare){
+  const initial=preparedDecodedFrameCount(spare);
+  if(initial==null){
+    failPreparedReplacement(p,state,"no decoded-frame observation on this engine");
+    return false;
+  }
+  const live=()=>PLAYER===p&&preparedState(p)===state
+    &&document.getElementById("video")===v&&preparedVideoElement()===spare
+    &&playbackOwnsAttachedMedia(p);
+  const started=performance.now();
+  let priorTime=Number(spare.currentTime)||0;
+  state.overlapPhase="decoded-frames";
+  const observe=()=>{
+    state.exposeFrameTimer=null;
+    if(!live()) return;
+    if(v.paused||v.seeking||spare.paused||spare.seeking||p.wantsPlayback===false){
+      failPreparedReplacement(p,state,"viewer-intent");
+      return;
+    }
+    const count=preparedDecodedFrameCount(spare);
+    const at=Number(spare.currentTime)||0;
+    const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+    const advancing=at>priorTime;
+    priorTime=at;
+    if(count!=null&&count-initial>=PREPARED_MONOTONIC_FRAME_STEPS&&advancing
+      &&Math.abs(at-target)*1000<=preparedClockAlignmentSlackMs(p)&&preparedAlignedBuffered(spare)){
+      exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+      return;
+    }
+    if(performance.now()-started>=PREPARED_FRAME_PROOF_MS){
+      failPreparedReplacement(p,state,`decoded-frame deadline: frames=${count==null?"none":count-initial} `+
+        `drift_ms=${Math.round(Math.abs(at-target)*1000)} ready_state=${spare.readyState}`);
+      return;
+    }
+    state.exposeFrameTimer=setTimeout(observe,40);
+  };
+  state.exposeFrameTimer=setTimeout(observe,40);
   return true;
 }
 // Phase two: the exposure, unchanged. Intent is sampled at the last reversible
@@ -1206,6 +1268,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     deferPreparedPredecessorRetirement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
       {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
+    reportPreparedSeamAfterWindow(p,state,"committed");
     const committedAtMs=performance.now();
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"committed",
       message:`switched to ${state.sessionId} at film ${Math.round(filmMs/1000)}s `+
@@ -1222,6 +1285,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     if(p.preparedCommitting===state) p.preparedCommitting=null;
     rollbackPreparedReplacement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
+    reportPreparedSeamAfterWindow(p,state,"switched_without_a_frame");
     // Rolled back to the incumbent, which is the quality the viewer was
     // already watching -- so the change they asked for still has not happened
     // and still owes them its one reopen.

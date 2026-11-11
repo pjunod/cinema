@@ -13,7 +13,7 @@ fn subtitle_source_job_argv_has_no_index_pipe_and_ends_in_null_sentinel() {
     let plan =
         crate::subtitle_ride_along::RideAlongPlan::standalone(temp.path(), 7, stamp, vec![0])
             .expect("plan");
-    let argv = subtitle_source_argv("/dev/fd/3", &plan);
+    let argv = subtitle_source_argv("/dev/fd/3", &[], &plan);
     assert!(argv.iter().all(|arg| arg != "pipe:1"));
     assert!(argv.last().is_some_and(|arg| arg.ends_with("[f=null]-")));
     assert!(argv.windows(2).any(|pair| pair == ["-i", "/dev/fd/3"]));
@@ -1143,10 +1143,17 @@ async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() 
     )
     .await
     .expect("join requesting viewer");
+    // The node-local half of the rule; the Store half (the claim's own
+    // capacity decision) needs a claimed row, which the worker takes below.
     assert!(
-        jobs.analysis_source_may_continue(&transcode, Some(&request))
-            .await,
+        jobs.analysis_source_local_rule(&transcode, &request).await,
         "any live request waiter permits the source read on a busy node"
+    );
+    assert!(
+        !jobs
+            .analysis_source_may_continue(&transcode, Some(&request))
+            .await,
+        "queued viewer demand wakes the worker but does not grant source ownership"
     );
     assert!(
         !jobs.analysis_source_may_continue(&transcode, None).await,
@@ -1711,6 +1718,7 @@ fn metrics_sample(value: i64) -> PrometheusStoreSnapshot {
             counts: [value; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
             oldest_age_seconds: [value; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
             source_io_reservations: value,
+            source_recovery_pending: value,
             legacy_pending: value,
         },
         analysis: plurx_core::store::AnalysisStoreMetrics {
@@ -1718,6 +1726,7 @@ fn metrics_sample(value: i64) -> PrometheusStoreSnapshot {
             queue_oldest_age_seconds: [value; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
             lifecycle_counts: [value; plurx_core::store::ANALYSIS_LIFECYCLE_METRIC_SLOTS],
             marker_counts: [value; plurx_core::store::ANALYSIS_MARKER_METRIC_SLOTS],
+            failed_by_code: [value; plurx_core::store::ANALYSIS_FAILURE_CODE_SLOTS],
             health: plurx_core::store::AnalysisQueueHealth {
                 ready_24h: value,
                 attempt_limit_24h: value,
@@ -1725,6 +1734,10 @@ fn metrics_sample(value: i64) -> PrometheusStoreSnapshot {
                 claimable: value,
                 running_past_lease: value,
                 last_ready_at_ms: value,
+                waiting: value,
+                incompatible: value,
+                eligible: value,
+                oldest_queued_at_ms: value,
             },
         },
     }
@@ -2082,7 +2095,27 @@ async fn busy_workers_allow_one_foreground_self_claim_and_one_subtitle_producer(
         EncoderCaps::default(),
         Pipeline::Cpu,
     ));
-    let _busy = transcode.test_mark_live_waiting();
+    store
+        .put_setting(keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("bounded CPU pool");
+    jobs.share_subtitle_admissions(transcode.admissions());
+    let background = transcode
+        .admit_fragment()
+        .await
+        .expect("real background CPU permit");
+    assert!(transcode.fragment_worker_idle(&background));
+    let background_manager = Arc::clone(&transcode);
+    let yielding = tokio::spawn(async move {
+        tokio::time::timeout(crate::admission::QUEUE_WAIT, async {
+            while background_manager.fragment_worker_idle(&background) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background observes registered foreground pressure");
+        drop(background);
+    });
     let (request, _) = jobs
         .request_file_analysis(file_id, false, "subtitle_source", "playback")
         .await
@@ -2091,6 +2124,11 @@ async fn busy_workers_allow_one_foreground_self_claim_and_one_subtitle_producer(
     let (first, second) = tokio::join!(
         jobs.self_claim_subtitle_source(&request.request_id, work.path()),
         jobs.self_claim_subtitle_source(&request.request_id, work.path())
+    );
+    yielding.await.expect("cooperative background yield");
+    assert!(
+        !transcode.admissions().live_is_waiting(),
+        "successful admission releases waiter before extracting"
     );
     assert_eq!((first as u8) + (second as u8), 1, "one owner runs");
     let rows = store.analysis_requests(20).await.expect("requests");
@@ -2214,7 +2252,12 @@ async fn full_subtitle_coverage_settles_ready_without_spawning_a_pass() {
 
 #[tokio::test]
 async fn remove_original_complete_publisher_and_request_third_ordinal_recovers_through_repair() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
     use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use plurx_core::store::BackgroundJobStore as _;
 
     let fixture = fixture(9, &[Sub::Srt, Sub::Srt, Sub::Srt]);
     let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -2267,6 +2310,17 @@ async fn remove_original_complete_publisher_and_request_third_ordinal_recovers_t
     assert_ne!(repair.request_id, initial.request_id);
     assert!(
         jobs.self_claim_subtitle_source(&repair.request_id, work.path())
+            .await,
+        "repair request: {:?}; jobs: {:?}",
+        store.analysis_request(&repair.request_id).await,
+        store
+            .list_jobs(plurx_core::store::background_jobs::JobQuery {
+                node_id: None,
+                state: None,
+                kind: None,
+                after_id: None,
+                limit: 10,
+            })
             .await
     );
     let after = store
@@ -2300,8 +2354,17 @@ async fn normal_subtitle_job_yields_uncharged_to_playback_but_foreground_is_not_
             crate::subtitle_ride_along::RideAlongPlan::standalone(work.path(), 8, stamp, vec![0])
                 .expect("normal plan");
         assert!(matches!(
-            run_subtitle_source_pass(plan, &source, work.path(), &lost, Some(&transcode), &|| {},)
-                .await,
+            run_subtitle_source_pass(
+                plan,
+                &source,
+                &[],
+                true,
+                work.path(),
+                &lost,
+                Some(&transcode),
+                &|| {},
+            )
+            .await,
             Err(AnalysisResolutionError::Retry {
                 code: "foreground_preempted",
                 charge_attempt: false,
@@ -2312,7 +2375,7 @@ async fn normal_subtitle_job_yields_uncharged_to_playback_but_foreground_is_not_
         crate::subtitle_ride_along::RideAlongPlan::standalone(work.path(), 8, stamp, vec![0])
             .expect("foreground plan");
     assert!(
-        run_subtitle_source_pass(plan, &source, work.path(), &lost, None, &|| {})
+        run_subtitle_source_pass(plan, &source, &[], true, work.path(), &lost, None, &|| {})
             .await
             .is_ok()
     );
@@ -4267,6 +4330,176 @@ async fn the_non_cluster_index_pass_rides_and_publishes() {
     );
 }
 
+/// A local pass over one catalogued fixture, with what it needs.
+async fn local_index_fixture() -> (
+    crate::subtitle_ride_along::testing::Fixture,
+    Arc<SqliteStore>,
+    MediaFile,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    Arc<JobManager>,
+    Arc<TranscodeManager>,
+) {
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    let fixture = fixture(0, &[Sub::Pgs]);
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file = catalogued_fixture(&store, &fixture).await;
+    let artwork = tempfile::tempdir().expect("artwork");
+    let transcode_dir = crate::test_tempdir().expect("transcode");
+    let jobs = manager(store.clone(), artwork.path());
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        transcode_dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    (
+        fixture,
+        store,
+        file,
+        artwork,
+        transcode_dir,
+        jobs,
+        transcode,
+    )
+}
+
+/// Lab5 (2026-10-26): the local pass quit whenever the pool was not idle,
+/// and a Dolby Vision title scan holds a background admission for minutes at
+/// a time, back to back, so titles waited days for an index. The pass now
+/// queues behind that work for the heavy lane and builds once it is free.
+#[tokio::test]
+async fn the_local_index_pass_queues_behind_background_work_instead_of_quitting() {
+    use plurx_core::store::FragmentIndexStore as _;
+    let (_fixture, store, file, _artwork, _transcode_dir, jobs, transcode) =
+        local_index_fixture().await;
+    // What a title scan holds while it runs: the heavy lane and its threads.
+    let scan = transcode
+        .admit_fragment()
+        .await
+        .expect("the scan's background admission");
+    let pass = tokio::spawn(Arc::clone(&jobs).build_fragment_indexes(Arc::clone(&transcode)));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !pass.is_finished(),
+        "the pass waits its turn rather than giving up"
+    );
+    drop(scan);
+    tokio::time::timeout(Duration::from_secs(60), pass)
+        .await
+        .expect("the pass finishes once the lane is free")
+        .expect("the pass");
+    assert!(
+        store
+            .holds_fragment_index_for_source(file.id, file.size, file.mtime)
+            .await
+            .expect("read"),
+        "built after the scan released the lane"
+    );
+}
+
+/// The queued pass still yields to a viewer: when its turn on the lane comes
+/// while playback waits for capacity, it leaves the file due and the pool to
+/// the viewer, and the next pass builds it.
+#[tokio::test]
+async fn a_queued_local_index_pass_yields_to_a_waiting_viewer() {
+    use plurx_core::store::FragmentIndexStore as _;
+    let (_fixture, store, file, _artwork, _transcode_dir, jobs, transcode) =
+        local_index_fixture().await;
+    let scan = transcode
+        .admit_fragment()
+        .await
+        .expect("the scan's background admission");
+    let pass = tokio::spawn(Arc::clone(&jobs).build_fragment_indexes(Arc::clone(&transcode)));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!pass.is_finished(), "queued behind the scan");
+    let viewer = transcode.test_mark_live_waiting();
+    drop(scan);
+    tokio::time::timeout(Duration::from_secs(10), pass)
+        .await
+        .expect("the pass yields promptly")
+        .expect("the pass");
+    let built = || async {
+        store
+            .holds_fragment_index_for_source(file.id, file.size, file.mtime)
+            .await
+            .expect("read")
+    };
+    assert!(!built().await, "the waiting viewer keeps the pool");
+    drop(viewer);
+    Arc::clone(&jobs)
+        .build_fragment_indexes(Arc::clone(&transcode))
+        .await;
+    assert!(built().await, "the next pass builds the file it left due");
+}
+
+/// Review of #1299: the heavy lane has one permit and everything else
+/// try-acquires it, so a pass that waited for the lane before every file won
+/// every turn and held the lane for the whole pass. It waits once; after its
+/// file it releases the lane, and a speech pass queued meanwhile goes next
+/// while the pass stops instead of re-taking the lane.
+#[tokio::test]
+async fn a_local_index_pass_waits_for_the_heavy_lane_once_and_lets_a_queued_worker_go_next() {
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use plurx_core::store::FragmentIndexStore as _;
+    let first = fixture(0, &[Sub::Pgs]);
+    let second = fixture(1, &[Sub::Pgs]);
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let files = [
+        catalogued_fixture(&store, &first).await,
+        catalogued_fixture(&store, &second).await,
+    ];
+    let artwork = tempfile::tempdir().expect("artwork");
+    let transcode_dir = crate::test_tempdir().expect("transcode");
+    let jobs = manager(store.clone(), artwork.path());
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        transcode_dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let scan = transcode
+        .admit_fragment()
+        .await
+        .expect("the scan's background admission");
+    let pass = tokio::spawn(Arc::clone(&jobs).build_fragment_indexes(Arc::clone(&transcode)));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let speech = tokio::spawn({
+        let transcode = Arc::clone(&transcode);
+        async move {
+            transcode
+                .admit_speech_queued(&tokio_util::sync::CancellationToken::new())
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(scan);
+    tokio::time::timeout(Duration::from_secs(60), pass)
+        .await
+        .expect("the pass ends")
+        .expect("the pass");
+    let speech = tokio::time::timeout(Duration::from_secs(10), speech)
+        .await
+        .expect("the queued speech pass gets its turn")
+        .expect("speech task")
+        .expect("a speech admission");
+    let mut built = 0;
+    for file in &files {
+        if store
+            .holds_fragment_index_for_source(file.id, file.size, file.mtime)
+            .await
+            .expect("read")
+        {
+            built += 1;
+        }
+    }
+    assert_eq!(
+        built, 1,
+        "one file under the queued turn, then the lane went on"
+    );
+    drop(speech);
+}
+
 /// Lab N4 (2026-10-11): a changed title waited for the round-robin
 /// cursor to wrap the whole library, 4 files a pass. A file a scan just
 /// added or changed is now examined before the backlog, under the same
@@ -4554,6 +4787,503 @@ async fn the_queue_worker_row_carries_its_ride_along() {
     assert!(row.fragments_indexed > 0, "{row:?}");
 }
 
+/// C1: one admission decision through execution. A foreground stream that
+/// takes the source between the claim and the hash stops the read before its
+/// first byte, and the request goes back to the queue uncharged.
+#[tokio::test]
+async fn a_foreground_permission_after_the_claim_yields_before_the_hash() {
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use plurx_core::store::background_jobs::BackgroundJobStore as _;
+    use plurx_core::store::background_jobs_resources::{
+        ForegroundSourceOwner, ForegroundSourcePolicy,
+    };
+    use plurx_core::store::ClusterFragmentIndexStore as _;
+
+    let fixture = fixture(0, &[Sub::Pgs]);
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+        .await
+        .expect("the queue on");
+    let file = catalogued_fixture(&store, &fixture).await;
+    let artwork = tempfile::tempdir().expect("artwork");
+    let transcode_dir = crate::test_tempdir().expect("transcode");
+    let jobs = manager(store.clone(), artwork.path());
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        transcode_dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let (request, _) = jobs
+        .request_file_analysis(file.id, false, "fragment_index", "admin")
+        .await
+        .expect("requested");
+    let node = jobs.coordinator.node_id().to_owned();
+    let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+    let policy = jobs.analysis_retry_policy().await;
+    let now = clock_ms();
+    let claimed = store
+        .claim_analysis_request_for_capacity(
+            &node,
+            Some(&engine),
+            now,
+            now + policy.lease_ms,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .await
+        .expect("claim")
+        .expect("an idle domain admits the claim");
+    assert_eq!(claimed.request_id, request.request_id);
+    // Playback takes the source after the claim.
+    store
+        .register_foreground_source(
+            ForegroundSourceOwner {
+                owner_id: uuid::Uuid::new_v4().to_string(),
+                lifetime_id: "c1-gesture".into(),
+                session_incarnation: uuid::Uuid::new_v4().to_string(),
+                producer_attempt: "producer-1".into(),
+                node_id: node.clone(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_generation: "c1-source".into(),
+                policy: ForegroundSourcePolicy::Rolling,
+            },
+            clock_ms(),
+            clock_ms() + 20_000,
+        )
+        .await
+        .expect("register")
+        .expect("playback takes the source");
+    jobs.work_claimed_analysis_request(&claimed, &node, &engine, &transcode, policy)
+        .await;
+    let row = store
+        .analysis_request(&request.request_id)
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, "queued", "{row:?}");
+    assert_eq!(row.attempts, 0, "the yield is uncharged: {row:?}");
+    assert_eq!(row.last_error_code, "foreground_preempted", "{row:?}");
+    let progress = finished_row_of(&jobs, file.id);
+    assert_eq!(
+        progress.bytes_read, 0,
+        "no source byte was hashed: {progress:?}"
+    );
+    assert_ne!(
+        progress.stage, "verifying",
+        "the hash never started: {progress:?}"
+    );
+}
+
+/// C1: an encoder in use no longer stops the indexer. A serving node (one
+/// software encoder held, nobody queuing) claims and resolves its own
+/// request but leaves another node's alone; once idle it takes that one too,
+/// and the work keeps the requester as its target.
+#[tokio::test]
+async fn a_serving_node_indexes_its_own_requests_and_an_idle_one_takes_others() {
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use plurx_core::store::ClusterFragmentIndexStore as _;
+
+    let fixture = fixture(0, &[Sub::Pgs]);
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+        .await
+        .expect("the queue on");
+    let file = catalogued_fixture(&store, &fixture).await;
+    let artwork = tempfile::tempdir().expect("artwork");
+    let transcode_dir = crate::test_tempdir().expect("transcode");
+    let jobs = manager(store.clone(), artwork.path());
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        transcode_dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let (own, _) = jobs
+        .request_file_analysis(file.id, false, "fragment_index", "admin")
+        .await
+        .expect("requested");
+    let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+    let now = clock_ms();
+    let foreign = store
+        .enqueue_analysis_request(&plurx_core::store::NewAnalysisRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            component: "fragment_index".into(),
+            pipeline_version: engine.clone(),
+            video_identity: own.video_identity.clone(),
+            requested_generation: "c1-foreign-generation".into(),
+            priority: "normal".into(),
+            trigger: "admin".into(),
+            force_rebuild: false,
+            target_node_id: "serving-peer".into(),
+            not_before_ms: now,
+            created_at_ms: now,
+        })
+        .await
+        .expect("another node's request");
+    let row = |id: String| {
+        let store = Arc::clone(&store);
+        async move {
+            store
+                .analysis_request(&id)
+                .await
+                .expect("read")
+                .expect("row")
+        }
+    };
+
+    let encoder = transcode
+        .test_hold_source_software_capacity()
+        .expect("an encoder in use");
+    assert!(!transcode.pretranscode_worker_idle(), "the node is serving");
+    Arc::clone(&jobs)
+        .resolve_analysis_requests(Arc::clone(&transcode))
+        .await;
+    let own_row = row(own.request_id.clone()).await;
+    assert!(
+        own_row.fence > 0,
+        "an encoder in use does not stop the claim: {own_row:?}"
+    );
+    assert_eq!(
+        own_row.state, "submitted",
+        "nor the read it admitted: {own_row:?}"
+    );
+    let foreign_row = row(foreign.request_id.clone()).await;
+    assert_eq!(
+        foreign_row.fence, 0,
+        "a serving node claims only its own: {foreign_row:?}"
+    );
+
+    drop(encoder);
+    assert!(transcode.pretranscode_worker_idle(), "the node is idle");
+    Arc::clone(&jobs)
+        .resolve_analysis_requests(Arc::clone(&transcode))
+        .await;
+    let foreign_row = row(foreign.request_id.clone()).await;
+    assert!(
+        foreign_row.fence > 0,
+        "an idle node takes another node's request: {foreign_row:?}"
+    );
+    assert_eq!(foreign_row.state, "submitted", "{foreign_row:?}");
+    assert_eq!(
+        foreign_row.target_node_id, "serving-peer",
+        "the requester keeps it"
+    );
+}
+
+/// Review 2 of C1 (B1): an idle node that cannot emit the copy-video
+/// identity another node's request names gives the row back uncharged --
+/// once. Its later passes leave the row to a node that can, instead of
+/// claiming, refusing and requeueing it (a fenced claim, an attempt row, a
+/// retry and a phase row through consensus) every time it comes due. The row
+/// has a viewer waiting, so nothing else keeps this node from it.
+#[tokio::test]
+async fn an_idle_node_does_not_reclaim_an_identity_it_cannot_emit() {
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use plurx_core::store::background_jobs::{AnalysisViewerInterest, BackgroundJobStore as _};
+    use plurx_core::store::{ClusterFragmentIndexStore as _, UserStore as _};
+
+    let fixture = fixture(0, &[Sub::Pgs]);
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    for (key, value) in [
+        (keys::VOD_INDEX_CLUSTER_CACHE, "1"),
+        // The uncharged retry comes due within a second.
+        (keys::ANALYSIS_BACKOFF_BASE_SECS, "1"),
+        (keys::ANALYSIS_BACKOFF_MAX_SECS, "1"),
+    ] {
+        store.put_setting(key, value).await.expect("setting");
+    }
+    let file = catalogued_fixture(&store, &fixture).await;
+    let artwork = tempfile::tempdir().expect("artwork");
+    let transcode_dir = crate::test_tempdir().expect("transcode");
+    let jobs = manager(store.clone(), artwork.path());
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        transcode_dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+    let now = clock_ms();
+    let foreign = store
+        .enqueue_analysis_request(&plurx_core::store::NewAnalysisRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            component: "fragment_index".into(),
+            pipeline_version: engine.clone(),
+            // A fingerprint no pipeline of this node renders (the target's
+            // Dolby Vision tooling, say, which this node lacks).
+            video_identity: "00c1b1d0b1d0c1c1".into(),
+            requested_generation: "b1-foreign-generation".into(),
+            priority: "normal".into(),
+            trigger: "playback".into(),
+            force_rebuild: false,
+            target_node_id: "serving-peer".into(),
+            not_before_ms: now,
+            created_at_ms: now,
+        })
+        .await
+        .expect("another node's request");
+    let viewer = store
+        .create_user("b1-viewer", "hash", false)
+        .await
+        .expect("viewer");
+    assert!(store
+        .join_analysis_viewer(AnalysisViewerInterest {
+            analysis_request_id: foreign.request_id.clone(),
+            requested_generation: foreign.requested_generation.clone(),
+            pipeline_version: foreign.pipeline_version.clone(),
+            video_identity: foreign.video_identity.clone(),
+            target_node_id: foreign.target_node_id.clone(),
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: viewer.id,
+            },
+            playback_id: "b1-playback".into(),
+            now_ms: now,
+        })
+        .await
+        .expect("a viewer waits on the target"));
+    let row = || {
+        let store = Arc::clone(&store);
+        let id = foreign.request_id.clone();
+        async move {
+            store
+                .analysis_request(&id)
+                .await
+                .expect("read")
+                .expect("row")
+        }
+    };
+    assert!(transcode.pretranscode_worker_idle(), "the node is idle");
+
+    Arc::clone(&jobs)
+        .resolve_analysis_requests(Arc::clone(&transcode))
+        .await;
+    let refused = row().await;
+    assert_eq!(refused.fence, 1, "claimed once: {refused:?}");
+    assert_eq!(refused.state, "queued", "{refused:?}");
+    assert_eq!(refused.attempts, 0, "uncharged: {refused:?}");
+    assert_eq!(
+        refused.last_error_code, "pipeline_version_unavailable",
+        "{refused:?}"
+    );
+
+    // Once the retry is due, the next pass leaves it alone.
+    let wait = refused.not_before_ms.saturating_sub(clock_ms()) + 50;
+    tokio::time::sleep(Duration::from_millis(
+        u64::try_from(wait.max(0)).unwrap_or(0),
+    ))
+    .await;
+    assert!(clock_ms() >= refused.not_before_ms);
+    Arc::clone(&jobs)
+        .resolve_analysis_requests(Arc::clone(&transcode))
+        .await;
+    let left = row().await;
+    assert_eq!(
+        (left.fence, left.state.as_str(), left.attempts),
+        (1, "queued", 0),
+        "the identity it cannot emit is not claimed again: {left:?}"
+    );
+    assert_eq!(left.target_node_id, "serving-peer", "{left:?}");
+}
+
+/// A learner membership lets execute fragment-index work.
+struct ArtifactLearnerAuthority;
+
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+impl ClusterJobAuthority for ArtifactLearnerAuthority {
+    async fn may_run_cluster_jobs(&self) -> bool {
+        false
+    }
+
+    async fn may_execute_job(&self, kind: plurx_core::store::background_jobs::JobKind) -> bool {
+        kind.permits_artifact_execution()
+    }
+}
+
+/// Lab3 (2026-10-26): resolving analysis requests was gated on the voters'
+/// singleton authority, so a learner allowed to execute fragment-index work
+/// never resolved the requests targeted at it -- and nothing else claims a
+/// targeted request. They sat queued for as long as it was a learner.
+#[tokio::test]
+async fn a_learner_resolves_the_analysis_request_targeted_at_it() {
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use plurx_core::store::ClusterFragmentIndexStore as _;
+
+    let fixture = fixture(0, &[Sub::Pgs]);
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+        .await
+        .expect("the queue on");
+    let file = catalogued_fixture(&store, &fixture).await;
+    let artwork = tempfile::tempdir().expect("artwork");
+    let transcode_dir = crate::test_tempdir().expect("transcode");
+    let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+        store.clone(),
+        artwork.path().to_path_buf(),
+        plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+        "learner-node".to_owned(),
+        Arc::new(ArtifactLearnerAuthority),
+    ));
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        transcode_dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let (request, _) = jobs
+        .request_file_analysis(file.id, false, "fragment_index", "admin")
+        .await
+        .expect("requested");
+    assert_eq!(request.target_node_id, "learner-node");
+    let mut state = request.state.clone();
+    for _ in 0..40 {
+        Arc::clone(&jobs)
+            .work_cluster_fragment_index_queue(Arc::clone(&transcode))
+            .await;
+        state = store
+            .analysis_request(&request.request_id)
+            .await
+            .expect("read")
+            .expect("request")
+            .state;
+        if state != "queued" && state != "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        matches!(state.as_str(), "submitted" | "ready"),
+        "the learner resolved its own request: {state}"
+    );
+}
+
+/// Lab3 (2026-10-26): background discovery had filled the analysis queue to
+/// its active ceiling, and a viewer's copy preparation -- queued as ordinary
+/// background work -- was refused with the rest. A viewer's request is
+/// foreground work with its own headroom above that ceiling.
+#[tokio::test]
+async fn a_viewer_preparation_is_queued_when_background_work_fills_the_ceiling() {
+    use plurx_core::store::{ClusterFragmentIndexStore as _, UserStore as _};
+    let dir = crate::test_tempdir().expect("db dir");
+    let path = dir.path().join("ceiling.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Movies".to_owned(),
+            kind: LibraryKind::Movies,
+            paths: Vec::new(),
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Ceiling".to_owned(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let id = store
+        .upsert_file(
+            item,
+            "/absent/ceiling.mkv",
+            100,
+            1,
+            &ProbeResult {
+                video_codec: Some("h264".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file");
+    let file = store.get_file(id).await.expect("read").expect("file");
+    rusqlite::Connection::open(&path)
+        .expect("seed connection")
+        .execute_batch(&format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {ceiling})
+             INSERT INTO analysis_requests (request_id, file_id, source_size, source_mtime,
+                 component, pipeline_version, video_identity, requested_generation, priority,
+                 trigger, force_rebuild, target_node_id, state, not_before_ms, created_at_ms,
+                 updated_at_ms)
+             SELECT 'filler-' || i, {id}, 100, 1, 'fragment_index', 'filler', '',
+                    'filler-' || i, 'normal', 'background', 0, 'node-filler', 'queued', 0, 0, 0
+               FROM n",
+            ceiling = plurx_core::store::MAX_ACTIVE_ANALYSIS_REQUESTS,
+        ))
+        .expect("fill the active ceiling");
+    let video = plurx_core::transcode::CopyVideoOptions::new(false, false);
+    assert!(
+        enqueue_copy_preparation_for_object(&store, "node-a", &file, video, None)
+            .await
+            .is_err(),
+        "background preparation still stops at the ceiling"
+    );
+    let viewer = store
+        .create_user("ceiling-viewer", "hash", false)
+        .await
+        .expect("viewer");
+    let request = enqueue_copy_preparation_for_object_with_viewer(
+        &store,
+        "node-a",
+        &file,
+        video,
+        None,
+        Some(&PlaybackViewerDemand {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: viewer.id,
+            },
+            playback_id: "ceiling-play".into(),
+        }),
+    )
+    .await
+    .expect("a viewer's preparation is admitted above the ceiling");
+    assert_eq!(request.state, "queued");
+    assert_eq!(request.priority, "foreground");
+    assert_eq!(request.trigger, "playback");
+
+    // A viewer's subtitle source shares the headroom; discovery does not.
+    let stamp = SubtitleSourceStamp {
+        file_id: file.id,
+        source_size: file.size,
+        source_mtime: file.mtime,
+        pipeline_version: "ceiling-subtitles".to_owned(),
+    };
+    assert!(
+        !matches!(
+            store
+                .enqueue_or_promote_subtitle_source(&stamp, "normal", 10)
+                .await,
+            Ok(Some(_))
+        ),
+        "background subtitle discovery still stops at the ceiling"
+    );
+    let subtitle = store
+        .enqueue_or_promote_subtitle_source(&stamp, "foreground", 11)
+        .await
+        .expect("a viewer's subtitle source is admitted above the ceiling")
+        .expect("request");
+    assert_eq!(subtitle.priority, "foreground");
+}
+
 /// #463 review finding 3: the switch turned off while a riding pass runs
 /// stops that pass's tracks reaching the store, and is counted.
 #[tokio::test]
@@ -4733,7 +5463,7 @@ async fn a_file_that_cannot_be_indexed_is_asked_once_per_identity() {
         .expect("the pass records why it could not index this file");
     assert_eq!(first.attempts, 1);
     assert!(
-        first.is_terminal(),
+        first.is_terminal(clock_ms()),
         "an unsupported source is terminal, not a wait: {first:?}"
     );
     assert!(!first.reason.is_empty(), "the builder's own words are kept");
@@ -4863,12 +5593,92 @@ fn the_vod_index_cursor_wraps_past_failed_low_ids() {
 #[test]
 fn long_remuxes_receive_a_complete_pass_budget() {
     assert_eq!(
-        index_file_budget(None),
+        index_file_budget(None, 0, None),
         Duration::from_secs(INDEX_FILE_BUDGET_FLOOR_SECS)
     );
-    let steel = index_file_budget(Some(7_095_005));
+    let steel = index_file_budget(Some(7_095_005), 0, None);
     assert!(steel >= Duration::from_secs(15 * 60));
     assert!(steel <= Duration::from_secs(INDEX_FILE_BUDGET_CEILING_SECS));
+}
+
+fn budget_exceeded(
+    elapsed_ms: u64,
+    covered_ms: i64,
+    expected_ms: i64,
+) -> plurx_core::segplan::FragmentIndexOutcome {
+    plurx_core::segplan::FragmentIndexOutcome {
+        source: plurx_core::segplan::SourceIdentity::new(1, 1, "argv"),
+        refusal: plurx_core::segplan::IndexRefusal::Truncated { rows: 900 },
+        reason: "exceeded the 1511s index budget".to_owned(),
+        attempts: 1,
+        next_attempt_at_ms: 0,
+        updated_at_ms: 0,
+        typed_code: Some(plurx_core::content_analysis::IndexFailureCode::IndexBudgetExceeded),
+        typed_retryable: Some(true),
+        retry_deadline_ms: 0,
+        policy_revision: 1,
+        terminal_reason: None,
+        diagnostic: Some(plurx_core::content_analysis::IndexDiagnostic {
+            version: 1,
+            code: "index_budget_exceeded".to_owned(),
+            retryable: true,
+            claim_fence: 0,
+            attempt: 1,
+            selected_stream: None,
+            expectation_provenance: None,
+            covered_ms: Some(covered_ms),
+            expected_ms: Some(expected_ms),
+            container_ms: None,
+            fragment_count: None,
+            output_bytes: None,
+            elapsed_ms: Some(elapsed_ms),
+            budget_ms: Some(1_511_000),
+            exit_category: Some("signal: 9 (SIGKILL)".to_owned()),
+            stderr_tail: Vec::new(),
+            recorded_at_ms: 0,
+        }),
+    }
+}
+
+/// a lab5 remux (79 GB, 197 min): killed by a 1511 s budget at 64% of
+/// the film. Its retry is budgeted from that measured rate, past the old
+/// 30-minute ceiling, instead of repeating the same kill.
+#[test]
+fn a_budget_failure_budgets_the_retry_from_the_rate_it_measured() {
+    let film_ms = 11_820_000;
+    let first = index_file_budget(Some(film_ms), 0, None);
+    assert_eq!(first, Duration::from_secs(1_508));
+    let previous = budget_exceeded(1_511_000, film_ms * 64 / 100, film_ms);
+    let retry = index_file_budget(Some(film_ms), 0, Some(&previous));
+    // 1511 s for 64% is 2361 s for the film; a quarter more, plus headroom.
+    assert!(retry >= Duration::from_secs(2_966), "{retry:?}");
+    assert!(retry > Duration::from_secs(INDEX_FILE_BUDGET_CEILING_SECS));
+    // Only a budget failure says anything about the rate.
+    let mut other = previous.clone();
+    other.typed_code = Some(plurx_core::content_analysis::IndexFailureCode::IndexSourceIo);
+    assert_eq!(index_file_budget(Some(film_ms), 0, Some(&other)), first);
+    // A measurement that covered nothing gives no rate.
+    let nothing = budget_exceeded(1_511_000, 0, film_ms);
+    assert_eq!(index_file_budget(Some(film_ms), 0, Some(&nothing)), first);
+    // And it is bounded, however slow the read was.
+    let crawl = budget_exceeded(1_511_000, 1_000, film_ms);
+    assert_eq!(
+        index_file_budget(Some(film_ms), 0, Some(&crawl)),
+        Duration::from_secs(INDEX_MEASURED_BUDGET_CEILING_SECS)
+    );
+}
+
+/// A first attempt on a large, high-bitrate remux is budgeted from its size
+/// too: 79 GB at the slowest planned read rate, not 197 minutes at 8x.
+#[test]
+fn a_first_attempt_on_a_large_remux_is_budgeted_from_its_size() {
+    let remux = index_file_budget(Some(11_820_000), 79_000_000_000, None);
+    assert!(remux >= Duration::from_secs(3_000), "{remux:?}");
+    // A small file keeps the duration budget.
+    assert_eq!(
+        index_file_budget(Some(11_820_000), 4_000_000_000, None),
+        Duration::from_secs(1_508)
+    );
 }
 
 #[tokio::test]

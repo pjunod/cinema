@@ -5,18 +5,10 @@ use plurx_core::store::background_jobs_library::{
     LibraryTrigger, LibraryWorkInput, LibraryWorkQuery, LibraryWorkRecord, LibraryWorkResult,
     NewLibraryWork, MAX_LIBRARY_RESULT_BYTES,
 };
-use plurx_worker_control::library_lifecycle::{
-    self, Effect, Effects, Event, Interrupt, Settlement, SettlementKind, State,
-};
-
-/// All events come from the immediately preceding effect's result. A stale
-/// pair here is an internal driver bug; it must not invent a recovery protocol.
-fn advance_library_lifecycle(state: &mut State, event: Event) -> Effects {
-    let (next, effects) = library_lifecycle::step(*state, event)
-        .expect("library driver event must match its current protocol phase");
-    *state = next;
-    effects
-}
+#[path = "library_work/env.rs"]
+mod env;
+#[path = "library_work/probe_input.rs"]
+mod probe_input;
 
 impl JobManager {
     pub(super) async fn trigger(
@@ -214,6 +206,36 @@ impl JobManager {
         statuses
     }
 
+    pub(super) async fn drive_library_queue(
+        self: &Arc<Self>,
+        transcode: &TranscodeManager,
+    ) -> bool {
+        let refresh_successors = async {
+            loop {
+                tokio::select! {
+                    () = self.library_wake.notified() => {},
+                    () = tokio::time::sleep(Duration::from_secs(3)) => {},
+                }
+                if let Err(error) = crate::background_jobs::advertise_library_successors(
+                    self.store.as_ref(),
+                    self.job_authority.as_ref(),
+                    transcode,
+                    self.coordinator.node_id(),
+                    &self.library_readiness,
+                )
+                .await
+                {
+                    tracing::warn!(%error,"refreshing ready library scans");
+                }
+            }
+        };
+        tokio::select! {
+            biased;
+            done = self.work_library_queue(transcode, None) => done,
+            () = refresh_successors => unreachable!("discovery runs until the worker returns"),
+        }
+    }
+
     pub(super) async fn work_library_queue(
         self: &Arc<Self>,
         transcode: &TranscodeManager,
@@ -241,7 +263,6 @@ impl JobManager {
             crate::background_jobs::faults::worker::Point::Claimed,
         )
         .await;
-        let fence = active.fence();
         let library_id = match job.supported_payload() {
             Ok(
                 JobPayload::LibraryScan { library_id, .. }
@@ -252,293 +273,11 @@ impl JobManager {
                 return false;
             }
         };
-        // The controller owns protocol phases; these Options own the actual
-        // guards. Only the corresponding effects consume them. Impossible
-        // phase/resource combinations are driver programming errors, rather
-        // than a second cleanup protocol alongside the controller.
-        let mut active = Some(active);
-        let mut admission = Some(admission);
-        let mut lease = None;
-        let mut publisher = None;
-        let mut work_result = None;
-        let mut controller = State::Initial;
-        let mut effects = advance_library_lifecycle(&mut controller, Event::Start);
-        while !effects.as_slice().is_empty() {
-            let current = effects;
-            effects = Effects::empty();
-            for effect in current.as_slice() {
-                match *effect {
-                    Effect::AcquireDomain => {
-                        let acquired = match self
-                            .acquire_job(format!("scan:library:{library_id}"))
-                            .await
-                        {
-                            Ok(Some(acquired)) => {
-                                #[cfg(test)]
-                                crate::background_jobs::faults::worker::at(
-                                    crate::background_jobs::faults::worker::Point::DomainAcquired,
-                                )
-                                .await;
-                                lease = Some(acquired);
-                                true
-                            }
-                            result => {
-                                #[cfg(test)]
-                                crate::background_jobs::faults::worker::at(
-                                    crate::background_jobs::faults::worker::Point::DomainUnavailable,
-                                )
-                                .await;
-                                if let Err(error) = result {
-                                    tracing::warn!(library_id, %error, "library domain lease unavailable");
-                                }
-                                false
-                            }
-                        };
-                        effects = advance_library_lifecycle(
-                            &mut controller,
-                            Event::DomainOutcome {
-                                acquired,
-                                now_ms: if acquired { 0 } else { clock_ms() },
-                            },
-                        );
-                    }
-                    Effect::Bind => {
-                        publisher = Some(
-                            lease
-                                .as_ref()
-                                .expect("Bind requires an acquired library domain")
-                                .publisher(self.store.as_ref()),
-                        );
-                        let accepted = match fence
-                            .bind_library(publisher.as_ref().expect("Bind just created publisher"))
-                            .await
-                        {
-                            Ok(true) => {
-                                #[cfg(test)]
-                                crate::background_jobs::faults::worker::at(
-                                    crate::background_jobs::faults::worker::Point::Bound,
-                                )
-                                .await;
-                                true
-                            }
-                            result => {
-                                tracing::warn!(
-                                    library_id,
-                                    ?result,
-                                    "library publication binding refused"
-                                );
-                                false
-                            }
-                        };
-                        effects = advance_library_lifecycle(
-                            &mut controller,
-                            Event::BindOutcome { accepted },
-                        );
-                    }
-                    Effect::Process => {
-                        let lease = lease.as_ref().expect("Process requires the bound domain");
-                        let publisher = publisher
-                            .as_ref()
-                            .expect("Process requires the bound publisher");
-                        let admission = admission
-                            .as_ref()
-                            .expect("Process retains physical admission");
-                        let cancellation = tokio_util::sync::CancellationToken::new();
-                        let queue_loss = fence.loss_token();
-                        let domain_loss = lease.loss_token();
-                        let result = {
-                            #[cfg(test)]
-                            crate::background_jobs::faults::worker::at_with_signals(
-                                crate::background_jobs::faults::worker::Point::Processing,
-                                Some(crate::background_jobs::faults::worker::Signals {
-                                    queue_loss: queue_loss.clone(),
-                                    domain_loss: domain_loss.clone(),
-                                }),
-                            )
-                            .await;
-                            let work = plurx_core::process::bounded::cancellable(
-                                cancellation.clone(),
-                                self.process_library_requests(
-                                    &job.id, library_id, lease, publisher, &fence,
-                                ),
-                            );
-                            tokio::pin!(work);
-                            let mut pressure = tokio::time::interval(Duration::from_millis(250));
-                            let (interrupt, mut completed) = loop {
-                                tokio::select! {
-                                    biased;
-                                    () = queue_loss.cancelled() => {
-                                        #[cfg(test)]
-                                        crate::background_jobs::faults::worker::at(
-                                            crate::background_jobs::faults::worker::Point::QueueLoss,
-                                        )
-                                        .await;
-                                        break (Interrupt::QueueLoss, None);
-                                    }
-                                    () = domain_loss.cancelled() => {
-                                        #[cfg(test)]
-                                        crate::background_jobs::faults::worker::at(
-                                            crate::background_jobs::faults::worker::Point::DomainLoss,
-                                        )
-                                        .await;
-                                        break (Interrupt::DomainLoss, None);
-                                    }
-                                    _ = pressure.tick() => {
-                                        let pressured = !transcode.fragment_worker_idle(admission);
-                                        #[cfg(test)]
-                                        let pressured = pressured
-                                            || crate::background_jobs::faults::worker::force_pressure();
-                                        if pressured {
-                                            #[cfg(test)]
-                                            crate::background_jobs::faults::worker::at(
-                                                crate::background_jobs::faults::worker::Point::Pressure,
-                                            )
-                                            .await;
-                                            break (Interrupt::Pressure, None);
-                                        }
-                                    }
-                                    result = &mut work => break (Interrupt::Completed, Some(result)),
-                                }
-                            };
-                            // This executor stays in the work future's lexical
-                            // scope so cancellation is followed by its real join.
-                            let interruption = advance_library_lifecycle(
-                                &mut controller,
-                                Event::Interrupt(interrupt),
-                            );
-                            let mut joined = None;
-                            for effect in interruption.as_slice() {
-                                match effect {
-                                    Effect::RevokeDomain => lease.revoke(),
-                                    Effect::CancelWork => cancellation.cancel(),
-                                    Effect::AwaitWorkJoin => {
-                                        joined = Some(match completed.take() {
-                                            Some(result) => result,
-                                            None => work.as_mut().await,
-                                        });
-                                    }
-                                    _ => unreachable!(
-                                        "interrupt emits only cancellation/join effects"
-                                    ),
-                                }
-                            }
-                            joined.expect("every interrupt consumes the work join")
-                        };
-                        #[cfg(test)]
-                        crate::background_jobs::faults::worker::at(
-                            crate::background_jobs::faults::worker::Point::WorkJoined,
-                        )
-                        .await;
-                        // `work` has returned only after the blocking walker and
-                        // any bounded media child joined. Admission is still held.
-                        effects = advance_library_lifecycle(
-                            &mut controller,
-                            Event::WorkJoined { ok: result.is_ok() },
-                        );
-                        work_result = Some(result);
-                    }
-                    Effect::DropPublisher => {
-                        drop(publisher.take().expect("cleanup requires the publisher"));
-                    }
-                    Effect::ReleaseDomain => {
-                        let settlement = match controller {
-                            State::Releasing { settlement } => settlement,
-                            _ => unreachable!("ReleaseDomain is emitted only while Releasing"),
-                        };
-                        let unbound = settlement == SettlementKind::Refused;
-                        if !unbound {
-                            #[cfg(test)]
-                            crate::background_jobs::faults::worker::at(
-                                crate::background_jobs::faults::worker::Point::ReleaseStarted,
-                            )
-                            .await;
-                        }
-                        if let Err(error) = lease
-                            .take()
-                            .expect("release consumes the acquired domain")
-                            .release()
-                            .await
-                        {
-                            if unbound {
-                                tracing::warn!(%error, "releasing unbound library lease");
-                            } else {
-                                tracing::warn!(library_id, %error, "releasing library domain lease");
-                            }
-                        }
-                        if !unbound {
-                            #[cfg(test)]
-                            crate::background_jobs::faults::worker::at(
-                                crate::background_jobs::faults::worker::Point::ReleaseFinished,
-                            )
-                            .await;
-                        }
-                        if settlement == SettlementKind::Retry {
-                            let error = work_result
-                                .as_ref()
-                                .expect("retry follows a work result")
-                                .as_ref()
-                                .expect_err("retry follows failed work");
-                            tracing::warn!(library_id, %error, "durable library attempt failed");
-                        }
-                        // Preserve sampling after release (and its fault point),
-                        // including when release itself returned an ambiguity.
-                        let now_ms = if settlement == SettlementKind::None {
-                            0
-                        } else {
-                            clock_ms()
-                        };
-                        let retry_delay_ms = if settlement == SettlementKind::Retry {
-                            crate::background_jobs::retry_delay_ms(&job.id, job.failed_attempts)
-                        } else {
-                            0
-                        };
-                        effects = advance_library_lifecycle(
-                            &mut controller,
-                            Event::DomainReleased {
-                                now_ms,
-                                retry_delay_ms,
-                            },
-                        );
-                    }
-                    Effect::Settle(settlement) => {
-                        settle_library(
-                            &fence,
-                            match settlement {
-                                Settlement::Yield { not_before_ms } => JobSettlement::Yield {
-                                    error_code: None,
-                                    checkpoint: None,
-                                    not_before_ms,
-                                },
-                                Settlement::Retry { not_before_ms } => JobSettlement::Retry {
-                                    error_code: "library_execution_failed".into(),
-                                    not_before_ms,
-                                },
-                            },
-                        )
-                        .await;
-                    }
-                    Effect::RetireQueue => {
-                        active.take().expect("queue is retired once").finish().await;
-                        #[cfg(test)]
-                        crate::background_jobs::faults::worker::at(
-                            crate::background_jobs::faults::worker::Point::Finished,
-                        )
-                        .await;
-                    }
-                    Effect::DropAdmission => {
-                        drop(admission.take().expect("admission is released once, last"));
-                        #[cfg(test)]
-                        crate::background_jobs::faults::worker::at(
-                            crate::background_jobs::faults::worker::Point::AdmissionDropped,
-                        )
-                        .await;
-                    }
-                    Effect::RevokeDomain | Effect::CancelWork | Effect::AwaitWorkJoin => {
-                        unreachable!("work effects are consumed inside the Process scope");
-                    }
-                }
-            }
-        }
+        let mut environment =
+            env::TokioEnvironment::new(self, transcode, job, library_id, active, admission);
+        plurx_worker_control::library_driver::run_driver(&mut environment)
+            .await
+            .expect("library environment replies must match the shared driver request");
         true
     }
 
@@ -793,6 +532,58 @@ mod tests {
     use plurx_core::store::{SqliteStore, Store};
     use plurx_core::transcode::{EncoderCaps, Pipeline};
     use tokio::sync::{mpsc, oneshot};
+
+    /// A bounded ready-source schedule: every selected non-pressuring tick
+    /// advances one period, so restoring tick-before-work fails after three
+    /// decisions. No timeout or assumptions about the runtime's poll cadence.
+    #[tokio::test(start_paused = true)]
+    async fn library_worker_ready_work_precedes_burst_pressure_ticks() {
+        use plurx_worker_control::library_driver::{select_work, Selected};
+        use std::future::{pending, poll_fn};
+        use std::task::Poll;
+
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        let work_polls = std::cell::Cell::new(0);
+        let mut work = std::pin::pin!(poll_fn(|_| {
+            work_polls.set(work_polls.get() + 1);
+            Poll::Ready(())
+        }));
+        let mut completed_on = None;
+        for decision in 0..3 {
+            match select_work(pending::<()>(), pending::<()>(), work.as_mut(), tick.tick()).await {
+                Selected::Work(()) => {
+                    completed_on = Some(decision);
+                    break;
+                }
+                Selected::Tick => tokio::time::advance(Duration::from_millis(250)).await,
+                _ => panic!("loss futures are pending"),
+            }
+        }
+        assert_eq!(
+            completed_on,
+            Some(0),
+            "ready work must outrank every ready tick"
+        );
+        assert_eq!(work_polls.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn library_worker_selector_preserves_loss_precedence_and_pending_work_pressure() {
+        use plurx_worker_control::library_driver::{select_work, Selected};
+        use std::future::{pending, ready};
+        assert_eq!(
+            select_work(ready(()), ready(()), ready(()), ready(())).await,
+            Selected::QueueLoss
+        );
+        assert_eq!(
+            select_work(pending::<()>(), ready(()), ready(()), ready(())).await,
+            Selected::DomainLoss
+        );
+        assert_eq!(
+            select_work(pending::<()>(), pending::<()>(), pending::<()>(), ready(())).await,
+            Selected::Tick
+        );
+    }
 
     type SpawnedWorker = (
         tokio::task::JoinHandle<(bool, u8)>,
@@ -1205,6 +996,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn library_worker_releases_source_after_pressure_during_completion_acknowledgement() {
+        let (store, _root, jobs, transcode) = queued_library("first-scan").await;
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (worker, _, resume) = spawn_worker(
+            "library",
+            Arc::clone(&jobs),
+            Arc::clone(&transcode),
+            tx,
+            Some(WorkerPoint::CompletionCommitted),
+            false,
+            0,
+        );
+        next_worker_event(&mut events, "library", WorkerPoint::BeforeCompletion).await;
+        // The Store can finish the write while its reply is still pending.
+        // A source check can therefore see the settled waiter and move the
+        // controller into JoinWork before the producer observes the commit.
+        // JoinWork polls the same producer but never starts a second check.
+        let mut observed = Vec::new();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let point = events.recv().await.expect("library worker event").point;
+                observed.push(point);
+                let committed = observed.contains(&WorkerPoint::CompletionCommitted);
+                let checked = observed.contains(&WorkerPoint::SourcePermissionCheck);
+                if committed
+                    && checked
+                    && (point == WorkerPoint::SourcePermissionCheck
+                        || observed.contains(&WorkerPoint::Pressure))
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("completion and source check did not converge: {observed:?}"));
+        let first = request_record(store.as_ref(), "first-scan").await;
+        assert_eq!(first.state, "succeeded");
+        resume
+            .expect("completion barrier")
+            .send(())
+            .expect("deliver completion reply");
+        tokio::time::timeout(Duration::from_secs(3), worker)
+            .await
+            .expect("a completed scan must release its source custody")
+            .expect("library worker joins");
+        enqueue_full(store.as_ref(), first.library_id, "next-scan", false).await;
+        assert!(jobs.work_library_queue(&transcode, None).await);
+        assert_eq!(
+            request_record(store.as_ref(), "next-scan").await.state,
+            "succeeded"
+        );
+    }
+
+    #[tokio::test]
     async fn library_worker_reconciles_lost_completion_acknowledgement() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let root = crate::test_tempdir().expect("root");
@@ -1237,6 +1082,332 @@ mod tests {
         assert!(
             record.result.is_some(),
             "committed completion survives lost acknowledgement"
+        );
+    }
+
+    /// One queued full-library request on a fresh store, ready to be claimed.
+    async fn queued_library(
+        request_id: &str,
+    ) -> (
+        Arc<dyn Store>,
+        tempfile::TempDir,
+        Arc<JobManager>,
+        Arc<TranscodeManager>,
+    ) {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Queued library".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        enqueue_full(store.as_ref(), library.id, request_id, false).await;
+        let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
+        let transcode = transcode_for(Arc::clone(&store), root.path());
+        (store, root, jobs, transcode)
+    }
+
+    /// What the environment still held at the instant its live work future was
+    /// dropped.
+    #[derive(Debug, Default)]
+    struct HeldWhenWorkDropped {
+        queue_released: bool,
+        domain_released: bool,
+        admission_released: bool,
+    }
+
+    /// Aborting a worker task mid-work drops its environment with the work
+    /// future alive. The work must go first, then its publisher and lease, then
+    /// physical admission, and the queue fence last, exactly as the pre-driver
+    /// worker's stack locals released. The previous field order released the
+    /// fence (cancelling its loss token) and admission (returning the transcode
+    /// permit and the heavy gate) while the work future could still run.
+    #[tokio::test]
+    async fn library_worker_abort_releases_in_the_original_order() {
+        let (_store, _root, jobs, transcode) = queued_library("abort-order").await;
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (task, scope, _resume) = spawn_worker(
+            "w1",
+            jobs,
+            Arc::clone(&transcode),
+            tx,
+            Some(WorkerPoint::BeforeScan),
+            false,
+            0,
+        );
+        let processing = next_worker_event(&mut events, "w1", WorkerPoint::Processing).await;
+        next_worker_event(&mut events, "w1", WorkerPoint::BeforeScan).await;
+        let signals = processing.signals.expect("worker loss tokens");
+        assert!(
+            transcode.background_worker_in_use(),
+            "the held scan holds physical admission"
+        );
+        assert!(!signals.queue_loss.is_cancelled() && !signals.domain_loss.is_cancelled());
+
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        crate::background_jobs::faults::worker::on_pause_end(&scope, {
+            let observed = Arc::clone(&observed);
+            let signals = signals.clone();
+            let transcode = Arc::clone(&transcode);
+            move || {
+                *observed.lock().expect("observation") = Some(HeldWhenWorkDropped {
+                    queue_released: signals.queue_loss.is_cancelled(),
+                    domain_released: signals.domain_loss.is_cancelled(),
+                    admission_released: !transcode.background_worker_in_use(),
+                });
+            }
+        });
+        task.abort();
+        let error = task.await.expect_err("aborted worker does not complete");
+        assert!(error.is_cancelled(), "abort must not panic: {error:?}");
+
+        let at_work_drop = observed
+            .lock()
+            .expect("observation")
+            .take()
+            .expect("the live work future was dropped by the abort");
+        assert!(
+            !at_work_drop.queue_released
+                && !at_work_drop.domain_released
+                && !at_work_drop.admission_released,
+            "nothing is released before the work future: {at_work_drop:?}"
+        );
+        assert!(
+            signals.queue_loss.is_cancelled() && signals.domain_loss.is_cancelled(),
+            "the fence and lease are released once the environment is gone"
+        );
+        assert!(
+            !transcode.background_worker_in_use(),
+            "admission is released with the environment"
+        );
+    }
+
+    #[tokio::test]
+    async fn readable_manual_scan_requests_a_turn_while_maintenance_owns_the_worker() {
+        use plurx_core::store::background_jobs::{ClaimJob, ClaimOutcome, JobKind, SettleJob};
+        let (store, _root, jobs, transcode) = queued_library("busy-manual").await;
+        let library_id = request_record(store.as_ref(), "busy-manual")
+            .await
+            .library_id;
+        // First announce a genuinely idle worker; the subsequent occupied
+        // observation must withdraw this cached positive advertisement.
+        crate::background_jobs::advertise_library_successors(
+            store.as_ref(),
+            jobs.job_authority.as_ref(),
+            &transcode,
+            jobs.coordinator.node_id(),
+            &jobs.library_readiness,
+        )
+        .await
+        .expect("idle worker");
+        let running = transcode
+            .admit_fragment()
+            .await
+            .expect("running maintenance");
+        assert!(!jobs.work_library_queue(&transcode, None).await);
+        assert!(jobs.library_readiness.poll_interval() <= Duration::from_secs(1));
+        assert!(
+            transcode.fragment_worker_idle(&running),
+            "maintenance retains physical custody"
+        );
+        let now = clock_ms();
+        let EnqueueOutcome::Accepted { job_id, .. } = store
+            .enqueue_library_work(NewLibraryWork {
+                request_id: "remote-scheduled".into(),
+                library_id,
+                input: LibraryWorkInput::Full {
+                    refresh: true,
+                    trigger: LibraryTrigger::Scheduled,
+                },
+                now_ms: now,
+            })
+            .await
+            .expect("remote maintenance")
+        else {
+            panic!("expected new maintenance")
+        };
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id,
+                expected_revision: 0,
+                node_id: "remote-worker".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::MetadataRefresh,
+                payload_version: 1,
+                now_ms: now,
+                dispatched_at_ms: now,
+            })
+            .await
+            .expect("remote may use free disk")
+        else {
+            panic!("busy voter blocked remote work")
+        };
+        assert!(store
+            .settle_job(SettleJob {
+                token: job.token.expect("running"),
+                now_ms: now,
+                settlement: JobSettlement::Yield {
+                    error_code: None,
+                    checkpoint: None,
+                    not_before_ms: now + 60000
+                },
+            })
+            .await
+            .expect("remote released disk"));
+        drop(running);
+        assert!(
+            jobs.work_library_queue(&transcode, None).await,
+            "same manual request runs after release"
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_library_worker_renews_its_next_manual_scan_before_release() {
+        let root = crate::test_tempdir().expect("root");
+        let db = root.path().join("queue.sqlite");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&db).expect("store"));
+        let media = root.path().join("media");
+        std::fs::create_dir(&media).expect("media directory");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        enqueue_full(store.as_ref(), library.id, "first", false).await;
+        let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
+        let transcode = transcode_for(Arc::clone(&store), root.path());
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (scope, resume) = worker_scope("only-reader", tx, Some(WorkerPoint::BeforeScan), false);
+        let driver = tokio::spawn({
+            let jobs = Arc::clone(&jobs);
+            async move {
+                crate::background_jobs::faults::worker::run(scope, async {
+                    jobs.drive_library_queue(&transcode).await
+                })
+                .await
+            }
+        });
+        next_worker_event(&mut events, "only-reader", WorkerPoint::BeforeScan).await;
+        enqueue_full(store.as_ref(), library.id, "next", true).await;
+        let next = request_record(store.as_ref(), "next").await.job_id;
+        jobs.library_wake.notify_one();
+        let read =
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("observation");
+        tokio::time::timeout(Duration::from_secs(12), async {
+            let mut first = None;
+            loop {
+                let until: Option<i64> = read
+                    .query_row(
+                        "SELECT max(expires_at_ms) FROM dispatch_turn_ready WHERE job_id=?1",
+                        [&next],
+                        |row| row.get(0),
+                    )
+                    .expect("turn expiry");
+                if let Some(until) = until.filter(|until| *until > clock_ms()) {
+                    if first.is_some_and(|old| until > old) {
+                        break;
+                    }
+                    first = Some(until);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("second request advertised and renewed while the first is still running");
+        resume.expect("resume").send(()).expect("release scan");
+        assert!(driver.await.expect("driver joined"));
+    }
+
+    /// A panic that unwinds through a worker drops its environment while
+    /// panicking. A `Drop` assertion there would be a double panic, which
+    /// aborts the whole process, so this test crashing the test binary is the
+    /// failure mode.
+    #[tokio::test]
+    async fn library_worker_environment_drops_quietly_while_unwinding() {
+        let (_store, _root, jobs, transcode) = queued_library("unwind-drop").await;
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (scope, _resume) = worker_scope("w1", tx, Some(WorkerPoint::BeforeScan), false);
+        let (unwind, unwinding) = oneshot::channel::<()>();
+        let task = {
+            let transcode = Arc::clone(&transcode);
+            tokio::spawn(async move {
+                crate::background_jobs::faults::worker::run(scope, async move {
+                    let mut unwinding = unwinding;
+                    let mut work = Box::pin(jobs.work_library_queue(&transcode, None));
+                    tokio::select! {
+                        biased;
+                        _ = &mut unwinding => panic!("injected unwind with live library work"),
+                        claimed = &mut work => claimed,
+                    }
+                })
+                .await
+            })
+        };
+        next_worker_event(&mut events, "w1", WorkerPoint::BeforeScan).await;
+        assert!(transcode.background_worker_in_use());
+        unwind.send(()).expect("start unwinding");
+        let error = task.await.expect_err("the injected panic ends the task");
+        assert!(error.is_panic(), "only the injected panic: {error:?}");
+        let payload = error.into_panic();
+        assert_eq!(
+            payload.downcast_ref::<&str>().copied(),
+            Some("injected unwind with live library work")
+        );
+        assert!(
+            !transcode.background_worker_in_use(),
+            "unwinding still released admission"
+        );
+    }
+
+    /// With the clock paused the first tick of a fresh interval is ready at
+    /// its first poll, so a ready work future and a ready tick are both
+    /// available at once. Work must win;
+    /// swapping the `work` and `pressure.tick()` arguments inside `select_next`
+    /// (the only selection `TokioEnvironment::poll_work` makes) reports `Tick`.
+    #[tokio::test(start_paused = true)]
+    async fn library_worker_select_prefers_ready_work_to_a_ready_tick() {
+        use plurx_worker_control::library_driver::Selected;
+        use tokio_util::sync::CancellationToken;
+        let (queue, domain) = (CancellationToken::new(), CancellationToken::new());
+        let mut pressure = tokio::time::interval(Duration::from_millis(250));
+        let mut work = Box::pin(std::future::ready(7_u8));
+        assert_eq!(
+            env::select_next(&queue, &domain, &mut work, &mut pressure).await,
+            Selected::Work(7),
+            "ready work must be taken before a ready pressure tick"
+        );
+
+        let mut pressure = tokio::time::interval(Duration::from_millis(250));
+        let mut pending = Box::pin(std::future::pending::<u8>());
+        assert_eq!(
+            env::select_next(&queue, &domain, &mut pending, &mut pressure).await,
+            Selected::Tick,
+            "a pending scan still yields to the pressure tick"
+        );
+
+        domain.cancel();
+        let mut pressure = tokio::time::interval(Duration::from_millis(250));
+        let mut work = Box::pin(std::future::ready(7_u8));
+        assert_eq!(
+            env::select_next(&queue, &domain, &mut work, &mut pressure).await,
+            Selected::DomainLoss,
+            "loss outranks ready work"
+        );
+        queue.cancel();
+        let mut work = Box::pin(std::future::ready(7_u8));
+        assert_eq!(
+            env::select_next(&queue, &domain, &mut work, &mut pressure).await,
+            Selected::QueueLoss
         );
     }
 }

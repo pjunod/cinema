@@ -1,15 +1,18 @@
 "use strict";
 const test=require("node:test"),assert=require("node:assert/strict");
 const fs=require("node:fs"),path=require("node:path"),vm=require("node:vm");
-const source=fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/player/prepared-replacement.js"),"utf8");
+const webPlayer=path.join(__dirname,"../../crates/plurxd/src/web/player");
+const frameSource=fs.readFileSync(path.join(webPlayer,"video-frames.js"),"utf8");
+const source=fs.readFileSync(path.join(webPlayer,"prepared-replacement.js"),"utf8");
 function harness({origin=600000,rate=1,voluntary=true}={}){
   let now=0,next=0,attached=true;
   const timers=new Map(),exposed=[],failed=[],pairs=[],logs=[];
-  const element=()=>({currentTime:17,playbackRate:rate,paused:false,seeking:false,readyState:4,
-    buffered:{length:1,start:()=>0,end:()=>60},callbacks:new Map(),listeners:new Map(),muted:true,
+  const element=()=>Object.assign(new EventTarget(),{
+    currentTime:17,playbackRate:rate,paused:false,seeking:false,readyState:4,
+    buffered:{length:1,start:()=>0,end:()=>60},callbacks:new Map(),muted:true,
     requestVideoFrameCallback(fn){const id=++next;this.callbacks.set(id,fn);return id;},
     cancelVideoFrameCallback(id){this.callbacks.delete(id);},
-    addEventListener(name,fn){this.listeners.set(name,fn);},removeEventListener(name){this.listeners.delete(name);}});
+    emit(name){this.dispatchEvent(new Event(name));}});
   const incumbent=element(),target=element();incumbent.muted=false;
   const state={sessionId:"target",mediaOriginMs:origin,bufferReadyAtMs:0};
   const player={prepared:state,offset:origin/1000,vod:false,wantsPlayback:true,
@@ -18,6 +21,7 @@ function harness({origin=600000,rate=1,voluntary=true}={}){
     performance:{now:()=>now},setTimeout(fn,ms){const id=++next;timers.set(id,{fn,at:now+ms});return id;},
     clearTimeout(id){timers.delete(id);},playbackOwnsAttachedMedia:()=>attached,
     streamHasVideo:()=>true,bufferRunway:()=>20,playbackContext:()=>({}),clientLog:row=>logs.push(row)});
+  vm.runInContext(frameSource,ctx);
   vm.runInContext(source,ctx);
   ctx.failPreparedReplacement=(p,s,reason)=>{failed.push(reason);p.prepared=null;};
   ctx.exposePreparedReplacement=(p,s,v,spare,filmMs)=>{exposed.push({p,s,v,spare,filmMs});};
@@ -63,7 +67,7 @@ test("prepared handoff never settles a superseded frame rendezvous",()=>{
 });
 test("prepared handoff retires on pause rather than waiting for alignment",()=>{
   const h=harness();h.start();h.warm();h.incumbentFrame(18.2,86525,100);
-  h.incumbent.paused=true;h.incumbent.listeners.get("pause")();h.deadline();
+  h.incumbent.paused=true;h.incumbent.emit("pause");h.deadline();
   assert.equal(h.exposed.length,0);assert.equal(h.failed.length,1);assert.match(h.failed[0],/pressure before voluntary commit/);
 });
 
@@ -140,4 +144,103 @@ test("prepared SDR clock alignment retries when the first seek still trails by m
   assert.equal(seeks.length,2,"60ms after a seek still exceeds one24fps frame");
   assert.equal(proof.length,1);assert.equal(proof[0],seeks[1]);
   assert.equal(h.failed.length,0);assert.equal(h.incumbent.muted,false);
+});
+
+// D1 seam fix (plan ruling 3): an engine without frame callbacks never
+// exposes on `readyState`. A seek into a buffer hole leaves HAVE_FUTURE_DATA
+// about a range the playhead is not in; the successor takes the picture only
+// after its decoder counts new frames while its clock advances on the
+// incumbent's second, under the same bound as the callback proof.
+function withoutFrameCallbacks(counter){
+  const h=harness({voluntary:false});
+  delete h.target.requestVideoFrameCallback;
+  h.target.requestVideoFrameCallback=undefined;
+  if(counter) h.target.getVideoPlaybackQuality=()=>({totalVideoFrames:h.decoded});
+  h.decoded=100;
+  h.step=(ms,frames=0,advance=0)=>{
+    h.advance(ms);h.decoded+=frames;h.target.currentTime+=advance;h.incumbent.currentTime+=advance;
+    for(const [id,t] of [...h.timers])if(t.at<=h.now()){h.timers.delete(id);t.fn();}
+  };
+  return h;
+}
+test("a successor without frame callbacks is not exposed on readyState alone",()=>{
+  const h=withoutFrameCallbacks(true);
+  h.now=()=>h.ctx.performance.now();
+  h.start();
+  assert.equal(h.exposed.length,0,"readyState 4 and a landed seek are not a picture");
+  for(let i=0;i<25;i++) h.step(40);
+  assert.equal(h.exposed.length,0);
+  assert.equal(h.failed.length,1);assert.match(h.failed[0],/decoded-frame deadline/);
+  assert.equal(h.incumbent.muted,false,"the incumbent stays the one heard");
+});
+test("decoded frames at the aligned position expose the successor",()=>{
+  const h=withoutFrameCallbacks(true);
+  h.now=()=>h.ctx.performance.now();
+  h.start();
+  h.step(40,1,0.04);h.step(40,1,0.04);
+  assert.equal(h.exposed.length,0,"two frames are not yet the monotonic proof");
+  h.step(40,1,0.04);
+  assert.equal(h.exposed.length,1);assert.equal(h.failed.length,0);
+});
+test("an engine with no decoded-frame counter refuses the exposure",()=>{
+  const h=withoutFrameCallbacks(false);
+  h.start();
+  assert.equal(h.exposed.length,0);
+  assert.equal(h.failed.length,1);assert.match(h.failed[0],/no decoded-frame observation/);
+});
+
+// Review 3 B2: the "no reopen" leg of the twenty-switch bar is what actually
+// happened inside the ±2 s window, not a constant. Every seam outcome is
+// reported after the window, reopened only when an ordinary reopen ran.
+function seamHarness(){
+  const timers=[],logs=[];
+  const p={attemptId:"a1",sessionId:"successor",fileId:"f7",switchCommit:null,switchFrames:[]};
+  const ctx=vm.createContext({
+    PLAYER:p,performance:{now:()=>0},
+    window:{PlurxPlaybackControl:control},
+    setTimeout(fn,ms){timers.push({fn,ms});return timers.length;},clearTimeout(){},
+    clientLog:row=>logs.push(row),playbackContext:()=>({})});
+  vm.runInContext(fs.readFileSync(path.join(webPlayer,"prepared-switch-measurement.js"),"utf8"),ctx);
+  return {ctx,p,timers,logs,
+    report(outcome,state={sessionId:"successor"}){ctx.reportPreparedSeamAfterWindow(p,state,outcome);return state;},
+    elapse(){for(const t of timers.splice(0)) t.fn();},
+    seams(){return logs.filter(row=>row.event==="prepared_seam").map(row=>row.prepared_seam);}};
+}
+const control=require("../../crates/plurxd/src/web/playback-control.js");
+test("a committed switch with no reopen in its window reports reopened false",()=>{
+  const h=seamHarness();
+  h.report("committed");
+  assert.equal(h.seams().length,0,"nothing is reported before the window has elapsed");
+  assert.ok(h.timers[0].ms>=control.PREPARED_SWITCH_WINDOW_MS);
+  h.elapse();
+  assert.deepEqual(h.seams().map(seam=>[seam.outcome,seam.reopened]),[["committed",false]]);
+});
+test("a reopen inside the window is reported, by attempt, session or a new player",()=>{
+  for(const reopen of [
+    h=>{h.p.attemptId="a2";},
+    h=>{h.p.sessionId="reopened";},
+    h=>{h.ctx.PLAYER={attemptId:"a9",sessionId:"x",fileId:"f7"};},
+  ]){
+    const h=seamHarness();
+    h.report("committed");reopen(h);h.elapse();
+    assert.deepEqual(h.seams().map(seam=>seam.reopened),[true]);
+  }
+  // The viewer closing the player, or opening another title, is not a reopen.
+  for(const leave of [h=>{h.ctx.PLAYER=null;},h=>{h.ctx.PLAYER={attemptId:"b1",sessionId:"y",fileId:"other"};}]){
+    const h=seamHarness();
+    h.report("committed");leave(h);h.elapse();
+    assert.deepEqual(h.seams().map(seam=>seam.reopened),[false]);
+  }
+});
+test("a refused switch counts as reopened only when the reopen it owes ran",()=>{
+  let h=seamHarness();
+  h.report("refused");h.elapse();
+  assert.deepEqual(h.seams().map(seam=>[seam.outcome,seam.reopened]),[["refused",false]]);
+  h=seamHarness();
+  h.report("switched_without_a_frame");h.p.attemptId="a2";h.elapse();
+  assert.deepEqual(h.seams().map(seam=>[seam.outcome,seam.reopened]),[["switched_without_a_frame",true]]);
+  // Reported once, however often the outcome is reached.
+  h=seamHarness();
+  const state=h.report("refused");h.report("refused",state);h.elapse();
+  assert.equal(h.seams().length,1);
 });

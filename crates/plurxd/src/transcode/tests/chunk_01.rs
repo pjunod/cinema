@@ -735,6 +735,7 @@ async fn channel_playback_repair_validates_distinct_init_before_publication() {
         aac: true,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     session.frozen_presentation = Some(FrozenHlsPresentation::new(
         execution_file_for_retry(),
@@ -1656,12 +1657,9 @@ async fn accepted_hold_and_active_control_signal_the_real_producer_immediately()
         );
         snapshot.demand = demand;
         // The started fixture has produced 64 s and published 48 s, one
-        // whole batch staged. Held on time additionally requires the
-        // producer to have reached what the next publication will ask
-        // for: the clock's desired end (position + 48 s initial runway)
-        // plus the 10 s guard, capped at its allowed end (+64 s). From
-        // position 0 that is 58 s, which 64 s of produced media covers;
-        // from position 10 s it is 68 s, which it does not.
+        // whole batch staged. A held producer releases below its 48s
+        // source-bank low watermark: 64s covers position 0, but position
+        // 20s needs 68s and must resume the producer.
         snapshot.position_ms = position_ms;
         snapshot.buffered_from_ms = Some(position_ms);
         if demand != crate::playback_control::PlaybackDemand::Active {
@@ -1776,7 +1774,7 @@ async fn accepted_hold_and_active_control_signal_the_real_producer_immediately()
         .hls_session_control(request(
             3,
             crate::playback_control::PlaybackDemand::Active,
-            10_000,
+            20_000,
         ))
         .await
         .expect("local worker")
@@ -1786,7 +1784,8 @@ async fn accepted_hold_and_active_control_signal_the_real_producer_immediately()
     };
     assert!(
         !behind_status.suspended,
-        "a producer short of the next publication must resume"
+        "a producer short of the next publication must resume: hold={:?}; demand={:?}",
+        behind_status.hold_reason, behind_status.control_demand
     );
     assert_eq!(behind_status.hold_reason, None);
     assert_eq!(behind_status.control_demand, Some("active"));
@@ -2253,6 +2252,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
         Pipeline::Cpu,
     ));
     let req = SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -2272,6 +2272,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds: 0.0,
         audio_index: None,
@@ -2321,6 +2322,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
 
 fn snapshot_probe_request() -> SessionRequest {
     SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -2340,6 +2342,7 @@ fn snapshot_probe_request() -> SessionRequest {
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds: 0.0,
         audio_index: None,
@@ -2819,6 +2822,7 @@ fn frozen_codec_evidence_changes_identity_without_rewriting_the_legacy_shape() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     let legacy_identity = serde_json::json!({
         "version": 2, "file": &file, "kind": &kind,
@@ -2907,6 +2911,7 @@ fn an_fmp4_avc_master_is_attempt_media_not_generation_metadata() {
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
     );
     let mpeg_ts =
@@ -3113,6 +3118,7 @@ fn a_copy_session_keeps_the_source_geometry() {
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
     );
 
@@ -3940,6 +3946,7 @@ async fn the_hdr10_grade_is_refused_until_every_precondition_is_proved() {
 #[test]
 fn the_grade_is_part_of_a_request_identity() {
     let request = SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,

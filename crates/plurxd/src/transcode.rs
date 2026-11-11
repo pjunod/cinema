@@ -54,14 +54,10 @@ const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
 /// The HTTP layer maps only this class to 503; source, filesystem, and ffmpeg
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
-/// The one capacity refusal a client may safely wait out by re-posting the
-/// same request: this player's previous start has not let go of it yet.
-///
-/// A strict subset of the capacity class, and deliberately narrow. The other
-/// producers of `capacity_error` are not all waits — one instructs the client
-/// to ask for a smaller height, and one reports a scratch ceiling above the
-/// configured budget, which no amount of retrying can satisfy. Those keep the
-/// codeless 503 that no client retries.
+/// One waitable capacity refusal with its own wait: this player's previous
+/// start has not let go of it yet. Every other refusal of the class is
+/// classified by [`capacity_refusal`]: waitable by default, terminal when its
+/// producer names a code ([`terminal_capacity_error`]).
 const REPLACEMENT_WAIT_PREFIX: &str =
     "transcode capacity is temporarily unavailable: waiting for this player's previous start: ";
 /// What a client should wait before re-posting. One cooperative window: by
@@ -547,7 +543,124 @@ mod rate_control;
 pub use rate_control::*;
 // split: end rate-control
 
+/// Live FEL reconstruction graphs one worker runs at once. Measured on a
+/// Phoenix iGPU (VA-API decode, Vulkan compose, hevc_vaapi Main10): one 4K
+/// FEL compose + encode sustains 1.4-1.7x real time. Concurrent graphs are not
+/// measured, so a second play takes its ordinary route with the reason.
+#[cfg(target_os = "linux")]
+pub(crate) const LIVE_RECONSTRUCTION_SLOTS: usize = 1;
+
+/// What the reconstructed 8.1 route does for one title on one node.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg(target_os = "linux")]
+pub(crate) enum FelGate {
+    Serve,
+    /// The play keeps the plain conversion, with this reason.
+    Decline(String),
+    /// No verdict yet: ask for the title to be measured; the play keeps the
+    /// plain conversion, saying it is being measured.
+    Measure,
+}
+
+/// How often one node may ask for the same title's FEL qualification.
+#[cfg(target_os = "linux")]
+pub(crate) const FEL_REQUALIFICATION_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(6 * 60 * 60);
+
+/// How long a live reconstructed 8.1 waits for a FEL qualification it has
+/// asked to yield the worker's reconstruction slot. The qualification kills
+/// and reaps its window children on the signal; that is well under a second.
+#[cfg(target_os = "linux")]
+pub(crate) const QUALIFICATION_SLOT_YIELD: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The reconstruction slot as a FEL qualification holds it: preemptible. A
+/// live play that finds the slot taken cancels `preempt` (the qualification's
+/// own cancellation) and waits for the permit. The permit is released before
+/// the registration is cleared, so a racing play never sees a taken slot
+/// with no one to ask.
+#[cfg(target_os = "linux")]
+pub(crate) struct QualificationSlot {
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    holder: Arc<std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for QualificationSlot {
+    fn drop(&mut self) {
+        let mut holder = self
+            .holder
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(self.permit.take());
+        *holder = None;
+    }
+}
+
+/// Node readings behind the Developer tab's FEL re-encode rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveReconstructionFacts {
+    /// A FEL qualification holds the slot (a live play would preempt it).
+    pub(crate) held_by_qualification: bool,
+    pub(crate) device_present: bool,
+    pub(crate) main10_vaapi_decode: bool,
+    pub(crate) gpu_decode: bool,
+    pub(crate) renderer_threads: usize,
+    pub(crate) encoder_threads: usize,
+    pub(crate) software_budget: usize,
+    pub(crate) slots: usize,
+    pub(crate) slots_in_use: usize,
+}
+
+/// How long a processed upgrade may spend rendering and verifying its first
+/// window. The same 8 s the in-create qualification was allowed at most, now
+/// spent after the viewer's first frame instead of before it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) const PROCESSED_UPGRADE_TRIAL_BUDGET: Duration = Duration::from_secs(8);
+
+/// One verified processed upgrade: the successor request (its incarnation
+/// already the staged successor's), the candidate it plays, and the exact
+/// prepared root its first window was produced on.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct ProcessedUpgradeTrial {
+    pub(crate) request: SessionRequest,
+    pub(crate) candidate: plurx_core::playback::candidate::QualityCandidate,
+    pub(crate) root: crate::vodserve::PreparedRootAdmission,
+}
+
+pub(crate) struct HeldProcessedUpgradeRoot {
+    context: Box<CandidateExecutionContext>,
+    root: crate::vodserve::PreparedRootAdmission,
+    deadline: Instant,
+}
+
+/// The holder's claim on a [`HeldProcessedUpgradeRoot`]. Dropped when staging
+/// ends: a root the successor's first preparation did not take is freed then
+/// (its admission credit and graph allowance with it), not at a timer.
+pub(crate) struct ProcessedUpgradeRootLease {
+    roots: Arc<std::sync::Mutex<HashMap<String, HeldProcessedUpgradeRoot>>>,
+    incarnation_id: String,
+}
+
+impl HeldProcessedUpgradeRoot {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn into_root(self) -> crate::vodserve::PreparedRootAdmission {
+        self.root
+    }
+}
+
+impl Drop for ProcessedUpgradeRootLease {
+    fn drop(&mut self) {
+        let unclaimed = self
+            .roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.incarnation_id);
+        drop(unclaimed);
+    }
+}
+
 pub struct TranscodeManager {
+    source_identity: Option<crate::source_custody::SourceIdentity>,
     #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
     source_workers: source_actor::SourceWorkerRegistry,
     pub(crate) source_http_starts: crate::http::shared_source_playback::SourceStartRegistry,
@@ -610,6 +723,25 @@ pub struct TranscodeManager {
     processed_preparation_slot: Arc<tokio::sync::Semaphore>,
     #[cfg(target_os = "linux")]
     processed_instance_slots: Arc<tokio::sync::Semaphore>,
+    /// Verified processed-upgrade roots waiting for the prepared successor
+    /// they were trialled for, by its incarnation. See
+    /// [`ProcessedUpgradeRootLease`].
+    processed_upgrade_roots: Arc<std::sync::Mutex<HashMap<String, HeldProcessedUpgradeRoot>>>,
+    /// Live FEL reconstruction (BL+EL composed on the GPU, then re-encoded):
+    /// one graph per worker until concurrent reconstruction is measured. Its
+    /// permit lives in the graph's runtime recipe, so it is held exactly as
+    /// long as the graph that spends the GPU.
+    #[cfg(target_os = "linux")]
+    pub(crate) processed_reconstruction_slots: Arc<tokio::sync::Semaphore>,
+    /// The FEL qualification holding the reconstruction slot, if any: its
+    /// cancellation, which a live play triggers to take the slot.
+    #[cfg(target_os = "linux")]
+    pub(crate) reconstruction_qualification:
+        Arc<std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// Titles this node asked to have FEL-qualified, and when.
+    #[cfg(target_os = "linux")]
+    fel_requalification_requests:
+        std::sync::Mutex<std::collections::HashMap<i64, std::time::Instant>>,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,
@@ -707,6 +839,15 @@ pub struct TranscodeManager {
     /// loop last resolved. Recovery may reopen the process, but registrations
     /// admitted under an older generation still refuse themselves.
     serving_loss_generation: AtomicU64,
+    /// How the current (or last) outage stands, published by
+    /// `serving_fence_loop`, the one owner of the outage budget. HTTP reads
+    /// it to hold a running stream's request across a short outage; nothing
+    /// that reads it can spend or reset the budget.
+    outage_resolution: tokio::sync::watch::Sender<crate::serving_fence::OutageResolution>,
+    /// Whether `serving_fence_loop` is running to publish `outage_resolution`.
+    /// Without it nothing resolves an outage, so a waiter fails fast as it
+    /// did before the hold existed.
+    outage_owner_active: AtomicBool,
     /// Lock-free projection for Prometheus. The session map remains the
     /// authority; every production insert/removal publishes its resulting
     /// length while holding that map's lock.
@@ -739,6 +880,9 @@ pub struct TranscodeManager {
     /// Shared by every heavy durable worker, independently of CPU/GPU cost.
     /// The owned guard follows the physical child through cancellation/join.
     background_heavy: Arc<tokio::sync::Semaphore>,
+    /// Readable manual library jobs currently waiting for a local heavy turn.
+    /// A cancelled waiter removes itself before maintenance resumes.
+    interactive_library_waiters: tokio::sync::watch::Sender<usize>,
     offline_waiting: AtomicBool,
     /// Whether this daemon's ffmpeg can strip a Dolby Vision configuration —
     /// probed at boot ([`crate::ffmpeg::has_dovi_rpu`]).

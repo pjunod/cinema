@@ -9,26 +9,42 @@ on:
   workflow_dispatch:
     inputs:
       retained_units_sha256:
+        type: string
         description: "Authenticated digest-addressed retained unit proof; no suite replay"
         required: false
         default: ""
       retained_units_attachment_id:
+        type: string
         description: "Private promotion PR evidence attachment ID"
         required: false
         default: ""
       retained_units_attachment_uuid:
+        type: string
         description: "Private promotion PR evidence attachment UUID"
         required: false
         default: ""
+      workspace_rust_evidence:
+        type: string
+        description: "Optional authenticated partial workspace test evidence descriptor"
+        required: false
+        default: ""
+      python_unit_evidence:
+        type: string
+        description: "Authenticated prior preflight and reviewed Python source coverage"
+        required: false
+        default: ""
       promotion_pr:
+        type: string
         description: "Optional open same-repo effort/integration promotion PR to main"
         required: false
         default: ""
       promotion_head_sha:
+        type: string
         description: "Immutable promotion head SHA; dispatch on that head branch"
         required: false
         default: ""
       promotion_base_sha:
+        type: string
         description: "Immutable current main SHA already merged into the promotion head"
         required: false
         default: ""
@@ -247,19 +263,32 @@ jobs:
           PLURX_PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
           PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
         run: make history-check
+      - name: Prepare authenticated Python test selection
+        id: python-continuation
+        if: inputs.python_unit_evidence != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
+          PYTHON_UNIT_EVIDENCE: ${{ inputs.python_unit_evidence }}
+          RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}
+          RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}
+        run: python3 -m validation.native_python_execute prepare
       - name: Check validation catalog and contract unit tests
         env:
           RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}
+          PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}
         run: |
           make validation-lint
           if [ "$RETAIN_VALIDATION_UNITS" = true ]; then
             echo "Adopted authenticated complete validation unit discovery"
+          elif [ -n "$PYTHON_SELECTION_SHA256" ]; then
+            python3 -m validation.native_python_execute validation
           else
             python3 -m unittest discover -s tests/validation -p 'test_*.py'
           fi
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
       - name: Check formal protocol source mapping
         id: formal-inputs
         env:
@@ -312,9 +341,12 @@ jobs:
       - name: Check CI, deploy, and shipping contracts
         env:
           RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}
+          PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}
         run: |
           if [ "$RETAIN_OPERATIONS_UNITS" = true ]; then
             echo "Adopted authenticated complete operations unit discovery"
+          elif [ -n "$PYTHON_SELECTION_SHA256" ]; then
+            python3 -m validation.native_python_execute operations
           else
             make operations-check
           fi
@@ -339,14 +371,35 @@ jobs:
     # The full unit and SQLite suite continues below; contributors may merge
     # after this compile gate and policy pass, then watch that suite on main.
     if: needs.scope.outputs.rust == 'true'
-    # General executors also reclaim above 4 GiB during the large Rust check.
-    # Share the existing larger-memory topology queue; keep its host bounds.
-    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
-    container: ubuntu:24.04
-    timeout-minutes: 20
+    # Use the same compiler pool and cold-build budget as main-fast-lane.
+    runs-on: [ci-nonvoter-heavy-amd64]
+    container:
+      image: ubuntu:24.04
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+    timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "1"
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Install Rust gate prerequisites
         run: |
           set -euo pipefail
@@ -354,7 +407,27 @@ jobs:
           apt-get -o Acquire::Retries=3 update
           apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
             build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
-            libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config python3
+            libgtk-4-dev libdbus-1-dev make nasm ninja-build xz-utils pkg-config python3
+          # Forgejo needs Node before checkout; use the patched upstream build.
+          case "$(dpkg --print-architecture)" in
+            amd64)
+              node_arch=x64
+              node_sha=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
+              ;;
+            arm64)
+              node_arch=arm64
+              node_sha=6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b
+              ;;
+            *) echo "Unsupported Node architecture" >&2; exit 1 ;;
+          esac
+          node_tmp="$(mktemp -d)"
+          trap 'rm -rf "$node_tmp"' EXIT
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-${node_arch}.tar.xz" \
+            -o "$node_tmp/node.tar.xz"
+          echo "$node_sha  $node_tmp/node.tar.xz" | sha256sum --check --strict
+          tar -xJf "$node_tmp/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
+          node --version | grep -Fx 'v22.23.4'
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -393,10 +466,12 @@ jobs:
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
     if: needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    # The 20-GiB unit container shares a capacity-one build slot on a nonvoter.
+    runs-on: [ci-nonvoter-heavy-amd64]
     # Private, smoke-tested CI target; never expose the management credential.
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
@@ -405,7 +480,30 @@ jobs:
     # Preserve every command with a finite 120m cap. Passing full-gate duration
     # remains unmeasured; this budget is not a completion guarantee.
     timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "1"
+      RUST_TEST_THREADS: "2"
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Capture mounted runner workspace owner
         run: |
           # Forgejo v13.1.0 provisions paired random job volumes and deletes
@@ -463,6 +561,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: rustfmt, clippy
@@ -473,12 +572,36 @@ jobs:
         with:
           major: "8"
           binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - name: Validate HDR measurement colour conversion
+        env:
+          PLURX_FFMPEG: /usr/lib/jellyfin-ffmpeg/ffmpeg
+        run: make dv-rgb-conversion-check
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
           lane: rust-gate
+      - name: Authenticate historical workspace Rust outcomes
+        id: workspace-continuation
+        if: inputs.workspace_rust_evidence != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
+          WORKSPACE_RUST_EVIDENCE: ${{ inputs.workspace_rust_evidence }}
+        run: python3 -m validation.workspace_rust_continuation
+      - name: Verify source recovery ownership in the root Linux unit container
+        if: steps.workspace-continuation.outputs.root_retained != 'true'
+        run: |
+          # This container is already the root-capable pinned Linux unit
+          # surface. Exercise real UID/GID handoff instead of counting the
+          # non-root operations lane's ownership-case skip as coverage.
+          python3 -c 'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"'
+          python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v
       - name: Run format, Clippy, unit, and SQLite contracts
+        if: inputs.workspace_rust_evidence == ''
         run: make ci-rust-gate
+      - name: Compile the full workspace and execute missing Rust outcomes
+        if: inputs.workspace_rust_evidence != ''
+        run: python3 -m validation.workspace_rust_execute
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
@@ -500,7 +623,7 @@ jobs:
     if: >-
       needs.scope.outputs.cluster_auth == 'true' &&
       needs.scope.outputs.execution_mode != 'accelerated'
-    runs-on: [self-hosted, Linux, X64, lab, ci-store]
+    runs-on: [ci-nonvoter-store]
     # Run 5228 completed 188 of 367 serial controls before the 40m cutoff.
     # Preserve the full inventory with a finite budget for its measured runtime.
     timeout-minutes: 95
@@ -634,7 +757,7 @@ jobs:
     if: >-
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    runs-on: [ci-nonvoter-store]
     # A cold runner builds the command-profile dependency graph before the
     # three-voter proof. Persistent non-voter caches shorten later runs.
     timeout-minutes: 40
@@ -758,7 +881,7 @@ jobs:
     name: cluster transport recovery contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    runs-on: [ci-nonvoter-store]
     timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -812,7 +935,7 @@ jobs:
     if: >-
       needs.scope.outputs.cluster_auth == 'true' &&
       needs.cluster_transport_recovery_contracts.result == 'success'
-    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    runs-on: [ci-nonvoter-store]
     timeout-minutes: 240
     steps:
       - name: Record the role job budget start
@@ -880,7 +1003,7 @@ jobs:
     if: >-
       needs.scope.outputs.cluster_auth == 'true' &&
       needs.cluster_transport_recovery_contracts.result == 'success'
-    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    runs-on: [ci-nonvoter-store]
     timeout-minutes: 240
     steps:
       - name: Record the role job budget start
@@ -951,7 +1074,7 @@ jobs:
       - cluster_transport_recovery_voter
       - cluster_transport_recovery_learner
     if: always() && needs.scope.outputs.cluster_auth == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    runs-on: [ci-nonvoter-store]
     timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -1065,13 +1188,33 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
     # Retained outcomes still require compiling the large current native targets.
-    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
+    runs-on: [ci-nonvoter-heavy-amd64]
     # Run 5447 passed 213 commands; the next feature target was still compiling
     # at 30 minutes. Full completion time remains unmeasured.
     timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "1"
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -1102,14 +1245,37 @@ jobs:
     name: cluster daemon contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [ci-nonvoter-heavy-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "1"
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Capture mounted runner workspace owner
         run: |
           # Forgejo v13.1.0 provisions paired random job volumes and deletes
@@ -1204,14 +1370,38 @@ jobs:
     if: needs.scope.outputs.web_layout == 'true'
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: [ci-nonvoter-heavy-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    timeout-minutes: 30
+    # Cold builds, fixture setup and 104 captures need room for later browser gates.
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "1"
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Capture mounted runner workspace owner
         run: |
           # Forgejo v13.1.0 provisions paired random job volumes and deletes
@@ -1309,6 +1499,8 @@ jobs:
         run: make cinema-remote-browser-check
       - name: Test grouped library rows in a real browser
         run: make library-rows-browser-check
+      - name: Test Shared library layouts and enriched metadata in a real browser
+        run: make web-shared-library-browser-check
       - name: Test subtitle model setup and generated-caption completion in a real browser
         run: make subtitle-generation-browser-check
       - name: Enforce persistent Cargo bounds
@@ -1335,14 +1527,37 @@ jobs:
     # concurrency group on both siblings but still executed them together.
     needs: [scope, preflight, web_layout]
     if: needs.scope.outputs.web_layout == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: [ci-nonvoter-heavy-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: "1"
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Capture mounted runner workspace owner
         run: |
           # Forgejo v13.1.0 provisions paired random job volumes and deletes
@@ -1411,7 +1626,7 @@ jobs:
           disk-gb: "45"
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
       - name: Cache Playwright browsers
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -1506,11 +1721,12 @@ jobs:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
     if: (needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true') || needs.scope.outputs.desktop_macos == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false
-    timeout-minutes: 60
+    # Full mobile units precede the same mandatory native suite as the fast lane.
+    timeout-minutes: 120
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       # The Apple runner is a launch daemon with a deliberately narrow PATH.
@@ -1525,8 +1741,8 @@ jobs:
         run: |
           xcode_version="$(xcodebuild -version)"
           printf '%s\n' "$xcode_version"
-          grep -Fxq "Xcode 27.1" <<< "$xcode_version"
-          grep -Fxq "Build version 27A9275" <<< "$xcode_version"
+          grep -Fxq "Xcode 27.2" <<< "$xcode_version"
+          grep -Fxq "Build version 27B52" <<< "$xcode_version"
           xcrun --find swift
       - name: Build and test native macOS server tray
         if: needs.scope.outputs.desktop_macos == 'true'
@@ -1547,26 +1763,14 @@ jobs:
       - name: Verify the pinned mobile Apple toolchain
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
-          test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.1"
-          test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.0"
+          test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.2"
+          test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.2"
           test "$(xcodegen --version)" = "Version: 2.46.0"
           simulator_runtimes="$(xcrun simctl list runtimes)"
           grep -Fq "iOS 26.5 (26.5 - 23F77)" <<< "$simulator_runtimes"
           grep -Fq "tvOS 26.5 (26.5 - 23L470)" <<< "$simulator_runtimes"
-      # Warm Swift incrementals: the Makefile builds into
-      # clients/apple/build/DerivedData precisely so this cache can restore it.
-      # restore-keys accepts the newest prior entry when sources moved — an
-      # incremental rebuild from a near miss still beats a cold compile, and a
-      # poisoned cache only ever costs the rebuild we paid before caching.
-      - name: Cache DerivedData
-        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
-        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: clients/apple/build/DerivedData
-          key: apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
-          restore-keys: |
-            apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-
-            apple-dd-xcode-27A9275-ios27.1-tvos27.0-
+      # Keep DerivedData local to this checkout across build/test steps.
+      # Its absolute-path build state is not transferred between job roots.
       - name: Create isolated iPhone, iPad, and Apple TV simulators
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
@@ -1683,7 +1887,7 @@ jobs:
       - name: Provision the vendored emulator action runtime
         uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "24"
+          node-version: "24.22.1"
       - name: Install locked emulator action dependencies
         run: npm ci --prefix .github/actions/android-emulator-ready --ignore-scripts --omit=dev
       - name: Run the Compose and TV focus suite on a disposable emulator
@@ -1764,13 +1968,34 @@ jobs:
             target: x86_64-unknown-linux-gnu
             kernel_machine: x86_64
             docker_machine: x86_64
-            runs_on: '["self-hosted","Linux","X64","lab","general","high-cpu"]'
+            runs_on: '["ci-nonvoter-heavy-amd64"]'
           - arch: arm64
             target: aarch64-unknown-linux-gnu
             kernel_machine: aarch64
             docker_machine: aarch64
             runs_on: '["self-hosted","Linux","ARM64","lab","ci-arm64"]'
     steps:
+      - name: Verify effective nonvoter resource bounds
+        if: matrix.arch == 'amd64'
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -1788,6 +2013,40 @@ jobs:
         uses: ./.github/actions/buildx-cache
         with:
           lane: package-smoke-${{ matrix.arch }}
+      - name: Bound the AMD package builder before compilation
+        if: matrix.arch == 'amd64'
+        env:
+          BUILDER: ${{ steps.buildx-cache.outputs.builder-name }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]] || exit 1
+          builder_info="$(docker buildx inspect "$BUILDER" | python3 -c 'import sys; data = sys.stdin.buffer.read(65537); len(data) <= 65536 or sys.exit("Buildx inspection exceeds 64 KiB"); sys.stdout.buffer.write(data)')"
+          printf '%s\n' "$builder_info" | awk -v expected="$BUILDER" '
+            /^Nodes:[[:space:]]*$/ { nodes = 1 }
+            !nodes && /^[[:space:]]*Name[[:space:]]*:/ {
+              names++
+              if ($0 !~ /^Name:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Name:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != expected) invalid = 1
+            }
+            !nodes && /^[[:space:]]*Driver[[:space:]]*:/ {
+              drivers++
+              if ($0 !~ /^Driver:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Driver:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != "docker-container") invalid = 1
+            }
+            END { if (names != 1 || drivers != 1 || !nodes || invalid) exit 1 }
+          '
+          container="buildx_buildkit_${BUILDER}0"
+          test "$(docker inspect --format '{{.Name}}' "$container")" = "/$container"
+          # This dedicated nonvoter builder shares the verified 20-GiB budget.
+          # Bound its sibling container independently of the runner service.
+          docker update --memory 20g --memory-swap 20g --pids-limit 4096 --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"
+          test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}} {{.HostConfig.PidsLimit}}' "$container")" = '21474836480 21474836480 400000 100000 0-3 4096'
       - name: Derive the binary-only Bookworm build
         id: binary-build
         run: |
@@ -1797,6 +2056,7 @@ jobs:
       - name: Compile and export the exact candidate binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
+          builder: ${{ steps.buildx-cache.outputs.builder-name }}
           context: .
           file: Dockerfile.binaries
           target: release-binaries
@@ -1823,26 +2083,14 @@ jobs:
               exit 1
             }
           done
-      - name: Build and export the exact audited Bookworm media package
-        if: matrix.arch == 'amd64'
-        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: Dockerfile
-          target: linux-dolby-package-export
-          platforms: linux/amd64
-          outputs: type=tar,dest=linux-dolby-export.tar
-          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,scope=package-media-amd64' || '' }}
-          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,mode=max,scope=package-media-amd64' || '' }}
-      - name: Validate and unpack the complete audited media export
-        if: matrix.arch == 'amd64'
-        run: python3 -m validation.media_export linux-dolby-export.tar linux-dolby-export
       - name: Build the runtime from only the verified binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
+          builder: ${{ steps.buildx-cache.outputs.builder-name }}
           context: .
           file: Dockerfile.release
-          build-contexts: ${{ matrix.arch == 'amd64' && 'linux-dolby-package=./linux-dolby-export/package' || '' }}
+          build-args: |
+            PLURX_MEDIA_RUNTIME_REPOSITORY=${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-media-runtime
           push: false
           load: true
           platforms: linux/${{ matrix.arch }}
@@ -1956,12 +2204,32 @@ jobs:
       github.ref == 'refs/heads/main' && inputs.promotion_pr == '' &&
       inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
       needs.scope.outputs.qualification != 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [ci-nonvoter-heavy-amd64]
     timeout-minutes: 90
     concurrency:
       group: publish-main-image
       cancel-in-progress: false
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Require the post-merge validation fan-out
         env:
           SCOPE_RESULT: ${{ needs.scope.result }}
@@ -1998,8 +2266,11 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - id: main-builder
+        uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
+          name: plurx-main-${{ github.run_id }}-${{ github.run_attempt }}
+          driver-opts: default-load=true
           buildkitd-config-inline: |
             # The fleet registry is deliberately plain HTTP on the private LAN. A
             # BuildKit container does not inherit Docker daemon insecure-registry
@@ -2007,6 +2278,39 @@ jobs:
             # Only requests to this exact address are affected.
             [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
               http = true
+      - name: Bound the main publisher builder before compilation
+        env:
+          BUILDER: ${{ steps.main-builder.outputs.name }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]] || exit 1
+          builder_info="$(docker buildx inspect "$BUILDER" | python3 -c 'import sys; data = sys.stdin.buffer.read(65537); len(data) <= 65536 or sys.exit("Buildx inspection exceeds 64 KiB"); sys.stdout.buffer.write(data)')"
+          printf '%s\n' "$builder_info" | awk -v expected="$BUILDER" '
+            /^Nodes:[[:space:]]*$/ { nodes = 1 }
+            !nodes && /^[[:space:]]*Name[[:space:]]*:/ {
+              names++
+              if ($0 !~ /^Name:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Name:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != expected) invalid = 1
+            }
+            !nodes && /^[[:space:]]*Driver[[:space:]]*:/ {
+              drivers++
+              if ($0 !~ /^Driver:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Driver:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != "docker-container") invalid = 1
+            }
+            END { if (names != 1 || drivers != 1 || !nodes || invalid) exit 1 }
+          '
+          container="buildx_buildkit_${BUILDER}0"
+          test "$(docker inspect --format '{{.Name}}' "$container")" = "/$container"
+          # This dedicated nonvoter builder shares the verified 20-GiB budget.
+          # Bound its sibling container independently of the runner service.
+          docker update --memory 20g --memory-swap 20g --pids-limit 4096 --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"
+          test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}} {{.HostConfig.PidsLimit}}' "$container")" = '21474836480 21474836480 400000 100000 0-3 4096'
       - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
@@ -2014,6 +2318,7 @@ jobs:
           password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Build once and publish the verified fleet image
         env:
+          BUILDX_BUILDER: ${{ steps.main-builder.outputs.name }}
           PLURX_BUILD_REF: ${{ github.sha }}
           PLURX_BUILD_SHA: ${{ github.sha }}
           PLURX_REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}

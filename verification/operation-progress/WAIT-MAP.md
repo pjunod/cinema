@@ -4,6 +4,425 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+
+## Main direct-push source drift — scoped review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed the authority-source drift that direct
+pushes left on main `ce11e8fd2`, against the last reviewed bytes. This is an
+author review awaiting an independent check, not execution evidence.
+
+| Changed source (commit) | Change | Model action or property | Still holds? |
+|---|---|---|---|
+| `plurxd/background_jobs.rs` (4f417e852) | Test-only: inside `#[cfg(test)] mod tests`, the fixture `lost_claim_acknowledgement_resolves_the_original_attempt` stops the heartbeat and settles joined source custody before reading the candidate | None; no production code changes. `ReplayClaim`/`ResolveClaim` correspondence and every claim/settlement body are unchanged | Yes |
+| `plurxd/main.rs` (d9a0ebc76) | `spawn_background_loops` also starts `worker_status_cache_loop`, a read-only, cancellable once-per-interval refresh of local worker capacity for Activity | None; the selected worker spawn, its wait/lock order and the queue/domain authority paths are unchanged | Yes |
+| `plurxd/transcode/manager/produce.rs` (0a33ddc02) | One `tracing::warn!` gains `target: "plurxd::transcode"` | None; no control flow change | Yes |
+
+No model, configuration or property changes; only whole-file pins are
+refreshed.
+
+## Source custody replay on 2026-11-07
+
+Compared with `cc2ca1338`, scheduler upkeep preserves the interval from a
+live owner's registration to activation. An armed owner requires settlement
+evidence, including after its authority expires. The cleanup transaction
+rechecks the current owner after its initial read. The selected library
+worker's token and publication-lock waits retain their existing order.
+The focused Store regression covers the activation and renewal interleavings.
+
+## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` compared the frozen corrections with
+`460d8e6d3ec494f2335ed4bbdfa6601f54bfa380`. The previous whole-file pin for the
+[library environment](../../crates/plurxd/src/library_work/env.rs) matches
+that base, and its selected acquisition anchor remains unique. Refresh only
+that one existing row; the authored review is not independent review or an
+execution receipt.
+
+The non-async `probe_work` factory heap-pins the producer before the generic
+probe-input/admission wrappers receive it. Work still runs by direct await,
+under the same task-local budget, cancellation and pause scopes. The same
+outer future owns publisher/domain references through `JoinWork`; selection
+priority, cancellation, admission retention, release, retirement and field drop
+order are unchanged. This removes native stack amplification without adding a
+worker action, detached task, deadline, retry or new completion premise.
+
+The related [Hiqlite bootstrap](../../crates/plurx-core/src/store/hiqlite_background_jobs.rs)
+correction recognizes an already exact canonical version-4 layout and marker
+in both success branches. It does not weaken shape validation, replace the
+managed view or change SQL authority guards. That startup dependency is pinned
+and audited by the [durable contract](../durable-jobs/CONTRACT.md#scan-stack-and-canonical-bootstrap--scoped-source-audit-on-2026-11-04),
+not modeled here. The model still assumes a running backend rather than
+proving startup, schema installation or host recovery terminates.
+
+The PR's future-size regression, ordinary-stack empty-library scan and real
+one-voter bootstrap/identity regression are runtime evidence with their own
+scope. An empty scan proves neither media parsing nor the full UI; a future
+size proves neither total native poll-stack use nor whole-daemon liveness.
+No model/configuration, bound, property, fairness premise, selected schedule
+or historical receipt identity changes. New source pins do not renew the
+earlier formal qualification or cover these external failure mechanisms.
+
+## Verified host-reboot recovery — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` compared `88fa37663` in
+[PR #1378](http://forge.lan:3000/noirr/plurx/pulls/1378) with
+`edf6d08faf549554b9892dee582406ff79af1c97`; all five affected previous
+whole-file pins match that base. The agent participated in implementation,
+so this authored audit is not independent Astra review or execution evidence.
+
+[Core claiming](../../crates/plurx-core/src/store/background_jobs.rs) only
+adds an exact-owner custody lookup to the trait/adapter; selected claim,
+renewal, binding and publication guards do not change.
+[Resource helpers](../../crates/plurx-core/src/store/background_jobs_resources.rs)
+retain the existing immutable key algorithm and add the consistent read.
+[Queue cleanup](../../crates/plurxd/src/background_jobs.rs) now passes its
+Store into custody journal cleanup without changing the selected token,
+heartbeat, publication or domain-release lock order.
+
+[Startup](../../crates/plurxd/src/main.rs) registers the exact Store/backend
+and awaits [verified recovery](../../crates/plurxd/src/source_custody/recovery.rs)
+before producers. [The scheduler](../../crates/plurxd/src/state.rs) retries it
+before ordinary settled-source replay. The new path clones its Store context
+before filesystem/Store work; its registry mutex is not held across an await.
+It may still await filesystem durability and authoritative Store replies.
+The existing finite worker model does not include these startup/scheduler
+steps, active-reader journals, abort cleanup, or physical custody states.
+
+The mapping refreshes 11 existing rows and adds four external dependency pins:
+the exact resource lookup, [custody integration](../../crates/plurxd/src/source_custody.rs),
+the recovery module, and [challenge preparation](../../scripts/source-custody-recovery).
+This expands drift detection, not modeled coverage. Trusted host identity,
+changed-kernel-boot proof, terminated descendants, fsync publication,
+exact-Store/fallback isolation and lost-ack abort reconciliation remain
+separate runtime obligations in the
+[recovery plan](../../docs/server/JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). Same-boot
+or missing proof remains a legitimate indefinite obstruction; the filesystem,
+backend and runtime return premises do not imply a reboot or discharge it.
+
+**Identity-source corrections (2026-11-04):** subsequent recovery-module
+dependency refreshes require both actual-host inputs, read-only bound at
+`/run/plurx-host-machine-id` and `/run/plurx-host-boot-id`, for native services
+and containers alike. Missing container markers do not justify image-local
+`/etc/machine-id`; a namespace's `/proc` boot UUID is not host-reboot proof
+either. Machine identity must be nonzero and host boot identity a canonical
+nonnil UUID. Missing or invalid input keeps recovery unproved and custody
+held. These remain external runtime obligations, not model progress evidence.
+
+Retain the historical `source-anchors.json`, all selected action/wait anchors,
+model/configuration bytes, bounds, properties, fairness and receipt identities.
+No historical schedule or temporal result gains a host-recovery, whole-daemon
+liveness or scan-completion guarantee. Static validation, fresh TLC smoke and
+runtime tests are distinct evidence.
+
+## Playback startup custody — scoped source review on 2026-11-03
+
+Codex agent `/root/other_formal_correspondence` compared base
+`bd213c81942175f591912e4bb0a2cc10f2a7a195` with source candidate
+`594210a783986d4da5ec7184f0895433ffe98b90`. All prior live mapped source
+fingerprints match that base. This is an authored correspondence audit,
+not an independent review or an execution receipt.
+
+[Queue ownership](../../crates/plurxd/src/background_jobs.rs) now registers
+and activates source custody before starting the heartbeat. Its existing
+`finish` order still joins the heartbeat and retires the token; it then
+awaits joined-source settlement before returning. Journal persistence,
+replicated settlement proof and exact custody deletion retry until they
+succeed. [The environment](../../crates/plurxd/src/library_work/env.rs)
+retains physical admission through an `Arc` owned by the processing future;
+`JoinWork` consumes that future before domain release, queue retirement and
+`DropAdmission`. Physical admission is distinct from the durable source slot:
+[the source driver](../../crates/plurxd/src/source_probe.rs) can pause that
+slot after verified quiescence and reacquire it before resuming reads.
+[Library probe inputs](../../crates/plurxd/src/library_work/probe_input.rs)
+close and join their private source bridge before reporting probe completion.
+
+These are additional source dependencies, not new modeled transitions.
+Custody registration/activation, pause/reacquisition, byte pacing, private
+source input, process-group quiescence and journal/settlement replay are
+outside this finite protocol argument. The existing external-return premises
+do not prove those mechanisms terminate: a failed journal write or unsettled
+custody can retain physical admission indefinitely after queue retirement.
+The model's cleanup and useful-progress results therefore supply no progress
+or starvation-freedom guarantee for these new paths. No historical schedule
+or model receipt is extended to cover them.
+
+[Core queue SQL](../../crates/plurx-core/src/store/background_jobs.rs) adds
+custody/foreground occupancy to claim eligibility and accepts exact paused
+reservations during renewal; it preserves the selected voter-only kind
+boundary. Those additional eligibility and reservation states are not modeled.
+[The Hiqlite facade](../../crates/plurx-core/src/store/hiqlite.rs) adds source
+and managed-v4 schema installation; mapped transaction timeout bodies remain
+unchanged. [Bounded processes](../../crates/plurx-core/src/process/bounded.rs)
+retain the cancellation scope and add owned pause/group-join behavior, whose
+termination is outside this package's filesystem-return premise.
+
+The selected domain/token/publication bodies, library iteration/reconciliation
+body, try-only physical admission, worker-loop signatures and main worker
+spawn anchor remain. The library entry file adds a probe-input module;
+[manager construction](../../crates/plurxd/src/transcode/manager/construct.rs),
+[state](../../crates/plurxd/src/state.rs) and
+[startup](../../crates/plurxd/src/main.rs) wire source identity, custody replay
+and modules around those retained boundaries. This audit does not establish
+whole-daemon lock ordering or liveness. Only reviewed whole-file fingerprints
+follow the candidate; exact anchors, historical `source-anchors.json`, model,
+configurations, properties, bounds, fairness and toolchain remain unchanged.
+Static mapping validation is separate from TLC or runtime qualification.
+
+## HTTP-to-HTTPS redirect — scoped source audit on 2026-11-01
+
+Codex landing agent `/root/triage_ready_prs` compared PR #1308's integrated
+[startup source](../../crates/plurxd/src/main.rs) with main
+`eb3229a65bf056e54b9f76ae9b1bcd78acbf72cc`. The delta validates the
+boot-active redirect port and wraps only the public HTTP router after the
+separate HTTPS and Jellyfin listeners retain the original router. The mapped
+`background_work_loop` spawn and argument, selected worker bodies and shutdown
+consumers are unchanged. Redirect validation, public listener startup and
+HTTP request latency remain outside this finite library-worker guarantee.
+
+Only Table44's whole-file hash follows these inspected bytes. The exact anchor
+remains unique; model, configurations, toolchain, properties, bounds, fairness
+premises, scope and historical receipts retain their identities. This authored
+source audit is not a second independent adversarial review and supplies no
+runtime, TLC or qualification evidence. The PR's original independent review
+and focused HTTP-to-TLS regression remain separately scoped evidence.
+
+## Local main integration — source correspondence on 2026-10-29
+
+The repair source `59c648db` is combined locally with main `5ac9d8f25`.
+Both parent audits below retain their historical source identities. Incoming
+Cargo.lock and `main.rs` pins follow the reviewed macOS runtime update and
+bounded test-only fork stress. The merged Store and caption fixtures retain
+both parents' closed shape, marker, retained-data and atomic refusal checks,
+including schema 121 with managed v3. Their live whole-file hashes follow the
+resolved source; selected formal-publication and library-worker anchors remain.
+
+This reconciliation changes no model, configuration, property, fairness
+premise, validator or historical qualification receipt and supplies no new
+runtime or TLC evidence. The frozen `59c648db` measurement and this integration
+candidate are separate source identities; neither substitutes for the other's
+required validation.
+
+## Main metadata integration — scoped reconciliation on 2026-10-29
+
+Codex agent `coverage_review` reconciled repair parent `6eaa9c72d` with
+main `85910425c`. Both parents' startup and repair audits below are retained.
+Incoming main changes since `6c8c98c79` affect no Rust/Cargo or served-asset
+bytes; current mapped source pins and exact anchors therefore stay unchanged.
+This reconciliation changes no model, configuration, validator, fairness
+premise or historical receipt and supplies no new runtime or TLC evidence.
+
+## Sharing startup integration — scoped source review on 2026-10-29
+
+Codex agent `coverage_review` compared main `66a33d723` with incoming main
+`10f45ae5f2619ab3e807b5576bf6ffb39ade6e86` and the repair worktree.
+[Startup](../../crates/plurxd/src/main.rs) adds a read-only Sharing host
+capability command and separate host-reconciliation and invitation-network
+loops using the existing background shutdown token. The mapped
+`background_work_loop` call, selected library scheduler/worker bodies and
+token/publication wait and lock order are unchanged. Sharing host setup and
+invitation-network lifecycle, including their child work and shutdown, remain
+outside this selected-worker model. This review does not prove their resource
+contention or liveness.
+
+[The translation schema test](../../crates/plurx-core/src/store/subtitle_translation_schema.rs)
+changes only its upgraded-version expectation from 119 to 120. Its production
+recognizer and upgrade guards are unchanged. Two whole-file row pins follow
+the reviewed bytes; retained exact anchors remain unique.
+
+This agent authored the mapping refresh; parent and independent Codex diagnose_core_failures metadata review found no issues.
+Model/configuration/toolchain bytes, bounds, fairness premises, properties,
+scope, validators and historical source receipts remain unchanged. This
+review ran no builds, tests or TLC and supplies no new runtime, refinement,
+liveness or qualification evidence.
+
+## Combined-source integration — scoped author audit on 2026-10-29
+
+The repair is combined with main `66a33d723096ee931ce2e05e860f51f8f3671513`.
+Retain its reviewed resource-admission v2 schema and mapping inputs. The
+historical rewind now validates schema 119 with managed v1, or schema 120
+with managed v2, before any mutation; crossed pairs are refused atomically.
+The conformance parent retains the selected `formal_publication` module and
+combines the independently reviewed strict caption/continuity teardown with
+main's exact managed shape/data planner. Relative to this main, `state.rs`
+adds only the test-module declaration; mapped production bodies are unchanged.
+
+Only affected whole-file pins follow the combined source; anchors, models,
+configurations, properties, bounds and historical source receipts retain their
+identities. Independent Codex agent `coverage_review` reviewed the merged source pins, both parents' anchors and the combined ownership census, finding no blockers. That source review ran no builds, tests or TLC. This is a
+source correspondence audit and supplies no new runtime or TLC qualification.
+
+## Unit-coverage repair — scoped author audit on 2026-10-28
+
+Codex agent `/root/diagnose_core_failures` compared immutable base
+`24d1bad72bed328b6de9a568a3537f375f9c206f` with runtime/test source
+`d03c8abdf17dea7147e112a32fec274834151fca`. Previous pins match the base.
+This agent authored the core SQL repairs; this audit is source-author
+correspondence, not independent review of that implementation. Independent Codex agent `coverage_review` reviewed the implementation diff and this metadata disposition on 2026-10-28, finding no blockers. That review ran no builds, tests or TLC checks and supplies no new qualification claim.
+
+[Membership](../../crates/plurx-core/src/cluster/membership.rs) corrects
+Hiqlite parameter binding in maintenance lease consumption, heartbeat
+acknowledgment and status capability/active-session projection. Exact
+node/claim/lease, maintenance and active-session predicates remain; values
+now reach their intended predicates in first-appearance order. Tables 31–32
+retain byte-identical `ClusterJobAuthority` and `may_run_cluster_jobs`
+bodies: local maintenance and absent committed-voter authority still refuse
+selected library work. Membership lifecycle, status and drain behavior are
+outside this selected-worker model; this audit does not prove them.
+
+[State](../../crates/plurxd/src/state.rs) adds only a `cfg(test)` backfill
+module declaration. Tables 42–43 retain the scheduler/worker bodies, selected
+claim/bind/renew/settle/publication flow and token/publication wait and lock
+ordering. Four whole-file row pins follow this source; exact anchors remain
+unique. Model/configuration/toolchain bytes, bounds, fairness premises,
+properties, scope, validators and historical source-anchor snapshots are
+unchanged. This audit supplies no new runtime or TLC execution, refinement,
+liveness, physical acceptance or qualification; earlier receipts retain only
+their recorded source identities. Fresh affected execution is separate.
+
+## macOS parser runtime — scoped lock refresh on 2026-10-29
+
+Wasmtime 50.0.0 includes the [upstream Mach receiver fix](https://github.com/bytecodealliance/wasmtime/pull/14414).
+The macOS-only runtime and required Cranelift dependencies change; native traps,
+epoch deadlines, memory/stack limits and import restrictions remain. Tokio
+1.53.1 and Hiqlite 0.14.0 remain pinned. Refresh only the live Cargo.lock
+whole-file hash. Selected library-worker behavior, historical anchors, models,
+configurations, toolchain and qualification identities are unchanged. This
+source correspondence adds no formal execution or progress claim.
+
+The bounded native fixture stress changes only its test module in `main.rs`.
+Four workers still accompany all 300 fixture executions, with 1,200 checked
+fork attempts and joined ownership on failures. The selected worker spawn,
+argument, shutdown protocol and model scope remain unchanged; Table 44 gets
+only its live whole-file correspondence update.
+
+## Current validation fixtures — scoped refresh on 2026-10-29
+
+Scoped review on 2026-10-29 of the startup test listener seam: the test-only constructor retains a prebound socket through startup; non-test binding and the selected background_work_loop spawn/argument are unchanged. Refresh only live Table44 correspondence. No selected-worker scheduling, shutdown, model, configuration, anchor or historical qualification identity changes; this source review is not execution evidence.
+
+## Historical schema fixtures — scoped refresh on 2026-10-29
+
+Compared with `d5cd473536`, the caption schema source changes only the
+[v115 migration test](../../crates/plurx-core/src/store/subtitle_translation_schema.rs):
+it expects the current composed schema and verifies the managed v2 resources.
+The production recognizer and migration SQL remain unchanged. Refresh its one
+whole-file pin while retaining the exact anchor and historical source anchors.
+
+The [SQLite fixture rewind](../../crates/plurx-core/tests/support/queue_fixture.rs)
+now validates the exact empty v120 text/caption tail, continuity layout and
+managed v2 marker before planning any mutation. Unknown objects, marker drift
+and retained work refuse without changing DDL, versions or data. Historical
+SQLite layouts retain their legacy translation witness; the published
+replicated fixture witnesses remain separate. This closes the SQLite v115-only
+limitation recorded in the earlier scoped review, without claiming a general
+downgrade or complete replicated-schema qualification.
+
+The consistent-read census records existing committed-authority reads and keeps
+its unannotated ceiling at 237. No selected library claim, publication,
+reservation, lease or progress behavior changes. Models, configurations,
+properties and qualification identities retain their bytes; fresh mapping and
+smoke results are separate execution evidence.
+
+## Sharing host startup — scoped refresh on 2026-10-28
+
+Compared the pinned `main.rs` from `2975dec487d2` with `10f45ae5f`.
+The additions declare sharing host/network modules, expose a host-capability
+probe and start independent sharing loops using the existing cancellation
+token. Table 44's selected `background_work_loop` spawn and its argument are
+unchanged. These sharing loops are outside this selected library-worker model;
+this review adds no fairness, shutdown or liveness claim for them.
+
+Refresh only Table 44's whole-file hash. The exact anchor, model, configurations,
+bounds and historical source anchors stay unchanged. This records source
+correspondence; it does not claim a new formal execution or qualification.
+
+## Metadata-only title analysis — scoped refresh on 2026-10-28
+
+Codex compared PR #1301 source `7d2d4a9c7` with main `77e985827`.
+The two title-only trait/delegation additions preserve Table 30's selected
+library/metadata authority arm. Stale-FEL selection is a read; the analysis
+publisher uses title source/scanner/generation checks and the existing title
+trigger with `job_id` NULL, matching no queue/waiter settlement rows.
+
+`state.rs` adds fresh-title timestamps, local-index mode and an analysis-result
+offer. The selected scheduler/worker, claim/bind/renew/settle/publication paths
+and token/publication lock ordering are unchanged. Title scanning, local index
+waiting, FEL requalification and analysis publication remain outside this
+selected-worker model and add no admission fairness or liveness guarantee.
+
+Three whole-file pins are refreshed; their exact anchors remain unique.
+Models, configurations, bounds, fairness premises, toolchain and historical
+source anchors retain their identities. This is source correspondence only;
+fresh affected smoke receipts remain separate from historical qualification.
+
+## VOD index recovery — scoped refresh on 2026-10-27
+
+`construct.rs` adds `admit_fragment_queued`, a FIFO wait on the shared heavy
+gate followed by the same `admit_source_work_with_heavy` refusal, used only by
+the node-local fragment index pass, plus `fragment_must_yield` and
+`background_yield_reason` predicates for that pass. The gate has one permit
+and other heavy workers only try-acquire it, so a waiter takes the next turn
+ahead of all of them: the pass waits once per pass, holds the gate for one
+file at a time, and otherwise try-acquires like the rest (a queued speech pass
+goes first). Like the speech queue, it is a competitor on the heavy gate,
+outside this model, and establishes no admission fairness for the selected
+library worker. `admit_fragment`
+(Table 41) is byte-identical and still try-only. `state.rs` changes the local
+index pass, the analysis-request resolver (learners resolve targeted
+requests) and copy-preparation priority; `membership.rs` retires a removed
+node's analysis requests in `finalize_node_removal`. None of them touches the
+selected library claim, renewal, binding, wait/lock order, settlement or
+fenced publication, `schedule_loop`, `background_work_loop` or the mapped
+`may_run_cluster_jobs` authority arms. Hashes refreshed; anchors, model,
+configurations and worker correspondence unchanged.
+
+## HTTPS and Linux-player integration — 2026-10-26
+
+The merge of HTTPS `67b09d29c` with main `167af4616` retains both scoped
+source reviews below. The new FEL trait/delegation methods, off-boot VA-API
+probe and independent handoff-pruning loop do not alter selected library
+claim, renewal, binding, wait/lock, settlement or fenced-publication paths.
+The Store parent retains strict historical fixtures and inventories; its
+`formal_publication` module is unchanged. Reviewed whole-file pins follow
+the composed source; models, configurations, anchors and scope do not change.
+FEL, handoff lifecycle, identity repair, historical migrations and public TLS
+remain outside these guarantees. This is source correspondence, not new
+execution, physical acceptance or qualification. Other historical explanatory
+anchors in `source-anchors.json` retain their recorded historical identity.
+Row 41 also follows the Linux-only guard on `extend_fragment_admission`;
+the selected `admit_fragment` body and try-only admission order are unchanged.
+
+## Completion identity-result correspondence — 2026-10-25
+
+Source `5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9` changes identity-repair result classification
+inside the shared publication file. Only its existing guarded annotation
+set-copy permits zero-to-many rows; full-vector and all other exact-one checks
+remain. Identity repair is outside the selected library-worker progress model
+and **is not proved here**. `atomic_publication` renewal, authority binding,
+wait/lock order, selected publication SQL/anchors and worker cancellation and
+settlement are unchanged. Two whole-file pins track this reviewed correspondence.
+No model, configuration, source-anchor, validator or scope changes are made;
+this adds no liveness, runtime, theorem, physical or qualification guarantee.
+Affected smoke receipts remain separate source-bound evidence.
+
+## HTTPS integration — scoped refresh on 2026-10-25
+
+Codex reviewed source `f18c39e66954b71fcedcf8f463914f112498a518` against
+`9bcfa9ca1f792d214122762981c84c85ba5b3e64`; the parent coordinator approved
+the scoped disposition. Four drifted whole-file inputs cover five table rows.
+
+| Binding | Source-backed disposition |
+|---|---|
+| Library authority (30) | Fragment enqueue guards now precede receipt reuse, but ordinary library inputs omit both fragment/analysis fields. The selected authority arm, claim/bind/publish/renew/cancel/settle paths and worker wait order are unchanged. General fragment receipt admission remains outside this operation. |
+| Daemon loops (42–43) | `AppState` gains only the HTTPS control field and initialization. Both mapped scheduler/worker bodies and their wait/lock/settlement order are unchanged. |
+| Main worker owner (44) | Public TLS preparation, serving and drain gain a separate owner and may request the existing daemon cancellation. The mapped background worker spawn and shutdown consumers are unchanged. Public listener startup, handshake/drain latency and whole-daemon shutdown remain outside the selected operation-progress guarantee. |
+| Tokio dependency | Only daemon dependency edges are added; Tokio remains 1.53.1 and Hiqlite remains 0.14.0. |
+
+Exact anchors, executable model/configurations, toolchain, historical
+source-anchor snapshot and worker correspondence are unchanged. Whole-file
+pins remain deliberate and fail closed on future drift. This source review
+adds no liveness guarantee or qualification result; fresh affected smoke
+receipts are separate evidence.
+
 ## Read-only readiness binding — scoped refresh on 2026-10-23
 
 The A2923b2c to be610d647 delta adds the advisory `dv_title_readiness`
@@ -12,6 +431,33 @@ trait method and delegation to the core background-job store. Table30's
 whole-file mapping hash is refreshed; exact anchors, executable source-anchor
 records, model/configurations and worker correspondence are unchanged. The
 readiness API's completion and latency acquire no liveness or qualification claim.
+
+## FEL qualification review fixes — scoped refresh on 2026-10-26 (2)
+
+`construct.rs` now lets a background job extend its own `FragmentAdmission`
+with a second bundle (`extend_fragment_admission`), and
+`fragment_worker_idle` compares the node's hardware and software use with
+what the admission claims, extension included. The selected library worker
+never extends its admission, so for it `claimed()` is `(0, threads)` and the
+predicate is exactly the old one (`in_use() <= 0` is `in_use() == 0`);
+`admit_fragment` (Table 41) is byte-identical. `main.rs` warms the VA-API
+HEVC Main10 probe in a spawned task instead of awaiting it during
+`probe_system`; the Table 44 spawn line is byte-identical and the worker
+loops start as before. Hashes refreshed; anchors, model, configurations and
+worker correspondence unchanged.
+
+## FEL qualification additions — scoped refresh on 2026-10-26
+
+The `claude/lp-fel-p81` delta against `origin/effort/linux-player` adds three
+DV-title store methods to the core background-job store (Table 30's
+`LibraryScan` / `MetadataRefresh` arm is byte-identical), two
+`TranscodeManager` field initializers in `construct.rs` (the live
+reconstruction slot and a per-title re-qualification throttle;
+`admit_fragment` is byte-identical), and a startup measurement of VA-API HEVC
+Main10 decode in `main.rs`'s `probe_system`, before the worker loops are
+spawned (Table 44's spawn line is byte-identical). None of it is on the
+selected library worker's path. Only whole-file hashes are refreshed; anchors,
+model, configurations and worker correspondence are unchanged.
 
 ## Physical admission correspondence refresh — 2026-10-25
 
@@ -93,3 +539,22 @@ Faithfully model one request's queue claim, domain lease, exact binding, finite 
 For useful completion, require readable roots, available physical admission, authority, finite filesystem/provider calls, and an eventual Store/Raft reply or explicit timeout outcome. Model queue-token and publication-lock grants as atomic FIFO transitions with the actual holder and the dependency whose return releases it; do not assume that a lock holder or the cleanup it performs eventually finishes. Derive cleanup/join progress from those held resources and their external-return edges, rather than assuming unconditional eventual cleanup. A blocked filesystem syscall can outlive cancellation, and a lease heartbeat's expiry path still drains its renewal future. These remain explicit liveness premises.
 
 No concrete lock cycle was found within this inspected application path. This is not a transitive deadlock proof: lower Raft/network/leader recovery, remote authority construction, kernel filesystem waits and process-runtime shutdown remain outside scope. Ripwire refused because `target` was inaccessible; claims were checked directly. The JSON file is a drift receipt, not a liveness proof.
+
+## November 8 reader recovery wait
+
+A live lock holder keeps its source slot. On the same kernel, replay must
+acquire the original armed anchor and verify its inode, change time and
+nonce. A raw descriptor handoff disqualifies that witness, including when
+a bounded command clears its environment. For one audited legacy DV
+activation, the Linux host helper instead requires two complete matching
+reader censuses under the launch fence. An unknown reader keeps the slot.
+[Witness replay](../../crates/plurxd/src/source_custody/recovery/reader.rs) ·
+[Child launch](../../crates/plurx-core/src/process/bounded.rs) ·
+[Host census](../../scripts/source-custody-reader-stop)
+
+Each recovery path still waits for the exact Store settlement and release.
+A lost acknowledgement leaves evidence for retry. These kernel and host
+checks are covered by focused implementation tests. Their success and the
+time until a slot reopens lie outside the modeled request's progress guarantee.
+[Native witness tests](../../crates/plurxd/src/source_custody/recovery/reader/tests.rs) ·
+[Legacy custody tests](../../crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs)

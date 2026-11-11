@@ -25,11 +25,12 @@ pub use super::background_jobs_library::{
 use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
 pub use super::background_jobs_migration::JobMigrationStatus;
 pub use super::background_jobs_observation::{
-    BackgroundJobMetrics, JobAttemptObservation, JobCount, JobLabel, SourceIoHolder,
-    JOB_METRIC_KINDS, JOB_METRIC_SLOTS, JOB_METRIC_STATES,
+    BackgroundJobMetrics, JobAttemptObservation, JobCount, JobLabel, NodeJobCompletions,
+    SourceIoHolder, JOB_METRIC_KINDS, JOB_METRIC_SLOTS, JOB_METRIC_STATES,
+    JOB_PROCESSING_WINDOW_MS,
 };
 use super::background_jobs_observation::{
-    ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL, SOURCE_IO_HOLDERS_SQL,
+    ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL, NODE_COMPLETIONS_SQL, SOURCE_IO_HOLDERS_SQL,
 };
 pub use super::background_jobs_offline::JoinOfflineJob;
 use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
@@ -122,12 +123,24 @@ macro_rules! subtitle_advanced_admission { () => { r#"EXISTS (SELECT 1 FROM sett
 // Translation admission linearizes saved disable, Stop, source revision and
 // shared live demand with the ordinary queue transaction. One viewer's seek
 // does not cancel another viewer's still-live interest in the same core.
+macro_rules! text_admission {
+    ($payload:literal, $now:literal) => { concat!(r#"EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND is_admin=1)
+    AND (json_extract("#,$payload,r#",'$.kind')='subtitle_text_model_operation' OR (
+    EXISTS(SELECT 1 FROM files WHERE id=json_extract("#,$payload,r#",'$.file_id') AND size=json_extract("#,$payload,r#",'$.source_size') AND mtime=json_extract("#,$payload,r#",'$.source_mtime') AND probe_json IS NOT NULL)
+    AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.text_translation.config.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.enabled')=1 ELSE 0 END)))"#) };
+}
+
 macro_rules! translation_admission {
-    ($payload:literal,$now:literal) => { concat!(r#"EXISTS (SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id
+    ($payload:literal,$now:literal,$job:literal) => { translation_admission!($payload,$now,$job,"0") };
+    ($payload:literal,$now:literal,$job:literal,$fence:literal) => { concat!(r#"EXISTS (SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id
       JOIN settings config ON config.key='subtitles.translation.config.v1'
       WHERE op.id=COALESCE(json_extract("#,$payload,r#",'$.operation_id'),json_extract("#,$payload,r#",'$.recipe.operation_id'))
       AND op.operation_epoch=COALESCE(json_extract("#,$payload,r#",'$.operation_epoch'),json_extract("#,$payload,r#",'$.recipe.operation_epoch'))
       AND op.stopped=0 AND op.state NOT IN ('failed','stopped','complete')
+      AND op.target_node_id=json_extract("#,$payload,r#",'$.target_node_id')
+      AND ((json_extract("#,$payload,r#",'$.kind')='subtitle_translation_prepare' AND op.preparation_job_id="#,$job,r#")
+        OR (json_extract("#,$payload,r#",'$.kind')='subtitle_translation_range'
+          AND op.preparation_job_id=json_extract("#,$payload,r#",'$.producer_preparation_job_id')))
       AND f.id=json_extract("#,$payload,r#",'$.file_id') AND f.probe_json IS NOT NULL
       AND f.size=json_extract(op.source_json,'$.source_size') AND f.mtime=json_extract(op.source_json,'$.source_mtime')
       AND CASE WHEN json_valid(config.value) THEN json_extract(config.value,'$.version')=1
@@ -137,7 +150,10 @@ macro_rules! translation_admission {
         AND d.expires_at_ms>"#,$now,r#" AND u.is_admin=1
         AND (json_extract("#,$payload,r#",'$.kind')='subtitle_translation_prepare' OR
         json_extract("#,$payload,r#",'$.recipe.core_index') BETWEEN CAST(d.position_ms/json_extract(op.profile_json,'$.core_ms') AS INTEGER)
-        AND CAST(d.position_ms/json_extract(op.profile_json,'$.core_ms') AS INTEGER)+min(2,CAST(d.playback_rate AS INTEGER)+1)))
+        AND CAST(d.position_ms/json_extract(op.profile_json,'$.core_ms') AS INTEGER)+min(2,CAST(d.playback_rate AS INTEGER)+1)
+        OR EXISTS(SELECT 1 FROM subtitle_translation_range_continuities continuity
+          WHERE continuity.job_id="#,$job,r#" AND continuity.fence="#,$fence,r#"
+          AND continuity.demand_id=d.id AND continuity.continuity_id=d.continuity_id)))
       AND (json_extract("#,$payload,r#",'$.kind')='subtitle_translation_prepare' OR
         (op.asset_id=json_extract("#,$payload,r#",'$.recipe.asset_id') AND EXISTS (
           SELECT 1 FROM subtitle_translation_assets a WHERE a.id=op.asset_id AND a.retired_at_ms IS NULL
@@ -234,7 +250,8 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
       AND NOT ("#,
     translation_admission!(
         "json_extract(body,'$.payload')",
-        "json_extract(body,'$.now_ms')"
+        "json_extract(body,'$.now_ms')",
+        "json_extract(body,'$.id')"
     ),
     r#") THEN 'no_demand'
     WHEN json_extract(body, '$.payload.kind') = 'subtitle_extract' AND (
@@ -266,6 +283,26 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_type(body,'$.repair_id') IS NOT NULL AND prior_job IS NULL AND active_job IS NULL
       AND (SELECT COUNT(*) FROM background_job_waiters WHERE request_scope = 'artifact-repair'
         AND state IN ('pending','awaiting_hydration')) >= 64 THEN 'queue_full'
+    -- An existing receipt cannot authorize a consumed/stale analysis claim or
+    -- a source generation that no longer exists. Fence both atomically before
+    -- receipt reuse can report success or raise job/waiter priority.
+    WHEN json_type(body, '$.analysis_request') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM analysis_requests WHERE request_id = json_extract(body, '$.analysis_request.request_id')
+        AND state = 'running' AND component = 'fragment_index' AND cancel_requested = 0
+        AND owner_node_id = json_extract(body, '$.analysis_request.owner_node_id')
+        AND fence = json_extract(body, '$.analysis_request.fence') AND lease_expires_ms > json_extract(body, '$.now_ms')
+        AND file_id = json_extract(body, '$.fragment_domain.file_id')
+        AND source_size = json_extract(body, '$.fragment_domain.source_size')
+        AND source_mtime = json_extract(body, '$.fragment_domain.source_mtime')
+        AND target_node_id = json_extract(body, '$.fragment_domain.target_node_id')
+        AND force_rebuild = json_extract(body, '$.analysis_request.force_rebuild')
+        AND requested_generation = json_extract(body, '$.analysis_request.requested_generation')
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || owner_node_id)
+    ) THEN 'request_fenced'
+    WHEN json_type(body, '$.fragment_domain') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM files WHERE id = json_extract(body, '$.fragment_domain.file_id')
+        AND size = json_extract(body, '$.fragment_domain.source_size') AND mtime = json_extract(body, '$.fragment_domain.source_mtime')
+    ) THEN 'source_changed'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
     WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND NOT EXISTS (SELECT 1 FROM job_leases lease
@@ -287,6 +324,14 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND active_job IS NULL
       AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'media_probe' AND state IN ('queued','running','cancelling')
         AND json_extract(payload_json,'$.coordinator') = json_extract(body,'$.payload.coordinator')) >= 128 THEN 'queue_full'
+    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') AND NOT ("#,
+    text_admission!(
+        "json_extract(body,'$.payload')",
+        "json_extract(body,'$.now_ms')"
+    ),
+    r#") THEN 'producer_fenced'
+    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_jobs WHERE kind IN ('subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') AND state IN ('queued','running','cancelling'))>=32 THEN 'queue_full'
     WHEN json_extract(body,'$.payload.kind')='subtitle_transcribe_managed' AND NOT ("#,
     subtitle_managed_admission!(),
     r#") THEN 'producer_fenced'
@@ -382,10 +427,6 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
         AND (deadline_ms IS NULL OR deadline_ms > json_extract(body, '$.now_ms'))
         AND CASE WHEN json_valid(result_ref) THEN COALESCE(CASE json_extract(result_ref, '$.artifact_kind') WHEN 'fragment_index' THEN 'fragment:' WHEN 'artwork' THEN 'artwork:' END || json_extract(result_ref, '$.artifact_key'), 'transcode:' || json_extract(result_ref,'$.recipe_hash') || ':' || json_extract(result_ref,'$.manifest_digest')) END = json_extract(body, '$.payload.artifact_key')
     ) THEN 'no_demand'
-    WHEN json_type(body, '$.fragment_domain') IS NOT NULL AND NOT EXISTS (
-      SELECT 1 FROM files WHERE id = json_extract(body, '$.fragment_domain.file_id')
-        AND size = json_extract(body, '$.fragment_domain.source_size') AND mtime = json_extract(body, '$.fragment_domain.source_mtime')
-    ) THEN 'source_changed'
     WHEN json_extract(body, '$.fragment_repair') = 1 AND NOT EXISTS (
       SELECT 1 FROM cluster_fragment_index_artifacts WHERE cache_key = json_extract(body, '$.fragment_domain.cache_key')
         AND file_id = json_extract(body, '$.fragment_domain.file_id')
@@ -394,19 +435,6 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
         AND source_sha256 = json_extract(body, '$.fragment_domain.source_sha256')
         AND pipeline_sha256 = json_extract(body, '$.fragment_domain.pipeline_sha256')
     ) THEN 'conflict'
-    WHEN json_type(body, '$.analysis_request') IS NOT NULL AND NOT EXISTS (
-      SELECT 1 FROM analysis_requests WHERE request_id = json_extract(body, '$.analysis_request.request_id')
-        AND state = 'running' AND component = 'fragment_index' AND cancel_requested = 0
-        AND owner_node_id = json_extract(body, '$.analysis_request.owner_node_id')
-        AND fence = json_extract(body, '$.analysis_request.fence') AND lease_expires_ms > json_extract(body, '$.now_ms')
-        AND file_id = json_extract(body, '$.fragment_domain.file_id')
-        AND source_size = json_extract(body, '$.fragment_domain.source_size')
-        AND source_mtime = json_extract(body, '$.fragment_domain.source_mtime')
-        AND target_node_id = json_extract(body, '$.fragment_domain.target_node_id')
-        AND force_rebuild = json_extract(body, '$.analysis_request.force_rebuild')
-        AND requested_generation = json_extract(body, '$.analysis_request.requested_generation')
-        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || owner_node_id)
-    ) THEN 'request_fenced'
     WHEN json_type(body, '$.fragment_domain') IS NOT NULL
       AND COALESCE(json_extract(body, '$.analysis_request.force_rebuild'), 0) = 0
       AND json_extract(body, '$.fragment_domain.cache_key') != COALESCE((
@@ -497,10 +525,14 @@ WHERE id = json_extract($1, '$.job_id')
     AND d.file_id=json_extract(background_jobs.payload_json,'$.file_id') AND d.terminal=0
     AND d.scanner_digest=json_extract(background_jobs.payload_json,'$.scanner_digest')
     AND f.size=json_extract(background_jobs.payload_json,'$.source_size') AND f.mtime=json_extract(background_jobs.payload_json,'$.source_mtime')))
+  AND (kind NOT IN ('subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') OR ("#,
+    text_admission!("payload_json", "json_extract($1,'$.now_ms')"),
+    r#"))
   AND (kind NOT IN ('subtitle_translation_prepare','subtitle_translation_range') OR ("#,
     translation_admission!(
         "background_jobs.payload_json",
-        "json_extract($1,'$.now_ms')"
+        "json_extract($1,'$.now_ms')",
+        "background_jobs.id"
     ),
     r#"))
   AND (kind!='subtitle_transcribe_managed' OR ("#,
@@ -557,14 +589,20 @@ WHERE id = json_extract($1, '$.job_id')
   -- The outer CAS already fixes id to this request. Bind resource lookup to
   -- that same value so SQLite pushes the identity into every UNION branch
   -- of the resource view instead of scanning all jobs under the Raft writer.
+  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required JOIN source_io_occupancy held
+      ON (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
+    WHERE required.job_id=json_extract($1,'$.job_id') AND held.custody_id IS NOT NULL
+      AND held.active_occupancy=1 AND held.expires_at_ms<=json_extract($1,'$.now_ms'))
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = json_extract($1, '$.job_id') AND ((SELECT COUNT(*) FROM background_job_reservations held
-      WHERE held.resource_key = required.resource_key AND held.expires_at_ms > json_extract($1, '$.now_ms')
-        AND held.job_id != json_extract($1, '$.job_id'))
-      + (SELECT COUNT(*) FROM analysis_source_reservations held
-          WHERE held.resource_key = required.resource_key
-            AND held.expires_at_ms > json_extract($1, '$.now_ms')))
-      >= 2)
+    JOIN foreground_source_permissions fg ON required.resource_key LIKE 'source_io%'
+      AND (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
+    WHERE required.job_id=json_extract($1,'$.job_id') AND (fg.lease_expires_at_ms>json_extract($1,'$.now_ms') OR fg.custody_held=1)
+      AND (fg.lease_expires_at_ms<=json_extract($1,'$.now_ms') OR COALESCE(fg.permits_through_ms,0)<=json_extract($1,'$.now_ms')))
+  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+    WHERE required.job_id = json_extract($1, '$.job_id') AND (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
+      WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.active_occupancy=1
+        AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)
+        AND (held.work_id!=json_extract($1,'$.job_id') OR held.custody_id IS NOT NULL))>=2)
   -- A second source reader is reserved for live demand. Classification uses
   -- durable consumer ownership, never the job's caller-supplied priority.
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
@@ -582,6 +620,16 @@ WHERE id = json_extract($1, '$.job_id')
                     AND viewer.consumer_kind = 'playback_fragment'
                     AND viewer.state IN ('pending','awaiting_hydration')
                     AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
+              OR (interest.consumer_kind IN ('subtitle_translation','subtitle_translation_range') AND EXISTS (
+                  SELECT 1 FROM background_jobs live_range WHERE live_range.id=interest.job_id
+                    AND ((interest.consumer_kind='subtitle_translation_range' AND live_range.kind='subtitle_translation_range')
+                      OR (interest.consumer_kind='subtitle_translation' AND live_range.kind='subtitle_translation_prepare')) AND ("#,
+    translation_admission!(
+        "live_range.payload_json",
+        "json_extract($1,'$.now_ms')",
+        "live_range.id"
+    ),
+    r#")))
               OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
                   SELECT 1 FROM analysis_requests request
                   WHERE request.request_id = interest.consumer_ref
@@ -589,7 +637,7 @@ WHERE id = json_extract($1, '$.job_id')
                     AND request.trigger = 'playback'
                     AND request.state IN ('queued','running')))))
       AND ((SELECT COUNT(*) FROM background_job_reservations held
-          WHERE held.resource_key = required.resource_key
+          WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
             AND held.expires_at_ms > json_extract($1, '$.now_ms')
             AND held.job_id != background_jobs.id
             AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
@@ -604,6 +652,17 @@ WHERE id = json_extract($1, '$.job_id')
                           AND viewer.consumer_kind = 'playback_fragment'
                           AND viewer.state IN ('pending','awaiting_hydration')
                           AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
+                    OR (interest.consumer_kind IN ('subtitle_translation','subtitle_translation_range') AND EXISTS (
+                        SELECT 1 FROM background_jobs live_range WHERE live_range.id=interest.job_id
+                          AND ((interest.consumer_kind='subtitle_translation_range' AND live_range.kind='subtitle_translation_range')
+                      OR (interest.consumer_kind='subtitle_translation' AND live_range.kind='subtitle_translation_prepare')) AND ("#,
+    translation_admission!(
+        "live_range.payload_json",
+        "json_extract($1,'$.now_ms')",
+        "live_range.id",
+        "live_range.fence"
+    ),
+    r#")))
                     OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
                         SELECT 1 FROM analysis_requests request
                         WHERE request.request_id = interest.consumer_ref
@@ -611,13 +670,17 @@ WHERE id = json_extract($1, '$.job_id')
                           AND request.trigger = 'playback'
                           AND request.state IN ('queued','running'))))))
         + (SELECT COUNT(*) FROM analysis_source_reservations held
-            WHERE held.resource_key = required.resource_key
+            WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
               AND held.expires_at_ms > json_extract($1, '$.now_ms')
               AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
                   WHERE viewer.request_scope = 'playback-analysis'
                     AND viewer.job_id = held.request_id
                     AND viewer.state = 'pending'
-                    AND viewer.deadline_ms > json_extract($1, '$.now_ms'))) >= 1))
+                    AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
+        + (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
+          WHERE held.owner_kind IN ('lease','offline') AND held.active_occupancy=1
+            AND (held.resource_key=required.resource_key OR held.resource_key='source_io' OR required.resource_key='source_io')
+            AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)) >= 1))
 "#
 );
 
@@ -643,7 +706,11 @@ WITH inputs AS (
                     SELECT 1 FROM background_job_reservations held
                     WHERE held.job_id = job.id AND held.fence = job.fence
                         AND held.resource_key = required.resource_key
-                        AND held.expires_at_ms >= job.lease_expires_ms))
+                        AND held.expires_at_ms >= job.lease_expires_ms)
+                  AND NOT EXISTS(SELECT 1 FROM background_source_pauses paused,json_each(paused.resource_keys_json) resource
+                    WHERE paused.job_id=job.id AND paused.fence=job.fence AND paused.node_id=job.owner_node_id
+                      AND paused.boot_id=job.owner_boot_id AND paused.claim_id=job.claim_id AND paused.phase='paused'
+                      AND resource.value=required.resource_key))
     AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > now_ms)
     AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || job.owner_node_id)
     AND job.revision < 9223372036854775807
@@ -665,13 +732,23 @@ UPDATE background_jobs SET
   failure_policy = COALESCE(json_extract($1, '$.failure_policy'), CASE json_extract($1, '$.settlement.disposition')
     WHEN 'retry' THEN 'retry' WHEN 'fail' THEN 'terminal' END),
   not_before_ms = COALESCE(json_extract($1, '$.settlement.not_before_ms'), not_before_ms),
-  checkpoint_json = CASE WHEN json_extract($1, '$.settlement.disposition') != 'yield' THEN checkpoint_json
+  checkpoint_json = CASE WHEN json_extract($1, '$.settlement.disposition') = 'yield'
+      AND json_type(checkpoint_json, '$.source_attestation') = 'object'
+    THEN json_set((
+CASE WHEN json_extract($1, '$.settlement.disposition') != 'yield' THEN checkpoint_json
     WHEN json_extract(checkpoint_json, '$.effective_recipe_hash') IS NOT NULL THEN json_set(
       CASE WHEN json_type($1, '$.settlement.checkpoint') = 'object' THEN json_extract($1, '$.settlement.checkpoint')
         ELSE checkpoint_json END,
       '$.effective_recipe_hash', json_extract(checkpoint_json, '$.effective_recipe_hash'),
       '$.recipe_node_id', json_extract(checkpoint_json, '$.recipe_node_id'))
-    ELSE COALESCE(json_extract($1, '$.settlement.checkpoint'), checkpoint_json) END,
+    ELSE COALESCE(json_extract($1, '$.settlement.checkpoint'), checkpoint_json) END), '$.source_attestation', json_extract(checkpoint_json, '$.source_attestation'))
+    ELSE CASE WHEN json_extract($1, '$.settlement.disposition') != 'yield' THEN checkpoint_json
+    WHEN json_extract(checkpoint_json, '$.effective_recipe_hash') IS NOT NULL THEN json_set(
+      CASE WHEN json_type($1, '$.settlement.checkpoint') = 'object' THEN json_extract($1, '$.settlement.checkpoint')
+        ELSE checkpoint_json END,
+      '$.effective_recipe_hash', json_extract(checkpoint_json, '$.effective_recipe_hash'),
+      '$.recipe_node_id', json_extract(checkpoint_json, '$.recipe_node_id'))
+    ELSE COALESCE(json_extract($1, '$.settlement.checkpoint'), checkpoint_json) END END,
   retry_deadline_ms = COALESCE(json_extract($1, '$.retry_deadline_ms'), retry_deadline_ms),
   index_diagnostic_json = COALESCE(json_extract($1, '$.index_diagnostic_json'), index_diagnostic_json),
   attempt_errors = CASE WHEN json_extract($1, '$.settlement.disposition') IN ('retry','fail') THEN
@@ -693,6 +770,16 @@ WHERE id = json_extract($1, '$.token.job_id')
     OR (state = 'cancelling' AND json_extract($1, '$.settlement.disposition') = 'cancel'))
 "#;
 
+/// A root-readable worker reports whether it can acquire its complete local
+/// library admission, or is waiting for the one heavy permit to turn over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryTurnCapacity {
+    Available,
+    HeavyOccupied,
+    Unavailable,
+}
+
 /// Closed registry. Supporting a payload version is an execution constraint,
 /// never a fleet-wide enablement prerequisite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -709,6 +796,10 @@ pub enum JobKind {
     SubtitleModelOperation,
     SubtitleTranslationPrepare,
     SubtitleTranslationRange,
+    SubtitleTextTranslate,
+    /// Separate from legacy extraction-capable workers during rolling upgrades.
+    SubtitleTextTranslateArtifact,
+    SubtitleTextModelOperation,
     LibraryScan,
     MetadataRefresh,
     ArtifactVerify,
@@ -733,6 +824,9 @@ impl JobKind {
             | Self::SubtitleModelOperation
             | Self::SubtitleTranslationPrepare
             | Self::SubtitleTranslationRange
+            | Self::SubtitleTextTranslate
+            | Self::SubtitleTextTranslateArtifact
+            | Self::SubtitleTextModelOperation
             | Self::SubtitleExtract
             | Self::ArtifactVerify
             | Self::ArtworkDerivative
@@ -960,6 +1054,52 @@ pub enum JobPayload {
         file_id: i64,
         recipe: super::subtitle_translation::RangeRecipe,
         target_node_id: String,
+        /// Current mutable producer incarnation; never part of immutable recipe IDs.
+        /// Empty only when decoding a pre-incarnation legacy job. Such jobs
+        /// remain inspectable but cannot pass enqueue/claim/publication guards.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        producer_preparation_job_id: String,
+    },
+    SubtitleTextTranslate {
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        subtitle_index: i64,
+        input_sha256: String,
+        source_language: String,
+        target_language: String,
+        engine_sha256: String,
+        model_id: String,
+        model_sha256: String,
+        adapter_contract: String,
+        target_node_id: String,
+        admin_user_id: i64,
+    },
+    /// Input must already be materialized. Claimed workers never extract media.
+    SubtitleTextTranslateArtifact {
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        subtitle_index: i64,
+        input_sha256: String,
+        source_language: String,
+        target_language: String,
+        engine_sha256: String,
+        model_id: String,
+        model_sha256: String,
+        adapter_contract: String,
+        target_node_id: String,
+        admin_user_id: i64,
+    },
+    SubtitleTextModelOperation {
+        action: super::background_jobs_transcription::ModelAction,
+        model_id: String,
+        catalog_revision: String,
+        model_sha256: String,
+        adapter_contract: String,
+        target_node_id: String,
+        target_boot_id: String,
+        admin_user_id: i64,
     },
     SubtitleModelOperation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1010,6 +1150,43 @@ pub enum JobPayload {
 }
 
 impl JobPayload {
+    /// Explicit retry may promote a legacy operation after its input was
+    /// materialized again. Existing queued/running job identities never change.
+    pub fn into_artifact_text(self) -> Self {
+        match self {
+            Self::SubtitleTextTranslate {
+                file_id,
+                source_size,
+                source_mtime,
+                subtitle_index,
+                input_sha256,
+                source_language,
+                target_language,
+                engine_sha256,
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                admin_user_id,
+            } => Self::SubtitleTextTranslateArtifact {
+                file_id,
+                source_size,
+                source_mtime,
+                subtitle_index,
+                input_sha256,
+                source_language,
+                target_language,
+                engine_sha256,
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                admin_user_id,
+            },
+            other => other,
+        }
+    }
+
     pub const fn kind(&self) -> JobKind {
         match self {
             Self::EncodedOutputPrepare { .. } => JobKind::EncodedOutputPrepare,
@@ -1023,6 +1200,9 @@ impl JobPayload {
             Self::SubtitleModelOperation { .. } => JobKind::SubtitleModelOperation,
             Self::SubtitleTranslationPrepare { .. } => JobKind::SubtitleTranslationPrepare,
             Self::SubtitleTranslationRange { .. } => JobKind::SubtitleTranslationRange,
+            Self::SubtitleTextTranslate { .. } => JobKind::SubtitleTextTranslate,
+            Self::SubtitleTextTranslateArtifact { .. } => JobKind::SubtitleTextTranslateArtifact,
+            Self::SubtitleTextModelOperation { .. } => JobKind::SubtitleTextModelOperation,
             Self::LibraryScan { .. } => JobKind::LibraryScan,
             Self::MetadataRefresh { .. } => JobKind::MetadataRefresh,
             Self::ArtifactVerify { .. } => JobKind::ArtifactVerify,
@@ -1041,7 +1221,10 @@ impl JobPayload {
             | Self::ArtifactVerify { target_node_id, .. }
             | Self::SubtitleModelOperation { target_node_id, .. }
             | Self::SubtitleTranslationPrepare { target_node_id, .. }
-            | Self::SubtitleTranslationRange { target_node_id, .. } => Some(target_node_id),
+            | Self::SubtitleTranslationRange { target_node_id, .. }
+            | Self::SubtitleTextTranslate { target_node_id, .. }
+            | Self::SubtitleTextTranslateArtifact { target_node_id, .. }
+            | Self::SubtitleTextModelOperation { target_node_id, .. } => Some(target_node_id),
             _ => None,
         }
     }
@@ -1212,7 +1395,7 @@ impl JobPayload {
                     && uuid::Uuid::parse_str(operation_id).is_ok()
                     && *operation_epoch > 0
                     && profile.validate().is_ok()
-                    && *audio_index == 0
+                    && (0..=255).contains(audio_index)
                     && super::background_jobs_transcription::whisper_language(spoken_language)
                     && (1..=super::subtitle_translation::MAX_TRANSLATION_DURATION_MS)
                         .contains(duration_ms)
@@ -1222,11 +1405,80 @@ impl JobPayload {
                 file_id,
                 recipe,
                 target_node_id,
+                producer_preparation_job_id,
             } => {
                 *file_id == recipe.source.file_id
-                    && recipe.audio_index == 0
+                    && (0..=255).contains(&recipe.audio_index)
                     && recipe.validate().is_ok()
                     && identifier(target_node_id)
+                    && (producer_preparation_job_id.is_empty()
+                        || uuid::Uuid::parse_str(producer_preparation_job_id).is_ok())
+            }
+            Self::SubtitleTextTranslate {
+                file_id,
+                source_size,
+                subtitle_index,
+                input_sha256,
+                source_language,
+                target_language,
+                engine_sha256,
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                admin_user_id,
+                ..
+            }
+            | Self::SubtitleTextTranslateArtifact {
+                file_id,
+                source_size,
+                subtitle_index,
+                input_sha256,
+                source_language,
+                target_language,
+                engine_sha256,
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                admin_user_id,
+                ..
+            } => {
+                *file_id > 0
+                    && *source_size > 0
+                    && (0..=1023).contains(subtitle_index)
+                    && digest(input_sha256)
+                    && digest(engine_sha256)
+                    && super::background_jobs_transcription::valid_language(source_language)
+                    && !matches!(source_language.as_str(), "en" | "und")
+                    && target_language == "en"
+                    && model_id == "opus-mt-mul-en"
+                    && digest(model_sha256)
+                    && adapter_contract == "candle-marian-0.11-v1"
+                    && identifier(target_node_id)
+                    && *admin_user_id > 0
+            }
+            Self::SubtitleTextModelOperation {
+                action,
+                model_id,
+                catalog_revision,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                target_boot_id,
+                admin_user_id,
+            } => {
+                matches!(
+                    action,
+                    super::background_jobs_transcription::ModelAction::Install
+                        | super::background_jobs_transcription::ModelAction::Verify
+                ) && model_id == "opus-mt-mul-en"
+                    && identifier(catalog_revision)
+                    && digest(model_sha256)
+                    && adapter_contract == "candle-marian-0.11-v1"
+                    && identifier(target_node_id)
+                    && uuid::Uuid::parse_str(target_boot_id).is_ok()
+                    && *admin_user_id > 0
             }
             Self::SubtitleModelOperation {
                 action,
@@ -1823,6 +2075,21 @@ RETURNING result_json
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
     async fn maintain_translation_cache(&self, now_ms: i64) -> Result<(), StoreError>;
+    async fn text_translation_request_receipt(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        digest: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError>;
+    async fn publish_text_translation_slice(
+        &self,
+        input: super::subtitle_text_translation::PublishTextSlice,
+    ) -> Result<bool, StoreError>;
+    async fn read_text_translation_cues(
+        &self,
+        source: JobPayload,
+    ) -> Result<Vec<super::subtitle_text_translation::TextTranslationCue>, StoreError>;
+
     async fn write_translation_settings(
         &self,
         request: super::subtitle_translation_settings::TranslationSettingsWrite,
@@ -1830,6 +2097,10 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn read_subtitle_translation(
         &self,
         request: super::subtitle_translation_read::TranslationRead,
+    ) -> Result<Vec<serde_json::Value>, StoreError>;
+    async fn read_shared_captions(
+        &self,
+        request: super::shared_caption_read::GrantCaptionRead,
     ) -> Result<Vec<serde_json::Value>, StoreError>;
     async fn acquire_translation_lease(
         &self,
@@ -1907,6 +2178,27 @@ pub trait BackgroundJobStore: Send + Sync {
         request: super::background_jobs_probe::ApplyProbeJob,
     ) -> Result<bool, StoreError>;
     async fn dv_title_readiness(&self) -> Result<super::dv_title_jobs::TitleReadiness, StoreError>;
+    async fn put_dv_fel_verdict(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        verdict: &serde_json::Value,
+    ) -> Result<bool, StoreError>;
+    async fn request_dv_fel_variant(
+        &self,
+        file_id: i64,
+        request: &crate::transcode::dv_fel_qualification::FelRecipeRequest,
+    ) -> Result<bool, StoreError>;
+    async fn request_dv_fel_requalification(
+        &self,
+        file_id: i64,
+        binding: &str,
+    ) -> Result<bool, StoreError>;
+    async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError>;
+    /// Settled FEL titles whose verdict another FEL identity measured.
+    async fn dv_fel_stale_titles(&self, identity: &str, limit: u32)
+        -> Result<Vec<i64>, StoreError>;
     async fn dv_title_demands(
         &self,
         scanner: &str,
@@ -1921,6 +2213,12 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: super::dv_title_jobs::PublishTitleJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+    /// Offer a content-analysis pass's complete-title aggregate to the
+    /// title's current demand.
+    async fn publish_dv_title_from_analysis(
+        &self,
+        output: super::dv_title_jobs::AnalysisTitleOutput,
+    ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError>;
     async fn probe_can_preempt_title(
         &self,
         probe_id: &str,
@@ -2019,6 +2317,15 @@ pub trait BackgroundJobStore: Send + Sync {
         mappings: Vec<super::background_jobs_resources::StorageDomainMapping>,
         now_ms: i64,
     ) -> Result<bool, StoreError>;
+    async fn advertise_library_turn(
+        &self,
+        job_id: &str,
+        revision: i64,
+        node: &str,
+        roots: &[std::path::PathBuf],
+        capacity: LibraryTurnCapacity,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     async fn enqueue_library_work(
         &self,
         request: NewLibraryWork,
@@ -2080,11 +2387,170 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
     async fn job_labels(&self, ids: &[String]) -> Result<Vec<JobLabel>, StoreError>;
     async fn job_counts(&self, now_ms: i64) -> Result<Vec<JobCount>, StoreError>;
+    async fn recent_job_completions(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<NodeJobCompletions>, StoreError>;
     async fn source_io_holders(&self, now_ms: i64) -> Result<Vec<SourceIoHolder>, StoreError>;
+    async fn register_foreground_source(
+        &self,
+        owner: super::background_jobs_resources::ForegroundSourceOwner,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
+    async fn project_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        projection: super::background_jobs_resources::ForegroundSourceProjection,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
+    async fn release_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn foreground_source_pressure(
+        &self,
+        file_id: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn list_foreground_source_owners(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
+    async fn resolve_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
+    async fn activate_foreground_source_custody(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError>;
+    async fn abort_foreground_source_activation(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError>;
+    async fn mark_foreground_source_settled(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+    ) -> Result<bool, StoreError>;
+    async fn reap_settled_source_custody(&self, now_ms: i64) -> Result<(), StoreError>;
+    async fn settled_foreground_source_custody(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
+    async fn activate_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError>;
+    async fn abort_background_source_activation(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError>;
+    async fn mark_background_source_settled(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+    ) -> Result<bool, StoreError>;
+    async fn settled_background_source_custody(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>;
+    /// Authoritative exact-owner lookup; absence may reconcile cleanup, but
+    /// neither a present row nor an expired lease proves physical termination.
+    async fn resolve_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+    ) -> Result<Option<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>;
+    async fn register_background_source_custody(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::BackgroundSourceRegistration, StoreError>;
+    async fn claim_background_source_service(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::BackgroundSourceServiceGrant>, StoreError>;
+    async fn release_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn close_read_attestation_source_lease(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn suspend_playback_analysis_interest(
+        &self,
+        receipt: super::background_jobs_resources::PlaybackAnalysisSuspension,
+        now_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::PlaybackAnalysisSuspension>, StoreError>;
+    async fn restore_playback_analysis_interest(
+        &self,
+        receipt: super::background_jobs_resources::PlaybackAnalysisSuspension,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn background_source_may_continue(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    /// The claim's source-capacity rule asked again of a claimed analysis
+    /// request, leaving out what the request itself holds: the decision the
+    /// claim made, carried through the read (before hashing, while hashing
+    /// and before submission). Reads the ledger rows the claim read.
+    async fn analysis_source_admission(
+        &self,
+        request_id: &str,
+        owner_node_id: &str,
+        fence: i64,
+        now_ms: i64,
+    ) -> Result<AnalysisSourceAdmission, StoreError>;
+    /// Fragment-index requests executed by `node_id` whose result reached
+    /// their target (state `ready`, which settlement sets only once the
+    /// target holds the index), settled at or after `since_ms`.
+    async fn analysis_completions_executed_by(
+        &self,
+        node_id: &str,
+        since_ms: i64,
+    ) -> Result<i64, StoreError>;
+    async fn pause_background_source(
+        &self,
+        token: JobToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn resume_background_source(
+        &self,
+        token: JobToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
     async fn job_attempts(&self, job_id: &str) -> Result<Vec<JobAttemptObservation>, StoreError>;
     async fn list_jobs(&self, query: JobQuery) -> Result<JobPage, StoreError>;
     async fn job_candidates(&self, query: CandidateQuery) -> Result<CandidatePage, StoreError>;
     async fn renew_jobs(&self, request: RenewJobs) -> Result<Vec<RenewOutcome>, StoreError>;
+    /// Node-local continuation artifacts still referenced by live jobs or
+    /// analysis requests. Used only for orphan retention.
+    async fn source_checkpoint_artifacts(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
+    /// Save resumable input under an exact analysis request incarnation.
+    async fn checkpoint_analysis_source(
+        &self,
+        request: super::fragment_index_cluster::AnalysisRequest,
+        checkpoint: serde_json::Value,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    /// Save resumable input without releasing the running attempt's source
+    /// reservation or advancing its ownership revision.
+    async fn checkpoint_job(
+        &self,
+        token: JobToken,
+        checkpoint: serde_json::Value,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     /// True acknowledges this token's transition. Read current job state
     /// separately: per-interest reduction and a new claim may advance it.
     async fn settle_job(&self, request: SettleJob) -> Result<bool, StoreError>;
@@ -2114,6 +2580,32 @@ pub trait BackgroundJobStore: Send + Sync {
     ) -> Result<JobPublishOutcome, StoreError>;
 }
 
+/// What [`BackgroundJobStore::analysis_source_admission`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalysisSourceAdmission {
+    /// The claim's rule still admits this read.
+    Admit,
+    /// The rule refuses it now; the reason names the term that refused.
+    Yield(&'static str),
+    /// The row is no longer this owner's running, uncancelled fence.
+    NotOwned,
+}
+
+impl AnalysisSourceAdmission {
+    fn from_verdict(verdict: &str) -> Self {
+        match verdict {
+            "admit" => Self::Admit,
+            "not_owned" => Self::NotOwned,
+            // The reasons `analysis_source_capacity_terms` names.
+            "source_custody_unsettled" => Self::Yield("source_custody_unsettled"),
+            "foreground_source" => Self::Yield("foreground_source"),
+            "domain_readers_full" => Self::Yield("domain_readers_full"),
+            "background_reader_busy" => Self::Yield("background_reader_busy"),
+            _ => Self::Yield("source_capacity"),
+        }
+    }
+}
+
 /// Narrow internal SQL bridge: callers cannot submit SQL through Store.
 /// Authority reads use the replicated leader barrier; listing is advisory.
 #[async_trait]
@@ -2137,7 +2629,11 @@ const CLAIM_RESOURCE_SNAPSHOT: &str = r#"NOT EXISTS (
         SELECT 1 FROM background_job_reservations held
         WHERE held.job_id = background_jobs.id AND held.fence = background_jobs.fence
             AND held.resource_key = required.resource_key
-            AND held.expires_at_ms >= background_jobs.lease_expires_ms))"#;
+            AND held.expires_at_ms >= background_jobs.lease_expires_ms)
+      AND NOT EXISTS(SELECT 1 FROM background_source_pauses paused,json_each(paused.resource_keys_json) resource
+        WHERE paused.job_id=background_jobs.id AND paused.fence=background_jobs.fence
+          AND paused.node_id=background_jobs.owner_node_id AND paused.boot_id=background_jobs.owner_boot_id
+          AND paused.claim_id=background_jobs.claim_id AND paused.phase='paused' AND resource.value=required.resource_key))"#;
 
 #[derive(Deserialize)]
 struct ClaimSnapshot {
@@ -2173,6 +2669,28 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn text_translation_request_receipt(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        digest: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        super::subtitle_text_translation::receipt(self, user_id, request_id, digest).await
+    }
+
+    async fn publish_text_translation_slice(
+        &self,
+        input: super::subtitle_text_translation::PublishTextSlice,
+    ) -> Result<bool, StoreError> {
+        super::subtitle_text_translation::publish(self, input).await
+    }
+    async fn read_text_translation_cues(
+        &self,
+        source: JobPayload,
+    ) -> Result<Vec<super::subtitle_text_translation::TextTranslationCue>, StoreError> {
+        super::subtitle_text_translation::read(self, &source).await
+    }
+
     async fn maintain_translation_cache(&self, now_ms: i64) -> Result<(), StoreError> {
         super::subtitle_translation_read::maintain(self, now_ms).await
     }
@@ -2187,6 +2705,12 @@ impl<T: QueueSql> BackgroundJobStore for T {
         request: super::subtitle_translation_read::TranslationRead,
     ) -> Result<Vec<serde_json::Value>, StoreError> {
         super::subtitle_translation_read::read(self, request).await
+    }
+    async fn read_shared_captions(
+        &self,
+        request: super::shared_caption_read::GrantCaptionRead,
+    ) -> Result<Vec<serde_json::Value>, StoreError> {
+        super::shared_caption_read::read(self, request).await
     }
     async fn acquire_translation_lease(
         &self,
@@ -2418,6 +2942,40 @@ LIMIT 1
     async fn dv_title_readiness(&self) -> Result<super::dv_title_jobs::TitleReadiness, StoreError> {
         super::dv_title_jobs::readiness(self).await
     }
+    async fn put_dv_fel_verdict(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        verdict: &serde_json::Value,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::put_fel_verdict(self, file_id, source_size, source_mtime, verdict)
+            .await
+    }
+    async fn request_dv_fel_variant(
+        &self,
+        file_id: i64,
+        request: &crate::transcode::dv_fel_qualification::FelRecipeRequest,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::request_fel_variant(self, file_id, request).await
+    }
+    async fn request_dv_fel_requalification(
+        &self,
+        file_id: i64,
+        binding: &str,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::request_requalification(self, file_id, binding).await
+    }
+    async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError> {
+        super::dv_title_jobs::fel_verdict_counts(self, identity).await
+    }
+    async fn dv_fel_stale_titles(
+        &self,
+        identity: &str,
+        limit: u32,
+    ) -> Result<Vec<i64>, StoreError> {
+        super::dv_title_jobs::stale_fel_titles(self, identity, limit).await
+    }
     async fn dv_title_demands(
         &self,
         scanner: &str,
@@ -2437,6 +2995,12 @@ LIMIT 1
         request: super::dv_title_jobs::PublishTitleJob,
     ) -> Result<JobPublishOutcome, StoreError> {
         super::dv_title_jobs::publish(self, request).await
+    }
+    async fn publish_dv_title_from_analysis(
+        &self,
+        output: super::dv_title_jobs::AnalysisTitleOutput,
+    ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError> {
+        super::dv_title_jobs::publish_from_analysis(self, output).await
     }
     async fn probe_can_preempt_title(
         &self,
@@ -2578,6 +3142,20 @@ LIMIT 1
         now_ms: i64,
     ) -> Result<bool, StoreError> {
         super::background_jobs_resources::replace(self, mappings, now_ms).await
+    }
+    async fn advertise_library_turn(
+        &self,
+        job_id: &str,
+        revision: i64,
+        node: &str,
+        roots: &[std::path::PathBuf],
+        capacity: LibraryTurnCapacity,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_job_turns::advertise(
+            self, job_id, revision, node, roots, capacity, now_ms,
+        )
+        .await
     }
     async fn enqueue_library_work(
         &self,
@@ -3090,6 +3668,7 @@ LIMIT 1
     }
 
     async fn maintain_jobs(&self, now_ms: i64) -> Result<bool, StoreError> {
+        super::subtitle_text_translation::maintain(self, now_ms).await?;
         if now_ms < 0 {
             return Err(invalid("invalid background maintenance time"));
         }
@@ -3248,6 +3827,87 @@ LIMIT 1
                 true,
             )
             .await?;
+        Ok(!rows.is_empty())
+    }
+
+    async fn source_checkpoint_artifacts(&self, node_id: &str) -> Result<Vec<String>, StoreError> {
+        if !identifier(node_id) {
+            return Err(invalid("invalid checkpoint node"));
+        }
+        self.queue_sql(
+            r#"SELECT json_quote(json_extract(checkpoint_json, '$.source_attestation.artifact')) AS result_json
+            FROM background_jobs WHERE state IN ('queued','running','cancelling')
+                AND json_extract(checkpoint_json, '$.source_attestation.node_id') = json_extract($1, '$.node_id')
+                AND json_type(checkpoint_json, '$.source_attestation.artifact') = 'text'
+            UNION
+            SELECT json_quote(json_extract(reference.artifact_json, '$.source_attestation.artifact'))
+            FROM analysis_source_checkpoints reference JOIN analysis_requests request USING(request_id)
+            WHERE request.state IN ('queued','running') AND request.cancel_requested = 0
+                AND reference.owner_node_id = json_extract($1, '$.node_id')
+                AND json_type(reference.artifact_json, '$.source_attestation.artifact') = 'text'"#.into(),
+            encode(&serde_json::json!({"node_id":node_id}))?, false, true,
+        ).await?.iter().map(|row| decode(row)).collect()
+    }
+
+    async fn checkpoint_analysis_source(
+        &self,
+        request: super::fragment_index_cluster::AnalysisRequest,
+        checkpoint: serde_json::Value,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if now_ms < 0
+            || request.fence <= 0
+            || !identifier(&request.owner_node_id)
+            || encode(&checkpoint)?.len() > MAX_CHECKPOINT_BYTES
+            || !checkpoint.is_object()
+        {
+            return Err(invalid("invalid analysis source checkpoint"));
+        }
+        let rows = self.queue_sql(
+            r#"INSERT INTO analysis_source_checkpoints(request_id, fence, owner_node_id, artifact_json)
+            SELECT request_id, fence, owner_node_id, json_extract($1, '$.checkpoint')
+            FROM analysis_requests WHERE request_id = json_extract($1, '$.request.request_id')
+                AND state = 'running' AND cancel_requested = 0
+                AND fence = json_extract($1, '$.request.fence')
+                AND owner_node_id = json_extract($1, '$.request.owner_node_id')
+                AND requested_generation = json_extract($1, '$.request.requested_generation')
+                AND lease_expires_ms > json_extract($1, '$.now_ms')
+            ON CONFLICT(request_id) DO UPDATE SET fence=excluded.fence,
+                owner_node_id=excluded.owner_node_id, artifact_json=excluded.artifact_json
+            RETURNING 'true' AS result_json"#.into(),
+            encode(&serde_json::json!({"request":request,"checkpoint":checkpoint,"now_ms":now_ms}))?,
+            true, true,
+        ).await?;
+        Ok(!rows.is_empty())
+    }
+
+    async fn checkpoint_job(
+        &self,
+        token: JobToken,
+        checkpoint: serde_json::Value,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        token.validate()?;
+        if now_ms < 0
+            || encode(&checkpoint)?.len() > MAX_CHECKPOINT_BYTES
+            || !checkpoint.is_object()
+        {
+            return Err(invalid("invalid background checkpoint"));
+        }
+        let rows = self.queue_sql(
+            r#"UPDATE background_jobs SET checkpoint_json = json_patch(COALESCE(checkpoint_json, '{}'), json_extract($1, '$.checkpoint')),
+                updated_at_ms = json_extract($1, '$.now_ms')
+            WHERE id = json_extract($1, '$.token.job_id') AND state = 'running'
+                AND owner_node_id = json_extract($1, '$.token.node_id')
+                AND owner_boot_id = json_extract($1, '$.token.boot_id')
+                AND claim_id = json_extract($1, '$.token.claim_id')
+                AND fence = json_extract($1, '$.token.fence')
+                AND revision = json_extract($1, '$.token.revision')
+                AND lease_expires_ms > json_extract($1, '$.now_ms')
+            RETURNING 'true' AS result_json"#.into(),
+            encode(&serde_json::json!({"token":token,"checkpoint":checkpoint,"now_ms":now_ms}))?,
+            true, true,
+        ).await?;
         Ok(!rows.is_empty())
     }
 
@@ -3644,7 +4304,29 @@ LIMIT 1
         }
         self.queue_sql(
             COUNTS_SQL.into(),
-            encode(&serde_json::json!({"now_ms": now_ms}))?,
+            encode(&serde_json::json!({
+                "now_ms": now_ms,
+                "manual_due_before_ms": now_ms - JOB_PROCESSING_WINDOW_MS,
+            }))?,
+            false,
+            false,
+        )
+        .await?
+        .iter()
+        .map(|row| decode(row))
+        .collect()
+    }
+
+    async fn recent_job_completions(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<NodeJobCompletions>, StoreError> {
+        if now_ms < 0 {
+            return Err(invalid("invalid queue observation time"));
+        }
+        self.queue_sql(
+            NODE_COMPLETIONS_SQL.into(),
+            encode(&serde_json::json!({"after_ms": now_ms - JOB_PROCESSING_WINDOW_MS, "now_ms": now_ms}))?,
             false,
             false,
         )
@@ -3670,6 +4352,250 @@ LIMIT 1
         .collect()
     }
 
+    async fn register_foreground_source(
+        &self,
+        owner: super::background_jobs_resources::ForegroundSourceOwner,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
+        super::background_jobs_resources::register_foreground(
+            self,
+            owner,
+            now_ms,
+            lease_expires_at_ms,
+        )
+        .await
+    }
+    async fn project_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        projection: super::background_jobs_resources::ForegroundSourceProjection,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
+        super::background_jobs_resources::project_foreground(
+            self,
+            token,
+            projection,
+            now_ms,
+            lease_expires_at_ms,
+        )
+        .await
+    }
+    async fn release_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::release_foreground(self, token, now_ms).await
+    }
+    async fn foreground_source_pressure(
+        &self,
+        file_id: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::foreground_pressure(self, file_id, now_ms).await
+    }
+    async fn list_foreground_source_owners(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
+        super::background_jobs_resources::foreground_owners(self, node_id).await
+    }
+    async fn resolve_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
+        super::background_jobs_resources::resolve_foreground(self, token).await
+    }
+    async fn activate_foreground_source_custody(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::activate_foreground_custody(self, token, activation_id)
+            .await
+    }
+    async fn abort_foreground_source_activation(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::abort_foreground_activation(self, token, activation_id)
+            .await
+    }
+    async fn mark_foreground_source_settled(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::mark_foreground_settled(self, token).await
+    }
+    async fn reap_settled_source_custody(&self, now_ms: i64) -> Result<(), StoreError> {
+        super::background_jobs_resources::reap_settled_source_custody(self, now_ms).await
+    }
+    async fn settled_foreground_source_custody(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
+        super::background_jobs_resources::settled_foreground_custody(self).await
+    }
+    async fn activate_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::activate_background_custody(self, token, activation_id)
+            .await
+    }
+    async fn abort_background_source_activation(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::abort_background_activation(self, token, activation_id)
+            .await
+    }
+    async fn mark_background_source_settled(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::mark_background_settled(self, token).await
+    }
+    async fn settled_background_source_custody(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>
+    {
+        super::background_jobs_resources::settled_background_custody(self).await
+    }
+    async fn resolve_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+    ) -> Result<Option<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>
+    {
+        super::background_jobs_resources::resolve_background_custody(self, token).await
+    }
+    async fn register_background_source_custody(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::BackgroundSourceRegistration, StoreError> {
+        super::background_jobs_resources::register_background_typed(self, owner, now_ms).await
+    }
+    async fn claim_background_source_service(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::BackgroundSourceServiceGrant>, StoreError>
+    {
+        super::background_jobs_resources::claim_background_service(self, owner, now_ms).await
+    }
+    async fn release_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::release_background_custody(self, token, now_ms).await
+    }
+    async fn close_read_attestation_source_lease(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::close_read_attestation_lease(self, owner, now_ms).await
+    }
+    async fn suspend_playback_analysis_interest(
+        &self,
+        receipt: super::background_jobs_resources::PlaybackAnalysisSuspension,
+        now_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::PlaybackAnalysisSuspension>, StoreError>
+    {
+        super::background_jobs_resources::suspend_analysis_interest(self, receipt, now_ms).await
+    }
+    async fn restore_playback_analysis_interest(
+        &self,
+        receipt: super::background_jobs_resources::PlaybackAnalysisSuspension,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::restore_analysis_interest(self, receipt, now_ms).await
+    }
+    async fn background_source_may_continue(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::background_may_continue(self, owner, now_ms).await
+    }
+    async fn analysis_source_admission(
+        &self,
+        request_id: &str,
+        owner_node_id: &str,
+        fence: i64,
+        now_ms: i64,
+    ) -> Result<AnalysisSourceAdmission, StoreError> {
+        if request_id.is_empty() || owner_node_id.is_empty() || fence <= 0 || now_ms < 0 {
+            return Err(invalid("invalid analysis source admission"));
+        }
+        let rows = self
+            .queue_sql(
+                super::fragment_index_cluster::analysis_source_admission_sql(),
+                encode(&serde_json::json!({
+                    "request_id": request_id,
+                    "owner_node_id": owner_node_id,
+                    "fence": fence,
+                    "now_ms": now_ms,
+                }))?,
+                false,
+                true,
+            )
+            .await?;
+        let verdict: String = rows
+            .first()
+            .map(|row| decode(row))
+            .transpose()?
+            .ok_or_else(|| invalid("missing analysis source admission"))?;
+        Ok(AnalysisSourceAdmission::from_verdict(&verdict))
+    }
+    async fn analysis_completions_executed_by(
+        &self,
+        node_id: &str,
+        since_ms: i64,
+    ) -> Result<i64, StoreError> {
+        if !identifier(node_id) || since_ms < 0 {
+            return Err(invalid("invalid analysis completion query"));
+        }
+        let rows = self
+            .queue_sql(
+                "SELECT json(COUNT(*)) AS result_json FROM analysis_attempts attempt
+                   JOIN analysis_requests request ON request.request_id = attempt.request_id
+                    AND request.fence = attempt.claim_epoch
+                  WHERE attempt.claim_node_id = json_extract($1, '$.node_id')
+                    AND attempt.phase = 'published'
+                    AND attempt.phase_updated_at_ms >= json_extract($1, '$.since_ms')
+                    AND request.component = 'fragment_index' AND request.state = 'ready'"
+                    .into(),
+                encode(&serde_json::json!({"node_id": node_id, "since_ms": since_ms}))?,
+                false,
+                false,
+            )
+            .await?;
+        rows.first()
+            .map(|row| decode(row))
+            .transpose()
+            .map(|count| count.unwrap_or(0))
+    }
+    async fn pause_background_source(
+        &self,
+        token: JobToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::pause_background(self, token, now_ms).await
+    }
+    async fn resume_background_source(
+        &self,
+        token: JobToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::resume_background(self, token, now_ms).await
+    }
     async fn job_attempts(&self, job_id: &str) -> Result<Vec<JobAttemptObservation>, StoreError> {
         if uuid::Uuid::parse_str(job_id).is_err() {
             return Err(invalid("invalid job identity"));

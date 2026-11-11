@@ -4,8 +4,10 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 // Native startup is part of the same required web-control lane.
 require("./native-hls-startup.test.js");
+require("./native-source-ownership.test.js");
 require("./paused-hls-resume.test.js");
 require("./prepared-frame-rendezvous.test.js");
+require("./resume-quality-boundary.test.js");
 const fs = require("node:fs");
 const path = require("node:path");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
@@ -32,8 +34,10 @@ const SHIPPED_UI = shellSource().bodyScript;
 // Keep its validation real: diagnostic files below use canonical local IDs.
 const FILE_CONTEXT_SOURCE=fs.readFileSync(path.join(__dirname,
   "../../crates/plurxd/src/web/core/file-context.js"),"utf8");
+const PLAYBACK_FRAME_SOURCE=fs.readFileSync(path.join(__dirname,
+  "../../crates/plurxd/src/web/player/video-frames.js"),"utf8");
 function PlaybackContextFunction(...args){
-  args[args.length-1]=FILE_CONTEXT_SOURCE+"\n"+args[args.length-1];
+  args[args.length-1]=FILE_CONTEXT_SOURCE+"\n"+PLAYBACK_FRAME_SOURCE+"\n"+args[args.length-1];
   return new Function(...args);
 }
 const DECLARATIONS = ["\nfunction ", "\nasync function "];
@@ -165,7 +169,8 @@ function fullOpenHarness() {
     "const requestIds=[];function newRequestId(){const id='rq-'+requestIds.length;requestIds.push(id);return id;}",
     shippedSource("playbackRetryDelay"),shippedSource("playbackCreateRetryContext"),
     shippedSource("openSessionRetryingNotYet"),
-    "function prePlayApplication(d,s){return {subtitle:s?.subtitle??null,burnedSub:null,textSub:null};} function autoskipOn(){return false;}",
+    shippedSource("prePlayBurnNeeded"),shippedSource("prePlayApplication"),
+    "function autoskipOn(){return false;}",
     "function newAttempt(){} function selectedAudioIndex(p){return p.audio[p.curAudio]?.index||0;} function setupAirplay(){} function setupTrackMenus(){}",
     "function renderPlayerInfo(){} function autoNextOn(){return false;} function useNativeHls(){return false;} function segmentedRemuxOk(){return false;}",
     "function tok(url){return url;} function armStall(){} function remuxUrl(url,audio,pos){return '/remux?audio='+audio+'&start='+pos;}",
@@ -207,6 +212,7 @@ function fullOpenHarness() {
     shippedSource("retirePlaybackPredecessor"),
     shippedSource("handlePlaybackTransportEvent"),
     shippedSource("beginPlaybackMediaAttachment"), shippedSource("applyPlaybackAttachmentPosition"),
+    shippedSource("playbackCaptionAttachmentPositionReady"),
     shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
     shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
     shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
@@ -234,6 +240,10 @@ function fullOpenHarness() {
     shippedSource("fallBackDirectedChange"),
     shippedSource("settleDirectedChange"),
     shippedSource("resetMediaSource"),
+    // This harness is the browser path. Settings → Playback → Open titles in
+    // at its default never hands off; tests/web/linux-player-handoff.test.js
+    // owns the plurx Player branch at the top of play().
+    "function playerHandoffWanted(){return false;}",
     ...["beginPlayAttempt","capturePlayInputs","decideForPlay","preparePlayOutgoing",
       "buildPlayer","presentPlayerChrome","choosePlayRoute","attachPlayRoute",
       "finishPlayAttach","play"].map(shippedSource),
@@ -279,6 +289,54 @@ function bootstrap() {
     lease_timeout_ms: 300_000,
   };
 }
+
+test("native default subtitle waits for track registration without reopening",async()=>{
+  const listeners=new Set();
+  const tracks={addEventListener(type,fn){assert.equal(type,"addtrack");listeners.add(fn);},
+    removeEventListener(type,fn){listeners.delete(fn);},[Symbol.iterator]:function*(){if(this[0])yield this[0];}};
+  const v={textTracks:tracks,querySelectorAll:()=>[]};
+  const p={sessionId:"native-start",curSub:0,subs:[{index:0}],offset:0,mediaAttachment:{},captionIntentSerial:1};
+  const build=new PlaybackContextFunction("video","player",[
+    "let PLAYER=player;const document={getElementById:()=>video};",
+    "function pbSyncSubIcon(){}function nativeHlsSubtitleOrdinal(){return 0;}",
+    shippedSource("clearSubs"),shippedSource("attachPlaybackSubtitle"),
+    "return {attach:()=>attachPlaybackSubtitle(video,player,0),clear:()=>clearSubs(video),replace(){player.mediaAttachment={};}};",
+  ].join("\n"));
+  const h=build(v,p);
+  await h.attach();
+  assert.equal(listeners.size,1,"selection waits on the track edge");
+  tracks[0]={mode:"disabled"};for(const fn of [...listeners])fn();
+  assert.equal(tracks[0].mode,"showing");assert.equal(listeners.size,0);
+  delete tracks[0];await h.attach();h.replace();
+  tracks[0]={mode:"disabled"};for(const fn of [...listeners])fn();
+  assert.equal(tracks[0].mode,"disabled","a replaced attachment cannot select a late track");
+  assert.equal(listeners.size,0);
+  delete tracks[0];await h.attach();assert.equal(listeners.size,1);
+  h.clear();assert.equal(listeners.size,0,"Close/replacement releases the listener");
+});
+
+test("Gran Turismo's default subtitle cannot supersede a slow initial HLS create", async()=>{
+  const h=fullOpenHarness();
+  const opening=h.play(7095,"Gran Turismo",0,8_055_589,{});
+  await flush();
+  h.decisions[0].resolve({method:"remux",source:{video_codec:"h264",duration_ms:8_055_589},
+    delivery:{requires_hls:true},audio:[{index:0,default:true}],
+    subtitles:[{index:0,codec:"subrip",text:true,default:true}],
+    selection:{subtitle_index:0,subtitle_requires_burn_in:false}});
+  for(let i=0;i<12;i++)await flush();
+  assert.equal(h.sessions.length,1);
+  assert.equal(h.current().preplay.subtitle,0,"default is frozen in the initial recipe");
+  h.advance(800);
+  for(let i=0;i<12;i++)await flush();
+  assert.equal(h.decisions.length,1,"no automatic subtitle command starts another play");
+  assert.equal(h.sessions.length,1);
+  assert.equal(h.sessions[0].signal.aborted,false,"the original create remains owned");
+  h.sessions[0].resolve({});
+  await opening;
+  assert.equal(h.current().curSub,0);
+  assert.equal(h.video.textTracks[0].mode,"showing");
+  assert.equal(h.sessions.length,1);
+});
 
 test("a refused cold start keeps its player identity and can close", async()=>{
  for(const previouslyPlayed of [false,true]){
@@ -1049,7 +1107,7 @@ async function main() {
     const callbacks=[];
     const queue=new PlaybackContextFunction("getPlayer",shippedSource("queuePlaybackFrame").replaceAll("PLAYER","getPlayer()")+"; return queuePlaybackFrame;")(()=>p);
     const p={started:true,offset:0,source:{video_codec:"h264"},controlHasFrameCallbacks:true};
-    const v={currentTime:80,paused:false,seeking:false,readyState:2,
+    const v={currentTime:80,paused:false,seeking:false,readyState:2,src:"blob:frame-epoch-fixture",
       addEventListener(){},removeEventListener(){},cancelVideoFrameCallback(){},
       requestVideoFrameCallback:callback=>callbacks.push(callback)};
     const epochs=[];
@@ -1074,17 +1132,25 @@ async function main() {
     const p={controlPresentationEpoch:0};
     let current=p;
     const queue=new PlaybackContextFunction("getPlayer",shippedSource("queuePlaybackFrame").replaceAll("PLAYER","getPlayer()")+"; return queuePlaybackFrame;")(()=>current);
-    const events=new Map(),registered=[],delivered=[],cancelled=[];
-    const v={readyState:0,seeking:false,
-      addEventListener(type,fn){if(!events.has(type))events.set(type,new Set());events.get(type).add(fn);},
-      removeEventListener(type,fn){events.get(type)?.delete(fn);},
+    const registered=[],delivered=[],cancelled=[];
+    const makeVideo=()=>Object.assign(new EventTarget(),{readyState:0,seeking:false,paused:false,listeners:new Map(),
+      addEventListener(type,fn,options){
+        if(!this.listeners.has(type))this.listeners.set(type,new Set());
+        this.listeners.get(type).add(fn);
+        EventTarget.prototype.addEventListener.call(this,type,fn,options);
+      },
+      removeEventListener(type,fn,options){
+        this.listeners.get(type)?.delete(fn);
+        EventTarget.prototype.removeEventListener.call(this,type,fn,options);
+      },
       cancelVideoFrameCallback(id){cancelled.push(id);},
       requestVideoFrameCallback(fn){registered.push({fn,deliverable:this.readyState>=2&&!this.seeking});return registered.length;}
-    };
-    const emit=type=>[...(events.get(type)||[])].forEach(fn=>fn());
+    });
+    const v=makeVideo(),events=v.listeners;
+    const emit=type=>v.dispatchEvent(new Event(type));
     queue(v,p,(_now,meta,epoch)=>delivered.push({time:meta.mediaTime,epoch}));
     assert.equal(registered.length,0,"initial frame registration waits for current media data");
-    v.readyState=2;v.seeking=true;emit("loadeddata");
+    v.readyState=3;v.seeking=true;emit("loadeddata");
     assert.equal(registered.length,0,"loadeddata during the initial seek must not strand a frame request");
     p.controlPresentationEpoch=1;v.seeking=false;emit("seeked");
     assert.equal(registered.length,1,"seek completion registers exactly one frame request");
@@ -1094,16 +1160,16 @@ async function main() {
     assert.deepEqual(delivered,[{time:566.055,epoch:0}],"waiting must preserve the request's presentation epoch");
     emit("loadeddata");emit("seeked");assert.equal(registered.length,1,"readiness listeners retire after registration");
     queue(v,p,()=>{});assert.equal(registered.length,2,"established playback immediately queues its next frame");
-    v.readyState=0;queue(v,p,()=>{});current={};v.readyState=2;emit("loadeddata");
+    v.readyState=0;queue(v,p,()=>{});current={};v.readyState=3;emit("loadeddata");
     assert.equal(registered.length,2,"a replaced player cannot register a delayed callback");
     current=p;v.readyState=0;queue(v,p,()=>{throw new Error("superseded listener");});
-    queue(v,p,()=>delivered.push("replacement"));v.readyState=2;emit("loadeddata");
+    queue(v,p,()=>delivered.push("replacement"));v.readyState=3;emit("loadeddata");
     assert.equal(registered.length,3,"a new observer replaces the element's pending readiness listener");
     assert.equal(typeof v._plurxFrameCancel,"function");
     const beforeReset=registered[2];
     v.readyState=0;emit("emptied");
     assert.ok(cancelled.includes(3),"source replacement cancels the outstanding native request");
-    v.readyState=2;v.seeking=true;emit("loadeddata");
+    v.readyState=3;v.seeking=true;emit("loadeddata");
     assert.equal(registered.length,3,"replacement data cannot rearm before the seek finishes");
     v.seeking=false;emit("seeked");assert.equal(registered.length,4);
     beforeReset.fn(200,{mediaTime:9});
@@ -1116,7 +1182,7 @@ async function main() {
     assert.ok([...events.values()].every(set=>set.size===0),"retirement removes every media lifecycle listener");
     queue(v,p,()=>delivered.push("retired-element"));
     const retiredRequest=registered.at(-1);
-    const adopted={...v,_plurxFrameCancel:null};
+    const adopted=Object.assign(makeVideo(),{readyState:v.readyState,seeking:v.seeking,paused:v.paused});
     queue(adopted,p,()=>delivered.push("adopted-element"));
     assert.equal(v._plurxFrameCancel,null,"adopting an element retires the player's former subscription");
     retiredRequest.fn(300,{mediaTime:61});
@@ -1207,7 +1273,8 @@ async function main() {
       "function sessionHeight(){return null;} function langName(){return 'English';}",
       "function useNativeHls(){return false;} function showSessionOpenFailure(){return false;}",
       "function showStallRecoveryFailure(){}",
-      "function selectedAudioIndex(){return 0;} function hlsJsSupported(){return true;} function mseCanTake(){return true;} function clearStreamFailure(){}",
+      shippedSource("selectedAudioIndex"),
+      "function hlsJsSupported(){return true;} function mseCanTake(){return true;} function clearStreamFailure(){}",
       "function transcodeOpts(position){return {position};}",
       "async function openSession(id,opts){calls.push({kind:'session',position:(opts.position??opts.start)*1000});if(failure)throw failure;if(held)return new Promise(resolve=>pending.push(resolve));return {session_id:'replacement'};}",
       "function releaseSession(id){released.push(id);}",
@@ -1229,6 +1296,9 @@ async function main() {
       shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),
       shippedSource("retirePlaybackPredecessor"),
+      // Progressive replacements retain the shipped attachment/caption owner.
+      shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
+      shippedSource("playbackCaptionAttachmentPositionReady"),
       shippedSource("rememberPlaybackSelection"),
       shippedSource("offsetLabel"),
       shippedSource("startCopyHls"),
@@ -1269,7 +1339,10 @@ async function main() {
     assert.equal(h.calls.length,1,`${operation} makes one replacement`);
     assert.equal(h.calls[0].position,90_000,`${operation} retains the unpresented seek destination`);
     assert.equal(p.controlSeek.targetMs,90_000);
-    if(operation==='audio-track') assert.equal(p.controlSeek.executed,true);
+    if(operation==='audio-track'){
+      assert.equal(p.controlSeek.executed,true);
+      assert.equal(p.mediaAttachment.audioOrdinal,1,'the replacement attachment owns the chosen audio');
+    }
   }
   {
     const h=replacementHarness();
@@ -1422,7 +1495,9 @@ async function main() {
       // against is the one ending.
       shippedSource("settleDirectedChange"),qualityCancellationSources(), shippedSource("supersedeDirectedChange"),
       shippedSource("teardownHls"),
+      shippedSource("clearEffectiveProcessing"),
       shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
+      shippedSource("playbackCaptionAttachmentPositionReady"),
       shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("attachHls"),shippedSource("beginHlsAttachment"),
       qualityResourceTimingSources(),shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
@@ -4097,9 +4172,9 @@ async function main() {
     const removed = [];
     const timers = new Map();
     const intervals = [];
-    let nextTimer = 1;
-    const element = (id) => ({
-      id, muted: id !== "video", volume: 1, paused: true, currentTime: 0,
+    let nextTimer = 1, nextFrame = 1;
+    const element = (id) => Object.assign(new EventTarget(), {
+      id, muted: id !== "video", volume: 1, paused: true, currentTime: 0, readyState: 4,
       playbackRate: 1, defaultPlaybackRate: 1,
       videoWidth: options.hasVideo === false ? 0 : 1920,
       style: { display: id === "video" ? "" : "none" },
@@ -4116,11 +4191,16 @@ async function main() {
       removeAttribute(name) { if (name === "src") this.src = null; delete this.attributes[name]; },
       querySelectorAll() { return []; },
       setAttribute(name, value) { this.attributes[name] = value; },
-      addEventListener(name, fn) { (this.listeners[name] = this.listeners[name] || []).push(fn); },
-      removeEventListener(name, fn) {
-        this.listeners[name] = (this.listeners[name] || []).filter((f) => f !== fn);
+      addEventListener(name, fn, options) {
+        const listeners=this.listeners[name]||(this.listeners[name]=[]);
+        if(!listeners.includes(fn)) listeners.push(fn);
+        EventTarget.prototype.addEventListener.call(this,name,fn,options);
       },
-      emit(name) { for (const fn of (this.listeners[name] || []).slice()) fn(); },
+      removeEventListener(name, fn, options) {
+        this.listeners[name] = (this.listeners[name] || []).filter((f) => f !== fn);
+        EventTarget.prototype.removeEventListener.call(this,name,fn,options);
+      },
+      emit(name) { this.dispatchEvent(new Event(name)); },
     });
     const live = element("video");
     live.buffered.owner = live;
@@ -4148,14 +4228,24 @@ async function main() {
         const node = element("");
         node.buffered.owner = node;
         if (options.videoFrameCallback !== false) {
-          node.requestVideoFrameCallback = (fn) => { node.frameCallback = fn; };
+          node.requestVideoFrameCallback = (fn) => {
+            node.frameCallback=fn;return node.frameCallbackId=nextFrame++;
+          };
+          node.cancelVideoFrameCallback = (id) => {
+            if(node.frameCallbackId===id) delete node.frameCallback;
+          };
         }
         created.push(node);
         return node;
       },
     };
     if (options.videoFrameCallback !== false) {
-      live.requestVideoFrameCallback = (fn) => { live.frameCallback = fn; };
+      live.requestVideoFrameCallback = (fn) => {
+        live.frameCallback=fn;return live.frameCallbackId=nextFrame++;
+      };
+      live.cancelVideoFrameCallback = (id) => {
+        if(live.frameCallbackId===id) delete live.frameCallback;
+      };
     }
     const instances = [];
     class FakeHls {
@@ -4173,7 +4263,7 @@ async function main() {
         this.events[event]=previous?(...args)=>{previous(...args);fn(...args);}:fn;
       }
       loadSource(url) { this.source = url; }
-      attachMedia(media) { this.media = media; }
+      attachMedia(media) { this.media = media;media.src="blob:prepared-hls-fixture"; }
       stopLoad() { this.loadsStopped = (this.loadsStopped || 0) + 1; }
       startLoad() { this.loadsResumed = (this.loadsResumed || 0) + 1; }
       recoverMediaError() { this.mediaRecoveries = (this.mediaRecoveries || 0) + 1; }
@@ -4263,7 +4353,11 @@ async function main() {
         shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
         shippedSource("preparedAlignedBuffered"), shippedSource("preparedFrameCadence"),
         shippedSource("preparedFramesMeet"), shippedSource("exposePreparedReplacementAtFrame"),
+        shippedSource("preparedDecodedFrameCount"), shippedSource("exposePreparedReplacementAfterDecodedFrames"),
         shippedSource("exposePreparedReplacement"),
+        // D1: the seam's outcome, reported (beacon only).
+        shippedSource("reportPreparedSeam"), shippedSource("reportPreparedSeamAfterWindow"),
+        shippedSource("preparedSeamReopenMark"), shippedSource("preparedSeamReopened"),
         // M3's instruments. Sliced rather than stubbed, so a commit in this
         // harness exercises the real recording and the assertions below can
         // read what it recorded.
@@ -4286,6 +4380,7 @@ async function main() {
         shippedSource("destroyHlsInstance"),
         shippedSource("resetPlaybackTransportEvents"), shippedSource("playbackTransportEvents"),
         shippedSource("beginPlaybackMediaAttachment"),
+        shippedSource("playbackCaptionAttachmentPositionReady"),
         shippedSource("hasPendingPlaybackOpen"), shippedSource("playbackOwnsAttachedMedia"),
         shippedSource("rememberPlaybackTransportIntent"),
         transportTelemetrySources(),shippedSource("pausePlaybackInternally"),
@@ -7163,7 +7258,9 @@ function terminalHlsStopTests(){
     shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),
     shippedSource("abortHlsStartupLoaders"),shippedSource("retireHlsTerminalAttempt"),
     seekTelemetrySources(), shippedSource("stopPlayerForExhaustion"),shippedSource("scheduleHlsNetworkRetry"),
+    shippedSource("clearEffectiveProcessing"),
     shippedSource("beginPlaybackMediaAttachment"),
+    shippedSource("playbackCaptionAttachmentPositionReady"),
     "const owned=()=>attachment.current()&&player.hls===hls&&!playbackAttemptTerminallyStopped(player,token);",
     "return {calls,player,episode,stop:stopPlayerForExhaustion,current:()=>hlsStartupCurrent(player,episode),retry:()=>scheduleHlsNetworkRetry(video,player,'late fatal'),late(){if(owned())surface='recovering';return surface;},reopen(){player.attemptId='a2';const next=beginPlaybackMediaAttachment(player);return {current:next.current(),terminal:player.terminalStop};}};",
   ].join("\n"))(policy);
@@ -7789,6 +7886,7 @@ function continuousChangeOwner(){
     "const released=[];function recordAutoSwitch(){}function releaseAutoFallback(p){released.push(p);}",
     "const clock={t:1};const performance={now:()=>clock.t};const timers=[];function setTimeout(run,ms){timers.push({run,ms});return timers.length;}function clearTimeout(){}",
     "const video={currentTime:0,paused:false,seeking:false,playbackRate:1};const document={getElementById:()=>video};function positionForPlaybackIntent(){return 0;}",
+    shippedConst("PREPARED_OFFER_BOUND_MS"),
     shippedConst("CONTINUOUS_CONTROL_BUDGET_MS"),shippedConst("CONTINUOUS_OBSERVATION_GRACE_SECONDS"),shippedConst("CONTINUOUS_OBSERVATION_POLL_MS"),
     shippedSource("continuousTargetBoundary"),shippedSource("continuousObservationDue"),shippedSource("armContinuousObservation"),
     nextEpisodeCancellationSources(),
@@ -7800,7 +7898,8 @@ function continuousChangeOwner(){
 }
 function continuousChangeHarness(owner,{autoMove=null}={}){
   let release;const gate=new Promise(resolve=>release=resolve),attachment={};
-  const adapter={protocol:{ledger:{latest_intent_revision:1,transactions:[]}},
+  const adapter={family:{version:2,video:[{candidate_id:"target"}]},
+    protocol:{ledger:{latest_intent_revision:1,transactions:[]}},
     async choose(id,live){await gate;return live()?"continuous":"superseded";}};
   const p={controlIntentGeneration:4,sessionId:"incumbent",started:true,mediaAttachment:attachment,
     continuousQuality:adapter,wantsPlayback:true,abr:{switching:!!autoMove,requestedCandidateId:autoMove?.candidateId||null}};

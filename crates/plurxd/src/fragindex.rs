@@ -920,28 +920,11 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         }
                     }
                     let fragment = fragment;
-                    let Some(video) = init.video() else {
-                        return IndexOutcome::Unsupported("the moov lost its video track".into());
+                    let row = match IndexRow::from_fragment(&fragment, init) {
+                        Ok(row) => row,
+                        Err(reason) => return IndexOutcome::Unsupported(reason.into()),
                     };
-                    let Some(track) = fragment.track(video.id) else {
-                        // A video-only pipe emitting a fragment with no video
-                        // in it describes nothing the plan can use.
-                        return IndexOutcome::Unsupported(
-                            "a fragment carried no video track".into(),
-                        );
-                    };
-                    let dts = track.base_decode_time;
-                    let duration = fragment.video_duration(init);
-                    covered_ticks = covered_ticks.saturating_add(duration);
-                    let bytes = u32::try_from(fragment.len()).unwrap_or(u32::MAX);
-                    // The landing matcher's quantity. Container overhead is
-                    // excluded deliberately: a production generation carries
-                    // audio, so its `moof` and `mdat` are tens of kilobytes
-                    // larger than this pipe's and vary with the audio track,
-                    // while the video samples themselves are copied and come
-                    // out byte for byte identical.
-                    let video_bytes = u32::try_from(track.byte_len()).unwrap_or(u32::MAX);
-                    let class = fmp4::classify(&fragment, init);
+                    covered_ticks = covered_ticks.saturating_add(row.duration);
 
                     // Only a clean fragment can begin a segment, so only a
                     // clean fragment can ever be a generation's first — which
@@ -953,7 +936,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     if hdr10.observe_fragment(&fragment, init).is_err() {
                         parameter_sets_constant = false;
                     }
-                    if class.is_clean() {
+                    if row.clean() {
                         let mut here = PromotionInputs::from_fragment(&fragment, init);
                         here.hdr10_sei.clear();
                         match promotion {
@@ -972,13 +955,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         }
                     }
 
-                    rows.push(IndexRow {
-                        dts,
-                        duration,
-                        bytes,
-                        video_bytes,
-                        class,
-                    });
+                    rows.push(row);
                 }
                 // ffmpeg's random-access index, written at EOF. Seeing it is
                 // the strongest evidence the pass was complete.
@@ -1383,6 +1360,213 @@ struct IndexPass {
     ride_along: Option<RideAlongPlan>,
 }
 
+/// The content-analysis pass also yields the title's Dolby Vision aggregate.
+/// While the pass reads the file for its index, the complete-title scanner
+/// reads the same held source in its ordinary standalone mode: the same
+/// unfiltered access units, the same checks, the same aggregate as the
+/// `dv_title_scan` job, which never has to read the file again. The two read
+/// the same pages in step, so the page cache serves the slower one and the
+/// file is read once from storage in practice.
+///
+/// The scan can only ever add an answer. It never touches the pass's argv,
+/// descriptors or exit status; it is kept only when the pass's lead output
+/// built, and killed otherwise.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct DvTitleRide {
+    tools: Arc<crate::vodencode::dv_runtime::ToolSet>,
+    stream_index: u32,
+}
+
+/// The companion scan's task. Ordinary pass completion and cancellation join
+/// this owner before returning source custody. Drop requests cancellation;
+/// a dropped waiter alone never proves that the child or its reads settled.
+#[cfg(target_os = "linux")]
+struct DvTitleScan {
+    task: tokio::task::JoinHandle<Result<plurx_core::process::bounded::Output, String>>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for DvTitleScan {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+/// A complete-title aggregate the pass's companion scan produced, not yet
+/// published. The caller publishes it after its own freshness checks.
+#[derive(Debug)]
+pub(crate) struct PendingDvTitle {
+    pub(crate) scanner_digest: String,
+    pub(crate) stats: plurx_core::scan::dv_title::DvTitleStats,
+}
+
+#[cfg(target_os = "linux")]
+impl DvTitleRide {
+    /// A title the scanner covers, on a node with the processing bundle.
+    async fn for_file(file: &MediaFile, stream_index: u32) -> Option<Self> {
+        let facts = &file.dolby_vision;
+        if !matches!(file.video_codec.as_deref(), Some("hevc"))
+            || !matches!(facts.profile, Some(5 | 7 | 8))
+            || facts.rpu_present != Some(true)
+        {
+            return None;
+        }
+        match crate::vodencode::dv_runtime::ToolSet::capture().await {
+            Ok(Some(tools)) => Some(Self {
+                tools,
+                stream_index,
+            }),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::debug!(file_id = file.id, %error, "title scanner unavailable to the index pass");
+                None
+            }
+        }
+    }
+
+    /// Start the scanner from the pass's held source capability. A budgeted
+    /// scan reads exclusively through the shared source service bridge. The
+    /// caller retains and joins this task through scanner and read cleanup.
+    fn spawn(&self, source: &std::fs::File, wall_time: Duration) -> Option<DvTitleScan> {
+        let held = match source.try_clone() {
+            Ok(held) => held,
+            Err(error) => {
+                tracing::info!(%error, "no descriptor for the index pass's title scan");
+                return None;
+            }
+        };
+        let scanner = self.tools.scanner.clone();
+        let index = self.stream_index.to_string();
+        let source_budget = crate::background_jobs::source_budget();
+        let pause = plurx_core::process::bounded::source_pause_controller();
+        let cancel = plurx_core::process::bounded::cancellation()
+            .unwrap_or_default()
+            .child_token();
+        let worker_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let work = async move {
+                use std::os::fd::AsRawFd;
+                let input = match crate::background_jobs::source_budget() {
+                    Some(budget) => Some(
+                        crate::source_input::SourceInput::open_background_held(
+                            crate::fragment_index_cluster::SourceFence::clone_current_held(&held)?,
+                            "application/octet-stream",
+                            budget,
+                        )
+                        .await?,
+                    ),
+                    None => None,
+                };
+                let mut command = tokio::process::Command::new(&scanner);
+                command.args([
+                    input
+                        .as_ref()
+                        .map_or("/proc/self/fd/3", |input| input.url()),
+                    &index,
+                ]);
+                if input.is_none() {
+                    crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
+                        &mut command,
+                        &[(held.as_raw_fd(), 3)],
+                        None,
+                    );
+                }
+                let output = plurx_core::process::bounded::output_command_clean_env(
+                    &mut command,
+                    wall_time,
+                    64 * 1024,
+                    plurx_core::process::ChildWork::background(
+                        "complete-title Dolby Vision scan (content-analysis pass)",
+                    ),
+                )
+                .await
+                .map_err(|error| error.to_string());
+                if let Some(input) = input {
+                    input
+                        .close_and_wait()
+                        .await
+                        .map_err(|error| format!("joining companion source input: {error}"))?;
+                }
+                drop(held);
+                output
+            };
+            let work = plurx_core::process::bounded::cancellable(worker_cancel, work);
+            let work = async move {
+                match source_budget {
+                    Some(budget) => crate::background_jobs::budgeted(budget, work).await,
+                    None => work.await,
+                }
+            };
+            match pause {
+                Some(pause) => plurx_core::process::bounded::pausable(pause, work).await,
+                None => work.await,
+            }
+        });
+        Some(DvTitleScan { task, cancel })
+    }
+
+    /// The scan's aggregate when the pass's lead output built; anything else
+    /// keeps nothing, and the title's own job reads the file itself.
+    async fn finish(
+        &self,
+        file_id: i64,
+        mut task: DvTitleScan,
+        lead_built: bool,
+        wait: Duration,
+    ) -> Option<PendingDvTitle> {
+        if !lead_built {
+            task.cancel.cancel();
+            let _ = (&mut task.task).await;
+            return None;
+        }
+        let refused = |reason: String| {
+            tracing::info!(file_id, %reason, "the index pass kept no Dolby Vision title aggregate");
+            None
+        };
+        let output = match tokio::time::timeout(wait, &mut task.task).await {
+            Ok(Ok(Ok(output))) => output,
+            Ok(Ok(Err(error))) => return refused(format!("scanner did not run: {error}")),
+            Ok(Err(error)) => return refused(format!("scanner task failed: {error}")),
+            Err(_) => {
+                task.cancel.cancel();
+                let _ = (&mut task.task).await;
+                return refused("scanner did not finish within the pass budget".to_owned());
+            }
+        };
+        dv_title_aggregate(&output, self.tools.is_current().await)
+            .map(|stats| PendingDvTitle {
+                scanner_digest: self.tools.title_scanner_digest(),
+                stats,
+            })
+            .map_err(refused)
+            .ok()
+    }
+}
+
+/// Judge the companion scan's output exactly as the title job judges its own.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn dv_title_aggregate(
+    output: &plurx_core::process::bounded::Output,
+    scanner_current: bool,
+) -> Result<plurx_core::scan::dv_title::DvTitleStats, String> {
+    use plurx_core::scan::dv_title::{DvTitleStats, TitleEligibility};
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("scanner refused: {}", stderr.trim()));
+    }
+    if !scanner_current {
+        return Err("the installed scanner changed during the pass".to_owned());
+    }
+    let stats: DvTitleStats = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("scanner aggregate: {error}"))?;
+    if !stats.complete || stats.eligibility() == TitleEligibility::InvalidAggregate {
+        return Err("incomplete or inconsistent aggregate".to_owned());
+    }
+    Ok(stats)
+}
+
 /// One identity's half of an index pass: what to do about the Dolby Vision
 /// record its muxer leaves behind, and the options both that answer and the
 /// argv block were derived from — carried so the index key is derived from
@@ -1403,6 +1587,11 @@ impl IndexOutput {
         })
     }
 }
+
+/// How long a built pass waits for its companion title scan beyond the pass
+/// budget. The scan reads what the pass just read, from the page cache.
+#[cfg(target_os = "linux")]
+const DV_TITLE_SCAN_GRACE: Duration = Duration::from_secs(10 * 60);
 
 /// The most identities one pass writes. A file has at most three (stripped,
 /// preserved, converted); the bound keeps the child's fd plumbing fixed-size.
@@ -1488,6 +1677,9 @@ fn shared_index_argv(
 pub(crate) struct IndexBuild {
     pub(crate) outcome: IndexOutcome,
     pub(crate) ride_along: Option<PendingRideAlong>,
+    /// The Dolby Vision title aggregate the pass's companion scan read, on
+    /// the pass's first built output.
+    pub(crate) dv_title: Option<PendingDvTitle>,
     /// Whether the held source was still the object the pass read when the
     /// pass ended, as far as this function could tell: [`build_riding`]
     /// reads its fence; the attested paths leave it to their caller, who
@@ -1500,6 +1692,7 @@ impl IndexBuild {
         Self {
             outcome,
             ride_along: None,
+            dv_title: None,
             source_unchanged: true,
         }
     }
@@ -1748,6 +1941,14 @@ impl SourceIndexHookOwner {
     pub(crate) fn pause_after_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks().after.arm("source_index_after_spawn")
     }
+    pub(crate) fn pause_after_spawn_for(
+        &self,
+        bound: std::time::Duration,
+    ) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.test_hooks()
+            .after
+            .arm_for("source_index_after_spawn", bound)
+    }
     pub(crate) fn pause_after_wait_failure(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks()
             .failed_wait
@@ -1826,7 +2027,7 @@ impl SourceIndexOperation {
     }
 }
 
-/// The first Source index lane uses current bounded stored H264 completion
+/// Source copy indexing uses current bounded stored H264/HEVC completion
 /// evidence. Missing/ambiguous evidence never starts a fallback live probe.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_source_index(
@@ -1841,11 +2042,12 @@ pub(crate) fn start_source_index(
     store: Arc<dyn plurx_core::store::Store>,
     hooks: Arc<SourceIndexHookOwner>,
 ) -> Result<SourceIndexOperation, String> {
-    if file.video_codec.as_deref() != Some("h264")
+    if !matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265"))
+        || plurx_core::playback::is_dolby_vision(&file)
         || Instant::now() >= deadline
         || file.id.to_string() != authority.assignment().binding().file_id().as_str()
     {
-        return Err("Source index supports bounded H264 copy only".into());
+        return Err("Source index supports bounded non-Dolby H264/HEVC copy only".into());
     }
     if stored_probe.len() > 1024 * 1024 {
         return Err("Source index has no bounded stored completion evidence".into());
@@ -2321,11 +2523,43 @@ async fn build_attested_pass(
         let input = "/dev/fd/3".to_owned();
         #[cfg(windows)]
         let input = path.to_string_lossy().into_owned();
+        let input_bridge = match crate::background_jobs::source_budget() {
+            Some(budget) => match crate::fragment_index_cluster::SourceFence::clone_held(
+                source,
+                source_object_version,
+            ) {
+                Ok(held) => match crate::source_input::SourceInput::open_background_held(
+                    held,
+                    crate::http::stream::file_content_type(&file.path),
+                    budget,
+                )
+                .await
+                {
+                    Ok(input) => Some(input),
+                    Err(error) => {
+                        return refuse_all(IndexOutcome::Unsupported(format!(
+                            "source input unavailable: {error}"
+                        )))
+                    }
+                },
+                Err(error) => return refuse_all(IndexOutcome::Unsupported(error)),
+            },
+            None => None,
+        };
+        #[cfg(target_os = "linux")]
+        let dv_title = match DvTitleRide::for_file(file, probed.expectation.stream_index).await {
+            Some(ride) => ride.spawn(source, budget).map(|task| (ride, task)),
+            None => None,
+        };
+        let input = input_bridge
+            .as_ref()
+            .map_or(input, |bridge| bridge.url().to_owned());
+        let output_count = outputs.len();
         let pass = shared_index_pass(file, outputs, Some(&input), probed.expectation, plan);
         #[cfg(unix)]
         let (source_fd, source_handoff) = {
             use std::os::fd::AsRawFd;
-            (Some(source.as_raw_fd()), None)
+            (input_bridge.is_none().then(|| source.as_raw_fd()), None)
         };
         #[cfg(windows)]
         let (source_fd, source_handoff) = (None, Some((source, path.as_path())));
@@ -2341,6 +2575,39 @@ async fn build_attested_pass(
             cancel,
         )
         .await;
+        let built = match input_bridge {
+            Some(input) => match input.close_and_wait().await {
+                Ok(()) => built,
+                Err(error) => (0..output_count)
+                    .map(|_| {
+                        IndexBuild::plain(IndexOutcome::Unsupported(format!(
+                            "source input cleanup did not settle: {error}"
+                        )))
+                    })
+                    .collect(),
+            },
+            None => built,
+        };
+        // Even a refused main pass must cancel and join its companion before
+        // the common owner can return source custody to the scheduler.
+        #[allow(unused_mut)]
+        let mut built = built;
+        #[cfg(target_os = "linux")]
+        if let Some((ride, task)) = dv_title {
+            let lead_built = matches!(
+                built.first().map(|build| &build.outcome),
+                Some(IndexOutcome::Built(_))
+            );
+            let paused = plurx_core::process::bounded::source_pause_controller()
+                .map_or(Duration::ZERO, |control| control.paused_duration());
+            let wait = budget
+                .saturating_sub(started.elapsed().saturating_sub(paused))
+                .max(DV_TITLE_SCAN_GRACE);
+            let pending = ride.finish(file.id, task, lead_built, wait).await;
+            if let Some(first) = built.first_mut() {
+                first.dv_title = pending;
+            }
+        }
         for (slot, build) in slots.into_iter().zip(built) {
             builds[slot] = Some(build);
         }
@@ -2590,6 +2857,23 @@ async fn build_with_args_owned(
             ));
         }
     }
+    let source_pause = plurx_core::process::bounded::source_pause_controller();
+    let source_cancel = cancel.cloned().unwrap_or_default();
+    let source_pause_guard = match source_pause.as_ref() {
+        Some(control) => match control.enlist(&source_cancel).await {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                return all(IndexOutcome::Unsupported(format!(
+                    "source scan did not enter active service: {error}"
+                )))
+            }
+        },
+        None => None,
+    };
+    #[cfg(unix)]
+    if source_pause_guard.is_some() {
+        command.process_group(0);
+    }
     let (mut child, _child_job) = match crate::process_control::spawn_job_owned(
         &mut command,
         crate::process_control::ChildWork::background("fragment index"),
@@ -2613,6 +2897,7 @@ async fn build_with_args_owned(
             )));
         }
     };
+    let source_pause_pid = source_pause_guard.as_ref().and_then(|_| child.id());
     // The child holds its own copies now. Ours must close, or a sibling's
     // reader would wait forever for the EOF our copy keeps from it.
     #[cfg(unix)]
@@ -2741,10 +3026,28 @@ async fn build_with_args_owned(
             shared,
         )));
     }
-    let stream = tokio::time::timeout(
-        budget.saturating_sub(started.elapsed()),
-        futures_util::future::join_all(streams),
-    );
+    let paused = source_pause
+        .as_ref()
+        .map_or(Duration::ZERO, |control| control.paused_duration());
+    let active_budget = budget.saturating_sub(started.elapsed().saturating_sub(paused));
+    let stream = async {
+        let collecting = futures_util::future::join_all(streams);
+        match (source_pause_guard.as_ref(), source_pause_pid) {
+            (Some(guard), Some(pid)) => {
+                guard
+                    .run_group(pid, active_budget, async { Ok(collecting.await) })
+                    .await
+            }
+            _ => tokio::time::timeout(active_budget, collecting)
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "index active budget exhausted",
+                    )
+                }),
+        }
+    };
     tokio::pin!(stream);
     let result = tokio::select! {
         result = &mut stream => Some(result),
@@ -2778,6 +3081,10 @@ async fn build_with_args_owned(
         }
     };
     if deadline_fired {
+        #[cfg(target_os = "linux")]
+        if let Some(pid) = source_pause_pid {
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        }
         let _ = child.start_kill();
     }
     let status =
@@ -2882,6 +3189,16 @@ async fn build_with_args_owned(
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = source_pause_pid {
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        while !plurx_core::process::bounded::source_group_quiescent(pid as i32, false)
+            .await
+            .unwrap_or(false)
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
     // `scan` is `None` unless the reader ran to the end of the stream: a
     // scan that did not finish cannot vouch that no slave failed.
     let (stderr_tail, scan, hevc_trace) = match stderr_task {
@@ -2962,6 +3279,7 @@ async fn build_with_args_owned(
             } else {
                 None
             },
+            dv_title: None,
             source_unchanged: true,
         })
         .collect()
@@ -3087,6 +3405,10 @@ fn finish_header_scans(
     {
         return;
     }
+    // `-xerror` is not on the index argv (it also aborts on a DTS head the muxer
+    // corrects), so a truncated or corrupt source no longer fails the child.
+    // FFmpeg's own messages for it are matched in the stderr scan instead.
+    let fault = trace.as_ref().and_then(|trace| trace.source_fault());
     let proof = trace.map(|trace| {
         trace.finish(
             expectation.source_object_version.clone(),
@@ -3095,7 +3417,13 @@ fn finish_header_scans(
     });
     for outcome in outcomes {
         if let IndexOutcome::Built(index) = outcome {
-            if hevc && proof.is_none() {
+            if let Some(fault) = fault {
+                *outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
+                    IndexFailureCode::IndexProcessFailed,
+                    format!("ffmpeg reported a damaged source packet ({fault}); the index is incomplete"),
+                    index.rows.len(),
+                )));
+            } else if hevc && proof.is_none() {
                 *outcome = IndexOutcome::Failed(Box::new(
                     IndexFailure::new(
                         IndexFailureCode::IndexProcessFailed,

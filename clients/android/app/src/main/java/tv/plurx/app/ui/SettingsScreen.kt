@@ -174,6 +174,8 @@ fun SettingsScreen(
                     { it.label },
                     vm::setSubtitleReadiness,
                 )
+                CaptionGenerationSettings(vm)
+                SubtitleTextTranslationSettings(vm)
                 PreferenceSwitch("Autoplay next episode", preferences.autoplayNext, vm::setAutoplayNext)
                 PreferenceSwitch("Skip intros and credits", preferences.autoSkip, vm::setAutoSkip)
                 // Graduated from Developer: a finished, device-local switch with

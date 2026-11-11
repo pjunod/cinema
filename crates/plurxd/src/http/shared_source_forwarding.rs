@@ -15,7 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{FutureExt, StreamExt};
-use plurx_core::playback_principal::PlaybackPrincipal;
+use plurx_core::{cluster::membership::ActivityPeer, playback_principal::PlaybackPrincipal};
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
@@ -65,7 +65,18 @@ fn credit_from(
     };
     Arc::clone(credits)
         .try_acquire_owned()
-        .map_err(|_| unavailable())
+        .map_err(|_| saturated())
+}
+
+/// A full credit pool is load, not an outage: typed 429 with `Retry-After`,
+/// which the client-facing retry path carries through.
+pub(super) fn saturated() -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "sharing_capacity_busy",
+        message: "Shared playback capacity is busy; retry shortly".to_owned(),
+        retry_after_seconds: 1,
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1078,7 +1089,10 @@ pub(super) async fn route_to_owner(
 }
 async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Response, ApiError> {
     let began = Instant::now();
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
+    // Mint one absolute answer clock before body reads or discovery. Local
+    // fall-through receives this same clock, never a fresh header allowance.
+    let clock = super::SourceStartClock::new(&parts.headers);
     if parts.method != axum::http::Method::POST || parts.uri.query().is_some() {
         return Err(invalid());
     }
@@ -1087,6 +1101,7 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         .await
         .map_err(|_| invalid())?;
     let op = operation(&path, &bytes)?;
+    let clocked = op == Operation::Start && clock.clocked();
     let permit = credit(op)?;
     let deadline = began + op.budget();
     let headers = SourceHeaders::from(parts.headers.clone());
@@ -1095,11 +1110,24 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         .get::<crate::SharingConnectionCancellation>()
         .cloned()
         .ok_or_else(unavailable)?;
-    let route = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        super::resolve_forward_route(&state, &headers, &path, &bytes, &connection, deadline),
-    )
-    .await
+    let route = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+        #[cfg(test)]
+        state
+            .transcode
+            .source_http_starts
+            .discovery_pause
+            .hold()
+            .await;
+        super::resolve_forward_route(&state, &headers, &path, &bytes, &connection, deadline).await
+    });
+    // Discovery reads routing/locality only. Its filesystem inspections are
+    // already owned by the accepted driver's monitors; dropping this waiter
+    // cannot drop a Start dispatch, registration or physical cleanup debt.
+    let route = if clocked {
+        clock.answer(route).await?
+    } else {
+        route.await
+    }
     .map_err(|_| {
         #[cfg(test)]
         eprintln!("Source forwarding route resolution timed out");
@@ -1112,6 +1140,9 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
     #[cfg(test)]
     eprintln!("Source forwarding route resolution succeeded");
     if matches!(route, ForwardRoute::Local) {
+        if clocked {
+            parts.extensions.insert(clock);
+        }
         return Ok(next
             .run(Request::from_parts(parts, Body::from(bytes)))
             .await);
@@ -1119,6 +1150,8 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
     // A member envelope never carries the sharing bearer credential or public
     // headers. The untouched complete recipe remains in the original body.
     let canonical_body = String::from_utf8(bytes.to_vec()).map_err(|_| invalid())?;
+    // Forwarded preparation keeps its own work deadline; all answer waits
+    // below use the original ingress clock minted before discovery.
     if !remote_operation_allowed(&route, op) {
         return Err(unavailable());
     }
@@ -1151,26 +1184,31 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
             }
             let driver =
                 capture_driver(&state, &connection, &fresh.candidate_node_id, deadline).await?;
+            let prepare = FreshRequest {
+                path: path.clone(),
+                canonical_body: canonical_body.clone(),
+                operation: op,
+                ingress: ForwardIngress {
+                    node_id: state.node_id.clone(),
+                    driver: driver.id().clone(),
+                    registration_sequence: None,
+                },
+                authority: (*fresh).clone(),
+                remaining_ms: remaining(deadline)?,
+                hop: 1,
+            };
             let prepared = bounded(
                 &state,
                 &fresh.candidate_node_id,
                 PREPARE_PATH,
-                &FreshRequest {
-                    path: path.clone(),
-                    canonical_body: canonical_body.clone(),
-                    operation: op,
-                    ingress: ForwardIngress {
-                        node_id: state.node_id.clone(),
-                        driver: driver.id().clone(),
-                        registration_sequence: None,
-                    },
-                    authority: (*fresh).clone(),
-                    remaining_ms: remaining(deadline)?,
-                    hop: 1,
-                },
+                &prepare,
                 deadline,
-            )
-            .await?;
+            );
+            let prepared = if clocked {
+                clock.answer(prepared).await??
+            } else {
+                prepared.await?
+            };
             #[cfg(test)]
             eprintln!(
                 "Source forwarding prepare reply status={} bytes={}",
@@ -1270,8 +1308,12 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
             CONTROL_PATH,
             &wire,
             deadline,
-        )
-        .await?;
+        );
+        let response = if clocked {
+            clock.answer(response).await??
+        } else {
+            response.await?
+        };
         if !response.status.is_success() {
             return Err(unavailable());
         }
@@ -1406,13 +1448,30 @@ async fn receive_at(
     let auth = authenticate(&state, &headers, path, &body).await?;
     let wire: ForwardRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
     let op = operation(&wire.path, wire.canonical_body.as_bytes())?;
-    let permit = credit(op)?;
     if !wire.valid_transport(&state.node_id, &auth.node_id, path, op) {
         return Err(unavailable());
     }
     let deadline = received_deadline(wire.remaining_ms, op.budget())?
         .min(began + Duration::from_millis(u64::from(wire.remaining_ms - 100)));
     remaining(deadline)?;
+    let permit = match credit(op) {
+        Ok(permit) => permit,
+        // A full owner pool is load: a control reply carries its typed 429
+        // and Retry-After in the signed envelope, which the ingress hands on
+        // unchanged, instead of an unsigned refusal it can only call 503.
+        Err(error) if !op.media() => {
+            return signed(
+                &state,
+                &auth,
+                path,
+                StatusCode::OK,
+                pack_control(error.into_response(), deadline).await?,
+                deadline,
+            )
+            .await;
+        }
+        Err(error) => return Err(error),
+    };
     tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         super::validate_retained_forward(
@@ -1499,10 +1558,24 @@ async fn prepare_inner(
     {
         return Err(unavailable());
     }
-    let _permit = credit(wire.operation)?;
     let deadline = received_deadline(wire.remaining_ms, wire.operation.budget())?
         .min(began + Duration::from_millis(u64::from(wire.remaining_ms - 100)));
     remaining(deadline)?;
+    // As at the control path: a full owner pool answers typed, signed.
+    let _permit = match credit(wire.operation) {
+        Ok(permit) => permit,
+        Err(error) => {
+            return signed(
+                &state,
+                &auth,
+                PREPARE_PATH,
+                StatusCode::CONFLICT,
+                pack_control(error.into_response(), deadline).await?,
+                deadline,
+            )
+            .await;
+        }
+    };
     if wire.operation != Operation::Start {
         let response = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
@@ -1641,6 +1714,7 @@ async fn custody_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header;
     #[test]
     fn public_headers_cannot_construct_forwarded_authority() {
         let mut raw = HeaderMap::new();
@@ -1876,6 +1950,49 @@ mod tests {
         let _ack = credit_from(Operation::End, &media, &control, &cleanup).expect("Ack cleanup");
         assert!(credit_from(Operation::End, &media, &control, &cleanup).is_err());
     }
+    #[test]
+    fn locate_asks_only_reachable_addressable_other_peers() {
+        let peer = |id: &str, raft_id| ActivityPeer {
+            node_id: id.to_owned(),
+            raft_id,
+            http_base: Some(format!("http://{id}")),
+            reachable: true,
+        };
+        let targets = locate_targets(
+            vec![
+                ActivityPeer {
+                    reachable: false,
+                    ..peer("lab3", 7)
+                },
+                peer("lab6", 6),
+                peer("self", 1),
+                ActivityPeer {
+                    http_base: None,
+                    ..peer("lab4", 4)
+                },
+            ],
+            "self",
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .map(|p| p.node_id.as_str())
+                .collect::<Vec<_>>(),
+            ["lab6"]
+        );
+    }
+    #[tokio::test]
+    async fn full_credit_pool_answers_429_with_retry_after() {
+        let media = Arc::new(tokio::sync::Semaphore::new(1));
+        let control = Arc::new(tokio::sync::Semaphore::new(1));
+        let cleanup = Arc::new(tokio::sync::Semaphore::new(1));
+        let _held = credit_from(Operation::Direct, &media, &control, &cleanup).expect("held");
+        let response = credit_from(Operation::Direct, &media, &control, &cleanup)
+            .expect_err("pool is full")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+    }
     #[tokio::test]
     async fn bounded_control_response_refuses_oversize_and_expired_deadline() {
         let response = Response::new(Body::from(vec![0u8; 24 * 1024 + 1]));
@@ -1942,6 +2059,15 @@ impl LocationReply {
     }
 }
 
+/// Peers worth asking to locate after the membership directory applies the
+/// route policy: reachable, addressable, and distinct from this node.
+fn locate_targets(peers: Vec<ActivityPeer>, own_node_id: &str) -> Vec<ActivityPeer> {
+    peers
+        .into_iter()
+        .filter(|peer| peer.node_id != own_node_id && peer.reachable && peer.http_base.is_some())
+        .collect()
+}
+
 /// Cold routing hints only. A timeout may try another read-only peer before
 /// any claim exists; once FreshPrepare is sent, its original candidate remains
 /// pinned and this collector must never be used to reconstruct its owner.
@@ -1954,15 +2080,19 @@ pub(super) async fn collect_fresh_location(
     deadline: Instant,
 ) -> Result<Option<(String, Uuid)>, ApiError> {
     let deadline = deadline.min(Instant::now() + Duration::from_secs(9));
-    let mut peers = tokio::time::timeout_at(
+    let peers = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        state.membership.media_peers(),
+        state
+            .membership
+            .media_peers_for_route(crate::http::learner_route_eligible(
+                &axum::http::Method::POST,
+                LOCATE_PATH,
+            )),
     )
     .await
     .map_err(|_| unavailable())?
     .map_err(|_| unavailable())?;
-    peers
-        .retain(|peer| peer.node_id != state.node_id && peer.reachable && peer.http_base.is_some());
+    let mut peers = locate_targets(peers, &state.node_id);
     peers.sort_by(|a, b| a.node_id.cmp(&b.node_id));
     peers.dedup_by(|a, b| a.node_id == b.node_id);
     if peers.len() > 64 {

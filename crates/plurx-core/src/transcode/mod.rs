@@ -16,9 +16,11 @@ mod avc_qualification;
 mod decode;
 pub mod decoder_inventory;
 mod dolby;
+pub mod dv_fel_qualification;
 pub mod dv_processing;
 pub mod dvconvert;
 mod encoder;
+mod enhancement_rate;
 pub mod health;
 pub mod hevc_census;
 mod hevc_scan;
@@ -50,11 +52,18 @@ pub use dolby::{
     StrictDolbyImplementation, StrictDolbyPolicy,
 };
 pub use encoder::{
-    benchmark_encoder, detect_encoders, detect_video_decoders, hevc_level_for, vaapi_device,
-    validate_quality_rate_control, validate_quality_rate_control_yielding, vbv_maxrate_bps,
-    vbv_maxrate_kbps, CompletedReconstructedOutputContract, EffectiveRateControl, Encoder,
-    EncoderCaps, EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
+    benchmark_encoder, detect_encoders, detect_video_decoders, hevc_level_for,
+    reconstructed_p81_video_kbps, reconstructed_p81_window_encode_args,
+    source_copy_hdr10_video_kbps, vaapi_device, validate_quality_rate_control,
+    validate_quality_rate_control_yielding, vbv_maxrate_bps, vbv_maxrate_kbps,
+    CompletedReconstructedOutputContract, EffectiveRateControl, Encoder, EncoderCaps,
+    EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
     QualityRateControlValidation, QualityRc, RateMode, VaapiHdrPolicy, VideoCodec,
+    RECONSTRUCTED_P81_RECIPE,
+};
+pub use enhancement_rate::{
+    enhancement_source_budget, enhancement_stream_rate, validate_encoded_enhancement_envelope,
+    EnhancementRateEnvelope, EnhancementRateLimits, EnhancementRateProvenance,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
@@ -212,73 +221,11 @@ pub const COPY_SEGMENT_MAX_SECS: u32 = 15;
 /// unknown GOP from being treated as if it were the one-second difference.
 pub const ROLLING_PRESENTATION_TARGET_SECS: u32 = 16;
 
-/// Seconds of media that must exist before the first `index.m3u8` is
-/// published.
-///
-/// **A playlist that starts at the live edge starts one publication gap from
-/// a freeze.** Delivery to the browser runs at hundreds of Mb/s against a
-/// producer that reads a 4K remux off the NAS at not much over 1×, so a
-/// client that starts on segment zero drains everything published within
-/// seconds and is then advancing at exactly the producer's publication rate.
-/// The first time it has to wait a whole publication out, the picture stops
-/// for one segment's worth of *production* time — once per film, always at
-/// the same second, because where the buffer first runs dry is a property of
-/// the film's early bitrate, not of timing. Measured on *reference film G* in Chrome:
-/// an 8.8 s freeze at 9.2 s in under a 15 s ceiling, a 5.5 s freeze at 6.0 s
-/// under a 6 s one — the freeze moved with the ceiling and scaled with it,
-/// which is the experiment that showed shrinking segments approaches this
-/// asymptotically and can never remove it. After that first stall the
-/// producer's accumulated lead covers every later gap, which is why it
-/// happens exactly once.
-///
-/// So the fix is a head start rather than a segment size: hold the playlist
-/// until this many seconds of media exist, and the client begins that far
-/// behind the edge. The cushion lives on the server — the client's
-/// quota-bounded buffer stays as small as `bufferTargets` says, it just
-/// always has published-but-unfetched segments in front of it, and every
-/// segment after the gate only adds lead.
-///
-/// **The unit is seconds, not segments, and it was segments for a day.** A
-/// count gate multiplies by whatever the opening happens to cut, and the cut
-/// is a property of the title: a stretch quiet enough for the 15 s duration
-/// ceiling to bind turns "three segments" into 2 + 15 + 15 = 32 s of
-/// cushion, 2.4× what the freeze needs, every extra second of it produced at
-/// the paced rate before a viewer sees frame one. A duration gate promises
-/// the cushion in the unit the freeze is measured in; its realized size is
-/// this value up to this value plus one segment, whatever the title cuts.
-/// (*reference film F*, the file that exposed the slow start at 21.0 s to first frame,
-/// turned out to cut clean 7.5–8.5 s segments — the overlay's own
-/// largest-appended figure said so — so its cushion was ~17 s under either
-/// unit, and its 21 s decomposes as ~8 s of cushion at the flat 2× pacing
-/// below plus a cold NFS open and probe of a Dolby Vision MKV plus fetch
-/// and decode; a warm second play started visibly faster with nothing
-/// changed. The count was still the wrong unit — it just wasn't *reference film F's*
-/// biggest cost.)
-///
-/// Why 12 s clears the worst gap: the gap is one segment's production time,
-/// and duration and production speed are inversely coupled through bitrate.
-/// A quiet stretch cuts long segments (up to 15 s) but reads cheap —
-/// `HLS_READRATE` holds production at 2×, so the gap is ≤ 7.5 s. A heavy
-/// stretch can be NAS-bound near 1×, but its segments are byte-capped: at
-/// any bitrate the NAS can sustain playback of at all, a 64 MB segment
-/// produces in ≤ ~8.5 s (8.8 s is the worst ever measured, on a 15 s
-/// segment under the old regime). 12 covers both shapes; raising it buys
-/// margin at one-for-one cost in time-to-first-frame on every paced open.
-///
-/// The remaining startup cost is honest and has one more owner: an ffmpeg
-/// without `-readrate_initial_burst` (pre-6.1 — jellyfin-ffmpeg7 has it)
-/// fills the gate at the flat paced rate instead of at I/O speed, which
-/// `pacing_caps` now warns about at startup. With the burst working, the
-/// cushion is produced as fast as the NAS will go and the gate costs a few
-/// seconds; without it, the gate costs cushion ÷ readrate. `Manager::playlist`
-/// holds the HTTP response while the gate fills rather than 404ing (verified
-/// against the vendored hls.js: the manifest loader waits indefinitely for
-/// the first byte — `maxTimeToFirstByteMs` is `Infinity` — inside a 20 s
-/// per-attempt window with two retries).
-///
-/// At end of stream the gate yields: a film shorter than the cushion
-/// publishes whole, `ENDLIST` and all, the moment it finishes.
-pub const COPY_PUBLISH_GATE_SECS: u32 = 12;
+/// The copy writer exposes its first complete segment and verified init.
+/// Rolling publication owns the bootstrap and replenishment phase; collecting
+/// a second duration cushion here would charge startup twice. Zero removes
+/// only the duration gate: no partial fragment or unvalidated init is served.
+pub const COPY_PUBLISH_GATE_SECS: u32 = 0;
 
 /// The bitstream filter every copied HEVC stream gets before a client sees it.
 ///
@@ -1522,6 +1469,18 @@ pub fn routing_hdr(file: &MediaFile) -> Option<&str> {
     }
 }
 
+fn heavy_hevc_source(
+    codec: Option<&str>,
+    hdr: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> bool {
+    matches!(codec, Some("hevc" | "h265" | "hevc10"))
+        && (hdr
+            || width.is_some_and(|width| width >= 3840)
+            || height.is_some_and(|height| height >= 2160))
+}
+
 /// Is this the kind of source that justifies hardware decode — and, with it,
 /// a GPU filter graph?
 ///
@@ -1537,10 +1496,12 @@ pub fn routing_hdr(file: &MediaFile) -> Option<&str> {
 /// that decodes in software would be a graph with nothing on the GPU to work
 /// on.
 pub fn heavy_source(source: &MediaFile) -> bool {
-    matches!(
+    heavy_hevc_source(
         source.video_codec.as_deref(),
-        Some("hevc" | "h265" | "hevc10")
-    ) && (source.hdr.is_some() || source.height.unwrap_or(0) >= 2160)
+        source.hdr.is_some(),
+        source.width.and_then(|width| u32::try_from(width).ok()),
+        source.height.and_then(|height| u32::try_from(height).ok()),
+    )
 }
 
 #[cfg(test)]
@@ -1987,14 +1948,18 @@ fn hls_args_inner(
         );
         let complex = if let Some(sub) = overlay {
             let prepared = sub.replace("[sburn]", ",format=yuva420p[sburn]");
-            format!("[{filter_input}]{vf}[vburn];{prepared};[vburn][sburn]overlay_videotoolbox=bitmap=1:eof_action=pass{BURNED_VIDEO_LABEL}")
+            format!(
+                "[{filter_input}]{vf}[vburn];{prepared};[vburn][sburn]overlay_videotoolbox=bitmap=1:eof_action=pass{BURNED_VIDEO_LABEL}"
+            )
         } else {
             let prepared = with_subtitles(Vec::new(), opts, &source_path).replacen(
                 "subtitles=",
                 "subtitles_vt_images=",
                 1,
             );
-            format!("[{filter_input}]{vf},split[vburn][sclock];[sclock]{prepared}[sburn];[vburn][sburn]overlay_videotoolbox=ass=1:eof_action=pass{BURNED_VIDEO_LABEL}")
+            format!(
+                "[{filter_input}]{vf},split[vburn][sclock];[sclock]{prepared}[sburn];[vburn][sburn]overlay_videotoolbox=ass=1:eof_action=pass{BURNED_VIDEO_LABEL}"
+            )
         };
         assert_no_pq_at_8_bit(&complex);
         args.push("-filter_complex".into());
@@ -2306,8 +2271,10 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
     let mut args: Vec<String> = Vec::new();
     args.push("-c:v".into());
     args.push("copy".into());
-    // Safari only decodes HEVC when the sample entry is tagged `hvc1`; MKV HEVC
-    // is commonly `hev1`, which renders black. Harmless if already hvc1.
+    // Keep the sample-entry contract shared by HLS admission and its CODECS
+    // declaration. Retaining source updates does not authorize hev1/dvhe on
+    // a client that only admits hvc1/dvh1; strict init validation still
+    // refuses a retaining stream that cannot satisfy this contract.
     if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         args.push("-tag:v".into());
         args.push(hevc_copy_tag_for_source(source, options.preserve_dolby_vision).into());
@@ -2728,9 +2695,10 @@ pub fn copy_index_shared_args_with_input(
         "-loglevel".into(),
         if hevc { "info" } else { "error" }.into(),
     ];
-    if hevc {
-        args.push("-xerror".into());
-    }
+    // Match ordinary copy playback: the muxer may repair a reordered DTS
+    // head. Treating every muxer diagnostic as fatal makes those playable
+    // titles permanently unindexable. HEVC trace parsing, parameter-set
+    // validation and complete-video coverage still decide artifact validity.
     args.push("-i".into());
     args.push(input.to_owned());
     for (at, video) in videos.iter().enumerate() {

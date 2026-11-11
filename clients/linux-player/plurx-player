@@ -1,0 +1,16 @@
+#!/usr/bin/python3 -I
+"""plurx Player launcher: the handler for plurx-player:// URLs.
+
+Installed as /usr/bin/plurx-player with the package in /usr/lib/plurx-player.
+Run from a checkout, it uses the plurx_player package beside it.
+"""
+import os
+import sys
+
+INSTALLED = "/usr/lib/plurx-player"
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, INSTALLED if os.path.isdir(os.path.join(INSTALLED, "plurx_player")) else HERE)
+
+from plurx_player.launcher import main  # noqa: E402
+
+sys.exit(main())

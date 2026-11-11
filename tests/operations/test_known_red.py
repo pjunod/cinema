@@ -61,12 +61,18 @@ class KnownRedContractTest(unittest.TestCase):
         validate_opt_in_fixtures(fixtures, ignored, load_entries())
         fixture_ids = {fixture["test"] for fixture in fixtures}
         self.assertEqual(fixture_ids, {
+            "crates/plurxd/src/playback_cache.rs::playback_cache::tests::actual_playback_cache_inventory_cost",
+            "crates/plurxd/src/decode_facts/tests.rs::decode_facts::tests::packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls",
             "crates/plurxd/src/transcoder_optimization/comparison.rs::transcoder_optimization::comparison::tests::real_media_production_tools_comparison",
             "crates/plurxd/src/pipeprobe.rs::pipeprobe::tests::real_neutral_peak_gate_rejects_old_metal_units",
             "crates/plurxd/src/subtitle_transcription.rs::subtitle_transcription::tests::managed_real_engine_held_fd_clean_environment_recognizes_fixture",
             "crates/plurxd/src/http/shared_receiver_forwarding_fixture.rs::http::shared_receiver_fixture::forwarding_fixture::sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_driver_closure",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_caption_busy_preserves_same_native_session",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_and_logs_one_stage",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_not_yet_rejoins_the_same_source_start",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_ready_in_retry_gap_is_retired_without_delivery",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_direct_range_head_through_b",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_quality_reopen_preserves_position_and_releases_slot",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_prepared_handoff_commit_and_abort",
@@ -76,6 +82,10 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login",
             "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope",
             "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection",
+            "crates/plurxd/src/subtitle_text_translation/engine.rs::subtitle_text_translation::engine::qualification::pinned_publisher_bundle_passes_production_multilingual_self_test",
+            "crates/plurxd/src/subtitle_translation/installer.rs::subtitle_translation::installer::qualification::pinned_whisper_install_and_verify_qualify_both_speech_tasks",
+            "crates/plurxd/src/subtitle_translation/installer.rs::subtitle_translation::installer::qualification::pinned_progressive_worker_commits_both_tasks_for_selected_audio_two",
+            "crates/plurxd/src/subtitle_translation/installer.rs::subtitle_translation::installer::qualification::pinned_progressive_worker_covers_advancing_playback_for_both_tasks",
         })
         # #811 adds three ffmpeg 8 fixture checks of the repeated-HEVC
         # description collapse (generations, output, copy pipe), each needing
@@ -215,6 +225,19 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/ffmpeg_support.rs::ffmpeg_support::tests::"
             "complete_macos_package_runs_metal_and_vulkan"
         ] = "requires PLURX_TEST_FFMPEG pointing at a complete native Mac package"
+        # Profile 7 FEL qualification (#1290) runs the deployed helper on a
+        # radeonsi VA-API device against a real P7 FEL title.
+        additional_fixture_reasons[
+            "crates/plurxd/src/source_probe/title_work_tests.rs::source_probe::title_work::tests::"
+            "physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict"
+        ] = "physical: the deployed processing helper, a radeonsi VA-API device and a P7 FEL title"
+        # The title/index parity check (#1301) needs a real title, the
+        # processing bundle and its standalone aggregate; ordinary unit
+        # runners do not provide those operator-owned inputs.
+        additional_fixture_reasons[
+            "crates/plurxd/src/fragindex/tests.rs::fragindex::tests::dv_title_companion::"
+            "physical_the_index_pass_reads_the_standalone_title_aggregate"
+        ] = "physical: a processing bundle (PLURX_DV_PROCESSING_DIR), a Dolby Vision title and its standalone aggregate"
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -222,9 +245,11 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 13)
+        self.assertEqual(len(additional_fixtures), 15)
         # HDR/DV and the explicit Mac graph check are operator-run fixtures.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 37)
+        # Explicitly registered CGNAT fixtures are excluded from this unchanged
+        # unadmitted-identity bound; they are not known-red exemptions.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 39)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

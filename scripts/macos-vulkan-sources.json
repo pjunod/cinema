@@ -90,6 +90,14 @@
       "url": "https://codeload.github.com/USCiLab/cereal/tar.gz/51cbda5f30e56c801c07fe3d3aba5d7fb9e6cca4"
     },
     {
+      "archive": "fast_float-97b54ca9.tar.gz",
+      "license_family": "Apache-2.0 OR BSL-1.0 OR MIT",
+      "revision": "97b54ca9e75f5303507699d27c6b4f4efe4641a1",
+      "role": "fast-float",
+      "sha256": "2b132274539286e41f37857cac22aa8441d21bd86d55de825a3342b149f66801",
+      "url": "https://codeload.github.com/fastfloat/fast_float/tar.gz/97b54ca9e75f5303507699d27c6b4f4efe4641a1"
+    },
+    {
       "archive": "libplacebo-cee9b076.tar.gz",
       "license_family": "LGPL-2.1-or-later",
       "revision": "cee9b076f2c63104ccfd497fa79c39a867293ec4",

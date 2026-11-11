@@ -192,12 +192,12 @@ function prePlayBurnNeeded(decision, index){
 // What a pre-play selection means for the cold start, decided in one place so
 // it can be reasoned about — and checked — without standing a player up.
 //
-// A transcode decision's default subtitle is part of its candidate recipe.
-// Carry it on the first create, while leaving defaults on copy routes to the
-// existing subtitle setup. An echoed `selection` alone is not a viewer choice.
-function prePlayApplication(decision, selection){
+// The decision's default belongs to the initial recipe on every route. A
+// delayed setSub() is a new viewer command and can cancel an in-flight create.
+// An echoed `selection` alone is not a viewer choice.
+function prePlayApplication(decision, selection, {skipDefaultSub=false}={}){
   const sub=selection&&selection.subtitle!=null?selection.subtitle:
-    decision.method==='transcode'?(decision.subtitles||[]).find(s=>s.default)?.index??null:null;
+    skipDefaultSub?-1:(decision.subtitles||[]).find(s=>s.default)?.index??null;
   const action=prePlayBurnNeeded(decision, sub)
     ? PlaybackPolicy.subtitleBurnAction({requiresBurn:true,
         deliveredRange:decision.delivered_dynamic_range})
@@ -212,8 +212,7 @@ function prePlayApplication(decision, selection){
     // re-buffer to satisfy a choice made before playback began.
     burnedSub:action==="burn"?sub:null,
     // A text track is handed to a <track> once the route knows its offset. Off
-    // (`-1`) and "no explicit choice" apply nothing here; the latter leaves the
-    // cold-start server default alone.
+    // (`-1`) and a decision with no selected subtitle apply nothing here.
     textSub:action==="native"&&sub!=null&&sub>=0?sub:null,
   };
 }
@@ -352,6 +351,17 @@ function acceptItemPage(page){
   clearPrePlay();
   page.files.forEach(f=>{ITEM_FOR_FILE[playbackFileKey(f.fileContext)]=page.id;});
 }
+function playbackResumeMs(watch,durationMs){
+  const position=watch?.position_ms;
+  if(!Number.isSafeInteger(position)||position<=3000)return 0;
+  const duration=Number.isSafeInteger(durationMs)&&durationMs>0?durationMs:
+    (Number.isSafeInteger(watch.duration_ms)&&watch.duration_ms>0?watch.duration_ms:0);
+  // Watched records history and remains true during a rewatch. A current
+  // partial position still resumes; the server's 95% completion boundary,
+  // rather than that historical flag, identifies a finished playback.
+  if(duration>0)return position<duration*0.95?position:0;
+  return watch.watched?0:position;
+}
 function itemPageModel(id,d,libs){
   const it=d.item;
   const lib=libs.find(l=>l.id===it.library_id);
@@ -373,7 +383,7 @@ function itemPageModel(id,d,libs){
   // rather than "you tapped it"; it appears on the button label, on the start-
   // over affordance and in the autoplay path, and a layout that rounded it
   // differently would offer to resume something the player restarts.
-  const resume=it.watch&&it.watch.position_ms>3000&&!it.watch.watched?it.watch.position_ms:0;
+  const resume=playbackResumeMs(it.watch,runtime);
   // The years a container spans, gathered from its seasons' air dates plus its
   // own. A show wears a range; a season wears one year; everything else wears
   // its year. Derived here because it is a fact about the item, not a choice
@@ -435,6 +445,8 @@ function itemPageModel(id,d,libs){
 // changes source files at part boundaries or when the scrubber crosses one.
 function playbackMetaFor(p,file){
   const m=Object.assign({},p.meta||{});
+  // Routing follows the selected version, never another version’s badge.
+  m.source_dynamic_range=file?sourceDynamicRange(file):null;
   if(p.item.kind!=='audiobook') return m;
   m.audiobook=true;
   m.part_offset_ms=file.part_offset_ms||0;
@@ -951,4 +963,149 @@ function useGeneratedSubtitles(id){
   if(typeof PLAYER!=="undefined"&&samePlaybackFile(PLAYER,state.context)&&PLAYER.started){setSub(state.readyIndex);return;}
   setPrePlay(state.context,"subtitle",String(state.readyIndex));
   const picker=/** @type {HTMLSelectElement|null} */ (document.getElementById(`pp-s-${id}`));if(picker)picker.value=String(state.readyIndex);
+}
+
+// ---- Dolby Vision on Linux in plurx Player --------------------------------
+// docs/clients/LINUX-PLAYER-PLAN.md §4.1. Settings → Playback → Dolby Vision
+// playback on Linux is a viewer preference saved per browser, like HDR peak:
+// only the viewer knows whether plurx Player is installed on this computer,
+// so it is not a feature gate and nothing on the server reads it.
+//
+// On Linux, when the selected file is Dolby Vision and the preference says
+// plurx Player, a cold Play mints a one-time handoff code and
+// navigates to plurx-player://play?server=…&code=…. The long-lived credential
+// never enters that URL (scheme URLs land in shell history, `ps` and desktop
+// logs); the launcher redeems the code over HTTPS for a token scoped to this
+// one file. Every other play() — an internal reopen of an open player, a
+// retry, the Watch layout's reserved episode attempt, Library channels,
+// audiobooks and shared-library sources — stays in this browser, exactly as
+// it always has.
+const OPEN_IN_KEY="plurx.openIn";
+// No install page exists until the .deb ships (plan M5); the plan is the
+// install documentation for now. An http(s) URL here renders as a link.
+const PLURX_PLAYER_INSTALL_URL="docs/clients/LINUX-PLAYER-PLAN.md";
+const PLAYER_HANDOFF_POLL_MS=1000, PLAYER_HANDOFF_POLLS=15;
+// `generation` fences a superseded handoff's poll; `bypass` is the one-shot
+// "Play here instead" for the file it names; `last` is what that replays.
+let PLAYER_HANDOFF={generation:0,bypass:null,last:null};
+// Detect the browser's computer, not the server. Android also reports Linux;
+// ChromeOS cannot use the native Linux scheme handler either. Unknown stays
+// in the browser, even if a preference was restored from another computer.
+function linuxPlayerClient(){
+  if(typeof navigator==="undefined") return false;
+  if(/Android|CrOS/i.test(navigator.userAgent||"")) return false;
+  const client=/** @type {Navigator & {userAgentData?:{platform?:string}}} */(navigator);
+  const platform=client.userAgentData?.platform||client.platform||"";
+  return /^Linux\b/i.test(platform);
+}
+function openInPreference(){
+  if(!linuxPlayerClient()) return "browser";
+  try{ return localStorage.getItem(OPEN_IN_KEY)==="player"?"player":"browser"; }
+  catch(_){ return "browser"; }
+}
+function playerHandoffWanted(fileId,meta,reservedOpenAttempt,retryIntent){
+  // Consumed by whichever play() comes next, so a bypass can never outlive
+  // the click that asked for it.
+  const bypass=PLAYER_HANDOFF.bypass; PLAYER_HANDOFF.bypass=null;
+  if(openInPreference()!=="player"||meta?.source_dynamic_range!=="dolby_vision") return false;
+  if(bypass!=null&&bypass===String(fileId)) return false;
+  if(retryIntent||reservedOpenAttempt) return false;
+  if(meta&&(meta.audiobook||meta.return_channel_id!=null)) return false;
+  if(typeof PENDING_LIBRARY_CHANNEL_PLAYBACK!=="undefined"&&PENDING_LIBRARY_CHANNEL_PLAYBACK) return false;
+  // An open player reopening itself (quality, subtitles, autoplay-next) is
+  // still this browser's playback.
+  if(document.getElementById("modal")?.classList.contains("open")) return false;
+  try{ if(playbackFileContextForPlay(fileId,meta).source_ref.kind!=="local") return false; }
+  catch(_){ return false; }
+  const id=Number(fileId);
+  return Number.isSafeInteger(id)&&id>0;
+}
+// The mint body: the detail screen's pre-play picks and the resume point.
+// null means "the server's default", the same as an omitted query parameter.
+function playerHandoffBody(fileId,resumeMs,sel){
+  const track=value=>Number.isSafeInteger(value)?value:null;
+  return {file_id:Number(fileId),start_ms:Math.max(0,Math.round(Number(resumeMs)||0)),
+    audio:track(sel&&sel.audio),subtitle:track(sel&&sel.subtitle)};
+}
+function playerHandoffUrl(origin,code){
+  return `plurx-player://play?server=${encodeURIComponent(origin)}&code=${encodeURIComponent(code)}`;
+}
+// Whether the launcher redeemed the code. The server is the only party that
+// knows: Chrome's first-use "Open xdg-open?" dialog takes focus whether or not
+// anything opens, so page focus proves nothing. null = superseded.
+async function pollPlayerHandoff(id,isCurrent,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))){
+  for(let i=0;i<PLAYER_HANDOFF_POLLS;i++){
+    await sleep(PLAYER_HANDOFF_POLL_MS);
+    if(!isCurrent()) return null;
+    try{
+      const status=await api(`/playback-handoffs/${encodeURIComponent(String(id))}`);
+      if(!isCurrent()) return null;
+      if(status&&status.redeemed===true) return true;
+    }catch(_){ if(!isCurrent()) return null; }
+  }
+  return false;
+}
+async function handOffToPlayer(fileId,title,resumeMs,knownDurMs,meta){
+  const generation=++PLAYER_HANDOFF.generation;
+  const isCurrent=()=>PLAYER_HANDOFF.generation===generation;
+  PLAYER_HANDOFF.last={fileId,title,resumeMs,knownDurMs,meta};
+  renderPlayerHandoff("opening",title);
+  let minted;
+  try{
+    minted=await api("/playback-handoffs",{method:"POST",
+      body:playerHandoffBody(fileId,resumeMs,prePlaySelection(fileId))});
+  }catch(e){
+    if(isCurrent()) renderPlayerHandoff("failed",title,e&&e.message);
+    return false;
+  }
+  if(!isCurrent()) return false;
+  if(!minted||typeof minted.code!=="string"||!minted.code||minted.id==null){
+    renderPlayerHandoff("failed",title,"the server sent no handoff code");
+    return false;
+  }
+  // This navigation runs after the mint round trip, still inside Chrome's
+  // transient user activation from the Play click (about 5 s), which an
+  // external-protocol launch needs. Keep the mint cheap: a slow mint would
+  // push this past the window and the scheme would silently not open.
+  location.href=playerHandoffUrl(location.origin,minted.code);
+  const opened=await pollPlayerHandoff(minted.id,isCurrent);
+  if(opened==null||!isCurrent()) return false;
+  renderPlayerHandoff(opened?"opened":"missing",title);
+  if(opened) setTimeout(()=>{ if(isCurrent()) dismissPlayerHandoff(); },6000);
+  return opened;
+}
+function playerHandoffHtml(state,title,detail){
+  const name=title?` <b>${esc(title)}</b>`:"";
+  const dismiss=`<button class="ghost" onclick="dismissPlayerHandoff()">Dismiss</button>`;
+  const here=`<button onclick="playHereInstead()">Play here instead</button>`;
+  const install=/^https?:\/\//.test(PLURX_PLAYER_INSTALL_URL)
+    ?`<a href="${esc(PLURX_PLAYER_INSTALL_URL)}" target="_blank" rel="noopener">Install plurx Player</a>`
+    :`Install plurx Player: see <code>${esc(PLURX_PLAYER_INSTALL_URL)}</code> in the plurx repository.`;
+  if(state==="opening") return `<p>Opening${name} in plurx Player…</p>`;
+  if(state==="opened") return `<p>Playing${name} in plurx Player</p><div class="handoff-actions">${dismiss}</div>`;
+  if(state==="missing") return `<p>plurx Player didn't open</p><p class="hint">${install}</p><div class="handoff-actions">${here}${dismiss}</div>`;
+  return `<p>Couldn't hand${name} to plurx Player${detail?`: ${esc(detail)}`:""}</p><div class="handoff-actions">${here}${dismiss}</div>`;
+}
+function renderPlayerHandoff(state,title,detail){
+  let el=document.getElementById("playerHandoff");
+  if(!el){
+    el=document.createElement("div");
+    el.id="playerHandoff"; el.className="handoff-notice";
+    el.setAttribute("role","status"); el.setAttribute("aria-live","polite");
+    document.body.appendChild(el);
+  }
+  el.dataset.state=state;
+  el.innerHTML=playerHandoffHtml(state,title,detail);
+  el.hidden=false;
+}
+function dismissPlayerHandoff(){
+  PLAYER_HANDOFF.generation++;
+  const el=document.getElementById("playerHandoff"); if(el) el.hidden=true;
+}
+function playHereInstead(){
+  const last=PLAYER_HANDOFF.last;
+  dismissPlayerHandoff();
+  if(!last) return;
+  PLAYER_HANDOFF.bypass=String(last.fileId);
+  return play(last.fileId,last.title,last.resumeMs,last.knownDurMs,last.meta);
 }

@@ -5,7 +5,7 @@
 //! non-API GET path.
 //!
 //! The app is not one file. `index.html` is a 97-line shell of markup and tags;
-//! the CSS and the JavaScript live in the ninety-two files of [`WEB_ASSETS`],
+//! the CSS and the JavaScript live in the ninety-nine files of [`WEB_ASSETS`],
 //! which is also their load order. There is no bundler and no build step —
 //! `docs/clients/WEB-SHELL-LAYOUT.md` is the map, and adding a file means a row
 //! there, a row here, and a tag in the shell, or the tests below say so.
@@ -93,6 +93,7 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("detail/edit.js",                         WebAsset::BodyScript,  include_str!("../web/detail/edit.js")),
     ("player/player.js",                       WebAsset::BodyScript,  include_str!("../web/player/player.js")),
     ("player/continuous-media.js",             WebAsset::BodyScript,  include_str!("../web/player/continuous-media.js")),
+    ("player/video-frames.js",                 WebAsset::BodyScript,  include_str!("../web/player/video-frames.js")),
     ("player/continuous-quality.js",           WebAsset::BodyScript,  include_str!("../web/player/continuous-quality.js")),
     ("player/session.js",                      WebAsset::BodyScript,  include_str!("../web/player/session.js")),
     ("player/prepared-replacement.js",         WebAsset::BodyScript,  include_str!("../web/player/prepared-replacement.js")),
@@ -108,6 +109,8 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("player/menus.js",                        WebAsset::BodyScript,  include_str!("../web/player/menus.js")),
     ("player/audio-sync.js",                   WebAsset::BodyScript,  include_str!("../web/player/audio-sync.js")),
     ("player/subtitle-translation.js",          WebAsset::BodyScript,  include_str!("../web/player/subtitle-translation.js")),
+    ("player/subtitle-text-translation.js",      WebAsset::BodyScript,  include_str!("../web/player/subtitle-text-translation.js")),
+    ("player/shared-subtitle-captions.js",       WebAsset::BodyScript,  include_str!("../web/player/shared-subtitle-captions.js")),
     ("player/stats.js",                        WebAsset::BodyScript,  include_str!("../web/player/stats.js")),
     ("player/watch-presentation.js", WebAsset::BodyScript, include_str!("../web/player/watch-presentation.js")),
     ("detail/watch-browser.js", WebAsset::BodyScript, include_str!("../web/detail/watch-browser.js")),
@@ -138,6 +141,9 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("pages/library-channels-page.js",         WebAsset::BodyScript,  include_str!("../web/pages/library-channels-page.js")),
     ("pages/shared-artwork.js",                WebAsset::BodyScript,  include_str!("../web/pages/shared-artwork.js")),
     ("pages/shared-libraries.js",              WebAsset::BodyScript,  include_str!("../web/pages/shared-libraries.js")),
+    ("vendor/qrcodegen.js", WebAsset::BodyScript, include_str!("../web/vendor/qrcodegen.js")),
+    ("vendor/jsQR.js", WebAsset::BodyScript, include_str!("../web/vendor/jsQR.js")),
+    ("pages/sharing-qr.js", WebAsset::BodyScript, include_str!("../web/pages/sharing-qr.js")),
     ("pages/sharing-management.js",            WebAsset::BodyScript,  include_str!("../web/pages/sharing-management.js")),
     ("core/remote-navigation.js",              WebAsset::BodyScript,  include_str!("../web/core/remote-navigation.js")),
     ("core/remote-router.js",                  WebAsset::BodyScript,  include_str!("../web/core/remote-router.js")),
@@ -149,6 +155,7 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("pages/settings-remote.js", WebAsset::BodyScript, include_str!("../web/pages/settings-remote.js")),
     ("pages/remote.js", WebAsset::BodyScript, include_str!("../web/pages/remote.js")),
     ("pages/diagnostics.js",                   WebAsset::BodyScript,  include_str!("../web/pages/diagnostics.js")),
+    ("pages/activity-starts.js",               WebAsset::BodyScript,  include_str!("../web/pages/activity-starts.js")),
     ("router.js",                              WebAsset::BodyScript,  include_str!("../web/router.js")),
 ];
 

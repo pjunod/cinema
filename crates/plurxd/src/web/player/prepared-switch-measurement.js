@@ -116,7 +116,7 @@ function deferPreparedPredecessorRetirement(p,state,successor){
   let prior=null,advances=0;
   const next=()=>{
     if(!current()) return;
-    try{ state.retireFrameCallbackId=successor.requestVideoFrameCallback((_,meta)=>{
+    try{ state.retireFrameCallbackId=requestPlaybackVideoFrame(successor,(_,meta)=>{
       state.retireFrameCallbackId=null;
       if(!current()) return;
       const at=Number(meta&&meta.mediaTime);
@@ -134,8 +134,8 @@ function retirePreparedPredecessor(p,state){
   if(!state) return;
   const successor=state.retireElement;
   if(state.retireFrameCallbackId!=null&&state.retireElement
-    &&typeof state.retireElement.cancelVideoFrameCallback==="function")
-    try{ state.retireElement.cancelVideoFrameCallback(state.retireFrameCallbackId); }catch(e){}
+    )
+    try{ cancelPlaybackVideoFrame(state.retireElement,state.retireFrameCallbackId); }catch(e){}
   state.retireFrameCallbackId=null;
   if(state.retireIdleCallbackId!=null&&typeof window.cancelIdleCallback==="function")
     try{ window.cancelIdleCallback(state.retireIdleCallbackId); }catch(e){}
@@ -301,8 +301,8 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
     settled=true;
     if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
     state.frameBudgetUpdate=null;
-    if(state.frameCallbackId!=null&&typeof element.cancelVideoFrameCallback==="function")
-      try{ element.cancelVideoFrameCallback(state.frameCallbackId); }catch(e){}
+    if(state.frameCallbackId!=null)
+      try{ cancelPlaybackVideoFrame(element,state.frameCallbackId); }catch(e){}
     if(state.frameListener){
       try{ element.removeEventListener("timeupdate",state.frameListener); }catch(e){}
       state.frameListener=null;
@@ -344,7 +344,7 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
   // moving media clock. The finite outer timer owns engines with neither.
   if(streamHasVideo(p,element)){
     if(typeof element.requestVideoFrameCallback==="function"){
-      try{ state.frameCallbackId=element.requestVideoFrameCallback(()=>done()); return; }catch(e){}
+      try{ state.frameCallbackId=requestPlaybackVideoFrame(element,()=>done()); return; }catch(e){}
     }
     const frameCount=()=>{
       try{
@@ -371,6 +371,9 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
 
 function failPreparedReplacement(p,state,detail){
   if(preparedState(p)!==state) return;
+  // A commit that began and never exposed the successor is the seam's
+  // `refused`: nothing the viewer sees or hears has changed.
+  if(state.state==="committing") reportPreparedSeamAfterWindow(p,state,"refused");
   state.state="failed";
   queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
   clientLog(Object.assign({level:"warn",event:"prepared_replacement",detail:"failed",
@@ -418,16 +421,16 @@ function freePreparedReplacement(p,state){
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
   state.frameBudgetUpdate=null;
   if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
-  if(spare&&state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
-    try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
+  if(spare&&state.exposeFrameCallbackId!=null)
+    try{ cancelPlaybackVideoFrame(spare,state.exposeFrameCallbackId); }catch(e){}
   state.exposeFrameCallbackId=null;
   const incumbent=state.incumbentElement;
   if(incumbent&&state.handoffFrameCallbackId!=null
-    &&typeof incumbent.cancelVideoFrameCallback==="function")
-    try{ incumbent.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
+    )
+    try{ cancelPlaybackVideoFrame(incumbent,state.handoffFrameCallbackId); }catch(e){}
   state.handoffFrameCallbackId=null;
-  if(spare&&state.warmFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
-    try{ spare.cancelVideoFrameCallback(state.warmFrameCallbackId); }catch(e){}
+  if(spare&&state.warmFrameCallbackId!=null)
+    try{ cancelPlaybackVideoFrame(spare,state.warmFrameCallbackId); }catch(e){}
   state.warmFrameCallbackId=null;
   if(state.framePollTimer!=null){ clearTimeout(state.framePollTimer); state.framePollTimer=null; }
   if(state.frameListener&&spare){
@@ -525,8 +528,8 @@ function cancelPreparedFirstFrame(p){
     try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}
   }
   state.frameListener=null;
-  if(state.frameCallbackId!=null&&spare&&typeof spare.cancelVideoFrameCallback==="function"){
-    try{ spare.cancelVideoFrameCallback(state.frameCallbackId); }catch(e){}
+  if(state.frameCallbackId!=null&&spare){
+    try{ cancelPlaybackVideoFrame(spare,state.frameCallbackId); }catch(e){}
   }
   state.frameCallbackId=null;
   state.frameElement=null;
@@ -819,4 +822,61 @@ function askPlaybackControl(renderOverride,observationOverride,deadlineMs=Infini
   // again, so nothing would ever settle this waiter but its timer.
   if(reporter.stopped) settle(null);
   return {trigger,action};
+}
+
+// ---- the seam's outcome, reported ------------------------------------------
+//
+// One `prepared_seam` beacon per prepared switch that reached its commit:
+// committed (after the ±2 s window has been sampled), refused (the commit
+// never exposed the successor), or switched without a frame. The server
+// counts these per platform (`plurx_playback_preparation_seams_*`); the
+// processed Dolby Vision upgrade leaves the Developer tab only after twenty
+// clean, fully measured committed switches. Web audio is not measured (see
+// `preparedSwitchAudioEnable`), so a web switch reports `audio_observed:false`
+// and is never one of the twenty. Reported, never acted on.
+function reportPreparedSeam(p,state,outcome,frames,reopened){
+  const control=window.PlurxPlaybackControl;
+  if(!control||typeof control.preparedSeamReport!=="function"||!state||state.seamReported) return;
+  const report=control.preparedSeamReport({platform:"web",outcome,frames,audioObserved:false,
+    reopened:reopened===true});
+  if(!report) return;
+  state.seamReported=true;
+  clientLog(Object.assign({level:"info",event:"prepared_seam",detail:outcome,
+    message:`prepared switch to ${state.sessionId}: ${outcome}`,
+    session_id:state.sessionId,prepared_seam:report},playbackContext()));
+}
+// What "no reopen" is measured against: the player, its attempt and its
+// session at the outcome. An ordinary reopen either opens a new attempt or a
+// new session on this player, or replaces the player for the same file; a
+// player closed by the viewer is neither.
+function preparedSeamReopenMark(p){
+  return {player:p||null,attemptId:p?p.attemptId:null,sessionId:p?p.sessionId:null,
+    fileId:p?p.fileId:null};
+}
+function preparedSeamReopened(mark){
+  const current=typeof PLAYER==="undefined"?null:PLAYER;
+  if(!current||!mark) return false;
+  if(current!==mark.player) return mark.fileId!=null&&current.fileId===mark.fileId;
+  return current.attemptId!==mark.attemptId||current.sessionId!==mark.sessionId;
+}
+// Every outcome is reported once the ±2 s window has elapsed, with whether an
+// ordinary reopen actually ran inside it (review 3 B2). A committed switch also
+// carries its frame delta: the successor's two seconds after the commit are
+// sampled on the existing 500 ms progress tick. A refused or frameless switch
+// counts as reopened only when the reopen it owes really ran.
+function reportPreparedSeamAfterWindow(p,state,outcome){
+  if(!state||state.seamScheduled) return;
+  state.seamScheduled=true;
+  const control=window.PlurxPlaybackControl;
+  const windowMs=control&&Number.isFinite(control.PREPARED_SWITCH_WINDOW_MS)?control.PREPARED_SWITCH_WINDOW_MS:2000;
+  const mark=preparedSeamReopenMark(p);
+  setTimeout(()=>{
+    const commit=outcome==="committed"?p&&p.switchCommit:null;
+    const samples=(p&&p.switchFrames)||[];
+    const frames=control&&commit?control.preparedSwitchCounterDelta({
+      before:samples.filter(sample=>sample.element===commit.predecessor),
+      after:samples.filter(sample=>sample.element===commit.successor),
+      commitAtMs:commit.at}):null;
+    reportPreparedSeam(p,state,outcome,frames,preparedSeamReopened(mark));
+  },windowMs+250);
 }

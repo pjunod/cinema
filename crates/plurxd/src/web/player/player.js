@@ -211,7 +211,8 @@
  * @property {number} [controlPresentedFrames] attachment-owned frame callback receipts, independent of timestamp validity
  * @property {boolean} [controlHasFrameCallbacks]
  * @property {any} [controlFrameCancel]    cancels the frame-callback loop
- * @property {()=>void} [controlFrameRearm] renews observation for the current seek
+ * @property {()=>void} [controlFrameRearm] renews observation for the current attachment
+ * @property {any} [controlFrameObservation] native observation-channel diagnosis; never frame proof
  * @property {any} [controlReporter]       the PlaybackControl reporter for this player
  * @property {any[]} [controlWaiters]      callers waiting for the reporter's next exchange
  * @property {number} [controlPresentationEpoch]
@@ -525,7 +526,7 @@ function hlsStartupCurrent(player,episode){
 }
 function hlsStartupIncomplete(player){
   const episode=player&&player.hlsStartup;
-  return !!(episode&&!['presenting','cancelled'].includes(episode.state));
+  return !!(episode&&!['presenting','cancelled','observation_unavailable'].includes(episode.state));
 }
 function hlsStartupManifestRequest(context){
   return !!(context&&(context.type==='manifest'||/\.m3u8(?:\?|$)/i.test(String(context.url||''))));
@@ -557,7 +558,7 @@ function cancelHlsStartup(player,reason){
 }
 function completeHlsStartup(player){
   const episode=player&&player.hlsStartup;
-  if(!episode||!hlsStartupCurrent(player,episode)||episode.state!=='active'
+  if(!episode||!hlsStartupCurrent(player,episode)||!['active','observation_unavailable'].includes(episode.state)
     ||player.controlSeek?.executed) return false;
   episode.state='presenting';
   clearTimeout(episode.native?.deadlineTimer);
@@ -575,7 +576,7 @@ function completeHlsStartup(player){
 }
 function configureHlsStartupDeadline(player,graceMs){
   const episode=player&&player.hlsStartup;
-  if(!episode||!hlsStartupCurrent(player,episode)||episode.state==='presenting') return;
+  if(!episode||!hlsStartupCurrent(player,episode)||['presenting','observation_unavailable'].includes(episode.state)) return;
   const grace=Number(graceMs)||PlaybackPolicy.HLS_STARTUP.cold_deadline_ms;
   episode.deadlineMs=Math.min(episode.deadlineMs,performance.now()+grace);
   if(episode.transport==='native') armNativeHlsDeadline(player,episode);
@@ -603,11 +604,16 @@ function notePlaybackPlayRejection(player,invocation,error){
     method:record.method,vcodec:record.vcodec,
     transport:record});
   const episode=player.hlsStartup;
-  if(!cancelled&&current&&episode&&hlsStartupCurrent(player,episode)&&episode.state==='active'){
+  if(!cancelled&&current&&episode&&hlsStartupCurrent(player,episode)
+    &&['active','observation_unavailable'].includes(episode.state)){
     // Keep the command failure separate from decoder evidence and viewer
     // Pause. Permission refusal stops below; other failures retain the
     // startup owner's existing absolute diagnosis deadline.
     episode.playRejection={name,code,status};
+    // The observation deadline is already concluded. This current transport
+    // refusal owns an immediate diagnosis; it never restarts that deadline.
+    if(episode.state==='observation_unavailable'&&name!=='NotAllowedError')
+      exhaustHlsStartup(player,'transport_play_rejected');
   }
   if(current&&!invocation.cancelledReason&&name==='NotAllowedError'&&!player.playPermissionDenied){
     // Permission is a transport refusal, never evidence of missing bytes or a
@@ -627,6 +633,9 @@ function diagnoseHlsStartup(player){
   const episode=player&&player.hlsStartup;
   if(episode?.playRejection) return {title:'The browser could not start playback.',
     detail:`The browser rejected Play (${episode.playRejection.name}). Retry to issue a new playback request.`};
+  if(episode?.state==='observation_unavailable')return {
+    title:'Playback observation is unavailable.',
+    detail:'The movie clock and decoder advanced, but the browser did not deliver frame observations before the startup deadline. Presentation could not be verified. Playback continues; choose Try again to restart, or Close to leave playback.'};
   const failure=episode&&episode.latestFailure;
   const explained=failure&&PlaybackPolicy.streamFailureOverlay(failure,Date.now());
   if(episode?.transport==='native'&&episode.state==='exhausted'&&failure?.message) return {
@@ -656,8 +665,47 @@ function diagnoseHlsStartup(player){
   return {title:'Playback did not start.',
     detail:'Media arrived, but no presented frame or advancing audio clock was observed. Try again; the decoder cause is not known.'};
 }
+// Independent clock/decode progress diagnoses only the sensor channel. Its
+// freshness and every observation identity must still belong to this element.
+function nativeHlsObservationUnavailable(player,episode){
+  const observer=player&&player.controlFrameObservation, video=episode?.native?.video;
+  return !!(episode?.transport==='native'&&episode.native.attached&&video
+    &&document.getElementById("video")===video&&observer?.unavailable
+    &&observer.attachment===player.mediaAttachment&&observer.element===video
+    &&observer.epoch===(player.controlPresentationEpoch||0)
+    &&observer.intent===(player.controlSeek?.sequence||0)
+    &&observer.intentGeneration===(player.controlIntentGeneration||0)
+    &&observer.lastAdvanceAt!=null
+    &&performance.now()-observer.lastAdvanceAt>=0
+    &&performance.now()-observer.lastAdvanceAt<PLAYBACK_SAMPLING_PERIOD_MS*3
+    &&!video.seeking&&!video.paused&&!video.ended&&!video.error&&!document.hidden
+    &&player.wantsPlayback!==false&&!player.playPermissionDenied
+    &&!episode.decoderFailed&&!episode.playRejection&&!currentStreamFailureOverlay());
+}
+function concludeNativeHlsObservation(player,episode){
+  if(!hlsStartupCurrent(player,episode)||!playbackOwnsAttachedMedia(player)
+    ||episode.state!=='active'||!nativeHlsObservationUnavailable(player,episode)) return false;
+  episode.state='observation_unavailable';
+  clearTimeout(episode.native.deadlineTimer);episode.native.deadlineTimer=null;
+  clearTimeout(player.stallTimer);player.stallTimer=null;
+  const intent=playbackSurfaceIntent(player),owner=playbackSurfaceObservationOwner(player);
+  const attached=playbackSurfaceGeneration(player);
+  // This observer owns both attached-media waits and pending-destination
+  // preparation. Conclude each exact scope; neither withdrawal proves the
+  // destination or settles its seek, and other intents/owners remain fenced.
+  for(const scopeIntent of intent==null?[null]:[null,intent])
+    playbackSurfaceStep({observation_unavailable:owner,attached,intent:scopeIntent});
+  const diagnosis=diagnoseHlsStartup(player);
+  raisePlaybackSurface("degraded_notice",{title:diagnosis.title,detail:diagnosis.detail,
+    actions:["retry","close"],intent});
+  clientLog(Object.assign({level:'warn',event:'native_frame_observation',detail:'observation_unavailable_deadline',
+    message:diagnosis.detail},playbackContext()));
+  return true;
+}
 function exhaustHlsStartup(player,reason){
   const episode=player&&player.hlsStartup;
+  if(episode?.transport==='native'&&['deadline','paused_past_deadline'].includes(reason)
+    &&performance.now()>=episode.deadlineMs&&concludeNativeHlsObservation(player,episode)) return true;
   if(!episode||!hlsStartupCurrent(player,episode)||episode.state==='presenting'
     ||episode.state==='cancelled') return false;
   if(episode.transport==='native'){
@@ -712,8 +760,8 @@ function armHlsStartupRetry(video,player,episode){
 function pauseHlsStartup(player){
   const episode=player&&player.hlsStartup;
   if(!episode||!hlsStartupCurrent(player,episode)
-    ||!['active','presenting'].includes(episode.state)) return false;
-  if(episode.state==='presenting'){
+    ||!['active','presenting','observation_unavailable'].includes(episode.state)) return false;
+  if(['presenting','observation_unavailable'].includes(episode.state)){
     if(episode.retry.state==='reserved') episode.retry.state='cancelled';
     clearTimeout(episode.retry.timer); episode.retry.timer=null;
     if(!episode.establishedSuspension){
@@ -849,7 +897,7 @@ function resumePausedStartupSeek(video,player,pending){
 function resumeHlsStartup(video,player){
   const episode=player&&player.hlsStartup;
   if(!episode||!hlsStartupCurrent(player,episode)) return false;
-  if(episode.state==='presenting'){
+  if(['presenting','observation_unavailable'].includes(episode.state)){
     const suspended=episode.establishedSuspension;
     if(!suspended||suspended.attachment!==player.mediaAttachment
       ||player.wantsPlayback===false) return false;
@@ -1646,6 +1694,8 @@ function onHlsError(hls,startup,video,observesCurrent){
 function attachNativeHls(video,playlistUrl,startAt,attachedPlayer,attachment){
   const {startup}=hlsStartupEpisode(attachedPlayer,attachment,playlistUrl,startAt,'native');
   startup.native.video=video;
+  attachment.token.nativePositionPending=true;
+  if(attachedPlayer.controlFrameRearm)attachedPlayer.controlFrameRearm();
   armNativeHlsDeadline(attachedPlayer,startup);
   attachedPlayer.segSrc=null; attachedPlayer.segTimes=null; attachedPlayer._segIdx=null;
   if(attachedPlayer.wantsPlayback===false) startup.state='paused';
@@ -1657,16 +1707,37 @@ function attachNativeHls(video,playlistUrl,startAt,attachedPlayer,attachment){
 // Use the current startup episode; no source assignment or decoder fallback
 // occurs until the master and selected media playlist have become usable.
 function armNativeHlsDeadline(player,episode){
+  if(episode.state==='observation_unavailable') return;
   clearTimeout(episode.native.deadlineTimer);
   episode.native.deadlineTimer=setTimeout(()=>{
     episode.native.deadlineTimer=null;
-    if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player)&&episode.state==='active')
+    if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player,true)&&episode.state==='active')
       exhaustHlsStartup(player,'deadline');
   },Math.max(0,episode.deadlineMs-performance.now()));
 }
+// Source-execution authority is independent of presentation observations.
+// It names one episode, element, attachment and execution.
+function nativeHlsSourceOwner(video,player,episode,execution,mediaEvent=false){
+  const attachment=episode?.mediaAttachment,sourceUrl=episode?.native?.sourceUrl;
+  const current=()=>{
+    if(!episode||episode.transport!=='native'||episode.native.video!==video
+      ||document.getElementById('video')!==video
+      ||player?.mediaAttachment!==attachment||episode.attachment.token!==attachment
+      ||episode.native.execution!==execution||episode.state==='cancelled'
+      ||!hlsStartupCurrent(player,episode)||!playbackOwnsAttachedMedia(player,true)) return false;
+    if(!mediaEvent) return true; // This execution may still be fetching before assignment.
+    if(!episode.native.attached||episode.native.sourceExecution!==execution
+      ||!sourceUrl||episode.native.sourceUrl!==sourceUrl) return false;
+    try{
+      const selected=video.currentSrc||video.getAttribute('src')||video.src;
+      return !!selected&&new URL(selected,location.href).href===sourceUrl;
+    }catch(error){return false;}
+  };
+  return Object.freeze({player,video,episode,attachment,execution,current});
+}
 function nativeHlsCurrent(player,episode,execution,intent){
   return hlsStartupCurrent(player,episode)&&episode.transport==='native'
-    &&playbackOwnsAttachedMedia(player)
+    &&playbackOwnsAttachedMedia(player,true)
     &&episode.native.execution===execution&&episode.state==='active'
     &&player.wantsPlayback!==false&&(player.controlIntentGeneration||0)===intent;
 }
@@ -1684,9 +1755,10 @@ function nativeHlsResourceUrl(uri,parent){
 // rendition manifest (4 MiB), plus the bounded acquisition-start tag. A master
 // or an error response is a different, small document; init has its own bound.
 const NATIVE_HLS_BODY_LIMITS=Object.freeze({playlist:4*1024*1024+72,master:65536,error:65536,init:1048576});
-async function nativeHlsFetch(player,episode,url,{init=false}={}){
+async function nativeHlsFetch(player,episode,url,{init=false,sourceOwner=null}={}){
   const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
-  const current=()=>nativeHlsCurrent(player,episode,execution,intent);
+  const owner=sourceOwner||nativeHlsSourceOwner(episode.native.video,player,episode,execution);
+  const current=()=>owner.current()&&nativeHlsCurrent(player,episode,execution,intent);
   if(!current()) throw Object.assign(new Error('Native readiness was superseded.'),{cancelled:true});
   if(performance.now()>=episode.deadlineMs||(!init&&episode.dispatches>=PlaybackPolicy.HLS_STARTUP.manifest_dispatch_ceiling))
     throw Object.assign(new Error('Native readiness budget exhausted.'),{terminal:true});
@@ -1745,9 +1817,9 @@ async function nativeHlsFetch(player,episode,url,{init=false}={}){
     })()]);
   }finally{clearTimeout(timer);ctl.signal.removeEventListener('abort',abortListener);ctl.abort();episode.loaders.delete(loader);}
 }
-async function nativeHlsPlaylists(player,episode){
+async function nativeHlsPlaylists(player,episode,sourceOwner){
   episode.manifestState='loading';
-  const master=await nativeHlsFetch(player,episode,tok(episode.playlistUrl));
+  const master=await nativeHlsFetch(player,episode,tok(episode.playlistUrl),{sourceOwner});
   let media=master;
   const lines=master.text.split(/\r?\n/).map(line=>line.trim());
   const variants=lines.map((line,i)=>line.startsWith('#EXT-X-STREAM-INF:')?i:-1).filter(i=>i>=0);
@@ -1757,7 +1829,7 @@ async function nativeHlsPlaylists(player,episode){
     if(variants.length!==1) throw Object.assign(new Error('Native readiness requires one session video variant.'),{terminal:true});
     const uri=lines[variants[0]+1];
     if(!uri||uri.startsWith('#')) throw Object.assign(new Error('The HLS master has no selected media URI.'),{terminal:true});
-    media=await nativeHlsFetch(player,episode,nativeHlsResourceUrl(uri,master.url));
+    media=await nativeHlsFetch(player,episode,nativeHlsResourceUrl(uri,master.url),{sourceOwner});
   }
   const times=parseSegTimes(media.text);
   if(!times.length||!times.every(time=>Number.isFinite(time)&&time>0))
@@ -1776,15 +1848,14 @@ function armNativeHlsReadiness(video,player,episode,delayMs){
 }
 // Reuse the attachment's authority owner after every asynchronous readiness
 // boundary. A retired session must never be reloaded or codec-rescued.
-function nativeHlsRecoverAuthority(video,player,episode,execution){
-  if(!hlsStartupCurrent(player,episode)||episode.native.execution!==execution
-    ||!['active','paused'].includes(episode.state)||!playbackOwnsAttachedMedia(player)) return false;
-  return recoverServingFencedAttachment(video,player);
+function nativeHlsRecoverAuthority(video,player,episode,execution,sourceOwner){
+  const owner=sourceOwner||nativeHlsSourceOwner(video,player,episode,execution);
+  if(!owner.current()||!['active','paused'].includes(episode.state)) return false;
+  return recoverServingFencedAttachment(video,player,owner);
 }
-function nativeHlsAuthenticationRefused(player,episode){
+function nativeHlsAuthenticationRefused(player,episode,sourceOwner){
   const failure=episode.latestFailure;
-  if(!hlsStartupCurrent(player,episode)||!playbackOwnsAttachedMedia(player)
-    ||![401,403].includes(failure?.status)) return false;
+  if(!sourceOwner.current()||![401,403].includes(failure?.status)) return false;
   // Cancel startup work before handing the typed refusal to the existing
   // authentication surface, which owns Sign in / Close in every context.
   cancelHlsStartup(player,'authentication_refused');
@@ -1796,20 +1867,24 @@ async function runNativeHlsReadiness(video,player,episode){
   // An asynchronous handover may still be pending at the first wakeup.
   // Retain one bounded retry under the original deadline; do not dispatch
   // for a player that does not yet own the media, or abandon its startup.
-  if(!playbackOwnsAttachedMedia(player)) return armNativeHlsReadiness(video,player,episode);
+  if(!playbackOwnsAttachedMedia(player,true)) return armNativeHlsReadiness(video,player,episode);
   const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
+  const sourceOwner=nativeHlsSourceOwner(video,player,episode,execution);
+  if(!sourceOwner.current()) return;
   const readinessAt=performance.now();
   episode.native.busy=true;
   try{
-    const media=await nativeHlsPlaylists(player,episode);
-    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return;
-    if(!nativeHlsCurrent(player,episode,execution,intent)) return;
+    const media=await nativeHlsPlaylists(player,episode,sourceOwner);
+    if(nativeHlsRecoverAuthority(video,player,episode,execution,sourceOwner)) return;
+    if(!sourceOwner.current()||!nativeHlsCurrent(player,episode,execution,intent)) return;
     player.segSrc=media.url;player.segTimes=parseSegTimes(media.text);player._segIdx=null;
     clearStreamFailure();episode.latestFailure=null;
     player.controlRenderOverride=null;
+    const expectedSource=new URL(tok(episode.playlistUrl),location.href).href;
     const go=()=>{
+      if(!video.currentSrc||new URL(video.currentSrc,location.href).href!==expectedSource||video.readyState<1)return;
       video.removeEventListener('loadedmetadata',go);episode.native.metadataListener=null;
-      if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player)&&episode.native.execution===execution
+      if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player,true)&&episode.native.execution===execution
         &&['active','paused'].includes(episode.state))
         applyPlaybackAttachmentPosition(video,player,episode.attachment,episode.startAt);
     };
@@ -1822,12 +1897,13 @@ async function runNativeHlsReadiness(video,player,episode){
       readiness_ms:Math.round(performance.now()-readinessAt),
       remaining_ms:Math.max(0,Math.round(episode.deadlineMs-performance.now())),
       message:'Current master and selected media playlist are ready; attaching native HLS.'},playbackContext()));
+    episode.native.sourceUrl=expectedSource;episode.native.sourceExecution=execution;
     setPlaybackMediaSource(video,tok(episode.playlistUrl));
     applyPlaybackTransportIntent(video,player);
   }catch(error){
-    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return;
-    if(!nativeHlsCurrent(player,episode,execution,intent)) return;
-    if(nativeHlsAuthenticationRefused(player,episode)) return;
+    if(nativeHlsRecoverAuthority(video,player,episode,execution,sourceOwner)) return;
+    if(!sourceOwner.current()||!nativeHlsCurrent(player,episode,execution,intent)) return;
+    if(nativeHlsAuthenticationRefused(player,episode,sourceOwner)) return;
     if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
       exhaustHlsStartup(player,'native_readiness_refused');}
     else if(!error.cancelled) armNativeHlsReadiness(video,player,episode);
@@ -1840,26 +1916,35 @@ async function runNativeHlsReadiness(video,player,episode){
       armNativeHlsReadiness(video,player,episode);
   }
 }
-async function classifyNativeHlsError(video,player,code,message){
+async function classifyNativeHlsError(video,player,code,message,sourceOwner=null){
   const episode=player&&player.hlsStartup;
   if(!episode||episode.transport!=='native'||episode.native.video!==video
     ||!episode.native.attached||![3,4].includes(code)
     ||episode.state==='presenting'||!hlsStartupCurrent(player,episode)) return false;
+  const owner=sourceOwner||nativeHlsSourceOwner(video,player,episode,episode.native.execution,true);
+  if(!owner.current()) return false;
+  if(episode.state==='observation_unavailable'){
+    // A real element rejection remains authoritative after the observation
+    // deadline. It must not be swallowed by the concluded sensor outcome.
+    episode.decoderFailed=true;
+    episode.latestFailure={message:message||'The native decoder rejected the stream.'};
+    return exhaustHlsStartup(player,'native_media_error');
+  }
   if(episode.native.classifying) return true;
   if(episode.state==='paused'||player.wantsPlayback===false){
     episode.native.pendingError={code,message,execution:episode.native.execution};return true;
   }
   episode.native.classifying=true;
   const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
-  const current=()=>nativeHlsCurrent(player,episode,execution,intent);
+  const current=()=>owner.current()&&nativeHlsCurrent(player,episode,execution,intent);
   try{
-    const media=await nativeHlsPlaylists(player,episode);
-    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
+    const media=await nativeHlsPlaylists(player,episode,owner);
+    if(nativeHlsRecoverAuthority(video,player,episode,execution,owner)) return true;
     if(!current()) throw Object.assign(new Error('Native classification was superseded.'),{cancelled:true});
     const init=/^#EXT-X-MAP:.*?URI="([^"]+)"/m.exec(media.text);
     if(!init) throw Object.assign(new Error('The native init shape could not be verified.'),{terminal:true});
-    await nativeHlsFetch(player,episode,nativeHlsResourceUrl(init[1],media.url),{init:true});
-    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
+    await nativeHlsFetch(player,episode,nativeHlsResourceUrl(init[1],media.url),{init:true,sourceOwner:owner});
+    if(nativeHlsRecoverAuthority(video,player,episode,execution,owner)) return true;
     if(!current()) return true;
     if(!episode.native.reloadUsed){
       episode.native.reloadUsed=true;episode.native.execution++;
@@ -1888,14 +1973,14 @@ async function classifyNativeHlsError(video,player,code,message){
     startTranscodeFallback('stream-rejected',note);
     return true;
   }catch(error){
-    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
+    if(nativeHlsRecoverAuthority(video,player,episode,execution,owner)) return true;
     if(!current()){
-      if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player)
+      if(owner.current()
         &&['paused','active'].includes(episode.state))
         episode.native.pendingError={code,message,execution};
       return true;
     }
-    if(nativeHlsAuthenticationRefused(player,episode)) return true;
+    if(nativeHlsAuthenticationRefused(player,episode,owner)) return true;
     if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
       exhaustHlsStartup(player,'native_readiness_refused');}
     else if(!error.cancelled){
@@ -1910,7 +1995,7 @@ async function classifyNativeHlsError(video,player,code,message){
     episode.native.classifying=false;
     const pending=episode.native.pendingError;
     if(pending&&pending.execution===episode.native.execution&&episode.state==='active'
-      &&hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player)&&player.wantsPlayback!==false){
+      &&hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player,true)&&player.wantsPlayback!==false){
       episode.native.pendingError=null;
       classifyNativeHlsError(video,player,pending.code,pending.message).catch(()=>{});
     }

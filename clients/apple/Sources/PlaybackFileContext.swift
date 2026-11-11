@@ -17,6 +17,15 @@ struct SharedPlaybackReference: Codable, Hashable {
 }
 
 private final class PlaybackDetailRedirectFence: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let decision = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(decision.0, decision.1)
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
@@ -145,7 +154,8 @@ struct PlaybackFileContext: Hashable {
     /// Closed resource grammar. Ordinary HLS/control UUID paths never pass here.
     func path(_ resource: String, query: [URLQueryItem] = []) throws -> String {
         try requireCurrent()
-        guard Self.matches(resource, "^(decision|hls/sessions|direct|stream\\.mp4|subs/[0-9]{1,6}(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/[0-9]{1,6}/thumb)$")
+        let sharedCaption = reference != nil && Self.matches(resource, "^captions(?:/[0-9a-f]{64}/(?:manifest|segments/[0-9a-f]{64}))?$")
+        guard sharedCaption || Self.matches(resource, "^(decision|hls/sessions|direct|stream\\.mp4|subs/[0-9]{1,6}(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/[0-9]{1,6}/thumb)$")
         else { throw APIError.badURL }
         if reference != nil, !Self.sharedAssetIndexIsCanonical(resource) { throw APIError.badURL }
         if reference != nil && (resource == "direct" || resource == "stream.mp4") && sessionId == nil {
@@ -237,6 +247,19 @@ struct PlaybackFileContext: Hashable {
         matches(id, "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
     }
     private static func validateQuery(_ resource: String, _ query: [URLQueryItem]) throws {
+        if resource == "captions" || resource.hasPrefix("captions/") {
+            guard Set(query.map(\.name)).count == query.count else { throw APIError.badURL }
+            if resource == "captions" {
+                guard query.isEmpty || (query.count == 1 && query[0].name == "after" && Self.matches(query[0].value ?? "", "^[a-f0-9]{64}$")) else { throw APIError.badURL }
+            } else if resource.hasSuffix("/manifest") {
+                guard query.count == 1, query[0].name == "position_ms", let text = query[0].value,
+                      let ms = Int(text), (0...14_400_000).contains(ms), String(ms) == text else { throw APIError.badURL }
+            } else {
+                guard query.count == 1, query[0].name == "lease", let id = query[0].value,
+                      Self.canonicalUUID(id), id != "00000000-0000-0000-0000-000000000000" else { throw APIError.badURL }
+            }
+            return
+        }
         let capabilities = ["client", "device", "profile", "vcodec", "vmaxheight", "acodec", "container", "maxheight", "hdr", "dv", "dvprofile", "dvhls", "hdr10t"]
         let allowed = resource == "decision" ? capabilities + ["force", "audio", "subtitle", "audio_offset_ms", "achannels", "capver", "hdrtypes", "dvdecoders", "dvraw", "dvstatus"]
             : resource == "stream.mp4" ? capabilities + ["force", "audio", "audio_offset_ms", "start", "stream"]

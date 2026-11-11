@@ -25,6 +25,21 @@ struct SharedDecisionClient {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         ReadAfterHTTP.bind(current, to: &request)
     }
+    /// The committed-caption adapter can issue only GETs under the signed
+    /// Shared subject. It cannot enter a Local file or produce Source work.
+    func captions(context: PlaybackFileContext, resource: String, query: [URLQueryItem] = [], maximumBytes: Int = 65_536) async throws -> Data {
+        try requireCurrent()
+        guard context.reference != nil, resource == "captions" || resource.hasPrefix("captions/"),
+              (1...65_536).contains(maximumBytes), let url = URL(string: origin + (try context.path(resource,query: query))) else { throw APIError.badURL }
+        var request = URLRequest(url:url); request.httpMethod = "GET"; request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        try authorize(&request)
+        let data = try await SharedDecisionReadOperation(request: request, configuration: configuration,
+            maxBytes: maximumBytes, current: { try requireCurrent(); _ = try context.path(resource,query: query) }).read()
+        try requireCurrent(); try Task.checkCancellation()
+        return data
+    }
+
     func decision(context: PlaybackFileContext, selection: PrePlaySelection = .none,
                   quality: PlaybackQuality = .auto, audioOffsetMs: Int = 0,
                   presentationTarget: PresentationTarget? = nil) async throws -> (decision: SharedDecision, caps: DeviceCaps) {
@@ -72,6 +87,9 @@ struct SharedDecisionClient {
         guard let url = URL(string: origin + (try context.path("hls/sessions"))) else { throw APIError.badURL }
         var request = URLRequest(url: url); request.httpMethod = "POST"; request.httpBody = encoded; request.timeoutInterval = 310
         try authorize(&request); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let remaining = PlaybackStartupRequestContext.remainingMs {
+            request.setValue(String(max(0, remaining)), forHTTPHeaderField: "X-Plurx-Startup-Remaining-Ms")
+        }
         let data = try await SharedDecisionReadOperation(request: request, configuration: configuration) {
             try requireCurrent(); _ = try context.path("hls/sessions")
         }.read()
@@ -201,7 +219,7 @@ struct SharedDecisionClient {
         defer { entry.busy = false; registry.active -= 1 }
         if entry.order.needsResync || entry.order.pending.map({ $0.sessionId != playback.context.sessionId }) == true {
             let expected = Session.shared.playbackAuthorization
-            let data = try await Self.detail(reference: reference, transport: URLSession(configuration: configuration), expected: expected)
+            let data = try await Self.detail(reference: reference, transport: ServerTrust.session(configuration: configuration), expected: expected)
             try requireCurrent()
             let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
             let detail = try decoder.decode(SharedLibraryDetail.self, from: data); try detail.validate(expected: reference)
@@ -297,6 +315,15 @@ struct SharedDecisionClient {
 private struct SharedDecisionHTTPResponse { let data: Data; let status: Int }
 
 private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegate {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let decision = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(decision.0, decision.1)
+    }
+
     private let request: URLRequest
     private let receiptExchange: ReadAfterHTTP.Exchange
     private let configuration: URLSessionConfiguration

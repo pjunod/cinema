@@ -18,7 +18,7 @@ type PauseMap = std::collections::HashMap<(String, &'static str), Arc<Preparatio
 static PAUSES: std::sync::OnceLock<std::sync::Mutex<PauseMap>> = std::sync::OnceLock::new();
 
 impl TranscodeManager {
-    pub(super) async fn processed_preparation_test_boundary(session: &str, boundary: &'static str) {
+    pub(crate) async fn processed_preparation_test_boundary(session: &str, boundary: &'static str) {
         let pause = PAUSES
             .get_or_init(Default::default)
             .lock()
@@ -781,6 +781,83 @@ async fn fixture_with_audio(
     destination: DvDestination,
     audio: Option<(Option<i64>, i64)>,
 ) -> Fixture {
+    fixture_with_encoder(destination, audio, Encoder::Software, None).await
+}
+
+#[tokio::test]
+async fn processed_cache_args_match_the_destination_window_encoder() {
+    use plurx_core::transcode::{Pacing, TranscodeExecution, VaapiHdrPolicy};
+
+    let policy = Some(VaapiHdrPolicy::MesaRadeonsiVbaq);
+    for (destination, encoder, vaapi_policy, compression, transfer) in [
+        (
+            DvDestination::Hdr10,
+            Encoder::Vaapi,
+            policy,
+            Some("19"),
+            "smpte2084",
+        ),
+        (
+            DvDestination::Profile81,
+            Encoder::Vaapi,
+            policy,
+            Some("0"),
+            "smpte2084",
+        ),
+        (
+            DvDestination::Sdr,
+            Encoder::Vaapi,
+            policy,
+            Some("19"),
+            "bt709",
+        ),
+        (
+            DvDestination::Profile81,
+            Encoder::Software,
+            None,
+            None,
+            "smpte2084",
+        ),
+    ] {
+        let f = fixture_with_encoder(destination, None, encoder, vaapi_policy).await;
+        let encoding = &f.encoding;
+        let file = encoding
+            .store
+            .get_file(f.remote.request.file_id)
+            .await
+            .expect("read bound source")
+            .expect("bound source");
+        let runtime = encoding
+            .dv_runtime
+            .as_ref()
+            .expect("admitted processed recipe");
+        let mut options = encoding.options.clone();
+        options.start_seconds = 0.0;
+        let execution = TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), ".")
+            .expect("window execution");
+        let end = file.duration_ms.expect("source duration") as f64 / 1000.0;
+        let window = runtime
+            .window_encoder_args(&file, &encoding.plan, &execution, encoding.grid, end)
+            .expect("actual encoder arguments");
+        let planned = encoding.args(&file, 0.0, end);
+        assert_eq!(planned, window, "{destination:?} {encoder:?}");
+        let flag = |name: &str| {
+            planned
+                .windows(2)
+                .find(|pair| pair[0] == name)
+                .map(|pair| pair[1].as_str())
+        };
+        assert_eq!(flag("-compression_level"), compression);
+        assert_eq!(flag("-color_trc"), Some(transfer));
+    }
+}
+
+async fn fixture_with_encoder(
+    destination: DvDestination,
+    audio: Option<(Option<i64>, i64)>,
+    encoder: Encoder,
+    vaapi_hdr_policy: Option<plurx_core::transcode::VaapiHdrPolicy>,
+) -> Fixture {
     use std::os::unix::fs::MetadataExt;
     let root = crate::test_tempdir().expect("processed lifecycle");
     let store: Arc<dyn Store> =
@@ -1006,8 +1083,19 @@ async fn fixture_with_audio(
             root.path().join("cache"),
             crate::ffmpeg::ffmpeg_build().await,
             "node".into(),
-        ),
+        )
+        .with_source_identity("node".into(), uuid::Uuid::new_v4()),
     );
+    manager.test_hooks();
+    let backend = DvBackendIdentity::new(
+        digest(b"lifecycle renderer"),
+        digest(b"lifecycle libraries"),
+        digest(b"lifecycle parser"),
+        digest(b"lifecycle graph"),
+        1,
+        digest(b"lifecycle environment"),
+    )
+    .expect("backend control");
     if destination == DvDestination::Sdr {
         store
             .put_setting(keys::DV_DISPLAY_TARGET, "1")
@@ -1018,10 +1106,152 @@ async fn fixture_with_audio(
             .await
             .expect("file")
             .expect("source");
-        let title_stats =
-            crate::source_probe::publish_title_for_control(&manager, &store, &source_file)
-                .await
-                .expect("real fenced title job publication");
+        // This lifecycle control never qualifies the installed scanner. Its
+        // scoped executable emits the aggregate for the three known control
+        // RPUs, while the real admitted title job proves source/claim/publish
+        // custody. Physical scanner coverage stays in the ignored bundle test.
+        use dolby_vision::rpu::extension_metadata::blocks::ExtMetadataBlock;
+        use plurx_core::scan::dv_title::{
+            DvTitleStats, MasteringLuminance, MasteringPrimaries, TitleConstant, SCHEMA,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let summarize = |raw: &[u8]| {
+            let rpu = dolby_vision::rpu::dovi_rpu::DoviRpu::parse_unspec62_nalu(raw)
+                .expect("known control RPU");
+            assert!(
+                !rpu.header.use_prev_vdr_rpu_flag,
+                "each source RPU is fresh"
+            );
+            let dm = rpu.vdr_dm_data.as_ref().expect("fresh control metadata");
+            let Some(ExtMetadataBlock::Level1(l1)) = dm.get_block(1) else {
+                panic!("control RPU needs L1");
+            };
+            assert!(l1.min_pq <= l1.avg_pq && l1.avg_pq <= l1.max_pq && l1.max_pq <= 4095);
+            DvTitleStats {
+                schema: SCHEMA,
+                complete: true,
+                decoded_frames: 1,
+                valid_l1_frames: 1,
+                missing_l1_frames: 0,
+                invalid_l1_frames: 0,
+                max_l1_pq: Some(l1.max_pq),
+                mastering_luminance: match dm.get_block(6) {
+                    Some(ExtMetadataBlock::Level6(l6)) => {
+                        TitleConstant::Consistent(MasteringLuminance {
+                            min_1e4_nits: u32::from(l6.min_display_mastering_luminance),
+                            max_nits: u32::from(l6.max_display_mastering_luminance),
+                        })
+                    }
+                    _ => TitleConstant::Unknown,
+                },
+                mastering_primaries: match dm.get_block(9) {
+                    Some(ExtMetadataBlock::Level9(l9)) => {
+                        TitleConstant::Consistent(MasteringPrimaries {
+                            index: l9.source_primary_index,
+                            custom_xy: (l9.source_primary_index == 255).then_some([
+                                l9.source_primary_red_x,
+                                l9.source_primary_red_y,
+                                l9.source_primary_green_x,
+                                l9.source_primary_green_y,
+                                l9.source_primary_blue_x,
+                                l9.source_primary_blue_y,
+                                l9.source_primary_white_x,
+                                l9.source_primary_white_y,
+                            ]),
+                        })
+                    }
+                    _ => TitleConstant::Unknown,
+                },
+            }
+        };
+        let raw_rpus = vec![
+            include_bytes!("../../../../plurx-core/tests/fixtures/dv-runtime/frame-000.nal")
+                .to_vec(),
+            include_bytes!("../../../../plurx-core/tests/fixtures/dv-runtime/frame-001.nal")
+                .to_vec(),
+            include_bytes!("../../../../plurx-core/tests/fixtures/dv-runtime/frame-002.nal")
+                .to_vec(),
+        ];
+        // The existing packet validator ties every bundled source RPU to
+        // the actual authored pictures before remuxing their clock above.
+        dv_validate_encoded_window(
+            include_bytes!("../../../../plurx-core/tests/fixtures/dv-runtime/authored.mp4"),
+            (64, 64),
+            24000,
+            48048,
+            1001,
+            &raw_rpus,
+            DvDestination::Profile81,
+        )
+        .expect("all three authored pictures carry these source RPUs");
+        assert_eq!(raw_rpus.len(), keys.len());
+        let frames: Vec<_> = raw_rpus.iter().map(|raw| summarize(raw)).collect();
+        let mut stats = frames[0];
+        stats.decoded_frames = frames.len() as u64;
+        stats.valid_l1_frames = frames.len() as u64;
+        stats.max_l1_pq = frames.iter().filter_map(|frame| frame.max_l1_pq).max();
+        for frame in &frames {
+            assert_eq!(
+                frame.mastering_luminance, stats.mastering_luminance,
+                "all authored L6 declarations must agree for this consistent aggregate"
+            );
+            assert_eq!(
+                frame.mastering_primaries, stats.mastering_primaries,
+                "all authored L9 declarations must agree for this consistent aggregate"
+            );
+        }
+        let scanner = root.path().join("controlled-title-scanner");
+        std::fs::write(
+            &scanner,
+            format!(
+                r#"#!/bin/sh
+set -eu
+test "$2" = 0
+case "$1" in http://127.0.0.1:*) ;; *) exit 1 ;; esac
+observed="$(python3 - "$1" <<'PYTHON'
+import hashlib, sys, urllib.request
+try:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
+    digest, count = hashlib.sha256(), 0
+    with opener.open(sys.argv[1]) as source:
+        while True:
+            chunk = source.read(65536)
+            if not chunk:
+                break
+            count += len(chunk)
+            digest.update(chunk)
+    print(count, digest.hexdigest())
+except Exception:
+    raise SystemExit("owned source capability read failed")
+PYTHON
+)"
+test "$observed" = '{} {}'
+printf '%s\n' '{}'
+"#,
+                source_file.size,
+                hex::encode(Sha256::digest(
+                    std::fs::read(&path).expect("held fixture bytes")
+                )),
+                serde_json::to_string(&stats).expect("controlled aggregate")
+            ),
+        )
+        .expect("scoped scanner");
+        std::fs::set_permissions(&scanner, std::fs::Permissions::from_mode(0o700))
+            .expect("executable control");
+        let tools = crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture_with_scanner(
+            backend.clone(),
+            scanner,
+        )
+        .expect("artifact-hashed controlled scanner");
+        let title_stats = crate::source_probe::publish_title_with_tools_for_control(
+            &manager,
+            &store,
+            &source_file,
+            Arc::new(tools),
+        )
+        .await
+        .expect("real fenced job with controlled scanner outcome");
+        assert_eq!(title_stats, stats);
         assert_eq!(
             title_stats.eligibility(),
             plurx_core::scan::dv_title::TitleEligibility::Eligible
@@ -1250,15 +1480,6 @@ async fn fixture_with_audio(
             .await
             .expect("held source"),
     );
-    let backend = DvBackendIdentity::new(
-        digest(b"lifecycle renderer"),
-        digest(b"lifecycle libraries"),
-        digest(b"lifecycle parser"),
-        digest(b"lifecycle graph"),
-        1,
-        digest(b"lifecycle environment"),
-    )
-    .expect("backend control");
     let source_facts = DvSourceFacts::new(
         file.dolby_vision,
         0,
@@ -1338,8 +1559,10 @@ async fn fixture_with_audio(
         preferences,
         destination,
         mode: DvProcessingMode::Fel,
-        encoder: Encoder::Software,
-        vaapi_hdr_policy: None,
+        decode: crate::dv_segment::RendererDecode::Software,
+        reconstruction_slot: None,
+        encoder,
+        vaapi_hdr_policy,
         runtime_cache: root.path().join("runtime"),
         shader_cache: Arc::new(crate::test_tempdir().expect("shader cache")),
         prepared: std::sync::Mutex::new(None),
@@ -1430,6 +1653,7 @@ async fn fixture_with_audio(
     let incarnation = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
     let request = SessionRequest {
+        source_telemetry: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: Some(Box::new(context)),
@@ -1709,17 +1933,19 @@ async fn staged_processed_second_successor_survives_normal_commit_and_parent_ret
                 .vod
                 .dv_effective_report(&session, &incarnation)
                 .await;
+            let report = report.expect("actual-owner-bound control publication");
+            assert!(report.fel_contributed());
+            let wire = serde_json::to_value(&report).expect("public processing report");
+            assert_eq!(wire["generation"].as_str(), Some(incarnation.as_str()));
             if destination == DvDestination::Hdr10 {
-                let report = report.expect("actual-owner-bound control publication");
-                assert!(report.fel_contributed());
-                let wire = serde_json::to_value(&report).expect("public processing report");
                 assert_eq!(wire["hdr10_enhanced"], serde_json::json!(true));
-                assert_eq!(wire["generation"].as_str(), Some(incarnation.as_str()));
+                assert!(wire.get("profile81_reconstructed").is_none());
             } else {
-                assert!(
-                    report.is_none(),
-                    "P81 reports its actual DV carrier, never HDR10-E"
-                );
+                // P81 reports its actual DV carrier, never HDR10-E: the
+                // served window's receipt says the FEL was composed.
+                assert_eq!(wire["hdr10_enhanced"], serde_json::json!(false));
+                assert_eq!(wire["profile81_reconstructed"], serde_json::json!(true));
+                assert!(report.profile81_reconstructed());
             }
             let (_, root) = f
                 .manager
@@ -1981,5 +2207,74 @@ async fn assert_admitted_delivery(f: &Fixture, session: &str, destination: DvDes
         assert_eq!(recovered.processed_dv_profile, None);
     } else {
         assert!(master.contains("VIDEO-RANGE=PQ"), "{master}");
+    }
+}
+
+async fn prepare_without_admitted_epoch(f: &Fixture, session: &str, json: &str) -> bool {
+    f.manager
+        .vod_prepare_first_before(
+            json,
+            session,
+            f.user_id,
+            PreparedVodOwner {
+                node_id: "node".into(),
+                source_authority: None,
+            },
+            f.manager.session_adoption_token(session).expect("adoption"),
+            None,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+}
+
+/// D1: the processed upgrade's successor. Its predecessor is the ordinary
+/// session, which has no processed root to lend, so the successor's first
+/// preparation consumes the exact root the post-first-frame trial verified and
+/// held for that successor's incarnation — once — and serves the admitted
+/// processed delivery from it. Without a held root (the old path) the same
+/// staged processed successor cannot prime at all.
+#[tokio::test]
+async fn a_processed_upgrade_successor_primes_from_the_root_its_trial_held() {
+    for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
+        let f = fixture(destination).await;
+        // No admitted predecessor epoch: the processed-predecessor seed is
+        // unavailable, exactly as for an ordinary predecessor.
+        let (incarnation, session, json) = stage(&f).await;
+        assert!(
+            !prepare_without_admitted_epoch(&f, &session, &json).await,
+            "a processed successor with neither a processed parent nor a held root cannot prime"
+        );
+        let (_, root) = f
+            .manager
+            .vod
+            .capture_staged_processed_root(
+                &SessionRequest {
+                    request_id: Some(incarnation.clone()),
+                    ..f.remote.request.clone()
+                },
+                &expectation(&f, &incarnation, &session),
+                &principal_supersession_scope(&f.remote.principal),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("the trial's verified root");
+        let context = f
+            .remote
+            .request
+            .candidate_context
+            .as_deref()
+            .cloned()
+            .expect("processed context");
+        let _lease = f
+            .manager
+            .hold_processed_upgrade_root(&incarnation, context, root);
+        assert!(prepare_without_admitted_epoch(&f, &session, &json).await);
+        assert!(
+            f.manager
+                .take_processed_upgrade_root(&incarnation)
+                .is_none(),
+            "the successor's first preparation consumed the held root"
+        );
+        assert_admitted_delivery(&f, &session, destination).await;
     }
 }

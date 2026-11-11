@@ -2264,6 +2264,7 @@ fn test_local_status(node_id: &str, raft_id: Option<u64>) -> ClusterNodeOperatio
         build: "test".to_owned(),
         protocol_min: 1,
         protocol_max: 1,
+        media_protocol: Some(crate::media_pool::PROTOCOL_VERSION),
         process: ProcessStatus { live: true },
         serving: ReadinessEvaluation {
             ready: true,
@@ -2307,6 +2308,7 @@ fn test_local_status(node_id: &str, raft_id: Option<u64>) -> ClusterNodeOperatio
         },
         snapshot: SnapshotStatus::from(None),
         transport: None,
+        workers: None,
         media: MediaDrainStatus {
             local_active_sessions: 0,
             drained: true,
@@ -2390,6 +2392,7 @@ fn test_observations(membership: &MembershipStatus) -> Vec<ClusterNodeObservatio
                 error_class: None,
                 status: Some(status),
                 transport: None,
+                placement: None,
             }
         })
         .collect()
@@ -2408,4 +2411,268 @@ fn test_replication_status() -> plurx_core::cluster::migration::status::Replicat
         "explanation": "test"
     }))
     .expect("test replication status")
+}
+
+fn placement_test_snapshot(node_id: &str) -> crate::media_pool::MediaNodeSnapshot {
+    use crate::media_pool::{EncoderOfferCapability, MediaIoObservation, MediaNodeSnapshot};
+    MediaNodeSnapshot {
+        retained_output_receipts: false,
+        prepared_output_capture: false,
+        node_id: node_id.to_owned(),
+        observed_at_unix_ms: unix_ms() as i64,
+        build: "new-build".to_owned(),
+        protocol_version: crate::media_pool::PROTOCOL_VERSION,
+        encoders: vec![EncoderOfferCapability {
+            family: "software".to_owned(),
+            max_target_height: 1080,
+            decoders: vec!["h264".to_owned()],
+        }],
+        tone_map: Vec::new(),
+        hardware_slots_used: 0,
+        hardware_slots_max: 0,
+        software_threads_used: 0,
+        software_threads_max: 4,
+        scratch_bytes_free: 1_000,
+        scratch_pressure: crate::media_pool::PressureBand::Idle,
+        source_io_pressure: crate::media_pool::PressureBand::Idle,
+        egress_pressure: crate::media_pool::PressureBand::Idle,
+        live_waiting: false,
+        background_active: false,
+        io: MediaIoObservation::default(),
+        live_tv_processing: false,
+        live_tv_resource_processing: false,
+    }
+}
+
+/// A two-build fleet mid-upgrade: the panel shows, per node, build, media
+/// protocol and whether this ingress would place on it — independently, so
+/// a protocol-skewed peer reads as `protocol_mismatch:<n>` rather than as a
+/// node that merely made no offer.
+#[test]
+fn placement_view_names_each_node_and_why_it_cannot_own() {
+    let membership = test_membership("node-1", 4);
+    let mut nodes = test_observations(&membership);
+    nodes[2]
+        .status
+        .as_mut()
+        .expect("placement fixture")
+        .media_protocol = Some(crate::media_pool::PROTOCOL_VERSION - 1);
+    nodes[2].status.as_mut().expect("placement fixture").build = "old-build".to_owned();
+    // An old peer predates the field entirely.
+    let old: ClusterNodeOperationsStatus = {
+        let mut value = serde_json::to_value(nodes[3].status.as_ref().expect("placement fixture"))
+            .expect("placement fixture");
+        value
+            .as_object_mut()
+            .expect("placement fixture")
+            .remove("media_protocol");
+        serde_json::from_value(value).expect("a status without media_protocol still parses")
+    };
+    assert_eq!(old.media_protocol, None);
+    nodes[3].status = Some(old);
+    let verdict = rollout_verdict(&membership, &nodes);
+    let mut aggregate = ClusterOperationsAggregate {
+        schema_version: 1,
+        observed_at_unix_ms: unix_ms(),
+        membership,
+        nodes,
+        verdict,
+        maintenance: Vec::new(),
+    };
+    let mut peers = BTreeMap::new();
+    peers.insert("node-2".to_owned(), None);
+    annotate_placement(
+        &mut aggregate,
+        "node-1",
+        &placement_test_snapshot("node-1"),
+        &peers,
+    );
+    let views: Vec<_> = aggregate
+        .nodes
+        .iter()
+        .map(|node| node.placement.clone().expect("every node is annotated"))
+        .collect();
+    assert!(views[0].eligible_owner && views[0].reason.is_none());
+    assert!(views[1].eligible_owner);
+    assert_eq!(
+        views[2].reason.as_deref(),
+        Some(
+            format!(
+                "protocol_mismatch:{}",
+                crate::media_pool::PROTOCOL_VERSION - 1
+            )
+            .as_str()
+        )
+    );
+    assert!(!views[2].eligible_owner);
+    assert_eq!(views[3].reason.as_deref(), Some("protocol_unreported"));
+
+    let json = serde_json::to_value(&aggregate).expect("placement fixture");
+    assert_eq!(json["nodes"][0]["placement"]["eligible_owner"], true);
+    assert_eq!(
+        json["nodes"][0]["status"]["media_protocol"],
+        crate::media_pool::PROTOCOL_VERSION
+    );
+}
+
+#[test]
+fn local_placement_view_reports_an_unavailable_egress() {
+    let membership = test_membership("node-1", 1);
+    let nodes = test_observations(&membership);
+    let verdict = rollout_verdict(&membership, &nodes);
+    let mut aggregate = ClusterOperationsAggregate {
+        schema_version: 1,
+        observed_at_unix_ms: unix_ms(),
+        membership,
+        nodes,
+        verdict,
+        maintenance: Vec::new(),
+    };
+    let mut local = placement_test_snapshot("node-1");
+    local.egress_pressure = crate::media_pool::PressureBand::Unavailable;
+    annotate_placement(&mut aggregate, "node-1", &local, &BTreeMap::new());
+    let view = aggregate.nodes[0]
+        .placement
+        .clone()
+        .expect("placement fixture");
+    assert!(!view.eligible_owner);
+    assert_eq!(view.reason.as_deref(), Some("egress_unavailable"));
+}
+
+fn learner_worker_sample() -> super::super::internal_activity::ActivityWorkers {
+    serde_json::from_value(serde_json::json!({
+        "observed_at_ms": unix_ms() as i64, "heavy_limit": 1, "heavy_in_use": 1,
+        "heavy_available": 0, "accepting_work": true, "hardware_used": 1,
+        "hardware_limit": 3, "software_used": 2, "software_limit": 8,
+        "children": [], "child_count": 0
+    }))
+    .expect("worker sample")
+}
+
+#[tokio::test(start_paused = true)]
+async fn learner_workers_require_fresh_answered_bounded_identity() {
+    let cache = PeerStatusCache::default();
+    let mut status = test_local_status("learner-3", Some(4));
+    status.workers = Some(Box::new(learner_worker_sample()));
+    let good = PeerStatusOutcome {
+        node_id: "learner-3".into(),
+        state: ObservationState::Answered,
+        status: Some(status),
+        transport: None,
+    };
+    cache
+        .store(&BTreeMap::from([("learner-3".into(), good.clone())]))
+        .await;
+    let observations = cache.worker_observations().await;
+    assert_eq!(observations["learner-3"].software_used, 2);
+    tokio::time::advance(PEER_STATUS_CACHE_TTL).await;
+    assert!(
+        cache.worker_observations().await.is_empty(),
+        "expired capacity stays unknown"
+    );
+    for corruption in 0..5 {
+        let mut bad = good.clone();
+        match corruption {
+            0 => bad.state = ObservationState::Refused,
+            1 => bad.node_id = "other".into(),
+            2 => {
+                bad.status
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .node_id = "other".into()
+            }
+            3 => {
+                let w = bad
+                    .status
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .workers
+                    .as_mut()
+                    .expect("seeded worker test value");
+                w.children = vec!["child".into(); 33];
+                w.child_count = 33;
+            }
+            _ => {
+                bad.status
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .workers
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .analysis_engine = Some("invalid".into())
+            }
+        }
+        cache
+            .store(&BTreeMap::from([("learner-3".into(), bad)]))
+            .await;
+        assert!(
+            cache.worker_observations().await.is_empty(),
+            "invalid sample {corruption}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn learner_workers_reach_activity_without_voter_activity() {
+    let (_, state) = crate::http::tests::test_app_with_state();
+    let admin = state
+        .store
+        .create_user("worker-admin", "hash", true)
+        .await
+        .expect("admin");
+    let mut status = test_local_status("learner-3", Some(4));
+    status.workers = Some(Box::new(learner_worker_sample()));
+    state
+        .peer_status_cache
+        .store(&BTreeMap::from([(
+            "learner-3".into(),
+            PeerStatusOutcome {
+                node_id: "learner-3".into(),
+                state: ObservationState::Answered,
+                status: Some(status),
+                transport: None,
+            },
+        )]))
+        .await;
+    let axum::Json(reply) = crate::http::system::activity_detail(
+        crate::http::extract::AuthUser(admin),
+        axum::extract::State(state),
+    )
+    .await
+    .expect("activity");
+    assert_eq!(reply["workers"]["learner-3"]["software_used"], 2);
+    assert_eq!(reply["workers"]["learner-3"]["hardware_used"], 1);
+    assert!(reply["worker_observed_nodes"]
+        .as_array()
+        .expect("seeded worker test value")
+        .contains(&serde_json::json!("learner-3")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_operations_reads_cached_worker_capacity_and_never_refreshes_it() {
+    let (_, state) = crate::http::tests::test_app_with_state();
+    let mut sample = learner_worker_sample();
+    sample.children = vec!["private process purpose".into()];
+    sample.child_count = 1;
+    sample.analysis_engine = Some("a".repeat(64));
+    state.peer_status_cache.store_local_workers(sample);
+    state
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "1")
+        .await
+        .expect("setting");
+    let status = local_snapshot(&state).await;
+    let workers = status.workers.expect("cached sample");
+    assert_eq!(
+        workers.software_limit, 8,
+        "handler must not recompute settings"
+    );
+    assert!(workers.children.is_empty());
+    assert!(workers.analysis_engine.is_none());
+    assert_eq!(workers.child_count, 1);
+    tokio::time::advance(PEER_STATUS_CACHE_TTL).await;
+    assert!(
+        local_snapshot(&state).await.workers.is_none(),
+        "stale sample is absent, not idle"
+    );
 }

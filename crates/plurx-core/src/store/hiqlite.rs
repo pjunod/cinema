@@ -5,6 +5,8 @@
 //! [`Store`](super::Store) until M2 imports existing state and activates this
 //! backend; backend completeness alone is not permission to skip that gate.
 
+mod dispatch_turns;
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
@@ -2044,10 +2046,15 @@ impl HiqliteAuthStore {
         }
         store.install_remote_schema(None).await?;
         store.install_invitation_schema(None).await?;
+        store.install_source_arbitration_schema(None).await?;
         store.install_subtitle_managed_schema(None).await?;
         store.install_subtitle_translation_schema(None).await?;
+        store.install_subtitle_text_translation_schema(None).await?;
+        store.install_shared_caption_schema(None).await?;
         store.install_library_annotations_schema(None).await?;
         store.install_dv_title_jobs_schema(None).await?;
+        store.install_playback_handoffs_schema(None).await?;
+        store.install_dispatch_turns(None).await?;
         Ok(store)
     }
 
@@ -2231,10 +2238,16 @@ impl HiqliteAuthStore {
                 SchemaMigrationAction::Current => {
                     self.install_remote_schema(admission).await?;
                     self.install_invitation_schema(admission).await?;
+                    self.install_source_arbitration_schema(admission).await?;
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
+                    self.install_subtitle_text_translation_schema(admission)
+                        .await?;
+                    self.install_shared_caption_schema(admission).await?;
                     self.install_library_annotations_schema(admission).await?;
-                    return self.install_dv_title_jobs_schema(admission).await;
+                    self.install_dv_title_jobs_schema(admission).await?;
+                    self.install_playback_handoffs_schema(admission).await?;
+                    return self.install_dispatch_turns(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -3939,6 +3952,69 @@ impl HiqliteAuthStore {
         ))
     }
 
+    async fn source_arbitration_shape(&self) -> Result<Option<bool>, StoreError> {
+        let expected = super::background_jobs_resources::source_arbitration_objects()?;
+        let names = expected
+            .iter()
+            .map(|(name, _)| format!("'{}'", name.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        // authority: all canonical source-owner objects must match the committed extension, not just its singleton marker.
+        let installed=self.client().query_consistent_map::<RemoteShapeRow,_>(format!("SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names}) ORDER BY name"),params!()).await?;
+        if installed.is_empty() {
+            return Ok(None);
+        }
+        if installed.len() != expected.len()
+            || installed
+                .iter()
+                .zip(&expected)
+                .any(|(row, (name, sql))| row.name != *name || row.sql != *sql)
+        {
+            return Err(StoreError::Migration(
+                "foreground source arbitration extension has incompatible shape".into(),
+            ));
+        }
+        // authority: reader admission requires the committed source-arbitration singleton.
+        let marker=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1",params!()).await?;
+        Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
+    }
+    async fn install_source_arbitration_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        match self.source_arbitration_shape().await? {
+            Some(true) => return Ok(()),
+            Some(false) => {
+                return Err(StoreError::Migration(
+                    "foreground source arbitration marker missing".into(),
+                ))
+            }
+            None => {}
+        }
+        let expected = super::background_jobs_resources::source_arbitration_objects()?;
+        let names = expected
+            .iter()
+            .map(|(name, _)| format!("'{}'", name.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statements=vec![(format!("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ({names})) THEN 1 ELSE json('source arbitration extension raced') END"),params!())];
+        statements.extend(
+            super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA
+                .split("-- next statement\n")
+                .filter(|sql| !sql.trim().is_empty())
+                .map(|sql| (sql.to_owned(), params!())),
+        );
+        admit_schema_migration(admission)?;
+        let attempt = self.schema_migration_transaction(statements).await;
+        if self.source_arbitration_shape().await? == Some(true) {
+            return Ok(());
+        }
+        attempt?;
+        Err(StoreError::Migration(
+            "foreground source arbitration extension did not settle".into(),
+        ))
+    }
+
     async fn subtitle_managed_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
@@ -3953,13 +4029,13 @@ impl HiqliteAuthStore {
             .map(|r| (r.name, r.sql))
             .collect::<Vec<_>>();
         let version = super::subtitle_managed_schema::version(&shape)?;
-        if version == Some(1) {
+        if let Some(version) = version {
             let rows = self
                 .client()
                 // authority: the installed marker must agree with the current replicated shape.
                 .query_consistent_map::<CountRow, _>(
-                    "SELECT count(*) AS count FROM subtitle_managed_schema WHERE singleton=1 AND version=1",
-                    params!(),
+                    "SELECT count(*) AS count FROM subtitle_managed_schema WHERE singleton=1 AND version=$1",
+                    params!(version),
                 )
                 .await?;
             if !matches!(rows.as_slice(),[row] if row.count==1) {
@@ -3975,21 +4051,86 @@ impl HiqliteAuthStore {
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
-        if self.subtitle_managed_schema_version().await? == Some(1) {
+        let version = self.subtitle_managed_schema_version().await?;
+        if version == Some(4) {
             return Ok(());
         }
-        let statements = super::subtitle_managed_schema::statements()
-            .into_iter()
-            .map(|sql| (sql, params!()))
-            .collect::<Vec<_>>();
-        admit_schema_migration(admission)?;
-        let result = self.schema_migration_transaction(statements).await;
+        if version.is_none() {
+            let statements = super::subtitle_managed_schema::statements()
+                .into_iter()
+                .map(|sql| (sql, params!()))
+                .collect::<Vec<_>>();
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await?.is_none() {
+                result?;
+                return Err(StoreError::Migration(
+                    "managed subtitle schema install did not settle".into(),
+                ));
+            }
+        }
         if self.subtitle_managed_schema_version().await? == Some(1) {
+            let mut statements = vec![(
+                super::subtitle_managed_schema::RESOURCE_GUARD.to_owned(),
+                params!(super::subtitle_managed_schema::resource_predecessor_view()),
+            )];
+            statements.extend(
+                super::subtitle_managed_schema::resource_statements()
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await? == Some(1) {
+                result?;
+                return Err(StoreError::Migration(
+                    "managed resource schema upgrade did not settle".into(),
+                ));
+            }
+        }
+        if self.subtitle_managed_schema_version().await? == Some(2) {
+            let mut statements = vec![(
+                super::subtitle_managed_schema::ARTIFACT_GUARD.to_owned(),
+                params!(super::subtitle_managed_schema::artifact_predecessor_view()),
+            )];
+            statements.extend(
+                super::subtitle_managed_schema::artifact_statements()
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await? == Some(2) {
+                result?;
+                return Err(StoreError::Migration(
+                    "managed artifact schema upgrade did not settle".into(),
+                ));
+            }
+        }
+        if self.subtitle_managed_schema_version().await? == Some(3) {
+            let mut statements = vec![(
+                super::subtitle_managed_schema::PREPARED_GUARD.to_owned(),
+                params!(super::subtitle_managed_schema::prepared_predecessor_view()),
+            )];
+            statements.extend(
+                super::subtitle_managed_schema::prepared_statements()
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await? != Some(4) {
+                result?;
+                return Err(StoreError::Migration(
+                    "managed prepared-artifact schema upgrade did not settle".into(),
+                ));
+            }
+        }
+        if self.subtitle_managed_schema_version().await? == Some(4) {
             return Ok(());
         }
-        result?;
         Err(StoreError::Migration(
-            "managed subtitle schema install did not settle".into(),
+            "managed resource schema upgrade did not settle".into(),
         ))
     }
 
@@ -4007,7 +4148,7 @@ impl HiqliteAuthStore {
             .map(|r| (r.name, r.sql))
             .collect::<Vec<_>>();
         let version = super::subtitle_translation_schema::version(&shape)?;
-        if version == Some(1) {
+        if version.is_some() {
             // authority: admission must observe the committed singleton marker paired with the extension shape.
             let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM subtitle_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
             if !matches!(rows.as_slice(),[row] if row.count==1) {
@@ -4023,21 +4164,125 @@ impl HiqliteAuthStore {
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
-        if self.subtitle_translation_schema_version().await? == Some(1) {
+        let current = self.subtitle_translation_schema_version().await?;
+        if current == Some(2) {
             return Ok(());
         }
-        let statements = super::subtitle_translation_schema::statements()
-            .into_iter()
-            .map(|sql| (sql, params!()))
-            .collect::<Vec<_>>();
+        let statements = match current {
+            Some(0) => super::subtitle_translation_schema::retarget_statements()
+                .into_iter()
+                .chain(super::subtitle_translation_schema::continuity_statements())
+                .collect(),
+            Some(1) => super::subtitle_translation_schema::continuity_statements(),
+            _ => super::subtitle_translation_schema::statements(),
+        }
+        .into_iter()
+        .map(|sql| (sql, params!()))
+        .collect::<Vec<_>>();
         admit_schema_migration(admission)?;
         let result = self.schema_migration_transaction(statements).await;
-        if self.subtitle_translation_schema_version().await? == Some(1) {
+        if self.subtitle_translation_schema_version().await? == Some(2) {
             return Ok(());
         }
         result?;
         Err(StoreError::Migration(
             "progressive translation subtitle schema install did not settle".into(),
+        ))
+    }
+
+    async fn subtitle_text_translation_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed translation shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::subtitle_text_translation_schema::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::subtitle_text_translation_schema::version(&shape)?;
+        if version == Some(1) {
+            // authority: admission must observe the committed singleton marker paired with the extension shape.
+            let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM subtitle_text_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
+            if !matches!(rows.as_slice(),[row] if row.count==1) {
+                return Err(StoreError::Migration(
+                    "text translation subtitle schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+    async fn install_subtitle_text_translation_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.subtitle_text_translation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::subtitle_text_translation_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.subtitle_text_translation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "text translation subtitle schema install did not settle".into(),
+        ))
+    }
+
+    async fn shared_caption_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed translation shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::shared_caption_schema::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::shared_caption_schema::version(&shape)?;
+        if version == Some(1) {
+            // authority: admission must observe the committed singleton marker paired with the extension shape.
+            let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM shared_caption_schema WHERE singleton=1 AND version=1",params!()).await?;
+            if !matches!(rows.as_slice(),[row] if row.count==1) {
+                return Err(StoreError::Migration(
+                    "Shared caption read schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+    async fn install_shared_caption_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.shared_caption_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::shared_caption_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.shared_caption_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "Shared caption read schema install did not settle".into(),
         ))
     }
 
@@ -4091,6 +4336,61 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "title jobs schema install did not settle".into(),
+        ))
+    }
+
+    async fn playback_handoffs_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed handoff shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::playback_handoffs::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::playback_handoffs::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    super::playback_handoffs::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "playback handoff schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    async fn install_playback_handoffs_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.playback_handoffs_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::playback_handoffs::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.playback_handoffs_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "playback handoff schema install did not settle".into(),
         ))
     }
 
@@ -5632,15 +5932,18 @@ impl NetworkPriorStore for HiqliteAuthStore {
 
 #[async_trait]
 impl MetricsStore for HiqliteAuthStore {
-    async fn prometheus_store_snapshot(
+    async fn prometheus_store_snapshot_with(
         &self,
         node_id: &str,
         now: i64,
+        live_fragment_engines: Option<&super::LiveAnalysisEngines>,
     ) -> Result<PrometheusStoreSnapshot, StoreError> {
+        let live = super::live_engines_param(live_fragment_engines);
+        let request_health = super::analysis_request_health_sql("$2", "$3");
         let row = self
             .client()
             .query_consistent_map::<PrometheusStoreRow, _>(
-                "SELECT \
+                String::from("SELECT \
                     (SELECT COUNT(*) FROM libraries) AS libraries, \
                     (SELECT COUNT(*) FROM users) AS users, \
                     COALESCE(SUM(state = 'queued'), 0) AS queued, \
@@ -5681,7 +5984,7 @@ impl MetricsStore for HiqliteAuthStore {
                        FROM (SELECT component, \
                               CASE \
                                 WHEN last_error_code = 'source_superseded' THEN 'stale' \
-                                WHEN state = 'queued' AND not_before_ms > $2 THEN 'retry_wait' \
+                                WHEN state = 'queued' AND not_before_ms > $2 * 1000 THEN 'retry_wait' \
                                 WHEN state = 'running' THEN 'claimed' \
                                 WHEN state = 'submitted' THEN 'staged' \
                                 WHEN state = 'ready' THEN 'published' \
@@ -5689,8 +5992,8 @@ impl MetricsStore for HiqliteAuthStore {
                                 ELSE state END AS durable_state, \
                               priority, trigger, \
                               COUNT(*) AS depth, \
-                              CASE WHEN $2 > MIN(created_at_ms) \
-                                THEN ($2 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds \
+                              CASE WHEN $2 * 1000 > MIN(created_at_ms) \
+                                THEN ($2 * 1000 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds \
                          FROM ( \
                            SELECT component, state, last_error_code, not_before_ms, \
                                   priority, trigger, created_at_ms \
@@ -5764,9 +6067,11 @@ impl MetricsStore for HiqliteAuthStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000) \
                             + (SELECT COUNT(*) FROM analysis_source_reservations \
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000)), \
-                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json \
-                 FROM offline_packages WHERE node_id = $1",
-                params!(node_id, now),
+                        'source_recovery_pending', (SELECT COUNT(DISTINCT custody_id) FROM source_io_occupancy WHERE custody_id IS NOT NULL AND active_occupancy=1 AND expires_at_ms <= $2 * 1000), \
+                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json, ")
+                    + &request_health
+                    + " FROM offline_packages WHERE node_id = $1",
+                params!(node_id, now, live),
             )
             .await?
             .into_iter()
@@ -6366,6 +6671,15 @@ impl UserStore for HiqliteAuthStore {
         token_hash: &str,
         audience: super::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
+        // A handoff token is never a row in `tokens`; its own table answers.
+        if audience == super::TokenAudience::PlaybackHandoff {
+            return Ok(
+                match self.authenticate_playback_handoff(token_hash).await? {
+                    Some(user) => TokenAuthentication::Authenticated(user),
+                    None => TokenAuthentication::Unknown,
+                },
+            );
+        }
         // The expiry policy rides the same consistent read as the token row:
         // no extra round trip per request, and every voter judges a token
         // against the committed policy rather than a node-local cache.
@@ -6455,8 +6769,16 @@ impl UserStore for HiqliteAuthStore {
         // the user predicate, so it is `$1`.
         let sql = "SELECT substr(token_hash, 1, 8) AS token_hash_prefix, \
                           substr(device, 1, $1) AS device, created_at, last_seen_at \
-                   FROM tokens WHERE user_id = $2 \
-                   ORDER BY created_at, token_hash LIMIT $3";
+                   FROM (SELECT token_hash, device, created_at, last_seen_at \
+                         FROM tokens WHERE user_id = $2 \
+                         UNION ALL \
+                         SELECT h.token_hash, h.device, h.created_at, h.created_at \
+                         FROM playback_handoffs_tokens h \
+                         WHERE h.user_id = $2 AND h.expires_at > $3 \
+                           AND EXISTS (SELECT 1 FROM tokens s \
+                                       WHERE s.token_hash = h.source_token_hash \
+                                         AND s.user_id = h.user_id)) \
+                   ORDER BY created_at, token_hash LIMIT $4";
         validate_sql(sql)?;
         Ok(self
             .client()
@@ -6465,6 +6787,7 @@ impl UserStore for HiqliteAuthStore {
                 params!(
                     MAX_DEVICE_LABEL_BYTES as i64,
                     user_id,
+                    self.now()?,
                     TOKEN_SUMMARY_MAX as i64
                 ),
             )
@@ -7070,6 +7393,11 @@ struct PrometheusStoreRow {
     analysis_running_past_lease: i64,
     analysis_last_ready_at_ms: i64,
     background_jobs_json: String,
+    analysis_waiting: i64,
+    analysis_incompatible: i64,
+    analysis_eligible_requests: i64,
+    analysis_oldest_queued_at_ms: i64,
+    analysis_failed_code_json: String,
 }
 
 impl From<&mut Row<'_>> for PrometheusStoreRow {
@@ -7100,6 +7428,11 @@ impl From<&mut Row<'_>> for PrometheusStoreRow {
             analysis_running_past_lease: row.get("analysis_running_past_lease"),
             analysis_last_ready_at_ms: row.get("analysis_last_ready_at_ms"),
             background_jobs_json: row.get("background_jobs_json"),
+            analysis_waiting: row.get("analysis_waiting"),
+            analysis_incompatible: row.get("analysis_incompatible"),
+            analysis_eligible_requests: row.get("analysis_eligible_requests"),
+            analysis_oldest_queued_at_ms: row.get("analysis_oldest_queued_at_ms"),
+            analysis_failed_code_json: row.get("analysis_failed_code_json"),
         }
     }
 }
@@ -7130,14 +7463,23 @@ impl TryFrom<PrometheusStoreRow> for PrometheusStoreSnapshot {
                 &row.analysis_queue_json,
                 &row.analysis_marker_json,
                 &row.analysis_lifecycle_json,
-                super::AnalysisQueueHealth {
-                    ready_24h: row.analysis_ready_24h,
-                    attempt_limit_24h: row.analysis_attempt_limit_24h,
-                    claimed_24h: row.analysis_claimed_24h,
-                    claimable: row.analysis_claimable,
-                    running_past_lease: row.analysis_running_past_lease,
-                    last_ready_at_ms: row.analysis_last_ready_at_ms,
-                },
+                &row.analysis_failed_code_json,
+                super::AnalysisQueueHealth::with_requests(
+                    [
+                        row.analysis_ready_24h,
+                        row.analysis_attempt_limit_24h,
+                        row.analysis_claimed_24h,
+                        row.analysis_claimable,
+                        row.analysis_running_past_lease,
+                        row.analysis_last_ready_at_ms,
+                    ],
+                    [
+                        row.analysis_waiting,
+                        row.analysis_incompatible,
+                        row.analysis_eligible_requests,
+                        row.analysis_oldest_queued_at_ms,
+                    ],
+                ),
             ),
         })
     }
@@ -7370,7 +7712,7 @@ dump_row!(JobLeaseDumpRow {
     updated_at_ms: i64,
 });
 dump_row!(MediaSessionRequestDumpRow {
-    user_id: i64,
+    user_id: Option<i64>,
     request_id: String,
     request_fingerprint: String,
     playback_id: String,
@@ -7389,7 +7731,7 @@ dump_row!(LibraryChannelSessionRecipeDumpRow {
     created_at_ms: i64,
 });
 dump_row!(MediaPlaybackPointerDumpRow {
-    user_id: i64,
+    user_id: Option<i64>,
     playback_id: String,
     current_incarnation_id: String,
     updated_at_ms: i64,
@@ -7397,7 +7739,7 @@ dump_row!(MediaPlaybackPointerDumpRow {
 dump_row!(MediaSessionDumpRow {
     incarnation_id: String,
     session_id: String,
-    user_id: i64,
+    user_id: Option<i64>,
     playback_id: String,
     request_fingerprint: String,
     owner_node_id: String,
@@ -7416,7 +7758,7 @@ dump_row!(MediaSessionDumpRow {
     updated_at_ms: i64,
 });
 dump_row!(MediaSessionPreparationDumpRow {
-    user_id: i64,
+    user_id: Option<i64>,
     playback_id: String,
     staged_incarnation_id: String,
     expected_predecessor_incarnation_id: String,

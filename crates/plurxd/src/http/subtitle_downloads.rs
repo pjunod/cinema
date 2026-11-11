@@ -338,7 +338,7 @@ pub(crate) async fn search_request(
             item.year.map(|v| v.to_string()).unwrap_or_default()
         )
     };
-    let hash = movie_hash(&file).await;
+    let hash = movie_hash(state, &file).await;
     Ok((
         file,
         Search {
@@ -353,7 +353,7 @@ pub(crate) async fn search_request(
 
 // OpenSubtitles' 64-bit little-endian sum of file size and the first/last
 // 64 KiB. Read only those blocks from the same revision-checked handle.
-async fn movie_hash(file: &MediaFile) -> Option<String> {
+async fn movie_hash(state: &AppState, file: &MediaFile) -> Option<String> {
     let source = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         crate::fragment_index_cluster::open_source_fence(file, None),
@@ -365,10 +365,26 @@ async fn movie_hash(file: &MediaFile) -> Option<String> {
     if size < 128 * 1024 {
         return None;
     }
+    let custody = match state
+        .jobs
+        .foreground_source_request(file, "opensubtitles-bounded-hash")
+    {
+        Some(request) => Some(
+            request
+                .object_version(source.object_version())
+                .register("first-last-64k")
+                .await
+                .ok()?,
+        ),
+        None => None,
+    };
     let mtime = file.mtime;
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || hash_held_source(source.handle, size, mtime)),
+        tokio::task::spawn_blocking(move || {
+            let _custody = custody;
+            hash_held_source(source.handle, size, mtime)
+        }),
     )
     .await
     .ok()?
@@ -482,6 +498,7 @@ async fn save_candidate(
         .await
         .map_err(provider_error)?;
     let track = DownloadedSubtitle {
+        text_translation: None,
         source_size: file.size,
         source_mtime: file.mtime,
         provider_file_id: candidate.file_id,

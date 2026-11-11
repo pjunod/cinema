@@ -10,6 +10,10 @@ mod startup_observer {
 use super::*;
 
 #[cfg(feature = "hiqlite-store")]
+#[path = "membership_api.rs"]
+mod membership_api;
+
+#[cfg(feature = "hiqlite-store")]
 fn portable_snapshot_fixture(root: &Path, cluster_id: &str) -> PathBuf {
     let active = root.join(HIQLITE_ACTIVE_DIRNAME);
     std::fs::create_dir_all(&active).expect("active fixture");
@@ -2692,6 +2696,135 @@ fn admitted_peer_count_ignores_tombstones_and_missing_schema() {
 
     assert_eq!(admitted_peer_count(&active, 1).expect("tombstoned peer"), 0);
     assert_eq!(admitted_peer_count(&active, 2).expect("live peer"), 1);
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn stale_bootstrap_fixture(rows: Option<&str>) -> (tempfile::TempDir, PathBuf, LocalMembership) {
+    let peer = |id: u64| ClusterPeer {
+        raft_id: id,
+        raft_address: format!("n{id}:1"),
+        api_address: format!("n{id}:2"),
+    };
+    let dir = tempfile::tempdir().expect("data dir");
+    let active = dir.path().join(HIQLITE_ACTIVE_DIRNAME);
+    let database = active
+        .join("state_machine")
+        .join("db")
+        .join(HIQLITE_DATABASE_FILENAME);
+    std::fs::create_dir_all(database.parent().expect("db dir")).expect("db dir");
+    if let Some(rows) = rows {
+        Connection::open(&database)
+            .expect("state machine")
+            .execute_batch(&format!(
+                "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL, \
+                 raft_address TEXT NOT NULL, api_address TEXT NOT NULL, \
+                 last_seen_at INTEGER NOT NULL, removed_at INTEGER, role TEXT);{rows}"
+            ))
+            .expect("rows");
+    }
+    // Joined as 5 when 3 and 4 were its peers; they were removed since.
+    let membership = LocalMembership {
+        version: 1,
+        cluster_id: "cluster-a".to_owned(),
+        node_id: "node-5".to_owned(),
+        raft_id: 5,
+        local: peer(5),
+        bootstrap: vec![peer(1), peer(3), peer(4), peer(5)],
+        join_token_digest: None,
+        role: ClusterRole::Voter,
+    };
+    write_local_membership(dir.path(), &membership).expect("membership.json");
+    (dir, active, membership)
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn roster_ids(membership: &LocalMembership) -> Vec<u64> {
+    hiqlite_roster(&membership.bootstrap, &membership.local)
+        .expect("roster")
+        .iter()
+        .map(|node| node.id)
+        .collect()
+}
+
+/// Removed Raft ids must not reach hiqlite's static `nodes` (which it copies
+/// into the split-brain check) nor the lost-volume bootstrap in membership.json.
+#[cfg(feature = "hiqlite-store")]
+#[test]
+fn committed_membership_replaces_stale_bootstrap_peers() {
+    let (dir, active, mut membership) = stale_bootstrap_fixture(Some(
+        "INSERT INTO cluster_nodes VALUES \
+           ('node-1', 1, 'n1:1', 'n1:2', 1, NULL, 'voter'),\
+           ('node-3', 3, 'n3:1', 'n3:2', 1, 99, 'voter'),\
+           ('node-4', 4, 'n4:1', 'n4:2', 1, 99, 'voter'),\
+           ('node-5', 5, 'n5:1', 'n5:2', 1, NULL, 'voter'),\
+           ('node-6', 6, 'n6:1', 'n6:2', 1, NULL, 'learner');",
+    ));
+    assert_eq!(roster_ids(&membership), vec![1, 3, 4, 5]);
+
+    assert!(
+        refresh_bootstrap_from_committed(dir.path(), &active, &mut membership).expect("refresh")
+    );
+    assert_eq!(roster_ids(&membership), vec![1, 5, 6]);
+    let on_disk = read_local_membership(dir.path())
+        .expect("read")
+        .expect("file");
+    assert_eq!(on_disk, membership);
+    assert_eq!(
+        on_disk
+            .bootstrap
+            .iter()
+            .map(|p| p.raft_id)
+            .collect::<Vec<_>>(),
+        vec![1, 5, 6]
+    );
+    // Already current: no rewrite.
+    assert!(
+        !refresh_bootstrap_from_committed(dir.path(), &active, &mut membership).expect("again")
+    );
+}
+
+/// Without a readable committed membership (fresh node, lost volume, first
+/// boot) the recorded list is used exactly as before.
+#[cfg(feature = "hiqlite-store")]
+#[test]
+fn unreadable_committed_membership_keeps_recorded_bootstrap() {
+    // No state machine file, no table, a table that does not list this node,
+    // and a file that is not a database.
+    let cases: [(&str, Option<&str>); 4] = [
+        ("absent", None),
+        ("no live rows", Some("")),
+        (
+            "local not live",
+            Some(
+                "INSERT INTO cluster_nodes VALUES ('node-1', 1, 'n1:1', 'n1:2', 1, NULL, 'voter');",
+            ),
+        ),
+        ("garbage", Some("")),
+    ];
+    for (name, rows) in cases {
+        let (dir, active, mut membership) = stale_bootstrap_fixture(rows);
+        if name == "garbage" {
+            let database = active
+                .join("state_machine")
+                .join("db")
+                .join(HIQLITE_DATABASE_FILENAME);
+            std::fs::write(&database, b"not a sqlite database at all, just bytes")
+                .expect("garbage");
+        }
+        let before = membership.clone();
+        assert!(
+            !refresh_bootstrap_from_committed(dir.path(), &active, &mut membership)
+                .unwrap_or_else(|e| panic!("{name}: {e}")),
+            "{name}"
+        );
+        assert_eq!(membership, before, "{name}");
+        assert_eq!(roster_ids(&membership), vec![1, 3, 4, 5], "{name}");
+        assert_eq!(
+            read_local_membership(dir.path()).expect("read"),
+            Some(before),
+            "{name}"
+        );
+    }
 }
 
 #[cfg(feature = "hiqlite-store")]

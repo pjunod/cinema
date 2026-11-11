@@ -6,6 +6,7 @@ pub mod bounded;
 mod census;
 pub mod priority;
 pub mod rlimit;
+pub mod source_lifetime;
 
 pub use priority::{ChildClass, ChildWork};
 
@@ -81,14 +82,21 @@ pub fn spawn_job_owned(
     command: &mut tokio::process::Command,
     work: ChildWork,
 ) -> io::Result<(tokio::process::Child, ChildJob)> {
+    let descriptor_handoff = source_lifetime::has_descriptor_handoff(command.as_std());
+    let _reader_admission = source_lifetime::before_spawn(descriptor_handoff)?;
     priority::apply(command, work.class);
     configure_suspended(command);
+    source_lifetime::strip_descriptor_handoff(command.as_std_mut());
     #[allow(clippy::disallowed_methods)] // the launcher itself
-    let mut child = spawn_on_owner(
+    let spawned = spawn_on_owner(
         command,
         || tokio::process::Command::new(""),
         |command| command.spawn(),
-    )?;
+    );
+    if descriptor_handoff {
+        source_lifetime::restore_descriptor_handoff(command.as_std_mut());
+    }
+    let mut child = spawned?;
     let mut job = ChildJob::attach(&child).inspect_err(|_| {
         let _ = child.start_kill();
     })?;
@@ -211,16 +219,24 @@ pub fn output_job_owned_blocking(
     command: &mut std::process::Command,
     work: ChildWork,
 ) -> io::Result<std::process::Output> {
+    let descriptor_handoff = source_lifetime::has_descriptor_handoff(command);
+    let reader_admission = source_lifetime::before_spawn(descriptor_handoff)?;
     priority::apply_policy(command, work.class.policy());
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    source_lifetime::strip_descriptor_handoff(command);
     #[allow(clippy::disallowed_methods)] // the blocking launcher itself
-    let mut child = spawn_on_owner(
+    let spawned = spawn_on_owner(
         command,
         || std::process::Command::new(""),
         |command| command.spawn(),
-    )?;
+    );
+    if descriptor_handoff {
+        source_lifetime::restore_descriptor_handoff(command);
+    }
+    let mut child = spawned?;
+    drop(reader_admission);
     let mut job = match ChildJob::attach_pid(child.id()) {
         Ok(job) => job,
         Err(error) => {
@@ -635,13 +651,14 @@ mod tests {
 
     #[test]
     fn output_job_owned_call_sites_are_the_audited_set() {
+        // Source-bound pixel, subtitle-offset and VTT probes use
+        // BoundedDiagnosticChild; its spawn remains registered by the launcher.
         let expected = BTreeMap::from([
-            ("ffmpeg.rs".to_owned(), 4),
+            ("ffmpeg.rs".to_owned(), 3),
             ("live_tv.rs".to_owned(), 1),
             ("live_tv/caption_probe.rs".to_owned(), 1),
             ("pipeprobe.rs".to_owned(), 2),
             ("subtitle_ride_along.rs".to_owned(), 1),
-            ("subtitles.rs".to_owned(), 1),
             ("transcode/media_origin.rs".to_owned(), 1),
         ]);
         let mut actual = BTreeMap::new();

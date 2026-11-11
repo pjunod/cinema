@@ -951,9 +951,9 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         {
             let mut sessions = serve.shared.sessions.lock().await;
             let session = sessions.get_mut(VIEWER).expect("parent");
-            session.children.push(ParentMediaReader { controlled: false, candidate_id: None, reader_id: "private-audio".into(),
+            session.children.push(ParentMediaReader { versioned_family: false, companion_bootstrap: false, controlled: false, candidate_id: None, reader_id: "private-audio".into(),
                 rendition: Arc::clone(&soundtrack), _reservation: None });
-            session.children.push(ParentMediaReader { controlled: false, candidate_id: None, reader_id: "private-root".into(),
+            session.children.push(ParentMediaReader { versioned_family: false, companion_bootstrap: false, controlled: false, candidate_id: None, reader_id: "private-root".into(),
                 rendition: Arc::clone(&rendition), _reservation: None });
         }
         let control = |sequence, snapshot| crate::playback_control::LocalControlRequest {
@@ -1423,6 +1423,10 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         ledger.transactions.push(transaction(1,"a".repeat(64),QualityState::Presented,Some(0)));
         ledger.transactions.push(transaction(2,"b".repeat(64),QualityState::Ready,None));
         ledger.latest_intent_revision=2;
+        ledger.transactions[1].state=QualityState::Preparing;
+        assert!(VodServe::companion_source_required(&ledger, &"b".repeat(64)),
+            "accepted Prepare upgrades source purpose before init is ready");
+        ledger.transactions[1].state=QualityState::Ready;
         let active = |ledger:&QualityLedger| VodServe::controlled_video_demand(ledger).expect("active")
             .into_iter().map(str::to_owned).collect::<Vec<_>>();
         assert_eq!(active(&ledger),vec!["a".repeat(64),"b".repeat(64)]);
@@ -1432,12 +1436,202 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         assert!(!ledger.transactions[0].cancel_requested);
         ledger.transactions[1].cancel_requested=true;
         assert_eq!(active(&ledger),vec!["a".repeat(64)]);
+        assert!(!VodServe::companion_source_required(&ledger, &"b".repeat(64)),
+            "superseded optional target gives source service back");
         ledger.transactions[1].cancel_requested=false;
         ledger.transactions[1].state=QualityState::Presented;
         ledger.transactions[1].first_presented_tick=Some(48);
         assert_eq!(active(&ledger),vec!["b".repeat(64)]);
         ledger.transactions[1].state=QualityState::Disposed;
         assert_eq!(active(&ledger),vec!["b".repeat(64)],"ordinary eviction does not retire wanted loading");
+    }
+
+    #[tokio::test]
+    async fn discovered_companion_upgrades_on_accepted_prepare_then_returns_to_optional() {
+        use plurx_core::playback::continuous_quality::{QualityAttachment, QualityLedger, QualityState, QualityTransaction};
+        let base = crate::test_tempdir().expect("quality settlement fixture");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
+        let generation = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        activate_control_route(&store, &session_id, &generation).await;
+        let mut incumbent = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut incumbent).expect("private incumbent").key = "a".repeat(64);
+        let mut companion = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut companion).expect("private companion").key = "b".repeat(64);
+        insert_control_session(&serve, &session_id, Arc::clone(&incumbent), Instant::now()).await;
+        companion.attach_reader("companion", 0).await;
+        {
+            let mut readers = companion.readers.lock().await;
+            let reader = readers.get_mut("companion").expect("attached companion");
+            reader.companion_bootstrap = true;
+            reader.admission_priority = crate::admission::Priority::Speculative;
+        }
+        let owner = {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let parent = sessions.get_mut(&session_id).expect("parent");
+            // Family discovery clears this transient flag before revision 2
+            // can be accepted. The Reader role must survive that transition.
+            parent.children.push(ParentMediaReader {
+                versioned_family: true,
+                companion_bootstrap: false,
+                controlled: true,
+                candidate_id: None,
+                reader_id: "companion".into(),
+                rendition: Arc::clone(&companion),
+                _reservation: None,
+            });
+            parent.response_owner()
+        };
+        let id = || uuid::Uuid::new_v4().to_string();
+        let transaction = |revision, target: String, state, presented: Option<u64>| QualityTransaction {
+            transaction_id: id(), intent_revision: revision, target_rendition_id: target, state,
+            intent_superseded: false, cancel_requested: false, preparation: None,
+            ready: vec![], reserved: vec![], appended: vec![], ever_appended: presented.is_some(),
+            disposed: vec![], first_presented_tick: presented,
+            first_presented_at_ms: presented.map(|_| 1),
+        };
+        let attachment = QualityAttachment {
+            client_instance_id: id(), lifetime_id: session_id.clone(),
+            attachment_id: id(), family_id: "c".repeat(64),
+        };
+        let mut ledger = QualityLedger::new(generation, 1, attachment).expect("ledger");
+        ledger.transactions.push(transaction(1, incumbent.key.clone(), QualityState::Presented, Some(0)));
+        ledger.transactions.push(transaction(2, companion.key.clone(), QualityState::Preparing, None));
+        ledger.latest_intent_revision = 2;
+        assert!(store.write_quality_ledger(&ledger, "node-a", 0, now_ms()).await.expect("prepare write"));
+        serve.settle_controlled_video(&session_id, &owner, &ledger).await.expect("accepted prepare settlement");
+        assert_eq!(companion.readers.lock().await["companion"].admission_priority,
+            crate::admission::Priority::Live, "accepted Preparing needs source before init");
+        ledger.transactions[1].intent_superseded = true;
+        ledger.transactions[1].cancel_requested = true;
+        assert!(store.write_quality_ledger(&ledger, "node-a", 1, now_ms()).await.expect("supersession write"));
+        serve.settle_controlled_video(&session_id, &owner, &ledger).await.expect("supersession settlement");
+        assert_eq!(companion.readers.lock().await["companion"].admission_priority,
+            crate::admission::Priority::Speculative, "superseded target returns to finite service");
+    }
+
+    #[tokio::test]
+    async fn accepted_parent_candidate_selection_requires_only_its_companion_before_discovery() {
+        use crate::playback_control::{ClientPlatform, LocalControlRequest, PreparedSuccessorObservation, QualitySelection};
+        use plurx_core::playback::continuous_quality::{QualityAttachment, QualityLedger, QualityState, QualityTransaction};
+        let base = crate::test_tempdir().expect("pending companion fixture");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
+        let generation = uuid::Uuid::new_v4().to_string();
+        let first = uuid::Uuid::new_v4().to_string();
+        let second = uuid::Uuid::new_v4().to_string();
+        activate_control_route(&store, &first, &generation).await;
+        let other_generation = uuid::Uuid::new_v4().to_string();
+        activate_control_route(&store, &second, &other_generation).await;
+        let mut root = synthetic_rendition(&base.path().join("first")).await;
+        Arc::get_mut(&mut root).expect("private root").key = "a".repeat(64);
+        let mut other_root = synthetic_rendition(&base.path().join("second")).await;
+        Arc::get_mut(&mut other_root).expect("private other root").key = "c".repeat(64);
+        let mut companion = synthetic_rendition(&base.path().join("pending-companion")).await;
+        Arc::get_mut(&mut companion).expect("private companion").key = "b".repeat(64);
+        insert_control_session(&serve, &first, root, Instant::now()).await;
+        insert_control_session(&serve, &second, other_root, Instant::now()).await;
+        let candidate = plurx_core::playback::candidate::CandidateId([7; 16]);
+        for (parent, reader_id) in [(&first, "first-companion"), (&second, "other-companion")] {
+            companion.attach_reader(reader_id, 0).await;
+            let mut readers = companion.readers.lock().await;
+            let reader = readers.get_mut(reader_id).expect("companion reader");
+            reader.companion_bootstrap = true;
+            reader.admission_priority = crate::admission::Priority::Speculative;
+            drop(readers);
+            serve.shared.sessions.lock().await.get_mut(parent).expect("parent").children.push(ParentMediaReader {
+                versioned_family: true, companion_bootstrap: true, controlled: true,
+                candidate_id: Some(candidate), reader_id: reader_id.into(),
+                rendition: Arc::clone(&companion), _reservation: None,
+            });
+        }
+        let mut pending = crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple);
+        pending.selection.quality = QualitySelection::Auto { height: None, candidate_id: Some(candidate) };
+        let control = |sequence, snapshot| LocalControlRequest {
+            session_id: first.as_str(), generation: generation.as_str(), owner_node_id: "node-a",
+            owner_epoch: 1, client_instance_id: "00000000-0000-4000-8000-000000000005",
+            sequence, snapshot, prepared_successor: PreparedSuccessorObservation::NotRequested,
+        };
+        let accepted = serve.control(control(1, pending.clone())).await.expect("parent exists").expect("accepted selection");
+        assert_eq!(accepted.accepted_sequence, 1);
+        {
+            let readers = companion.readers.lock().await;
+            assert_eq!(readers["first-companion"].admission_priority, crate::admission::Priority::Live,
+                "the accepted candidate needs init before family revision 2");
+            assert_eq!(readers["other-companion"].admission_priority, crate::admission::Priority::Speculative,
+                "a second viewer cannot borrow the selection");
+        }
+        let id = || uuid::Uuid::new_v4().to_string();
+        let transaction = |revision, target: String, state, presented: Option<u64>| QualityTransaction {
+            transaction_id: id(), intent_revision: revision, target_rendition_id: target, state,
+            intent_superseded: false, cancel_requested: false, preparation: None,
+            ready: vec![], reserved: vec![], appended: vec![], ever_appended: presented.is_some(),
+            disposed: vec![], first_presented_tick: presented,
+            first_presented_at_ms: presented.map(|_| 1),
+        };
+        let attachment = QualityAttachment { client_instance_id: id(), lifetime_id: first.clone(),
+            attachment_id: id(), family_id: "e".repeat(64) };
+        let mut ledger = QualityLedger::new(generation.clone(), 1, attachment).expect("ledger");
+        ledger.transactions.push(transaction(1, "a".repeat(64), QualityState::Presented, Some(0)));
+        ledger.latest_intent_revision = 1;
+        assert!(store.write_quality_ledger(&ledger, "node-a", 0, now_ms()).await.expect("incumbent ledger"));
+        let owner = serve.shared.sessions.lock().await[&first].response_owner();
+        serve.settle_controlled_video(&first, &owner, &ledger).await.expect("old incumbent settlement");
+        assert_eq!(companion.readers.lock().await["first-companion"].admission_priority,
+            crate::admission::Priority::Live, "old ledger cannot revoke accepted pending selection");
+        // A later family response clears the transient bootstrap marker.
+        serve.shared.sessions.lock().await.get_mut(&first).expect("parent").children[0].companion_bootstrap = false;
+        assert_eq!(companion.readers.lock().await["first-companion"].admission_priority, crate::admission::Priority::Live);
+        ledger.transactions.push(transaction(2, companion.key.clone(), QualityState::Preparing, None));
+        ledger.latest_intent_revision = 2;
+        assert!(store.write_quality_ledger(&ledger, "node-a", 1, now_ms()).await.expect("accepted prepare"));
+        serve.settle_controlled_video(&first, &owner, &ledger).await.expect("prepare settlement");
+        let replay = serve.control(control(1, crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple)))
+            .await.expect("parent exists").expect("same sequence replays");
+        assert_eq!(replay.disposition, crate::playback_control::ControlDisposition::Replay);
+        assert_eq!(replay.accepted_sequence, 1);
+        {
+            let readers = companion.readers.lock().await;
+            assert!(readers["first-companion"].control_required);
+            assert!(readers["first-companion"].quality_required);
+            assert_eq!(readers["first-companion"].admission_priority, crate::admission::Priority::Live,
+                "replay cannot undo the accepted selection");
+            assert!(!readers["other-companion"].control_required);
+            assert!(!readers["other-companion"].quality_required);
+            assert_eq!(readers["other-companion"].admission_priority, crate::admission::Priority::Speculative,
+                "replay cannot borrow another viewer's selection");
+        }
+        let incumbent = crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple);
+        // A new accepted sequence must also honor the control fence's 250 ms
+        // rate limit; the replay above does not advance that interval.
+        tokio::time::sleep(Duration::from_millis(260)).await;
+        let restored = serve.control(control(2, incumbent)).await.expect("parent exists").expect("accepted incumbent");
+        assert_eq!(restored.accepted_sequence, 2);
+        {
+            let readers = companion.readers.lock().await;
+            assert!(!readers["first-companion"].control_required);
+            assert!(readers["first-companion"].quality_required);
+            assert_eq!(readers["first-companion"].admission_priority,
+                crate::admission::Priority::Live, "incumbent control cannot revoke accepted Preparing");
+            assert!(!readers["other-companion"].control_required);
+            assert!(!readers["other-companion"].quality_required);
+            assert_eq!(readers["other-companion"].admission_priority, crate::admission::Priority::Speculative);
+        }
+        ledger.transactions[1].intent_superseded = true;
+        ledger.transactions[1].cancel_requested = true;
+        assert!(store.write_quality_ledger(&ledger, "node-a", 2, now_ms()).await.expect("accepted cancellation"));
+        serve.settle_controlled_video(&first, &owner, &ledger).await.expect("cancellation settlement");
+        {
+            let readers = companion.readers.lock().await;
+            assert!(!readers["first-companion"].control_required);
+            assert!(!readers["first-companion"].quality_required);
+            assert_eq!(readers["first-companion"].admission_priority,
+                crate::admission::Priority::Speculative, "supersession returns optional source service");
+            assert!(!readers["other-companion"].control_required);
+            assert!(!readers["other-companion"].quality_required);
+            assert_eq!(readers["other-companion"].admission_priority, crate::admission::Priority::Speculative);
+        }
     }
 
     #[tokio::test]
@@ -1501,7 +1695,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         };
         let permit = admissions.try_admit_bundle(0, 1, &estimate, crate::admission::Priority::Speculative)
             .expect("one retained credit");
-        serve.shared.sessions.lock().await.get_mut(parent).expect("parent").children.push(ParentMediaReader {
+        serve.shared.sessions.lock().await.get_mut(parent).expect("parent").children.push(ParentMediaReader { versioned_family: false, companion_bootstrap: false,
             controlled: true, candidate_id: Some(plurx_core::playback::candidate::CandidateId([1;16])),
             reader_id: "target".into(), rendition: Arc::clone(&rendition), _reservation: Some(permit.into()),
         });
@@ -2096,6 +2290,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
                 "shipped-shape",
                 None,
                 Recipe {
+            source_telemetry:false,
                     retained_logical: None,
                     measured_candidate: None,
                     file,
@@ -2980,7 +3175,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         {
             let mut sessions = serve.shared.sessions.lock().await;
             let parent = sessions.get_mut("target").expect("prepared family");
-            parent.children.push(ParentMediaReader {
+            parent.children.push(ParentMediaReader { versioned_family: false, companion_bootstrap: false,
                 controlled: true, candidate_id: None, reader_id: "owned-child".into(),
                 rendition: Arc::clone(&rendition), _reservation: None,
             });
@@ -3010,7 +3205,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         insert_control_session(&serve, "old", Arc::clone(&rendition), Instant::now()).await;
         rendition.attach_reader("old-child", 7).await;
         rendition.attach_reader("other", 3).await;
-        serve.shared.sessions.lock().await.get_mut("old").expect("old").children.push(ParentMediaReader {
+        serve.shared.sessions.lock().await.get_mut("old").expect("old").children.push(ParentMediaReader { versioned_family: false, companion_bootstrap: false,
             controlled: false, candidate_id: None, reader_id: "old-child".into(),
             rendition: Arc::clone(&rendition), _reservation: None,
         });
@@ -3954,6 +4149,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
     fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
         let index = synthetic_index(24);
         let recipe = Recipe {
+            source_telemetry:false,
             retained_logical: None,
             measured_candidate: None,
             file: media_file_at(PathBuf::from("unused.mkv"), 0),
@@ -5443,6 +5639,99 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         assert!(serve.local_index_demand().is_empty());
     }
 
+    /// Lab5 (2026-10-26): 83 titles whose index attempts had run out
+    /// answered `vod_index_pending` for good -- a refusal promising work the
+    /// indexer would never do -- and the start log said only "pending". An
+    /// outcome the indexer will not retry now refuses as unavailable, with
+    /// what the attempt found, and asks for no examination.
+    #[tokio::test]
+    async fn a_start_whose_index_attempts_are_exhausted_is_refused_as_unavailable() {
+        let base = crate::test_tempdir().expect("base");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = local_serve(base.path().to_path_buf(), Arc::clone(&store));
+        let mut file = media_file_at(testfixtures::source("h264"), 12_000);
+        file.video_codec = Some("h264".into());
+        file.video_profile = Some("High".into());
+        let identity = crate::fragindex::identity_for(
+            &file,
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+        );
+        store
+            .record_fragment_index_outcome(
+                file.id,
+                &identity,
+                plurx_core::segplan::IndexRefusal::Unsupported,
+                "the video stream has no keyframes",
+            )
+            .await
+            .expect("record the exhausted outcome");
+        let error = serve
+            .try_create(
+                &request("exhausted", 0.0),
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                "exhausted".into(),
+            )
+            .await
+            .expect_err("a file the indexer gave up on cannot start VOD");
+        let (code, reason) = crate::transcode::vod_refusal(&error).expect("a typed refusal");
+        assert_eq!(code, "vod_index_unavailable");
+        assert!(reason.contains("no keyframes"), "{reason}");
+        assert!(
+            serve.local_index_demand().is_empty(),
+            "a terminal outcome is not demand for another examination"
+        );
+        assert!(matches!(
+            crate::transcode::vod_refusal_class(code),
+            Some(crate::transcode::VodRefusalClass::LiveRecovery(
+                crate::transcode::LiveRecoveryReason::IndexUnavailable
+            ))
+        ));
+
+        // A typed outcome the indexer will not retry -- here its attempts ran
+        // out -- refuses the same way.
+        let typed = store
+            .record_fragment_index_typed_outcome(
+                file.id,
+                &identity,
+                plurx_core::content_analysis::IndexFailureCode::IndexProbeTimeout,
+                false,
+                "probe timed out",
+                0,
+                &plurx_core::content_analysis::IndexDiagnostic::default(),
+                1,
+            )
+            .await
+            .expect("record the attempt-limited outcome");
+        assert_eq!(typed.terminal_reason.as_deref(), Some("attempt_limit"));
+        let error = serve
+            .try_create(
+                &request("attempt-limited", 0.0),
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                "attempt-limited".into(),
+            )
+            .await
+            .expect_err("an attempt-limited title cannot start VOD");
+        assert_eq!(
+            crate::transcode::vod_refusal(&error)
+                .expect("a typed refusal")
+                .0,
+            "vod_index_unavailable"
+        );
+        assert!(serve.local_index_demand().is_empty());
+    }
+
     /// Review of N2: a probe that could not answer once (its 5 s bound under
     /// load, a failed reopen) left its entry refused for the rendition's
     /// life. A refusal whose landing time was never measured is not kept.
@@ -5484,6 +5773,21 @@ fn prepared_vod_start_hint_preserves_full_timeline_and_preceding_acquisition() {
     assert_eq!(text.matches("#EXT-X-START:").count(), 1);
     assert!(text.starts_with(&format!("#EXTM3U\n{hint}")));
     assert_eq!(text.replace(hint, "").as_bytes(), original);
+    let resource = plurx_core::sharing_resources::SharingHlsResource::parse("index.m3u8")
+        .expect("actual Source playlist resource");
+    plurx_core::sharing_resources::validate_sharing_playlist(&resource, &hinted)
+        .expect("the shared Source relays the actual nonzero attachment start hint");
+    let acquired = vod_serve_delivery::playlist_with_acquisition_start(
+        original,
+        Some(293_106),
+        Some(1_000),
+        670_000,
+    );
+    assert!(std::str::from_utf8(&acquired)
+        .expect("actual acquisition playlist")
+        .contains("#EXT-X-START:TIME-OFFSET=1.000,PRECISE=NO\n"));
+    plurx_core::sharing_resources::validate_sharing_playlist(&resource, &acquired)
+        .expect("the shared Source relays the actual prepared acquisition hint");
     assert_eq!(
         vod_serve_delivery::playlist_with_preferred_start(original, None),
         original

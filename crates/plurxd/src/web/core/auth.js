@@ -4,6 +4,8 @@ function clearLocalSession(expectedGeneration,notice){
   // A logout response can arrive after another sign-in. It belongs to the
   // captured bearer, never to whichever credential happens to be current now.
   if(expectedGeneration!==AUTH_GENERATION) return false;
+  if(typeof textTranslationReset==="function")textTranslationReset();
+  if(typeof sharedCaptionRetire==="function")sharedCaptionRetire("account ended");
   if(typeof translationReset==="function")translationReset();
   if(typeof cinemaRemoteRetire==="function")cinemaRemoteRetire(true);
   if(typeof cinemaRemoteRouteChanged==="function")cinemaRemoteRouteChanged();
@@ -129,13 +131,13 @@ async function boot(){
   location.hash=location.hash||"#/";
   render();
 }
-function authShell(title, sub, fields, btn, onsubmit){
+function authShell(title, sub, fields, btn, onsubmit, showReport=true){
   document.getElementById("app").innerHTML=`<div class="center"><form class="card auth" id="af">
     <div class="logo" style="font-size:30px">${APP_NAME}</div>
     <h1>${title}</h1><p class="muted" style="margin-top:0">${sub}</p>
     ${fields}<div class="err" id="aerr"></div>
     <button style="width:100%;margin-top:16px" id="ab">${btn}</button>
-    <button type="button" onclick="showDiagnostics()">Help · Report a problem</button><div class="versionstamp">Version ${esc(buildLabel())}</div></form></div>`;
+    ${showReport?'<button type="button" onclick="showDiagnostics()">Help · Report a problem</button>':''}<div class="versionstamp">Version ${esc(buildLabel())}</div></form></div>`;
   document.getElementById("af").addEventListener("submit",async e=>{
     e.preventDefault(); const b=document.getElementById("ab"); b.disabled=true;
     try{ await onsubmit(); }catch(err){ document.getElementById("aerr").textContent=err.message; b.disabled=false; }
@@ -185,6 +187,6 @@ function renderLogin(){
       if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
       TOKEN=r.token; AUTH_GENERATION++; AUTH_NOTICE=""; localStorage.setItem("plurx_token",TOKEN); ME=r.user;
       refreshClientErrorReporterAuth(); await loadFeatures(); location.hash="#/"; render();
-    });
+    },false);
   markBootReady();
 }

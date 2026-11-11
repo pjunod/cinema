@@ -16,6 +16,8 @@ pub struct TitleDemand {
     pub source_size: i64,
     pub source_mtime: i64,
     pub probe_json: String,
+    /// Resume the same yielded job even when its pending recipe set changed.
+    pub queued_job_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleOutput {
@@ -25,6 +27,32 @@ pub struct TitleOutput {
     pub source_mtime: i64,
     pub scanner_digest: String,
     pub stats: DvTitleStats,
+}
+/// A complete-title aggregate the content-analysis pass read while it indexed
+/// the file, offered for the title's current demand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisTitleOutput {
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub scanner_digest: String,
+    pub stats: DvTitleStats,
+}
+/// What became of an analysis pass's aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisTitleOutcome {
+    /// Stored for the demand's current revision and scanner. The title's job
+    /// reuses it instead of reading the file, and qualifies a FEL title.
+    Published,
+    /// That revision already holds this scanner's completed answer.
+    Current,
+    /// Another scanner's job is working on the title: its generation is not
+    /// rotated away from under it. The job publishes its own answer.
+    Busy,
+    /// The catalogue row no longer describes the source the pass read, or the
+    /// title is not one the scanner covers.
+    NoDemand,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishTitleJob {
@@ -41,11 +69,31 @@ pub(super) async fn demands<T: QueueSql>(
     if !digest(scanner) || after < 0 {
         return Err(StoreError::Task("invalid title demand query".into()));
     }
+    store.queue_sql(r#"
+UPDATE dv_title_jobs_demand SET terminal=0 WHERE terminal=1 AND json_type($1)='object'
+ AND EXISTS(SELECT 1 FROM files f WHERE f.id=dv_title_jobs_demand.file_id AND json_valid(f.probe_json)
+  AND EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(f.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+   THEN json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END) r
+   WHERE json_extract(r.value,'$.source_size')=f.size AND json_extract(r.value,'$.source_mtime')=f.mtime))
+ AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('queued','running','cancelling')
+  AND json_extract(j.payload_json,'$.file_id')=dv_title_jobs_demand.file_id)
+RETURNING 'true' AS result_json
+"#.into(),"{}".into(),true,true).await?;
     let rows = store.queue_sql(r#"
 SELECT json_object('file_id',file.id,'probe_revision',d.revision,
- 'source_size',file.size,'source_mtime',file.mtime,'probe_json',file.probe_json) AS result_json
+ 'source_size',file.size,'source_mtime',file.mtime,'probe_json',file.probe_json,
+ 'queued_job_id',(SELECT j.id FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state='queued'
+  AND json_extract(j.payload_json,'$.file_id')=file.id
+  AND json_extract(j.payload_json,'$.source_size')=file.size AND json_extract(j.payload_json,'$.source_mtime')=file.mtime
+  AND json_extract(j.payload_json,'$.probe_revision')=d.revision
+  AND json_extract(j.payload_json,'$.scanner_digest')=json_extract($1,'$.scanner')
+  ORDER BY j.created_at_ms,j.id LIMIT 1)) AS result_json
 FROM dv_title_jobs_demand d JOIN files file ON file.id=d.file_id
 WHERE d.revision>json_extract($1,'$.after') AND (d.terminal=0 OR d.scanner_digest IS NOT json_extract($1,'$.scanner'))
+ AND (NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+ THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END))
+ OR NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('running','cancelling')
+  AND json_extract(j.payload_json,'$.file_id')=file.id))
 ORDER BY d.revision LIMIT 128
 "#.into(), encode(&serde_json::json!({"scanner":scanner,"after":after}))?, false, true).await?;
     rows.iter().map(|row| decode(row)).collect()
@@ -113,6 +161,88 @@ pub(super) async fn publish<T: QueueSql>(
             .ok_or_else(|| StoreError::Task("no title publication verdict".into()))?,
     )
 }
+
+/// Offer an analysis pass's aggregate to the title's demand. The demand is
+/// first bound to the pass's scanner exactly as the title worker binds it, so
+/// a different scanner's generation is rotated away and its aggregate dropped;
+/// the aggregate is then stored through the same `publish_dv_title` command a
+/// job uses, with no job attached. The demand stays open: the title worker
+/// finds this revision's aggregate already stored and settles the job without
+/// a second read of the file (and qualifies a FEL title while it holds it).
+pub(super) async fn publish_from_analysis<T: QueueSql>(
+    store: &T,
+    output: AnalysisTitleOutput,
+) -> Result<AnalysisTitleOutcome, StoreError> {
+    if output.file_id <= 0
+        || output.source_size < 0
+        || output.source_mtime < 0
+        || !digest(&output.scanner_digest)
+        || !output.stats.complete
+        || output.stats.eligibility() == TitleEligibility::InvalidAggregate
+        || encode(&output)?.len() > 64 * 1024
+    {
+        return Err(StoreError::Task(
+            "invalid complete-title analysis publication".into(),
+        ));
+    }
+    #[derive(Deserialize)]
+    struct Verdict {
+        outcome: String,
+        revision: Option<i64>,
+    }
+    for _ in 0..2 {
+        let body = serde_json::json!({"id": uuid::Uuid::new_v4().to_string(), "output": output});
+        let rows = store
+            .queue_sql(ANALYSIS_PUBLISH_SQL.into(), encode(&body)?, true, true)
+            .await?;
+        let verdict =
+            decode::<Verdict>(rows.first().ok_or_else(|| {
+                StoreError::Task("no analysis title publication verdict".into())
+            })?)?;
+        match (verdict.outcome.as_str(), verdict.revision) {
+            ("published", _) => return Ok(AnalysisTitleOutcome::Published),
+            ("current", _) => return Ok(AnalysisTitleOutcome::Current),
+            ("busy", _) => return Ok(AnalysisTitleOutcome::Busy),
+            ("unbound", Some(revision)) => {
+                if bind(store, revision, &output.scanner_digest)
+                    .await?
+                    .is_none()
+                {
+                    return Ok(AnalysisTitleOutcome::NoDemand);
+                }
+            }
+            _ => return Ok(AnalysisTitleOutcome::NoDemand),
+        }
+    }
+    Ok(AnalysisTitleOutcome::NoDemand)
+}
+
+/// `job_id` is null: the command's job and waiter settlements match nothing,
+/// and only the probe document receives the aggregate.
+const ANALYSIS_PUBLISH_SQL: &str = r#"
+WITH input AS (SELECT json($1) AS body), verdict AS (
+ SELECT body,d.revision AS revision,CASE
+  WHEN d.revision IS NULL OR f.id IS NULL
+   OR f.size IS NOT json_extract(body,'$.output.source_size')
+   OR f.mtime IS NOT json_extract(body,'$.output.source_mtime')
+   OR NOT (f.video_codec='hevc' AND f.dv_profile IN (5,7,8) AND f.dv_rpu_present=1
+    AND json_valid(f.probe_json)) THEN 'no_demand'
+  WHEN d.scanner_digest IS NOT json_extract(body,'$.output.scanner_digest')
+   AND EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
+    AND job.state IN ('queued','running','cancelling')
+    AND json_extract(job.payload_json,'$.file_id')=d.file_id) THEN 'busy'
+  WHEN d.scanner_digest IS NOT json_extract(body,'$.output.scanner_digest') THEN 'unbound'
+  WHEN d.terminal=1 AND json_type(f.probe_json,'$.plurx_dv_title_v1') IS NOT NULL THEN 'current'
+  ELSE 'published' END AS outcome
+ FROM input LEFT JOIN dv_title_jobs_demand d ON d.file_id=json_extract(body,'$.output.file_id')
+ LEFT JOIN files f ON f.id=d.file_id
+)
+INSERT INTO background_job_commands(id,operation,request_json,result_json)
+SELECT json_extract(body,'$.id'),'publish_dv_title',body,
+ json_object('outcome',outcome,'job_id',NULL,'revision',revision,
+  'file_id',json_extract(body,'$.output.file_id'))
+FROM verdict RETURNING result_json
+"#;
 
 /// Conservative scheduler handoff, never a claim or publication authority.
 /// The worker also checks its exact reporter and readable physical source.
@@ -242,4 +372,242 @@ AND json_extract(probe_json,'$.plurx_dv_title_v1.schema')=json_extract($1,'$.sch
         }
     }
     Ok(result)
+}
+
+/// Store a title's FEL qualification verdict beside its Dolby Vision facts in
+/// its probe document, only while the measured source is still the row's.
+/// A reprobe or source change rewrites the document and drops it.
+pub(super) async fn put_fel_verdict<T: QueueSql>(
+    store: &T,
+    file_id: i64,
+    source_size: i64,
+    source_mtime: i64,
+    verdict: &serde_json::Value,
+) -> Result<bool, StoreError> {
+    if file_id <= 0 || source_size < 0 || source_mtime < 0 || !verdict.is_object() {
+        return Err(StoreError::Task("invalid FEL verdict".into()));
+    }
+    if verdict.get("request").is_some() {
+        let row: crate::transcode::dv_fel_qualification::FelRecipeVerdict =
+            serde_json::from_value(verdict.clone()).map_err(|e| StoreError::Task(e.to_string()))?;
+        if row.verdict.schema != crate::transcode::dv_fel_qualification::SCHEMA
+            || !row.request.valid()
+            || row.request.source_size != source_size
+            || row.request.source_mtime != source_mtime
+            || row.verdict.identity != row.request.identity
+            || row.verdict.source_size != source_size
+            || row.verdict.source_mtime != source_mtime
+        {
+            return Err(StoreError::Task("invalid exact FEL recipe verdict".into()));
+        }
+        let body = serde_json::json!({"file":file_id,"size":source_size,"mtime":source_mtime,"identity":row.request.identity,"row":row});
+        if encode(&body)?.len() > 64 * 1024 {
+            return Err(StoreError::Task("FEL variant receipt exceeds bound".into()));
+        }
+        let rows=store.queue_sql(r#"
+UPDATE files SET probe_json=json_set(
+ json_remove(probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.identity')),
+ '$.plurx_dv_fel_variants_v3',json_set(
+  COALESCE((SELECT json_group_object(key,json(value)) FROM (
+   SELECT key,value FROM json_each(CASE WHEN json_type(files.probe_json,'$.plurx_dv_fel_variants_v3')='object'
+    THEN json_extract(files.probe_json,'$.plurx_dv_fel_variants_v3') ELSE '{}' END)
+   WHERE key!=json_extract($1,'$.identity') ORDER BY json_extract(value,'$.verdict.measured_at_ms') DESC,key LIMIT 7)), '{}'),
+  '$.'||json_extract($1,'$.identity'),json(json_extract($1,'$.row'))))
+WHERE id=json_extract($1,'$.file') AND size=json_extract($1,'$.size') AND mtime=json_extract($1,'$.mtime')
+ AND dv_profile=7 AND dv_el_present=1 AND json_valid(probe_json)
+RETURNING 'true' AS result_json
+"#.into(),encode(&body)?,true,true).await?;
+        return Ok(!rows.is_empty());
+    }
+    let body = serde_json::json!({"file_id":file_id,"size":source_size,"mtime":source_mtime,"verdict":verdict});
+    if encode(&body)?.len() > 64 * 1024 {
+        return Err(StoreError::Task("FEL verdict exceeds its bound".into()));
+    }
+    let rows = store
+        .queue_sql(
+            format!(
+                "UPDATE files SET probe_json=json_set(probe_json,'$.{}',json(json_extract($1,'$.verdict')))
+WHERE id=json_extract($1,'$.file_id') AND size=json_extract($1,'$.size')
+ AND mtime=json_extract($1,'$.mtime') AND json_valid(probe_json)
+ AND dv_profile=7 AND dv_el_present=1
+RETURNING 'true' AS result_json",
+                crate::transcode::dv_fel_qualification::PROBE_KEY
+            ),
+            encode(&body)?,
+            true,
+            true,
+        )
+        .await?;
+    Ok(!rows.is_empty())
+}
+
+/// Ask for one title to be rescanned and re-qualified: rebind its title
+/// demand to `binding`, which no scanner digest equals, so the title worker
+/// rebinds it to its scanner and runs the title job again. `false` when the
+/// title has no demand (not a Dolby Vision title the scanner covers), or when
+/// a title job for it is already queued, running or cancelling: rotating the
+/// demand would cancel that attempt, and the attempt qualifies the title
+/// anyway if it is due.
+pub(super) async fn request_requalification<T: QueueSql>(
+    store: &T,
+    file_id: i64,
+    binding: &str,
+) -> Result<bool, StoreError> {
+    if file_id <= 0 || !digest(binding) {
+        return Err(StoreError::Task("invalid FEL re-qualification".into()));
+    }
+    #[derive(Deserialize)]
+    struct Revision {
+        revision: i64,
+    }
+    let rows = store
+        .queue_sql(
+            "SELECT json_object('revision',d.revision) AS result_json FROM dv_title_jobs_demand d
+WHERE d.file_id=json_extract($1,'$.file_id')
+ AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
+  AND job.state IN ('queued','running','cancelling')
+  AND json_extract(job.payload_json,'$.file_id')=d.file_id)"
+                .into(),
+            encode(&serde_json::json!({"file_id": file_id}))?,
+            false,
+            true,
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+    let revision = decode::<Revision>(row)?.revision;
+    Ok(bind(store, revision, binding).await?.is_some())
+}
+
+/// Settled Profile 7 FEL titles whose stored verdict was measured under
+/// another FEL identity (renderer, recipe or encoder), with no title job in
+/// flight: what a renderer change has to re-qualify. Bounded, oldest
+/// generation first.
+pub(super) async fn stale_fel_titles<T: QueueSql>(
+    store: &T,
+    identity: &str,
+    limit: u32,
+) -> Result<Vec<i64>, StoreError> {
+    if !digest(identity) || limit == 0 || limit > 128 {
+        return Err(StoreError::Task("invalid FEL staleness query".into()));
+    }
+    #[derive(Deserialize)]
+    struct Title {
+        file_id: i64,
+    }
+    let rows = store
+        .queue_sql(
+            format!(
+                "SELECT json_object('file_id',f.id) AS result_json
+FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+WHERE d.terminal=1 AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
+ AND (json_type(f.probe_json,'$.{key}')='object' OR json_type(f.probe_json,'$.plurx_dv_fel_variants_v3')='object')
+ AND json_extract(f.probe_json,'$.{key}.identity') IS NOT json_extract($1,'$.identity')
+ AND NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(f.probe_json,'$.plurx_dv_fel_variants_v3')='object'
+ THEN json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3') ELSE '{{}}' END) variant
+ WHERE json_extract(variant.value,'$.request.backend_identity')=json_extract($1,'$.identity')
+ AND json_extract(variant.value,'$.verdict.source_size')=f.size AND json_extract(variant.value,'$.verdict.source_mtime')=f.mtime)
+ AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
+  AND job.state IN ('queued','running','cancelling')
+  AND json_extract(job.payload_json,'$.file_id')=f.id)
+ORDER BY d.revision LIMIT json_extract($1,'$.limit')",
+                key = crate::transcode::dv_fel_qualification::PROBE_KEY
+            ),
+            encode(&serde_json::json!({"identity": identity, "limit": limit}))?,
+            false,
+            true,
+        )
+        .await?;
+    rows.iter()
+        .map(|row| decode::<Title>(row).map(|title| title.file_id))
+        .collect()
+}
+
+/// How many titles hold a FEL verdict for `identity`, and how many of those
+/// admit reconstruction. Advisory (Developer tab) only. Walks the Dolby
+/// Vision title demand (one row per DV title) and reads each title's row by
+/// its key, so it never scans the whole catalogue.
+pub(super) async fn fel_verdict_counts<T: QueueSql>(
+    store: &T,
+    identity: &str,
+) -> Result<(u64, u64), StoreError> {
+    let rows=store.queue_sql(r#"
+SELECT json_object('size',f.size,'mtime',f.mtime,
+ 'legacy',json_extract(f.probe_json,'$.plurx_dv_fel_v1'),
+ 'variants',json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3')) AS result_json
+FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+WHERE f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json) AND json_type($1)='object'
+ AND (json_type(f.probe_json,'$.plurx_dv_fel_v1')='object' OR json_type(f.probe_json,'$.plurx_dv_fel_variants_v3')='object')
+"#.into(),"{}".into(),false,false).await?;
+    let mut counts = (0, 0);
+    for row in rows {
+        let row: serde_json::Value = decode(&row)?;
+        let size = row["size"].as_i64();
+        let mtime = row["mtime"].as_i64();
+        let mut answers = Vec::new();
+        if let Ok(verdict) = serde_json::from_value::<
+            crate::transcode::dv_fel_qualification::FelVerdict,
+        >(row["legacy"].clone())
+        {
+            if verdict.identity == identity
+                && Some(verdict.source_size) == size
+                && Some(verdict.source_mtime) == mtime
+            {
+                answers.push(verdict.admitted);
+            }
+        }
+        if let Some(variants) = row["variants"].as_object() {
+            for value in variants.values().take(8) {
+                if let Ok(receipt) = serde_json::from_value::<
+                    crate::transcode::dv_fel_qualification::FelRecipeVerdict,
+                >(value.clone())
+                {
+                    if receipt.request.valid()
+                        && (receipt.request.backend_identity == identity
+                            || receipt.request.identity == identity)
+                        && Some(receipt.verdict.source_size) == size
+                        && Some(receipt.verdict.source_mtime) == mtime
+                    {
+                        answers.push(receipt.verdict.admitted);
+                    }
+                }
+            }
+        }
+        if !answers.is_empty() {
+            counts.0 += 1;
+            counts.1 += u64::from(answers.into_iter().any(|v| v));
+        }
+    }
+    Ok(counts)
+}
+
+/// Persist one private, source-bound recipe request; the existing title outbox
+/// reopens it after any current owner completes. No publication consumes peers.
+pub(super) async fn request_fel_variant<T: QueueSql>(
+    store: &T,
+    file_id: i64,
+    request: &crate::transcode::dv_fel_qualification::FelRecipeRequest,
+) -> Result<bool, StoreError> {
+    if file_id <= 0 || !request.valid() {
+        return Err(StoreError::Task("invalid FEL recipe request".into()));
+    }
+    let body = serde_json::json!({"file":file_id,"request":request,"identity":request.identity,"size":request.source_size,"mtime":request.source_mtime});
+    let rows=store.queue_sql(r#"
+UPDATE files SET probe_json=json_set(probe_json,
+ '$.plurx_dv_fel_requests_v3',json_set(COALESCE((SELECT json_group_object(key,json(value))
+ FROM json_each(CASE WHEN json_type(files.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+ THEN json_extract(files.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END)
+ WHERE json_extract(value,'$.source_size')=files.size AND json_extract(value,'$.source_mtime')=files.mtime),'{}'),
+ '$.'||json_extract($1,'$.identity'),json(json_extract($1,'$.request'))))
+WHERE id=json_extract($1,'$.file') AND size=json_extract($1,'$.size') AND mtime=json_extract($1,'$.mtime')
+ AND dv_profile=7 AND dv_el_present=1 AND json_valid(probe_json)
+ AND EXISTS(SELECT 1 FROM dv_title_jobs_demand d WHERE d.file_id=files.id)
+ AND (json_type(probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.identity')) IS NOT NULL
+ OR (SELECT count(*) FROM json_each(CASE WHEN json_type(files.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+ THEN json_extract(files.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END)
+ WHERE json_extract(value,'$.source_size')=files.size AND json_extract(value,'$.source_mtime')=files.mtime)<8)
+RETURNING 'true' AS result_json
+"#.into(),encode(&body)?,true,true).await?;
+    Ok(!rows.is_empty())
 }

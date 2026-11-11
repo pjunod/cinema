@@ -41,6 +41,9 @@ pub enum SharingFileResourceKind {
     SubtitleManifest { index: u16 },
     SubtitleObject { index: u16 },
     ChapterThumbnail { index: u16 },
+    Captions,
+    CaptionManifest,
+    CaptionSegment,
 }
 
 /// A file-relative suffix only. Authentication, exact file/revision membership
@@ -55,7 +58,12 @@ impl SharingFileResource {
         if suffix.len() > 256 || !suffix.is_ascii() {
             return Err(SharingResourceUnsupported);
         }
-        let fields = suffix.split('/').collect::<Vec<_>>();
+        let (path, query) = match suffix.split_once('?') {
+            Some((path, query)) if !query.is_empty() && !query.contains('?') => (path, Some(query)),
+            Some(_) => return Err(SharingResourceUnsupported),
+            None => (suffix, None),
+        };
+        let fields = path.split('/').collect::<Vec<_>>();
         let index = |value: &str| -> Result<u16> {
             let parsed = digits(value, 4095)?;
             if parsed.to_string() != value {
@@ -70,6 +78,13 @@ impl SharingFileResource {
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         };
         let kind = match fields.as_slice() {
+            ["captions"] => SharingFileResourceKind::Captions,
+            ["captions", asset, "manifest"] if digest(asset) => {
+                SharingFileResourceKind::CaptionManifest
+            }
+            ["captions", asset, "segments", segment] if digest(asset) && digest(segment) => {
+                SharingFileResourceKind::CaptionSegment
+            }
             ["decision"] => SharingFileResourceKind::Decision,
             ["hls", "sessions"] => SharingFileResourceKind::Start,
             ["direct"] => SharingFileResourceKind::Direct,
@@ -92,6 +107,35 @@ impl SharingFileResource {
             },
             _ => return Err(SharingResourceUnsupported),
         };
+        match kind {
+            SharingFileResourceKind::Captions => {
+                if let Some(value) = query {
+                    if !value.strip_prefix("after=").is_some_and(digest) {
+                        return Err(SharingResourceUnsupported);
+                    }
+                }
+            }
+            SharingFileResourceKind::CaptionManifest => {
+                let value = query
+                    .and_then(|q| q.strip_prefix("position_ms="))
+                    .ok_or(SharingResourceUnsupported)?;
+                if digits(value, 14_400_000)?.to_string() != value {
+                    return Err(SharingResourceUnsupported);
+                }
+            }
+            SharingFileResourceKind::CaptionSegment => {
+                let value = query
+                    .and_then(|q| q.strip_prefix("lease="))
+                    .ok_or(SharingResourceUnsupported)?;
+                if !uuid::Uuid::parse_str(value)
+                    .is_ok_and(|id| !id.is_nil() && id.to_string() == value)
+                {
+                    return Err(SharingResourceUnsupported);
+                }
+            }
+            _ if query.is_some() => return Err(SharingResourceUnsupported),
+            _ => {}
+        }
         Ok(Self {
             suffix: suffix.to_owned(),
             kind,
@@ -430,7 +474,19 @@ pub fn validate_sharing_playlist(resource: &SharingHlsResource, bytes: &[u8]) ->
             }
             pending = true;
         } else if let Some(raw) = line.strip_prefix("#EXT-X-START:") {
-            let attrs = closed_attributes(raw, &["TIME-OFFSET"])?;
+            let attrs = closed_attributes(raw, &["TIME-OFFSET", "PRECISE"])?;
+            // PRECISE is an unquoted enumerated string, unlike URI-bearing
+            // quoted attributes. Check its parsed value as well as the raw
+            // spelling so a comma inside a quoted value cannot spoof a token.
+            if let Some(&precise) = attrs.get("PRECISE") {
+                if !matches!(precise, "YES" | "NO")
+                    || !raw
+                        .split(',')
+                        .any(|attribute| matches!(attribute, "PRECISE=YES" | "PRECISE=NO"))
+                {
+                    return Err(SharingResourceUnsupported);
+                }
+            }
             let offset = attrs
                 .get("TIME-OFFSET")
                 .ok_or(SharingResourceUnsupported)?
@@ -599,6 +655,47 @@ mod tests {
         .expect("unmodified actual generator output");
     }
     #[test]
+    fn sharing_hls_playlist_accepts_bounded_start_hints_with_closed_precision() {
+        let resource = SharingHlsResource::parse("index.m3u8").expect("media playlist");
+        for attributes in [
+            "TIME-OFFSET=1.000,PRECISE=NO",
+            "TIME-OFFSET=-1.5,PRECISE=YES",
+            "PRECISE=NO,TIME-OFFSET=86400",
+            "TIME-OFFSET=-86400",
+        ] {
+            let playlist = format!(
+                "#EXTM3U\n#EXT-X-START:{attributes}\n#EXTINF:2.000,\nseg00000.m4s\n#EXT-X-ENDLIST\n"
+            );
+            validate_sharing_playlist(&resource, playlist.as_bytes())
+                .unwrap_or_else(|_| panic!("valid start hint: {attributes}"));
+        }
+        for attributes in [
+            "TIME-OFFSET=1,PRECISE=MAYBE",
+            "TIME-OFFSET=1,PRECISE=yes",
+            "TIME-OFFSET=1,PRECISE=\"NO\"",
+            "TIME-OFFSET=1,PRECISE=\"YES\"",
+            "TIME-OFFSET=1,PRECISE=\"x,PRECISE=YES,x\"",
+            "TIME-OFFSET=1,PRECISE=NO,PRECISE=YES",
+            "TIME-OFFSET=1,TIME-OFFSET=2,PRECISE=NO",
+            "TIME-OFFSET=1,PRECISE=NO,URI=\"source\"",
+            "TIME-OFFSET=1,PRECISE=NO,UNKNOWN=1",
+            "TIME-OFFSET=NaN,PRECISE=NO",
+            "TIME-OFFSET=inf,PRECISE=YES",
+            "TIME-OFFSET=86400.001,PRECISE=NO",
+            "TIME-OFFSET=-86400.001,PRECISE=YES",
+            "PRECISE=NO",
+        ] {
+            let playlist = format!(
+                "#EXTM3U\n#EXT-X-START:{attributes}\n#EXTINF:2.000,\nseg00000.m4s\n#EXT-X-ENDLIST\n"
+            );
+            assert!(
+                validate_sharing_playlist(&resource, playlist.as_bytes()).is_err(),
+                "invalid start hint: {attributes}"
+            );
+        }
+    }
+
+    #[test]
     fn sharing_hls_playlist_refuses_hidden_uris_encryption_and_unbounded_bodies() {
         let resource = SharingHlsResource::parse("index.m3u8").expect("media playlist");
         for tag in [
@@ -665,7 +762,10 @@ mod tests {
                 SharingFileResourceKind::Subtitle { .. }
                 | SharingFileResourceKind::SubtitleManifest { .. }
                 | SharingFileResourceKind::SubtitleObject { .. }
-                | SharingFileResourceKind::ChapterThumbnail { .. } => "asset",
+                | SharingFileResourceKind::ChapterThumbnail { .. }
+                | SharingFileResourceKind::Captions
+                | SharingFileResourceKind::CaptionManifest
+                | SharingFileResourceKind::CaptionSegment => "asset",
             };
             assert_eq!(row["b"], route, "{suffix:?}");
         }
@@ -685,6 +785,23 @@ pub fn valid_cached_subtitle_revision(revision: &str) -> bool {
 #[cfg(test)]
 mod cached_caption_tests {
     use super::*;
+    /// Sources and receivers run different builds: the retired in-session
+    /// identity must stay parseable (an old peer may still send or receive it),
+    /// beside the versioned window grammar a current Source publishes.
+    #[test]
+    fn cached_caption_revision_grammars_old_and_versioned_both_parse() {
+        for revision in [
+            "source-7f3a9c1e-2b4d-4c11-9a6e-0d5f8e2b1a34-3-0.vtt",
+            "f7-s1-123-456.vtt",
+            "f7-s1-123-456-w600-200.vtt",
+            "f7-s1-123-456-o0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-w600-200.vtt",
+        ] {
+            let resource = SharingHlsResource::parse(&format!("subs/0/cached-{revision}"))
+                .unwrap_or_else(|_| panic!("{revision}"));
+            assert_eq!(resource.cached_subtitle_revision(), Some(revision));
+        }
+    }
+
     #[test]
     fn cached_caption_session_resource_is_bounded_and_cannot_escape_its_namespace() {
         let revision = "f7-s1-123-456-w0-200.vtt";
@@ -699,6 +816,38 @@ mod cached_caption_tests {
             "subs/4096/cached-a",
         ] {
             assert!(SharingHlsResource::parse(path).is_err(), "{path}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod progressive_caption_grammar_tests {
+    use super::*;
+    #[test]
+    fn shared_captions_are_closed_read_resources_with_canonical_queries() {
+        let hash = "a".repeat(64);
+        for path in [
+            "captions".to_owned(),
+            format!("captions?after={hash}"),
+            format!("captions/{hash}/manifest?position_ms=14400000"),
+            format!("captions/{hash}/segments/{hash}?lease=11111111-1111-4111-8111-111111111111"),
+        ] {
+            assert!(SharingFileResource::parse(&path).is_ok(), "{path}");
+        }
+        for path in [
+            "captions?after=".to_owned(),
+            "captions?after=wrong".into(),
+            format!("captions/{hash}/manifest"),
+            format!("captions/{hash}/manifest?position_ms=-1"),
+            format!("captions/{hash}/manifest?position_ms=01"),
+            format!("captions/{hash}/manifest?position_ms=1&position_ms=2"),
+            format!("captions/{hash}/manifest?position_ms=14400001"),
+            format!("captions/{hash}/segments/{hash}?lease=00000000-0000-0000-0000-000000000000"),
+            format!("captions/{hash}/stop"),
+            "captions%2fsecret".into(),
+            "decision?after=1".into(),
+        ] {
+            assert!(SharingFileResource::parse(&path).is_err(), "{path}");
         }
     }
 }

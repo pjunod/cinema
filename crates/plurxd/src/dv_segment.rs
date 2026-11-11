@@ -125,6 +125,7 @@ impl SegmentAdmission {
 /// argv already selects encoder/output and keeps source time with -copyts. Its
 /// NUT video is fd3; original source audio remains fd4 (independent demux input).
 pub(crate) struct SegmentRequest {
+    pub(crate) source_input: Option<Arc<SourceInputLease>>,
     pub(crate) renderer: PathBuf,
     /// Trusted worker runtime configuration, scoped to the renderer child only.
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
@@ -153,6 +154,16 @@ pub(crate) struct SegmentEvidence {
 }
 #[cfg(target_os = "linux")]
 impl SegmentEvidence {
+    #[cfg(test)]
+    pub(crate) fn from_test_directory(directory: tempfile::TempDir) -> Result<Self, String> {
+        let held = plurx_core::fs_secure::open_directory_nofollow_blocking(directory.path())
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            directory: Arc::new(directory),
+            held: Arc::new(held),
+        })
+    }
+
     fn open(
         directory: &std::fs::File,
         name: &std::ffi::CStr,
@@ -291,6 +302,8 @@ pub(crate) fn supervise_streaming_helper(
 /// Same registered pipes/writer barrier the existing producer consumes. On
 /// unsuccessful handoff the detached owner retires this exact generation.
 pub(crate) struct SegmentProducer {
+    #[cfg(target_os = "linux")]
+    source_settlement: Option<SourceInputSettlement>,
     registration: ProducerRegistration,
     writers: Option<ProducerWriters>,
     stdout: Option<tokio::process::ChildStdout>,
@@ -302,6 +315,11 @@ pub(crate) struct SegmentProducer {
     evidence: Option<SegmentEvidence>,
 }
 impl SegmentProducer {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_source_settlement(&mut self) -> Option<SourceInputSettlement> {
+        self.source_settlement.take()
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn take_evidence(&mut self) -> Option<SegmentEvidence> {
         self.evidence.take()
@@ -342,7 +360,84 @@ impl Drop for SegmentProducer {
     }
 }
 
+/// One existing input owner shared by the renderer/encoder resource graph.
+/// Closing the input waits for those actual physical owners to drop, as well
+/// as the input server's blocking reads; an error waiter is not reap proof.
+pub(crate) struct SourceInputLease {
+    input: std::sync::Mutex<Option<crate::source_input::SourceInput>>,
+    #[cfg(target_os = "linux")]
+    url: String,
+    users: std::sync::atomic::AtomicUsize,
+    settled: tokio::sync::Notify,
+}
+impl SourceInputLease {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn new(input: crate::source_input::SourceInput) -> Arc<Self> {
+        Arc::new(Self {
+            url: input.url().into(),
+            input: std::sync::Mutex::new(Some(input)),
+            users: std::sync::atomic::AtomicUsize::new(0),
+            settled: tokio::sync::Notify::new(),
+        })
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn physical_owner(self: &Arc<Self>) -> SourceInputUse {
+        self.users.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        SourceInputUse(Arc::clone(self))
+    }
+    pub(crate) async fn close_and_wait(&self) -> std::io::Result<()> {
+        loop {
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if self.users.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                break;
+            }
+            settled.await;
+        }
+        let input = { self.input.lock().expect("DV source input").take() };
+        if let Some(input) = input {
+            input.close_and_wait().await?;
+        }
+        Ok(())
+    }
+}
+#[cfg(target_os = "linux")]
+pub(crate) struct SourceInputUse(Arc<SourceInputLease>);
+#[cfg(target_os = "linux")]
+impl Drop for SourceInputUse {
+    fn drop(&mut self) {
+        let prior = self
+            .0
+            .users
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(prior > 0);
+        self.0.settled.notify_waiters();
+    }
+}
+/// Minted only after the actual helper and encoder are registered. It is
+/// move-only: a cached receipt can never pretend another read owner settled.
+#[cfg(target_os = "linux")]
+pub(crate) struct SourceInputSettlement {
+    input: Arc<SourceInputLease>,
+    encoder: ProducerRegistration,
+    helper: HelperCompletion,
+}
+#[cfg(target_os = "linux")]
+impl SourceInputSettlement {
+    pub(crate) async fn settle(self) -> Result<(), String> {
+        self.encoder.wait_confirmed_reap().await;
+        let _ = self.helper.wait().await;
+        self.input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("DV source read join: {error}"))
+    }
+}
+
 struct Resources {
+    #[cfg(target_os = "linux")]
+    _source_input: Option<SourceInputUse>,
     source: Arc<SourceFence>,
     original_offset: u64,
     _offset_lane: Option<OwnedSemaphorePermit>,
@@ -551,9 +646,14 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
         .count()
         != policies.len()
         || policies.len() > 1
-        || policies
-            .first()
-            .is_some_and(|pair| pair[1] != "19" || codecs[0][1] != "hevc_vaapi")
+        || policies.first().is_some_and(|pair| {
+            // The radeonsi policy (19), or the reconstructed 8.1 route's
+            // own recipe (0, VBAQ off): nothing else.
+            let policy = plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq;
+            ![policy.flags()[1], policy.reconstructed_profile81_flags()[1]]
+                .contains(&pair[1].as_str())
+                || codecs[0][1] != "hevc_vaapi"
+        })
     {
         return Err("unsupported or ambiguous completed VAAPI driver policy".into());
     }
@@ -575,14 +675,16 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
                 occurrences.len() != 1 || occurrences[0][1] != *value
             })
             || {
-                // The level describes the window's raster and cadence
-                // (`hevc_level_for`), so any defined Main-tier step is valid.
+                // Admit the same Main10 High-tier level vocabulary used by
+                // the frozen enhancement envelope, including high-rate 6.2.
                 let levels: Vec<_> = output
                     .windows(2)
                     .filter(|pair| pair[0] == "-level:v")
                     .collect();
                 levels.len() != 1
-                    || !["4", "4.1", "5", "5.1", "5.2", "6", "6.1"].contains(&levels[0][1].as_str())
+                    || !plurx_core::transcode::EnhancementRateEnvelope::supports_hevc_level_name(
+                        &levels[0][1],
+                    )
             }
         {
             return Err(
@@ -663,6 +765,13 @@ async fn run(
     request: SegmentRequest,
     cancel: CancellationToken,
 ) -> Result<SegmentProducer, String> {
+    if let Some(input) = request.source_input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|error| error.to_string())?;
+        return Err("source input service requires an original movie window".into());
+    }
     let raw_limit = request.shape.validate()?;
     let admission = request.admission;
     let held = admission.resources();
@@ -708,6 +817,8 @@ async fn run(
         .tempdir_in(&request.runtime_cache)
         .map_err(|e| e.to_string())?;
     let resources = Arc::new(Resources {
+        #[cfg(target_os = "linux")]
+        _source_input: None,
         source: request.source,
         original_offset,
         _offset_lane: Some(lane),
@@ -843,6 +954,8 @@ async fn run(
         }, _ = watched.wait_confirmed_reap() => {} }
     });
     Ok(SegmentProducer {
+        #[cfg(target_os = "linux")]
+        source_settlement: None,
         registration,
         writers: Some(writers),
         stdout: Some(encoded.stdout),
@@ -915,6 +1028,9 @@ pub(crate) struct StreamingSegmentRequest {
     pub(crate) renderer_deadline: Instant,
     pub(crate) window: Option<SegmentWindow>,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    /// Where the renderer was admitted to decode its layers. It decides the
+    /// renderer's CPU debit, so it is part of the frozen graph admission.
+    pub(crate) decode: RendererDecode,
     pub(crate) export_raster: Option<(u32, u32)>,
     /// Explicit producer policy only; this layer never reads client caps.
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
@@ -923,26 +1039,54 @@ pub(crate) struct StreamingSegmentRequest {
 #[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
 pub(crate) const STREAMING_DECODER_THREADS: usize = 4;
 
+/// Where the renderer decodes its source layers.
+///
+/// `segment_decode_render.c` (`open_layer`) gives each layer's decoder four
+/// frame workers only when it opened without a VA-API device; with one, each
+/// layer decodes with `thread_count = 1` and the GPU does the work. Debiting
+/// the software shape for a GPU decode reserved eight decoder threads nobody
+/// runs, and on a 12-thread worker it made every FEL graph (10 + 5 threads
+/// against a budget of 11) unadmittable.
+#[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RendererDecode {
+    /// The renderer is given the VA-API render device and the node measured
+    /// a VA-API HEVC decode. A window that nevertheless opened its decoders
+    /// in software is refused (`dv_runtime`), never served over budget.
+    #[cfg(any(target_os = "linux", plurx_dv_segment_probe))]
+    Gpu,
+    Software,
+}
+
 #[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
 pub(crate) fn streaming_helper_cpu_threads(
     mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    decode: RendererDecode,
 ) -> usize {
-    // Four frame-only decoder workers per native layer, one caller doing
-    // parsing/upload/packing, and one bounded software-Vulkan worker.
-    if mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu {
-        STREAMING_DECODER_THREADS + 2
+    let layers = if mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu {
+        1
     } else {
-        2 * STREAMING_DECODER_THREADS + 2
+        2
+    };
+    // Per layer: four frame-only software decoder workers, or one GPU decode
+    // context. Plus one caller doing parsing/upload/packing, one bounded
+    // software-Vulkan worker and one owned source-reader worker. Finite legacy
+    // controls conservatively reserve the windowed graph's source-reader debit.
+    match decode {
+        RendererDecode::Software => layers * STREAMING_DECODER_THREADS + 3,
+        #[cfg(any(target_os = "linux", plurx_dv_segment_probe))]
+        RendererDecode::Gpu => layers + 3,
     }
 }
 
 #[cfg(target_os = "linux")]
 fn check_streaming_budget(
     mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    decode: RendererDecode,
     args: &[String],
     cpu: usize,
 ) -> Result<(), String> {
-    let helper = streaming_helper_cpu_threads(mode);
+    let helper = streaming_helper_cpu_threads(mode, decode);
     let encoder = cpu
         .checked_sub(helper)
         .filter(|threads| *threads >= 3)
@@ -1004,7 +1148,12 @@ async fn run_streaming(
     let cpu = held
         .software
         .ok_or("concurrent helper and encoder lack their frozen CPU debit")?;
-    check_streaming_budget(stream.mode, &request.encoder_args, cpu.threads())?;
+    check_streaming_budget(
+        stream.mode,
+        stream.decode,
+        &request.encoder_args,
+        cpu.threads(),
+    )?;
     check_streaming_clock(&request.encoder_args, windowed)?;
     let reservation = request
         .producer
@@ -1034,7 +1183,9 @@ async fn run_streaming(
         .prefix("dv-stream-")
         .tempdir_in(&request.runtime_cache)
         .map_err(|e| e.to_string())?;
+    let source_input = request.source_input;
     let resources = Arc::new(Resources {
+        _source_input: source_input.as_ref().map(|input| input.physical_owner()),
         source: request.source,
         original_offset,
         _offset_lane: Some(lane),
@@ -1057,6 +1208,12 @@ async fn run_streaming(
     let read: std::fs::File = std::os::fd::OwnedFd::from(read).into();
     let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
     let mut args = request.shape.renderer_args();
+    if let Some(input) = &source_input {
+        if !windowed {
+            return Err("original source service requires windowed renderer input".into());
+        }
+        args[0] = input.url.clone();
+    }
     args.push(fd(5));
     if let Some(window_args) = window_args {
         args.extend(window_args);
@@ -1135,13 +1292,18 @@ async fn run_streaming(
         }
         producer_spawn::spawn(
             &request.encoder,
-            &request.encoder_args,
+            &crate::source_input::source_args(
+                &request.encoder_args,
+                std::path::Path::new(""),
+                &[4],
+                source_input.as_ref().map(|input| input.url.as_str()),
+            ),
             SpawnOptions {
                 runtime_cache: &request.runtime_cache,
                 progress: Progress::Stderr,
                 descriptors: Descriptors::from_files(
                     Some(&read),
-                    Some(&resources.source.handle),
+                    source_input.is_none().then_some(&resources.source.handle),
                     None,
                     false,
                 ),
@@ -1190,7 +1352,13 @@ async fn run_streaming(
         Arc::downgrade(&request.producer),
         registration.clone(),
     );
+    let source_settlement = source_input.map(|input| SourceInputSettlement {
+        input,
+        encoder: registration.clone(),
+        helper: completion.clone(),
+    });
     Ok(SegmentProducer {
+        source_settlement,
         registration,
         writers: Some(writers),
         stdout: Some(encoded.stdout),
@@ -1261,7 +1429,7 @@ async fn stage<R: Send + Sync + 'static>(
         tokio::select! {
             result = completed => result.and_then(|(status,(stdout,stderr))| {
                 if status.success() { Ok(stdout) } else {
-                    Err(format!("{name} {}: {}",if status.code()==Some(1) {"refused segment"} else {"failed"},String::from_utf8_lossy(&stderr)))
+                    Err(format!("{name} {}: {}",if status.code()==Some(1) {"refused segment"} else {"failed"},crate::scratch_put::redact(&String::from_utf8_lossy(&stderr))))
                 }
             }),
             _ = cancel.cancelled() => Err(format!("{name} cancelled")),
@@ -1286,6 +1454,8 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
             export_raster: None,
             display_target: None,
             mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
+            // The probe passes no decode device: the renderer decodes in software.
+            decode: RendererDecode::Software,
             request,
             renderer_deadline: Instant::now() + Duration::from_secs(30),
             window: std::env::var("PLURX_DV_SEGMENT_WINDOW_START")
@@ -1419,8 +1589,10 @@ pub(crate) async fn physical_probe() {
     use plurx_core::domain::MediaFile;
     let streaming = std::env::var("PLURX_DV_SEGMENT_STREAMING").is_ok_and(|v| v == "1");
     let cpu_threads = if streaming {
-        streaming_helper_cpu_threads(plurx_core::transcode::dv_processing::DvProcessingMode::Fel)
-            + 3
+        streaming_helper_cpu_threads(
+            plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
+            RendererDecode::Software,
+        ) + 3
     } else {
         3
     };
@@ -1515,6 +1687,7 @@ pub(crate) async fn physical_probe() {
         Duration::from_millis(500),
         probe_spawn(
             SegmentRequest {
+                source_input: None,
                 renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                     .expect("renderer")
                     .into(),
@@ -1572,6 +1745,7 @@ pub(crate) async fn physical_probe() {
     .expect("predecessor slot fully settled");
     let producer = probe_spawn(
         SegmentRequest {
+            source_input: None,
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
                 .into(),
@@ -1634,7 +1808,7 @@ pub(crate) async fn physical_probe() {
     assert!(
         status.success(),
         "encoder: {}",
-        String::from_utf8_lossy(&diagnostic)
+        crate::scratch_put::redact(&String::from_utf8_lossy(&diagnostic))
     );
     #[cfg(target_os = "linux")]
     if let Some(completion) = completion {
@@ -1702,6 +1876,7 @@ pub(crate) async fn physical_probe() {
     let slot = Arc::new(ProducerSlot::new());
     let unaccepted = probe_spawn(
         SegmentRequest {
+            source_input: None,
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
                 .into(),
@@ -1763,6 +1938,7 @@ pub(crate) async fn physical_probe() {
         let slot = Arc::new(ProducerSlot::new());
         let mut refused = probe_spawn(
             SegmentRequest {
+                source_input: None,
                 renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                     .expect("renderer")
                     .into(),
@@ -1981,6 +2157,75 @@ mod tests {
     }
 
     #[test]
+    fn completed_vaapi_accepts_envelope_level_62_and_rejects_ambiguous_levels() {
+        use plurx_core::transcode::*;
+        let mut source = encoded_recipe_source(true);
+        source.width = Some(3840);
+        source.height = Some(2160);
+        source.bitrate = Some(300_000_000);
+        let options = TranscodeOptions {
+            pipeline: Pipeline::Hdr10Passthrough,
+            audio_index: None,
+            ..Default::default()
+        };
+        let (plan, execution, _, _) = recipe_fixture_parts(&source, &options);
+        let output = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("typed Main10 output");
+        let mut args = vod_completed_reconstructed_pipe_args(
+            &source,
+            &output,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            2.0,
+            &fd(3),
+            &fd(4),
+            VodSourceClock::ReportedOrigin(0),
+        )
+        .expect("production graph");
+        let envelope = EnhancementRateEnvelope::resolve(
+            300_000,
+            EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+            3840,
+            2160,
+            (24, 1),
+            false,
+            Default::default(),
+        )
+        .expect("legal high-rate envelope");
+        assert_eq!(envelope.hevc_level(), "6.2");
+        envelope.apply_args(&mut args, Encoder::Vaapi);
+        for (flag, value) in [
+            ("-level:v", "6.2"),
+            ("-b:v", "300000k"),
+            ("-maxrate", "450000k"),
+            ("-bufsize", "600000k"),
+            ("-tier:v", "high"),
+        ] {
+            let actual: Vec<_> = args
+                .windows(2)
+                .filter(|pair| pair[0] == flag)
+                .map(|pair| pair[1].as_str())
+                .collect();
+            assert_eq!(actual, [value], "{flag}: {args:?}");
+        }
+        assert!(check_encoder_budget(&args, 5).is_ok(), "{args:?}");
+
+        let level = args
+            .iter()
+            .position(|arg| arg == "-level:v")
+            .expect("frozen level argument")
+            + 1;
+        for unknown in ["", "6.3", "6.20", "186"] {
+            let mut invalid = args.clone();
+            invalid[level] = unknown.into();
+            assert!(check_encoder_budget(&invalid, 5).is_err(), "{invalid:?}");
+        }
+        args.extend(["-level:v".into(), "6.2".into()]);
+        assert!(check_encoder_budget(&args, 5).is_err(), "duplicate level");
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
     fn streaming_graph_accounts_every_native_decoder_and_audio_scope() {
         use plurx_core::transcode::dv_processing::DvProcessingMode;
@@ -2025,15 +2270,20 @@ mod tests {
                     .collect::<Vec<_>>(),
                 ["19"]
             );
-            for (mode, helper) in [(DvProcessingMode::BaseRpu, 6), (DvProcessingMode::Fel, 10)] {
-                assert_eq!(streaming_helper_cpu_threads(mode), helper);
+            for (mode, decode, helper) in [
+                (DvProcessingMode::BaseRpu, RendererDecode::Software, 7),
+                (DvProcessingMode::Fel, RendererDecode::Software, 11),
+                (DvProcessingMode::BaseRpu, RendererDecode::Gpu, 4),
+                (DvProcessingMode::Fel, RendererDecode::Gpu, 5),
+            ] {
+                assert_eq!(streaming_helper_cpu_threads(mode, decode), helper);
                 let total = helper + if audio { 5 } else { 3 };
                 assert!(
-                    check_streaming_budget(mode, &args, total).is_ok(),
+                    check_streaming_budget(mode, decode, &args, total).is_ok(),
                     "{args:?}"
                 );
                 assert!(
-                    check_streaming_budget(mode, &args, total - 1).is_err(),
+                    check_streaming_budget(mode, decode, &args, total - 1).is_err(),
                     "every scope must fit before producer reservation"
                 );
             }
@@ -2221,6 +2471,10 @@ mod tests {
             duplicated.extend([flag.into(), "19".into()]);
             assert!(check_encoder_budget(&duplicated, 3).is_err());
         }
+        // The reconstructed 8.1 route's recipe (VBAQ off) is the one other
+        // qualified value; without it every 8.1 window was refused here.
+        *qualified.last_mut().expect("policy") = "0".into();
+        assert!(check_encoder_budget(&qualified, 3).is_ok());
         *qualified.last_mut().expect("policy") = "20".into();
         assert!(check_encoder_budget(&qualified, 3).is_err());
         let mut wrong_encoder = nvenc.to_vec();

@@ -397,6 +397,10 @@ pub struct AudioTrackDto {
 
 #[derive(Serialize)]
 pub struct SubTrackDto {
+    /// Acquired/generated captions are sidecars and are absent from direct media.
+    pub source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downloaded_subtitle_id: Option<String>,
     /// Position among subtitle streams (`s:{index}`).
     pub index: i64,
     pub codec: String,
@@ -972,6 +976,14 @@ fn sub_tracks(file: &MediaFile, overlay_enabled: bool) -> Vec<SubTrackDto> {
         .iter()
         .enumerate()
         .map(|(i, s)| SubTrackDto {
+            source: if file.downloaded_subtitle(i as i64).is_some() {
+                "downloaded"
+            } else {
+                "embedded"
+            },
+            downloaded_subtitle_id: file
+                .downloaded_subtitle(i as i64)
+                .map(|subtitle| subtitle.stable_id()),
             index: i as i64,
             codec: s.codec.clone(),
             language: s.language.clone(),
@@ -1908,7 +1920,7 @@ async fn stored_markers_for_source(state: &AppState, file: &MediaFile) -> Vec<Ma
 }
 
 #[derive(Clone, Copy)]
-enum MarkerReadPolicy {
+enum PlanningReadPolicy {
     LocalDerivation,
     StoredSourceEvidence,
 }
@@ -2285,7 +2297,7 @@ pub async fn decision(
             identity.as_ref(),
             super::hls::link_receipts::requested_receipt(&headers),
         ),
-        MarkerReadPolicy::LocalDerivation,
+        PlanningReadPolicy::LocalDerivation,
     )
     .await
     .map(Json)
@@ -2298,6 +2310,9 @@ pub(super) async fn decision_for_source_file(
     file: MediaFile,
     q: Caps,
 ) -> Result<DecisionResponse, ApiError> {
+    // Source Start prepares a missing non-Dolby HEVC index under its owned
+    // admission. Keep the common capability plan: an absent index does not
+    // require video encoding or an HDR10 encoder for HDR10 copy delivery.
     decision_for_file(
         state,
         file,
@@ -2305,7 +2320,7 @@ pub(super) async fn decision_for_source_file(
         None,
         None,
         (None, None),
-        MarkerReadPolicy::StoredSourceEvidence,
+        PlanningReadPolicy::StoredSourceEvidence,
     )
     .await
 }
@@ -2317,7 +2332,7 @@ async fn decision_for_file(
     network_prior: Option<plurx_core::domain::NetworkPrior>,
     user: Option<&plurx_core::domain::User>,
     link_evidence: (Option<&crate::telemetry::NetworkIdentity>, Option<&str>),
-    marker_policy: MarkerReadPolicy,
+    marker_policy: PlanningReadPolicy,
 ) -> Result<DecisionResponse, ApiError> {
     let (identity, incumbent_receipt) = link_evidence;
     let id = file.id;
@@ -2499,15 +2514,19 @@ async fn decision_for_file(
         playback::resolve_audio_for_method(&file, &q.profile(decision_now_ms), decision.method);
     // Only a copy needs the census; an encode never carries the source's
     // parameter sets, and a direct play serves them untouched.
-    let probe_json = if decision.method == playback::PlaybackMethod::Remux {
+    let local_derivation = matches!(marker_policy, PlanningReadPolicy::LocalDerivation);
+    let probe_json = if local_derivation && decision.method == playback::PlaybackMethod::Remux {
         crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?
     } else {
+        // Source planning must not mutate its revision witness or launch an
+        // anonymous census. Actual Source preparation owns physical work.
         state.store.get_file_probe_json(id).await?
     };
+    let have_dovi = local_derivation && crate::ffmpeg::has_dovi_rpu().await;
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
         probe_json.as_deref(),
-        crate::ffmpeg::has_dovi_rpu().await,
+        have_dovi,
         decision.preserve_dolby_vision,
     )
     .with_dolby_vision_conversion(decision.convert_dolby_vision);
@@ -2593,8 +2612,8 @@ async fn decision_for_file(
         None
     };
     let markers = match marker_policy {
-        MarkerReadPolicy::LocalDerivation => markers_for(state, &file).await,
-        MarkerReadPolicy::StoredSourceEvidence => stored_markers_for_source(state, &file).await,
+        PlanningReadPolicy::LocalDerivation => markers_for(state, &file).await,
+        PlanningReadPolicy::StoredSourceEvidence => stored_markers_for_source(state, &file).await,
     };
 
     // DTO defaults and the verdict now come from the same selection above.
@@ -3015,8 +3034,7 @@ pub async fn download(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let file = load_file(&state, id).await?;
-    let mut response =
-        serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await?;
+    let mut response = serve_original_file_range(&state, &file, &headers, &method).await?;
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_static("attachment"),
@@ -3053,21 +3071,21 @@ pub async fn direct(
             return Err(error);
         }
     };
-    let served =
-        serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await;
+    let served = serve_original_file_range(&state, &file, &headers, &method).await;
     match &served {
         // Bytes are going out: this is the moment playback is real. Every
         // request in the storm reports, and the registry collapses them — the
         // repetition is what keeps a live viewer listed, since a direct play
         // has no session to end and a closed tab announces nothing.
         Ok(response) if method == Method::GET && response.status().is_success() => {
-            crate::playstart::note_playback_started(
+            crate::playstart::note_request_started(
                 &state,
                 user.id,
                 &user.username,
                 id,
                 crate::delivery::Method::Direct,
                 q.stream.as_deref(),
+                crate::playstart::request_client_build(&headers),
             )
         }
         // HEAD and rejected ranges carry no media and are not playback.
@@ -3134,8 +3152,7 @@ pub(super) async fn serve_book_content(
     if item.kind != ItemKind::Book {
         return Err(ApiError::NotFound("book content"));
     }
-    let mut response =
-        serve_file_range(&file.path, headers, method, Some(file.size.max(0) as u64)).await?;
+    let mut response = serve_original_file_range(state, &file, headers, method).await?;
     if response.status().is_success() {
         let name = file
             .path
@@ -3270,10 +3287,12 @@ pub async fn stream_mp4(
     auth: AuthUser,
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
+    headers: HeaderMap,
     query: Query<StreamQuery>,
 ) -> Result<Response, ApiError> {
     let (user_id, start_attempts) = (auth.0.id, std::sync::Arc::clone(&state.start_attempts));
-    let served = serve_stream_mp4(auth, State(state), AxPath(id), query).await;
+    let client_build = crate::playstart::request_client_build(&headers);
+    let served = serve_stream_mp4(auth, State(state), AxPath(id), query, client_build).await;
     // A start request the server refused (C-08 M5 row 4).
     if let Err(error) = &served {
         start_attempts.refused(
@@ -3292,6 +3311,7 @@ async fn serve_stream_mp4(
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
     Query(q): Query<StreamQuery>,
+    client_build: String,
 ) -> Result<Response, ApiError> {
     let mut file = load_file(&state, id).await?;
     file.audio_offset_ms = if file.audio_streams.is_empty() {
@@ -3358,13 +3378,14 @@ async fn serve_stream_mp4(
         },
         "progressive delivery narrowed requested playback policy"
     );
-    crate::playstart::note_playback_started(
+    crate::playstart::note_request_started(
         &state,
         user.id,
         &user.username,
         id,
         crate::delivery::Method::Remux,
         q.stream.as_deref(),
+        client_build,
     );
     let readrate = readrate_setting(&state).await;
     // A remux copies the video untouched, so the wire and the source read both
@@ -3408,6 +3429,12 @@ async fn serve_stream_mp4(
     #[cfg(not(windows))]
     let remux_path = file.path.clone();
     remux(RemuxSpec {
+        source_request: state.transcode.foreground_source_request(
+            &file,
+            &format!("progressive-{}", file.id),
+            uuid::Uuid::new_v4(),
+            plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+        ),
         audio_delivery: (caps.achannels.is_some()
             || caps
                 .caps_v2
@@ -3650,6 +3677,46 @@ pub(crate) fn file_content_type(path: &Path) -> &'static str {
 
 /// HTTP range serving of a file (direct play). Shared by the native part
 /// endpoint and the Plex-compat `/library/parts/...` endpoint.
+pub(crate) async fn serve_original_file_range(
+    state: &AppState,
+    file: &MediaFile,
+    headers: &HeaderMap,
+    method: &Method,
+) -> Result<Response, ApiError> {
+    let len = file.size.max(0) as u64;
+    let plan = plan_file_range(headers, method, len);
+    let (start, length) = match plan {
+        FileRangePlan::Partial { start, end } if method != Method::HEAD => (start, end - start + 1),
+        FileRangePlan::Full if method != Method::HEAD => (0, len),
+        _ => return serve_file_range(&file.path, headers, method, Some(len)).await,
+    };
+    let Some(request) = state.transcode.foreground_source_request(
+        file,
+        &format!("original-range-{}", file.id),
+        uuid::Uuid::new_v4(),
+        plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+    ) else {
+        return serve_file_range(&file.path, headers, method, Some(len)).await;
+    };
+    // Opening/stat'ing a capability performs no original byte read. The
+    // replicated owner is bound to this exact object before its first read.
+    let source = crate::fragment_index_cluster::open_source_playback_fence(file, None)
+        .await
+        .map_err(|_| ApiError::NotFound("file on disk"))?;
+    let body = crate::source_custody::file_body(source, start, length, request)
+        .await
+        .map_err(ApiError::Internal)?;
+    let (status, fields) = file_range_head(plan, len, content_type(&file.path));
+    let mut response = (status, body).into_response();
+    for (name, value) in fields {
+        response.headers_mut().insert(
+            name,
+            HeaderValue::from_str(&value).map_err(|error| ApiError::Internal(error.to_string()))?,
+        );
+    }
+    Ok(response)
+}
+
 pub(crate) async fn serve_file_range(
     path: &Path,
     headers: &HeaderMap,
@@ -3705,6 +3772,7 @@ pub(crate) async fn serve_file_range(
 /// transposition away from remuxing at the wrong pace with the wrong track.
 struct RemuxSpec<'a> {
     audio_delivery: Option<&'a plurx_core::playback::audio::AudioDelivery>,
+    source_request: Option<crate::source_custody::SourceRequest>,
     path: &'a Path,
     #[cfg(windows)]
     source: &'a std::fs::File,
@@ -3777,12 +3845,35 @@ impl Drop for RemuxProcessGuard {
 /// buffered output still drains. The owner keeps that decision after a
 /// natural exit, until the body is dropped, so a body waiting on authority
 /// always has someone to end its wait.
+#[cfg(test)]
 fn spawn_remux_process_owner(
+    child: tokio::process::Child,
+    child_job: crate::process_control::ChildJob,
+    serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    admitted_generation: u64,
+    registry_guard: Option<crate::progressive::StreamGuard>,
+) -> (
+    RemuxProcessGuard,
+    tokio_util::sync::CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_remux_process_owner_with_source(
+        child,
+        child_job,
+        serving,
+        admitted_generation,
+        registry_guard,
+        None,
+    )
+}
+
+fn spawn_remux_process_owner_with_source(
     mut child: tokio::process::Child,
     child_job: crate::process_control::ChildJob,
     mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
     admitted_generation: u64,
     registry_guard: Option<crate::progressive::StreamGuard>,
+    source_custody: Option<crate::source_input::SourceInput>,
 ) -> (
     RemuxProcessGuard,
     tokio_util::sync::CancellationToken,
@@ -3794,6 +3885,7 @@ fn spawn_remux_process_owner(
     let owner_fenced = fenced.clone();
     let task = tokio::spawn(async move {
         let _child_job = child_job;
+        let mut source_custody = source_custody;
         // Registration belongs to the process lifetime. It disappears on
         // natural exit, body drop, or serving loss—not merely when Hyper next
         // decides to poll a response body.
@@ -3820,6 +3912,7 @@ fn spawn_remux_process_owner(
                     crate::serving_fence::LossOutcome::Recovered {
                         outage,
                         budget_spent,
+                        ..
                     } => {
                         generation = serving.borrow_and_update().loss_generation;
                         tracing::info!(
@@ -3843,8 +3936,12 @@ fn spawn_remux_process_owner(
                 status = child.wait(), if !exited => {
                     if let Err(error) = status {
                         tracing::warn!(%error, "waiting for remux ffmpeg failed");
+                        if let Some(custody)=source_custody.take() { custody.cleanup_pending(); }
                     }
                     exited = true;
+                    if let Some(input)=source_custody.take() {
+                        if let Err(error)=input.close_and_wait().await {tracing::warn!(%error,"progressive original input settlement failed");}
+                    }
                     drop(registry_guard.take());
                 }
                 () = owner_cancel.cancelled() => break None,
@@ -3868,7 +3965,20 @@ fn spawn_remux_process_owner(
             if child.try_wait().ok().flatten().is_none() {
                 let _ = child.kill().await;
             }
-            let _ = child.wait().await;
+            match child.wait().await {
+                Ok(_) => {
+                    if let Some(input) = source_custody.take() {
+                        if let Err(error) = input.close_and_wait().await {
+                            tracing::warn!(%error,"progressive original input settlement failed");
+                        }
+                    }
+                }
+                Err(_) => {
+                    if let Some(custody) = source_custody.take() {
+                        custody.cleanup_pending();
+                    }
+                }
+            }
         }
     });
     (RemuxProcessGuard { cancel }, fenced, task)
@@ -4055,6 +4165,7 @@ async fn consume_remux_stderr<R>(
                 continue;
             }
         }
+        let line = crate::scratch_put::redact(&line);
         tracing::warn!("remux ffmpeg: {line}");
     }
 }
@@ -4062,6 +4173,7 @@ async fn consume_remux_stderr<R>(
 async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     let RemuxSpec {
         audio_delivery,
+        source_request,
         path,
         #[cfg(windows)]
         source,
@@ -4208,6 +4320,20 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         .map_err(ApiError::Internal)?;
     #[cfg(not(windows))]
     let descriptors = crate::producer_spawn::Descriptors::default();
+    let source_custody = match source_request {
+        Some(request) => Some(
+            crate::source_input::SourceInput::open(request, "progressive-remux")
+                .await
+                .map_err(ApiError::Internal)?,
+        ),
+        None => None,
+    };
+    let args = crate::source_input::source_args(
+        &args,
+        path,
+        &[],
+        source_custody.as_ref().map(|input| input.url()),
+    );
     let program = ffmpeg_bin();
     let crate::producer_spawn::Spawned {
         child,
@@ -4254,12 +4380,13 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // serving authority during the origin probe is resolved by the same grace
     // as one during playback rather than refusing the start outright.
     let owner_guard = guard.clone();
-    let (process_guard, fenced, _process_owner) = spawn_remux_process_owner(
+    let (process_guard, fenced, _process_owner) = spawn_remux_process_owner_with_source(
         child,
         child_job,
         serving.clone(),
         admitted_generation,
         owner_guard,
+        source_custody,
     );
 
     // Probe after the remux starts opening the source, matching the HLS copy

@@ -86,6 +86,17 @@ impl ApiError {
         }
     }
 
+    /// The HTTP status this error answers with, for a record of a refusal that
+    /// carries no `code`.
+    pub fn http_status(&self) -> StatusCode {
+        self.parts().0
+    }
+
+    /// The sentence this error answers with.
+    pub fn refusal_text(&self) -> String {
+        self.parts().1
+    }
+
     /// The machine-readable `code` a typed error carries, if it is one.
     pub fn code(&self) -> Option<&'static str> {
         match self {
@@ -128,8 +139,25 @@ impl ApiError {
     }
 }
 
+/// The typed `code` an [`ApiError`] answered with, carried on the response so
+/// a layer that never sees the error itself (the playback failure log in
+/// `http::hls::fence`) can still say which refusal a client received.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ApiErrorCode(pub(crate) &'static str);
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let code = self.code();
+        let mut response = self.render();
+        if let Some(code) = code {
+            response.extensions_mut().insert(ApiErrorCode(code));
+        }
+        response
+    }
+}
+
+impl ApiError {
+    fn render(self) -> Response {
         if let ApiError::Unprocessable(body) = self {
             return (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response();
         }

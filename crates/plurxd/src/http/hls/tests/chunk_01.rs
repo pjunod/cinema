@@ -159,7 +159,7 @@
     /// added to `http/hls/` without being listed here fails each scan instead
     /// of going unread by it. Test children (`tests.rs`, `tests/`) quote
     /// production code as literals and are not product sources.
-    const HLS_PRODUCT_SOURCES: [(&str, &str); 21] = [
+    const HLS_PRODUCT_SOURCES: [(&str, &str); 23] = [
         ("../hls.rs", include_str!("../../hls.rs")),
         ("hooks.rs", include_str!("../hooks.rs")),
         ("session_guard.rs", include_str!("../session_guard.rs")),
@@ -187,6 +187,8 @@
         ),
         ("link_receipts.rs", include_str!("../link_receipts.rs")),
         ("prepared_link.rs", include_str!("../prepared_link.rs")),
+        ("processed_upgrade.rs", include_str!("../processed_upgrade.rs")),
+        ("fence.rs", include_str!("../fence.rs")),
     ];
 
     mod source_inventory {
@@ -263,20 +265,9 @@
             after_mint
                 .matches("recovery_epoch: recovery_epoch.clone(),")
                 .count(),
-            3,
-            "processed qualification, worker identity and activation share the one epoch"
-        );
-        let qualification = after_mint
-            .split_once("let recovery = crate::transcode::SessionRecoveryIdentity {")
-            .expect("processed qualification identity")
-            .1
-            .split_once(".prepare_processed_hdr10(")
-            .expect("processed qualification call")
-            .0;
-        assert!(qualification.contains("recovery_epoch: recovery_epoch.clone(),"));
-        assert!(
-            !qualification.contains("recovery_epoch_for("),
-            "processed qualification borrows the existing epoch and cannot remint"
+            2,
+            "worker identity and activation share the one epoch; the create mints no \
+             processed-qualification identity (plan ruling 3)"
         );
         // And the mint precedes placement, because the session that carries it
         // is built by the task the placement loop spawns.
@@ -292,45 +283,66 @@
         );
     }
 
-    /// A processed Auto candidate enhances an ordinary start the create has
-    /// already resolved. Nothing that happens to the enhancement afterwards —
-    /// not being admitted by the playback's evidence, the catalog refusing its
-    /// row, or the worker finding its prepared graph gone — may turn that
-    /// start into a refusal: each leaves the ordinary start in place and its
-    /// reason on the plan notes, where the other Dolby Vision decisions are.
-    ///
-    /// A control-flow property of the same `async fn` as the two above, pinned
-    /// where it lives for the same reason.
+    /// Processed Dolby Vision / HDR10-E is an upgrade after the first frame,
+    /// never work before it (plan ruling 3). The create resolves the ordinary
+    /// plan only: no processed trial, no `processed_qualification` phase in its
+    /// ledger, and an applicable upgrade only *registered* for the session's
+    /// first frame, after activation. The request-only gates the create does
+    /// run can decline with a reason on the plan notes, never refuse the start.
+    /// A dispatch that degrades a processed request (none should reach one now)
+    /// still answers the ordinary request it carries.
     #[test]
-    fn a_processed_candidate_that_cannot_be_adopted_or_consumed_degrades_with_its_reason() {
+    fn the_create_runs_no_processed_work_before_the_first_frame() {
         let source = hls_product_source();
-        let qualification = source
-            .split_once(".prepare_processed_hdr10(")
-            .expect("processed qualification call")
+        assert!(
+            !source.contains("mark_create_phase(\"processed_qualification\")"),
+            "the create phase ledger has no processed_qualification phase"
+        );
+        // The trial runs only in processed_upgrade.rs, after a first frame.
+        let create = include_str!("../create.rs");
+        assert!(
+            !create.contains(".prepare_processed_upgrade(")
+                && !source.contains(".prepare_processed_hdr10("),
+            "the create never runs the processed trial"
+        );
+        assert!(include_str!("../processed_upgrade.rs").contains(".prepare_processed_upgrade("));
+        let gates = create
+            .split_once("let processed_upgrade_applies = if pinned_owner")
+            .expect("the create's processed gates")
             .1
-            .split_once("crate::media_pool::mark_create_phase(\"processed_qualification\");")
-            .expect("the qualification phase mark")
+            .split_once("let advertise_control")
+            .expect("the gates end before control advertisement")
             .0;
         assert!(
-            !qualification.contains("ApiError::"),
-            "no outcome of the enhancement may abort the ordinary start: {qualification}"
+            !gates.contains("ApiError::") && !gates.contains(".await"),
+            "the gates are synchronous and cannot refuse the ordinary start: {gates}"
         );
         assert_eq!(
-            qualification.matches("plan_notes.push(processing_declined_note(").count(),
-            2,
-            "a candidate not adopted and a qualification refused each leave their reason"
+            gates.matches("plan_notes.push(processing_declined_note(").count(),
+            1,
+            "a declined upgrade leaves its reason on the start it answers"
         );
+        let registration = create
+            .split_once("if published_route.owner_node_id == state.node_id {")
+            .expect("the owner-local activation tail")
+            .1;
         assert!(
-            qualification.contains("ordinary_link_source_binding = link_source_binding.take();"),
-            "the ordinary candidate's link binding is kept for a dispatch that degrades"
+            registration
+                .split_once("Ok(Json(response))")
+                .expect("the answer")
+                .0
+                .contains("super::processed_upgrade::register("),
+            "an applicable upgrade waits for the first frame on the owning node"
         );
         let degraded = source
-            .split_once("    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) =")
-            .expect("the dispatch result carries the worker's degrade reason")
+            .split_once("crate::media_pool::mark_create_phase(\"dispatch\");")
+            .expect("the completed dispatch phase")
             .1
             .split_once("    if owner_node_id == state.node_id {")
             .expect("the activation that follows dispatch")
             .0;
+        assert!(degraded.contains("(degraded_processing, processing_note)"), "the worker result carries its degrade reason and processing note");
+        assert!(degraded.contains("if let Some(reason) = degraded_processing {"));
         for restored in [
             "plan_notes.push(processing_declined_note(&reason));",
             "request = ordinary;",
@@ -828,6 +840,29 @@
         assert_eq!(accepted_bytes(), 0, "stale bytes must not be acknowledged");
     }
 
+    /// Review of #1299: the local indexer's reason -- which can carry source
+    /// paths and ffmpeg's stderr -- reached the client in the refusal message.
+    #[test]
+    fn an_unindexable_title_tells_the_client_the_code_not_the_indexer_log() {
+        let error = crate::transcode::vod_refusal_error(
+            "vod_index_unavailable",
+            "this node cannot index this title: ffmpeg: /srv/media/Film.mkv: Invalid data",
+        );
+        match super::create::session_start_error(7, error) {
+            ApiError::Typed {
+                status,
+                code,
+                message,
+            } => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(code, "vod_index_pending");
+                assert!(!message.contains("/srv"), "{message}");
+                assert!(!message.contains("ffmpeg"), "{message}");
+            }
+            other => panic!("not a typed refusal: {other:?}"),
+        }
+    }
+
     #[test]
     fn same_incarnation_publication_rejection_is_retryable_not_not_found() {
         let error = response_publication_rejection(
@@ -984,6 +1019,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                source_telemetry: None,
                 dv_processing_destination: None,
         sdr_master_codecs: None,
                 continuous_media: None,
@@ -1697,7 +1733,7 @@
             }
         })
         .await
-        .expect("detached DELETE cleanup survives caller cancellation");
+        .unwrap_or_else(|_| panic!("detached DELETE cleanup survives caller cancellation: {}", fixture.worker_retirement_debug(&session_id)));
     }
 
     #[tokio::test]
@@ -2171,6 +2207,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                source_telemetry: None,
                 dv_processing_destination: None,
         sdr_master_codecs: None,
                 continuous_media: None,
@@ -2452,6 +2489,7 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
+                    source_telemetry: None,
                     dv_processing_destination: None,
         sdr_master_codecs: None,
                     continuous_media: None,

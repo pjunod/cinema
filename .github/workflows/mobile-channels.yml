@@ -1,0 +1,74 @@
+name: mobile beta channels
+
+# Forgejo reads the repository's existing .github/workflows directory.
+# No path filter: inspect the complete push range, including multi-commit merges.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Full before-SHA from the mobile update to retry; unchanged platforms are skipped
+        required: true
+        type: string
+
+concurrency:
+  group: mobile-beta-channels
+  cancel-in-progress: false
+
+jobs:
+  scope:
+    name: affected mobile release platforms
+    if: github.server_url != 'https://github.com' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.scope.outputs.publish }}
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Select only changed app platforms
+        id: scope
+        env:
+          MOBILE_BEFORE: ${{ github.event.before }}
+          MOBILE_SHA: ${{ github.sha }}
+          MOBILE_EVENT: ${{ github.event_name }}
+          MOBILE_RETRY_BASE: ${{ inputs.base_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$MOBILE_EVENT" = workflow_dispatch ]; then export MOBILE_BEFORE="$MOBILE_RETRY_BASE"; fi
+          python3 -m validation.mobile_channels scope >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: upload TestFlight and Google Play internal builds
+    needs: scope
+    if: needs.scope.outputs.publish == 'true'
+    # A signing identity is an extra capability, not a general Apple CI label.
+    runs-on: [self-hosted, macOS, ARM64, mobile-release]
+    timeout-minutes: 120
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Publish affected Cinema platforms through the signing controller
+        env:
+          MOBILE_BEFORE: ${{ github.event.before }}
+          MOBILE_SHA: ${{ github.sha }}
+          MOBILE_EVENT: ${{ github.event_name }}
+          MOBILE_RETRY_BASE: ${{ inputs.base_sha }}
+          MOBILE_RELEASE_ENV: ${{ vars.MOBILE_RELEASE_ENV }}
+        run: |
+          set -euo pipefail
+          set +x
+          release_env="${MOBILE_RELEASE_ENV:-$HOME/.config/plurx/mobile-channels.env}"
+          test -f "$release_env" || { echo "Missing signing-runner environment: $release_env" >&2; exit 1; }
+          set -a
+          source "$release_env"
+          set +a
+          if [ "$MOBILE_EVENT" = workflow_dispatch ]; then export MOBILE_BEFORE="$MOBILE_RETRY_BASE"; fi
+          python3 -m validation.mobile_channels release

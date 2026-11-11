@@ -2104,7 +2104,7 @@ class DisplayAwareAutoEvidenceTest {
             route, height * 16 / 9, height, height, average_bps = 8_000_000L, peak_bps = peak,
             grade = "sdr", decoder_compatible = true, complete_cache = false, sustainable = false)
 
-    @Test fun processedHdr10PreferenceRequiresQualifiedProductionAndCodec() {
+    @Test fun processedDvPreferenceRequiresQualifiedProductionAndCodecForBothGrades() {
         val original = candidate(2160, route = "remux")
         val processed = candidate(720).copy(grade = "hdr10", sustainable = true,
             planned_codec = "hevc", processed_hdr10 = true)
@@ -2114,7 +2114,14 @@ class DisplayAwareAutoEvidenceTest {
         assertEquals(original, pick(processed.copy(sustainable = false)))
         assertEquals(original, pick(processed.copy(decoder_compatible = false)))
         assertEquals(original, pick(processed.copy(planned_codec = "h264")))
-        assertEquals(original, pick(processed.copy(grade = "sdr")))
+        assertEquals(original, pick(processed.copy(grade = "invalid")))
+        // processed_hdr10 is the legacy wire name for processed Dolby Vision;
+        // the server can qualify either HDR10 or SDR output (candidate.rs).
+        val processedSdr = processed.copy(grade = "sdr")
+        assertEquals(processedSdr, pick(processedSdr))
+        assertEquals(original, pick(processedSdr.copy(sustainable = false)))
+        assertEquals(original, pick(processedSdr.copy(decoder_compatible = false)))
+        assertEquals(original, pick(processedSdr.copy(planned_codec = "h264")))
     }
 
     @Test fun runtimeDecoderSnapshotUsesStrictServerVocabulary() {
@@ -2509,7 +2516,7 @@ class SeekDeferredBehindSwitchTest {
         assertTrue(attach.contains("heldSeek != null -> playerTimelinePositionMs(positionForPlaybackIntent())"))
         assertTrue(attach.indexOf("heldSeek != null") < attach.indexOf("player.currentPosition"),
             "a held seek wins over the successor's playhead")
-        assertTrue(retry.indexOf("player.setMediaItem(MediaItem.fromUri(next), attachPosition)") >
+        assertTrue(retry.indexOf("player.setMediaItem(if (directTransport) directMediaItem(next) else MediaItem.fromUri(next), attachPosition)") >
             retry.indexOf("val attachPosition = when {"))
         assertTrue(retry.contains("markIntentExecuted(sequence, recipe)"))
         // Still exactly two drains in the controller: this path takes, it does not drain.

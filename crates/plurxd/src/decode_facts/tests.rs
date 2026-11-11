@@ -435,6 +435,26 @@ fn build_static_probe_with_private_path(path: &Path, mode: u8, private_path: &Pa
 #define NR_PTRACE 101
 #define NR_PROCESS_VM_READV 310
 #define NR_GETDENTS64 217
+#define NR_PREAD64 17
+#define NR_READV 19
+#define NR_PREADV 295
+#define NR_PREADV2 327
+#define NR_MMAP 9
+#define NR_MUNMAP 11
+#define NR_SENDFILE 40
+#define NR_SPLICE 275
+#define NR_COPY_FILE_RANGE 326
+#define NR_READAHEAD 187
+#define NR_FADVISE64 221
+#define NR_IO_SETUP 206
+#define NR_IO_DESTROY 207
+#define NR_IO_GETEVENTS 208
+#define NR_IO_SUBMIT 209
+#define NR_IO_CANCEL 210
+#define NR_IO_PGETEVENTS 333
+#define NR_IO_URING_SETUP 425
+#define NR_IO_URING_ENTER 426
+#define NR_IO_URING_REGISTER 427
 #if defined(__aarch64__)
 #undef NR_READ
 #undef NR_WRITE
@@ -459,6 +479,40 @@ fn build_static_probe_with_private_path(path: &Path, mode: u8, private_path: &Pa
 #define NR_PTRACE 117
 #define NR_PROCESS_VM_READV 270
 #define NR_GETDENTS64 61
+#undef NR_PREAD64
+#undef NR_READV
+#undef NR_PREADV
+#undef NR_PREADV2
+#undef NR_MMAP
+#undef NR_MUNMAP
+#undef NR_SENDFILE
+#undef NR_SPLICE
+#undef NR_COPY_FILE_RANGE
+#define NR_PREAD64 67
+#define NR_READV 65
+#define NR_PREADV 69
+#define NR_PREADV2 286
+#define NR_MMAP 222
+#define NR_MUNMAP 215
+#define NR_SENDFILE 71
+#define NR_SPLICE 76
+#define NR_COPY_FILE_RANGE 285
+#undef NR_READAHEAD
+#undef NR_FADVISE64
+#undef NR_IO_SETUP
+#undef NR_IO_DESTROY
+#undef NR_IO_GETEVENTS
+#undef NR_IO_SUBMIT
+#undef NR_IO_CANCEL
+#undef NR_IO_PGETEVENTS
+#define NR_READAHEAD 213
+#define NR_FADVISE64 223
+#define NR_IO_SETUP 0
+#define NR_IO_DESTROY 1
+#define NR_IO_SUBMIT 2
+#define NR_IO_CANCEL 3
+#define NR_IO_GETEVENTS 4
+#define NR_IO_PGETEVENTS 292
 #define NR_READ 63
 #define NR_WRITE 64
 #define NR_CLOSE 57
@@ -542,6 +596,24 @@ static __attribute__((noreturn)) void finish(long status) {
 }
 
 static const char facts[] = "{\"streams\":[{\"index\":4,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":1920,\"height\":1080,\"avg_frame_rate\":\"24000/1001\",\"r_frame_rate\":\"24000/1001\",\"disposition\":{\"attached_pic\":0}}]}\n";
+
+#if PROBE_MODE == 14
+static __attribute__((noreturn, noinline, used)) void source_thread_reader(void) {
+    static char byte;
+    syscall6(NR_READ, 3, (long)&byte, 1, 0, 0, 0);
+    for (;;) { unsigned long delay[2] = { 60, 0 }; syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0); }
+}
+extern long make_source_thread(void *stack);
+#if defined(__x86_64__)
+__asm__(".text\n.global make_source_thread\nmake_source_thread:\n"
+        "mov %rdi,%rsi\nmov $0x50f00,%edi\nxor %edx,%edx\nxor %r10d,%r10d\nxor %r8d,%r8d\n"
+        "mov $56,%eax\nsyscall\ntest %rax,%rax\njnz 1f\ncall source_thread_reader\nud2\n1: ret\n");
+#else
+__asm__(".text\n.global make_source_thread\nmake_source_thread:\n"
+        "mov x1,x0\nmov x0,#0x0f00\nmovk x0,#5,lsl #16\nmov x2,xzr\nmov x3,xzr\nmov x4,xzr\n"
+        "mov x8,#220\nsvc #0\ncbnz x0,1f\nbl source_thread_reader\nbrk #0\n1: ret\n");
+#endif
+#endif
 
 void probe_main(unsigned long *stack) {
     long argc = (long)stack[0];
@@ -713,6 +785,63 @@ void probe_main(unsigned long *stack) {
 #if PROBE_MODE == 9
     unsigned long delay[2] = { 60, 0 };
     syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
+#endif
+#elif PROBE_MODE == 14
+    if (argc > 1 && same(argv[1], "-version")) { write_text(1, facts); finish(0); }
+    static char thread_stack[65536] __attribute__((aligned(16)));
+    if (make_source_thread(thread_stack+sizeof(thread_stack)) < 0) finish(146);
+    char byte;
+    syscall6(NR_READ, 3, (long)&byte, 1, 0, 0, 0);
+    for (;;) { unsigned long delay[2] = {60,0}; syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0); }
+#elif PROBE_MODE >= 10 && PROBE_MODE <= 13
+    if (argc > 1 && same(argv[1], "-version")) { write_text(1, facts); finish(0); }
+    char byte = 0;
+#if PROBE_MODE == 10
+    if (syscall6(NR_LSEEK, 3, 0, 0, 0, 0, 0) != 0) finish(112);
+    if (syscall6(NR_READ, 3, (long)&byte, 1, 0, 0, 0) != 1 || byte != 'p') finish(113);
+    long alias = syscall6(NR_FCNTL, 3, F_DUPFD, 10, 0, 0, 0);
+    if (alias < 0) finish(114);
+    if (syscall6(NR_READ, alias, (long)&byte, 1, 0, 0, 0) != 1 || byte != 'r') finish(115);
+    long reopened = syscall6(NR_OPENAT, -100, (long)"/dev/fd/3", 0, 0, 0, 0);
+    if (reopened < 0) finish(116);
+    if (syscall6(NR_PREAD64, reopened, (long)&byte, 1, 22, 0, 0) != 1 || byte != 'e') finish(117);
+    if (syscall6(NR_READ, reopened, (long)&byte, 1, 0, 0, 0) != 1 || byte != 'p') finish(118);
+    if (syscall6(NR_LSEEK, alias, 22, 0, 0, 0, 0) != 22) finish(119);
+    if (syscall6(NR_READ, 3, (long)&byte, 1, 0, 0, 0) != 1 || byte != 'e') finish(120);
+    if (syscall6(NR_READ, alias, (long)&byte, 0, 0, 0, 0) != 0) finish(121);
+#elif PROBE_MODE == 11
+    static char buffer[1048577];
+    if (syscall6(NR_READ, 3, (long)buffer, sizeof(buffer), 0, 0, 0) != -7) finish(122);
+#elif PROBE_MODE == 12
+    long mapped = syscall6(NR_MMAP, 0, 4096, 1, 2, 3, 0);
+    if (mapped != -1) finish(123);
+    long anonymous = syscall6(NR_MMAP, 0, 4096, 3, 0x22, -1, 0);
+    if (anonymous < 0) finish(124);
+    *(char *)anonymous = 'a';
+    if (syscall6(NR_MUNMAP, anonymous, 4096, 0, 0, 0, 0) != 0) finish(125);
+    struct probe_iovec io = { &byte, 1 };
+    if (syscall6(NR_READV, 3, (long)&io, 1, 0, 0, 0) != -1) finish(126);
+    if (syscall6(NR_PREADV, 3, (long)&io, 1, 0, 0, 0) != -1) finish(127);
+    if (syscall6(NR_PREADV2, 3, (long)&io, 1, 0, 0, 0) != -1) finish(128);
+    if (syscall6(NR_SENDFILE, 1, 3, 0, 1, 0, 0) != -1) finish(129);
+    if (syscall6(NR_SPLICE, 3, 0, 1, 0, 1, 0) != -1) finish(130);
+    if (syscall6(NR_COPY_FILE_RANGE, 3, 0, 1, 0, 1, 0) != -1) finish(131);
+    if (syscall6(NR_READAHEAD, 3, 0, 4096, 0, 0, 0) != -1) finish(134);
+    if (syscall6(NR_FADVISE64, 3, 0, 4096, 3, 0, 0) != -1) finish(135);
+    if (syscall6(NR_FADVISE64, 3, 0, 4096, 1, 0, 0) != 0) finish(136);
+    if (syscall6(NR_IO_SETUP, 1, 0, 0, 0, 0, 0) != -1) finish(137);
+    if (syscall6(NR_IO_DESTROY, 0, 0, 0, 0, 0, 0) != -1) finish(138);
+    if (syscall6(NR_IO_SUBMIT, 0, 0, 0, 0, 0, 0) != -1) finish(139);
+    if (syscall6(NR_IO_CANCEL, 0, 0, 0, 0, 0, 0) != -1) finish(140);
+    if (syscall6(NR_IO_GETEVENTS, 0, 0, 0, 0, 0, 0) != -1) finish(141);
+    if (syscall6(NR_IO_PGETEVENTS, 0, 0, 0, 0, 0, 0) != -1) finish(142);
+    if (syscall6(NR_IO_URING_SETUP, 1, 0, 0, 0, 0, 0) != -1) finish(143);
+    if (syscall6(NR_IO_URING_ENTER, 0, 0, 0, 0, 0, 0) != -1) finish(144);
+    if (syscall6(NR_IO_URING_REGISTER, 0, 0, 0, 0, 0, 0) != -1) finish(145);
+#elif PROBE_MODE == 13
+    static char buffer[1048576];
+    if (syscall6(NR_READ, 3, (long)buffer, sizeof(buffer), 0, 0, 0) != 23) finish(132);
+    if (syscall6(NR_PREAD64, 3, (long)buffer, 32768, 0, 0, 0) != 23) finish(133);
 #endif
 #endif
     write_text(1, facts);
@@ -1262,15 +1391,19 @@ async fn supervisor_stop_bounds_persistent_steady_response_interrupts() {
     // Long enough that a loaded runner's launch cannot reach it: whether
     // the stop signal or the deadline released the loop is read from the
     // loop's own exit counters below, not from how long the call took.
-    probe_version_with_deadline_on(
+    let result = probe_version_with_deadline_on(
         &identity.executable_snapshot,
         identity.executable(),
         ProbeLaunchMode::ProductionSteadyResponseInterruptedUntilStop,
         Duration::from_secs(20),
         Arc::clone(&ownership),
     )
-    .await
-    .expect("the supervisor stop signal releases the response loop before deadline");
+    .await;
+    assert!(
+        matches!(result, Err(DecodeFactError::ProbeIdentity(ref message))
+            if message == "bounded version probe failed"),
+        "the injected stop denies the child's second exec without reaching the deadline"
+    );
     assert!(
         STEADY_RESPONSE_STOP_INTERRUPT_HITS.load(Ordering::Acquire) >= 1,
         "the stop-path proof must first consume a steady response interruption"
@@ -1551,18 +1684,25 @@ async fn pidfd_read_failure_retains_source_ownership_until_reap() {
         .await
         .expect("detached pidfd-read cleanup finishes")
         .expect("source ownership returns after reap");
+    // The caller's deadline cancels its detached collection. That collection
+    // reports cancellation only after its physical owner finishes cleanup.
     tokio::time::timeout(Duration::from_millis(250), async {
-            loop {
-                if cache.metrics().prometheus().contains(
-                    "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"deadline\"} 1"
-                ) {
-                    break;
-                }
-                tokio::task::yield_now().await;
+        loop {
+            if cache.metrics().prometheus().contains(
+                "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"cancelled\"} 1",
+            ) {
+                break;
             }
-        })
-        .await
-        .expect("the collection sample appears after the detached owner finishes cleanup");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the collection sample appears after the detached owner finishes cleanup: {}",
+            cache.metrics().prometheus()
+        )
+    });
     assert_eq!(PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
     assert_eq!(
         source
@@ -3248,4 +3388,236 @@ esac
         changed_probe.document(None).await,
         Err(DecodeFactError::ProbeChanged)
     ));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn strict_native_listener_accounts_alias_seek_and_scalar_reads_and_denies_bypasses() {
+    let root = crate::test_tempdir().expect("create strict source test directory");
+    for mode in 10..=13 {
+        let (_store, _job, active) = crate::background_jobs::tests::active().await;
+        let budget = active.fence().source_budget();
+        let probe = root.path().join(format!("strict-reader-{mode}"));
+        build_static_probe(&probe, mode);
+        let identity =
+            DecodeProbeIdentity::discover(probe.to_str().expect("temporary probe path is UTF-8"))
+                .await
+                .expect("discover strict native reader probe");
+        let media = root.path().join(format!("source-{mode}.bin"));
+        std::fs::write(&media, b"production-bound source").expect("write strict source fixture");
+        let source = Arc::new(std::fs::File::open(media).expect("open strict source fixture"));
+        let facts = crate::background_jobs::budgeted(Arc::clone(&budget), async {
+            DecodeFactCache::new()
+                .get_or_probe(
+                    &identity,
+                    DecodeFactSource::isolated(source),
+                    None,
+                    ProbeStreamSelection::Absolute(4),
+                    Duration::from_secs(5),
+                    None,
+                )
+                .await
+        })
+        .await;
+        if mode == 11 || mode == 12 {
+            let error = facts.expect_err("read refusal cannot become codec evidence");
+            assert!(matches!(error, DecodeFactError::SourceService(_)));
+            assert_eq!(
+                error.fallback_reason(),
+                DecodePlanFallbackReason::IdentityIo
+            );
+        } else {
+            assert_eq!(
+                facts
+                    .expect("supported strict reader returns codec facts")
+                    .codec(),
+                Some("h264")
+            );
+        }
+        let charged = budget.current_reserved_test_bytes().await;
+        match mode {
+            10 => assert_eq!(
+                charged,
+                Some(5),
+                "dup, reopen, pread and seek aliases all spend service"
+            ),
+            11 | 12 => assert_eq!(
+                charged, None,
+                "refused scalar/vector/mmap/copy operations issue no source read"
+            ),
+            13 => assert_eq!(
+                charged,
+                Some(1048576 + 32768),
+                "short/EOF reads never refund the full immutable request"
+            ),
+            _ => unreachable!(),
+        }
+        active.finish().await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn strict_quota_stopped_thread_fixture(retain_daemon_activity: bool) {
+    use plurx_core::{
+        process::bounded, store::background_jobs_resources::BackgroundSourceServiceGrant,
+    };
+    let (_store, _job, active) = crate::background_jobs::tests::active().await;
+    let budget = active.fence().source_budget();
+    let now = crate::state::clock_ms();
+    budget
+        .install_test_service_grant(BackgroundSourceServiceGrant {
+            receipt_id: uuid::Uuid::new_v4().to_string(),
+            epoch_id: now / 5000,
+            expires_at_ms: now + 60_000,
+            byte_allowance: Some(0),
+            resource_keys: vec!["source_io".into()],
+        })
+        .await;
+    let root = crate::test_tempdir().expect("create strict source test directory");
+    let probe = root.path().join("quota-blocked-threaded-parser");
+    build_static_probe(&probe, 14);
+    let identity =
+        DecodeProbeIdentity::discover(probe.to_str().expect("temporary quota probe path is UTF-8"))
+            .await
+            .expect("discover strict quota probe");
+    let media = root.path().join("source.bin");
+    std::fs::write(&media, b"production-bound source").expect("write strict source fixture");
+    let source = Arc::new(std::fs::File::open(media).expect("open strict source fixture"));
+    let control = bounded::SourcePauseController::new(Duration::from_secs(10));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let activity = if retain_daemon_activity {
+        Some(
+            control
+                .enlist(&cancel)
+                .await
+                .expect("register daemon source activity"),
+        )
+    } else {
+        None
+    };
+    let task = tokio::spawn({
+        let budget = Arc::clone(&budget);
+        let control = control.clone();
+        let cancel = cancel.clone();
+        async move {
+            bounded::pausable(
+                control,
+                crate::background_jobs::budgeted(budget, async {
+                    DecodeFactCache::new()
+                        .get_or_probe(
+                            &identity,
+                            DecodeFactSource::isolated(source),
+                            None,
+                            ProbeStreamSelection::Absolute(4),
+                            Duration::from_secs(8),
+                            Some(&cancel),
+                        )
+                        .await
+                }),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while budget.pacing_waiters() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("actual native broker is waiting for finite quota");
+    control.request_pause();
+    if let Some(activity) = activity {
+        control.wait_active_budget(Duration::from_millis(350)).await;
+        assert_eq!(control.observation().phase,bounded::SourcePausePhase::Stopping,
+            "a retained daemon read prevents aggregate paused-time credit despite stopped native threads");
+        drop(activity);
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while control.observation().phase != bounded::SourcePausePhase::Paused {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("every actual parser thread and daemon read acknowledged stopped");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !task.is_finished(),
+        "verified quota hold must preserve the same parser operation"
+    );
+    let stopped_cancel = tokio::time::Instant::now();
+    cancel.cancel();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("stopped parser cancellation settles within three seconds")
+            .expect("stopped parser task joins without panic"),
+        Err(DecodeFactError::Cancelled)
+    );
+    assert!(
+        stopped_cancel.elapsed() < Duration::from_secs(3),
+        "cancel must join stopped group and wake the existing broker quota callback"
+    );
+    assert_eq!(
+        budget.pacing_waiters(),
+        0,
+        "no detached callback retains a budget future"
+    );
+    active.finish().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn strict_native_quota_cancellation_joins_all_stopped_threads_and_broker() {
+    strict_quota_stopped_thread_fixture(false).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn strict_native_group_hold_never_excludes_outstanding_daemon_read_time() {
+    strict_quota_stopped_thread_fixture(true).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires exact packaged static parser PLURX_TEST_STRICT_FFPROBE and generated PLURX_TEST_STRICT_MEDIA"]
+async fn packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls() {
+    let probe =
+        std::env::var("PLURX_TEST_STRICT_FFPROBE").expect("supply packaged static parser artifact");
+    // Existing discovery validates static ELF, immutable executable snapshot,
+    // exact build digest and fresh bounded -version before collection.
+    let identity = DecodeProbeIdentity::discover(&probe)
+        .await
+        .expect("qualify exact packaged parser identity");
+    let media = PathBuf::from(
+        std::env::var_os("PLURX_TEST_STRICT_MEDIA").expect("generated qualification media"),
+    );
+    let (_store, _job, active) = crate::background_jobs::tests::active().await;
+    let budget = active.fence().source_budget();
+    let source = Arc::new(
+        plurx_core::fs_secure::open_read_nofollow(&media)
+            .await
+            .expect("open packaged source without following symlinks")
+            .into_std()
+            .await,
+    );
+    let facts = crate::background_jobs::budgeted(Arc::clone(&budget), async {
+        DecodeFactCache::new()
+            .get_or_probe(
+                &identity,
+                DecodeFactSource::isolated(source),
+                None,
+                ProbeStreamSelection::FirstPlayable,
+                Duration::from_secs(10),
+                None,
+            )
+            .await
+    })
+    .await
+    .expect("real packaged parser needs only permitted scalar reads and anonymous allocation");
+    assert!(facts.codec().is_some());
+    assert!(
+        budget.current_reserved_test_bytes().await.unwrap_or(0) > 0,
+        "actual parser source reads must enter shared service accounting"
+    );
+    active.finish().await;
 }

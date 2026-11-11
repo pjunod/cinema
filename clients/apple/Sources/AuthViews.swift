@@ -52,8 +52,12 @@ struct PrimaryButton: View {
 }
 
 private struct AuthScaffold<Content: View>: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var confirmReplacement = false
     let subtitle: String
     let error: String?
+    var showReport = true
+    var identityOrigin: String? = nil
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -71,13 +75,26 @@ private struct AuthScaffold<Content: View>: View {
                     .foregroundColor(Palette.accent)
                     .multilineTextAlignment(.center)
             }
-            #if os(tvOS)
-            DiagnosticReportButton(category: "connection", label: "Help")
-                .buttonStyle(TVReadableButtonStyle(prominent: false))
-            #else
-            DiagnosticReportButton(category: "connection")
-                .shelfActionButtonStyle()
-            #endif
+            if error != nil, let identityOrigin,
+               ServerTrust.shared.changedOrigin(for: AppModel.normalizeOrigin(identityOrigin)) != nil {
+                Button("Trust replacement server identity") { confirmReplacement = true }
+                    .confirmationDialog("Trust this server's replacement certificate?", isPresented: $confirmReplacement) {
+                        Button("Trust replacement and sign in again", role: .destructive) {
+                            Task { await model.trustReplacementServer(identityOrigin) }
+                        }
+                    } message: {
+                        Text("Continue only if you replaced this server's certificate. Cinema will discard the previous sign-in before trusting the new identity.")
+                    }
+            }
+            if showReport {
+                #if os(tvOS)
+                DiagnosticReportButton(category: "connection", label: "Help")
+                    .buttonStyle(TVReadableButtonStyle(prominent: false))
+                #else
+                DiagnosticReportButton(category: "connection")
+                    .shelfActionButtonStyle()
+                #endif
+            }
         }
         .frame(maxWidth: 460)
         .padding(30)
@@ -97,7 +114,7 @@ struct ConnectView: View {
     #endif
 
     var body: some View {
-        AuthScaffold(subtitle: "Servers on your network", error: model.authError) {
+        AuthScaffold(subtitle: "Servers on your network", error: model.authError, identityOrigin: url) {
             if discovery.servers.isEmpty {
                 HStack(spacing: 10) {
                     if discovery.isSearching { ProgressView().tint(Palette.accent) }
@@ -234,6 +251,7 @@ struct ConnectView: View {
             do {
                 let origin = try await discovery.resolve(server)
                 resolving = nil
+                url = origin
                 await model.connect(origin)
             } catch {
                 resolving = nil
@@ -318,7 +336,7 @@ struct LoginView: View {
     @State private var password = ""
 
     var body: some View {
-        AuthScaffold(subtitle: model.serverName ?? model.origin, error: model.authError) {
+        AuthScaffold(subtitle: model.serverName ?? model.origin, error: model.authError, showReport: false, identityOrigin: model.origin) {
             TextField("Username", text: $username)
                 .plurxFieldStyle()
                 .font(.system(.body, design: .monospaced))
@@ -356,7 +374,7 @@ struct ReconnectView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        AuthScaffold(subtitle: model.serverName ?? model.origin, error: model.authError) {
+        AuthScaffold(subtitle: model.serverName ?? model.origin, error: model.authError, identityOrigin: model.origin) {
             Text("Your sign-in is still saved.")
                 .font(.system(.body, design: .rounded))
                 .foregroundColor(Palette.onBg.opacity(0.82))

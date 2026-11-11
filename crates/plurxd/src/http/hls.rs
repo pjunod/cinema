@@ -149,6 +149,9 @@ mod preparation;
 pub(in crate::http) use preparation::*;
 // split: end hls-preparation
 
+#[path = "hls/processed_upgrade.rs"]
+pub(in crate::http) mod processed_upgrade;
+
 // split: begin hls-status
 #[path = "hls/status.rs"]
 mod status;
@@ -195,7 +198,7 @@ use subtitle_names::*;
 mod playlist_text;
 use playlist_text::*;
 pub(crate) use playlist_text::{
-    source_native_master, source_native_playlist, source_native_segment,
+    source_native_master, source_native_playlist, source_native_segment_window, source_native_slice,
 };
 // split: end hls-playlist-text
 
@@ -214,3 +217,6 @@ mod tests;
 #[path = "hls/quality_schedule.rs"]
 mod quality_schedule;
 pub(crate) use quality_schedule::*;
+
+#[path = "hls/fence.rs"]
+pub(crate) mod fence;

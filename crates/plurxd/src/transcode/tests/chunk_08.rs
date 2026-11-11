@@ -16,6 +16,7 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -195,6 +196,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -279,6 +281,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -349,6 +352,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let original = SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -651,6 +655,7 @@ quality_catalog: None,
                     aac: false,
                     preserve_dolby_vision: false,
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                 },
             },
         )
@@ -671,6 +676,7 @@ quality_catalog: None,
                 aac: false,
                 preserve_dolby_vision: false,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             },
             "a copy that wedged comes back a copy",
         );
@@ -1130,6 +1136,67 @@ quality_catalog: None,
             "a refusal that asks the client to change the request is not a wait"
         );
         drop(held);
+    }
+
+    /// Review 1, S5: the 4K HDR10 refusal through the real admission. With
+    /// the one QuickSync slot held and the class measured fast enough in
+    /// software, `admit_live_with` grants software, and the start's refusal
+    /// for that grant is the terminal `transcode_height_unavailable`, not the
+    /// waitable capacity answer a client would re-post unchanged.
+    #[tokio::test]
+    async fn a_4k_hdr10_start_admitted_off_quicksync_is_refused_terminally() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let workload = Workload {
+            source_height: 2160,
+            codec: "hevc",
+            hdr: Some("hdr10"),
+            target_height: HDR10_4K_HEIGHT,
+        };
+        mgr.admissions.record(&workload.software_class(), 4.0);
+        let _quicksync = mgr
+            .admissions
+            .try_acquire(1, Priority::Live)
+            .expect("another start holds the one QuickSync slot");
+        let admission = mgr
+            .admit_live_with(
+                Encoder::Qsv,
+                None,
+                workload,
+                Duration::ZERO,
+                Priority::Live,
+                64,
+                1,
+            )
+            .await
+            .expect("software admits the measured class");
+        assert_eq!(admission.encoder, Encoder::Software);
+        let refusal = super::manager_start::hdr10_4k_encoder_refusal(
+            OutputGrade::Hdr10,
+            HDR10_4K_HEIGHT,
+            admission.encoder,
+        )
+        .expect_err("a 4K HDR10 start off QuickSync is refused");
+        assert_eq!(
+            capacity_refusal(&refusal).map(|(class, _)| class),
+            Some(CapacityRefusal::Terminal(TRANSCODE_HEIGHT_UNAVAILABLE)),
+            "{refusal}"
+        );
+        for (height, encoder) in [(HDR10_4K_HEIGHT, Encoder::Qsv), (1080, Encoder::Software)] {
+            assert!(
+                super::manager_start::hdr10_4k_encoder_refusal(OutputGrade::Hdr10, height, encoder)
+                    .is_ok(),
+                "{height} on {encoder:?} is not this refusal"
+            );
+        }
     }
 
     /// A start with no budget left is out of time, not behind a wedged hold.
@@ -2808,6 +2875,7 @@ scope = "test"
     #[test]
     fn continuous_media_roles_have_strict_wire_and_distinct_request_identity() {
         let mut request = SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             quality_catalog: None,

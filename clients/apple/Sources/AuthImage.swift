@@ -171,7 +171,7 @@ final class AuthImageCache: @unchecked Sendable {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.init(
             diskCache: diskCache,
-            session: URLSession(configuration: configuration)
+            session: ServerTrust.session(configuration: configuration)
         )
     }
 

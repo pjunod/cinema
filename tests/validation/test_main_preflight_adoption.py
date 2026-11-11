@@ -249,6 +249,42 @@ class MainPreflightAdoptionCase(unittest.TestCase):
         self.assertEqual(set(adopted), {TWO})
         self.assertIn(f"Not adopted: {ONE} — Missing reviewed input witness", output)
 
+    def test_live_head_guard_allows_base_advance_and_refuses_identity_or_readiness_changes(self):
+        event = {"number": 7, "repository": REPO, "action": "synchronize", "pull_request": {
+            "number": 7, "draft": False, "state": "open", "head": {"repo": dict(REPO), "sha": CURRENT},
+            "base": {"repo": dict(REPO), "ref": "main", "sha": X}}}
+        run = {"id": 99, "repository": REPO, "commit_sha": CURRENT, "event": "pull_request",
+               "event_payload": json.dumps(event), "workflow_id": "main-fast-lane.yml"}
+        env = {"GITHUB_EVENT_PATH": "fixture-event.json", "GITHUB_EVENT_NAME": "pull_request",
+               "GITHUB_REPOSITORY": REPO["full_name"], "GITHUB_SHA": CURRENT,
+               "GITHUB_RUN_ATTEMPT": "1", "GITHUB_RUN_ID": "99", "GITHUB_TOKEN": "fixture",
+               "GITHUB_SERVER_URL": "https://forge.example", "GITHUB_API_URL": "https://forge.example/api/v1"}
+        cases = [("base advance", None),
+                 ("head", lambda p: p["head"].update(sha=Y)),
+                 ("closed", lambda p: p.update(state="closed")),
+                 ("draft", lambda p: p.update(draft=True)),
+                 ("head repo", lambda p: p["head"]["repo"].update(id=2)),
+                 ("base repo", lambda p: p["base"]["repo"].update(id=2)),
+                 ("base ref", lambda p: p["base"].update(ref="effort/other"))]
+        for name, change in cases:
+            with self.subTest(name=name):
+                live = copy.deepcopy(event["pull_request"])
+                live["base"]["sha"] = Z
+                if change:
+                    change(live)
+                api = mock.Mock()
+                api.get.side_effect = [copy.deepcopy(run), live]
+                with mock.patch.dict(os.environ, env), \
+                     mock.patch.object(adoption.Path, "read_bytes", return_value=json.dumps(event).encode()), \
+                     mock.patch.object(adoption, "git", side_effect=lambda *a: {
+                         ("rev-parse", "HEAD"): CURRENT, ("diff", "--name-only", "HEAD"): ""}[a]), \
+                     mock.patch.object(adoption, "API", return_value=api):
+                    if change:
+                        with self.assertRaisesRegex(ReceiptError, "Live PR moved/closed/drafted"):
+                            adoption.api_context()
+                    else:
+                        self.assertEqual(adoption.api_context(), (api, SCOPE, CURRENT, 99))
+
     def test_current_run_integrity_still_refuses(self):
         ledger = Ledger()
         ledger.run(10, X, own=[ONE])
@@ -340,6 +376,52 @@ class MainPreflightAdoptionCase(unittest.TestCase):
             adoption._TREE_CACHE.clear()
             adoption._TREE_CACHE.update(saved)
             adoption._DIGEST_CACHE.clear()
+
+    def test_media_runtime_witnesses_bind_only_the_recipes_they_read(self):
+        root = Path(__file__).resolve().parents[2]
+        rows = json.loads((root / "validation/main-preflight-inputs.json").read_text())["families"]
+        media_only = (
+            "test_runtime_assets_layer_drops_build_time_state",
+            "test_docker_build_frees_each_ffmpeg_download_before_the_next",
+            "test_docker_build_requires_the_profile5_renderer_used_at_runtime",
+            "test_docker_build_requires_the_atsc3_audio_decoder",
+        )
+        both = ("test_dockerfile_base_images_are_pinned_by_digest",
+                "test_docker_build_pins_and_verifies_disk_conversion_tools")
+        old, new = "6" * 40, "7" * 40
+        files = {path: ("100644", "blob", "1" * 40) for path in
+                 ("Dockerfile", "Dockerfile.media-runtime", "scripts/build-static-ffprobe",
+                  ".github/workflows/ci.yml", "unrelated.txt")}
+        with mock.patch.dict(adoption._TREE_CACHE, {old: files}, clear=True), \
+             mock.patch.dict(adoption._DIGEST_CACHE, {}, clear=True):
+            for name in media_only + both:
+                row = adoption.witness("operations:test_contracts.OperationsContractCase." + name, rows)
+                for path in ("Dockerfile.media-runtime", "Dockerfile", "unrelated.txt"):
+                    with self.subTest(method=name, changed=path):
+                        adoption._TREE_CACHE[new] = {**files, path: ("100644", "blob", "2" * 40)}
+                        adoption._DIGEST_CACHE.clear()
+                        changed = adoption.input_digest(old, row) != adoption.input_digest(new, row)
+                        self.assertEqual(path == "Dockerfile.media-runtime" or
+                                         (path == "Dockerfile" and name in both), changed)
+
+    def test_release_publication_witness_binds_current_ci_recipe(self):
+        root = Path(__file__).resolve().parents[2]
+        rows = json.loads((root / "validation/main-preflight-inputs.json").read_text())["families"]
+        row = adoption.witness(
+            "operations:test_release_publication.ReleasePublicationContractCase."
+            "test_normal_package_ci_reuses_media_base_and_legacy_publication_remains_supported", rows)
+        old, new = "6" * 40, "7" * 40
+        paths = ("Dockerfile", ".github/workflows/ci.yml", ".github/workflows/publish-release.yml",
+                 "Dockerfile.media-runtime", "unrelated.txt")
+        files = {path: ("100644", "blob", "1" * 40) for path in paths}
+        with mock.patch.dict(adoption._TREE_CACHE, {old: files}, clear=True), \
+             mock.patch.dict(adoption._DIGEST_CACHE, {}, clear=True):
+            for path in paths:
+                with self.subTest(changed=path):
+                    adoption._TREE_CACHE[new] = {**files, path: ("100644", "blob", "2" * 40)}
+                    adoption._DIGEST_CACHE.clear()
+                    changed = adoption.input_digest(old, row) != adoption.input_digest(new, row)
+                    self.assertEqual(path in paths[:3], changed)
 
     def test_knowledge_smoke_witness_binds_document_and_physical_child_bytes(self):
         root = Path(__file__).resolve().parents[2]

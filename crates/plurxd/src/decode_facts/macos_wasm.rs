@@ -17,7 +17,7 @@ use wasmtime::{
     StoreLimitsBuilder, Val,
 };
 
-pub const ABI_ID: &str = "plurx-source-wasi-p1-v1-wasmtime-49.0.2";
+pub const ABI_ID: &str = "plurx-source-wasi-p1-v1-wasmtime-50.0.0";
 const MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 const IO_LIMIT: usize = 64 * 1024;
 const BADF: i32 = 8;
@@ -40,6 +40,10 @@ pub struct Output {
 struct State {
     source: Option<Arc<File>>,
     source_size: u64,
+    range_reader: Option<(
+        crate::source_input::SourceInputRangeReader,
+        tokio_util::sync::CancellationToken,
+    )>,
     cursors: BTreeMap<i32, u64>,
     args: Vec<Vec<u8>>,
     stdout: Vec<u8>,
@@ -94,6 +98,7 @@ impl Parser {
         Ok(Self { engine, module })
     }
 
+    #[cfg(test)]
     pub fn run(
         &self,
         source: Option<Arc<File>>,
@@ -101,6 +106,21 @@ impl Parser {
         output_limits: (usize, usize),
         deadline: Instant,
         stop: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<Output, String> {
+        self.run_with_reader(source, args, output_limits, deadline, stop, None)
+    }
+
+    pub fn run_with_reader(
+        &self,
+        source: Option<Arc<File>>,
+        args: Vec<String>,
+        output_limits: (usize, usize),
+        deadline: Instant,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        range_reader: Option<(
+            crate::source_input::SourceInputRangeReader,
+            tokio_util::sync::CancellationToken,
+        )>,
     ) -> Result<Output, String> {
         let source_size = source
             .as_ref()
@@ -111,6 +131,7 @@ impl Parser {
         let state = State {
             source,
             source_size,
+            range_reader,
             cursors: BTreeMap::new(),
             args: std::iter::once("ffprobe".to_owned())
                 .chain(args)
@@ -566,9 +587,14 @@ fn dispatch(name: &str, c: &mut Caller<'_, State>, a: &[Val]) -> Result<i32, Err
                         .as_ref()
                         .ok_or_else(|| Error::msg("parser has no source"))?;
                     let mut bytes = vec![0; len];
-                    let got = source
-                        .read_at(&mut bytes, offset)
-                        .map_err(|e| Error::msg(e.to_string()))?;
+                    let got = match &c.data().range_reader {
+                        Some((reader, cancel)) => reader
+                            .read_at(&mut bytes, offset, cancel)
+                            .map_err(|error| Error::msg(format!("source service: {error}")))?,
+                        None => source
+                            .read_at(&mut bytes, offset)
+                            .map_err(|error| Error::msg(error.to_string()))?,
+                    };
                     write(c, dest, &bytes[..got])?;
                     total += got;
                     offset = offset
@@ -680,6 +706,52 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn native_traps_keep_memory_arithmetic_stack_and_growth_bounds() {
+        for (source, expected) in [
+            (
+                "(module (memory 1) (func (export \"_start\") (drop (i32.load (i32.const 65536)))))",
+                "out of bounds memory access",
+            ),
+            (
+                "(module (func (export \"_start\") (drop (i32.div_s (i32.const 1) (i32.const 0)))))",
+                "integer divide by zero",
+            ),
+            (
+                "(module (func (export \"_start\") unreachable))",
+                "unreachable",
+            ),
+            (
+                "(module (func $recurse (call $recurse)) (func (export \"_start\") (call $recurse)))",
+                "call stack exhausted",
+            ),
+        ] {
+            let p = parser(source);
+            assert!(p.engine.get_signals_based_traps());
+            assert!(p.engine.get_epoch_interruption());
+            assert_eq!(p.engine.get_max_wasm_stack(), 1024 * 1024);
+            let error = run(&p, None, 32).err().expect("guest traps within its owner");
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+        let p = parser(
+            "(module (memory 1) (func (export \"_start\") (if (i32.ne (memory.grow (i32.const 8192)) (i32.const -1)) (then unreachable))))",
+        );
+        assert!(run(&p, None, 32).is_ok(), "growth above 512MiB is refused");
+    }
+
+    #[test]
+    fn cancelled_parser_work_is_refused_before_guest_output() {
+        let p = parser("(module (func (export \"_start\") (loop $again (br $again))))");
+        let result = p.run(
+            None,
+            Vec::new(),
+            (32, 16 * 1024),
+            Instant::now() + std::time::Duration::from_secs(1),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
+        assert_eq!(result.err().as_deref(), Some("parser cancelled"));
+    }
+
     #[test]
     fn endless_guest_code_observes_the_existing_deadline() {
         let p = parser("(module (func (export \"_start\") (loop $again (br $again))))");

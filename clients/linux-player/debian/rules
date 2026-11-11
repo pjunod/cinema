@@ -1,0 +1,39 @@
+#!/usr/bin/make -f
+# Cinema is a Python/Lua frontend for the system mpv.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export PYTHONDONTWRITEBYTECODE = 1
+DPKG_EXPORT_BUILDFLAGS = 1
+include /usr/share/dpkg/buildflags.mk
+include /usr/share/dpkg/buildopts.mk
+
+PRIVATE = usr/lib/plurx-player
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+
+override_dh_auto_build:
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	# The source package has the launcher but not the server's caps.rs, so
+	# the caps drift check is the one skip allowed here; make
+	# linux-player-check and the package verification run it, and fail on
+	# any skip.
+	python3 -B packaging/run-tests tests \
+	  --allow-skip test_caps_and_trust.CapsTests.test_every_field_is_a_caps_rs_field
+	lua5.2 tests/test_cinema.lua plurx_player/scripts/cinema.lua
+endif
+
+# All installed files are declared in debian/install. No renderer is built.
+override_dh_auto_install:
+
+# The launcher's modules live in a private directory. dh_python3 byte-compiles
+# them at install and its prerm removes every .pyc, including any a root run
+# of the launcher wrote, so dpkg -r leaves nothing behind. These generated
+# maintainer scripts are the package's only ones, and they register no MIME
+# handler (dpkg's desktop-database trigger does that).
+override_dh_python3:
+	dh_python3 /$(PRIVATE)

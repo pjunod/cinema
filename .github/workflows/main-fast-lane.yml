@@ -33,7 +33,7 @@ jobs:
           fetch-depth: 0
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22.23.2"
+          node-version: "22.23.4"
       - name: Check index rows, release counters, names and Regression-Test fields
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -85,9 +85,29 @@ jobs:
     name: production worker controller proof
     needs: scope
     if: github.event.pull_request.draft == false
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: [ci-nonvoter-heavy-amd64]
     timeout-minutes: 45
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -109,7 +129,8 @@ jobs:
           while IFS= read -r path; do
             case "$path" in
               crates/plurx-worker-control/*|verification/worker-control/*|\
-              crates/plurxd/src/library_work.rs|crates/plurxd/Cargo.toml|\
+              crates/plurxd/src/library_work.rs|crates/plurxd/src/library_work/env.rs|\
+              crates/plurxd/Cargo.toml|\
               Cargo.toml|Cargo.lock|rust-toolchain.toml|\
               scripts/check-worker-control|validation/worker_control_resume.py|\
               .github/workflows/main-fast-lane.yml)
@@ -140,12 +161,34 @@ jobs:
             'import platform, sys; assert sys.version_info[:3] == (3, 12, 15) and sys.platform == "linux" and platform.machine() == "x86_64"'
           rm -- "$runtime_archive"
           printf '%s\n' "$python_dir/python/bin" >> "$GITHUB_PATH"
+      - name: Install the pinned Rust controller prerequisite
+        if: steps.worker-control-inputs.outputs.affected == 'true'
+        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+        with:
+          toolchain: "1.97.1"
       - name: Prepare same-PR worker proof resumption
         id: worker-control-resume
         if: steps.worker-control-inputs.outputs.affected == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m validation.worker_control_resume
+      - name: Cache the pinned worker controller toolchain
+        if: steps.worker-control-inputs.outputs.affected == 'true'
+        env:
+          PLURX_WORKER_CACHE_BASE: ${{ github.server_url }}/api/packages/noirr/generic/plurx-worker-control-toolchain
+          PLURX_WORKER_CACHE_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PLURX_WORKER_CACHE_TOKEN"
+          cache_version="$(sha256sum verification/worker-control/toolchain.json | cut -d' ' -f1)"
+          cache_base="$PLURX_WORKER_CACHE_BASE/$cache_version"
+          mkdir -p target/worker-control-tools/archives
+          curl -q --fail --silent --show-error --proto '=http,https' \
+            --retry 2 --connect-timeout 15 --max-time 240 --max-filesize 268435456 \
+            --user "noirr:$PLURX_WORKER_CACHE_TOKEN" \
+            "$cache_base/kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz" \
+            --output target/worker-control-tools/archives/kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz
+          unset PLURX_WORKER_CACHE_TOKEN
       - name: Run the pinned production worker controller proof
         if: steps.worker-control-inputs.outputs.affected == 'true'
         run: >-
@@ -182,9 +225,10 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Allows the 5-minute worker witness smoke, other package smokes, toolchain
-    # provisioning and preflight validation to finish with headroom.
-    timeout-minutes: 15
+    # A cold continuation can run the full unit set when older receipts cannot
+    # authenticate. History alone took seven minutes in run 6234; allow the
+    # remaining contracts and receipt publication to finish on a busy runner.
+    timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -210,7 +254,7 @@ jobs:
           printf '%s\n' "$plurx_python_dir/python/bin" >> "$GITHUB_PATH"
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22.23.2"
+          node-version: "22.23.4"
       - name: Restore attributable main Python successes
         id: receipts
         env:
@@ -269,7 +313,22 @@ jobs:
           python3 -c 'import json, os; from pathlib import Path; base=Path("target/verification"); durable=json.loads((base/"durable-jobs/ci-inputs.json").read_text()); progress=json.loads((base/"operation-progress/ci-inputs.json").read_text()); worker=json.loads((base/"worker-refinement/ci-inputs.json").read_text()); assert all(type(item["affected"]) is bool for item in (durable, progress, worker)); out=open(os.environ["GITHUB_OUTPUT"], "a"); print("affected_durable=" + str(durable["affected"]).lower(), file=out); print("affected_progress=" + str(progress["affected"]).lower(), file=out); print("affected_worker_refinement=" + str(worker["affected"]).lower(), file=out); print("affected=" + str(durable["affected"] or progress["affected"] or worker["affected"]).lower(), file=out)'
       - name: Provision the pinned formal toolchain
         if: steps.formal-inputs.outputs.affected == 'true'
-        run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
+        env:
+          PLURX_FORMAL_CACHE_BASE: ${{ github.server_url }}/api/packages/noirr/generic/plurx-formal-toolchain
+          PLURX_FORMAL_CACHE_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+        run: |
+          set -eu
+          # Cache the verified upstream bytes by the unchanged manifest hash.
+          # No redirects: credentials stay on this Forgejo instance. Bootstrap
+          # still verifies the original artifact pins before installing either.
+          test -n "$PLURX_FORMAL_CACHE_TOKEN"
+          cache_version="$(sha256sum verification/durable-jobs/toolchain.json | cut -d' ' -f1)"
+          cache_base="$PLURX_FORMAL_CACHE_BASE/$cache_version"
+          mkdir -p target/formal-toolchain-seed
+          curl -q --fail --silent --show-error --proto '=http,https' --retry 2 --connect-timeout 15 --max-time 240 --max-filesize 536870912 --user "noirr:$PLURX_FORMAL_CACHE_TOKEN" "$cache_base/temurin-21.0.12+8-linux-x64.tar.gz" -o target/formal-toolchain-seed/temurin-21.0.12+8-linux-x64.tar.gz
+          curl -q --fail --silent --show-error --proto '=http,https' --retry 2 --connect-timeout 15 --max-time 240 --max-filesize 16777216 --user "noirr:$PLURX_FORMAL_CACHE_TOKEN" "$cache_base/tla2tools-1.7.4.jar" -o target/formal-toolchain-seed/tla2tools-1.7.4.jar
+          unset PLURX_FORMAL_CACHE_TOKEN
+          python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain --seed-dir target/formal-toolchain-seed
       - name: Complete the bounded formal smoke configuration
         id: formal-smoke
         if: steps.formal-inputs.outputs.affected_durable == 'true'
@@ -344,11 +403,13 @@ jobs:
     name: fast Rust gate
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [ci-nonvoter-heavy-amd64]
     # The online generic runners currently carry ffmpeg 8. Ubuntu 24.04 is the
     # pinned ffmpeg 6 environment used by this lane, while the host label keeps
     # the job on the high-CPU pool.
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
     # Compile all targets and enforce workspace/vendor Clippy here. The full
     # Rust unit and SQLite suites belong to manual full CI, while each change
     # carries its named, locally run focused regression through preflight.
@@ -360,6 +421,26 @@ jobs:
       # Keep compilation within the shared guest's memory budget.
       CARGO_BUILD_JOBS: "1"
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Install Rust gate prerequisites
         run: |
           set -euo pipefail
@@ -367,7 +448,27 @@ jobs:
           apt-get -o Acquire::Retries=3 update
           apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
             build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
-            libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config python3
+            libgtk-4-dev libdbus-1-dev make nasm ninja-build xz-utils pkg-config python3
+          # Forgejo needs Node before checkout; use the patched upstream build.
+          case "$(dpkg --print-architecture)" in
+            amd64)
+              node_arch=x64
+              node_sha=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
+              ;;
+            arm64)
+              node_arch=arm64
+              node_sha=6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b
+              ;;
+            *) echo "Unsupported Node architecture" >&2; exit 1 ;;
+          esac
+          node_tmp="$(mktemp -d)"
+          trap 'rm -rf "$node_tmp"' EXIT
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-${node_arch}.tar.xz" \
+            -o "$node_tmp/node.tar.xz"
+          echo "$node_sha  $node_tmp/node.tar.xz" | sha256sum --check --strict
+          tar -xJf "$node_tmp/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
+          node --version | grep -Fx 'v22.23.4'
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -422,7 +523,7 @@ jobs:
           fetch-depth: 0
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
       - name: Parse every shipped JavaScript surface
         run: |
           scripts/js-check
@@ -437,10 +538,11 @@ jobs:
       - name: Type-check the web shell against its baseline
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          node tests/web/jsconfig-generated.test.js
+          python3 -m validation.web_unit_receipts --command jsconfig-generated
           scripts/web-types --base "$PR_BASE_SHA"
-          node tests/web/player-typedef.test.js
+          python3 -m validation.web_unit_receipts --command player-typedef
       # Every Node web and playback test, the same list `make web-check` runs
       # minus its two real-browser scripts. Until 2026-10-04 a pull request ran
       # two of them here and the rest ran only when someone typed make; a stale
@@ -448,18 +550,26 @@ jobs:
       - name: Run every Node web and playback test
         env:
           TMPDIR: /tmp
-        run: make web-unit-check
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.web_unit_receipts --command suite
+      - name: Preserve original web unit adoption provenance
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: web-unit-adoption-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .main-preflight-receipts/web-unit
+          if-no-files-found: error
+          retention-days: 90
 
   apple_compile:
     name: Apple compile and native TV navigation
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
     timeout-minutes: 120
-    concurrency:
-      group: plurx-apple-silicon-heavy
-      cancel-in-progress: false
+    # The dedicated 32 GiB M4 runner admits two independent fast-lane jobs.
+    # Each owns its checkout, DerivedData, simulator UUID and evidence paths.
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -467,21 +577,40 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
           printf '%s\n' "$xcode_version"
-          grep -Fxq "Xcode 27.1" <<< "$xcode_version"
-          grep -Fxq "Build version 27A9275" <<< "$xcode_version"
+          grep -Fxq "Xcode 27.2" <<< "$xcode_version"
+          grep -Fxq "Build version 27B52" <<< "$xcode_version"
           xcrun --find swift
+      - name: Authenticate compatible original native test receipts
+        id: native_receipts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.native_receipts
+      - name: Preserve native adoption provenance
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: native-adoption-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .main-preflight-receipts/native/receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Build and test native macOS server tray
         if: needs.scope.outputs.desktop_macos == 'true'
         # Keep desktop XCTest namespaces out of mobile unit receipt parsing.
         # The complete native output is preserved independently, including failures.
         run: |
           mkdir -p target/validation
-          make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
-          echo "Native macOS server tray build and unit checks passed."
+          if [ "${{ steps.native_receipts.outputs.desktop_macos }}" = "true" ]; then
+            echo "Native macOS server tray builds and tests adopted from authenticated original evidence; see native-adoption artifact." > target/validation/desktop-macos-check.log
+            echo "Native macOS server tray builds and tests adopted; original provenance is preserved in native-adoption artifact."
+          else
+            make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
+            echo "Native macOS server tray build and unit checks passed."
+          fi
       - name: Preserve native macOS server tray check output
         if: always() && needs.scope.outputs.desktop_macos == 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -494,26 +623,22 @@ jobs:
         if: needs.scope.outputs.apple == 'true'
         run: |
           test "$(xcodegen --version)" = "Version: 2.46.0"
-      - name: Cache DerivedData
-        if: needs.scope.outputs.apple == 'true'
-        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: clients/apple/build/DerivedData
-          key: main-fast-apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**') }}
-          restore-keys: |
-            main-fast-apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-
-            effort-apple-dd-xcode-27A9275-ios27.1-tvos27.0-
-            apple-dd-xcode-27A9275-ios27.1-tvos27.0-
       - name: Compile iOS and tvOS without running simulator tests
-        if: needs.scope.outputs.apple == 'true'
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         run: make apple-build
+      - name: Reauthenticate original native cases before executing the pending selection
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.native_receipts --verify-tv-plan
       - name: Require native TV navigation journeys
-        if: needs.scope.outputs.apple == 'true'
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+          PLURX_TV_NAVIGATION_PLAN: .main-preflight-receipts/native/receipt.json
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
-        if: always() && needs.scope.outputs.apple == 'true'
+        if: always() && needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}

@@ -504,15 +504,11 @@ pub struct CandidateExecutionContext {
     /// Accepted descriptive query before delivery-route resolution. This
     /// contains no executable, principal, admission or source descriptor.
     pub(crate) catalog_query: Option<crate::media_pool::QualityCatalogRequest>,
-    /// One exact admitted executable; request clones share consumption state.
-    /// Durable/remote reconstruction never carries this process-local credit.
-    pub(crate) prepared_processing:
-        Option<Arc<PreparedCandidateOnce<crate::vodserve::PreparedRootAdmission>>>,
     /// The already-resolved ordinary request a processed Auto candidate
     /// enhances. Dispatch serves it, and reports why, when the prepared
     /// processing cannot be consumed; a processed candidate the client named
-    /// itself carries none and is refused instead. Process-private, like
-    /// `prepared_processing`: durable/remote reconstruction never carries it.
+    /// itself carries none and is refused instead. Process-private: durable
+    /// and remote reconstruction never carry it.
     pub(crate) ordinary_request: Option<Box<SessionRequest>>,
     /// Private exact artifact chosen using a live measured-cost proof. The
     /// actual dispatch reacquires it; this is never client-supplied authority.
@@ -520,6 +516,8 @@ pub struct CandidateExecutionContext {
     /// Explicit live-only policy, derived from current admitted caps and the
     /// fenced complete-title probe and resolved source mastering. The effective
     /// floor is fixed before preparation identity; ordinary VOD/pre-encode use None.
+    // Its processing consumer is Linux-only, like ProcessedUpgradeTrial.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display_target_note: Option<String>,
     pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
@@ -536,61 +534,6 @@ pub struct CandidateExecutionContext {
     pub normalized_geometry: bool,
     pub grade: plurx_core::transcode::OutputGrade,
     pub profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
-}
-
-pub(crate) struct PreparedCandidateOnce<T> {
-    pub(crate) binding: [u8; 32],
-    pub(crate) deadline: Instant,
-    pub(crate) value: std::sync::Mutex<Option<T>>,
-}
-
-impl<T> std::fmt::Debug for PreparedCandidateOnce<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PreparedCandidateOnce")
-            .field("deadline", &self.deadline)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<T> PreparedCandidateOnce<T> {
-    pub(crate) fn take(&self, binding: [u8; 32]) -> Result<T, String> {
-        let mut value = self
-            .value
-            .lock()
-            .map_err(|_| "prepared candidate lock poisoned")?;
-        if Instant::now() >= self.deadline {
-            value.take();
-            return Err("prepared candidate deadline expired".into());
-        }
-        if binding != self.binding {
-            return Err("prepared candidate owner/request changed".into());
-        }
-        value
-            .take()
-            .ok_or_else(|| "prepared candidate already consumed".into())
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl<T: Send + 'static> PreparedCandidateOnce<T> {
-    pub(crate) fn new(binding: [u8; 32], deadline: Instant, value: T) -> Arc<Self> {
-        let prepared = Arc::new(Self {
-            binding,
-            deadline,
-            value: std::sync::Mutex::new(Some(value)),
-        });
-        let expiry = Arc::downgrade(&prepared);
-        tokio::spawn(async move {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-            if let Some(prepared) = expiry.upgrade() {
-                if let Ok(mut value) = prepared.value.lock() {
-                    value.take();
-                }
-            }
-        });
-        prepared
-    }
 }
 
 /// Current ordinary source-owner selection, private to first preparation.
@@ -649,9 +592,10 @@ fn continuous_media_is_autonomous(controlled: &bool) -> bool {
 
 impl ContinuousMediaRequest {
     pub fn valid_for(&self, request: &SessionRequest) -> bool {
-        self.version == 1
+        (self.version == 1 || self.version == 2 && self.controlled)
             && self.family_descriptor.as_ref().is_none_or(|description| {
                 description.valid()
+                    && u32::from(description.version) == self.version
                     && description.mode
                         == if self.controlled {
                             "controlled"
@@ -659,12 +603,13 @@ impl ContinuousMediaRequest {
                             "autonomous_reserved"
                         }
                     && self.role == ContinuousMediaRole::Video
-                    && self.autonomous_companion.is_some_and(|companion| {
-                        description
-                            .video
-                            .iter()
-                            .any(|row| row.candidate_id == companion)
-                    })
+                    && (description.version == 2 && description.video.len() == 1
+                        || self.autonomous_companion.is_some_and(|companion| {
+                            description
+                                .video
+                                .iter()
+                                .any(|row| row.candidate_id == companion)
+                        }))
                     && request.candidate_context.as_ref().is_none_or(|primary| {
                         description
                             .video
@@ -710,6 +655,16 @@ impl ContinuousMediaRequest {
                     })
             })
     }
+}
+
+/// A client's explicit promise to report accepted film demand. This is source
+/// service metadata, independent of HLS teardown and media recipe identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SourceTelemetry {
+    #[serde(rename = "film-v1")]
+    FilmV1,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -827,6 +782,8 @@ pub struct SessionRequest {
     /// recipe and a new node's recipe for the same request are byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_telemetry: Option<SourceTelemetry>,
 }
 
 /// How long a retired presentation is kept readable after the exact viewer
@@ -1022,6 +979,19 @@ pub enum SessionKind {
         /// writes. Only ever true when preserving is — there is nothing to
         /// rewrite in a stream the filter removed.
         convert_dolby_vision: bool,
+        /// The reviewed plan hands this client a dual-layer source (Profile 4
+        /// or 7) as copied — its configuration record, RPUs and enhancement
+        /// layer intact — because the client's own capabilities enumerate
+        /// that profile (plurx Player composes the enhancement layer itself).
+        ///
+        /// Without it a copy narrows every dual-layer source it does not
+        /// convert to its base layer (`served_copy_options`). Set only by
+        /// `apply_plan_review`, from the server's derivation, never from a
+        /// wire field; only ever true beside `preserve_dolby_vision` and
+        /// without `convert_dolby_vision`. Omitted when false, so a recipe
+        /// written by this build stays readable by one without the field.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dual_layer_as_copied: bool,
     },
 }
 
@@ -1058,6 +1028,8 @@ pub(super) struct CopySessionOptions {
     /// Rewrite Profile 7 RPUs to Profile 8.1 in the fragments the copy pipe
     /// writes. Only ever set beside `preserve_dolby_vision`.
     pub(super) convert_dolby_vision: bool,
+    /// See `SessionKind::Copy::dual_layer_as_copied`.
+    pub(super) dual_layer_as_copied: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1077,6 +1049,7 @@ impl SessionKind {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
             Self::Transcode { .. } => None,
         }
@@ -1160,15 +1133,20 @@ impl SessionRequest {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                dual_layer_as_copied,
             } => {
                 // A converted stream is different bytes, so it must not answer
-                // a replay for an unconverted one. Appended rather than folded
-                // into the existing digits so an unconverted request
-                // fingerprints to exactly the string it always did — a replay
-                // in flight across a deploy still recovers its session.
+                // a replay for an unconverted one, and a dual-layer source
+                // handed over as copied is different bytes from its base
+                // layer. Appended rather than folded into the existing digits
+                // so an unconverted request fingerprints to exactly the string
+                // it always did — a replay in flight across a deploy still
+                // recovers its session.
                 let base = format!("c{}d{}", u8::from(aac), u8::from(preserve_dolby_vision));
                 if convert_dolby_vision {
                     format!("{base}+p81")
+                } else if dual_layer_as_copied {
+                    format!("{base}+dl")
                 } else {
                     base
                 }
@@ -1291,45 +1269,6 @@ impl SessionRequest {
         };
         hex::encode(Sha256::digest(durable.to_string().as_bytes()))
     }
-
-    /// Exact dispatch identity, unlike the stable Auto idempotency intent.
-    /// Includes the actual rung, start, tracks, principal and private inputs.
-    pub(crate) fn processed_preparation_binding(
-        &self,
-        recovery: &SessionRecoveryIdentity,
-    ) -> Result<[u8; 32], String> {
-        let context = self
-            .candidate_context
-            .as_ref()
-            .ok_or("processed candidate context missing")?;
-        if self.request_id.as_deref() != Some(recovery.incarnation_id.as_str())
-            || context.canonical_caps.is_none()
-            || context.planning_binding.is_none()
-            || context.owner_node_id.is_none()
-        {
-            return Err("processed preparation authority is incomplete".into());
-        }
-        let bytes = serde_json::to_vec(&(
-            "plurx:admitted-processed-request:v1",
-            &recovery.principal,
-            &recovery.incarnation_id,
-            &recovery.recovery_epoch,
-            self,
-            &context.canonical_caps,
-            &context.catalog_query,
-            &context.planning_binding,
-            &context.owner_node_id,
-            &context.selected_candidate,
-            context.candidate_id,
-            context.recipe_digest,
-            context.normalized_geometry,
-            context.grade,
-            context.profile,
-            context.display_target,
-        ))
-        .map_err(|error| error.to_string())?;
-        Ok(Sha256::digest(bytes).into())
-    }
 }
 
 pub struct StartInfo {
@@ -1344,6 +1283,10 @@ pub struct StartInfo {
     /// not be consumed, and this session serves the ordinary request it
     /// enhanced instead; the reason, for the create's plan notes.
     pub(crate) degraded_processing: Option<String>,
+    /// Why this start's own processing (a reconstructed 8.1 or HDR10-E the
+    /// ordinary request was eligible for) was declined: the verdict, a busy
+    /// reconstruction slot, a refused window. For the enhancement detail.
+    pub(crate) processing_note: Option<String>,
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,
@@ -1521,6 +1464,7 @@ mod prepared_candidate_tests {
                 aac: false,
                 preserve_dolby_vision: native,
                 convert_dolby_vision: !native,
+                dual_layer_as_copied: false,
             };
             assert!(invalid.dv_processing_route().is_err());
             invalid.dv_processing_destination = None;
@@ -1580,285 +1524,5 @@ mod prepared_candidate_tests {
             "{error}"
         );
         assert!(manager.active_session_ids().await.is_empty());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn prepared_candidate_timer_releases_unconsumed_credit_without_replay() {
-        let slot = Arc::new(tokio::sync::Semaphore::new(1));
-        let permit = Arc::clone(&slot).try_acquire_owned().expect("root credit");
-        let prepared =
-            PreparedCandidateOnce::new([1; 32], Instant::now() + Duration::from_millis(20), permit);
-        let cloned = Arc::clone(&prepared);
-        assert_eq!(slot.available_permits(), 0);
-        let returned = tokio::time::timeout(Duration::from_secs(1), slot.acquire())
-            .await
-            .expect("unconsumed expiry returns capacity")
-            .expect("open semaphore");
-        drop(returned);
-        assert!(prepared.take([1; 32]).is_err());
-        assert!(cloned.take([1; 32]).is_err());
-        assert_eq!(slot.available_permits(), 1);
-    }
-
-    #[test]
-    fn prepared_candidate_clones_can_consume_only_once() {
-        let prepared = Arc::new(PreparedCandidateOnce {
-            binding: [1; 32],
-            deadline: Instant::now() + Duration::from_secs(10),
-            value: std::sync::Mutex::new(Some(7)),
-        });
-        let barrier = Arc::new(std::sync::Barrier::new(3));
-        let workers = (0..2)
-            .map(|_| {
-                let prepared = Arc::clone(&prepared);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    prepared.take([1; 32])
-                })
-            })
-            .collect::<Vec<_>>();
-        barrier.wait();
-        let results = workers
-            .into_iter()
-            .map(|worker| worker.join().expect("consumer thread"))
-            .collect::<Vec<_>>();
-        assert_eq!(results.iter().filter(|result| **result == Ok(7)).count(), 1);
-        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
-    }
-
-    #[test]
-    fn prepared_candidate_wrong_binding_cannot_consume_and_expiry_releases_value() {
-        struct Owned(Arc<std::sync::atomic::AtomicUsize>);
-        impl Drop for Owned {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut prepared = PreparedCandidateOnce {
-            binding: [1; 32],
-            deadline: Instant::now() + Duration::from_secs(10),
-            value: std::sync::Mutex::new(Some(Owned(Arc::clone(&drops)))),
-        };
-        assert!(prepared.take([2; 32]).is_err());
-        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
-        prepared.deadline = Instant::now() - Duration::from_secs(1);
-        assert!(prepared.take([1; 32]).is_err());
-        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(prepared.take([1; 32]).is_err());
-        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn resolved_source_floor_changes_the_actual_processed_preparation_binding() {
-        use plurx_core::{scan::dv_title::*, transcode::dv_processing::*};
-        let recovery = SessionRecoveryIdentity {
-            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
-            incarnation_id: "incarnation-a".into(),
-            recovery_epoch: "epoch-a".into(),
-        };
-        let mut request:SessionRequest = serde_json::from_value(serde_json::json!({
-            "file_id":1,"playback_id":"resolved-floor-binding","request_id":"incarnation-a","automatic":true,
-            "kind":{"kind":"transcode","height":720},"start_seconds":0.0,"audio_offset_ms":0,"hdr10":true,"presentation":"vod"})).expect("request");
-        let mut context = continuous_test_candidate_context(
-            plurx_core::playback::candidate::CandidateId::for_recipe_digest([3; 32]),
-            [3; 32],
-            720,
-        );
-        context.owner_node_id = Some("node-a".into());
-        context.canonical_caps =
-            Some(serde_json::from_value(serde_json::json!({"v":2})).expect("caps"));
-        context.planning_binding = Some(crate::media_pool::PlanningBinding {
-            generation: 1,
-            source_digest: "source-a".into(),
-        });
-        let stats = DvTitleStats {
-            schema: SCHEMA,
-            complete: true,
-            decoded_frames: 1,
-            valid_l1_frames: 1,
-            missing_l1_frames: 0,
-            invalid_l1_frames: 0,
-            max_l1_pq: Some(4095),
-            mastering_luminance: TitleConstant::Unknown,
-            mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
-                index: 0,
-                custom_xy: None,
-            }),
-        };
-        let DvDisplayTargetChoice::Target(proposal) =
-            DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
-        else {
-            panic!("target")
-        };
-        let source = DvSourceMastering {
-            primaries_rgbw: [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450],
-            min_1e4_nits: 17,
-        };
-        context.display_target = Some(
-            proposal
-                .resolve_source(Some(source))
-                .expect("resolved source floor"),
-        );
-        request.candidate_context = Some(Box::new(context));
-        let source_binding = request
-            .processed_preparation_binding(&recovery)
-            .expect("source binding");
-        request
-            .candidate_context
-            .as_mut()
-            .expect("context")
-            .display_target = Some(proposal.resolve_source(None).expect("renderer fallback"));
-        assert_ne!(
-            source_binding,
-            request
-                .processed_preparation_binding(&recovery)
-                .expect("fallback binding")
-        );
-    }
-
-    #[test]
-    fn processed_preparation_binds_owner_start_tracks_caps_and_planning_and_cannot_serialize_credit(
-    ) {
-        let recovery = SessionRecoveryIdentity {
-            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
-            incarnation_id: "incarnation-a".into(),
-            recovery_epoch: "epoch-a".into(),
-        };
-        let mut request: SessionRequest = serde_json::from_value(serde_json::json!({
-            "file_id": 1, "playback_id": "processed-binding", "request_id": "incarnation-a",
-            "automatic": true, "kind": {"kind": "transcode", "height": 720},
-            "start_seconds": 0.0, "audio_offset_ms": 0, "hdr10": true, "presentation": "vod"
-        }))
-        .expect("exact request fixture");
-        let mut context = continuous_test_candidate_context(
-            plurx_core::playback::candidate::CandidateId::for_recipe_digest([3; 32]),
-            [3; 32],
-            720,
-        );
-        context.owner_node_id = Some("node-a".into());
-        context.canonical_caps =
-            Some(serde_json::from_value(serde_json::json!({"v": 2})).expect("caps"));
-        context.planning_binding = Some(crate::media_pool::PlanningBinding {
-            generation: 1,
-            source_digest: "source-a".into(),
-        });
-        request.candidate_context = Some(Box::new(context));
-        let baseline = request
-            .processed_preparation_binding(&recovery)
-            .expect("complete binding");
-        for destination in [
-            plurx_core::transcode::dv_processing::DvDestination::Hdr10,
-            plurx_core::transcode::dv_processing::DvDestination::Profile81,
-        ] {
-            let mut changed = request.clone();
-            changed.dv_processing_destination = Some(destination);
-            assert_ne!(
-                changed
-                    .processed_preparation_binding(&recovery)
-                    .expect("destination"),
-                baseline
-            );
-        }
-        let mut changed = request.clone();
-        changed.start_seconds = 360.0;
-        assert_ne!(
-            changed
-                .processed_preparation_binding(&recovery)
-                .expect("start"),
-            baseline
-        );
-        let mut changed = request.clone();
-        changed.audio_index = Some(2);
-        assert_ne!(
-            changed
-                .processed_preparation_binding(&recovery)
-                .expect("track"),
-            baseline
-        );
-        let mut changed = request.clone();
-        changed.kind = SessionKind::Transcode { height: 1080 };
-        assert_ne!(
-            changed
-                .processed_preparation_binding(&recovery)
-                .expect("rung"),
-            baseline
-        );
-        let mut changed = request.clone();
-        changed
-            .candidate_context
-            .as_mut()
-            .expect("context")
-            .selected_candidate
-            .planned_codec = Some("hevc".into());
-        assert_ne!(
-            changed
-                .processed_preparation_binding(&recovery)
-                .expect("descriptor codec"),
-            baseline
-        );
-        let mut changed = request.clone();
-        changed
-            .candidate_context
-            .as_mut()
-            .expect("context")
-            .selected_candidate
-            .processed_dv = true;
-        assert_ne!(
-            changed
-                .processed_preparation_binding(&recovery)
-                .expect("descriptor processing"),
-            baseline
-        );
-        let mut changed = request.clone();
-        changed
-            .candidate_context
-            .as_mut()
-            .expect("context")
-            .canonical_caps
-            .as_mut()
-            .expect("caps")
-            .audio
-            .push("aac".into());
-        assert_ne!(
-            changed
-                .processed_preparation_binding(&recovery)
-                .expect("caps"),
-            baseline
-        );
-        let mut changed = request.clone();
-        changed
-            .candidate_context
-            .as_mut()
-            .expect("context")
-            .planning_binding
-            .as_mut()
-            .expect("planning")
-            .generation += 1;
-        assert_ne!(
-            changed
-                .processed_preparation_binding(&recovery)
-                .expect("planning"),
-            baseline
-        );
-        let mut changed = recovery.clone();
-        changed.principal =
-            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 2 };
-        assert_ne!(
-            request
-                .processed_preparation_binding(&changed)
-                .expect("principal"),
-            baseline
-        );
-        let mut changed = recovery.clone();
-        changed.incarnation_id = "incarnation-b".into();
-        assert!(request.processed_preparation_binding(&changed).is_err());
-        let restored: SessionRequest =
-            serde_json::from_slice(&serde_json::to_vec(&request).expect("durable recipe"))
-                .expect("restored request");
-        assert!(restored.candidate_context.is_none());
-        assert!(restored.processed_preparation_binding(&recovery).is_err());
     }
 }

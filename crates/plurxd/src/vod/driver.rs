@@ -1,11 +1,32 @@
 use super::*;
 
+/// Source copies transfer an actual copy permit through SourceRenditionOwners
+/// even though their recipe has no Encoding. Local copy owns no such permit.
+pub(super) fn producer_contention(
+    belief: Producer,
+    encoding: Option<&crate::vodencode::Encoding>,
+    source_copy_admissions: Option<&crate::admission::Admissions>,
+    handoff_waiting: bool,
+) -> Contention {
+    let admissions = encoding
+        .map(|encoding| &encoding.admissions)
+        .or(source_copy_admissions);
+    Contention {
+        live_waiting: admissions.is_some_and(|admissions| admissions.live_is_waiting()),
+        holds_permit: crate::prodexec::holds_permit(belief, admissions.is_some()),
+        handoff_waiting: admissions.is_some() && handoff_waiting,
+    }
+}
+
 pub(super) fn spawn_driver(
     shared: Arc<Shared>,
     rendition: Arc<Rendition>,
 ) -> tokio::task::JoinHandle<()> {
-    #[cfg(test)]
-    if let Some(driver) = controlled_driver::spawn(&rendition) {
+    if let Some(driver) = shared
+        .hooks
+        .get()
+        .controlled_driver(rendition.recipe.encoding.as_ref())
+    {
         return driver;
     }
     tokio::spawn(async move {
@@ -15,12 +36,20 @@ pub(super) fn spawn_driver(
                 .encoding
                 .as_ref()
                 .is_some_and(|encoding| encoding.is_waiting());
-            let stopped_encoder = rendition.recipe.encoding.is_some()
-                && matches!(rendition.slot.belief().await, Producer::Stopped { .. });
-            if encoded_waiting || stopped_encoder {
+            let belief = rendition.slot.belief().await;
+            let copy_admissions = rendition.source_owners.copy_admissions();
+            let stopped_permit_owner = matches!(belief, Producer::Stopped { .. })
+                && producer_contention(
+                    belief,
+                    rendition.recipe.encoding.as_deref(),
+                    copy_admissions.as_ref(),
+                    false,
+                )
+                .holds_permit;
+            if encoded_waiting || stopped_permit_owner {
                 // One owned driver, not one retry task per GET. Pool releases
                 // outside VOD cannot notify this registry. A queued rendition
-                // retries admission quickly; a stopped encoder polls slowly
+                // retries admission quickly; a stopped permit owner polls slowly
                 // enough to yield inside the live start's five-second budget.
                 let poll = if encoded_waiting {
                     Duration::from_millis(250)
@@ -32,7 +61,7 @@ pub(super) fn spawn_driver(
                     _ = rendition.wake.notified() => {},
                     _ = tokio::time::sleep(poll) => {},
                 }
-                if stopped_encoder && !encoded_waiting {
+                if stopped_permit_owner && !encoded_waiting {
                     rendition.hooks.stopped_poll_fired();
                 }
             } else {
@@ -199,9 +228,139 @@ pub(super) async fn perform_driver_step(
     rendition: &Rendition,
     step: Step,
 ) -> std::io::Result<Performed> {
+    if matches!(
+        step,
+        Step::Resume | Step::Start { .. } | Step::Restart { .. }
+    ) {
+        if let Some(observer) = rendition
+            .source_owners
+            .source_observer(rendition.gen_epoch.load(Relaxed))
+        {
+            observer.refill().await.map_err(std::io::Error::other)?;
+            if source_readers_are_optional(rendition).await {
+                observer
+                    .companion_service()
+                    .await
+                    .map_err(std::io::Error::other)?;
+            }
+        }
+    }
     let performed = rendition.slot.perform(step, || {}).await?;
     record_performed_step(shared, rendition, step);
+    project_source_sharing(shared, rendition).await;
     Ok(performed)
+}
+
+pub(super) async fn source_readers_are_optional(rendition: &Rendition) -> bool {
+    let readers = rendition.readers.lock().await;
+    let active =
+        |reader: &&Reader| !reader.authority_only && !reader.draining_after_prepared_commit;
+    readers
+        .values()
+        .filter(active)
+        .any(|reader| reader.companion_bootstrap)
+        && readers
+            .values()
+            .filter(active)
+            .all(|reader| reader.admission_priority == crate::admission::Priority::Speculative)
+}
+
+pub(super) fn source_control_session<'a>(
+    sessions: &'a HashMap<String, Session>,
+    rendition: &Rendition,
+    reader_id: &str,
+) -> Option<&'a Session> {
+    sessions
+        .get(reader_id)
+        .filter(|session| {
+            session.tombstone.is_none()
+                && session
+                    .rendition
+                    .as_ref()
+                    .is_some_and(|root| std::ptr::eq(root.as_ref(), rendition))
+        })
+        .or_else(|| {
+            sessions.values().find(|session| {
+                session.tombstone.is_none()
+                    && session.children.iter().any(|child| {
+                        child.reader_id == reader_id
+                            && std::ptr::eq(child.rendition.as_ref(), rendition)
+                    })
+            })
+        })
+}
+
+/// Every live reader of this physical producer must offer fresh contiguous
+/// media lead. A cached segment GET never creates an original-source owner.
+async fn project_source_sharing(shared: &Shared, rendition: &Rendition) {
+    let Some(observer) = rendition
+        .source_owners
+        .source_observer(rendition.gen_epoch.load(Relaxed))
+    else {
+        return;
+    };
+    if source_readers_are_optional(rendition).await {
+        let _ = observer.companion_service().await;
+        return;
+    }
+    let readers = rendition.readers.lock().await.clone();
+    let sessions = shared.sessions.lock().await;
+    let manifest = rendition.manifest.lock().await;
+    let mut lead = None::<u64>;
+    let mut low = 1_u64;
+    let mut high = 2_u64;
+    let mut fresh = !readers.is_empty();
+    let mut telemetry_capable = false;
+    for (id, reader) in &readers {
+        if reader.authority_only || reader.draining_after_prepared_commit {
+            continue;
+        }
+        let Some(session) = source_control_session(&sessions, rendition, id) else {
+            fresh = false;
+            continue;
+        };
+        let Some((demand, observed)) = session
+            .last_control_snapshot
+            .as_ref()
+            .zip(session.control_observed_at)
+        else {
+            fresh = false;
+            continue;
+        };
+        telemetry_capable = true;
+        let age = observed.elapsed();
+        if age > Duration::from_secs(5)
+            || demand.render_state != crate::playback_control::RenderState::Rendering
+        {
+            fresh = false;
+        }
+        let rate = demand.playback_rate.clamp(0.25, 4.0);
+        let reserve = ((48_000.0 * rate).ceil() as u64).clamp(48_000, 124_000);
+        low = low.max(reserve);
+        high = high.max(reserve.saturating_add((32_000.0 * rate).ceil() as u64));
+        let mut end = None;
+        for index in reader.frontier..rendition.plan.len() as u32 {
+            if !matches!(manifest.state(index), Some(SegState::Materialized { .. })) {
+                break;
+            }
+            let Some(entry) = rendition.plan.entry(index) else {
+                break;
+            };
+            end = Some(entry.end_ticks().saturating_mul(1_000) / u64::from(rendition.timescale));
+        }
+        let position =
+            crate::playback_control::rolling_estimated_position_ms(demand, age).max(0) as u64;
+        let current = end.unwrap_or(0).saturating_sub(position);
+        lead = Some(lead.map_or(current, |previous| previous.min(current)));
+    }
+    drop(manifest);
+    drop(sessions);
+    let held = matches!(rendition.slot.belief().await, Producer::Stopped { .. })
+        && crate::source_custody::stopped_group(Some(rendition.last_child_pid.load(Relaxed))).await;
+    if telemetry_capable && observer.declare_rolling_policy().await.is_err() {
+        return;
+    }
+    let _ = observer.rolling(lead, low, high, held, fresh).await;
 }
 
 /// An encoded rendition that wanted to start was refused an encoder permit.
@@ -526,6 +685,7 @@ fn arm_handoff_expiry(rendition: &Arc<Rendition>) {
 
 /// One pass: demand → decide → step → carry it out.
 pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
+    project_source_sharing(shared, rendition).await;
     let mut prepared_permit = None;
     loop {
         if rendition.closed.load(Relaxed) {
@@ -585,17 +745,12 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             (demands, ledgers)
         };
         let handoff_requested = handoff.is_some();
-        let contention = rendition.recipe.encoding.as_ref().map_or(
-            Contention {
-                live_waiting: false,
-                holds_permit: false,
-                handoff_waiting: false,
-            },
-            |encoding| Contention {
-                live_waiting: encoding.admissions.live_is_waiting(),
-                holds_permit: crate::prodexec::holds_permit(belief, true),
-                handoff_waiting: handoff_requested,
-            },
+        let copy_admissions = rendition.source_owners.copy_admissions();
+        let contention = producer_contention(
+            belief,
+            rendition.recipe.encoding.as_deref(),
+            copy_admissions.as_ref(),
+            handoff_requested,
         );
         let position = Position {
             produced_through: belief.produced_through(),
@@ -1180,7 +1335,7 @@ pub(super) fn continuous_dependency_windows(
 // or control flow exists in production. These controls do not qualify normal
 // driver scheduling, process execution or reap behavior.
 #[cfg(test)]
-mod controlled_driver {
+pub(super) mod controlled_driver {
     use super::*;
 
     #[derive(Default)]
@@ -1242,8 +1397,10 @@ mod controlled_driver {
         }
     }
 
-    pub(super) fn spawn(rendition: &Rendition) -> Option<tokio::task::JoinHandle<()>> {
-        let state = state(rendition.recipe.encoding.as_ref()?)?;
+    pub(crate) fn spawn(
+        encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let state = state(encoding?)?;
         state.registered.fetch_add(1, AcqRel);
         // Capture synchronously before spawn_driver returns or a first wake can
         // race guard teardown. Ticket drops even if aborted before first poll.
@@ -1261,6 +1418,7 @@ mod controlled_driver {
             &self,
             encoding: &Arc<crate::vodencode::Encoding>,
         ) -> Box<dyn Send + Sync> {
+            self.shared.test_hooks();
             let state = Arc::new(State::default());
             let inserted = {
                 let mut controls = CONTROLS

@@ -5,6 +5,95 @@ use plurx_core::store::background_jobs::{
     BackgroundJob, EnqueueOutcome, JobKind, JobPayload, JobSettlement,
 };
 
+// Keep foreground pressure registered across the bounded wait so existing
+// background workers observe it and cooperatively release their CPU permits.
+async fn admit_foreground_subtitle(
+    admissions: &crate::admission::Admissions,
+    budget: usize,
+) -> Option<crate::admission::TranscodePermit> {
+    let mut waiting = admissions.software_pool().queue_for_capacity();
+    let deadline = tokio::time::Instant::now() + crate::admission::QUEUE_WAIT;
+    loop {
+        if let Some(permit) = admissions.try_admit_bundle(
+            0,
+            budget,
+            &crate::admission::TranscodeResourceEstimate {
+                hardware_slot: false,
+                cpu_threads: 1,
+                decoder_threads: None,
+            },
+            crate::admission::Priority::Live,
+        ) {
+            return Some(permit);
+        }
+        waiting.mark_capacity_blocked();
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        tokio::time::sleep(crate::transcode::ADMISSION_POLL.min(deadline - now)).await;
+    }
+}
+
+async fn await_subtitle_work<F, C, CF, N, NF, B>(
+    mut work: std::pin::Pin<&mut F>,
+    loss: &CancellationToken,
+    cancellation: &CancellationToken,
+    pressure: &mut tokio::time::Interval,
+    source_changed: N,
+    source_may_continue: C,
+    background_preempted: B,
+) -> Result<(), AnalysisResolutionError>
+where
+    F: std::future::Future<Output = Result<(), AnalysisResolutionError>>,
+    C: Fn() -> CF,
+    CF: std::future::Future<Output = bool>,
+    N: Fn() -> NF,
+    NF: std::future::Future<Output = ()>,
+    B: Fn() -> bool,
+{
+    // The producer may hold the job-fence mutex across an awaited Store write.
+    // Keep pressure observations inside competing branch futures so waiting
+    // for that mutex cannot stop polling the producer that must release it.
+    loop {
+        tokio::select! {
+            biased;
+            () = loss.cancelled() => { cancellation.cancel(); return work.await; }
+            preempted = async {
+                pressure.tick().await;
+                background_preempted() || !source_may_continue().await
+            } => {
+                if preempted {
+                    cancellation.cancel();
+                    // A completion write can retire its own source authority
+                    // before this observation returns. Preserve that committed
+                    // success after the worker has joined; permit no new reads.
+                    if work.await.is_ok() {
+                        return Ok(());
+                    }
+                    return Err(AnalysisResolutionError::Retry { code: "foreground_preempted", charge_attempt: false });
+                }
+            }
+            preempted = async {
+                source_changed().await;
+                !source_may_continue().await
+            } => {
+                if preempted {
+                    cancellation.cancel();
+                    // A completion write can retire its own source authority
+                    // before this observation returns. Preserve that committed
+                    // success after the worker has joined; permit no new reads.
+                    if work.await.is_ok() {
+                        return Ok(());
+                    }
+                    return Err(AnalysisResolutionError::Retry { code: "foreground_preempted", charge_attempt: false });
+                }
+            }
+            result = &mut work => return result,
+        }
+    }
+}
+
 impl JobManager {
     pub(crate) fn share_subtitle_admissions(&self, admissions: crate::admission::Admissions) {
         *self
@@ -163,16 +252,7 @@ impl JobManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let Some(_admission) = admissions.try_admit_bundle(
-            0,
-            budget,
-            &crate::admission::TranscodeResourceEstimate {
-                hardware_slot: false,
-                cpu_threads: 1,
-                decoder_threads: None,
-            },
-            crate::admission::Priority::Live,
-        ) else {
+        let Some(_admission) = admit_foreground_subtitle(&admissions, budget).await else {
             return false;
         };
         let Some((job, active)) = self.claim_subtitle_work(Some(request_id)).await else {
@@ -237,23 +317,33 @@ impl JobManager {
                 );
                 let cancellation = CancellationToken::new();
                 let loss = fence.loss_token();
-                let work =
-                    self.resolve_durable_subtitle(&request, runtime_cache, &fence, &cancellation);
+                let work = crate::background_jobs::budgeted(
+                    fence.source_budget(),
+                    plurx_core::process::bounded::cancellable(
+                        cancellation.clone(),
+                        self.resolve_durable_subtitle(
+                            &request,
+                            runtime_cache,
+                            &fence,
+                            &cancellation,
+                        ),
+                    ),
+                );
                 tokio::pin!(work);
                 let mut pressure = tokio::time::interval(Duration::from_millis(250));
-                loop {
-                    tokio::select! {
-                        biased;
-                        () = loss.cancelled() => { cancellation.cancel(); break work.await; }
-                        _ = pressure.tick() => {
-                            if background.is_some_and(|(manager, permit)| !manager.fragment_worker_idle(permit)) {
-                                cancellation.cancel(); let _ = work.await;
-                                break Err(AnalysisResolutionError::Retry { code: "foreground_preempted", charge_attempt: false });
-                            }
-                        }
-                        result = &mut work => break result,
-                    }
-                }
+                await_subtitle_work(
+                    work.as_mut(),
+                    &loss,
+                    &cancellation,
+                    &mut pressure,
+                    || crate::source_custody::source_pressure_changed().notified(),
+                    || async { fence.source_may_continue().await.unwrap_or(false) },
+                    || {
+                        background
+                            .is_some_and(|(manager, permit)| !manager.fragment_worker_idle(permit))
+                    },
+                )
+                .await
             }
             Ok(None) => Err(AnalysisResolutionError::Terminal("source_deleted")),
             Err(_) => Err(AnalysisResolutionError::Retry {
@@ -332,5 +422,175 @@ impl JobManager {
             lost,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod foreground_admission_tests {
+    use super::admit_foreground_subtitle;
+    use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
+
+    #[tokio::test(start_paused = true)]
+    async fn subtitle_pressure_preserves_committed_success_after_join() {
+        for notification in [false, true] {
+            let loss = super::CancellationToken::new();
+            let cancellation = super::CancellationToken::new();
+            let work = async {
+                cancellation.cancelled().await;
+                Ok(())
+            };
+            tokio::pin!(work);
+            let mut pressure = tokio::time::interval_at(
+                tokio::time::Instant::now()
+                    + std::time::Duration::from_secs(if notification { 3600 } else { 0 }),
+                std::time::Duration::from_secs(3600),
+            );
+            let result = super::await_subtitle_work(
+                work.as_mut(),
+                &loss,
+                &cancellation,
+                &mut pressure,
+                || async {
+                    if !notification {
+                        std::future::pending::<()>().await;
+                    }
+                },
+                || async { false },
+                || false,
+            )
+            .await;
+            assert!(
+                cancellation.is_cancelled(),
+                "pressure path must join the worker"
+            );
+            assert!(
+                result.is_ok(),
+                "committed completion was discarded: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subtitle_pressure_checks_keep_polling_the_write_that_holds_the_fence() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::Poll;
+        use tokio::sync::{oneshot, Mutex, Notify};
+
+        for notification in [false, true] {
+            let state = Mutex::new(());
+            let checked = AtomicBool::new(false);
+            let changed = Notify::new();
+            let loss = super::CancellationToken::new();
+            let cancellation = super::CancellationToken::new();
+            let (complete_write, write_reply) = oneshot::channel();
+            // JobFence::write_subtitle retains its state mutex across the
+            // Store write. Only polling this owner can consume the reply,
+            // release the mutex and proceed to joined-source settlement.
+            let work = async {
+                let _state = state.lock().await;
+                write_reply.await.expect("Store write reply");
+                Ok(())
+            };
+            tokio::pin!(work);
+            let delay = if notification { 3600 } else { 1 };
+            let mut pressure = tokio::time::interval_at(
+                tokio::time::Instant::now() + std::time::Duration::from_secs(delay),
+                std::time::Duration::from_secs(3600),
+            );
+            let driver = super::await_subtitle_work(
+                work.as_mut(),
+                &loss,
+                &cancellation,
+                &mut pressure,
+                || changed.notified(),
+                || async {
+                    checked.store(true, Ordering::SeqCst);
+                    let _state = state.lock().await;
+                    true
+                },
+                || false,
+            );
+            tokio::pin!(driver);
+            std::future::poll_fn(|cx| {
+                assert!(driver.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert!(state.try_lock().is_err(), "write retains fence state");
+            if notification {
+                changed.notify_waiters();
+            } else {
+                tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            }
+            std::future::poll_fn(|cx| {
+                assert!(driver.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert!(
+                checked.load(Ordering::SeqCst),
+                "pressure waits for fence state"
+            );
+            complete_write
+                .send(())
+                .expect("deliver committed write reply");
+            let result = tokio::time::timeout(std::time::Duration::from_millis(20), driver)
+                .await
+                .expect("pressure must keep polling the write owner");
+            assert!(result.is_ok(), "joined work reaches settlement");
+            assert!(!cancellation.is_cancelled());
+            assert!(state.try_lock().is_ok(), "write releases fence state");
+        }
+    }
+
+    fn background(admissions: &Admissions) -> crate::admission::TranscodePermit {
+        admissions
+            .try_admit_bundle(
+                0,
+                2,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: 2,
+                    decoder_threads: None,
+                },
+                Priority::Speculative,
+            )
+            .expect("real background CPU holder")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn foreground_subtitle_admission_timeout_releases_live_waiter() {
+        let admissions = Admissions::new();
+        let held = background(&admissions);
+        let started = tokio::time::Instant::now();
+        assert!(admit_foreground_subtitle(&admissions, 2).await.is_none());
+        assert_eq!(started.elapsed(), crate::admission::QUEUE_WAIT);
+        assert!(!admissions.live_is_waiting());
+        assert_eq!(admissions.software_in_use(), 2);
+        drop(held);
+        drop(background(&admissions));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_foreground_subtitle_admission_releases_live_waiter() {
+        let admissions = Admissions::new();
+        let held = background(&admissions);
+        let shared = admissions.clone();
+        let waiting = tokio::spawn(async move { admit_foreground_subtitle(&shared, 2).await });
+        tokio::task::yield_now().await;
+        assert!(
+            admissions.live_is_waiting(),
+            "foreground registers pressure before sleeping"
+        );
+        waiting.abort();
+        assert!(waiting
+            .await
+            .expect_err("cancelled admission")
+            .is_cancelled());
+        assert!(!admissions.live_is_waiting());
+        assert_eq!(admissions.software_in_use(), 2);
+        drop(held);
+        drop(background(&admissions));
     }
 }

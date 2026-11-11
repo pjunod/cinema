@@ -21,15 +21,31 @@ final class SharedPlayerController: ObservableObject {
         case remoteControl(SharedControlIntent, () -> Bool, (CinemaRemoteOutcome) -> Void)
         case change(SharedDirectedChange)
         case restartDirect(session: String)
+        case caption(SharedCaptionAsset, Int)
     }
     let player = AVPlayer()
+    private var captionIntentSerial = 0
+    let captions = SharedCaptionReadSession()
+    private var captionObservation: AnyCancellable?
+    private func observeCaptions() { captionObservation = captions.objectWillChange.sink { [weak self] in self?.objectWillChange.send() } }
     private let makeClient: () throws -> SharedDecisionClient
-    init() { makeClient = { try SharedDecisionClient() } }
+    init() { makeClient = { try SharedDecisionClient() }; observeCaptions() }
     #if DEBUG
     private var beforeStopCleanup: (() async -> Void)?
     init(testConfiguration: URLSessionConfiguration, beforeStopCleanup: (() async -> Void)? = nil) {
         makeClient = { try SharedDecisionClient(testConfiguration: testConfiguration) }
         self.beforeStopCleanup = beforeStopCleanup
+        observeCaptions()
+    }
+    /// Inject only an already authenticated Start and its attached item. The
+    /// caption/change operation and B control exchange remain production code.
+    func seedCaptionPlaybackForTesting(plan: SharedPlaybackPlan, playback: SharedStartedPlayback,
+                                       client: SharedDecisionClient, item: AVPlayerItem) throws {
+        self.plan=plan;self.playback = .hls(playback);self.client=client
+        var capabilities=Caps.controlCapabilities();capabilities.dualPlayerPreparation=false
+        channel=try SharedControlChannel(playback:playback,clientInstanceId:clientInstanceId,capabilities:capabilities)
+        player.replaceCurrentItem(with:item)
+        configureCaptions(plan,client:client)
     }
     #endif
     @Published private(set) var playback: SharedStartedMedia?
@@ -154,7 +170,49 @@ final class SharedPlayerController: ObservableObject {
 
     /// Quality, audio or subtitle. B declines a directed change on a shared
     /// session with `preparation: "none"`, and the answer is a fresh Start.
-    func change(_ change: SharedDirectedChange) async { await retireNetworkBeforePhysicalOperation(); await run(.change(change)) }
+    func change(_ change: SharedDirectedChange) async {
+        if change.subtitleIndex != nil || change.audioIndex != nil { captionIntentSerial += 1 }
+        await retireNetworkBeforePhysicalOperation(); await run(.change(change))
+    }
+
+    func selectCaption(_ asset: SharedCaptionAsset) async {
+        captionIntentSerial += 1
+        let intent = captionIntentSerial
+        await retireNetworkBeforePhysicalOperation()
+        guard intent == captionIntentSerial else { return }
+        await run(.caption(asset, intent))
+    }
+    func useLocalCaptionOutput() { player.allowsExternalPlayback=false }
+    private func performCaptionSelection(_ asset: SharedCaptionAsset, intent: Int) async {
+        guard intent == captionIntentSerial, let initialPlan = plan else { return }
+        let owner = operationSerial, source = initialPlan.subject.context.sourceKey
+        let burned = initialPlan.request.subtitleBurn != nil
+        let incumbent = player.currentItem
+        guard !player.isExternalPlaybackActive else { notice="Return playback to this device to display published captions.";return }
+        if plan?.request.subtitleBurn != nil { await performChange(SharedDirectedChange(subtitleIndex:.some(nil))) }
+        guard !closing,!Task.isCancelled,intent == captionIntentSerial,owner == operationSerial,!preemptRequested,
+              let acceptedPlan=plan,acceptedPlan.subject.context.sourceKey == source,let item=player.currentItem else { return }
+        guard acceptedPlan.request.subtitleBurn == nil,
+              !burned || (item !== incumbent && acceptedPlan.rawSubtitleIndex == nil) else {
+            notice="Captions were not selected because subtitle removal did not attach. Try again after the stream change finishes."
+            return
+        }
+        if let group=try? await item.asset.loadMediaSelectionGroup(for:.legible) {
+            guard !closing,!Task.isCancelled,intent == captionIntentSerial,owner == operationSerial,!preemptRequested,player.currentItem===item else { return }
+            item.select(nil,in:group)
+        }
+        guard intent == captionIntentSerial,!closing,!Task.isCancelled,!preemptRequested,player.currentItem===item else { return }
+        captions.choose(asset)
+        if captions.selected != nil { player.allowsExternalPlayback=false }
+    }
+    private func configureCaptions(_ plan: SharedPlaybackPlan,client: SharedDecisionClient) {
+        let key=plan.subject.context.sourceKey
+        let tracks=plan.decision.presentation.audio ?? []
+        let ordinal=plan.rawAudioIndex ?? plan.decision.presentation.delivery?.audio ?? tracks.first(where: { $0.default })?.index ?? (tracks.count==1 ? tracks.first?.index : nil)
+        captions.configure(client:client,context:plan.subject.context,audio:ordinal,
+            clock:{ [weak self] in self?.currentPositionMs() ?? 0 },
+            current:{ [weak self] in self?.closing==false && self?.plan?.subject.context.sourceKey==key })
+    }
 
     func currentPositionMs() -> Int { positionMs().map { Int($0) } ?? lastPositionMs }
 
@@ -196,6 +254,7 @@ final class SharedPlayerController: ObservableObject {
         case .remoteControl(let intent, let permit, let complete): complete(await performControl(intent, permit: permit))
         case .change(let change): await performChange(change)
         case .restartDirect(let session): await restartDirect(session)
+        case .caption(let asset, let intent): await performCaptionSelection(asset, intent: intent)
         }
     }
 
@@ -255,13 +314,14 @@ final class SharedPlayerController: ObservableObject {
             throw CancellationError()
         }
         // Direct play reads the signed alias with no account header.
-        let item = AVPlayerItem(url: url)
+        let item = ServerTrust.playerItem(url: url)
         historyFrameObserved = false
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
         item.add(output); historyOutput = output
         observe(item)
         player.replaceCurrentItem(with: item)
         self.plan = plan; playback = media; channel = nextChannel
+        configureCaptions(plan,client:client)
         statusSummary = nil; sessionEnded = false; notice = nil
         if let predecessor { unreleased.append(predecessor) }
         let resume = plan.subject.resumeMs
@@ -300,7 +360,7 @@ final class SharedPlayerController: ObservableObject {
     private func applySubtitle(_ plan: SharedPlaybackPlan, item: AVPlayerItem, permit: (() -> Bool)? = nil) async {
         guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
               !closing, permit?() ?? true, player.currentItem === item else { return }
-        _ = PlayerController.selectNativeSubtitle(plan.rawSubtitleIndex, tracks: plan.decision.presentation.subtitles ?? [],
+        _ = PlayerController.selectNativeSubtitle(captions.selected == nil ? plan.rawSubtitleIndex : nil, tracks: plan.decision.presentation.subtitles ?? [],
                                               in: group, of: item)
     }
 
@@ -360,6 +420,10 @@ final class SharedPlayerController: ObservableObject {
 
     private func performChange(_ change: SharedDirectedChange) async {
         guard let media = playback, let client, let plan else { return }
+        let captionWasSelected = captions.selected != nil
+        if change.subtitleIndex != nil || change.audioIndex != nil {
+            captions.deselect(); player.allowsExternalPlayback = true
+        }
         notice = nil
         switch media {
         case .direct:
@@ -367,7 +431,10 @@ final class SharedPlayerController: ObservableObject {
             // fresh session, which leaves direct play for copy or encoded HLS.
             guard (change.quality ?? plan.rawQuality) != plan.rawQuality
                     || (change.audioIndex ?? plan.rawAudioIndex) != plan.rawAudioIndex
-                    || (change.subtitleIndex ?? plan.rawSubtitleIndex) != plan.rawSubtitleIndex else { return }
+                    || (change.subtitleIndex ?? plan.rawSubtitleIndex) != plan.rawSubtitleIndex else {
+                if captionWasSelected,let item=player.currentItem { await applySubtitle(plan,item:item) }
+                return
+            }
             await reopen(at: currentPositionMs(), change: change, play: playing)
         case .hls(let started):
             if sessionEnded { await reopen(at: currentPositionMs(), change: change, play: false); return }
@@ -375,7 +442,10 @@ final class SharedPlayerController: ObservableObject {
             do {
                 let selection = try plan.directedSelection(change)
                 let frozen = try plan.frozenControlSelection()
-                guard selection != frozen else { return }
+                guard selection != frozen else {
+                    if captionWasSelected,let item=player.currentItem { await applySubtitle(plan,item:item) }
+                    return
+                }
                 if channel.prepares {
                     try await prepareChange(change, selection: selection, frozen: frozen, playback: started, client: client)
                     return
@@ -417,6 +487,7 @@ final class SharedPlayerController: ObservableObject {
         case .play: player.play(); playing = true
         case .pause: player.pause(); playing = false; lastPositionMs = currentPositionMs()
         case .seek(let ms):
+            captions.mediaChanged(seekTo: max(0,ms))
             await player.seek(to: CMTime(seconds: Double(max(0, ms)) / 1000, preferredTimescale: 1000),
                               toleranceBefore: .zero, toleranceAfter: .zero)
             lastPositionMs = currentPositionMs()
@@ -529,6 +600,7 @@ final class SharedPlayerController: ObservableObject {
                     }
                 }
                 self.lastPositionMs = Int(position)
+                self.captions.mediaChanged()
                 self.ticks += 1
                 if self.ticks % 10 == 0 { self.reportProgress() }
             }
@@ -571,6 +643,7 @@ final class SharedPlayerController: ObservableObject {
     func beginStop(watched: Bool = false) -> Task<Void, Never> {
         if let stopCleanup { return stopCleanup }
         closing = true
+        captions.retire()
         player.pause(); playing = false
         if let timeObserver { player.removeTimeObserver(timeObserver); self.timeObserver = nil }
         for observer in itemObservers { NotificationCenter.default.removeObserver(observer) }
@@ -807,6 +880,7 @@ extension SharedPlayerController {
                                                    capabilities: capabilities)
         else { failure = "This Shared change could not continue."; return }
         plan = adoption.plan; playback = .hls(adoption.playback); channel = next
+        if let client { configureCaptions(adoption.plan,client:client) }
         // The prepared commit already proved its successor frame.
         historyFrameObserved = true; historyOutput = nil
         statusSummary = nil; sessionEnded = false; restartAllowance = true
@@ -886,7 +960,7 @@ extension SharedPlayerController: PreparedSuccessorHost {
         guard !closing, player.currentItem != nil, let client, let adoption = preparedAdoption,
               adoption.playback.start.response.sessionId == action.sessionId,
               let url = try? client.playlistURL(playback: adoption.playback) else { return false }
-        let item = AVPlayerItem(url: url)
+        let item = ServerTrust.playerItem(url: url)
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
         item.add(output)
         let successor = AVPlayer(playerItem: item)
@@ -932,8 +1006,29 @@ extension SharedPlayerController: PreparedSuccessorHost {
               !closing, playing, preparedItem === item, preparedPlayer === successor else { return .refused }
         guard cadence.covers(itemPositionMs: rendezvous.itemPositionMs) else { return .refused }
         let frameDurationSeconds = cadence.frameDurationSeconds
+        // The switch point's lead covers two bounded suspensions, inspection
+        // and alignment (`commitLeadWallMs`). The alignment seek and the
+        // decoded frame that proves it share the second one's budget rather
+        // than each taking a full `alignmentMs`: a third suspension would
+        // routinely carry the incumbent past the point (review 3 S5).
+        let alignmentDeadlineMs = Int(ProcessInfo.processInfo.systemUptime * 1_000)
+            + PreparedReplacementBounds.alignmentMs
         guard await alignPrepared(item, to: rendezvous.itemPositionMs), !closing,
               preparedItem === item, preparedPlayer === successor else {
+            discardPreparedSuccessor()
+            return PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
+        }
+        // A landed seek says where the item's clock is, not that a picture
+        // exists there: a seek into a buffer hole lands and decodes nothing.
+        // The parked successor shows a decoded frame at the aligned position
+        // before it is exposed, inside what remains of the same alignment
+        // bound, or the incumbent stays and the change takes its ordinary
+        // reopen.
+        guard await awaitSharedDecodedAlignment(item, output: output, rendezvous: rendezvous,
+                                                frameDurationSeconds: frameDurationSeconds,
+                                                boundMs: alignmentDeadlineMs
+                                                    - Int(ProcessInfo.processInfo.systemUptime * 1_000)),
+              !closing, preparedItem === item, preparedPlayer === successor else {
             discardPreparedSuccessor()
             return PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
         }
@@ -957,6 +1052,34 @@ extension SharedPlayerController: PreparedSuccessorHost {
             return .switchedWithoutAFrame
         }
         return .committed(firstFrameUnixMs: frame)
+    }
+
+    /// The aligned successor's own decoded frame, at the item position the
+    /// rendezvous froze, read off the output the commit already installed.
+    /// Bounded by `boundMs`, what the alignment seek left of its one
+    /// `alignmentMs` budget; nothing left means no proof and no exposure.
+    private func awaitSharedDecodedAlignment(_ item: AVPlayerItem, output: AVPlayerItemVideoOutput,
+                                             rendezvous: PreparedCommitRendezvous,
+                                             frameDurationSeconds: Double, boundMs: Int) async -> Bool {
+        let began = Int(ProcessInfo.processInfo.systemUptime * 1_000)
+        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - began < boundMs {
+            guard !Task.isCancelled, !closing, playing, preparedItem === item, preparedOutput === output,
+                  item.status == .readyToPlay else { return false }
+            let itemTime = item.currentTime()
+            var displayTime = CMTime.invalid
+            if itemTime.isValid, itemTime.seconds.isFinite,
+               output.hasNewPixelBuffer(forItemTime: itemTime),
+               let pixels = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &displayTime),
+               displayTime.isValid,
+               rendezvous.acceptsDecodedAlignment(
+                   displaySeconds: displayTime.seconds,
+                   width: CVPixelBufferGetWidth(pixels), height: CVPixelBufferGetHeight(pixels),
+                   frameDurationSeconds: frameDurationSeconds) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: UInt64(PreparedReplacementBounds.pollMs) * 1_000_000)
+        }
+        return false
     }
 
     /// Wait for the incumbent to reach the planned switch point. Arriving

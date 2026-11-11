@@ -1476,7 +1476,7 @@ async fn install_stand_in_producer(
 ) -> Result<(), String> {
     if pipe {
         session
-            .spawn_and_install_prepublication_pipe_child(producer_attempt, || {
+            .spawn_and_install_prepublication_pipe_child(producer_attempt, |_| {
                 let mut child = tokio::process::Command::new("sleep")
                     .arg("60")
                     .stdout(std::process::Stdio::piped())
@@ -1490,7 +1490,7 @@ async fn install_stand_in_producer(
             .map(drop)
     } else {
         session
-            .spawn_and_install_prepublication_child(producer_attempt, || {
+            .spawn_and_install_prepublication_child(producer_attempt, |_| {
                 Ok(ObservedFfmpeg::for_test(long_running_child()))
             })
             .await
@@ -2106,6 +2106,7 @@ fn actual_audio_delivery_changes_manifest_codec_and_rung_budget() {
 fn audio_intent_fingerprint_keys_the_claim_not_a_refreshed_server_answer() {
     use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
     let mut request = SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -2246,6 +2247,7 @@ async fn candidate_catalog_and_execution_share_typed_audio_recipe_identity() {
         }],
     };
     let mut request = SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -2465,6 +2467,7 @@ async fn retained_audio_consumer_case(encoded: bool) {
         reason: "retained actual producer".into(),
     };
     let mut request = SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -2722,7 +2725,7 @@ async fn queued_transcode_publishes_while_holding_its_own_admission() {
         claimed.token.expect("token"),
         tokio::time::Instant::now() + Duration::from_secs(30),
         JobKind::TranscodePrepare,
-    )
+    ).await
     .expect("active job");
     let fence = PretranscodeFence::new(job, active.fence(), admission);
     let source = pretranscode_source_snapshot(&file, &[media.path().to_path_buf()])
@@ -2910,6 +2913,7 @@ fn compatibility_finite_budget_contains_native_audio_and_video_peak_and_changes_
         aac: true,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     request.finite_bitrate_limit_bps = Some(750_000);
     assert!(super::manager_create::validate_finite_copy_rate(&request, &file).is_err());
@@ -2924,4 +2928,629 @@ fn compatibility_finite_budget_contains_native_audio_and_video_peak_and_changes_
         serde_json::from_value::<SessionRequest>(unexpected).is_err(),
         "worker request schemas refuse unknown policy fields before startup"
     );
+}
+
+/// M2 (Linux player plan §3.3): a 12-thread worker debited a GPU-decoded FEL
+/// graph as if its renderer ran eight software decoder threads, so the
+/// reconstructed Profile 8.1 (and FEL HDR10-E) was unadmittable there:
+/// "DV processing needs 15 CPU threads (10 renderer, 5 encoder) and this
+/// server's software encoder budget is 11".
+#[cfg(target_os = "linux")]
+#[test]
+fn a_gpu_decoded_fel_graph_fits_a_twelve_thread_worker() {
+    use crate::dv_segment::{streaming_helper_cpu_threads, RendererDecode};
+    use plurx_core::transcode::dv_processing::DvProcessingMode;
+    // The renderer decodes on the GPU only with the device and a proved
+    // VA-API HEVC Main10 decode; anything else keeps the software debit.
+    assert_eq!(
+        TranscodeManager::processed_renderer_decode(true, true),
+        RendererDecode::Gpu
+    );
+    for (device, proved) in [(false, true), (true, false), (false, false)] {
+        assert_eq!(
+            TranscodeManager::processed_renderer_decode(device, proved),
+            RendererDecode::Software
+        );
+    }
+    let budget = 12 - 1; // crate::admission::software_budget() on 12 threads
+    let audio_encoder = 5;
+    let fel = |decode| streaming_helper_cpu_threads(DvProcessingMode::Fel, decode) + audio_encoder;
+    assert!(fel(RendererDecode::Gpu) <= budget, "{}", fel(RendererDecode::Gpu));
+    assert!(fel(RendererDecode::Software) > budget, "software decode keeps its full debit");
+    // What the node reports (and the preparation debits) follows the same
+    // decision from the same inputs.
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("rt");
+    let base = crate::test_tempdir().expect("runtime");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("isolated store"));
+    let manager =
+        TranscodeManager::new(store, base.path().join("runtime"), EncoderCaps::default(), Pipeline::Cpu);
+    let facts = rt.block_on(manager.live_reconstruction_facts());
+    let decode = TranscodeManager::processed_renderer_decode(facts.device_present, facts.main10_vaapi_decode);
+    assert_eq!(facts.gpu_decode, decode == RendererDecode::Gpu);
+    assert_eq!(facts.renderer_threads, streaming_helper_cpu_threads(DvProcessingMode::Fel, decode));
+}
+
+/// A runtime recipe (the processed graph's lifetime: the encoding and its
+/// producer share it) holding `slot`.
+#[cfg(target_os = "linux")]
+async fn graph_holding(
+    store: &Arc<dyn Store>,
+    dir: &std::path::Path,
+    slot: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> crate::vodencode::dv_runtime::RuntimeRecipe {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::transcode::dv_processing::{
+        DvBackendIdentity, DvDestination, DvDigest, DvProcessingMode, DvSourceOrigin, DvTimestamp,
+    };
+    use sha2::Digest as _;
+    let digest =
+        |bytes: &[u8]| DvDigest::new(hex::encode(sha2::Sha256::digest(bytes))).expect("digest");
+    let path = dir.join("graph-source.mkv");
+    std::fs::write(&path, b"held source").expect("source");
+    let metadata = std::fs::metadata(&path).expect("metadata");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "graph".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "graph".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let mtime = metadata
+        .modified()
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs() as i64;
+    let id = store
+        .upsert_file(item, path.to_str().expect("path"), metadata.len() as i64, mtime, &ProbeResult::default())
+        .await
+        .expect("file");
+    let file = store.get_file(id).await.expect("file").expect("file");
+    let source = Arc::new(
+        crate::fragment_index_cluster::open_source_fence(&file, None)
+            .await
+            .expect("held source"),
+    );
+    let backend = DvBackendIdentity::new(
+        digest(b"renderer"),
+        digest(b"libraries"),
+        digest(b"parser"),
+        digest(b"graph"),
+        1,
+        digest(b"environment"),
+    )
+    .expect("backend");
+    crate::vodencode::dv_runtime::RuntimeRecipe {
+        tools: Arc::new(crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture(backend)),
+        source,
+        source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
+        display_target: None,
+        display: None,
+        display_target_note: None,
+        source_tick: (1, 1000),
+        source_origin: DvSourceOrigin::observed_common(
+            DvTimestamp::new(0, 1_000_000).expect("origin"),
+            plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
+        )
+        .expect("origin"),
+        native_bl: (64, 64),
+        source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
+        source_mastering: Ok(None),
+        source_mastering_minimum: Ok(None),
+        source_frame_probe: None,
+        preferences: Default::default(),
+        destination: DvDestination::Profile81,
+        mode: DvProcessingMode::Fel,
+        decode: crate::dv_segment::RendererDecode::Gpu,
+        reconstruction_slot: slot,
+        encoder: plurx_core::transcode::Encoder::Vaapi,
+        vaapi_hdr_policy: None,
+        runtime_cache: dir.join("runtime"),
+        shader_cache: Arc::new(crate::test_tempdir().expect("shader cache")),
+        prepared: std::sync::Mutex::new(None),
+        failure_episode: digest(b"episode"),
+        preparation_budget: std::time::Duration::from_secs(5),
+        report_revision: std::sync::atomic::AtomicU64::new(0),
+        published_receipt: std::sync::Mutex::new(None),
+    }
+}
+
+/// One live reconstructed 8.1 per worker: its graph holds the slot for its
+/// whole life (shared by the encoding and its producer), a second play is
+/// declined with the reason it reports, other destinations (HDR10-E, SDR)
+/// never take it, and it frees when the last owner of the graph drops it.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn one_live_reconstruction_per_worker_frees_with_the_graph_and_is_profile81_only() {
+    use plurx_core::transcode::dv_processing::DvDestination;
+    let base = crate::test_tempdir().expect("runtime");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("isolated store"));
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        base.path().join("runtime"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    for other in [DvDestination::Hdr10, DvDestination::Sdr] {
+        assert!(manager
+            .acquire_reconstruction_slot(other)
+            .await
+            .expect("not a reconstruction slot")
+            .is_none());
+    }
+    let first = manager
+        .acquire_reconstruction_slot(DvDestination::Profile81)
+        .await
+        .expect("free slot");
+    assert!(first.is_some());
+    let graph = Arc::new(graph_holding(&store, base.path(), first).await);
+    let producer = Arc::clone(&graph);
+    let refused = manager
+        .acquire_reconstruction_slot(DvDestination::Profile81)
+        .await
+        .expect_err("second live reconstruction");
+    assert_eq!(refused, TranscodeManager::reconstruction_slot_busy());
+    assert!(manager
+        .acquire_reconstruction_slot(DvDestination::Hdr10)
+        .await
+        .expect("HDR10-E is not limited by the slot")
+        .is_none());
+    let facts = manager.live_reconstruction_facts().await;
+    assert_eq!((facts.slots_in_use, facts.slots), (1, 1));
+    assert!(!facts.held_by_qualification);
+    drop(graph);
+    assert!(
+        manager
+            .acquire_reconstruction_slot(DvDestination::Profile81)
+            .await
+            .is_err(),
+        "the producer still owns the graph"
+    );
+    drop(producer);
+    assert!(manager
+        .acquire_reconstruction_slot(DvDestination::Profile81)
+        .await
+        .expect("freed with the graph")
+        .is_some());
+}
+
+/// A FEL qualification holds the slot preemptibly: a live play cancels it,
+/// takes the slot once it lets go, and a qualification that does not let go
+/// in time gives the play its own reason, not the live-play one.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_live_play_takes_the_slot_from_a_qualification_or_says_it_was_held_by_one() {
+    use plurx_core::transcode::dv_processing::DvDestination;
+    let base = crate::test_tempdir().expect("runtime");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("isolated store"));
+    let manager = Arc::new(TranscodeManager::new(
+        store,
+        base.path().join("runtime"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let preempt = tokio_util::sync::CancellationToken::new();
+    let slot = manager
+        .try_qualification_slot(preempt.clone())
+        .expect("free slot");
+    assert!(manager.try_qualification_slot(tokio_util::sync::CancellationToken::new()).is_none());
+    assert!(manager.live_reconstruction_facts().await.held_by_qualification);
+    // The qualification lets go when told (its stages kill and reap).
+    let releaser = tokio::spawn({
+        let preempt = preempt.clone();
+        async move {
+            preempt.cancelled().await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            drop(slot);
+        }
+    });
+    let live = manager
+        .acquire_reconstruction_slot(DvDestination::Profile81)
+        .await
+        .expect("taken from the qualification");
+    assert!(live.is_some() && preempt.is_cancelled());
+    releaser.await.expect("releaser");
+    assert!(!manager.live_reconstruction_facts().await.held_by_qualification);
+    drop(live);
+    // One that ignores the signal: the play waits the bounded yield, then
+    // says the slot was held by a qualification.
+    tokio::time::pause();
+    let stubborn = manager
+        .try_qualification_slot(tokio_util::sync::CancellationToken::new())
+        .expect("free slot");
+    let refused = manager
+        .acquire_reconstruction_slot(DvDestination::Profile81)
+        .await
+        .expect_err("held past the yield");
+    assert_eq!(refused, TranscodeManager::reconstruction_slot_held_by_qualification());
+    assert_ne!(refused, TranscodeManager::reconstruction_slot_busy());
+    drop(stubborn);
+}
+
+/// The reconstructed 8.1 is served only for a title whose own verdict, for
+/// this renderer, recipe and encoder, admits it. Until a verdict exists, or
+/// when it refuses, the play keeps the plain conversion and says why; a
+/// missing verdict asks for the title to be measured, once per throttle
+/// window; a node whose encoder has no qualified recipe never serves it.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise_says_why() {
+    use plurx_core::domain::{DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::transcode::dv_fel_qualification::{self as q, FelVerdict, VerdictState};
+    let base = crate::test_tempdir().expect("runtime");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("isolated store"));
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        base.path().join("runtime"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let library = store
+        .create_library(&NewLibrary {
+            name: "fel".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "fel".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let probe = ProbeResult {
+        video_codec: Some("hevc".into()),
+        dolby_vision: DolbyVisionFacts {
+            profile: Some(7),
+            el_present: Some(true),
+            rpu_present: Some(true),
+            ..Default::default()
+        },
+        raw_json: Some(r#"{"streams":[{"index":0,"codec_type":"video"}]}"#.into()),
+        ..Default::default()
+    };
+    let id = store.upsert_file(item, "/fel.mkv", 10, 20, &probe).await.expect("file");
+    let file = store.get_file(id).await.expect("file").expect("file");
+    let scanner = "a".repeat(64);
+    let identity = q::identity(&scanner, plurx_core::transcode::RECONSTRUCTED_P81_RECIPE, "encoder");
+    let verdict = |admitted| FelVerdict {
+        schema: q::SCHEMA,
+        identity: identity.clone(),
+        source_size: file.size,
+        source_mtime: file.mtime,
+        admitted,
+        served_mean: 2.9,
+        dropped_mean: 1.79,
+        served_p99: 7.78,
+        dropped_p99: 9.6,
+        p99_tolerance: 0.0,
+        measured_at_ms: 3,
+        windows: vec![
+            q::WindowScore {
+                start_ms: 0,
+                served_mean: 2.9,
+                served_p99: 7.78,
+                dropped_mean: 1.79,
+                dropped_p99: 9.6,
+                samples: 1,
+            };
+            q::MIN_WINDOWS
+        ],
+    };
+    let document = |verdict: &FelVerdict| serde_json::json!({ q::PROBE_KEY: verdict }).to_string();
+    // Admitting verdict: served.
+    manager
+        .fel_route_decision(&file, Some(&document(&verdict(true))), &scanner, &identity)
+        .await
+        .expect("served");
+    // Refusing verdict: the measured reason.
+    let refused = manager
+        .fel_route_decision(&file, Some(&document(&verdict(false))), &scanner, &identity)
+        .await
+        .expect_err("refused");
+    assert!(refused.contains("adds less than re-encoding loses for this title"), "{refused}");
+    assert!(refused.contains("2.90 reconstructed vs 1.79 without the EL"), "{refused}");
+    // A verdict for another encoder is no verdict: measure, and say so. The
+    // request rotates the title's scan demand (here already bound to the
+    // scanner, as after a scan); a second play inside the throttle window
+    // does not rotate it again.
+    let revision = |demands: Vec<plurx_core::store::dv_title_jobs::TitleDemand>| {
+        demands.into_iter().find(|d| d.file_id == id).map(|d| d.probe_revision).expect("demand")
+    };
+    let unbound = revision(store.dv_title_demands(&scanner, 0).await.expect("demand"));
+    let bound = store
+        .bind_dv_title_demand(unbound, &scanner)
+        .await
+        .expect("bind")
+        .expect("bound");
+    let other = q::identity(&scanner, plurx_core::transcode::RECONSTRUCTED_P81_RECIPE, "another GPU");
+    let measure = || async {
+        manager
+            .fel_route_decision(&file, Some(&document(&verdict(true))), &scanner, &other)
+            .await
+            .expect_err("measured first")
+    };
+    assert_eq!(measure().await, TranscodeManager::fel_being_measured());
+    let requested = revision(store.dv_title_demands(&scanner, 0).await.expect("demand"));
+    assert!(requested > bound, "{bound} -> {requested}");
+    let rebound = store
+        .bind_dv_title_demand(requested, &scanner)
+        .await
+        .expect("bind")
+        .expect("bound");
+    assert_eq!(measure().await, TranscodeManager::fel_being_measured());
+    assert_eq!(
+        revision(store.dv_title_demands(&scanner, 0).await.expect("demand")),
+        rebound,
+        "throttled"
+    );
+    // Capability decides before any verdict.
+    for state in [VerdictState::Missing, VerdictState::Current(verdict(true))] {
+        assert_eq!(
+            TranscodeManager::fel_gate(false, state),
+            crate::transcode::FelGate::Decline(TranscodeManager::fel_recipe_unqualified().into())
+        );
+    }
+    assert!(crate::transcode::FEL_REQUALIFICATION_INTERVAL >= std::time::Duration::from_secs(3600));
+}
+
+/// One rolling worker registered under `id`, with a real child the
+/// retirement owner must reap, for the release-cause tests below.
+async fn release_cause_fixture(
+    id: &str,
+    control: Option<crate::playback_control::RollingControlHandle>,
+) -> (tempfile::TempDir, Arc<TranscodeManager>, Arc<Session>) {
+    use plurx_core::store::SqliteStore;
+
+    let dir = crate::test_tempdir().expect("release cause root");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let manager = Arc::new(TranscodeManager::new(
+        store,
+        dir.path().join("manager-work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let session = match control {
+        Some(control) => watchdog_session_with_control(
+            dir.path(),
+            Some(long_running_child()),
+            false,
+            false,
+            control,
+            0,
+        ),
+        None => watchdog_session(dir.path(), Some(long_running_child()), false),
+    };
+    manager
+        .sessions
+        .lock()
+        .await
+        .insert(id.to_owned(), Arc::clone(&session));
+    manager.active_session_count.store(1, Relaxed);
+    (dir, manager, session)
+}
+
+fn settled_retirement_cause(session: &Session) -> String {
+    session
+        .retirement_settlement
+        .lock()
+        .expect("retirement settlement")
+        .as_ref()
+        .expect("a retirement owner settled this session")
+        .cause()
+        .to_string()
+}
+
+async fn actor_terminal(
+    session: &Session,
+) -> Option<crate::playback_control::RollingTerminalCause> {
+    session
+        .control
+        .snapshot()
+        .await
+        .expect("retired actor still answers its snapshot")
+        .terminal
+}
+
+/// R1: a client DELETE's phase-one publication fence (as `release_session`
+/// runs it) commits the requester's release, not an authority fence, and the
+/// stop that follows settles `client_released`.
+#[tokio::test]
+async fn client_release_settles_released_not_authority_fence() {
+    use crate::playback_control::RollingTerminalCause;
+
+    let (_dir, manager, session) = release_cause_fixture("client-release", None).await;
+    manager
+        .begin_session_release_fence("client-release", crate::vodserve::Terminal::Deleted)
+        .await;
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::Released),
+        "phase one commits the release, not an authority fence"
+    );
+    assert!(
+        manager
+            .stop_session_for_terminal(
+                "client-release",
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            )
+            .await
+    );
+    assert_eq!(settled_retirement_cause(&session), "client_released");
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::Released)
+    );
+}
+
+/// R1: an operator stop's phase-two projection commits `Stopped`, and its
+/// retirement settles `killed`; the same holds for `stop_session` alone.
+#[tokio::test]
+async fn admin_stop_settles_stopped_not_authority_fence() {
+    use crate::playback_control::RollingTerminalCause;
+
+    let (_dir, manager, session) = release_cause_fixture("admin-stop", None).await;
+    manager
+        .begin_session_terminal(
+            "admin-stop",
+            crate::vodserve::Terminal::AdminStop,
+            "stopped by admin",
+        )
+        .await;
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::Stopped),
+        "the durable winner projects the operator stop"
+    );
+    // Join (or follow) the stop the projection spawned.
+    let outcome = manager
+        .retire_session_until_with_cause("admin-stop", &session, None, "killed")
+        .await
+        .expect("stop retirement settles");
+    assert_eq!(outcome.cause.as_ref(), "killed");
+
+    let (_dir, manager, session) = release_cause_fixture("admin-stop-direct", None).await;
+    assert!(
+        manager
+            .stop_session_for_terminal(
+                "admin-stop-direct",
+                crate::vodserve::Terminal::AdminStop,
+                "stopped by admin",
+            )
+            .await
+    );
+    assert_eq!(settled_retirement_cause(&session), "killed");
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::Stopped)
+    );
+}
+
+/// Review 1, S12: the cause of a stop is typed by its caller, not read out
+/// of its reason sentence. An internal stop whose reason happens to say
+/// "released" or "admin" is an ordinary retirement under that reason; only
+/// the terminal a release or operator stop won makes it `client_released` or
+/// `killed`.
+#[tokio::test]
+async fn a_reason_sentence_does_not_type_a_stop() {
+    let (_dir, manager, session) = release_cause_fixture("sentence-only", None).await;
+    assert!(
+        manager
+            .stop_session("sentence-only", "released by client")
+            .await
+    );
+    assert_eq!(settled_retirement_cause(&session), "released by client");
+    assert_ne!(
+        actor_terminal(&session).await,
+        Some(crate::playback_control::RollingTerminalCause::Released),
+        "a sentence did not project the viewer's release"
+    );
+}
+
+/// R1: a genuine serving fence that retires the worker first keeps its
+/// cause; the client release that follows observes it and cannot relabel
+/// failover as a routine release.
+#[tokio::test]
+async fn serving_fence_before_release_still_settles_authority_fence() {
+    use crate::playback_control::RollingTerminalCause;
+
+    let (_dir, manager, session) = release_cause_fixture("fence-first", None).await;
+    manager.fence_sessions(&["fence-first".to_owned()]).await;
+    assert!(
+        manager
+            .stop_session_for_terminal(
+                "fence-first",
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            )
+            .await
+    );
+    assert_eq!(settled_retirement_cause(&session), "authority_fence");
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::AuthorityFence)
+    );
+}
+
+/// R1: a release that committed first wins over a serving fence racing it,
+/// and the two retirement requests share one cleanup owner.
+#[tokio::test]
+async fn release_before_serving_fence_wins_and_cleanup_runs_once() {
+    use crate::playback_control::RollingTerminalCause;
+
+    let (_dir, manager, session) = release_cause_fixture("release-first", None).await;
+    manager
+        .begin_session_release_fence("release-first", crate::vodserve::Terminal::Deleted)
+        .await;
+    manager.fence_sessions(&["release-first".to_owned()]).await;
+    let (released, fenced) = tokio::join!(
+        manager.retire_session_until_with_cause("release-first", &session, None, "client_released"),
+        manager.retire_session_until_with_cause("release-first", &session, None, "authority_fence"),
+    );
+    let released = released.expect("release retirement settles");
+    let fenced = fenced.expect("fence retirement settles");
+    assert_eq!(
+        [released.participation, fenced.participation]
+            .iter()
+            .filter(|participation| **participation == RollingRetirementParticipation::Won)
+            .count(),
+        1,
+        "exactly one retirement owner runs cleanup"
+    );
+    assert!(released.removed || fenced.removed);
+    assert_eq!(released.cause.as_ref(), "client_released");
+    assert_eq!(fenced.cause.as_ref(), "client_released");
+    assert_eq!(
+        actor_terminal(&session).await,
+        Some(RollingTerminalCause::Released)
+    );
+}
+
+/// R1: with no actor left to answer a snapshot, the retirement of a
+/// released worker still settles the release it projected rather than the
+/// fail-closed authority-fence default.
+#[tokio::test]
+async fn release_with_unavailable_actor_settles_the_projected_release() {
+    let (_dir, manager, session) = release_cause_fixture(
+        "release-no-actor",
+        Some(crate::playback_control::RollingControlHandle::unavailable_for_test()),
+    )
+    .await;
+    assert!(
+        manager
+            .stop_session_for_terminal(
+                "release-no-actor",
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            )
+            .await
+    );
+    assert_eq!(settled_retirement_cause(&session), "client_released");
 }

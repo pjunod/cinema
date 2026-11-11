@@ -170,8 +170,28 @@ pub fn still_same(expected: &KernelProcess) -> Result<bool> {
     }
 }
 pub fn wait_gone(expected: &KernelProcess, timeout: Duration) -> Result<()> {
+    wait_gone_with(expected, timeout, still_same)
+}
+fn wait_gone_with(
+    expected: &KernelProcess,
+    timeout: Duration,
+    mut inspect: impl FnMut(&KernelProcess) -> Result<bool>,
+) -> Result<()> {
     let until = Instant::now() + timeout;
-    while still_same(expected)? {
+    loop {
+        match inspect(expected) {
+            Ok(false) => return Ok(()),
+            Ok(true) => {}
+            Err(error) if error.code == ErrorCode::IdentityMismatch => {
+                // A terminating macOS process can temporarily reject proc_pidinfo
+                // before the kernel reports ESRCH. Unknown is not exit proof:
+                // keep waiting, bounded by the same shutdown deadline.
+                if Instant::now() >= until {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
         if Instant::now() >= until {
             return Err(Error::new(
                 ErrorCode::UnsafeShutdown,
@@ -180,5 +200,46 @@ pub fn wait_gone(expected: &KernelProcess, timeout: Duration) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Ok(())
+}
+
+#[cfg(test)]
+mod exit_wait_tests {
+    use super::*;
+
+    fn expected() -> KernelProcess {
+        KernelProcess {
+            pid: 123,
+            uid: 501,
+            generation: "bound-generation".into(),
+        }
+    }
+
+    #[test]
+    fn wait_gone_retries_unavailable_inspection_without_treating_it_as_exit() {
+        let mut calls = 0;
+        wait_gone_with(&expected(), Duration::from_secs(1), |_| {
+            calls += 1;
+            match calls {
+                1 => Err(Error::new(
+                    ErrorCode::IdentityMismatch,
+                    "process inspection unavailable",
+                )),
+                2 => Ok(true),
+                _ => Ok(false),
+            }
+        })
+        .expect("only confirmed exit completes the wait");
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn wait_gone_never_accepts_unknown_or_live_process_at_deadline() {
+        let error = wait_gone_with(&expected(), Duration::ZERO, |_| {
+            Err(Error::new(ErrorCode::IdentityMismatch, "still unknown"))
+        })
+        .expect_err("unknown is not exit");
+        assert_eq!(error.code, ErrorCode::IdentityMismatch);
+        assert!(wait_gone_with(&expected(), Duration::ZERO, |_| Ok(true)).is_err());
+        wait_gone_with(&expected(), Duration::ZERO, |_| Ok(false)).expect("confirmed absent");
+    }
 }

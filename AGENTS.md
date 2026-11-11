@@ -60,6 +60,11 @@ every push. Forgejo runs it as the first job of every pull request, drafts
 included, and nothing else starts until it passes, so skipping it only costs
 you the wait. [docs/ci/PAPERWORK.md](docs/ci/PAPERWORK.md) lists the rules.
 
+A start-path change — anything under `crates/plurxd/src/http/hls/`,
+`transcode/`, `vod/`, `playstart.rs`, or the client players — cites in its
+pull request a before reading from `/metrics` and names the after reading it
+expects, so the next reader can compare the fleet against the claim.
+
 ## Where the documents are
 
 [docs/README.md](docs/README.md) is a short router: the reference documents
@@ -136,6 +141,17 @@ card (and any temporary toggle) is removed and the feature is simply on.
 The rule and the current audit are in
 [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates).
 
+## Mobile publishing and signing
+
+Before diagnosing a missing signing identity or asking the owner for a key,
+read [the publishing recovery runbook](docs/PUBLISHING.md#recover-mobile-signing)
+and the previous setup receipts. Verify the actual signing controller from
+fresh fleet data; the current agent's Mac may be a different machine. Reuse
+and repair the existing account/runner configuration. Record the verified
+repair and private controller details in the durable external-drive handoff
+before declaring the task complete; keep secrets and real addresses out of
+this mirrored repository.
+
 ## Rust compile loop — do not use CI as a compiler
 
 At the start of any session that may change Rust, establish a working compiler
@@ -155,6 +171,12 @@ shape for an agent here — use the source-only loop in
   evidence for a branch whose base moved.
 - Verify `rustc --version` (pinned 1.97.1) rather than trusting the default
   `cargo`. Remove stale source extractions when disk gets tight.
+- **Never build uncapped on a Raft voter.** Use a learner or lab host; on a
+  voter, a build container goes through `scripts/voter-build` (8 GiB, no
+  swap, four CPUs, `-j4`). An uncapped build on a voter cost the cluster its
+  leader on 2026-11-01
+  ([docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md](docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md));
+  `scripts/voter-isolation-check` shows whether a voter is isolated.
 
 ## Large efforts
 

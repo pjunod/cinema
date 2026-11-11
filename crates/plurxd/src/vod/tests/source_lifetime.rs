@@ -179,6 +179,7 @@ async fn source_generation_registration_close_and_cancel_retain_actual_resources
                 "owned-registration",
                 None,
                 Recipe {
+                    source_telemetry: false,
                     // Physical legacy-AAC fixture, no candidate or retained artifact.
                     audio_delivery: None,
                     measured_candidate: None,
@@ -302,6 +303,7 @@ async fn source_physical_build_and_spawn_refuse_identity_drift_and_symlinks() {
     let serve = bare_serve(&base.path().join("renditions"));
     let plan = encoding.grid.plan(96_000, 428_000);
     let recipe = |file: MediaFile| Recipe {
+        source_telemetry: false,
         audio_delivery: None,
         measured_candidate: None,
         retained_logical: None,
@@ -396,6 +398,7 @@ async fn source_missing_cached_init_refuses_before_head_regeneration() {
     let (file, encoding) = encoded_fixture(base.path()).await;
     let serve = bare_serve(&base.path().join("renditions"));
     let recipe = Recipe {
+        source_telemetry: false,
         audio_delivery: None,
         measured_candidate: None,
         retained_logical: None,
@@ -503,6 +506,7 @@ async fn source_copy_actual_cpu_admission_and_bounded_argv_retain_until_reap() {
         SourceCopyPermitRead::Capacity
     ));
     let recipe = Recipe {
+        source_telemetry: false,
         audio_delivery: None,
         measured_candidate: None,
         retained_logical: None,
@@ -588,5 +592,145 @@ async fn source_copy_actual_cpu_admission_and_bounded_argv_retain_until_reap() {
     slot.wait_registered_retirement(&registered)
         .await
         .expect("actual successful wait+writers");
+    assert_eq!(admissions.software_in_use(), 0);
+}
+
+/// Source copy uses the same four-thread admission that a caption window asks
+/// for. The controlled driver decision must release it only through the real
+/// registered producer's child/writer reaper, rather than a recipe flag.
+#[cfg(unix)]
+#[tokio::test]
+async fn source_copy_ahead_hold_yields_to_live_window_only_after_actual_reap_and_writers() {
+    use crate::vodencode::{EncodePermit, SourceCopyPermitRead, SOURCE_COPY_CPU_THREADS};
+    use plurx_core::store::SettingsStore;
+    let store = SqliteStore::open_in_memory().expect("Source copy policy");
+    store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "4")
+        .await
+        .expect("minimum pool");
+    let admissions = crate::admission::Admissions::new();
+    let permit = match EncodePermit::try_source_copy(&admissions, &store).await {
+        SourceCopyPermitRead::Admitted(permit) => permit,
+        _ => panic!("actual Source copy permit"),
+    };
+    let slot = Arc::new(crate::prodrun::ProducerSlot::new());
+    let pause = crate::seam_hooks::AsyncPause::new("yielded Source copy actual wait");
+    let retry_pause = crate::seam_hooks::AsyncPause::new("yielded Source copy actual wait retry");
+    slot.set_reap_hooks(Arc::new(SourceLifetimeWait {
+        pause: Arc::clone(&pause),
+        retry: Arc::clone(&retry_pause),
+        fail_once: AtomicBool::new(true),
+    }))
+    .await;
+    let (child, job) = crate::process_control::spawn_job_owned(
+        tokio::process::Command::new("sleep").arg("60"),
+        crate::process_control::ChildWork::realtime("Source copy contention fixture"),
+    )
+    .expect("actual permit-owning Source child");
+    let pid = child.id().expect("actual Source child pid");
+    let (registered, writers) = slot
+        .attach_registered_job_owned(child, job, 0, Some(Box::new(permit)))
+        .await;
+    let running = slot.belief().await;
+    slot.perform(Step::Stop, || {})
+        .await
+        .expect("actual ahead stop");
+    let belief = slot.belief().await;
+    assert!(matches!(belief, Producer::Stopped { .. }));
+    assert_eq!(admissions.software_in_use(), SOURCE_COPY_CPU_THREADS);
+    let mut waiting = admissions.queue_for_slot();
+    waiting.mark_capacity_blocked();
+    assert!(matches!(
+        EncodePermit::try_source_copy(&admissions, &store).await,
+        SourceCopyPermitRead::Capacity
+    ));
+    let local_copy = driver::producer_contention(belief, None, None, false);
+    assert!(
+        !local_copy.holds_permit,
+        "ordinary Local copy never acquires Source admission by recipe shape"
+    );
+    assert_eq!(yield_step(belief, Step::Nothing, local_copy), Step::Nothing);
+    let source_copy = driver::producer_contention(belief, None, Some(&admissions), false);
+    assert!(source_copy.live_waiting);
+    assert!(
+        source_copy.holds_permit,
+        "stopped Source copy owns actual admission despite encoding=None"
+    );
+    assert!(
+        !driver::producer_contention(
+            Producer::Absent {
+                produced_through: None
+            },
+            None,
+            Some(&admissions),
+            false
+        )
+        .holds_permit
+    );
+    assert_eq!(
+        yield_step(
+            running,
+            Step::Stop,
+            driver::producer_contention(running, None, Some(&admissions), false)
+        ),
+        Step::Terminate {
+            why: Termination::YieldToWaiter
+        },
+        "a Source copy about to stop yields through the same governor",
+    );
+    let step = yield_step(belief, Step::Nothing, source_copy);
+    assert_eq!(
+        step,
+        Step::Terminate {
+            why: Termination::YieldToWaiter
+        }
+    );
+    let yielding = tokio::spawn({
+        let slot = Arc::clone(&slot);
+        async move { slot.perform(step, || {}).await }
+    });
+    let held = pause.reached().await;
+    assert_eq!(admissions.software_in_use(), SOURCE_COPY_CPU_THREADS);
+    assert!(registered.confirmed_reap().is_none());
+    held.release();
+    let retry = retry_pause.reached().await;
+    assert_eq!(
+        admissions.software_in_use(),
+        SOURCE_COPY_CPU_THREADS,
+        "failed wait cannot release capacity"
+    );
+    retry.release();
+    assert_eq!(
+        admissions.software_in_use(),
+        SOURCE_COPY_CPU_THREADS,
+        "unsettled writers retain capacity"
+    );
+    assert!(matches!(
+        EncodePermit::try_source_copy(&admissions, &store).await,
+        SourceCopyPermitRead::Capacity
+    ));
+    writers.settled();
+    tokio::time::timeout(Duration::from_secs(5), yielding)
+        .await
+        .expect("bounded Source copy yield")
+        .expect("yield task")
+        .expect("actual reap and writers");
+    let receipt = slot
+        .wait_registered_retirement(&registered)
+        .await
+        .expect("confirmed physical settlement");
+    assert!(receipt.matches(&registered));
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    drop(waiting);
+    let window_permit = match EncodePermit::try_source_copy(&admissions, &store).await {
+        SourceCopyPermitRead::Admitted(permit) => permit,
+        _ => panic!("requested window acquires the actual yielded four-thread allowance"),
+    };
+    assert_eq!(admissions.software_in_use(), SOURCE_COPY_CPU_THREADS);
+    drop(window_permit);
     assert_eq!(admissions.software_in_use(), 0);
 }

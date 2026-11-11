@@ -98,6 +98,27 @@ final class ReadAfterHTTP: @unchecked Sendable {
         return result
     }
 
+    /// Stream caption pages and immutable segments under their byte ceiling.
+    func boundedData(for original: URLRequest, using session: URLSession, maximumBytes: Int) async throws -> (Data, URLResponse) {
+        guard (1...65_536).contains(maximumBytes) else { throw CaptionProtocolError.budget }
+        let exchange = prepare(for: original)
+        let redirect = ReadAfterRedirect(refuse: true)
+        do {
+            let (bytes, response) = try await session.bytes(for: exchange.request, delegate: redirect)
+            guard response.expectedContentLength <= Int64(maximumBytes) else {
+                bytes.task.cancel()
+                throw CaptionProtocolError.budget
+            }
+            var data = Data()
+            for try await byte in bytes {
+                if data.count >= maximumBytes { bytes.task.cancel(); throw CaptionProtocolError.budget }
+                data.append(byte)
+            }
+            received(response, data: data, exchange: exchange, redirected: redirect.wasRedirected)
+            return (data, response)
+        } catch { failed(exchange); throw error }
+    }
+
     private struct Ingress: Decodable { let node_urls: [String] }
 
     private static func isAccountAPI(_ url: URL, authorization: Authorization) -> Bool {
@@ -126,6 +147,25 @@ final class ReadAfterHTTP: @unchecked Sendable {
 /// URLSession ordinarily forwards custom headers on redirects. Never forward
 /// this per-account floor, even if the destination happens to share a host.
 private final class ReadAfterRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let decision = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(decision.0, decision.1)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let decision = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(decision.0, decision.1)
+    }
+
     private let refuse: Bool
     init(refuse: Bool) { self.refuse = refuse; super.init() }
     private let lock = NSLock()

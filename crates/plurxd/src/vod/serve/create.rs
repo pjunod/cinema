@@ -477,6 +477,10 @@ impl VodServe {
                     "the captured processing graph changed",
                 ));
             }
+            drop(cached);
+            if recipe.source_telemetry {
+                rendition.source_owners.declare_source_telemetry().await?;
+            }
             return Ok((
                 RenditionAttachment {
                     rendition,
@@ -626,6 +630,7 @@ impl VodServe {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } if prepared.encoding.is_none() => (aac, preserve_dolby_vision, convert_dolby_vision),
             _ if prepared.encoding.is_some() => (
                 true,
@@ -835,12 +840,20 @@ impl VodServe {
                     None => "this process has no cluster index identity".to_owned(),
                 }
             } else {
-                // The node-local pass builds this index; a viewer asking for
-                // it is the strongest reason to build it next.
-                self.shared.demand_local_index(file.id);
-                unavailable_reason.unwrap_or_else(|| {
-                    "shared preparation is disabled; no matching local index exists".to_owned()
-                })
+                // The node-local pass builds this index; what its last
+                // attempt found decides the refusal (`local_index_refusal`).
+                let (code, reason) = self
+                    .shared
+                    .local_index_refusal(
+                        file.id,
+                        &identity,
+                        unavailable_reason.unwrap_or_else(|| {
+                            "shared preparation is disabled; no matching local index exists"
+                                .to_owned()
+                        }),
+                    )
+                    .await;
+                return Err(crate::transcode::vod_refusal_error(code, reason));
             };
             // This is a prerequisite refusal, not a claim that a worker is
             // active. The durable analysis row and reason carry its actual
@@ -881,6 +894,8 @@ impl VodServe {
             video,
         ));
         let recipe = Recipe {
+            source_telemetry: req.source_telemetry
+                == Some(crate::transcode::SourceTelemetry::FilmV1),
             retained_logical: incoming_logical.clone(),
             measured_candidate: prepared.measured_candidate.take(),
             file: file.clone(),
@@ -1324,37 +1339,64 @@ impl VodServe {
             }
         }
         let mut private_media = if continuous {
-            let permits = Self::reserve_media_group(&media, Some(admission_priority)).await?;
+            let deferred = |child: &Arc<Rendition>| {
+                req.continuous_media
+                    .as_ref()
+                    .is_some_and(|media| media.controlled && media.version == 2)
+                    && companion_rendition
+                        .as_ref()
+                        .is_some_and(|companion| Arc::ptr_eq(companion, child))
+            };
+            let admitted = media
+                .iter()
+                .filter(|child| !deferred(child))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut permits = Self::reserve_media_group(&admitted, Some(admission_priority))
+                .await?
+                .into_iter();
             media
                 .into_iter()
-                .zip(permits)
-                .map(|(child, permit)| ParentMediaReader {
-                    controlled: req
-                        .continuous_media
-                        .as_ref()
-                        .is_some_and(|media| media.controlled)
-                        && child
-                            .recipe
-                            .encoding
-                            .as_ref()
-                            .is_some_and(|encoding| encoding.shared_audio.is_none()),
-                    candidate_id: if Arc::ptr_eq(&child, &rendition) {
-                        req.candidate_context
-                            .as_ref()
-                            .map(|context| context.candidate_id)
-                    } else if companion_rendition
-                        .as_ref()
-                        .is_some_and(|companion| Arc::ptr_eq(&child, companion))
-                    {
-                        req.continuous_media
-                            .as_ref()
-                            .and_then(|media| media.autonomous_companion)
-                    } else {
+                .map(|child| {
+                    let companion_bootstrap = deferred(&child);
+                    let permit = if companion_bootstrap {
                         None
-                    },
-                    reader_id: uuid::Uuid::new_v4().to_string(),
-                    rendition: child,
-                    _reservation: Some(permit),
+                    } else {
+                        permits.next()
+                    };
+                    ParentMediaReader {
+                        versioned_family: req
+                            .continuous_media
+                            .as_ref()
+                            .is_some_and(|media| media.version == 2),
+                        companion_bootstrap,
+                        controlled: req
+                            .continuous_media
+                            .as_ref()
+                            .is_some_and(|media| media.controlled)
+                            && child
+                                .recipe
+                                .encoding
+                                .as_ref()
+                                .is_some_and(|encoding| encoding.shared_audio.is_none()),
+                        candidate_id: if Arc::ptr_eq(&child, &rendition) {
+                            req.candidate_context
+                                .as_ref()
+                                .map(|context| context.candidate_id)
+                        } else if companion_rendition
+                            .as_ref()
+                            .is_some_and(|companion| Arc::ptr_eq(&child, companion))
+                        {
+                            req.continuous_media
+                                .as_ref()
+                                .and_then(|media| media.autonomous_companion)
+                        } else {
+                            None
+                        },
+                        reader_id: uuid::Uuid::new_v4().to_string(),
+                        rendition: child,
+                        _reservation: permit,
+                    }
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -1652,8 +1694,17 @@ impl VodServe {
             );
             if Arc::ptr_eq(&child.rendition, &rendition) {
                 replacement_readers.insert(child.reader_id.clone(), {
-                    let mut reader = Reader::with_priority(entry, admission_priority);
+                    let mut reader = Reader::with_priority(
+                        entry,
+                        if child.companion_bootstrap {
+                            crate::admission::Priority::Speculative
+                        } else {
+                            admission_priority
+                        },
+                    );
                     reader.nonpreemptive_trial = nonpreemptive_trial;
+                    reader.companion_bootstrap = child.companion_bootstrap;
+                    reader.authority_only = child.companion_bootstrap;
                     reader
                 });
             } else {
@@ -1667,8 +1718,17 @@ impl VodServe {
                 }
                 .expect("private media reader guard");
                 readers.insert(child.reader_id.clone(), {
-                    let mut reader = Reader::with_priority(entry, admission_priority);
+                    let mut reader = Reader::with_priority(
+                        entry,
+                        if child.companion_bootstrap {
+                            crate::admission::Priority::Speculative
+                        } else {
+                            admission_priority
+                        },
+                    );
                     reader.nonpreemptive_trial = nonpreemptive_trial;
+                    reader.companion_bootstrap = child.companion_bootstrap;
+                    reader.authority_only = child.companion_bootstrap;
                     reader
                 });
                 *child.rendition.dormant_since.lock().expect("dormant lock") = None;
@@ -1877,6 +1937,7 @@ impl ReservedSourceVodRendition {
                     .as_ref()
                     .and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
+                processing_note: None,
                 session_id: session_id.into(),
                 playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
                 duration_ms: Some(plan_duration_ms(&self.rendition.plan)),
@@ -2529,6 +2590,7 @@ impl VodServe {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } if prepared.encoding.is_none() => (aac, preserve_dolby_vision, convert_dolby_vision),
             _ if prepared.encoding.is_some() => (
                 true,
@@ -2757,12 +2819,20 @@ impl VodServe {
                     None => "this process has no cluster index identity".to_owned(),
                 }
             } else {
-                // The node-local pass builds this index; a viewer asking for
-                // it is the strongest reason to build it next.
-                self.shared.demand_local_index(file.id);
-                unavailable_reason.unwrap_or_else(|| {
-                    "shared preparation is disabled; no matching local index exists".to_owned()
-                })
+                // The node-local pass builds this index; what its last
+                // attempt found decides the refusal (`local_index_refusal`).
+                let (code, reason) = self
+                    .shared
+                    .local_index_refusal(
+                        file.id,
+                        &identity,
+                        unavailable_reason.unwrap_or_else(|| {
+                            "shared preparation is disabled; no matching local index exists"
+                                .to_owned()
+                        }),
+                    )
+                    .await;
+                return Err(crate::transcode::vod_refusal_error(code, reason));
             };
             // This is a prerequisite refusal, not a claim that a worker is
             // active. The durable analysis row and reason carry its actual
@@ -2795,6 +2865,8 @@ impl VodServe {
             ));
         }
         let recipe = Recipe {
+            source_telemetry: req.source_telemetry
+                == Some(crate::transcode::SourceTelemetry::FilmV1),
             measured_candidate: None,
             retained_logical: None,
             audio_delivery: prepared
@@ -2961,6 +3033,7 @@ mod principal_demand_tests {
             None,
         );
         let request = SessionRequest {
+            source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
@@ -2974,6 +3047,7 @@ mod principal_demand_tests {
                 aac: true,
                 preserve_dolby_vision: false,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             },
             start_seconds: 0.0,
             audio_index: None,

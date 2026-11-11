@@ -177,9 +177,18 @@ test("source retirement overrides are explicit and narrowly owned", () => {
     contract.sources
       .filter((row) => row.retired_by != null)
       .map((row) => ({ id: row.id, retired_by: row.retired_by })),
-    [{ id: "system_interruption", retired_by: ["system_resumed"] }],
+    [
+      { id: "system_interruption", retired_by: ["system_resumed"] },
+      { id: "media_waiting", retired_by: [
+        "presenting", "playback_not_requested", "intent_settled",
+        "intent_superseded", "attached_retired",
+      ] },
+    ],
     "a source-level retirement must be visible as an intentional exception",
   );
+  assert.deepEqual(contract.classes.buffering.retired_by,
+    ["presenting", "playback_not_requested", "attached_retired"],
+    "destination settlement is specific to media_waiting, not all buffering faults");
 });
 
 test("the shipped policy carries the fixture verbatim", () => {
@@ -252,6 +261,22 @@ function checkCase(item, presenter, label) {
 
 test(`the shipped web reducer runs all ${contract.cases.length} cases`, () => {
   for (const item of contract.cases) checkCase(item, policy, "web");
+});
+
+test("observation withdrawal supplies no presentation credit and retains authority", () => {
+  const item=contract.cases.find(row=>row.name==="observation_unavailable_withdraws_owned_progress_without_presenting_or_stopping");
+  let state=policy.initialSurfaceState();
+  for(const event of item.events){
+    const before=JSON.stringify(state);
+    const step=policy.presentSurface(state,event);
+    assert.equal(JSON.stringify(state),before,"withdrawal cannot mutate an earlier reducer state");
+    state=step.state;
+    assert.equal(state.presenting,false);
+    assert.equal(state.presentingSince,null);
+    assert.ok(state.faults.every(fault=>!fault.playerStopped));
+  }
+  assert.equal(state.faults.length,1);
+  assert.equal(state.faults[0].source,"degraded_notice");
 });
 
 test("a blocking surface is never rendered over a player nobody stopped", () => {

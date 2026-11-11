@@ -24,11 +24,17 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
             if index > 0 { remote.press(.down) }
             let paragraph = app.descendants(matching: .any).matching(identifier: "info:paragraph:\(index)").firstMatch
             assertFocus(paragraph, in: app, context: "Synopsis region \(index + 1)")
+            var lastGeometrySample = "No geometry sample recorded"
             let outlineFits = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                readingViewport.frame.contains(paragraph.frame.insetBy(dx: -4, dy: -4))
+                let viewportFrame = readingViewport.frame
+                let paragraphFrame = paragraph.frame
+                let outlineFrame = paragraphFrame.insetBy(dx: -4, dy: -4)
+                let fits = viewportFrame.contains(outlineFrame)
+                lastGeometrySample = "region=\(index + 1), viewport=\(viewportFrame), paragraph=\(paragraphFrame), expandedOutline=\(outlineFrame)"
+                return fits
             }, object: nil)
             XCTAssertEqual(XCTWaiter.wait(for: [outlineFits], timeout: 2), .completed,
-                           "Synopsis focus outline fits inside the reading viewport")
+                           "Synopsis focus outline fits inside the reading viewport; \(lastGeometrySample)")
             if index == 3 { XCTAssertTrue(paragraph.label.contains("FINAL SYNOPSIS LINE")) }
         }
         remote.press(.menu)
@@ -80,13 +86,49 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
         remote.press(.right)
         let quality = app.descendants(matching: .any).matching(identifier: "settings-quality").firstMatch
         assertFocus(quality, in: app, context: "Quality opener")
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Settings labels and selected values"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        XCTAssertTrue(app.staticTexts["settings-quality-title"].exists, "The setting name must remain visible beside Auto")
+        XCTAssertTrue(app.staticTexts["Audio language"].exists, "Language values must identify their setting")
+        XCTAssertTrue(app.staticTexts["Subtitle language"].exists, "Language values must identify their setting")
+        XCTAssertTrue(app.staticTexts["Subtitle switching"].exists, "Readiness values must identify their setting")
         remote.press(.select)
         let auto = app.cells.containing(NSPredicate(format: "label == %@", "Auto")).firstMatch
         assertFocus(auto, in: app, context: "Selected Auto quality")
+        remote.press(.down)
+        let original = app.cells.containing(NSPredicate(format: "label == %@", "Original")).firstMatch
+        assertFocus(original, in: app, context: "Original quality choice")
+        remote.press(.select)
+        assertFocus(quality, in: app, context: "Choosing quality restores setting")
+        XCTAssertTrue(app.staticTexts["settings-quality-title"].exists && app.staticTexts["Original"].exists,
+                      "The row must keep its name and update its selected value")
+        remote.press(.select)
         remote.press(.menu)
         assertFocus(quality, in: app, context: "Quality Back restores setting")
         remote.press(.menu)
         assertFocus(playback, in: app, context: "Playback Back restores category")
+        let appearance = app.buttons["settings-category-Appearance"]
+        reachForSetup(appearance, in: app, limit: 8)
+        assertFocus(appearance, in: app, context: "Appearance category")
+        remote.press(.right)
+        let layout = app.buttons["settings-viewer-layout"]
+        assertFocus(layout, in: app, context: "Layout opener")
+        for identifier in ["settings-viewer-layout", "Theme", "Appearance", "Poster size", "settings-tv-home-layout", "Library grouping"] {
+            XCTAssertTrue(app.staticTexts[identifier + "-title"].exists,
+                          "Appearance choices must retain their setting names: " + identifier)
+        }
+        remote.press(.menu)
+        assertFocus(appearance, in: app, context: "Appearance Back restores category")
+        let liveTv = app.buttons["settings-category-Live TV"]
+        reachForSetup(liveTv, in: app, limit: 8)
+        assertFocus(liveTv, in: app, context: "Live TV category")
+        remote.press(.right)
+        assertFocus(app.buttons["Live TV layout"], in: app, context: "Live TV layout opener")
+        XCTAssertTrue(app.staticTexts["Live TV layout-title"].exists)
+        remote.press(.menu)
+        assertFocus(liveTv, in: app, context: "Live TV Back restores category")
         let help = app.buttons["settings-category-Help"]
         reachForSetup(help, in: app, limit: 8)
         assertFocus(help, in: app, context: "Help category")

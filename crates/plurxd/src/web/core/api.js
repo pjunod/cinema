@@ -38,11 +38,21 @@ function observeReadAfter(value,request){
 // type below makes scripts/web-types refuse a string it can see; the check at
 // the top of the body refuses one it cannot (a value typed `any`, a wrapper
 // that passes its argument through), before anything is sent.
+// A session create's own remaining start time: the server spends at most this
+// (and never more than its 10 s clamp) before answering, and works for the
+// viewer no longer than it. Local creates send it through api(); a shared
+// create sends the same header from SHARED_DECISION, and B carries it on to
+// the Source, so one clock governs both hops.
+/** @param {number|null|undefined} startupRemainingMs */
+function startupRemainingHeaders(startupRemainingMs){
+  return typeof startupRemainingMs==="number"&&Number.isFinite(startupRemainingMs)
+    ?{"x-plurx-startup-remaining-ms":String(Math.max(0,Math.floor(startupRemainingMs)))}:{};
+}
 /**
  * @param {string} path
- * @param {{method?:string, body?:Record<string, unknown>|unknown[]|null, raw?:boolean, signal?:AbortSignal|null, keepSessionOn401?:boolean, linkReceipt?:string|null}} [options]
+ * @param {{method?:string, body?:Record<string, unknown>|unknown[]|null, raw?:boolean, signal?:AbortSignal|null, keepSessionOn401?:boolean, linkReceipt?:string|null, startupRemainingMs?:number|null}} [options]
  */
-async function api(path, {method="GET", body=null, raw=false, signal=null, keepSessionOn401=false, linkReceipt=null}={}){
+async function api(path, {method="GET", body=null, raw=false, signal=null, keepSessionOn401=false, linkReceipt=null, startupRemainingMs=null}={}){
   if(typeof body==="string"||body instanceof String)
     throw new TypeError(`api(${path}): pass the body value, not a JSON string; api() serializes it`);
   const authGeneration=AUTH_GENERATION;
@@ -53,6 +63,7 @@ async function api(path, {method="GET", body=null, raw=false, signal=null, keepS
   if(typeof linkReceipt==="string"&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(linkReceipt))
     headers["x-plurx-link-receipt"]=linkReceipt;
   if(readAfter.index) headers["x-plurx-read-after"]=readAfter.index;
+  Object.assign(headers,startupRemainingHeaders(startupRemainingMs));
   if(TOKEN) headers["authorization"]="Bearer "+TOKEN;
   if(body){ headers["content-type"]="application/json"; }
   let res;

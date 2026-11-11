@@ -18,6 +18,169 @@ turns that into a public listing, §5 does the same for Play. §4 explains the
 store-facing keys that land with this doc, so nobody deletes one later without
 knowing what it bought.
 
+## Post-merge beta channels — Forgejo submits changed mobile builds
+
+[mobile-channels.yml](../.github/workflows/mobile-channels.yml) runs after a
+push to `main` on Forgejo. It compares the complete push range using the same
+release-input paths as [the build-counter validator](../validation/mobile_versions.py).
+Apple source, resources or project metadata select iOS and tvOS TestFlight;
+Android release source or build metadata select Google Play **internal testing**.
+Docs, native test changes and server changes alone do not allocate a signing
+runner. Contributors still bump the affected build counter in their pull
+request; this job preserves those numbers rather than committing a new bump.
+
+The job calls `media/mobile-channels.yml` in the private Ansible repository,
+selecting `cinema` only. This channel playbook is separate from the physical
+device playbook below. It builds signed archives/AABs, validates them, and
+uploads without changing store listings or submitting production releases.
+
+**Signing runner setup.** Register a native Forgejo runner on the signing Mac
+under the account that owns the distribution signing identity, with labels
+`self-hosted`, `macOS`, `ARM64`, and `mobile-release`. General Apple CI runners
+do not carry this last label. Install Ansible, Xcode/XcodeGen, Java, the Android
+SDK and fastlane there. Keep a durable authenticated plurx clone available:
+the publisher fetches its `origin/main`, never its working files.
+
+Create a private shell environment file at
+`~/.config/plurx/mobile-channels.env` under that account, readable only by its
+owner (`chmod 600`). Forgejo variable `MOBILE_RELEASE_ENV` can select another
+absolute path. The job loads this file without shell tracing; keep signing
+files and passwords on the controller, outside the repository.
+
+| Environment setting | Purpose |
+|---|---|
+| `PLURX_ANSIBLE_DIR` | Private playbook directory; defaults to `~/code/ansible/media`. The signing controller sets this to its tested, commit-specific source snapshot under `~/.local/share/plurx-mobile-publisher/versions/`. It must contain `mobile-channels.yml`. |
+| `PLURX_ANSIBLE_INVENTORY` | Controller inventory; defaults to `inventory.yml` in that directory. Its `control` host must execute locally under the signing account. |
+| `PLURX_MOBILE_SOURCE_REPO` | Authenticated durable source clone; defaults to `~/code/plurx`. |
+| `PLURX_MOBILE_VARS_FILE` | Optional private Ansible vars file for signing settings, including the team ID and API-key path. |
+| `ASC_KEY_ID`, `ASC_ISSUER_ID` | Required only for the private playbook's `api-key` authentication mode. Its private key defaults to `~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8`; override `mobile_release_channels_apple_private_key` in the vars file. The signing controller uses `xcode-account` mode instead. |
+| `CINEMA_ANDROID_KEYSTORE`, `CINEMA_ANDROID_KEYSTORE_PASSWORD`, `CINEMA_ANDROID_KEY_ALIAS`, `CINEMA_ANDROID_KEY_PASSWORD` | Existing Cinema Play upload signing identity; the keystore path must be absolute. |
+| `GOOGLE_PLAY_JSON_KEY` | Absolute path to a Google Play service-account credential with testing-release access to Cinema. |
+| `PLURX_MOBILE_STATE_DIR` | Persistent receipts and controller lock; defaults to `~/.local/state/noirr/mobile-channels`. Preserve it when clearing build caches. |
+
+**Signing controller, 2026-11-03.** The repository-scoped
+`gha-macb-mobile-signing-01` runner uses a separate user LaunchAgent,
+`tv.plurx.mobile-signing`, with capacity one. Its private configuration is in
+`~/.config/plurx/mobile-runner/`; work and logs are in
+`~/.local/share/plurx-mobile-runner/`. The existing Apple CI standby is a
+separate service. This signing runner carries no `apple` or `lab` label.
+
+The private publisher supports
+`mobile_release_channels_apple_auth_mode: xcode-account`, which uses the
+already-signed-in Xcode account and omits the API-key arguments for archive,
+export and upload. The existing API key's cloud-signing HTTP 403 is preserved
+as historical evidence in the private signing notes, rather than worked
+around by granting it more access. Export of the existing Cinema iOS and
+tvOS distribution archives succeeded with the Xcode account on 2026-11-03;
+these checks submitted no new builds to TestFlight.
+
+### Recover mobile signing
+
+Identify the actual signing controller from the current fleet/runner report
+before inspecting Keychain or asking the owner to supply a key. The current
+Codex host, a scrubbed host alias and an old DHCP address do not establish
+which Mac executes the publisher. Match the job's runner registration and
+work directory to the controller's hardware, user and running LaunchAgent.
+Private addresses and setup receipts belong in the private operational
+handoff, outside this mirrored repository.
+
+On the signing controller, check these existing paths first:
+
+```bash
+launchctl print gui/$(id -u)/tv.plurx.mobile-signing
+security list-keychains -d user
+security find-identity -v -p codesigning
+xcode-select -p
+xcodebuild -version
+```
+
+Inspect the configured `MOBILE_RELEASE_ENV` (default
+`~/.config/plurx/mobile-channels.env`) without printing its secrets. Its
+`PLURX_ANSIBLE_DIR` names the installed, versioned publisher, not necessarily
+the source checkout. The original setup/export receipts are under
+`~/.local/state/noirr/mobile-channels/setup-evidence-2026-11-03/`.
+
+Check credentials in the controller's actual GUI session. An SSH-session
+Keychain lock result does not establish the signing runner's GUI access.
+Certificates may be listed without usable private credentials. If the GUI
+confirms a locked login Keychain, its owner unlocks it locally. A successful
+export, rather than certificate metadata, establishes signing recovery.
+
+**M5 verification, 2026-11-09:** iOS and tvOS build294 were exported and
+uploaded from the M5 with the signed-in Xcode account and automatic signing.
+The exported summary names **Cloud Managed Apple Distribution**. Both builds
+reached `VALID` and `IN_BETA_TESTING`; the existing automatic internal group
+receives them. The M5 needed no local Apple Distribution private-key bundle.
+Use this account-based path before looking for a `.p12` or creating a new
+certificate. The existing API key cannot create a distribution certificate
+(HTTP403); increasing that key's privileges was unnecessary.
+
+The verified November 3 exports used the signed-in Xcode account and
+`-allowProvisioningUpdates`. Do not assume an exported mobile `.p12` was
+part of that setup, or confuse the standalone macOS Developer ID identity
+with an iOS/tvOS Apple Distribution identity. Xcode may use cloud-managed
+signing; account metadata alone does not establish that signing works now.
+A certificate marked **Not in keychain** on another Mac is not evidence
+that the controller's key was lost. [Apple describes the relationship
+between certificates and local private keys](https://help.apple.com/xcode/mac/current/en.lproj/dev97211aeac.html).
+
+Verify with an export-only check of an existing archive using the installed
+publisher's options. Keep agent output in the required external storage;
+never recreate signing or runner state from defaults merely because it is
+absent on the wrong host. If the actual controller requires account sign-in,
+the owner completes that step there. Record the exact repair, controller
+identity, export result and later store-processing result in the durable
+handoff. A green workflow that skips publication proves no upload.
+
+Cinema's internal TestFlight group `Developer Automatic` receives all current
+and future Apple builds. Its membership was verified on 2026-11-03 against
+the same one tester in `Internal Beta`; the original group was preserved.
+
+The Cinema Play upload key remains in its existing private signing file.
+The service-account JSON is stored at `~/.config/noirr/google-play.json`
+with mode `0600`. Its Play grant covers Cinema only: view app information
+and release apps to testing tracks, with no account-wide or production
+permissions. On 2026-11-03 the Android Developer API was enabled and fastlane
+authenticated, read Cinema's internal track, and validated an empty edit.
+The edit was discarded without uploading an artifact or committing a release.
+This proves store access separately from the presence of a local key file.
+Missing credentials and rejected uploads fail the job.
+
+Credential checks do not prove an end-to-end store submission. Collect the
+first real mobile update's workflow result and store processing result as
+that acceptance evidence; do not bump versions or publish unchanged apps
+solely to exercise controller setup.
+
+**Queued runs and recovery.** Workflow concurrency queues this repository's
+releases without cancelling an upload. A controller file lock also refuses
+overlapping publishers using this entry point; other apps and manual channel
+runs must honor the same lock or run separately. A queued run publishes the
+latest `origin/main` containing its triggering commit, and includes subsequent
+mobile changes in its selection. The selected revision is passed to the
+private publisher and checked before any build starts. Rewritten history and
+non-ancestor recovery baselines are refused. The private playbook checks main
+again before uploading; if main advances during the
+build, rerun after merges settle. Successful upload receipts let retries skip
+version/build/platform/track combinations already submitted. The receipt is
+not a live store query: after a crash between store acceptance and receipt
+writing, inspect the store before retrying.
+
+Use Forgejo's **Run workflow** action on **mobile beta channels**, from
+`main`, to retry a mobile update. Supply its original push's full before-SHA
+as `base_sha`; recovery selects only platforms changed since that baseline.
+There is no build-all override. A manual run from any other branch is skipped.
+The workflow is disabled on the public GitHub mirror.
+It does not require attached devices and does not install apps on them.
+
+**How to read the result.** `uploaded` means the store accepted submission;
+`already uploaded; receipt exists` names a previous submission. Apple still
+processes the build before it appears in TestFlight. Configure internal
+TestFlight groups to receive new builds and configure the Play internal test
+audience in the stores. External beta review and production release remain
+separate actions. The local regression is
+`python3 -m unittest tests.operations.test_mobile_channels`; it uses temporary
+Git repositories and a fake publisher, and performs no store upload.
+
 ## Ansible owns the repeatable mobile deploy
 
 The versioned playbook is `~/code/ansible/media/mobile.yml` in the private

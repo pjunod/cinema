@@ -1,0 +1,28 @@
+Source: plurx-player
+Section: video
+Priority: optional
+Maintainer: plurx maintainers <noreply@plurx.invalid>
+Build-Depends: debhelper-compat (= 13),
+               dh-sequence-python3,
+               git,
+               lua5.2,
+               python3 (>= 3.10)
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: plurx-player
+Architecture: amd64
+Depends: ${misc:Depends}, ${python3:Depends}, mpv, python3 (>= 3.10), zenity
+Recommends: desktop-file-utils, mesa-vulkan-drivers | vulkan-icd
+Description: Cinema playback controls for plurx titles on Linux
+ plurx Player plays titles handed over from the plurx web app in the system
+ mpv, with Cinema controls, scoped server sessions and progress reporting.
+ The package installs the Python launcher and Lua controls; mpv and its
+ rendering libraries are supplied by the system mpv package.
+ .
+ HDR output needs a Wayland compositor with wp_color_manager_v1 in HDR mode,
+ such as GNOME in HDR mode. An accurate target luminance needs a compositor
+ that reports the panel's real luminance; stock compositors may report a
+ default instead. Dolby Vision rendering and enhancement-layer composition
+ require the native-dovi-api-1 compiled capability. Other builds negotiate
+ server conversion to HDR10; this launcher does not supply renderer support.

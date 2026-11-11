@@ -82,6 +82,31 @@ fn qsv_main10_probes_take_their_graph_from_the_proof_builder() {
     }
 }
 
+#[test]
+fn unsettled_reporter_metadata_cannot_reuse_changed_bytes_or_replace_an_older_pin() {
+    use super::*;
+    let directory = tempfile::tempdir().expect("reporter directory");
+    let path = directory.path().join("reporter");
+    std::fs::write(&path, b"new reporter").expect("reporter");
+    let version = engine_path_version(&path).expect("object version");
+    let old_digest = Sha256::digest(b"old reporter").to_vec();
+    let pinned = pinned_engine_object_version(&version, &hex::encode(&old_digest));
+    // A coalesced timestamp returns the same version for old and new bytes.
+    // The first verification has not yet earned metadata-only reuse.
+    remember_engine_digest(&path, &version, &old_digest, false);
+    assert!(!engine_object_is_current(&path, &pinned));
+    let new_digest = Sha256::digest(b"new reporter").to_vec();
+    remember_engine_digest(&path, &version, &new_digest, true);
+    assert!(engine_object_is_current(
+        &path,
+        &pinned_engine_object_version(&version, &hex::encode(new_digest))
+    ));
+    assert!(
+        !engine_object_is_current(&path, &pinned),
+        "a newer capture must never authorize an older byte pin"
+    );
+}
+
 #[tokio::test]
 async fn held_clock_reporter_bytes_enter_existing_engine_identity_and_publication_fence() {
     use super::*;
@@ -220,13 +245,26 @@ async fn engine_object_digest_is_reused_per_version_and_rehashed_on_change() {
     std::fs::write(&path, b"first engine bytes").expect("object");
     let (first, version) = super::hash_engine_object(&path).await.expect("first hash");
     assert_eq!(first, sha2::Sha256::digest(b"first engine bytes").to_vec());
+    #[cfg(unix)]
+    if !super::engine_metadata_has_settled(&std::fs::metadata(&path).expect("object metadata")) {
+        assert_eq!(
+            super::cached_engine_digest(&path, &version),
+            None,
+            "a newly written object has not earned metadata-only reuse"
+        );
+        // ctime cannot be backdated. Let the actual object age beyond the
+        // production two-second grace, then capture its now-settled version.
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    }
+    let (again, same_version) = super::hash_engine_object(&path)
+        .await
+        .expect("settled hash");
+    assert_eq!((again, same_version), (first.clone(), version.clone()));
     assert_eq!(
         super::cached_engine_digest(&path, &version),
         Some(first.clone()),
-        "a captured version is served without reading the object again"
+        "a settled captured version is served without reading the object again"
     );
-    let (again, same_version) = super::hash_engine_object(&path).await.expect("cached");
-    assert_eq!((again, same_version), (first.clone(), version.clone()));
     // A replacement changes the cheap object version (size, ctime, inode).
     std::fs::write(&path, b"replaced engine object bytes").expect("replacement");
     let (replaced, replaced_version) = super::hash_engine_object(&path).await.expect("rehash");
@@ -432,6 +470,28 @@ fn a_recorded_hevc_census_is_not_a_change_in_the_source() {
         "one build on both sides compares the whole document"
     );
     // Still a real comparison: a changed fact beside the record refuses.
+    stored["streams"][0]["width"] = serde_json::json!(1920);
+    assert!(
+        !super::compare_probe_documents(&stored.to_string(), &held.to_string())
+            .expect("compare")
+            .same
+    );
+}
+
+/// A title's FEL qualification verdict is stored beside its Dolby Vision
+/// facts in the probe document. Without this exemption storing a verdict
+/// made every later encoded session of the title refuse as
+/// `vod_source_rescan_required` ("/plurx_dv_fel_v1 missing").
+#[test]
+fn a_fel_qualification_verdict_is_not_a_change_in_the_source() {
+    let held = current_reporter_probe();
+    let mut stored = held.clone();
+    stored[plurx_core::transcode::dv_fel_qualification::PROBE_KEY] = serde_json::json!({
+        "schema": 1, "identity": "a".repeat(64), "admitted": false,
+    });
+    let comparison =
+        super::compare_probe_documents(&stored.to_string(), &held.to_string()).expect("compare");
+    assert!(comparison.same, "{:?}", comparison.differences);
     stored["streams"][0]["width"] = serde_json::json!(1920);
     assert!(
         !super::compare_probe_documents(&stored.to_string(), &held.to_string())
@@ -2698,5 +2758,45 @@ async fn nightly_runner_has_ffmpeg_readrate() {
     assert!(
         caps.readrate,
         "nightly arbitration coverage requires ffmpeg 5.1+ (-readrate)"
+    );
+}
+
+/// A failed VA-API Main10 decode probe (a device still settling at boot) is
+/// not remembered forever: it is retried on later need after a bounded
+/// backoff. The probe decodes a shipped clip, so it needs no encoder.
+#[test]
+fn a_failed_main10_decode_probe_is_retried_after_a_bounded_backoff() {
+    use std::time::Duration;
+    assert_eq!(super::main10_probe_backoff(1), Duration::from_secs(30));
+    assert_eq!(super::main10_probe_backoff(2), Duration::from_secs(60));
+    assert_eq!(super::main10_probe_backoff(5), Duration::from_secs(480));
+    assert_eq!(super::main10_probe_backoff(40), Duration::from_secs(3600));
+    // Matroska (EBML magic) carrying the two-picture Main10 clip.
+    assert!(super::HEVC_MAIN10_PROBE_CLIP.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
+    assert!(super::HEVC_MAIN10_PROBE_CLIP.len() < 16 * 1024);
+}
+
+#[tokio::test]
+async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_arguments() {
+    let nonce = "0123456789abcdef0123456789ABCDEF";
+    let url = format!("http://127.0.0.1:43210/{nonce}");
+    let diagnostic = format!("Error opening input '{url}': invalid data; retry {url}\n");
+    let redacted = drain_diagnostics(diagnostic.as_bytes()).await;
+    assert!(!redacted.contains(nonce));
+    assert_eq!(redacted,"Error opening input 'http://127.0.0.1:43210/REDACTED': invalid data; retry http://127.0.0.1:43210/REDACTED\n");
+    assert_eq!(url, format!("http://127.0.0.1:43210/{nonce}"));
+    let truncated = format!("{url}{}", "x".repeat(8150));
+    let tail = drain_diagnostics(truncated.as_bytes()).await;
+    assert!(tail.len() <= 8 * 1024);
+    assert!(
+        !tail.contains(nonce),
+        "tail truncation cannot expose a nonce after cutting its URL prefix"
+    );
+    let other =
+        "file /media/movie.mkv; http://127.0.0.1:43210/status; https://example.invalid/video";
+    assert_eq!(crate::scratch_put::redact(other), other);
+    assert_eq!(
+        crate::scratch_put::redact(&format!("({url}), ü {url}/part.m4s")),
+        "(http://127.0.0.1:43210/REDACTED), ü http://127.0.0.1:43210/REDACTED/part.m4s"
     );
 }

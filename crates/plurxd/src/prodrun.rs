@@ -68,6 +68,7 @@ use crate::prodexec::{after, Producer, Step, Termination};
 pub(crate) struct ProducerRegistration(Arc<GenerationLifetime>);
 
 struct GenerationLifetime {
+    source_input: StdMutex<Option<crate::source_input::SourceInput>>,
     identity: Arc<()>,
     writers: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     receipt: StdMutex<Option<ConfirmedProducerReap>>,
@@ -226,6 +227,15 @@ fn owned_reap(
                     }
                 }
             }
+            if let Some(generation)=generation.as_ref() {
+                let input={generation.0.source_input.lock().expect("producer source input").take()};
+                if let Some(input)=input {
+                    if let Err(error)=input.close_and_wait().await {
+                        tracing::error!(%error,"producer source input could not settle; retaining physical resources");
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
             drop(child_job);
             drop(resources);
             if let Some(generation)=generation {
@@ -286,8 +296,14 @@ impl EmptyProducerSlot {
 }
 
 fn registered_generation() -> (ProducerRegistration, ProducerWriters) {
+    registered_generation_with_source(None)
+}
+fn registered_generation_with_source(
+    source_input: Option<crate::source_input::SourceInput>,
+) -> (ProducerRegistration, ProducerWriters) {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let registration = ProducerRegistration(Arc::new(GenerationLifetime {
+        source_input: StdMutex::new(source_input),
         identity: Arc::new(()),
         writers: Mutex::new(Some(receiver)),
         receipt: StdMutex::new(None),
@@ -423,6 +439,25 @@ impl ProducerSlot {
         resources: Option<Box<dyn Send>>,
     ) -> (ProducerRegistration, ProducerWriters) {
         let (registration, writers) = registered_generation();
+        self.attach_resources_registered(
+            child,
+            Some(child_job),
+            at,
+            resources,
+            Some(registration.clone()),
+        )
+        .await;
+        (registration, writers)
+    }
+    pub(crate) async fn attach_registered_source_job_owned(
+        &self,
+        child: Child,
+        child_job: crate::process_control::ChildJob,
+        at: u32,
+        resources: Option<Box<dyn Send>>,
+        source_input: Option<crate::source_input::SourceInput>,
+    ) -> (ProducerRegistration, ProducerWriters) {
+        let (registration, writers) = registered_generation_with_source(source_input);
         self.attach_resources_registered(
             child,
             Some(child_job),
@@ -688,7 +723,7 @@ impl ProducerSlot {
                     inner.belief = after(inner.belief, step);
                     return Ok(Performed::Done);
                 }
-                crate::process_control::signal(
+                crate::source_custody::signal_group(
                     attached_pid(&inner)?,
                     crate::process_control::ProcessSignal::Suspend,
                 )?;
@@ -703,7 +738,7 @@ impl ProducerSlot {
                     inner.belief = after(inner.belief, step);
                     return Ok(Performed::Done);
                 }
-                crate::process_control::signal(
+                crate::source_custody::signal_group(
                     attached_pid(&inner)?,
                     crate::process_control::ProcessSignal::Resume,
                 )?;
@@ -944,7 +979,7 @@ mod tests {
     /// these tests is observing real process states, not a mock's.
     fn sleeper() -> Child {
         let mut command = tokio::process::Command::new("sleep");
-        command.arg("300").kill_on_drop(true);
+        command.arg("300").kill_on_drop(true).process_group(0);
         command.spawn().expect("spawn sleep")
     }
 

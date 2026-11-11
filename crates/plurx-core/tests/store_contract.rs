@@ -35,6 +35,8 @@ mod jellyfin_identity;
 mod jellyfin_login;
 #[path = "store_contract/jellyfin_play.rs"]
 mod jellyfin_play;
+#[path = "store_contract/playback_handoffs.rs"]
+mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
 mod remote;
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -65,6 +67,11 @@ mod sharing_source_sessions;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/source_contract.rs"]
 mod source_contract;
+#[path = "store_contract/subtitle_text.rs"]
+mod subtitle_text;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/subtitle_translation_upgrade.rs"]
+mod subtitle_translation_upgrade;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
@@ -587,6 +594,21 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    // Both-backend title publication/cancellation/reprobe and priority
+    // contracts in store_contract/dv_title_jobs.rs exercise these five.
+    // The source-fenced FEL verdict/requalification contract exercises these
+    // three methods on every backend in store_contract/dv_title_jobs.rs.
+    "put_dv_fel_verdict",
+    "request_dv_fel_requalification",
+    "request_dv_fel_variant",
+    "dv_fel_verdict_counts",
+    "dv_fel_stale_titles",
+    "dv_title_readiness",
+    "dv_title_demands",
+    "bind_dv_title_demand",
+    "publish_dv_title_job",
+    "publish_dv_title_from_analysis",
+    "probe_can_preempt_title",
     // Progressive translation's actual source-bind/publication/Stop/read-lease
     // contract below exercises these on every backend, including three voters.
     "maintain_translation_cache",
@@ -596,6 +618,15 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "mutate_subtitle_translation",
     "bind_translation_source",
     "publish_translation_segment",
+    // text_caption_dispatch_refuses_unowned_work_and_reads_absent_state checks
+    // typed dispatch, absent state and invalid-input refusal on every backend.
+    // subtitle_text_contract_preserves_receipts_and_immutable_cues additionally
+    // exercises positive publication/receipt fences and read-only grant
+    // projection through for_each_backend, including replicated storage.
+    "publish_text_translation_slice",
+    "read_text_translation_cues",
+    "text_translation_request_receipt",
+    "read_shared_captions",
     // Managed configuration CAS and node-bounded model publication/observation
     // run on both backends in the managed_subtitle_configuration_* and
     // managed_subtitle_model_operations_* contracts in background_jobs.rs.
@@ -672,6 +703,36 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "maintain_jobs",
     "publish_transcode_job",
     "publish_fragment_job",
+    "advertise_library_turn",
+    "recent_job_completions",
+    "register_foreground_source",
+    "project_foreground_source",
+    "release_foreground_source",
+    "foreground_source_pressure",
+    "list_foreground_source_owners",
+    "resolve_foreground_source",
+    "activate_foreground_source_custody",
+    "abort_foreground_source_activation",
+    "mark_foreground_source_settled",
+    "reap_settled_source_custody",
+    "settled_foreground_source_custody",
+    "activate_background_source_custody",
+    "abort_background_source_activation",
+    "mark_background_source_settled",
+    "settled_background_source_custody",
+    "resolve_background_source_custody",
+    "register_background_source_custody",
+    "claim_background_source_service",
+    "release_background_source_custody",
+    "close_read_attestation_source_lease",
+    "suspend_playback_analysis_interest",
+    "restore_playback_analysis_interest",
+    "background_source_may_continue",
+    "pause_background_source",
+    "resume_background_source",
+    "source_checkpoint_artifacts",
+    "checkpoint_analysis_source",
+    "checkpoint_job",
 ];
 const PRETRANSCODE_METHODS: &[&str] = &["pretranscode_job", "pretranscode_staging_jobs"];
 const OFFLINE_METHODS: &[&str] = &[
@@ -12546,6 +12607,85 @@ async fn drop_baseline_sharing_schema(client: &Client) {
         source_objects[0].value, 0,
         "Source activation cannot be rewound"
     );
+    // Ordinary Local migration does not install optional Sharing lineage.
+    // Derive the complete owned object set from the published schemas before
+    // querying any of their tables; a missing first table is not proof of absence.
+    let witness = rusqlite::Connection::open_in_memory().expect("sharing fixture shape witness");
+    witness
+        .execute_batch(include_str!("../src/store/sharing_schema.sql"))
+        .expect("published Sharing shape");
+    witness
+        .execute_batch(include_str!(
+            "../src/store/sharing_ingress_custody_schema.sql"
+        ))
+        .expect("published Sharing custody shape");
+    witness
+        .execute_batch(hiqlite::Error::SOURCE_LAYOUT_GUARD_DDL)
+        .expect("published Local dispatch assertion shape");
+    let expected = witness
+        .prepare(
+            "SELECT name,json_array(type,name,tbl_name,sql) FROM sqlite_master \
+         WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY type,name",
+        )
+        .expect("published Sharing object inventory")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("published Sharing objects")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete published Sharing inventory");
+    assert!(
+        !expected.is_empty(),
+        "published Sharing object set must be closed"
+    );
+    let names = serde_json::to_string(&expected.iter().map(|(name, _)| name).collect::<Vec<_>>())
+        .expect("encode canonical Sharing object names");
+    let actual: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT json_array(type,name,tbl_name,sql) AS value FROM sqlite_master \
+         WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' \
+           AND (name GLOB 'sharing_*' OR tbl_name GLOB 'sharing_*' \
+                OR name IN (SELECT value FROM json_each($1)) \
+                OR tbl_name IN (SELECT value FROM json_each($1))) ORDER BY type,name",
+            hiqlite::params!(names),
+        )
+        .await
+        .expect("read complete Sharing fixture namespace");
+    // The additive dispatch assertion belongs to ordinary Local compatibility,
+    // not installed Sharing lineage. Retain its exact published empty shape;
+    // never drop or exempt an object merely because its name matches.
+    let guard_only = expected
+        .iter()
+        .filter(|(name, _)| name == "sharing_source_dispatch_guard")
+        .map(|(_, shape)| shape.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        guard_only.len(),
+        1,
+        "published Local dispatch assertion is one exact table"
+    );
+    let actual = actual.into_iter().map(|row| row.value).collect::<Vec<_>>();
+    let sharing_absent = actual == guard_only;
+    let complete = expected
+        .into_iter()
+        .map(|(_, shape)| shape)
+        .collect::<Vec<_>>();
+    assert!(sharing_absent || actual == complete,
+        "only the complete published Sharing layout or its exact Local-only guard may be rewound; partial or unknown layouts remain untouched");
+    let guard_rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT COUNT(*) AS value FROM sharing_source_dispatch_guard",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read the validated Local dispatch assertion");
+    assert!(
+        matches!(guard_rows.as_slice(), [row] if row.value == 0),
+        "Local dispatch assertion must retain no successful or malformed row"
+    );
+    if sharing_absent {
+        return;
+    }
     let tables = [
         include_str!("../src/store/sharing_schema.sql"),
         include_str!("../src/store/sharing_ingress_custody_schema.sql"),
@@ -12568,6 +12708,11 @@ async fn drop_baseline_sharing_schema(client: &Client) {
             )
             .await
             .expect("read disposable sharing fixture rows");
+        assert_eq!(
+            rows.len(),
+            1,
+            "sharing fixture COUNT must return one row for {table}"
+        );
         assert_eq!(
             rows[0].value, 0,
             "populated sharing table {table} cannot be rewound"
@@ -12672,6 +12817,10 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
         Vec<String>,
         Vec<String>,
         Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
     ) {
         async fn rows(client: &Client, sql: &str) -> Vec<String> {
             client
@@ -12683,25 +12832,53 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
                 .collect()
         }
         (replicated_schema_marker(client).await,
+         rows(client, "SELECT json_array(resource_key,epoch_id,allocated_bytes) AS payload FROM background_source_service_epochs ORDER BY resource_key,epoch_id").await,
          rows(client, "SELECT json_object('name',name,'type',type,'sql',sql) AS payload FROM sqlite_master ORDER BY name,type,sql").await,
          rows(client, "SELECT json_array(node_id,model_id,profile_id,receipt_json) AS payload FROM subtitle_translation_capabilities ORDER BY node_id,model_id,profile_id").await,
          rows(client, "SELECT json_array(node_id,model_id,receipt_json) AS payload FROM subtitle_model_receipts ORDER BY node_id,model_id").await,
          rows(client, "SELECT json_array(id,kind,payload_version,payload_json,dedupe_key,priority,state,target_node_id,owner_node_id,owner_boot_id,claim_id,fence,revision,lease_expires_ms,failure_policy,failed_attempts,attempt_limit,retry_deadline_ms,attempt_errors,index_diagnostic_json,yield_count,abandoned_count,not_before_ms,checkpoint_json,result_ref,last_error_code,created_at_ms,updated_at_ms) AS payload FROM background_jobs ORDER BY id").await,
-         rows(client, "SELECT json_array('translation',singleton,version) AS payload FROM subtitle_translation_schema UNION ALL SELECT json_array('managed',singleton,version) AS payload FROM subtitle_managed_schema ORDER BY payload").await)
+         rows(client, "SELECT json_array('translation',singleton,version) AS payload FROM subtitle_translation_schema UNION ALL SELECT json_array('managed',singleton,version) AS payload FROM subtitle_managed_schema UNION ALL SELECT json_array('text',singleton,version) AS payload FROM subtitle_text_translation_schema UNION ALL SELECT json_array('caption',singleton,version) AS payload FROM shared_caption_schema ORDER BY payload").await,
+         rows(client, "SELECT json_array(job_id,recipe_digest,cue_index,input_sha256,start_ms,end_ms,body,created_at_ms) AS payload FROM subtitle_text_translation_cues ORDER BY job_id,recipe_digest,cue_index").await,
+         rows(client, "SELECT json_array(id,grant_id,principal,file_id,asset_id,manifest_revision,expires_at_ms,created_at_ms) AS payload FROM shared_caption_read_leases ORDER BY id").await,
+         rows(client, "SELECT json_array(job_id,fence,demand_id,continuity_id) AS payload FROM subtitle_translation_range_continuities ORDER BY job_id,fence,demand_id").await)
     }
     for scenario in [
+        "source-service-epoch",
         "translation-job",
         "translation-data",
         "translation-shape",
         "managed-data",
         "managed-marker",
         "managed-shape",
+        "translation-marker",
+        "text-marker",
+        "caption-marker",
+        "extra-managed-object",
+        "unowned-text-index",
+        "unowned-managed-index",
+        "text-shape",
+        "caption-shape",
+        "text-cue",
     ] {
         let (inject, restore) = match scenario {
+            "source-service-epoch" => ("INSERT INTO background_source_service_epochs VALUES('retained-fixture',1,64)".to_owned(), "DELETE FROM background_source_service_epochs WHERE resource_key='retained-fixture'".to_owned()),
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,1)".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,4)".to_owned()),
+            "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
+            "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
+            "caption-marker" => ("DELETE FROM shared_caption_schema".to_owned(), "INSERT INTO shared_caption_schema VALUES(1,1)".to_owned()),
+            "extra-managed-object" => ("CREATE TABLE subtitle_managed_unknown(value TEXT)".to_owned(), "DROP TABLE subtitle_managed_unknown".to_owned()),
+            "unowned-text-index" => ("CREATE INDEX unexpected_text_fixture_index ON subtitle_text_translation_cues(cue_index)".to_owned(), "DROP INDEX unexpected_text_fixture_index".to_owned()),
+            "unowned-managed-index" => ("CREATE INDEX unexpected_managed_fixture_index ON subtitle_model_receipts(model_id)".to_owned(), "DROP INDEX unexpected_managed_fixture_index".to_owned()),
+            "text-cue" => ("INSERT INTO subtitle_text_translation_cues VALUES('fixture-tail-data',printf('%064d',0),0,printf('%064d',0),0,1,'{}',0)".to_owned(), "DELETE FROM subtitle_text_translation_cues WHERE job_id='fixture-tail-data'".to_owned()),
+            "text-shape" | "caption-shape" => {
+                let index = if scenario == "text-shape" {"subtitle_text_translation_recipe"} else {"shared_caption_read_expiry"};
+                let mut rows = client.query_consistent("SELECT sql FROM sqlite_master WHERE name=$1", hiqlite::params!(index)).await.expect("published tail index");
+                assert_eq!(rows.len(), 1);
+                (format!("DROP INDEX {index}"), rows[0].get::<String>("sql"))
+            }
             "translation-shape" | "managed-shape" => {
                 let trigger = if scenario == "translation-shape" {"subtitle_translation_source_changed"} else {"subtitle_managed_source_changed"};
                 let mut rows = client.query_consistent("SELECT sql FROM sqlite_master WHERE name=$1", hiqlite::params!(trigger)).await.expect("original trigger definition");
@@ -12710,8 +12887,20 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             }
             _ => unreachable!(),
         };
+        let mut injections = vec![(inject, hiqlite::params!())];
+        let mut restorations = vec![(restore, hiqlite::params!())];
+        if scenario == "text-cue" {
+            // A real parent satisfies FK checks. Its unrelated cancelled kind
+            // cannot satisfy any managed accepted-work guard, isolating the
+            // retained cue check rather than relying on a different refusal.
+            injections.insert(0, ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-tail-data','library_scan',1,'{}','fixture-tail-data',0,'cancelled',0,0,0,'fixture-node')".to_owned(), hiqlite::params!()));
+            restorations.push((
+                "DELETE FROM background_jobs WHERE id='fixture-tail-data'".to_owned(),
+                hiqlite::params!(),
+            ));
+        }
         client
-            .txn([(inject, hiqlite::params!())])
+            .txn(injections)
             .await
             .expect("inject only owned refusal fixture")
             .into_iter()
@@ -12731,7 +12920,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "{scenario} refusal preserves complete DDL, schema marker and owned payloads"
         );
         client
-            .txn([(restore, hiqlite::params!())])
+            .txn(restorations)
             .await
             .expect("restore only injected refusal fixture")
             .into_iter()
@@ -12740,14 +12929,272 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
     }
 }
 
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exactly() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("current rewind client");
+    let telemetry = cluster._root.path().join("current-rewind.db");
+    let store = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current replicated extensions");
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("empty owned fixture");
+    store
+        .put_setting("fixture.subtitle-tail-unrelated", "survives")
+        .await
+        .expect("unrelated retained row");
+    let queries = [
+        queue_fixture::source_extensions_fixture::SOURCE_TAIL_SHAPE,
+        queue_fixture::CURRENT_TAIL_FIXTURE_SHAPE_SQL,
+        queue_fixture::TRANSLATION_FIXTURE_SHAPE_SQL,
+        queue_fixture::MANAGED_FIXTURE_SHAPE_SQL,
+    ];
+    let mut before = Vec::new();
+    for query in queries {
+        before.push(replicated_fixture_shape(&client, query).await);
+    }
+    drop(store);
+    rewind_empty_managed_subtitle_extension(&client).await;
+    for query in queries {
+        let rows = replicated_fixture_shape(&client, query).await;
+        if query == queue_fixture::MANAGED_FIXTURE_SHAPE_SQL {
+            assert_eq!(
+                rows.len(),
+                1,
+                "only the restored predecessor resource view remains"
+            );
+            assert_eq!(rows[0].0, "background_job_required_resources");
+        } else {
+            assert!(rows.is_empty(), "complete empty extension removed");
+        }
+    }
+    let reopened = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("ordinary bootstrap restores published current extensions");
+    assert_eq!(
+        reopened
+            .get_setting("fixture.subtitle-tail-unrelated")
+            .await
+            .expect("unrelated row"),
+        Some("survives".into())
+    );
+    for (query, expected) in queries.into_iter().zip(before) {
+        assert_eq!(
+            replicated_fixture_shape(&client, query).await,
+            expected,
+            "bootstrap exact published shape"
+        );
+    }
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
+    require_replicated_fixture_marker(&client, "subtitle_translation_schema", 1).await;
+    for marker in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
+        require_replicated_fixture_marker(&client, marker, 1).await;
+    }
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM pragma_foreign_key_check",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("restored FK inventory");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].value, 0,
+        "no dangling child schema/data after bootstrap"
+    );
+    assert_unactivated_contract_baseline(&client).await;
+}
+
+/// Exact marker identity and total cardinality; a matching row may not hide
+/// an extra row installed with disabled CHECK constraints in an owned fixture.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn require_replicated_fixture_marker(client: &Client, table: &str, version: i64) -> i64 {
+    let mut rows = client.query_consistent(
+        format!("SELECT count(*) AS total,COALESCE(sum(singleton=1 AND version={version}),0) AS correct FROM {table}"),
+        hiqlite::params!(),
+    ).await.expect("exact replicated fixture marker inventory");
+    assert_eq!(rows.len(), 1, "marker inventory: {table}");
+    let total = rows[0].get::<i64>("total");
+    let correct = rows[0].get::<i64>("correct");
+    assert_eq!(
+        (total, correct),
+        (1, 1),
+        "one exact published marker: {table}"
+    );
+    correct
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, String)> {
+    client
+        .query_consistent(sql.to_owned(), hiqlite::params!())
+        .await
+        .expect("complete replicated extension shape")
+        .iter_mut()
+        .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+        .collect()
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_source_tail_drops(
+    client: &Client,
+    remove: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    use queue_fixture::source_extensions_fixture::{
+        validated_source_tail_drops, SOURCE_TAIL_SHAPE,
+    };
+    let source_shape: Vec<_> = client
+        .query_consistent(SOURCE_TAIL_SHAPE.to_owned(), hiqlite::params!())
+        .await
+        .expect("replicated source and dispatch inventory")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect();
+    let mut source_counts = Vec::new();
+    for (_, name, _) in source_shape.iter().filter(|(kind, _, _)| kind == "table") {
+        let query = format!(
+            r#"SELECT count(*) AS value FROM "{}""#,
+            name.replace('"', r#""""#)
+        );
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(query, hiqlite::params!())
+            .await
+            .expect("replicated source data inventory");
+        assert_eq!(rows.len(), 1);
+        source_counts.push((name.clone(), rows[0].value));
+    }
+    require_replicated_fixture_marker(client, "background_source_schema", 1).await;
+    validated_source_tail_drops(&source_shape, &source_counts, true, remove)
+}
+
 /// A historical queue fixture cannot retain half of the independent managed
 /// extension after removing its background objects. Rewind only an empty,
 /// unactivated current extension, then let ordinary open reinstall it.
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_unactivated_contract_baseline(client).await;
+    // These independently recognized current extensions must be validated
+    // before the queue teardown. Their drops join the one transaction below.
+    async fn extension_shape(client: &Client, sql: &str) -> Vec<(String, String)> {
+        client
+            .query_consistent(sql.to_owned(), hiqlite::params!())
+            .await
+            .expect("extension shape inventory")
+            .iter_mut()
+            .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+            .collect()
+    }
+    let source_drops = replicated_source_tail_drops(client, |_| true).await;
+    let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
+    assert_eq!(
+        handoff_shape,
+        queue_fixture::handoff_fixture_shape(),
+        "exact handoff shape required before inventory"
+    );
+    require_replicated_fixture_marker(client, "playback_handoffs_schema", 1).await;
+    let mut handoff_counts = Vec::new();
+    for (name, sql) in &handoff_shape {
+        if sql.starts_with("CREATE TABLE") {
+            let rows: Vec<I64Value> = client
+                .query_consistent_map(
+                    format!("SELECT count(*) AS value FROM {name}"),
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("complete handoff data inventory");
+            assert_eq!(rows.len(), 1);
+            handoff_counts.push((name.clone(), rows[0].value));
+        }
+    }
+    let handoff_drops =
+        queue_fixture::validated_empty_handoff_rewind(&handoff_shape, &handoff_counts);
+    let tail_shape = extension_shape(client, queue_fixture::CURRENT_TAIL_FIXTURE_SHAPE_SQL).await;
+    assert_eq!(
+        tail_shape,
+        queue_fixture::current_tail_fixture_shape(),
+        "exact current replicated tail"
+    );
+    let mut tail_counts = Vec::new();
+    for table in queue_fixture::CURRENT_TAIL_FIXTURE_TABLES {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                format!("SELECT count(*) AS value FROM {table}"),
+                hiqlite::params!(),
+            )
+            .await
+            .expect("complete tail data inventory");
+        assert_eq!(rows.len(), 1);
+        tail_counts.push((table.to_owned(), rows[0].value));
+    }
+    let mut tail_markers = Vec::new();
+    for table in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
+        let correct = require_replicated_fixture_marker(client, table, 1).await;
+        tail_markers.push((table.to_owned(), correct));
+    }
+    let tail_drops = queue_fixture::validated_empty_current_tail_rewind(
+        &tail_shape,
+        &tail_counts,
+        &tail_markers,
+    );
+    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 1).await;
+    require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
+    require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
+    require_replicated_fixture_marker(client, "subtitle_managed_schema", 4).await;
+    let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
+    let title_marker: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("current title fixture marker");
+    assert_eq!(title_marker.len(), 1);
+    let title_data: Vec<I64Value> = client.query_consistent_map(
+        "SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL) AS value", hiqlite::params!(),
+    ).await.expect("complete title fixture data inventory");
+    assert_eq!(title_data.len(), 1);
+    let title_drops = queue_fixture::validated_empty_title_rewind(
+        &title_shape,
+        title_marker[0].value,
+        title_data[0].value,
+    );
+    let annotations_shape =
+        extension_shape(client, queue_fixture::ANNOTATIONS_FIXTURE_SHAPE_SQL).await;
+    let mut annotations_counts = Vec::new();
+    for table in queue_fixture::ANNOTATIONS_FIXTURE_DATA_TABLES {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                format!("SELECT count(*) AS value FROM {table}"),
+                hiqlite::params!(),
+            )
+            .await
+            .expect("annotation fixture data inventory");
+        assert_eq!(rows.len(), 1);
+        annotations_counts.push((table.to_owned(), rows[0].value));
+    }
+    let annotations_drops =
+        queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=1) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=4) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -12755,13 +13202,17 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         rows[0].value, 1,
         "only the current managed fixture may be rewound"
     );
-    let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_model_receipts) + (SELECT count(*) FROM background_jobs WHERE kind IN ('subtitle_model_operation','subtitle_transcribe_managed')) AS value",
-        hiqlite::params!(),
-    ).await.expect("managed fixture data inventory");
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            format!("{} AS value", queue_fixture::MANAGED_FIXTURE_DATA_SQL),
+            hiqlite::params!(),
+        )
+        .await
+        .expect("managed fixture data inventory");
     assert_eq!(rows.len(), 1);
+    let managed_data_count = rows[0].value;
     assert_eq!(
-        rows[0].value, 0,
+        managed_data_count, 0,
         "managed receipts or accepted work cannot be rewound"
     );
     let rows: Vec<I64Value> = client.query_consistent_map(
@@ -12773,6 +13224,9 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         rows[0].value, 6,
         "partial managed fixtures cannot be rewound"
     );
+    let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
+    let managed_drops =
+        queue_fixture::validated_empty_managed_rewind(&managed_shape, 4, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -12791,8 +13245,8 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     };
     assert_eq!(
         shape,
-        queue_fixture::translation_fixture_shape(),
-        "only exact current translation fixtures may be rewound"
+        queue_fixture::current_translation_fixture_shape(),
+        "only exact current generation-2 translation fixtures may be rewound"
     );
     let mut counts = Vec::new();
     for (name, sql) in &shape {
@@ -12812,30 +13266,20 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(jobs.len(), 1);
     let translation_drops =
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
-    let old_view = include_str!("../src/store/background_jobs_probe.sql")
-        .split("-- next statement")
-        .find(|sql| {
-            sql.trim_start()
-                .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
-        })
-        .expect("published predecessor resource view");
-    let mut statements: Vec<_> = translation_drops
+    let mut statements: Vec<_> = source_drops
         .into_iter()
+        .chain(tail_drops)
+        .chain(handoff_drops)
+        .chain(title_drops)
+        .chain(annotations_drops)
+        .chain(translation_drops)
         .map(|sql| (sql, hiqlite::params!()))
         .collect();
     statements.extend(
-        [
-            "DROP TRIGGER subtitle_managed_config_write",
-            "DROP TRIGGER subtitle_managed_source_deleted",
-            "DROP TRIGGER subtitle_managed_source_changed",
-            "DROP VIEW background_job_required_resources",
-            "DROP TABLE subtitle_model_receipts",
-            "DROP TABLE subtitle_managed_schema",
-        ]
-        .into_iter()
-        .map(|sql| (sql.to_owned(), hiqlite::params!())),
+        managed_drops
+            .into_iter()
+            .map(|sql| (sql, hiqlite::params!())),
     );
-    statements.push((old_view.to_owned(), hiqlite::params!()));
     client
         .txn(statements)
         .await
@@ -13005,6 +13449,27 @@ async fn downgrade_current_schema_after_producer_recovery(
     client: &Client,
 ) -> Vec<(String, String)> {
     let triggers = drop_post_v39_extension_schema(client).await;
+    // Reconstruct a genuine v31 session declaration. Removing only the latest
+    // column from today's inline declaration fabricates a hybrid no historical
+    // migration produced, which the exact ownership-layout guard must refuse.
+    let sessions: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM media_sessions",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("count disposable historical sessions");
+    assert_eq!(
+        sessions[0].value, 0,
+        "only rebuild an empty historical session fixture"
+    );
+    let mut session_objects = client.query_consistent(
+        "SELECT sql FROM sqlite_master WHERE tbl_name='media_sessions' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name", hiqlite::params!(),
+    ).await.expect("retain exact session indexes and triggers");
+    let session_objects = session_objects
+        .iter_mut()
+        .map(|row| row.get::<String>("sql"))
+        .collect::<Vec<_>>();
     let mut statements = post_v39_downgrade_statements();
     statements.extend([
         (
@@ -13035,11 +13500,30 @@ async fn downgrade_current_schema_after_producer_recovery(
             "ALTER TABLE offline_packages DROP COLUMN claim_generation",
             hiqlite::params!(),
         ),
+        ("DROP TABLE media_sessions", hiqlite::params!()),
+        (MEDIA_SESSIONS_V10_TO_V15_FIXTURE_SCHEMA, hiqlite::params!()),
         (
-            "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
+            "ALTER TABLE media_sessions ADD COLUMN terminal_reason TEXT
+        CHECK (terminal_reason IN
+          ('deleted', 'superseded', 'admin_stop', 'revoked', 'replaced'))",
             hiqlite::params!(),
         ),
+        (
+            "ALTER TABLE media_sessions ADD COLUMN publication_ready_at_ms INTEGER NOT NULL DEFAULT 0
+        CHECK (publication_ready_at_ms >= 0)",
+            hiqlite::params!(),
+        ),
+        ("ALTER TABLE media_sessions ADD COLUMN drain_deadline_ms INTEGER", hiqlite::params!()),
     ]);
+    let mut statements = statements
+        .into_iter()
+        .map(|(sql, params)| (sql.to_owned(), params))
+        .collect::<Vec<_>>();
+    statements.extend(
+        session_objects
+            .into_iter()
+            .map(|sql| (sql, hiqlite::params!())),
+    );
     let results = client
         .txn(statements)
         .await
@@ -13348,7 +13832,7 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 1",
+             WHERE singleton = 1 AND version = 4",
             1,
         ),
         (
@@ -13374,6 +13858,12 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
+        assert_eq!(
+            replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
+            queue_fixture::managed_fixture_shape(4),
+            "{round}: exact current managed v4 view, marker and guards",
+        );
         let views: Vec<SchemaText> = client
             .query_consistent_map(
                 "SELECT sql AS value FROM sqlite_master \
@@ -16700,6 +17190,214 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
+mod managed_bootstrap_regressions {
+    use super::*;
+    use plurx_core::store::background_jobs::{
+        BackgroundJobStore, EnqueueJob, EnqueueOutcome, JobPayload, JobRequest,
+    };
+    use plurx_core::store::background_jobs_transcription::{ModelAction, SubtitleModelReceipt};
+
+    async fn populated_fixture() -> (ContractCluster, Client, HiqliteAuthStore) {
+        let cluster = ContractCluster::start().await;
+        let store = open_contract_hiqlite_store(&cluster).await;
+        let client = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            false,
+            None,
+        )
+        .await
+        .expect("managed bootstrap client");
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let outcome = store
+            .enqueue_job(EnqueueJob {
+                id: job_id.clone(),
+                payload: JobPayload::SubtitleModelOperation {
+                    translation_profile: None,
+                    action: ModelAction::Verify,
+                    model_id: "bootstrap-model".into(),
+                    catalog_revision: "catalog-v1".into(),
+                    model_sha256: "a".repeat(64),
+                    adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+                    target_node_id: "node-a".into(),
+                },
+                dedupe_key: job_id.clone(),
+                priority: 0,
+                not_before_ms: 1000,
+                now_ms: 1000,
+                request: JobRequest {
+                    scope: "subtitle-model".into(),
+                    request_id: job_id.clone(),
+                    request_digest: "c".repeat(64),
+                    consumer_kind: "subtitle_model".into(),
+                    consumer_ref: job_id.clone(),
+                    target_node_id: Some("node-a".into()),
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("seed populated managed queue");
+        assert!(matches!(outcome, EnqueueOutcome::Accepted { .. }));
+        let receipt = SubtitleModelReceipt {
+            node_id: "node-a".into(),
+            boot_id: "boot-a".into(),
+            model_id: "bootstrap-model".into(),
+            model_sha256: "a".repeat(64),
+            adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+            engine_sha256: "b".repeat(64),
+            model_file_identity: "model:identity".into(),
+            engine_file_identity: "engine:identity".into(),
+            job_id,
+            fence: 1,
+            verified_at_ms: 1000,
+        };
+        client.execute("INSERT INTO subtitle_model_receipts(node_id,model_id,receipt_json) VALUES($1,$2,$3)",
+            hiqlite::params!(receipt.node_id.clone(),receipt.model_id.clone(),serde_json::to_string(&receipt).expect("receipt JSON")))
+            .await.expect("seed retained model receipt");
+        let receipts = store
+            .subtitle_model_receipts("node-a")
+            .await
+            .expect("read seeded model receipt");
+        assert_eq!(receipts.len(), 1);
+        let resources: Vec<I64Value> = client.query_consistent_map(
+            "SELECT count(*) AS value FROM background_job_required_resources WHERE resource_key='subtitle_model:node-a'",hiqlite::params!())
+            .await.expect("managed resource contract");
+        assert_eq!(
+            resources[0].value, 1,
+            "populated fixture exercises the managed view"
+        );
+        (cluster, client, store)
+    }
+
+    async fn snapshot(client: &Client) -> Vec<String> {
+        let mut snapshot = client.query_consistent_map::<SchemaText,_>(
+            "SELECT value FROM (
+             SELECT json_object('kind','schema','name',name,'sql',sql) AS value FROM sqlite_master
+               WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources')
+             UNION ALL SELECT json_object('kind','receipt','node',node_id,'model',model_id,'receipt',receipt_json) FROM subtitle_model_receipts
+             UNION ALL SELECT json_object('kind','job','id',id,'payload',payload_json,'state',state,'revision',revision,'created_at_ms',created_at_ms) FROM background_jobs
+             UNION ALL SELECT json_object('kind','marker','version',version) FROM subtitle_managed_schema
+             ) ORDER BY value",hiqlite::params!()).await.expect("snapshot populated managed extension")
+            .into_iter().map(|row|row.value).collect::<Vec<_>>();
+        let views: Vec<I64Value> = client.query_consistent_map(
+            "SELECT count(*) AS value FROM sqlite_master WHERE type='view' AND name='background_job_required_resources'", hiqlite::params!(),
+        ).await.expect("observe optional resource view in partial fixture");
+        if views[0].value == 1 {
+            snapshot.extend(client.query_consistent_map::<SchemaText,_>(
+                "SELECT json_object('kind','resource','job',job_id,'resource',resource_key) AS value FROM background_job_required_resources", hiqlite::params!(),
+            ).await.expect("snapshot existing resource view").into_iter().map(|row|row.value));
+        }
+        snapshot.sort();
+        snapshot
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_bootstrap_preserves_populated_managed_receipts_queue_and_view() {
+        let _case = HIQLITE_CASE.lock().await;
+        let (cluster, client, store) = populated_fixture().await;
+        let before = snapshot(&client).await;
+        let marker = replicated_schema_marker(&client).await;
+        drop(store);
+        HiqliteAuthStore::bootstrap(
+            client.clone(),
+            CONTRACT_INSTANCE_ID,
+            &cluster._root.path().join("managed-repeat.db"),
+        )
+        .await
+        .expect("repeat populated bootstrap");
+        assert_eq!(snapshot(&client).await, before);
+        assert_eq!(replicated_schema_marker(&client).await, marker);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_bootstrap_refuses_partial_managed_extension_without_repair() {
+        let _case = HIQLITE_CASE.lock().await;
+        let (cluster, client, store) = populated_fixture().await;
+        drop(store);
+        let mut declarations = client.query_consistent_map::<SchemaText,_>(
+            "SELECT sql AS value FROM sqlite_master WHERE name IN ('background_job_required_resources','subtitle_managed_source_changed') ORDER BY name", hiqlite::params!(),
+        ).await.expect("retain exact declarations for independent partial cases");
+        assert_eq!(declarations.len(), 2);
+        let view = declarations.remove(0).value;
+        let trigger = declarations.remove(0).value;
+        for (ordinal, (damage, restore, expected_error)) in [
+            (
+                "DROP TRIGGER subtitle_managed_source_changed",
+                trigger,
+                "partial or incompatible",
+            ),
+            (
+                "DROP VIEW background_job_required_resources",
+                view,
+                "partial or incompatible",
+            ),
+            (
+                "DELETE FROM subtitle_managed_schema",
+                "INSERT INTO subtitle_managed_schema VALUES(1,4)".into(),
+                "marker missing",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            client
+                .execute(damage, hiqlite::params!())
+                .await
+                .expect("manufacture independent partial managed extension");
+            let partial = snapshot(&client).await;
+            let result = HiqliteAuthStore::bootstrap(
+                client.clone(),
+                CONTRACT_INSTANCE_ID,
+                &cluster
+                    ._root
+                    .path()
+                    .join(format!("managed-partial-{ordinal}.db")),
+            )
+            .await;
+            let error = match result {
+                Ok(_) => panic!("partial managed extension must refuse bootstrap"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(expected_error),
+                "{damage}: {error}"
+            );
+            assert_eq!(
+                snapshot(&client).await,
+                partial,
+                "refusal must not repair or discard {damage}"
+            );
+            // Restore the exact retained fixture declaration only to isolate the
+            // next corruption; production bootstrap itself must never repair it.
+            client
+                .execute(restore, hiqlite::params!())
+                .await
+                .expect("restore independent test fixture");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_repeated_bootstraps_preserve_populated_managed_extension() {
+        let _case = HIQLITE_CASE.lock().await;
+        let (cluster, client, store) = populated_fixture().await;
+        let before = snapshot(&client).await;
+        drop(store);
+        let first_path = cluster._root.path().join("managed-repeat-a.db");
+        let second_path = cluster._root.path().join("managed-repeat-b.db");
+        let (first, second) = tokio::join!(
+            HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &first_path),
+            HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &second_path)
+        );
+        first.expect("first concurrent current-layout repeat");
+        second.expect("second concurrent current-layout repeat");
+        assert_eq!(snapshot(&client).await, before);
+    }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idempotent() {
     let _case = HIQLITE_CASE.lock().await;
@@ -17294,10 +17992,13 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             .any(|(table, rows)| *table == "background_jobs" && !rows.is_empty()),
         "forced handoff has an actual common job"
     );
-    assert!(store
+    // The successful handoff consumed this running claim. A retained receipt
+    // cannot authorize it again after the request became submitted and its
+    // owner was cleared, even though the immutable worker result remains ready.
+    assert!(!store
         .submit_fragment_index_analysis(&force_claim, &forced_job, 41)
         .await
-        .expect("return the previously accepted forced handoff receipt"));
+        .expect("reject the consumed forced analysis claim before receipt reuse"));
     assert_eq!(
         receipt_snapshot().await,
         before_replay,
@@ -18308,21 +19009,8 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 74 with the current durable tables, including the Library channel
-    // entities, media classifications, channel subject jobs and decisions,
-    // the three DVR tables, the scoped book file grants (SQLite v68), the
-    // replicated candidate-recovery memory (SQLite v96), and the three
-    // continuous-quality tables that travel with media sessions. A
-    // v14 source has no rows for newer tables — each one's `minimum_schema` is
-    // later — but every table is still reported, because the digest inventory
-    // is over what the import *plans*, not over what the source happened to
-    // hold. The subtitle-source ledgers are node-held facts about local files
-    // and are deliberately not imported, so they are not counted here.
-    // 77: main's replicated candidate recovery, plus Jellyfin compatibility's
-    // wire identities, compatibility logins and bounded negotiations
-    // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
-    // v102–v103).
-    // Plus the item ratings and per-person lists (SQLite v113).
+    // The report covers the entire current import plan, including later families
+    // with no rows in v14. SQLite v122 added seven durable source-arbitration tables.
     let mut imported_tables = report
         .tables
         .iter()
@@ -18335,6 +19023,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "analysis_attempts",
             "analysis_lifecycle_counters",
             "analysis_requests",
+            "analysis_source_checkpoints",
             "api_keys",
             "background_artifact_repairs",
             "background_artwork_locations",
@@ -18350,6 +19039,10 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "background_library_requests",
             "background_predictions",
             "background_provider_budgets",
+            "background_source_custody",
+            "background_source_pauses",
+            "background_source_service_epochs",
+            "background_source_service_grants",
             "background_storage_domains",
             "background_transcode_artifacts",
             "cache_consumer_pins",
@@ -18368,6 +19061,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "dvr_rules",
             "file_grants",
             "files",
+            "foreground_source_owners",
             "items",
             "jellyfin_entity_ids",
             "jellyfin_login_tokens",
@@ -18396,6 +19090,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "media_sessions",
             "offline_package_leases",
             "offline_packages",
+            "playback_analysis_suspensions",
+            "playback_handoffs",
+            "playback_handoffs_tokens",
             "pretranscode_jobs",
             "quality_cancellation_receipts",
             "quality_preparation_owners",
@@ -18582,10 +19279,11 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
 
     let source = tempfile::tempdir().expect("current SQLite import fixture directory");
     let source_path = populated_current_import_fixture(source.path());
-    // This shared fixture seeds the old domain rows with SQL. Run the actual
-    // v71 upgrade before calling it a current backup, so live work has the
-    // same sealed mapping and common queue rows a real upgraded daemon has.
-    let connection = rusqlite::Connection::open(&source_path).expect("open upgrade fixture");
+    // This current-schema fixture seeds legacy domain rows with SQL after
+    // startup sealed an empty queue inbox. Run the real capture payload again
+    // against that empty inbox; this prepares current import data, not evidence
+    // of a historical schema upgrade. Keep all later domain rows and lineage.
+    let connection = rusqlite::Connection::open(&source_path).expect("open current fixture");
     assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row
@@ -20429,7 +21127,13 @@ fn contract_inventory_matches_every_store_method() {
     // (set, flags, a page of a list, membership of a batch). All six are named
     // in `ANNOTATION_METHODS` and covered on both backends by
     // `annotation_contract_runs_through_dyn_store`.
-    assert_eq!(declared.len(), 503, "review the Store method count");
+    // +5: source-revision title demand/readiness, binding, fenced publication
+    // and same-node probe priority, explicitly listed in BACKGROUND_JOB_METHODS.
+    // +3: source-fenced FEL verdict write, requalification and verdict counts.
+    // 27 foreground/background source custody, service, and checkpoint methods,
+    // plus library turn readiness and recent job completions.
+    // The recovery sweep checks current authority and settlement in the writer.
+    assert_eq!(declared.len(), 547, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -24093,7 +24797,10 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("busy-engine"),
                     11,
                     1011,
-                    true
+                    true,
+                    false,
+                    false,
+                    &[]
                 )
                 .await
                 .expect("busy claim")
@@ -24140,7 +24847,10 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("other-engine"),
                     13,
                     1013,
-                    true
+                    true,
+                    false,
+                    false,
+                    &[]
                 )
                 .await
                 .expect("wrong engine")
@@ -24148,7 +24858,16 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
             "{backend}"
         );
         let claimed = store
-            .claim_analysis_request_for_capacity("busy-node", Some("busy-engine"), 14, 1014, true)
+            .claim_analysis_request_for_capacity(
+                "busy-node",
+                Some("busy-engine"),
+                14,
+                1014,
+                true,
+                false,
+                false,
+                &[],
+            )
             .await
             .expect("viewer claim")
             .expect("viewer source read admitted");
@@ -24173,7 +24892,10 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("busy-engine"),
                     120013,
                     121013,
-                    true
+                    true,
+                    false,
+                    false,
+                    &[]
                 )
                 .await
                 .expect("expired viewer claim")
@@ -24187,7 +24909,10 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("busy-engine"),
                     120014,
                     121014,
-                    false
+                    false,
+                    false,
+                    false,
+                    &[]
                 )
                 .await
                 .expect("idle maintenance claim")
@@ -24196,6 +24921,831 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
         );
     })
     .await;
+}
+
+/// C1: an idle node takes another node's fragment-index request for its own
+/// engine -- after its own rows, never for a different engine, never for a
+/// target membership removed -- and the work keeps the requester's target:
+/// the executor builds, delivery hydrates the requester, and settlement
+/// counts the target-verified completion against the executor.
+#[tokio::test]
+async fn an_idle_node_claims_another_nodes_fragment_request_for_its_engine() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "cross-node-analysis").await;
+        let request = |id: &str, target: &str, engine: &str, created: i64| NewAnalysisRequest {
+            request_id: id.into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: engine.into(),
+            video_identity: String::new(),
+            requested_generation: format!("{id}-generation"),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: target.into(),
+            not_before_ms: created,
+            created_at_ms: created,
+        };
+        for row in [
+            request("serving-row", "serving-node", "shared-engine", 10),
+            request("own-row", "idle-node", "shared-engine", 20),
+            request("gone-row", "gone-node", "shared-engine", 5),
+            request("other-engine-row", "serving-node", "other-engine", 6),
+        ] {
+            store
+                .enqueue_analysis_request(&row)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {}: {error}", row.request_id));
+        }
+        store
+            .put_setting("internal.cluster_job_owner_removed.gone-node", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: mark removed: {error}"));
+        let claim = |node: &'static str, engine: &'static str, at: i64, cross_node: bool| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .claim_analysis_request_for_capacity(
+                        node,
+                        Some(engine),
+                        at,
+                        at + 1_000,
+                        false,
+                        false,
+                        cross_node,
+                        &[],
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: claim at {at}: {error}"))
+            }
+        };
+
+        // Its own row first, though the other node's is older.
+        let own = claim("idle-node", "shared-engine", 30, true)
+            .await
+            .unwrap_or_else(|| panic!("{backend}: the idle node's own row"));
+        assert_eq!(own.request_id, "own-row", "{backend}: own rows first");
+        assert!(store
+            .fail_analysis_request(
+                &own.request_id,
+                "idle-node",
+                own.fence,
+                "admin_cancelled",
+                31
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle own row: {error}")));
+
+        // After its lease (the reservation outlives the failure), a node
+        // that is not idle takes nothing it was not asked to do...
+        assert!(
+            claim("idle-node", "shared-engine", 2_000, false)
+                .await
+                .is_none(),
+            "{backend}: a serving node claims only its own rows"
+        );
+        // ...an idle one takes nothing for another engine...
+        assert!(
+            claim("idle-node", "unknown-engine", 2_001, true)
+                .await
+                .is_none(),
+            "{backend}: never another engine's request"
+        );
+        // ...and the other live node's row for its own engine.
+        let taken = claim("idle-node", "shared-engine", 2_002, true)
+            .await
+            .unwrap_or_else(|| panic!("{backend}: the serving node's row"));
+        assert_eq!(
+            taken.request_id, "serving-row",
+            "{backend}: not the removed target's"
+        );
+        assert_eq!(taken.owner_node_id, "idle-node", "{backend}");
+        assert_eq!(
+            taken.target_node_id, "serving-node",
+            "{backend}: the requester keeps it"
+        );
+
+        // Submission accepts an executor that is not the target.
+        let source_sha256 = "c1".repeat(32);
+        let pipeline_sha256 = "d1".repeat(32);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("cross-node cache key");
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            target_node_id: "serving-node".into(),
+            not_before_ms: 2_003,
+            created_at_ms: 2_003,
+        };
+        assert!(
+            store
+                .submit_fragment_index_analysis(&taken, &job, 2_003)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: submit: {error}")),
+            "{backend}: the executor submits the requester's job"
+        );
+        assert!(
+            claim("idle-node", "shared-engine", 2_004, true)
+                .await
+                .is_none(),
+            "{backend}: nothing left that this engine may do"
+        );
+
+        // The executor builds it; delivery hydrates the requester.
+        let built = store
+            .fixture_claim_cluster_fragment_index("idle-node", &[], 2_010, 3_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: build claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the executor may build the job"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            blob_sha256: "e1".repeat(32),
+            bytes: 4_096,
+            built_by_node_id: "idle-node".into(),
+            built_at_ms: 2_020,
+        };
+        let location = |node: &str, at: i64| ClusterFragmentIndexLocation {
+            cache_key: cache_key.clone(),
+            node_id: node.into(),
+            bytes: 4_096,
+            verified_at_ms: at,
+            last_seen_at_ms: at,
+        };
+        assert!(store
+            .fixture_complete_cluster_fragment_index(
+                &built,
+                &artifact,
+                &location("idle-node", 2_020),
+                2_020
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish: {error}")));
+        store
+            .settle_analysis_requests(2_025)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: early settle: {error}"));
+        assert_ne!(
+            store
+                .analysis_request("serving-row")
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "ready",
+            "{backend}: not ready until the target holds it"
+        );
+        let hydrating = store
+            .fixture_claim_cluster_fragment_index("serving-node", &[], 2_030, 3_030)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: hydration claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: delivery to the requester"));
+        assert_eq!(hydrating.target_node_id, "serving-node", "{backend}");
+        assert!(store
+            .fixture_complete_cluster_fragment_index_by_hydration(
+                &hydrating,
+                &artifact,
+                &location("serving-node", 2_040),
+                2_040,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: hydrate: {error}")));
+        store
+            .settle_analysis_requests(2_050)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle: {error}"));
+        assert_eq!(
+            store
+                .analysis_request("serving-row")
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "ready",
+            "{backend}: target-verified"
+        );
+        for (node, completed) in [("idle-node", 1), ("serving-node", 0)] {
+            assert_eq!(
+                store
+                    .analysis_completions_executed_by(node, 0)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: completions: {error}")),
+                completed,
+                "{backend}: {node} executed {completed}"
+            );
+        }
+        assert_eq!(
+            store
+                .analysis_completions_executed_by("idle-node", 2_051)
+                .await
+                .expect("since"),
+            0,
+            "{backend}: only completions settled since the given time"
+        );
+    })
+    .await;
+}
+
+/// Review 2 of C1 (S1, B1): a foreign row a viewer is waiting on outranks
+/// this node's own background rows, and a foreign row naming a copy-video
+/// identity this executor cannot emit is never claimed by it -- it stays
+/// queued for its own target, which still claims it.
+#[tokio::test]
+async fn a_waited_foreign_row_comes_first_and_an_unemittable_identity_stays_queued() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, own_file) = seed_file(&store, "ranked-own").await;
+        let (_, waited_file) = seed_file(&store, "ranked-waited").await;
+        let (_, excluded_file) = seed_file(&store, "ranked-excluded").await;
+        let request = |id: &str, file_id: i64, target: &str, identity: &str, created: i64| {
+            NewAnalysisRequest {
+                request_id: id.into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "ranked-engine".into(),
+                video_identity: identity.into(),
+                requested_generation: format!("{id}-generation"),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: target.into(),
+                not_before_ms: created,
+                created_at_ms: created,
+            }
+        };
+        let mut waited = None;
+        for row in [
+            request("own-background", own_file, "idle-node", "own-identity", 10),
+            request(
+                "foreign-waited",
+                waited_file,
+                "serving-node",
+                "waited-identity",
+                20,
+            ),
+            request(
+                "foreign-excluded",
+                excluded_file,
+                "serving-node",
+                "no-dovi-here",
+                5,
+            ),
+        ] {
+            let enqueued = store
+                .enqueue_analysis_request(&row)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {}: {error}", row.request_id));
+            if enqueued.request_id == "foreign-waited" {
+                waited = Some(enqueued);
+            }
+        }
+        let waited = waited.expect("the waited row");
+        assert!(
+            store
+                .join_analysis_viewer(AnalysisViewerInterest {
+                    analysis_request_id: waited.request_id.clone(),
+                    requested_generation: waited.requested_generation.clone(),
+                    pipeline_version: waited.pipeline_version.clone(),
+                    video_identity: waited.video_identity.clone(),
+                    target_node_id: waited.target_node_id.clone(),
+                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id,
+                    },
+                    playback_id: "ranked-viewer".into(),
+                    now_ms: 25,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: join viewer: {error}")),
+            "{backend}"
+        );
+        let excluded = vec!["no-dovi-here".to_owned()];
+        let claim = |node: &'static str, at: i64, cross_node: bool, excluded: Vec<String>| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .claim_analysis_request_for_capacity(
+                        node,
+                        Some("ranked-engine"),
+                        at,
+                        at + 1_000,
+                        false,
+                        false,
+                        cross_node,
+                        &excluded,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: claim at {at}: {error}"))
+            }
+        };
+        let settle = |claimed: plurx_core::store::AnalysisRequest, node: &'static str, at: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                assert!(store
+                    .fail_analysis_request(
+                        &claimed.request_id,
+                        node,
+                        claimed.fence,
+                        "admin_cancelled",
+                        at
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: settle: {error}")));
+            }
+        };
+
+        // The viewer's row first, though it is another node's and younger
+        // than this node's own background row.
+        let first = claim("idle-node", 30, true, excluded.clone())
+            .await
+            .unwrap_or_else(|| panic!("{backend}: a claimable row"));
+        assert_eq!(
+            first.request_id, "foreign-waited",
+            "{backend}: a waiting viewer outranks own background work"
+        );
+        settle(first, "idle-node", 31).await;
+        // Then its own row (after the first claim's reservation lapses).
+        let second = claim("idle-node", 2_000, true, excluded.clone())
+            .await
+            .unwrap_or_else(|| panic!("{backend}: its own row"));
+        assert_eq!(second.request_id, "own-background", "{backend}");
+        settle(second, "idle-node", 2_001).await;
+        // The oldest foreign row names an identity this executor cannot
+        // emit: not this node's to take, however often it asks.
+        for at in [4_000, 4_001] {
+            assert!(
+                claim("idle-node", at, true, excluded.clone())
+                    .await
+                    .is_none(),
+                "{backend}: an excluded identity is not re-claimed at {at}"
+            );
+        }
+        let row = store
+            .analysis_request("foreign-excluded")
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            (row.state.as_str(), row.fence, row.attempts),
+            ("queued", 0, 0),
+            "{backend}: untouched"
+        );
+        // Its target is not excluded from its own row.
+        let own = claim("serving-node", 4_002, false, excluded.clone())
+            .await
+            .unwrap_or_else(|| panic!("{backend}: the target claims its own row"));
+        assert_eq!(own.request_id, "foreign-excluded", "{backend}");
+
+        let too_many = (0..=plurx_core::store::MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES)
+            .map(|n| format!("identity-{n}"))
+            .collect::<Vec<_>>();
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "idle-node",
+                    Some("ranked-engine"),
+                    6_000,
+                    7_000,
+                    false,
+                    false,
+                    true,
+                    &too_many,
+                )
+                .await
+                .is_err(),
+            "{backend}: the exclusion list is bounded"
+        );
+    })
+    .await;
+}
+
+/// Review 2 of G1 (S2): what "index now" says about a file comes from that
+/// file's own requests -- an active one when there is any, else the newest --
+/// however deep the queue is.
+#[tokio::test]
+async fn fragment_index_requests_for_files_answers_per_file() {
+    for_each_backend(|store, backend| async move {
+        let (_, active_file) = seed_file(&store, "lookup-active").await;
+        let (_, failed_file) = seed_file(&store, "lookup-failed").await;
+        let (_, empty_file) = seed_file(&store, "lookup-empty").await;
+        let request = |id: &str, file_id: i64, generation: &str, created: i64| NewAnalysisRequest {
+            request_id: id.into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: "lookup-engine".into(),
+            video_identity: String::new(),
+            requested_generation: generation.into(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: "lookup-node".into(),
+            not_before_ms: created,
+            created_at_ms: created,
+        };
+        store
+            .enqueue_analysis_request(&request("failed-old", failed_file, "lookup-g1", 10))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let claimed = store
+            .claim_analysis_request("lookup-node", 11, 1_011)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: claimable"));
+        assert!(store
+            .fail_analysis_request(
+                &claimed.request_id,
+                "lookup-node",
+                claimed.fence,
+                "attempt_limit",
+                12
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail: {error}")));
+        store
+            .enqueue_analysis_request(&request("active", active_file, "lookup-g2", 20))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let rows = store
+            .fragment_index_requests_for_files(&[active_file, failed_file, empty_file])
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: lookup: {error}"));
+        let by_file = rows
+            .iter()
+            .map(|row| (row.file_id, (row.request_id.as_str(), row.state.as_str())))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            by_file.get(&active_file),
+            Some(&("active", "queued")),
+            "{backend}"
+        );
+        assert_eq!(
+            by_file.get(&failed_file),
+            Some(&("failed-old", "failed")),
+            "{backend}"
+        );
+        assert!(
+            !by_file.contains_key(&empty_file),
+            "{backend}: no request, no row"
+        );
+        assert!(store
+            .fragment_index_requests_for_files(&[])
+            .await
+            .expect("empty")
+            .is_empty());
+        assert!(store.fragment_index_requests_for_files(&[0]).await.is_err());
+    })
+    .await;
+}
+
+/// C1: the claim's source-capacity rule, asked again of the claimed request,
+/// leaves out what the request itself holds, and yields to a foreground
+/// stream that arrived after the claim; the yield goes back uncharged.
+#[tokio::test]
+async fn analysis_source_admission_carries_the_claim_decision_through_the_read() {
+    use plurx_core::store::background_jobs::AnalysisSourceAdmission;
+    use plurx_core::store::background_jobs_resources::{
+        ForegroundSourceOwner, ForegroundSourcePolicy,
+    };
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-admission").await;
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "admission-row".into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "admission-engine".into(),
+                video_identity: String::new(),
+                requested_generation: "admission-generation".into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: "node-a".into(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let claimed = store
+            .claim_analysis_request_for_capacity(
+                "node-a",
+                Some("admission-engine"),
+                10,
+                60_010,
+                false,
+                false,
+                false,
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: an idle domain admits the claim"));
+        let admission = |fence: i64, at: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .analysis_source_admission("admission-row", "node-a", fence, at)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: admission at {at}: {error}"))
+            }
+        };
+        assert_eq!(
+            admission(claimed.fence, 11).await,
+            AnalysisSourceAdmission::Admit,
+            "{backend}: its own reservation is not a competing reader"
+        );
+        assert_eq!(
+            admission(claimed.fence + 1, 11).await,
+            AnalysisSourceAdmission::NotOwned,
+            "{backend}: another fence is not this claim"
+        );
+        let foreground = store
+            .register_foreground_source(
+                ForegroundSourceOwner {
+                    owner_id: uuid::Uuid::new_v4().to_string(),
+                    lifetime_id: "admission-gesture".into(),
+                    session_incarnation: uuid::Uuid::new_v4().to_string(),
+                    producer_attempt: "producer-1".into(),
+                    node_id: "node-a".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    source_generation: "admission-source".into(),
+                    policy: ForegroundSourcePolicy::Rolling,
+                },
+                12,
+                20_012,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: foreground: {error}"));
+        assert!(foreground.is_some(), "{backend}: playback takes the source");
+        assert_eq!(
+            admission(claimed.fence, 13).await,
+            AnalysisSourceAdmission::Yield("foreground_source"),
+            "{backend}: a foreground permission after the claim stops the read"
+        );
+        assert!(store
+            .retry_analysis_request(&claimed, "foreground_preempted", 14, 15, false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: yield: {error}")));
+        let row = store
+            .analysis_request("admission-row")
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(row.state, "queued", "{backend}");
+        assert_eq!(row.attempts, 0, "{backend}: the yield is uncharged");
+        assert_eq!(row.last_error_code, "foreground_preempted", "{backend}");
+    })
+    .await;
+}
+
+/// Lab3 (2026-10-26): 104 active requests targeted a node removed from the
+/// cluster. Nothing but a request's target claims it, so they stayed active,
+/// counted against the queue's ceiling, for good. Removal retires them; a
+/// learner's targeted-only claim never takes untargeted work.
+#[tokio::test]
+async fn removing_a_node_retires_only_its_active_analysis_requests() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "removed-node-analysis").await;
+        let request = |id: &str, target: &str, generation: &str| NewAnalysisRequest {
+            request_id: id.into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: "removal-engine".into(),
+            video_identity: String::new(),
+            requested_generation: generation.into(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: target.into(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        for (id, target, generation) in [
+            ("gone-a", "gone-node", "removal-a"),
+            ("gone-b", "gone-node", "removal-b"),
+            ("kept", "kept-node", "removal-c"),
+        ] {
+            store
+                .enqueue_analysis_request(&request(id, target, generation))
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {id}: {error}"));
+        }
+        let running = store
+            .claim_analysis_request_for_capacity(
+                "gone-node",
+                Some("removal-engine"),
+                11,
+                1011,
+                false,
+                true,
+                false,
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the removed node held a claim"));
+        assert_eq!(
+            store
+                .retire_analysis_requests_for_node("gone-node", 20)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: retire: {error}")),
+            2,
+            "{backend}: its queued and its running request"
+        );
+        for id in ["gone-a", "gone-b"] {
+            let row = store
+                .analysis_request(id)
+                .await
+                .expect("read")
+                .expect("row");
+            assert_eq!(row.state, "cancelled", "{backend}: {id}");
+            assert_eq!(row.last_error_code, "node_removed", "{backend}: {id}");
+        }
+        let attempts = store
+            .analysis_attempts(&running.request_id, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: attempts: {error}"));
+        assert_eq!(attempts[0].phase, "canceled", "{backend}");
+        assert_eq!(
+            store
+                .analysis_request("kept")
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "queued",
+            "{backend}: another node's request is untouched"
+        );
+        assert_eq!(
+            store
+                .retire_analysis_requests_for_node("gone-node", 21)
+                .await
+                .expect("again"),
+            0,
+            "{backend}"
+        );
+
+        // The retired claim keeps its lease-bound source reservation, as any
+        // cancelled reader does, so the claims below come after its lease.
+        let (_, other_file) = seed_file(&store, "untargeted-analysis").await;
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "untargeted".into(),
+                file_id: other_file,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "skip_markers".to_owned(),
+                pipeline_version: "chapter-classifier-v1".to_owned(),
+                video_identity: String::new(),
+                requested_generation: "untargeted-generation".to_owned(),
+                priority: "normal".to_owned(),
+                trigger: "admin".to_owned(),
+                force_rebuild: false,
+                target_node_id: String::new(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: untargeted: {error}"));
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "lonely-node",
+                    None,
+                    2_000,
+                    3_000,
+                    false,
+                    true,
+                    false,
+                    &[]
+                )
+                .await
+                .expect("targeted-only claim")
+                .is_none(),
+            "{backend}: a targeted-only claim leaves untargeted work"
+        );
+        assert_eq!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "lonely-node",
+                    None,
+                    2_001,
+                    3_001,
+                    false,
+                    false,
+                    false,
+                    &[]
+                )
+                .await
+                .expect("claim")
+                .expect("untargeted work")
+                .request_id,
+            "untargeted",
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+/// Review of #1299: the voters' settle pass retires the active requests of a
+/// node membership has already removed -- the rows a removal predating the
+/// retirement left behind (104 on lab3).
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn hiqlite_settle_retires_requests_of_a_node_membership_removed() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let raw = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await
+    .expect("connect raw replicated client");
+    raw.execute(
+        "CREATE TABLE IF NOT EXISTS cluster_nodes (node_id TEXT PRIMARY KEY, removed_at INTEGER)",
+        hiqlite::params!(),
+    )
+    .await
+    .expect("the membership table");
+    raw.execute(
+        "INSERT INTO cluster_nodes (node_id, removed_at) VALUES ($1, $2)",
+        hiqlite::params!("removed-node", 5_i64),
+    )
+    .await
+    .expect("a removed node");
+    let store: Arc<dyn Store> = Arc::new(store);
+    let (_, file_id) = seed_file(&store, "settle-removed").await;
+    for (id, target, generation) in [
+        ("settle-removed", "removed-node", "settle-removed-a"),
+        ("settle-kept", "kept-node", "settle-removed-b"),
+    ] {
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: id.into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "settle-engine".into(),
+                video_identity: String::new(),
+                requested_generation: generation.into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: target.into(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .expect("enqueue");
+    }
+    store.settle_analysis_requests(20).await.expect("settle");
+    let removed = store
+        .analysis_request("settle-removed")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(removed.state, "cancelled");
+    assert_eq!(removed.last_error_code, "node_removed");
+    assert_eq!(
+        store
+            .analysis_request("settle-kept")
+            .await
+            .expect("read")
+            .expect("row")
+            .state,
+        "queued"
+    );
 }
 
 #[tokio::test]
@@ -24730,8 +26280,12 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry metrics worker: {error}")));
+        // `now` is Unix seconds and the retry wait ends at 14 ms, so only a
+        // sample taken at second 0 is still inside it. Before the units fix
+        // the depth gauge compared milliseconds to seconds and filed every
+        // queued row as `retry_wait`.
         let retrying = store
-            .prometheus_store_snapshot("analysis-node", 13)
+            .prometheus_store_snapshot("analysis-node", 0)
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry metrics: {error}"));
         assert_eq!(
@@ -25055,6 +26609,325 @@ async fn hydration_refuses_a_stale_claim_and_a_mismatched_blob() {
     .await;
 }
 
+/// The pre-worker half of the queue health and the depth gauge read the same
+/// rows: due requests split into eligible and incompatible by the live engine
+/// set, delayed ones are `waiting`, and the gauge files them as `queued` and
+/// `retry_wait` with real ages. On 2026-11-07 the fleet held 3,878 due
+/// requests under retired digests and read `idle`, and the gauge filed every
+/// queued row as `retry_wait` with age 0 (milliseconds compared to seconds).
+#[tokio::test]
+async fn pre_worker_requests_are_split_by_live_engine_and_counted_once() {
+    for_each_backend(|store, backend| async move {
+        const NOW_MS: i64 = 1_700_000_000_000;
+        const NOW_SECS: i64 = NOW_MS / 1_000;
+        let live = "a".repeat(64);
+        let retired = "b".repeat(64);
+        let live_set = plurx_core::store::LiveAnalysisEngines {
+            engines: [("split-node".to_owned(), live.clone())].into(),
+            members: None,
+        };
+        let mut seeded = Vec::new();
+        for (name, engine, not_before_ms) in [
+            ("due-live", &live, NOW_MS - 60_000),
+            ("due-retired", &retired, NOW_MS - 60_000),
+            ("waiting-live", &live, NOW_MS + 60_000),
+        ] {
+            let (_, file_id) = seed_file(&store, &format!("split-{name}")).await;
+            let request = NewAnalysisRequest {
+                request_id: format!("split-{name}"),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: engine.clone(),
+                video_identity: String::new(),
+                requested_generation: format!("split-{name}-generation"),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: "split-node".to_owned(),
+                not_before_ms,
+                created_at_ms: NOW_MS - 120_000,
+            };
+            // Through the runnable-work cap with a known live set, so both
+            // backends execute that statement and not only its source text.
+            store
+                .enqueue_analysis_request_with(&request, Some(&live_set))
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {name}: {error}"));
+            seeded.push(request);
+        }
+
+        let split = store
+            .prometheus_store_snapshot_with("split-node", NOW_SECS, Some(&live_set))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: split snapshot: {error}"))
+            .analysis;
+        assert_eq!(
+            split.health.eligible, 1,
+            "{backend}: one due request runs on a live engine"
+        );
+        assert_eq!(
+            split.health.claimable, 1,
+            "{backend}: claimable is eligible"
+        );
+        assert_eq!(
+            split.health.incompatible, 1,
+            "{backend}: one due request is stranded"
+        );
+        assert_eq!(
+            split.health.waiting, 1,
+            "{backend}: one request is inside its wait"
+        );
+        assert_eq!(
+            split.health.oldest_queued_at_ms,
+            NOW_MS - 120_000,
+            "{backend}"
+        );
+        let queued = split.queue_depth
+            [analysis_queue_slot("fragment_index", "queued", "normal", "background")];
+        let retry_wait = split.queue_depth
+            [analysis_queue_slot("fragment_index", "retry_wait", "normal", "background")];
+        assert_eq!(
+            queued,
+            split.health.eligible + split.health.incompatible,
+            "{backend}: the gauge's due rows are the health's due rows"
+        );
+        assert_eq!(
+            retry_wait, split.health.waiting,
+            "{backend}: the same delayed rows"
+        );
+        assert_eq!(
+            split.queue_oldest_age_seconds
+                [analysis_queue_slot("fragment_index", "queued", "normal", "background")],
+            120,
+            "{backend}: ages are seconds of real time"
+        );
+        assert_eq!(
+            plurx_core::store::analysis_queue_verdict(split.health, 0, 0, 0),
+            plurx_core::store::AnalysisQueueVerdict::Degraded,
+            "{backend}: a backlog is not idle"
+        );
+
+        // An unknown live set strands nothing: every due request is eligible.
+        let unknown = store
+            .prometheus_store_snapshot("split-node", NOW_SECS)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unknown snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(
+            (unknown.eligible, unknown.incompatible),
+            (2, 0),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+/// One stranded rule for the health, the enqueue caps and the reconciler
+/// (review S7/S8). Due pre-worker requests split into `eligible` and
+/// `incompatible` exactly as `LiveAnalysisEngines::is_stranded` calls them —
+/// a row another live worker can claim (the claim's cross-node arm) is not
+/// stranded whatever its own target runs — and a removed target's row is
+/// stranded in the Store and never reconciled. Both enqueues run their
+/// live-set cap on both backends, and two reconcilers racing on one row
+/// commit exactly one successor.
+#[tokio::test]
+async fn one_stranded_rule_splits_the_health_and_refuses_racing_reconcilers() {
+    for_each_backend(|store, backend| async move {
+        const NOW_MS: i64 = 1_700_000_000_000;
+        const NOW_SECS: i64 = NOW_MS / 1_000;
+        let (live, busy, retired) = ("a".repeat(64), "c".repeat(64), "b".repeat(64));
+        let inventory = plurx_core::store::LiveAnalysisEngines {
+            engines: [
+                ("rule-live".to_owned(), live.clone()),
+                ("rule-busy".to_owned(), busy.clone()),
+            ]
+            .into(),
+            members: Some(
+                ["rule-live", "rule-busy", "rule-silent"]
+                    .map(str::to_owned)
+                    .into(),
+            ),
+        };
+        let mut rows = Vec::new();
+        for (name, engine, target) in [
+            ("runnable", &live, "rule-live"),
+            ("cross-node", &live, "rule-busy"),
+            ("engine-changed", &retired, "rule-live"),
+            ("absent", &retired, "rule-gone"),
+            ("silent", &retired, "rule-silent"),
+        ] {
+            let (_, file_id) = seed_file(&store, &format!("rule-{name}")).await;
+            let request = NewAnalysisRequest {
+                request_id: format!("rule-{name}"),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: engine.clone(),
+                video_identity: String::new(),
+                requested_generation: format!("rule-{name}-generation"),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: target.to_owned(),
+                not_before_ms: NOW_MS - 60_000,
+                created_at_ms: NOW_MS - 120_000,
+            };
+            rows.push(
+                store
+                    .enqueue_analysis_request_with(&request, Some(&inventory))
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: enqueue {name}: {error}")),
+            );
+        }
+        let stranded = rows.iter().filter(|row| inventory.is_stranded(row)).count() as i64;
+        assert_eq!(stranded, 3, "{backend}: engine-changed, absent and silent");
+        let remedies = rows
+            .iter()
+            .map(|row| inventory.remedy(row))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remedies,
+            vec![
+                None,
+                None,
+                Some(plurx_core::store::StrandedRemedy::TargetEngine(
+                    live.clone()
+                )),
+                Some(plurx_core::store::StrandedRemedy::TargetAbsent),
+                Some(plurx_core::store::StrandedRemedy::TargetSilent),
+            ],
+            "{backend}"
+        );
+        let health = |at| {
+            let store = Arc::clone(&store);
+            let inventory = inventory.clone();
+            async move {
+                store
+                    .prometheus_store_snapshot_with("rule-live", at, Some(&inventory))
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: snapshot: {error}"))
+                    .analysis
+                    .health
+            }
+        };
+        let split = health(NOW_SECS).await;
+        assert_eq!(
+            (split.eligible, split.incompatible),
+            (5 - stranded, stranded),
+            "{backend}: the metric's incompatible is the reconciler's stranded"
+        );
+
+        // A subtitle source runs the same live-set cap.
+        let (_, subtitle_file) = seed_file(&store, "rule-subtitle").await;
+        let subtitle = store
+            .enqueue_or_promote_subtitle_source_with(
+                &subtitle_source_stamp(subtitle_file),
+                "normal",
+                NOW_MS,
+                Some(&inventory),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: subtitle enqueue: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: inside the repair budget"));
+        assert_eq!(subtitle.state, "queued", "{backend}");
+
+        // Two voters re-home the absent target's row, each onto itself, at
+        // once: exactly one successor commits.
+        let absent = rows[3].clone();
+        let replacement = |voter: &str| NewAnalysisRequest {
+            request_id: format!("rule-absent-{voter}"),
+            file_id: absent.file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: live.clone(),
+            video_identity: String::new(),
+            requested_generation: format!("rule-absent-{voter}-generation"),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            target_node_id: voter.to_owned(),
+            not_before_ms: 0,
+            created_at_ms: 0,
+        };
+        let (left, right) = (replacement("rule-live"), replacement("rule-busy"));
+        let (a, b) = tokio::join!(
+            store.reconcile_analysis_request(&absent, &left, NOW_MS),
+            store.reconcile_analysis_request(&absent, &right, NOW_MS),
+        );
+        let (a, b) = (
+            a.unwrap_or_else(|error| panic!("{backend}: reconcile a: {error}")),
+            b.unwrap_or_else(|error| panic!("{backend}: reconcile b: {error}")),
+        );
+        assert!(
+            a ^ b,
+            "{backend}: exactly one reconciler commits ({a}, {b})"
+        );
+        let read = |id: String| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .analysis_request(&id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read {id}: {error}"))
+            }
+        };
+        assert_eq!(
+            read(absent.request_id.clone()).await.map(|row| row.state),
+            Some("cancelled".to_owned()),
+            "{backend}: the predecessor is retired once"
+        );
+        let successors = [left.request_id.clone(), right.request_id.clone()];
+        let mut live_successors = 0;
+        for id in successors {
+            if read(id).await.is_some_and(|row| row.state == "queued") {
+                live_successors += 1;
+            }
+        }
+        assert_eq!(live_successors, 1, "{backend}: one successor, not two");
+
+        // A removed target's row is stranded in the Store, and never
+        // reconciled: removal retires it.
+        store
+            .put_setting("internal.cluster_job_owner_removed.rule-live", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: removal fence: {error}"));
+        let fenced = health(NOW_SECS).await;
+        assert_eq!(
+            fenced.incompatible,
+            // engine-changed and silent as before; runnable now targets a
+            // removed node; absent is cancelled; the winner of the race
+            // targets rule-live (removed) or rule-busy (a live digest).
+            2 + 1 + i64::from(a),
+            "{backend}: a removed target's row is not claimable"
+        );
+        let engine_changed = rows[2].clone();
+        assert!(
+            !store
+                .reconcile_analysis_request(
+                    &engine_changed,
+                    &NewAnalysisRequest {
+                        request_id: "rule-engine-changed-successor".to_owned(),
+                        file_id: engine_changed.file_id,
+                        target_node_id: "rule-live".to_owned(),
+                        pipeline_version: live.clone(),
+                        requested_generation: "rule-engine-changed-successor".to_owned(),
+                        ..replacement("rule-live")
+                    },
+                    NOW_MS,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reconcile fenced: {error}")),
+            "{backend}: a removed target's row is never reconciled"
+        );
+    })
+    .await;
+}
+
 /// The four figures the verdict divides by, read off a queue driven through
 /// the states they describe.
 ///
@@ -25117,6 +26990,17 @@ async fn the_prometheus_snapshot_answers_what_the_queue_verdict_asks() {
         assert_eq!(
             too_early.claimable, 0,
             "{backend}: a job inside its retry wait is not work the queue is refusing"
+        );
+        // ...but it is work: a queue whose whole backlog is backing off is
+        // not idle (review S9 — job-level waits were missing from `waiting`).
+        assert_eq!(
+            too_early.waiting, 1,
+            "{backend}: a job inside its retry wait is waiting"
+        );
+        assert_ne!(
+            plurx_core::store::analysis_queue_verdict(too_early, 0, 0, 0),
+            plurx_core::store::AnalysisQueueVerdict::Idle,
+            "{backend}: a backing-off backlog does not read idle"
         );
 
         let claim = store
@@ -29316,6 +31200,84 @@ async fn scan_identity_repair_contract() {
             (show, season, episode, file)
         }
 
+        // No list membership is also a real first repair, not a replay.
+        // The optional set-copy affects zero rows while every fence still applies.
+        let empty_first = tree(
+            store.as_ref(),
+            library.id,
+            "Empty-list original",
+            "No List Show",
+            "",
+        )
+        .await;
+        let empty_second = tree(
+            store.as_ref(),
+            library.id,
+            "Empty-list duplicate",
+            "No List Show",
+            ".2160p",
+        )
+        .await;
+        let empty_snapshot = store
+            .identity_repair_snapshot(library.id, &[empty_first.0, empty_second.0])
+            .await
+            .expect("empty-list repair snapshot");
+        let empty_plan = plurx_core::store::plan_identity_repair(empty_snapshot.clone())
+            .expect("empty-list repair plan");
+        assert!(
+            empty_plan.ready(),
+            "{backend}: empty-list plan {:?}",
+            empty_plan.blockers
+        );
+        let empty_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let empty_lease = acquired(
+            store
+                .acquire_lease(
+                    &format!("scan:library:{}", library.id),
+                    "empty-list-owner",
+                    empty_now,
+                    empty_now + 90_000,
+                )
+                .await
+                .expect("empty-list repair lease"),
+            backend,
+        );
+        let empty_successor = publication_successor(&empty_lease);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(
+                    &empty_snapshot,
+                    &empty_plan,
+                    &empty_lease,
+                    &empty_successor
+                )
+                .await
+                .expect("first empty-list repair"),
+            IdentityRepairOutcome::Applied,
+            "{backend}: zero-row annotation copy is a first application"
+        );
+        let empty_retry = publication_successor(&empty_successor);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(
+                    &empty_snapshot,
+                    &empty_plan,
+                    &empty_successor,
+                    &empty_retry
+                )
+                .await
+                .expect("empty-list repair replay"),
+            IdentityRepairOutcome::AlreadyApplied
+        );
+        assert!(store
+            .release_lease(&empty_retry, empty_now)
+            .await
+            .expect("release empty-list repair lease"));
+
         let first = tree(
             store.as_ref(),
             library.id,
@@ -29401,7 +31363,8 @@ async fn scan_identity_repair_contract() {
                 .apply_identity_repair_fenced(&snapshot, &plan, &lease, &replacement)
                 .await
                 .expect("apply repair"),
-            IdentityRepairOutcome::Applied
+            IdentityRepairOutcome::Applied,
+            "{backend}: the first fenced repair must apply"
         );
         assert_eq!(
             store
@@ -32583,6 +34546,7 @@ async fn downloaded_subtitles_survive_rescan_and_reject_stale_or_duplicate_write
             .expect("subtitle contract fixture")
             .expect("subtitle contract fixture");
         let track = plurx_core::domain::DownloadedSubtitle {
+            text_translation: None,
             source_size: original.size,
             source_mtime: original.mtime,
             provider_file_id: 123,
@@ -33991,6 +35955,7 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     // Marker 65 replays every step to the head, and the 67→68 step adds
     // `dv_conversions.requested_manually` unconditionally: rewind that shape
     // too, or the replay fails before it reaches the audio step (69→70).
+    drop_baseline_sharing_schema(&client).await;
     downgrade_dv_request_provenance(&client).await;
     client
         .txn([
@@ -34028,6 +35993,7 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     // The second rewind leaves `audio_recipe` in place: the audio step must
     // tolerate its own column on replay. Provenance is rewound again because
     // its step is not replay-tolerant and is not what this test is about.
+    drop_baseline_sharing_schema(&client).await;
     downgrade_dv_request_provenance(&client).await;
     client
         .txn([(
@@ -36701,6 +38667,20 @@ fn watch_fence_reader(store: &Arc<HiqliteAuthStore>, applied_index: u64) -> Cata
 }
 
 #[cfg(feature = "cluster-read-cost-validation")]
+async fn counted_watch_read<T>(
+    operation: impl Future<Output = Result<T, plurx_core::error::StoreError>>,
+) -> Result<T, plurx_core::error::StoreError> {
+    let request = plurx_core::store::HttpStoreOperationCounts::default();
+    let result = plurx_core::store::scope_http_store_operations(request.clone(), operation).await;
+    assert_eq!(
+        request.watch_reads(),
+        1,
+        "exactly one watch-state statement"
+    );
+    result
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
 fn assert_watch_read_path(store: &HiqliteAuthStore, local: bool, label: &str) {
     let counts = store.validation_operation_counts();
     assert_eq!(
@@ -36782,10 +38762,13 @@ async fn watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_wri
     // header: Authority. Its record cannot prove the user wrote nothing
     // through a peer since.
     writer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&writer, commit + 1_000)
-        .watch_map(fixture.user, &ids, None)
-        .await
-        .expect("writer without header");
+    let actual = counted_watch_read(watch_fence_reader(&writer, commit + 1_000).watch_map(
+        fixture.user,
+        &ids,
+        None,
+    ))
+    .await
+    .expect("writer without header");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&writer, false, "writer without X-Plurx-Read-After");
 
@@ -36794,20 +38777,26 @@ async fn watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_wri
     // the bounded lag proof and the client's floor alone would allow a local
     // read.
     writer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&writer, commit - 1)
-        .watch_map(fixture.user, &ids, Some(progress_index))
-        .await
-        .expect("writer below its fence");
+    let actual = counted_watch_read(watch_fence_reader(&writer, commit - 1).watch_map(
+        fixture.user,
+        &ids,
+        Some(progress_index),
+    ))
+    .await
+    .expect("writer below its fence");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&writer, false, "writer below its own write");
 
     // Node A once it has applied the write, for the client that echoed it:
     // local, and it sees the write.
     writer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&writer, commit)
-        .watch_map(fixture.user, &ids, Some(commit))
-        .await
-        .expect("writer at its fence");
+    let actual = counted_watch_read(watch_fence_reader(&writer, commit).watch_map(
+        fixture.user,
+        &ids,
+        Some(commit),
+    ))
+    .await
+    .expect("writer at its fence");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&writer, true, "writer at its own write");
 
@@ -36816,55 +38805,77 @@ async fn watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_wri
     // however far ahead it is.
     let peer = Arc::new(open_contract_hiqlite_store(&cluster).await);
     peer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&peer, commit + 1_000)
-        .watch_map(fixture.user, &ids, None)
-        .await
-        .expect("peer without header");
+    let actual = counted_watch_read(watch_fence_reader(&peer, commit + 1_000).watch_map(
+        fixture.user,
+        &ids,
+        None,
+    ))
+    .await
+    .expect("peer without header");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&peer, false, "peer without X-Plurx-Read-After");
 
     // With the writer's index echoed and applied past it: local.
     peer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&peer, commit)
-        .watch_map(fixture.user, &ids, Some(commit))
-        .await
-        .expect("peer with header, applied");
+    let actual = counted_watch_read(watch_fence_reader(&peer, commit).watch_map(
+        fixture.user,
+        &ids,
+        Some(commit),
+    ))
+    .await
+    .expect("peer with header, applied");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&peer, true, "peer applied past X-Plurx-Read-After");
 
     // With the header but not yet applied: Authority.
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit - 1)
-        .watch_map(fixture.user, &ids, Some(commit))
-        .await
-        .expect("peer with header, behind");
+    counted_watch_read(watch_fence_reader(&peer, commit - 1).watch_map(
+        fixture.user,
+        &ids,
+        Some(commit),
+    ))
+    .await
+    .expect("peer with header, behind");
     assert_watch_read_path(&peer, false, "peer behind X-Plurx-Read-After");
 
     // Every reader method takes the same fence, not only the watch map.
     let containers = vec![fixture.show, fixture.season];
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit + 1_000)
-        .watch_summary(fixture.user, &ids, &containers, None)
-        .await
-        .expect("peer summary without header");
+    counted_watch_read(watch_fence_reader(&peer, commit + 1_000).watch_summary(
+        fixture.user,
+        &ids,
+        &containers,
+        None,
+    ))
+    .await
+    .expect("peer summary without header");
     assert_watch_read_path(&peer, false, "summary without header");
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit + 1_000)
-        .progress_rails(fixture.user, 20, None)
-        .await
-        .expect("peer rails without header");
+    counted_watch_read(watch_fence_reader(&peer, commit + 1_000).progress_rails(
+        fixture.user,
+        20,
+        None,
+    ))
+    .await
+    .expect("peer rails without header");
     assert_watch_read_path(&peer, false, "rails without header");
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit + 1_000)
-        .watch_rollup(fixture.user, fixture.show, None)
-        .await
-        .expect("peer rollup without header");
+    counted_watch_read(watch_fence_reader(&peer, commit + 1_000).watch_rollup(
+        fixture.user,
+        fixture.show,
+        None,
+    ))
+    .await
+    .expect("peer rollup without header");
     assert_watch_read_path(&peer, false, "rollup without header");
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit)
-        .watch_rollup(fixture.user, fixture.show, Some(commit))
-        .await
-        .expect("peer rollup with header");
+    counted_watch_read(watch_fence_reader(&peer, commit).watch_rollup(
+        fixture.user,
+        fixture.show,
+        Some(commit),
+    ))
+    .await
+    .expect("peer rollup with header");
     assert_watch_read_path(&peer, true, "rollup with header");
 }
 
@@ -36937,47 +38948,62 @@ async fn watch_fence_a_peers_older_record_does_not_prove_a_write_through_another
     let applied = phone_index - 1;
     assert!(applied >= tv_index, "B has applied its own write");
     node_b.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&node_b, applied)
-        .watch_map(fixture.user, &ids, None)
-        .await
-        .expect("B without header");
+    let actual = counted_watch_read(watch_fence_reader(&node_b, applied).watch_map(
+        fixture.user,
+        &ids,
+        None,
+    ))
+    .await
+    .expect("B without header");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&node_b, false, "B's own older record, no header");
     let containers = vec![fixture.show, fixture.season];
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, applied)
-        .watch_summary(fixture.user, &ids, &containers, None)
-        .await
-        .expect("B summary without header");
+    counted_watch_read(watch_fence_reader(&node_b, applied).watch_summary(
+        fixture.user,
+        &ids,
+        &containers,
+        None,
+    ))
+    .await
+    .expect("B summary without header");
     assert_watch_read_path(&node_b, false, "B summary, no header");
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, applied)
-        .progress_rails(fixture.user, 20, None)
+    counted_watch_read(watch_fence_reader(&node_b, applied).progress_rails(fixture.user, 20, None))
         .await
         .expect("B rails without header");
     assert_watch_read_path(&node_b, false, "B rails, no header");
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, applied)
-        .watch_rollup(fixture.user, fixture.show, None)
-        .await
-        .expect("B rollup without header");
+    counted_watch_read(watch_fence_reader(&node_b, applied).watch_rollup(
+        fixture.user,
+        fixture.show,
+        None,
+    ))
+    .await
+    .expect("B rollup without header");
     assert_watch_read_path(&node_b, false, "B rollup, no header");
 
     // A client floor older than B's own write is raised by B's record.
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, tv_index - 1)
-        .watch_map(fixture.user, &ids, Some(1))
-        .await
-        .expect("B below its own write");
+    counted_watch_read(watch_fence_reader(&node_b, tv_index - 1).watch_map(
+        fixture.user,
+        &ids,
+        Some(1),
+    ))
+    .await
+    .expect("B below its own write");
     assert_watch_read_path(&node_b, false, "B below its own record");
 
     // The phone's index, echoed and applied on B: local, and it shows the
     // episode watched.
     node_b.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&node_b, phone_index)
-        .watch_map(fixture.user, &ids, Some(phone_index))
-        .await
-        .expect("B with the phone's index");
+    let actual = counted_watch_read(watch_fence_reader(&node_b, phone_index).watch_map(
+        fixture.user,
+        &ids,
+        Some(phone_index),
+    ))
+    .await
+    .expect("B with the phone's index");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&node_b, true, "B applied past the echoed write");
 }
@@ -37109,10 +39135,14 @@ async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_rea
     assert_eq!(request.watch_reads(), 1, "rails: one counted watch read");
 
     store.validation_reset_operation_counts();
-    let summary = watch_fence_reader(&store, commit)
-        .watch_summary(fixture.user, &item_ids, &container_ids, Some(commit))
-        .await
-        .expect("local summary");
+    let summary = counted_watch_read(watch_fence_reader(&store, commit).watch_summary(
+        fixture.user,
+        &item_ids,
+        &container_ids,
+        Some(commit),
+    ))
+    .await
+    .expect("local summary");
     check_summary(summary, "local");
     assert_watch_read_path(
         &store,
@@ -37121,10 +39151,13 @@ async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_rea
     );
 
     store.validation_reset_operation_counts();
-    let rails = watch_fence_reader(&store, commit)
-        .progress_rails(fixture.user, 20, Some(commit))
-        .await
-        .expect("local rails");
+    let rails = counted_watch_read(watch_fence_reader(&store, commit).progress_rails(
+        fixture.user,
+        20,
+        Some(commit),
+    ))
+    .await
+    .expect("local rails");
     assert_eq!(
         serde_json::to_value(rails).expect("serialize rails"),
         expected_rails,

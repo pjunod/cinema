@@ -222,7 +222,7 @@ pub(super) struct SourceWorkerRegistry {
     entries: std::sync::Mutex<Vec<Arc<SourceViewerInner>>>,
     index_hooks: Arc<crate::fragindex::SourceIndexHookOwner>,
     probe_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
-    native_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
+    pub(super) native_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
 }
 struct SourceViewerInner {
     control_target_duration_ms: i64,
@@ -243,7 +243,6 @@ struct SourceViewerInner {
 struct SourcePreparationSettlements {
     index: Option<crate::fragindex::SourceIndexSettlement>,
     probe: Option<super::source_preparation::SourceProbeSettlement>,
-    native: Option<super::source_subtitles::SourceNativeSettlement>,
 }
 impl SourcePreparationSettlements {
     fn matches(&self, assignment: &SourceDispatchAssignment) -> bool {
@@ -252,10 +251,6 @@ impl SourcePreparationSettlements {
             .is_none_or(|receipt| receipt.matches(assignment))
             && self
                 .probe
-                .as_ref()
-                .is_none_or(|receipt| receipt.matches(assignment))
-            && self
-                .native
                 .as_ref()
                 .is_none_or(|receipt| receipt.matches(assignment))
     }
@@ -314,6 +309,7 @@ impl SourceOpenedResource {
 pub(crate) struct SourceResponseGuard {
     owner: Arc<SourceViewerInner>,
     source: Option<crate::fragment_index_cluster::SourceFence>,
+    pub(crate) source_request: Option<crate::source_custody::SourceRequest>,
 }
 impl Drop for SourceResponseGuard {
     fn drop(&mut self) {
@@ -379,6 +375,25 @@ impl SourceResponseGuard {
             }
             notification.await;
         }
+    }
+}
+#[cfg(test)]
+impl TranscodeManager {
+    /// Hold the Source's cold-index scan after its child spawns, so a test can
+    /// act while a start is mid-preparation.
+    pub(crate) fn pause_source_index_after_spawn(
+        &self,
+        bound: Duration,
+    ) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.source_workers.index_hooks.pause_after_spawn_for(bound)
+    }
+    /// Source owners still holding a worker registry slot.
+    pub(crate) fn source_worker_count(&self) -> usize {
+        self.source_workers
+            .entries
+            .lock()
+            .expect("Source workers")
+            .len()
     }
 }
 impl SourceViewerActor {
@@ -472,6 +487,7 @@ impl SourceViewerActor {
         let mut guard = SourceResponseGuard {
             owner: Arc::clone(&self.0),
             source: None,
+            source_request: None,
         };
         let facts = manager
             .vod
@@ -509,6 +525,35 @@ impl SourceViewerActor {
             return Err(SourceWorkerError::Unavailable);
         }
         Ok((response, guard))
+    }
+    /// Actual selected-caption work shares the control's counted physical
+    /// guard. Its HTTP observer may leave; this factory retains custody until
+    /// the child, pipes, sparse readers and cache jobs have really settled.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_native_window_work(
+        &self,
+        tracks: Arc<super::source_subtitles::SourceNativeTracks>,
+        manager: Arc<TranscodeManager>,
+        index: u16,
+        demand: i64,
+        span: i64,
+        custody: resource::SourceResourceReadCustody,
+        deadline: Instant,
+    ) -> tokio::task::JoinHandle<Result<Vec<u8>, SourceWorkerError>> {
+        tokio::spawn(async move {
+            let result = tracks
+                .window(&manager, index, demand, span, &custody, deadline)
+                .await;
+            if matches!(
+                result,
+                Err(SourceWorkerError::Unavailable
+                    | SourceWorkerError::Conflict
+                    | SourceWorkerError::Unresolved)
+            ) {
+                custody.request_revocation();
+            }
+            result
+        })
     }
     pub(crate) async fn open_resource(
         &self,
@@ -593,6 +638,7 @@ impl SourceViewerActor {
         let mut guard = SourceResponseGuard {
             owner: Arc::clone(&self.0),
             source: None,
+            source_request: None,
         };
         let initial = self.0.gate.current_owned(&self.0.assignment).await?;
         initial
@@ -684,7 +730,11 @@ impl SourceViewerActor {
                 {
                     return Err(SourceWorkerError::Unavailable);
                 }
-                let (file, context) = source_native_presentation(facts, tracks.probe());
+                if !tracks.matches(&self.0.assignment, &facts.file) {
+                    return Err(SourceWorkerError::Unavailable);
+                }
+                let (file, context) =
+                    source_native_presentation(facts, tracks.presentation_probe().as_deref());
                 let payload = match kind {
                     SharingHlsResourceKind::Master => {
                         SourceResourcePayload::Playlist(crate::http::hls::source_native_master(
@@ -695,13 +745,17 @@ impl SourceViewerActor {
                         ))
                     }
                     SharingHlsResourceKind::SubtitlePlaylist { index } => {
-                        tracks.track(index).ok_or(SourceWorkerError::Unsupported)?;
+                        if !tracks.has_track(index) {
+                            return Err(SourceWorkerError::Unsupported);
+                        }
                         SourceResourcePayload::Playlist(crate::http::hls::source_native_playlist(
                             &video,
                         ))
                     }
                     SharingHlsResourceKind::SubtitleSegment { index } => {
-                        let track = tracks.track(index).ok_or(SourceWorkerError::Unsupported)?;
+                        if !tracks.has_track(index) {
+                            return Err(SourceWorkerError::Unsupported);
+                        }
                         let name = resource
                             .as_str()
                             .split('?')
@@ -711,11 +765,13 @@ impl SourceViewerActor {
                             .next()
                             .unwrap_or("");
                         if let Some(revision) = resource.cached_subtitle_revision() {
-                            let present = tracks.revision(index).as_deref() == Some(revision);
+                            let cached = tracks.cached(index, revision, &custody).await?;
+                            let absent = cached.is_none();
+                            let (bytes, complete) = cached.unwrap_or_default();
                             SourceResourcePayload::CachedSubtitle {
-                                bytes: if present { track.to_vec() } else { Vec::new() },
-                                complete: present,
-                                absent: !present,
+                                bytes,
+                                complete,
+                                absent,
                             }
                         } else {
                             let sequence = name
@@ -723,15 +779,20 @@ impl SourceViewerActor {
                                 .and_then(|name| name.strip_suffix(".vtt"))
                                 .and_then(|name| name.parse::<u64>().ok())
                                 .ok_or(SourceWorkerError::Unsupported)?;
-                            let bytes = crate::http::hls::source_native_segment(
-                                &video,
-                                track,
-                                sequence,
-                                context.media_origin_seconds,
-                            )
-                            .ok_or(SourceWorkerError::Unavailable)?;
+                            let bytes = tracks
+                                .segment(
+                                    &manager,
+                                    index,
+                                    &video,
+                                    sequence,
+                                    context.media_origin_seconds,
+                                    &custody,
+                                    deadline,
+                                )
+                                .await?
+                                .ok_or(SourceWorkerError::Unavailable)?;
                             if bytes.len() > 2 * 1024 * 1024 {
-                                return Err(SourceWorkerError::Capacity);
+                                return Err(SourceWorkerError::Unsupported);
                             }
                             SourceResourcePayload::SubtitleText(bytes)
                         }
@@ -746,18 +807,6 @@ impl SourceViewerActor {
                 .map_err(|_| SourceWorkerError::Unsupported)?;
         }
 
-        if let Some(native) = native.as_ref() {
-            if !native.matches(
-                &self.0.assignment,
-                guard
-                    .source
-                    .as_ref()
-                    .ok_or(SourceWorkerError::Unavailable)?
-                    .object_version(),
-            ) {
-                return Err(SourceWorkerError::Unavailable);
-            }
-        }
         // Detached observation survives waiter timeout only to settle actual
         // jobs; an expired request cannot extend authority or viewer activity.
         if Instant::now() >= deadline {
@@ -1059,7 +1108,7 @@ impl TranscodeManager {
     /// deadline and the foreground queue wait together, holding its waiter
     /// for the whole wait so background work yields and cannot refill the
     /// pool between attempts.
-    async fn admit_source_copy(
+    pub(super) async fn admit_source_copy(
         &self,
         deadline: Instant,
     ) -> Result<crate::vodencode::EncodePermit, SourceWorkerError> {
@@ -1086,11 +1135,14 @@ impl TranscodeManager {
         &self,
         owner: &Arc<SourceViewerInner>,
         prepared: &crate::http::hls::PreparedSourcePlayback,
+        source_node_id: &str,
         deadline: Instant,
         work: &mut Option<crate::fragindex::SourceIndexOperation>,
     ) -> Result<(), SourceWorkerError> {
         let file = prepared.file();
-        if file.video_codec.as_deref() != Some("h264") {
+        if !matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265"))
+            || plurx_core::playback::is_dolby_vision(file)
+        {
             // Existing warm indexes retain their established support policy.
             return Ok(());
         }
@@ -1105,7 +1157,35 @@ impl TranscodeManager {
         if preserve_dolby_vision || convert_dolby_vision {
             return Err(SourceWorkerError::Unsupported);
         }
-        let video = plurx_core::transcode::CopyVideoOptions::new(false, false);
+        let authority = owner.gate.current_preparation(&owner.assignment).await?;
+        let stored_probe = self
+            .store
+            .source_index_probe_evidence(&authority)
+            .await
+            .map_err(|_| SourceWorkerError::Unresolved)?;
+        if stored_probe
+            .as_ref()
+            .is_some_and(|probe| probe.len() > 1024 * 1024)
+        {
+            return Err(SourceWorkerError::Unsupported);
+        }
+        if let Some(tracks) = owner
+            .state
+            .lock()
+            .expect("Source copy presentation")
+            .native
+            .as_ref()
+        {
+            tracks.set_presentation_probe(stored_probe.as_deref());
+        }
+        // Match Source VOD's exact recipe, including parameter-set promotion
+        // and retention. A plain-copy identity cannot stand in for either.
+        let video = plurx_core::transcode::CopyVideoOptions::from_probe(
+            file,
+            stored_probe.as_deref(),
+            false,
+            false,
+        );
         let identity = crate::fragindex::identity_for(file, video);
         if self
             .store
@@ -1125,12 +1205,7 @@ impl TranscodeManager {
             .map_err(|_| SourceWorkerError::Unavailable)?;
         let object_version = source.object_version().to_owned();
         let authority = owner.gate.current_preparation(&owner.assignment).await?;
-        let stored_probe = self
-            .store
-            .source_index_probe_evidence(&authority)
-            .await
-            .map_err(|_| SourceWorkerError::Unresolved)?
-            .ok_or(SourceWorkerError::Unsupported)?;
+        let stored_probe = stored_probe.ok_or(SourceWorkerError::Unsupported)?;
         authority
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
             .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -1158,7 +1233,7 @@ impl TranscodeManager {
         if !built.source_unchanged {
             return Err(SourceWorkerError::Unavailable);
         }
-        let crate::fragindex::IndexOutcome::Built(index) = built.outcome else {
+        let crate::fragindex::IndexOutcome::Built(mut index) = built.outcome else {
             return Err(SourceWorkerError::Unavailable);
         };
         let fence =
@@ -1166,6 +1241,30 @@ impl TranscodeManager {
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
         owner.gate.current_preparation(&owner.assignment).await?;
+        if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+            // This scan read the held local source, not a peer's index. Bind
+            // its original-header proof to the actual assigned physical node
+            // before VOD copy admission can rely on it.
+            if source_node_id.is_empty() || source_node_id != owner.assignment.owner_node_id() {
+                return Err(SourceWorkerError::Unavailable);
+            }
+            let proof = index
+                .promotion
+                .hevc_configuration
+                .as_mut()
+                .ok_or(SourceWorkerError::Unsupported)?;
+            proof.source_node_id = source_node_id.to_owned();
+            let verified = if video.retains_hevc_parameter_sets() {
+                // Retaining copies deliver changing parameter sets rather
+                // than deleting them; VOD does not require a constant proof.
+                proof.current_on_node(&object_version, source_node_id)
+            } else {
+                proof.permits_on_node(&object_version, source_node_id)
+            };
+            if !verified {
+                return Err(SourceWorkerError::Unsupported);
+            }
+        }
         self.store
             .put_fragment_index(file.id, &index)
             .await
@@ -1175,40 +1274,6 @@ impl TranscodeManager {
         }
         owner.gate.current_preparation(&owner.assignment).await?;
         Ok(())
-    }
-
-    async fn prepare_source_native_tracks(
-        &self,
-        owner: &Arc<SourceViewerInner>,
-        prepared: &crate::http::hls::PreparedSourcePlayback,
-        deadline: Instant,
-        work: &mut Option<super::source_subtitles::SourceNativeOperation>,
-    ) -> Result<Arc<super::source_subtitles::SourceNativeTracks>, SourceWorkerError> {
-        super::source_subtitles::supported_tracks(prepared.file(), prepared.native_subtitles().1)
-            .map_err(|_| SourceWorkerError::Unsupported)?;
-        let permit = self.admit_source_copy(deadline).await?;
-        let source =
-            crate::fragment_index_cluster::open_source_playback_fence(prepared.file(), None)
-                .await
-                .map_err(|_| SourceWorkerError::Unavailable)?;
-        *work = Some(super::source_subtitles::start_source_native(
-            prepared.file().clone(),
-            source,
-            owner.assignment.clone(),
-            Arc::clone(&owner.gate),
-            prepared.native_subtitles().1,
-            permit,
-            Arc::clone(&self.store),
-            deadline,
-            Arc::clone(&self.source_workers.native_hooks),
-        ));
-        let tracks = work
-            .as_ref()
-            .expect("Source native owner")
-            .outcome()
-            .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
-        Ok(Arc::new(tracks))
     }
 
     async fn prepare_source_encoded_recipe(
@@ -1291,12 +1356,49 @@ impl TranscodeManager {
         deadline: Instant,
     ) {
         let actor = SourceViewerActor(Arc::clone(&owner));
+        let source_request = self.foreground_source_request(
+            prepared.file(),
+            &owner.assignment.binding().incarnation_id().to_string(),
+            owner.assignment.binding().incarnation_id(),
+            plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling,
+        );
+        let mut preparation_custody = match source_request {
+            Some(request) => match request.register("source-preparation").await {
+                Ok(custody) => Some(custody),
+                Err(_) => {
+                    tracing::warn!(target: "plurxd::transcode", stage = "preparation_custody", error_class = ?SourceWorkerError::Unavailable, "Source producer startup failed");
+                    let mut current = owner.state.lock().expect("Source worker state");
+                    current.start = Some(Err(SourceWorkerError::Unavailable));
+                    current.settled = Some(Err(SourceWorkerError::Unavailable));
+                    current.finished = true;
+                    drop(current);
+                    owner.changed.notify_waiters();
+                    return;
+                }
+            },
+            None => None,
+        };
         let mut reserved: Option<crate::vodserve::ReservedSourceVodRendition> = None;
         let mut index_work = None;
         let mut probe_work = None;
-        let mut native_work = None;
         let mut unowned_existing = true;
         let mut startup_stage = "deadline";
+        // Retirement (a Source End, a drain, a revocation) ends a start that
+        // has not published at its next stage boundary: after the route
+        // proof, after native tracks, after recipe preparation, and after
+        // reservation. Each stage runs to its own end under the start's
+        // bounded budget, so a cold index the viewer left still completes
+        // and persists for the next play, and nothing is dropped mid-await:
+        // no custody registration, index write or file fence is abandoned
+        // half-done. The registry slot and copy permit are freed when the
+        // boundary is reached, by the ordinary settlement below.
+        let retirement_requested = || {
+            owner
+                .state
+                .lock()
+                .expect("Source worker state")
+                .retirement_requested
+        };
         let start = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             Box::pin(async {
@@ -1317,6 +1419,9 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unresolved);
                 }
                 unowned_existing = false;
+                if retirement_requested() {
+                    return Err(SourceWorkerError::Unavailable);
+                }
                 // This actual worker owns the configured queue/materialization
                 // allowance. Its inherited deadline can only become shorter.
                 startup_stage = "startup_budget";
@@ -1347,16 +1452,19 @@ impl TranscodeManager {
                     .await
                     .map_err(|_| SourceWorkerError::Unavailable)?
                     .ok_or(SourceWorkerError::Unavailable)?;
-                startup_stage = "native_tracks";
                 if prepared.native_subtitles().0 {
-                    let tracks = Box::pin(self.prepare_source_native_tracks(
-                        &owner,
-                        &prepared,
-                        deadline,
-                        &mut native_work,
-                    ))
-                    .await?;
-                    owner.state.lock().expect("Source native actor").native = Some(tracks);
+                    let tracks = super::source_subtitles::SourceNativeTracks::prepare(
+                        prepared.file(),
+                        &owner.assignment,
+                        prepared.native_subtitles().1,
+                        state.subs_dir.clone(),
+                    )
+                    .map_err(|_| SourceWorkerError::Unsupported)?;
+                    owner.state.lock().expect("Source native actor").native =
+                        Some(Arc::new(tracks));
+                }
+                if retirement_requested() {
+                    return Err(SourceWorkerError::Unavailable);
                 }
                 startup_stage = "recipe_preparation";
                 let encoding = if source_recipe_is_encoded(prepared.request()) {
@@ -1373,12 +1481,18 @@ impl TranscodeManager {
                     Box::pin(self.prepare_source_cold_index(
                         &owner,
                         &prepared,
+                        &state.node_id,
                         deadline,
                         &mut index_work,
                     ))
                     .await?;
                     None
                 };
+                // The prepared recipe (and a cold index, persisted) is done;
+                // a viewer who left during it is acted on before admission.
+                if retirement_requested() {
+                    return Err(SourceWorkerError::Unavailable);
+                }
                 startup_stage = "vod_admission";
                 let admitted = Box::pin(self.vod.prepare_admitted_source_vod(
                     &prepared,
@@ -1543,8 +1657,21 @@ impl TranscodeManager {
         )
         .await
         .unwrap_or(Err(SourceWorkerError::Deadline));
+        // Every start that does not publish ends here with its stage, once.
         if let Err(error) = &start {
-            tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, "Source producer startup failed");
+            tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, retirement_requested = owner.state.lock().expect("Source worker state").retirement_requested, "Source producer startup failed");
+        }
+        if start.is_ok() {
+            // Readiness helpers have returned; join their independent owners
+            // before dropping this preparation-only source charge. Materializer
+            // generations have separate exact reaper-owned ledger tokens.
+            if let Some(work) = index_work.as_ref() {
+                let _ = work.settle().await;
+            }
+            if let Some(work) = probe_work.as_ref() {
+                let _ = work.settle().await;
+            }
+            drop(preparation_custody.take());
         }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
         owner.changed.notify_waiters();
@@ -1601,10 +1728,9 @@ impl TranscodeManager {
             work.cancel();
             preparations.probe = Some(work.settle().await);
         }
-        if let Some(work) = native_work.as_ref() {
-            work.cancel();
-            preparations.native = Some(work.settle().await);
-        }
+        // These operations' settle methods join the detached reader/child,
+        // including work which outlived the startup deadline.
+        drop(preparation_custody);
         self.finish_source_owner(
             &owner,
             &state,
@@ -1867,7 +1993,7 @@ pub(crate) fn source_delivery_refusal(
 
 fn source_native_presentation(
     facts: crate::vodserve::VodHlsFacts,
-    probe: &str,
+    probe: Option<&str>,
 ) -> (plurx_core::domain::MediaFile, HlsContext) {
     if let Some(encoding) = facts.encoding.as_ref() {
         let file = encoded_vod_presentation_file(
@@ -1904,8 +2030,9 @@ fn source_native_presentation(
                 transcode_audio: facts.aac,
                 preserve_dolby_vision: facts.preserve_dolby_vision,
                 convert_dolby_vision: facts.convert_dolby_vision,
+                dual_layer_as_copied: false,
             },
-            Some(probe),
+            probe,
         );
         let context = HlsContext {
             codec_facts: Some(
@@ -1922,7 +2049,7 @@ fn source_native_presentation(
             media_origin_seconds: 0.0,
             codecs,
             supplemental_codecs,
-            frame_rate: frozen_video_frame_rate(Some(probe)),
+            frame_rate: frozen_video_frame_rate(probe),
         };
         (facts.file, context)
     }

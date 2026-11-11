@@ -616,7 +616,7 @@ fn verify_macos_package(root: &Path, contract: &Contract) -> Result<(), String> 
     for name in ["ffmpeg", "ffprobe"] {
         verify_file(root, name, manifest["binaries"][name]["sha256"].as_str())?;
     }
-    if manifest["source_parser"]["parser_abi"] != "plurx-source-wasi-p1-v1-wasmtime-49.0.2" {
+    if manifest["source_parser"]["parser_abi"] != "plurx-source-wasi-p1-v1-wasmtime-50.0.0" {
         return Err("Source parser does not match the required ABI".to_owned());
     }
     verify_file(

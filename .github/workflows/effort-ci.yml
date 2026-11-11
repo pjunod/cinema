@@ -32,7 +32,7 @@ jobs:
           fetch-depth: 0
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22.23.2"
+          node-version: "22.23.4"
       - name: Check index rows, release counters, names and Regression-Test reminders
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -122,7 +122,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: ${{ !inputs.compile_only }}
         with:
-          node-version: "22"
+          node-version: "22.23.4"
       - name: Check formal protocol source mapping
         id: formal-inputs
         env:
@@ -200,15 +200,36 @@ jobs:
     name: effort Rust compile
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
-    # All-target metadata can exceed general runners' soft memory ceiling.
-    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
-    # Include cold toolchain/cache setup and every-target compilation.
-    container: ubuntu:24.04
-    timeout-minutes: 30
+    # Use the capacity-one nonvoter compiler slot; verify its actual limits.
+    runs-on: [ci-nonvoter-heavy-amd64]
+    container:
+      image: ubuntu:24.04
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+    timeout-minutes: 60
     # Bound Cargo before parallel working sets reach the runner's memory cap.
     env:
       CARGO_BUILD_JOBS: "1"
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
+          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Install Rust gate prerequisites
         run: |
           set -euo pipefail
@@ -216,7 +237,27 @@ jobs:
           apt-get -o Acquire::Retries=3 update
           apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
             build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
-            libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config python3
+            libgtk-4-dev libdbus-1-dev make nasm ninja-build xz-utils pkg-config python3
+          # Forgejo needs Node before checkout; use the patched upstream build.
+          case "$(dpkg --print-architecture)" in
+            amd64)
+              node_arch=x64
+              node_sha=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
+              ;;
+            arm64)
+              node_arch=arm64
+              node_sha=6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b
+              ;;
+            *) echo "Unsupported Node architecture" >&2; exit 1 ;;
+          esac
+          node_tmp="$(mktemp -d)"
+          trap 'rm -rf "$node_tmp"' EXIT
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-${node_arch}.tar.xz" \
+            -o "$node_tmp/node.tar.xz"
+          echo "$node_sha  $node_tmp/node.tar.xz" | sha256sum --check --strict
+          tar -xJf "$node_tmp/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
+          node --version | grep -Fx 'v22.23.4'
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -259,7 +300,7 @@ jobs:
           persist-credentials: false
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
       - name: Lint current web source and shape contracts
         # No behavioral, mutation, VM-load or Chromium fixtures in this lane.
         # Focused behavior units have once-per-PR receipts; web-check is retained
@@ -270,7 +311,7 @@ jobs:
     name: effort Apple compile
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -283,8 +324,8 @@ jobs:
         run: |
           xcode_version="$(xcodebuild -version)"
           printf '%s\n' "$xcode_version"
-          grep -Fxq "Xcode 27.1" <<< "$xcode_version"
-          grep -Fxq "Build version 27A9275" <<< "$xcode_version"
+          grep -Fxq "Xcode 27.2" <<< "$xcode_version"
+          grep -Fxq "Build version 27B52" <<< "$xcode_version"
           xcrun --find swift
       - name: Compile native macOS server tray
         if: needs.scope.outputs.desktop_macos == 'true'
@@ -293,15 +334,6 @@ jobs:
         if: needs.scope.outputs.apple == 'true'
         run: |
           test "$(xcodegen --version)" = "Version: 2.46.0"
-      - name: Cache DerivedData
-        if: needs.scope.outputs.apple == 'true'
-        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: clients/apple/build/DerivedData
-          key: effort-apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
-          restore-keys: |
-            effort-apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-
-            apple-dd-xcode-27A9275-ios27.1-tvos27.0-
       - name: Compile iOS and tvOS without running simulator tests
         if: needs.scope.outputs.apple == 'true'
         run: make apple-build

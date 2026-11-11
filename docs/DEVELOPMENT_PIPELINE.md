@@ -45,13 +45,18 @@
 > surfaces. A passing subset does not close the whole-app or physical-device
 > acceptance matrix, and no periodic schedule is introduced.
 
-> **Coverage amendment, 2026-10-11:** [coverage.yml](../.github/workflows/coverage.yml)
+> **Coverage amendment, 2026-10-29:** [coverage.yml](../.github/workflows/coverage.yml)
 > refreshes the dated unit coverage badge only by manual dispatch on `main`.
-> Its `ci-coverage` runner is a reserved VM outside the general merge pool;
-> the job has two CPUs, 6 GiB RAM, two Cargo jobs and two test threads.
-> A new request cancels the stale measurement. Failed runs retain the last
-> successful badge and its UTC measurement date. See
-> [runner recovery and budgets](ci/RUNNER-DISK.md#runner-recovery-and-memory-budgets).
+> It uses the existing capacity-one `unit-memory-16g` host registration, sharing
+> that queue with full-unit qualification rather than general merge jobs.
+> [The coverage command](../scripts/unit-coverage) launches a standard Docker
+> child with three CPUs, 16 GiB resident/18 GiB combined memory, one Cargo job
+> and two test threads. Its fixed corpus covers default workspace tests,
+> isolated sharing and replicated contracts; it preserves the existing source
+> exclusions and records exact source/artifact identities. Only successful
+> execution creates badge publication inputs. A failed or cancelled refresh
+> retains the previous successful badge and its UTC measurement date. See
+> [the repair ledger](ci/UNIT-COVERAGE-REPAIR.md) for corpus and evidence limits.
 
 
 **Status:** accepted and implemented · **Decider:** Paul · **Written:**
@@ -129,6 +134,13 @@ The [`effort-ci.yml`](../.github/workflows/effort-ci.yml) gate runs only:
 | Web | Embedded JavaScript and theme static contracts | Browser layout and playback acceptance |
 | Apple | iOS and tvOS compilation | XCTest and physical-device acceptance |
 | Android | Debug application compilation | JVM tests, lint, emulator tests, and physical-device acceptance |
+
+The effort Rust job has a bounded 20-minute whole-job budget, including
+checkout, pinned-toolchain setup, cache restoration, all-target compilation
+and vendored Hiqlite denied-warning Clippy. The earlier ten-minute ceiling
+repeatedly expired during compilation without compiler diagnostics; this
+budget change removes no check and changes no runner, cache or service limit.
+Focused regressions remain local and final qualification remains mandatory.
 
 The aggregate result is named `Effort development gate`. Receipt-bearing
 attempts serialize without automatic cancellation so successful Python units

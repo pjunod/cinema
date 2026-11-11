@@ -711,3 +711,536 @@ async fn title_priority_observation_requires_live_higher_priority_same_node_work
     })
     .await;
 }
+
+#[tokio::test]
+async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the_title() {
+    use plurx_core::transcode::dv_fel_qualification::{self as q, FelVerdict};
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let (_, id) = seed_file(&store, "title-fel-verdict").await;
+        let file = store.get_file(id).await.expect("file").expect("file");
+        let mut fel = probe();
+        fel.dolby_vision.el_present = Some(true);
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("path"),
+                file.size,
+                file.mtime,
+                &fel,
+            )
+            .await
+            .expect("FEL probe");
+        let file = store.get_file(id).await.expect("file").expect("file");
+        let (scanned, job) = active(&store, file.id, &scanner, 1_000).await;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&scanned, &job, &scanner, 1_001))
+                .await
+                .expect("publish"),
+            JobPublishOutcome::Published { .. }
+        ));
+        let identity = q::identity(
+            &scanner,
+            plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
+            &q::encoder_identity("ffmpeg", "Mesa (radeonsi)", "/dev/dri/renderD128"),
+        );
+        let verdict = FelVerdict {
+            schema: q::SCHEMA,
+            identity: identity.clone(),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            admitted: false,
+            served_mean: 2.9,
+            dropped_mean: 1.79,
+            served_p99: 7.78,
+            dropped_p99: 9.6,
+            p99_tolerance: 0.0,
+            measured_at_ms: 2_000,
+            windows: Vec::new(),
+        };
+        let value = serde_json::to_value(&verdict).expect("verdict");
+        // Another source generation never receives this verdict.
+        assert!(
+            !store
+                .put_dv_fel_verdict(file.id, file.size + 1, file.mtime, &value)
+                .await
+                .expect("stale"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .put_dv_fel_verdict(file.id, file.size, file.mtime, &value)
+                .await
+                .expect("store"),
+            "{backend}"
+        );
+        let stored = store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe")
+            .expect("probe");
+        // Beside the title aggregate, which it leaves intact; read back as
+        // this source's current verdict for this renderer and recipe.
+        let document: serde_json::Value = serde_json::from_str(&stored).expect("JSON");
+        assert_eq!(
+            document[PROBE_FIELD],
+            serde_json::to_value(stats()).expect("stats")
+        );
+        assert_eq!(
+            q::verdict_state(Some(&stored), file.size, file.mtime, &identity),
+            q::VerdictState::Current(verdict.clone()),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .dv_fel_verdict_counts(&identity)
+                .await
+                .expect("counts"),
+            (1, 0)
+        );
+        assert_eq!(
+            store
+                .dv_fel_verdict_counts(&"b".repeat(64))
+                .await
+                .expect("counts"),
+            (0, 0)
+        );
+        // A verdict measured under this identity is current; under any other
+        // it is what a renderer change re-qualifies.
+        assert!(
+            store
+                .dv_fel_stale_titles(&identity, 16)
+                .await
+                .expect("current")
+                .is_empty(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .dv_fel_stale_titles(&"b".repeat(64), 16)
+                .await
+                .expect("stale"),
+            vec![file.id],
+            "{backend}"
+        );
+        assert!(store.dv_fel_stale_titles(&identity, 0).await.is_err());
+        // The settled title has no demand until a play asks for it again.
+        assert!(store
+            .dv_title_demands(&scanner, 0)
+            .await
+            .expect("settled")
+            .is_empty());
+        assert!(
+            store
+                .request_dv_fel_requalification(file.id, &q::requalify_binding(&scanner, &identity))
+                .await
+                .expect("requalify"),
+            "{backend}"
+        );
+        let rerun = demand(&store, file.id, &scanner).await;
+        assert!(rerun.probe_revision > scanned.probe_revision, "{backend}");
+        // While a title job for it is queued or running, a request is a
+        // no-op: rotating the demand would cancel that attempt.
+        let (attempt, attempt_job) = active(&store, file.id, &scanner, 3_000).await;
+        assert!(
+            !store
+                .request_dv_fel_requalification(file.id, &q::requalify_binding(&scanner, &identity))
+                .await
+                .expect("requalify during a scan"),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .background_job(&attempt_job.id)
+                .await
+                .expect("job")
+                .expect("job")
+                .state,
+            JobState::Running,
+            "{backend}: the in-flight scan keeps running"
+        );
+        assert_eq!(
+            demand(&store, file.id, &scanner).await.probe_revision,
+            attempt.probe_revision
+        );
+        // A verdict is never written for a title without an enhancement layer.
+        let plain = seed(&store, "title-fel-verdict-mel").await;
+        assert!(
+            !store
+                .put_dv_fel_verdict(plain.id, plain.size, plain.mtime, &value)
+                .await
+                .expect("not FEL"),
+            "{backend}"
+        );
+        assert!(store
+            .put_dv_fel_verdict(file.id, file.size, file.mtime, &serde_json::json!([]))
+            .await
+            .is_err());
+    })
+    .await;
+}
+
+fn analysis(file: &MediaFile, scanner: &str) -> AnalysisTitleOutput {
+    AnalysisTitleOutput {
+        file_id: file.id,
+        source_size: file.size,
+        source_mtime: file.mtime,
+        scanner_digest: scanner.into(),
+        stats: stats(),
+    }
+}
+
+async fn stored_aggregate(store: &Arc<dyn Store>, file: i64) -> Option<DvTitleStats> {
+    let document = store
+        .get_file_probe_json(file)
+        .await
+        .expect("probe")
+        .expect("probe");
+    DvTitleStats::from_probe_json(&document)
+}
+
+/// The content-analysis pass's aggregate lands on the title's current
+/// demand only: bound to the pass's scanner like a job's, refused for a
+/// source the catalogue no longer describes, dropped with its generation when
+/// another scanner binds, and left open for the job to settle without a read.
+#[tokio::test]
+async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let file = seed(&store, "title-analysis").await;
+        let before = demand(&store, file.id, &scanner).await;
+
+        let mut stale = analysis(&file, &scanner);
+        stale.source_size += 1;
+        assert_eq!(
+            store
+                .publish_dv_title_from_analysis(stale)
+                .await
+                .expect("stale"),
+            AnalysisTitleOutcome::NoDemand,
+            "{backend}"
+        );
+        assert_eq!(stored_aggregate(&store, file.id).await, None, "{backend}");
+
+        // An unbound demand is bound to the pass's scanner, then receives it.
+        assert_eq!(
+            store
+                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .await
+                .expect("publish"),
+            AnalysisTitleOutcome::Published,
+            "{backend}"
+        );
+        assert_eq!(
+            stored_aggregate(&store, file.id).await,
+            Some(stats()),
+            "{backend}"
+        );
+        // Still open, same generation: the title worker's own bind changes
+        // nothing, which is what lets its job reuse the aggregate.
+        let open = demand(&store, file.id, &scanner).await;
+        assert_eq!(open.probe_revision, before.probe_revision, "{backend}");
+        assert_eq!(
+            DvTitleStats::from_probe_json(&open.probe_json),
+            Some(stats()),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .bind_dv_title_demand(open.probe_revision, &scanner)
+                .await
+                .expect("rebind"),
+            Some(open.probe_revision),
+            "{backend}"
+        );
+        assert_eq!(
+            stored_aggregate(&store, file.id).await,
+            Some(stats()),
+            "{backend}"
+        );
+
+        // Another scanner rotates the generation away with its aggregate.
+        let other = "b".repeat(64);
+        let rotated = store
+            .bind_dv_title_demand(open.probe_revision, &other)
+            .await
+            .expect("rotate")
+            .expect("rotated");
+        assert_ne!(rotated, open.probe_revision, "{backend}");
+        assert_eq!(stored_aggregate(&store, file.id).await, None, "{backend}");
+
+        // That scanner's queued job keeps its generation: the pass does not
+        // rotate it away, and the job publishes its own answer.
+        let other_demand = demand(&store, file.id, &other).await;
+        assert!(matches!(
+            enqueue(&store, &other_demand, &other, 4_000).await,
+            EnqueueOutcome::Accepted { .. }
+        ));
+        assert_eq!(
+            store
+                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .await
+                .expect("busy"),
+            AnalysisTitleOutcome::Busy,
+            "{backend}"
+        );
+        assert_eq!(
+            demand(&store, file.id, &scanner).await.probe_revision,
+            rotated,
+            "{backend}: not rotated"
+        );
+
+        // A job's completed answer for this scanner is not replaced.
+        let (job_demand, job) = active(&store, file.id, &scanner, 5_000).await;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&job_demand, &job, &scanner, 5_001))
+                .await
+                .expect("job publication"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert_eq!(
+            store
+                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .await
+                .expect("settled"),
+            AnalysisTitleOutcome::Current,
+            "{backend}"
+        );
+        assert!(store
+            .publish_dv_title_from_analysis(AnalysisTitleOutput {
+                scanner_digest: "not a digest".into(),
+                ..analysis(&file, &scanner)
+            })
+            .await
+            .is_err());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fel_recipe_variants_preserve_peers_and_late_requests_reopen_the_title_outbox() {
+    use plurx_core::transcode::{
+        dv_fel_qualification as q, EnhancementRateEnvelope, EnhancementRateLimits,
+        EnhancementRateProvenance,
+    };
+    for_each_backend(|store, backend| async move {
+        eprintln!("exact FEL variant backend entered: {backend}");
+        let scanner = "a".repeat(64);
+        let (_, id) = seed_file(&store, "fel-exact-variants").await;
+        let file = store.get_file(id).await.expect("file").expect("file");
+        let mut p = probe();
+        p.dolby_vision.el_present = Some(true);
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("path"),
+                file.size,
+                file.mtime,
+                &p,
+            )
+            .await
+            .expect("FEL probe");
+        let file = store.get_file(id).await.expect("file").expect("file");
+        let envelope = |peak| {
+            EnhancementRateEnvelope::resolve(
+                90_000,
+                EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+                3840,
+                2160,
+                (24, 1),
+                true,
+                EnhancementRateLimits {
+                    video_peak_bps: Some(peak),
+                    ..Default::default()
+                },
+            )
+            .expect("checked envelope")
+        };
+        let first =
+            q::FelRecipeRequest::new("b".repeat(64), file.size, file.mtime, envelope(135_000_000), q::FelRecipeOutput::new(0,(3840,2160),(24,1)));
+        let second =
+            q::FelRecipeRequest::new("b".repeat(64), file.size, file.mtime, envelope(130_000_000), q::FelRecipeOutput::new(0,(3840,2160),(24,1)));
+        assert_ne!(
+            first.identity, second.identity,
+            "same target with a different peak is different evidence"
+        );
+        assert!(
+            store
+                .request_dv_fel_variant(id, &first)
+                .await
+                .expect("first request"),
+            "{backend}"
+        );
+        let (scanned, mut job) = active(&store, id, &scanner, 1000).await;
+        // Arrives after the worker's snapshot/claim and must survive completion.
+        assert!(store
+            .request_dv_fel_variant(id, &second)
+            .await
+            .expect("late request"));
+        assert!(store.dv_title_demands(&scanner,0).await.expect("running demand").iter().all(|d|d.file_id!=id));
+        // Qualification Busy/preempted does not complete its request. The same
+        // durable title job must be discoverable and reclaimable after Yield,
+        // including the recipe which arrived after its original snapshot.
+        for (now,reason) in [(1001,"fel_busy"),(1004,"fel_preempted")] {
+            assert!(store.settle_job(SettleJob {
+                token:job.token.clone().expect("owner"), now_ms:now,
+                settlement:JobSettlement::Yield { error_code:Some(reason.into()),
+                    not_before_ms:now+1,checkpoint:Some(serde_json::json!({"fel_title_aggregate":publication(&scanned,&job,&scanner,now).output})) },
+            }).await.expect("yield pending measurement"));
+            let resumed=demand(&store,id,&scanner).await;
+            assert_eq!(resumed.queued_job_id.as_deref(),Some(job.id.as_str()));
+            assert_eq!(q::pending_recipes(&resumed.probe_json,file.size,file.mtime).len(),2);
+            job=claim(&store,resumed.queued_job_id.as_deref().expect("queued resume"),now+2).await;
+            assert!(job.checkpoint.is_some(),"resume retains scanned title aggregate");
+        }
+        let receipt = |request: q::FelRecipeRequest, at| q::FelRecipeVerdict {
+            verdict: q::FelVerdict::unmeasurable(
+                request.identity.clone(),
+                request.source_size,
+                request.source_mtime,
+                at,
+            ),
+            request,
+        };
+        assert!(store
+            .put_dv_fel_verdict(
+                id,
+                file.size,
+                file.mtime,
+                &serde_json::to_value(receipt(first.clone(), 1001)).expect("receipt")
+            )
+            .await
+            .expect("publish first"));
+        let document = store
+            .get_file_probe_json(id)
+            .await
+            .expect("probe")
+            .expect("probe");
+        assert_eq!(
+            q::pending_recipes(&document, file.size, file.mtime),
+            vec![second.clone()]
+        );
+        assert!(matches!(
+            q::verdict_state(Some(&document), file.size, file.mtime, &first.identity),
+            q::VerdictState::Current(_)
+        ));
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&scanned, &job, &scanner, 1008))
+                .await
+                .expect("complete"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert!(store
+            .dv_title_demands(&scanner, 0)
+            .await
+            .expect("pending wakes after completion")
+            .iter()
+            .any(|d| d.file_id == id));
+        assert!(store
+            .put_dv_fel_verdict(
+                id,
+                file.size,
+                file.mtime,
+                &serde_json::to_value(receipt(second.clone(), 1003)).expect("second receipt")
+            )
+            .await
+            .expect("publish second"));
+        let document = store
+            .get_file_probe_json(id)
+            .await
+            .expect("probe")
+            .expect("probe");
+        assert!(q::pending_recipes(&document, file.size, file.mtime).is_empty());
+        for request in [&first, &second] {
+            assert!(matches!(
+                q::verdict_state(Some(&document), file.size, file.mtime, &request.identity),
+                q::VerdictState::Current(_)
+            ));
+        }
+        assert_eq!(
+            store.dv_fel_verdict_counts(&"b".repeat(64)).await.expect("variant readiness counts"),
+            (1, 0), "multiple completed variants count this title only once"
+        );
+        assert_eq!(
+            store.dv_fel_verdict_counts(&"f".repeat(64)).await.expect("other backend counts"),
+            (0, 0)
+        );
+        assert!(store
+            .put_dv_fel_verdict(
+                id, file.size + 1, file.mtime,
+                &serde_json::to_value(receipt(first.clone(), 1004)).expect("inconsistent receipt")
+            ).await.is_err(), "mismatched API/request/verdict source facts are malformed");
+        let mut stale = first.clone();
+        stale.source_size += 1;
+        assert!(!store
+            .put_dv_fel_verdict(
+                id,
+                file.size + 1,
+                file.mtime,
+                &serde_json::to_value(receipt(stale, 1004)).expect("coherent stale source receipt")
+            )
+            .await
+            .expect("source fence"));
+        for i in 0..8 {
+            let request = q::FelRecipeRequest::new(
+                format!("{i:064x}"),
+                file.size,
+                file.mtime,
+                envelope(130_000_000),
+                q::FelRecipeOutput::new(0,(3840,2160),(24,1)),
+            );
+            assert!(store
+                .request_dv_fel_variant(id, &request)
+                .await
+                .expect("bounded request"));
+        }
+        let ninth =
+            q::FelRecipeRequest::new("f".repeat(64), file.size, file.mtime, envelope(130_000_000), q::FelRecipeOutput::new(0,(3840,2160),(24,1)));
+        assert!(!store
+            .request_dv_fel_variant(id, &ninth)
+            .await
+            .expect("pending bound"));
+        let pending_doc = store
+            .get_file_probe_json(id)
+            .await
+            .expect("pending")
+            .expect("pending");
+        for (i, request) in q::pending_recipes(&pending_doc, file.size, file.mtime)
+            .into_iter()
+            .enumerate()
+        {
+            assert!(store
+                .put_dv_fel_verdict(
+                    id,
+                    file.size,
+                    file.mtime,
+                    &serde_json::to_value(receipt(request, 2000 + i as i64)).expect("receipt")
+                )
+                .await
+                .expect("publish bounded variants"));
+        }
+        let final_doc = store
+            .get_file_probe_json(id)
+            .await
+            .expect("final")
+            .expect("final");
+        let parsed: serde_json::Value = serde_json::from_str(&final_doc).expect("JSON");
+        assert_eq!(
+            parsed[q::VARIANTS_KEY].as_object().expect("variants").len(),
+            8
+        );
+        assert!(q::pending_recipes(&final_doc, file.size, file.mtime).is_empty());
+        assert!(
+            matches!(
+                q::verdict_state(Some(&final_doc), file.size, file.mtime, &first.identity),
+                q::VerdictState::Missing
+            ),
+            "oldest complete variant evicts only under bounded pressure"
+        );
+        eprintln!("exact FEL variant backend completed: {backend}");
+    })
+    .await;
+}

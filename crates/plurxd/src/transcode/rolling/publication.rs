@@ -134,12 +134,19 @@ pub(super) struct ServedPlaylistSnapshot {
     pub(super) available_at: Instant,
 }
 
-/// Frozen at create. No production source/transport class is qualified for
-/// shorter readiness yet; candidate selection belongs only to the test lab.
+/// First publication is separate from steady reserve. Native HLS must admit
+/// its fixed advertised target before attachment; the audited hls.js path can
+/// replenish a shorter first reload window. This contract is frozen at create,
+/// so a retry or producer replacement cannot shorten native admission.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum RollingStartupPolicy {
-    #[default]
+    #[cfg(test)]
     Conservative,
+    #[default]
+    NativePresentationWindow,
+    FirstReloadWindow,
+    #[cfg(test)]
+    FirstCompleteSegment,
     #[cfg(test)]
     WebFixedHlsV1,
 }
@@ -147,7 +154,12 @@ pub(super) enum RollingStartupPolicy {
 impl RollingStartupPolicy {
     pub(super) fn uses_small_bootstrap(self) -> bool {
         match self {
+            #[cfg(test)]
             Self::Conservative => false,
+            Self::NativePresentationWindow => false,
+            Self::FirstReloadWindow => true,
+            #[cfg(test)]
+            Self::FirstCompleteSegment => true,
             #[cfg(test)]
             Self::WebFixedHlsV1 => true,
         }
@@ -155,7 +167,20 @@ impl RollingStartupPolicy {
 
     pub(super) fn bootstrap_ms(self, rate: f64) -> i64 {
         match self {
+            #[cfg(test)]
             Self::Conservative => rolling_initial_runway_ms(rate),
+            Self::NativePresentationWindow => rolling_initial_runway_ms(rate),
+            Self::FirstReloadWindow => {
+                ((ROLLING_PUBLICATION_TARGET.as_millis() as f64 * rate).ceil() as i64).clamp(
+                    ROLLING_PUBLICATION_TARGET.as_millis() as i64,
+                    ROLLING_RESERVE_MAX_MS,
+                )
+            }
+            #[cfg(test)]
+            Self::FirstCompleteSegment => {
+                ((f64::from(plurx_core::transcode::SEGMENT_SECONDS) * 1_000.0 * rate).ceil() as i64)
+                    .clamp(2_000, ROLLING_RESERVE_MAX_MS)
+            }
             #[cfg(test)]
             Self::WebFixedHlsV1 => {
                 ((32_000.0 * rate).ceil() as i64).clamp(32_000, ROLLING_RESERVE_MAX_MS)
@@ -192,7 +217,6 @@ pub(super) struct RollingPublicationClock {
     pub(super) retention_first_segment: Option<i64>,
     pub(super) budget_attempt: Option<u64>,
     pub(super) budget_anchor_sequence: Option<u64>,
-    legacy_bootstrap_at: Option<Instant>,
     pub(super) allowed_end_ms: Option<i64>,
     pub(super) carried_surplus_ms: i64,
     pub(super) demand_observation_age_ms: Option<i64>,
@@ -203,12 +227,26 @@ pub(super) struct RollingPublicationClock {
 }
 
 impl RollingPublicationClock {
-    pub(super) fn bind_startup_transport(&mut self, _transport: Option<&str>) {
-        // A web transport label proves neither source cadence nor native
-        // discovery, rate/resume behavior, or the daemon resource path.
-        // Retain conservative readiness before the first production response.
+    #[cfg(test)]
+    pub(super) fn historical_control_for_test() -> Self {
+        Self {
+            startup_policy: RollingStartupPolicy::Conservative,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn bind_startup_transport(&mut self, transport: Option<&str>) {
+        // A ready playlist is not native decoder admission. Safari can fetch
+        // every object in a short target-16 window yet stay at HAVE_METADATA
+        // until startup expires. Only the audited hls.js path has evidence for
+        // the short reload window; native, omitted and future transports need
+        // a window derived from that same fixed presentation target. Keep the
+        // producer's paid steady reserve and all media validation unchanged.
         if !self.startup_policy_bound && self.served.is_none() {
-            self.startup_policy = RollingStartupPolicy::Conservative;
+            self.startup_policy = match transport {
+                Some("hlsjs") => RollingStartupPolicy::FirstReloadWindow,
+                _ => RollingStartupPolicy::NativePresentationWindow,
+            };
             self.startup_policy_bound = true;
         }
     }
@@ -255,9 +293,6 @@ impl RollingPublicationClock {
         budget: &RollingPublicationBudget,
         lease: Option<&crate::playback_control::RollingLeaseSnapshot>,
     ) -> i64 {
-        if budget.demand_sequence.is_none() {
-            return budget.desired_end_ms;
-        }
         let rate = rolling_playback_rate(lease.and_then(|lease| lease.demand.as_ref()));
         budget
             .consumed_end_ms
@@ -288,7 +323,6 @@ impl RollingPublicationClock {
             self.retention_first_segment = None;
             self.budget_attempt = None;
             self.budget_anchor_sequence = None;
-            self.legacy_bootstrap_at = None;
             self.allowed_end_ms = None;
             self.carried_surplus_ms = 0;
             self.demand_observation_age_ms = None;
@@ -303,18 +337,42 @@ impl RollingPublicationClock {
         producer_attempt: u64,
         lease: Option<&crate::playback_control::RollingLeaseSnapshot>,
         media_origin_ms: i64,
+        requested_position_ms: i64,
     ) -> RollingPublicationBudget {
         self.budget_attempt = Some(producer_attempt);
+        let initial_consumed_ms = requested_position_ms.saturating_sub(media_origin_ms).max(0);
+        let published = self
+            .served
+            .as_ref()
+            .is_some_and(|served| served.producer_attempt == producer_attempt);
         let explicit = lease.filter(|lease| {
             lease.mode == crate::playback_control::RollingLeaseMode::Explicit
                 && lease.demand.is_some()
                 && lease.accepted_demand_sequence.is_some()
         });
         let budget = if let Some(lease) = explicit {
-            self.legacy_bootstrap_at = None;
             let demand = lease.demand.as_ref().expect("explicit demand checked");
-            let observation_age = lease.demand_observation_age.unwrap_or_default();
-            let ends = rolling_explicit_publication_ends(demand, observation_age, media_origin_ms);
+            // Rendering telemetry is not permission to extrapolate a playhead
+            // before this attachment has actually presented. The actor's
+            // admission requires advancing, exact-attempt post-publication
+            // observations; its latest observation then owns elapsed time.
+            let observation_age = if published
+                && lease.startup.phase == crate::playback_control::RollingStartupPhase::Presented
+            {
+                lease.demand_observation_age.unwrap_or_default()
+            } else {
+                Duration::ZERO
+            };
+            let mut ends =
+                rolling_explicit_publication_ends(demand, observation_age, media_origin_ms);
+            if !published {
+                ends.consumed_end_ms = initial_consumed_ms;
+                ends.consumed_absolute_ms = media_origin_ms.saturating_add(initial_consumed_ms);
+                ends.desired_end_ms = initial_consumed_ms.saturating_add(
+                    rolling_initial_runway_ms(rolling_playback_rate(Some(demand))),
+                );
+                ends.allowed_end_ms = ends.desired_end_ms.saturating_add(ROLLING_SEGMENT_MAX_MS);
+            }
             RollingPublicationBudget {
                 demand_sequence: lease.accepted_demand_sequence,
                 consumed_end_ms: ends.consumed_end_ms,
@@ -331,19 +389,40 @@ impl RollingPublicationClock {
                 ),
             }
         } else {
-            let bootstrap_at = *self.legacy_bootstrap_at.get_or_insert(now);
-            let consumed_end_ms =
-                i64::try_from(now.saturating_duration_since(bootstrap_at).as_millis())
-                    .unwrap_or(i64::MAX);
+            // A legacy client supplies no playhead. Its conservative clock
+            // starts with actual media delivery, never writer inventory or
+            // mere playlist availability. The actor resets this evidence on
+            // replacement and rejects predecessor commits.
+            let delivered_at = lease
+                .filter(|lease| published && lease.delivery.producer_attempt == producer_attempt)
+                .and_then(|lease| lease.delivery.first_media_committed_at);
+            let elapsed_ms = delivered_at.map_or(0, |at| {
+                i64::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(i64::MAX)
+            });
+            let consumed_end_ms = initial_consumed_ms.saturating_add(elapsed_ms);
             let desired_end_ms = consumed_end_ms.saturating_add(ROLLING_INITIAL_RUNWAY_MS);
-            let fetched_end_ms = lease.map_or(0, |lease| lease.delivery.fetched_end_ms.max(0));
+            let fetched_end_ms = lease
+                .map_or(0, |lease| lease.delivery.fetched_end_ms.max(0))
+                .max(initial_consumed_ms);
+            // The create's frozen position authorizes native bootstrap even
+            // before any media can be fetched. Pay one bounded complete cut
+            // past the admission floor: rounding down would publish an unsafe
+            // short window (or wait forever at a non-segment boundary). Once
+            // published, the ordinary fetch frontier owns the allowance again.
+            let allowed_end_ms = if !published
+                && self.startup_policy == RollingStartupPolicy::NativePresentationWindow
+            {
+                desired_end_ms.saturating_add(ROLLING_SEGMENT_MAX_MS)
+            } else {
+                desired_end_ms
+                    .saturating_add(ROLLING_SEGMENT_MAX_MS)
+                    .min(fetched_end_ms.saturating_add(ROLLING_INITIAL_RUNWAY_MS))
+            };
             RollingPublicationBudget {
                 demand_sequence: None,
                 consumed_end_ms,
                 desired_end_ms,
-                allowed_end_ms: desired_end_ms
-                    .saturating_add(ROLLING_SEGMENT_MAX_MS)
-                    .min(fetched_end_ms.saturating_add(ROLLING_INITIAL_RUNWAY_MS)),
+                allowed_end_ms,
                 protected_position_ms: consumed_end_ms
                     .saturating_sub(ROLLING_PUBLICATION_GUARD_MS)
                     .saturating_sub(ROLLING_BACK_BUFFER_MS)

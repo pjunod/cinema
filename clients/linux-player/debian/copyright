@@ -1,0 +1,76 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: plurx-player
+Comment: The launcher is part of plurx; see LICENSE and NOTICE at the
+ repository root. The binary package contains only the Python/Lua frontend.
+ Historical renderer patches and CPU controls remain in the source package;
+ mpv and libplacebo binaries/libraries are supplied by their system packages.
+
+Files: *
+Copyright: 2026 plurx contributors
+License: Apache-2.0
+
+Files: packaging/patches/mpv/*
+Copyright: 2000-2025 the MPlayer, mplayer2 and mpv contributors
+ 2026 plurx contributors
+License: GPL-2+
+Comment: Historical source patches only. No mpv binary or upstream source
+ component is included in this package.
+
+Files: packaging/patches/mpv/0006-vo_gpu_next-normalize-DV-reconstruction-metadata.patch
+ packaging/patches/mpv/0007-vo_gpu_next-preserve-DV-software-sampling-precision.patch
+ packaging/patches/mpv/0008-vo_gpu_next-round-the-final-DV-UNORM16-cache-exactly.patch
+Copyright: 2026 plurx contributors
+License: LGPL-2.1+
+Comment: Dolby Vision reconstruction, upload precision and terminal RGB rounding.
+
+Files: dm/*
+Copyright: 2026 Paul Junod
+License: Apache-2.0
+Comment: plurx's closed-form Dolby Vision display management
+ (tools/dv_processing in the plurx repository; see its LICENSE and NOTICE),
+ retained as source for historical CPU controls.
+
+Files: packaging/libdovi/rpu_parser.h
+Copyright: 2021-2026 quietvoid and the dovi_tool contributors
+License: MIT
+Comment: The libdovi C API header (dolby_vision 3.2.0), the copy plurx's
+ processing helper pins. mpv links the distribution's libdovi.
+
+License: Apache-2.0
+ On Debian systems the full text is in /usr/share/common-licenses/Apache-2.0.
+
+License: LGPL-2.1+
+ This library is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation; either version 2.1 of the License, or (at
+ your option) any later version.
+ .
+ On Debian systems the full text is in
+ /usr/share/common-licenses/LGPL-2.1.
+
+License: GPL-2+
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the Free
+ Software Foundation; either version 2 of the License, or (at your option)
+ any later version.
+ .
+ On Debian systems the full text is in /usr/share/common-licenses/GPL-2.
+
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a
+ copy of this software and associated documentation files (the "Software"),
+ to deal in the Software without restriction, including without limitation
+ the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ and/or sell copies of the Software, and to permit persons to whom the
+ Software is furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ DEALINGS IN THE SOFTWARE.

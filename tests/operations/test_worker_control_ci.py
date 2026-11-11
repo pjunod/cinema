@@ -3,6 +3,7 @@
 import io
 import json
 import hashlib
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -44,6 +45,7 @@ class WorkerControlCiTests(unittest.TestCase):
         for path in (
             "crates/plurx-worker-control/*",
             "crates/plurxd/src/library_work.rs",
+            "crates/plurxd/src/library_work/env.rs",
             "crates/plurxd/Cargo.toml",
             "Cargo.toml",
             "Cargo.lock",
@@ -62,6 +64,13 @@ class WorkerControlCiTests(unittest.TestCase):
         self.assertIn("target/worker-control-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", python)
         self.assertIn("731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91", python)
         self.assertIn("sys.version_info[:3] == (3, 12, 15)", python)
+
+        rust = step_block(self.proof, "Install the pinned Rust controller prerequisite")
+        self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", rust)
+        self.assertIn("dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5", rust)
+        self.assertIn('toolchain: "1.97.1"', rust)
+        self.assertLess(self.proof.index("Install the pinned Rust controller prerequisite"),
+                        self.proof.index("Run the pinned production worker controller proof"))
 
         resume = step_block(self.proof, "Prepare same-PR worker proof resumption")
         self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", resume)
@@ -89,6 +98,92 @@ class WorkerControlCiTests(unittest.TestCase):
         self.assertIn("always()", provenance)
         self.assertIn('test -s "$output_dir/receipt.json"', provenance)
         self.assertIn('cp -- "$origin" "$output_dir/resume-origin.json"', provenance)
+
+    def test_worker_cache_uses_its_manifest_and_drops_auth_before_proof(self) -> None:
+        cache = step_block(self.proof, "Cache the pinned worker controller toolchain")
+        self.assertIn("if: steps.worker-control-inputs.outputs.affected == 'true'", cache)
+        self.assertIn(
+            "PLURX_WORKER_CACHE_BASE: ${{ github.server_url }}/api/packages/noirr/generic/plurx-worker-control-toolchain",
+            cache,
+        )
+        self.assertIn("PLURX_WORKER_CACHE_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}", cache)
+        self.assertLess(self.proof.index(cache), self.proof.index(
+            "      - name: Run the pinned production worker controller proof\n"
+        ))
+        run = cache.split("        run: |\n", 1)[1]
+        run = "\n".join(line.removeprefix("          ") for line in run.splitlines())
+        manifest_path = ROOT / "verification/worker-control/toolchain.json"
+        manifest = json.loads(manifest_path.read_text())
+        archive = manifest["platforms"]["Linux-x86_64"]["archive"]
+        version = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        base = "http://forge.invalid/api/packages/noirr/generic/plurx-worker-control-toolchain"
+        destination = f"target/worker-control-tools/archives/{archive}"
+        token = "offline-contract-token"
+        variants = {
+            "valid": run,
+            "wrong-manifest": run.replace("verification/worker-control/toolchain.json",
+                                          "verification/durable-jobs/toolchain.json"),
+            "wrong-tool": run.replace(archive, "tla2tools-1.7.4.jar"),
+            "redirect": run.replace("curl -q ", "curl -q --location "),
+            "auth-retained": run.replace("unset PLURX_WORKER_CACHE_TOKEN", ":"),
+            "wrong-cache": run.replace("target/worker-control-tools/archives",
+                                       "target/formal-toolchain-seed"),
+        }
+        scratch = ROOT / "target/worker-cache-contract"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+            fixture = Path(temporary)
+            binary = fixture / "bin"
+            binary.mkdir()
+            curl = binary / "curl"
+            curl.write_text("""#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[0] == '-q'
+assert not set(args) & {'-L', '--location', '--location-trusted', '-k', '--insecure'}
+def option(name):
+    return args[args.index(name) + 1]
+assert option('--proto') == '=http,https'
+assert option('--max-filesize') == '268435456'
+assert 0 < int(option('--connect-timeout')) <= 15
+assert 0 < int(option('--max-time')) <= 240
+assert option('--user') == 'noirr:' + os.environ['CACHE_CONTRACT_TOKEN']
+urls = [arg for arg in args if arg.startswith(('http://', 'https://'))]
+assert urls == [os.environ['CACHE_CONTRACT_URL']]
+assert option('--output') == os.environ['CACHE_CONTRACT_OUTPUT']
+Path(option('--output')).write_bytes(b'offline pinned archive fixture')
+""")
+            curl.chmod(0o755)
+            for name, commands in variants.items():
+                with self.subTest(variant=name):
+                    case = fixture / name
+                    case.mkdir()
+                    for relative in ("verification/worker-control/toolchain.json",
+                                     "verification/durable-jobs/toolchain.json"):
+                        target = case / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes((ROOT / relative).read_bytes())
+                    env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
+                               PLURX_WORKER_CACHE_BASE=base, PLURX_WORKER_CACHE_TOKEN=token,
+                               CACHE_CONTRACT_TOKEN=token,
+                               CACHE_CONTRACT_URL=f"{base}/{version}/{archive}",
+                               CACHE_CONTRACT_OUTPUT=destination)
+                    env.pop("BASH_ENV", None)
+                    proof = '\ntest -z "${PLURX_WORKER_CACHE_TOKEN+x}"\n'
+                    proof += f'test -s "{destination}"\nprintf "proof-ready\\n"\n'
+                    result = subprocess.run(["bash", "--noprofile", "--norc", "-c", commands + proof],
+                                            cwd=case, env=env, capture_output=True, text=True)
+                    if name == "valid":
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout, "proof-ready\n")
+                        self.assertNotIn(token, result.stdout + result.stderr)
+                        files = [str(item.relative_to(case)) for item in (case / "target").rglob("*")
+                                 if item.is_file()]
+                        self.assertEqual(files, [destination])
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertNotIn("proof-ready", result.stdout)
 
     def test_promotion_gate_requires_worker_proof_success(self) -> None:
         self.assertIn("- worker_control_proof", self.gate)
@@ -261,17 +356,30 @@ class WorkerControlResumeFixtures(unittest.TestCase):
             archive.writestr("t1_example.log", b"VERIFICATION: SUCCESSFUL\n")
             archive.writestr("source/Cargo.toml", b"[package]\n")
             archive.writestr("source/src/lib.rs", b"pub fn safe() {}\n")
+            archive.writestr("source/src/library_driver.rs", b"pub fn driver() {}\n")
             archive.writestr("build/ignored.bin", b"not needed")
         with tempfile.TemporaryDirectory(dir=self.fixture_scratch) as scratch:
             destination = Path(scratch) / "prior"
             destination.mkdir()
             count, byte_count = resume.extract_evidence(buffer.getvalue(), destination)
-            self.assertEqual(count, 4)
+            self.assertEqual(count, 5)
             self.assertEqual(byte_count, sum(len(value) for value in
                                              (b"{}", b"VERIFICATION: SUCCESSFUL\n",
-                                              b"[package]\n", b"pub fn safe() {}\n")))
+                                              b"[package]\n", b"pub fn safe() {}\n",
+                                              b"pub fn driver() {}\n")))
             self.assertTrue((destination / "source/src/lib.rs").is_file())
+            self.assertTrue((destination / "source/src/library_driver.rs").is_file())
             self.assertFalse((destination / "build/ignored.bin").exists())
+
+    def test_resume_source_allowlist_accepts_exact_driver_and_rejects_neighbor_paths(self) -> None:
+        from validation import worker_control_resume as resume
+
+        self.assertTrue(resume.selected_path(("source", "src", "library_driver.rs"), False))
+        for path in (("source", "src", "nested", "library_driver.rs"),
+                     ("source", "src", "library_driver.rs.bak"),
+                     ("source", "src", "build.rs")):
+            with self.subTest(path=path):
+                self.assertFalse(resume.selected_path(path, False))
 
     def test_unsafe_archive_member_is_rejected(self) -> None:
         from validation import python_unit_receipts as receipts

@@ -64,6 +64,226 @@ impl ProcessedCandidateHints {
 }
 
 impl TranscodeManager {
+    /// Ordinary catalog and source-copy enhancement use the same current
+    /// routing decision, including expiring learned decoder limits.
+    fn catalog_copy_decision(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        file: &plurx_core::domain::MediaFile,
+        caps: &plurx_core::playback::DeviceCaps,
+        strip_dovi: bool,
+    ) -> plurx_core::playback::Decision {
+        let mut profile = plurx_core::playback::DeviceProfile::from_caps_v2(caps);
+        profile.retain_applicable_learned_limits(crate::media_sessions::unix_ms());
+        let mut node = plurx_core::playback::RenderCaps::strip_only(strip_dovi);
+        node.dolby_vision_convert = plurx_core::store::stored_switch(
+            snapshot.settings.get(keys::DV_CONVERT).map(String::as_str),
+            true,
+        );
+        plurx_core::playback::decide(file, &profile, &node)
+    }
+
+    /// Resolve one of two server-derived HDR10-E recipes before executing a
+    /// helper. Descriptive bandwidth can disambiguate a cold processed row;
+    /// it grants no source, decoder, producer or admission authority. The
+    /// caller still requires the freshly prepared full recipe digest/ID.
+    #[cfg(test)]
+    pub(crate) fn processed_enhancement_envelope(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        request: &SessionRequest,
+        options: &TranscodeOptions,
+        input_has_audio: bool,
+        strip_dovi: bool,
+        destination: plurx_core::transcode::dv_processing::DvDestination,
+    ) -> Result<transcode::EnhancementRateEnvelope, String> {
+        Self::processed_enhancement_envelope_with_source_rate(
+            snapshot,
+            request,
+            options,
+            input_has_audio,
+            strip_dovi,
+            destination,
+            None,
+        )
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn processed_enhancement_envelope_with_source_rate(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        request: &SessionRequest,
+        options: &TranscodeOptions,
+        input_has_audio: bool,
+        strip_dovi: bool,
+        destination: plurx_core::transcode::dv_processing::DvDestination,
+        held_video_bps: Option<u64>,
+    ) -> Result<transcode::EnhancementRateEnvelope, String> {
+        let context = request
+            .candidate_context
+            .as_ref()
+            .ok_or("processed rate requires its current candidate context")?;
+        let caps = context
+            .canonical_caps
+            .as_ref()
+            .ok_or("processed rate requires current client capabilities")?;
+        let file = &snapshot.file;
+        let rung = if !context.selected_candidate.processed_dv
+            && context.selected_candidate.route == CandidateRoute::Encode
+        {
+            options.video_bitrate_kbps
+        } else {
+            super::bitrate_for_height(options.target_height)
+        };
+        let audio_bps = if input_has_audio {
+            u64::from(options.audio_bitrate_kbps) * 1000
+        } else {
+            0
+        };
+        let facts = Self::quality_facts_from_snapshot(snapshot);
+        let rate = facts
+            .as_ref()
+            .and_then(|facts| facts.frame_rate().value())
+            .map(|rate| (rate.numerator(), rate.denominator()));
+        let raster = file
+            .width
+            .and_then(|width| u32::try_from(width).ok())
+            .zip(file.height.and_then(|height| u32::try_from(height).ok()));
+        let native = raster.filter(|(width, height)| {
+            *width > 0
+                && *height > 0
+                && i64::from(*height) == options.target_height
+                && transcode::output_size(file, options.target_height)
+                    == Some((i64::from(*width), i64::from(*height)))
+        });
+        let copy_allowed = native.is_some()
+            && request.subtitle_burn.is_none()
+            && request.continuous_media.is_none()
+            && Self::catalog_copy_decision(snapshot, file, caps, strip_dovi).method
+                != plurx_core::playback::PlaybackMethod::Transcode
+            && copy_decoder_compatible(file, caps, rate);
+        let (width, height) = transcode::output_size(file, options.target_height)
+            .and_then(|(w, h)| u32::try_from(w).ok().zip(u32::try_from(h).ok()))
+            .ok_or("enhancement raster unavailable")?;
+        let rate = rate.ok_or("enhancement cadence unavailable")?;
+        let profile81 =
+            destination == plurx_core::transcode::dv_processing::DvDestination::Profile81;
+        let limits = {
+            // Union of actual Main10/PQ decoder entries at this raster/rate;
+            // unrelated codec/profile entries cannot lend their ceiling.
+            let mut peak = Some(0_u64);
+            for entry in caps.video.iter().filter(|entry| {
+                entry.codec == "hevc"
+                    && entry
+                        .profiles
+                        .iter()
+                        .any(|profile| normalized_profile(profile) == "main10")
+                    && entry.present.contains(&plurx_core::playback::Transfer::Pq)
+                    && (!profile81
+                        || entry.dv_profiles.contains(&8)
+                        || caps.legacy_blanket_dolby_vision)
+                    && entry.geometry_admission(width, height, Some(rate)) != Some(false)
+            }) {
+                match entry.max_bitrate_bps {
+                    None => {
+                        peak = None;
+                        break;
+                    }
+                    Some(limit) => {
+                        if let Some(current) = peak.as_mut() {
+                            *current = (*current).max(u64::try_from(limit).unwrap_or(0));
+                        }
+                    }
+                }
+            }
+            if let Some(limit) = request.finite_bitrate_limit_bps {
+                peak = Some(peak.map_or(u64::from(limit), |current| current.min(u64::from(limit))));
+            }
+            let video_peak = peak.map(|limit| limit.saturating_sub(audio_bps));
+            transcode::EnhancementRateLimits {
+                video_peak_bps: video_peak,
+                ..Default::default()
+            }
+        };
+        let make = |target, provenance| {
+            transcode::EnhancementRateEnvelope::resolve(
+                target, provenance, width, height, rate, profile81, limits,
+            )
+            .map_err(str::to_owned)
+        };
+        let rung_envelope = || make(rung, transcode::EnhancementRateProvenance::ExplicitEncode);
+        let source_envelope = || {
+            let held_rate = held_video_bps.or_else(|| {
+                snapshot
+                    .probe_json
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .and_then(|document| {
+                        facts.as_ref().and_then(|facts| {
+                            transcode::enhancement_stream_rate(
+                                &document,
+                                facts.input_video_stream(),
+                            )
+                        })
+                    })
+            });
+            let (target, provenance) =
+                transcode::enhancement_source_budget(file, held_rate).map_err(str::to_owned)?;
+            let envelope = make(target, provenance)?;
+            if !copy_allowed {
+                return Err(
+                    "enhancement source-copy budget requires fresh native copy compatibility"
+                        .to_owned(),
+                );
+            }
+            Ok(envelope)
+        };
+        let selected = &context.selected_candidate;
+        if !selected.processed_dv {
+            return if matches!(
+                selected.route,
+                CandidateRoute::Original | CandidateRoute::Remux
+            ) {
+                source_envelope()
+            } else {
+                rung_envelope()
+            };
+        }
+        let costs_match = |envelope: transcode::EnhancementRateEnvelope| {
+            selected.average_bps == Some(u64::from(envelope.target_kbps()) * 1000 + audio_bps)
+                && selected.peak_bps == Some(envelope.peak_bps() + audio_bps)
+        };
+        // Bandwidth descriptions select only independently derived recipes;
+        // fresh full recipe identity is still mandatory after preparation.
+        if let Ok(rung) = rung_envelope() {
+            if costs_match(rung) {
+                return Ok(rung);
+            }
+        }
+        let source = source_envelope()?;
+        if costs_match(source) {
+            Ok(source)
+        } else {
+            Err("the processed candidate's nominal rate matches no current quality recipe".into())
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn processed_hdr10_video_kbps(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        request: &SessionRequest,
+        options: &TranscodeOptions,
+        input_has_audio: bool,
+        strip_dovi: bool,
+    ) -> Result<u32, String> {
+        Self::processed_enhancement_envelope(
+            snapshot,
+            request,
+            options,
+            input_has_audio,
+            strip_dovi,
+            plurx_core::transcode::dv_processing::DvDestination::Hdr10,
+        )
+        .map(|envelope| envelope.target_kbps())
+    }
+
     /// The physical carrier can be Encode after catalog selection. Only the
     /// original service-reviewed conversion scope can restore its P81 intent;
     /// source tags, client preferences and a serialized description cannot.
@@ -310,7 +530,7 @@ impl TranscodeManager {
             *self.rate_control.read().expect("rate control snapshot")
         );
         let bytes = serde_json::to_vec(&(
-            "plurx:processed-catalog-description:v2",
+            "plurx:processed-catalog-description:v4-source-budget-envelope",
             destination,
             Self::vod_dv_preferences_from_snapshot(snapshot),
             crate::media_pool::PlanningBinding::from_snapshot(snapshot),
@@ -752,17 +972,33 @@ impl TranscodeManager {
             quality_rc: self.rate_control_snapshot().quality_rc,
         };
         let mut result = Vec::new();
-        let mut profile = plurx_core::playback::DeviceProfile::from_caps_v2(caps);
-        profile.retain_applicable_learned_limits(crate::media_sessions::unix_ms());
-        let mut node =
-            plurx_core::playback::RenderCaps::strip_only(crate::ffmpeg::has_dovi_rpu().await);
-        node.dolby_vision_convert = plurx_core::store::stored_switch(
-            snapshot.settings.get(keys::DV_CONVERT).map(String::as_str),
-            true,
-        );
-        let copy_decision = plurx_core::playback::decide(file, &profile, &node);
+        let copy_decision =
+            Self::catalog_copy_decision(snapshot, file, caps, crate::ffmpeg::has_dovi_rpu().await);
+        // Discovery has no retained Copy tuple. Resolve its canonical selected
+        // track with the same sink/route/offset contract as session creation;
+        // decide() alone still inspects the source's default audio track.
+        let resolved_copy_audio =
+            audio_claim
+                .as_ref()
+                .map_or(copy_decision.transcode_audio, |claim| {
+                    let selected = audio.map_or_else(
+                        || file.audio_streams.first(),
+                        |index| {
+                            file.audio_streams
+                                .iter()
+                                .find(|stream| stream.index == index)
+                        },
+                    );
+                    plurx_core::playback::audio::resolve_audio(
+                        selected,
+                        &claim.profile(),
+                        plurx_core::playback::audio::AudioRoute::Progressive,
+                        audio_offset_ms,
+                    )
+                    .transcodes()
+                });
         let (copy_audio, copy_dv, copy_conversion) = retained_copy.unwrap_or((
-            copy_decision.transcode_audio,
+            resolved_copy_audio,
             copy_decision.preserve_dolby_vision,
             copy_decision.convert_dolby_vision,
         ));
@@ -815,32 +1051,13 @@ impl TranscodeManager {
             file.width.and_then(|value| u32::try_from(value).ok()),
             file.height.and_then(|value| u32::try_from(value).ok()),
         ) {
-            let transfer = match transcode::routing_hdr(file) {
-                Some("hlg") => plurx_core::playback::Transfer::Hlg,
-                Some("hdr10" | "hdr10plus" | "dolby_vision") => plurx_core::playback::Transfer::Pq,
-                _ => plurx_core::playback::Transfer::Sdr,
-            };
             let compatible = copy_decision.method
                 != plurx_core::playback::PlaybackMethod::Transcode
                 && copy_source.is_some()
                 && copy_engine.is_some()
                 && copy_runtime_engine.is_some()
                 && subtitle.is_none()
-                && caps.video.iter().any(|entry| {
-                    file.video_codec.as_deref() == Some(entry.codec.as_str())
-                        && entry.geometry_admission(width, height, coded_rate) != Some(false)
-                        && (entry.max_frame_rate.is_none() || coded_rate.is_some())
-                        && entry.max_bitrate_bps.is_none_or(|ceiling| {
-                            file.bitrate.is_some_and(|bitrate| bitrate <= ceiling)
-                        })
-                        && entry.present.contains(&transfer)
-                        && file.video_profile.as_ref().is_none_or(|profile| {
-                            entry.profiles.is_empty()
-                                || entry.profiles.iter().any(|claim| {
-                                    normalized_profile(claim) == normalized_profile(profile)
-                                })
-                        })
-                });
+                && copy_decoder_compatible(file, caps, coded_rate);
             if compatible {
                 let recipe_digest = copy_candidate_recipe_digest(
                     file,
@@ -1114,6 +1331,7 @@ impl TranscodeManager {
                     aac: copy_audio,
                     preserve_dolby_vision: copy_dv,
                     convert_dolby_vision: copy_conversion,
+                    dual_layer_as_copied: false,
                 },
                 CandidateRoute::Encode => SessionKind::Transcode {
                     height: i64::from(candidate.target_height),
@@ -1121,6 +1339,7 @@ impl TranscodeManager {
                 CandidateRoute::Original => continue,
             };
             let request = SessionRequest {
+                source_telemetry: None,
                 dv_processing_destination: None,
                 sdr_master_codecs: None,
                 continuous_media: None,
@@ -1455,6 +1674,7 @@ impl TranscodeManager {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
             SessionKind::Transcode { .. } => None,
         };
@@ -1532,6 +1752,7 @@ impl TranscodeManager {
                     aac,
                     preserve_dolby_vision,
                     convert_dolby_vision,
+                    ..
                 } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
                 SessionKind::Transcode { .. } => None,
             };
@@ -1731,7 +1952,6 @@ impl TranscodeManager {
     pub(crate) fn candidate_context(candidate: &QualityCandidate) -> CandidateExecutionContext {
         CandidateExecutionContext {
             catalog_query: None,
-            prepared_processing: None,
             display_target: None,
             display_target_note: None,
             ordinary_request: None,
@@ -1842,7 +2062,12 @@ pub(super) fn prepared_processed_candidate(
         target_height: u32::try_from(options.target_height)
             .map_err(|_| "processed rung overflow")?,
         average_bps: Some(u64::from(options.video_bitrate_kbps) * 1000 + audio),
-        peak_bps: Some(u64::from(options.video_bitrate_kbps) * 1500 + audio),
+        peak_bps: Some(
+            plan.enhancement_rate_envelope().map_or_else(
+                || transcode::vbv_maxrate_bps(options.video_bitrate_kbps),
+                |envelope| envelope.peak_bps(),
+            ) + audio,
+        ),
         grade: if destination == DvDestination::Sdr {
             OutputGrade::Sdr
         } else {
@@ -1952,7 +2177,10 @@ fn encoded_client_compatible_for_grade(
                     } else {
                         0
                     };
-                    u64::from(plan.options().video_bitrate_kbps) * 1500 + audio
+                    plan.enhancement_rate_envelope().map_or_else(
+                        || transcode::vbv_maxrate_bps(plan.options().video_bitrate_kbps),
+                        |envelope| envelope.peak_bps(),
+                    ) + audio
                         <= u64::try_from(ceiling).unwrap_or(0)
                 })
                 && entry.present.contains(&if grade == OutputGrade::Hdr10 {
@@ -1961,6 +2189,44 @@ fn encoded_client_compatible_for_grade(
                     plurx_core::playback::Transfer::Sdr
                 })
         })
+}
+
+/// The same native-copy decoder predicate serves ordinary catalog discovery
+/// and source-quality processing. Source/executable custody remains with each
+/// caller's existing bound preparation.
+fn copy_decoder_compatible(
+    file: &plurx_core::domain::MediaFile,
+    caps: &plurx_core::playback::DeviceCaps,
+    coded_rate: Option<(u32, u32)>,
+) -> bool {
+    let Some((width, height)) = file
+        .width
+        .and_then(|value| u32::try_from(value).ok())
+        .zip(file.height.and_then(|value| u32::try_from(value).ok()))
+    else {
+        return false;
+    };
+    let transfer = match transcode::routing_hdr(file) {
+        Some("hlg") => plurx_core::playback::Transfer::Hlg,
+        Some("hdr10" | "hdr10plus" | "dolby_vision") => plurx_core::playback::Transfer::Pq,
+        _ => plurx_core::playback::Transfer::Sdr,
+    };
+    caps.video.iter().any(|entry| {
+        file.video_codec.as_deref() == Some(entry.codec.as_str())
+            && entry.geometry_admission(width, height, coded_rate) != Some(false)
+            && (entry.max_frame_rate.is_none() || coded_rate.is_some())
+            && entry
+                .max_bitrate_bps
+                .is_none_or(|ceiling| file.bitrate.is_some_and(|bitrate| bitrate <= ceiling))
+            && entry.present.contains(&transfer)
+            && file.video_profile.as_ref().is_none_or(|profile| {
+                entry.profiles.is_empty()
+                    || entry
+                        .profiles
+                        .iter()
+                        .any(|claim| normalized_profile(claim) == normalized_profile(profile))
+            })
+    })
 }
 
 fn normalized_profile(value: &str) -> String {
@@ -2064,6 +2330,439 @@ mod tests {
 #[cfg(test)]
 mod snapshot_catalog_regression {
     use super::*;
+
+    async fn hdr10_source_quality_fixture() -> (
+        plurx_core::store::PlaybackPlanningSnapshot,
+        SessionRequest,
+        TranscodeOptions,
+    ) {
+        use plurx_core::playback::audio::AudioClaim;
+        let store: Arc<dyn Store> = Arc::new(
+            plurx_core::store::SqliteStore::open_in_memory().expect("source-quality store"),
+        );
+        let (mut file, _) = macos_test_sdr_source(&store).await;
+        file.width = Some(3840);
+        file.height = Some(2160);
+        file.video_profile = Some("Main 10".into());
+        file.bit_depth = Some(10);
+        file.bitrate = Some(80_000_000);
+        file.size = 1_200_000_000;
+        file.duration_ms = Some(120_000);
+        file.hdr = Some("dolby_vision".into());
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.bl_compat_id = Some(1);
+        file.dolby_vision.el_present = Some(true);
+        file.dolby_vision.rpu_present = Some(true);
+        file.audio_streams = vec![plurx_core::domain::AudioStream {
+            index: 1,
+            codec: "aac".into(),
+            channels: Some(2),
+            sample_rate: Some(48_000),
+            channel_layout: Some("stereo".into()),
+            language: None,
+            title: None,
+            default: true,
+        }];
+        let mut document = macos_test_sdr_document();
+        let video = &mut document["streams"][0];
+        video["width"] = serde_json::json!(3840);
+        video["height"] = serde_json::json!(2160);
+        video["profile"] = serde_json::json!("Main 10");
+        video["pix_fmt"] = serde_json::json!("yuv420p10le");
+        video["color_transfer"] = serde_json::json!("smpte2084");
+        video["color_primaries"] = serde_json::json!("bt2020");
+        video["color_space"] = serde_json::json!("bt2020nc");
+        document["streams"]
+            .as_array_mut()
+            .expect("streams")
+            .push(serde_json::json!({
+                "index":1,"codec_type":"audio","codec_name":"aac","sample_rate":"48000",
+                "channels":2,"channel_layout":"stereo"
+            }));
+        let snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+            file,
+            probe_json: Some(document.to_string()),
+            settings: Default::default(),
+            generation: 1,
+            item_title: Some("source-quality control".into()),
+        };
+        let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+            "v":2,"video":[{"codec":"hevc","profiles":["main10"],"present":["pq"],"max_width":3840,"max_height":2160}],
+            "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],
+            "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
+        })).expect("HDR10 client");
+        let digest = [17; 32];
+        let candidate = QualityCandidate {
+            id: CandidateId::for_recipe_digest(digest),
+            recipe_digest: digest,
+            route: CandidateRoute::Remux,
+            planned_codec: None,
+            processed_dv: false,
+            normalized_geometry: true,
+            width: 3840,
+            height: 2160,
+            target_height: 2160,
+            average_bps: Some(80_000_000),
+            peak_bps: None,
+            grade: OutputGrade::Hdr10,
+            decoder_compatible: true,
+            complete_cache: false,
+            sustainable: true,
+        };
+        let mut context = TranscodeManager::candidate_context(&candidate);
+        context.canonical_caps = Some(caps.clone());
+        let mut request: SessionRequest = serde_json::from_value(serde_json::json!({
+            "file_id":snapshot.file.id,"playback_id":"source-quality","automatic":false,
+            "kind":{"kind":"transcode","height":2160},"start_seconds":0.0,
+            "audio_offset_ms":0,"hdr10":true,"presentation":"vod"
+        }))
+        .expect("trial request");
+        request.dv_processing_destination =
+            Some(plurx_core::transcode::dv_processing::DvDestination::Hdr10);
+        request.candidate_context = Some(Box::new(context));
+        request.audio_index = Some(1);
+        request.audio_claim = AudioClaim::from_caps(&caps).expect("canonical audio");
+        let options = TranscodeManager::encoded_audio_options(
+            &snapshot.file,
+            Some(1),
+            request.audio_claim.as_ref(),
+            None,
+            TranscodeOptions {
+                target_height: 2160,
+                pipeline: Pipeline::Hdr10Passthrough,
+                video_bitrate_kbps: 20_000,
+                audio_index: Some(1),
+                software_threads: Some(1),
+                ..Default::default()
+            },
+        )
+        .expect("actual encoded soundtrack");
+        (snapshot, request, options)
+    }
+
+    #[tokio::test]
+    async fn hdr10_source_copy_quality_freezes_rate_and_advertises_the_real_peak() {
+        use plurx_core::playback::candidate::{select_quality_candidate, NetworkTransferEvidence};
+        use plurx_core::playback::geometry::DisplayAspect;
+        use plurx_core::transcode::dv_processing::DvDestination;
+        use plurx_core::transcode::{Pacing, TranscodeExecution, VodFrameGrid, VodSourceClock};
+        let (snapshot, request, mut options) = hdr10_source_quality_fixture().await;
+        let rate =
+            TranscodeManager::processed_hdr10_video_kbps(&snapshot, &request, &options, true, true)
+                .expect("source-copy quality");
+        assert_eq!(rate, 80_000);
+        assert_ne!(
+            options.video_bitrate_kbps, rate,
+            "a stale 20 Mb/s root cannot be reused"
+        );
+        options.video_bitrate_kbps = rate;
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("source-quality plan");
+        let manager = TranscodeManager::new(
+            store,
+            root.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let facts =
+            TranscodeManager::quality_facts_from_snapshot(&snapshot).expect("native source facts");
+        let plan = manager
+            .resolve_movie_plan_with_facts(
+                &snapshot.file,
+                &options,
+                Encoder::Software,
+                &facts,
+                &AttemptRestrictions::none(),
+            )
+            .expect("source-quality plan")
+            .with_enhancement_rate_envelope(
+                TranscodeManager::processed_enhancement_envelope(
+                    &snapshot,
+                    &request,
+                    &options,
+                    true,
+                    true,
+                    DvDestination::Hdr10,
+                )
+                .expect("envelope"),
+            )
+            .expect("freeze envelope");
+        let output = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("completed Main10 output")
+            .with_vaapi_hdr_policy(Some(transcode::VaapiHdrPolicy::MesaRadeonsiVbaq));
+        let execution =
+            TranscodeExecution::from_options(&snapshot.file, &options, Pacing::unpaced(), ".")
+                .expect("source-quality execution");
+        let args = transcode::vod_completed_reconstructed_pipe_args(
+            &snapshot.file,
+            &output,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            2.0,
+            "/proc/self/fd/3",
+            "/proc/self/fd/4",
+            VodSourceClock::ProducerDefaultZero,
+        )
+        .expect("actual completed recipe");
+        for pair in [
+            ["-b:v", "80000k"],
+            ["-maxrate", "120000k"],
+            ["-level:v", "5.1"],
+            ["-compression_level", "19"],
+        ] {
+            assert!(args.windows(2).any(|actual| actual == pair), "{pair:?}");
+        }
+        let context = request.candidate_context.as_ref().expect("context");
+        let prepared = prepared_processed_candidate(
+            [18; 32],
+            &plan,
+            &options,
+            context.canonical_caps.as_ref().expect("caps"),
+            &facts,
+            DvDestination::Hdr10,
+            options.audio.as_ref(),
+        )
+        .expect("source-quality advertised recipe");
+        let audio = u64::from(options.audio_bitrate_kbps) * 1000;
+        assert_eq!(prepared.average_bps, Some(80_000_000 + audio));
+        assert_eq!(prepared.peak_bps, Some(120_000_000 + audio));
+        let choices = [context.selected_candidate.clone(), prepared.clone()];
+        let aspect = DisplayAspect::from_source(3840, 2160, Some((1, 1)), Some(0)).expect("aspect");
+        let network = |bytes| {
+            Some(NetworkTransferEvidence {
+                bytes,
+                elapsed_ms: 1000,
+                age_ms: 0,
+                completed: true,
+                from_cache: false,
+                producer_paced: false,
+            })
+        };
+        assert_eq!(
+            select_quality_candidate(&choices, aspect, None, network(10_000_000))
+                .expect("ordinary still playable")
+                .route,
+            CandidateRoute::Remux
+        );
+        assert_eq!(
+            select_quality_candidate(&choices, aspect, None, network(20_000_000))
+                .expect("source-quality rate admitted")
+                .id,
+            prepared.id
+        );
+    }
+
+    #[tokio::test]
+    async fn hdr10_source_quality_keeps_explicit_rungs_and_revalidates_native_copy_caps() {
+        let (mut snapshot, mut request, mut options) = hdr10_source_quality_fixture().await;
+        request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .selected_candidate
+            .route = CandidateRoute::Encode;
+        assert_eq!(
+            TranscodeManager::processed_hdr10_video_kbps(&snapshot, &request, &options, true, true)
+                .expect("explicit rung"),
+            20_000
+        );
+        request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .selected_candidate
+            .route = CandidateRoute::Remux;
+        snapshot.file.bitrate = Some(8_000_000);
+        assert_eq!(
+            TranscodeManager::processed_hdr10_video_kbps(&snapshot, &request, &options, true, true)
+                .expect("source budget"),
+            8_000
+        );
+        snapshot.file.bitrate = None;
+        snapshot.file.size = 0;
+        snapshot.file.duration_ms = None;
+        assert!(TranscodeManager::processed_hdr10_video_kbps(
+            &snapshot, &request, &options, true, true
+        )
+        .is_err());
+        snapshot.file.bitrate = Some(80_000_000);
+        request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .canonical_caps
+            .as_mut()
+            .expect("caps")
+            .video[0]
+            .max_bitrate_bps = Some(40_000_000);
+        assert!(
+            TranscodeManager::processed_hdr10_video_kbps(&snapshot, &request, &options, true, true)
+                .is_err(),
+            "stale source intent cannot silently downshift"
+        );
+        request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .canonical_caps
+            .as_mut()
+            .expect("caps")
+            .video[0]
+            .max_bitrate_bps = None;
+        snapshot.file.width = Some(1920);
+        snapshot.file.height = Some(1080);
+        options.target_height = 1080;
+        let mut doc: serde_json::Value =
+            serde_json::from_str(snapshot.probe_json.as_deref().expect("probe")).expect("JSON");
+        doc["streams"][0]["width"] = serde_json::json!(1920);
+        doc["streams"][0]["height"] = serde_json::json!(1080);
+        snapshot.probe_json = Some(doc.to_string());
+        let envelope = TranscodeManager::processed_enhancement_envelope(
+            &snapshot,
+            &request,
+            &options,
+            true,
+            true,
+            plurx_core::transcode::dv_processing::DvDestination::Hdr10,
+        )
+        .expect("higher legal level");
+        assert_eq!(envelope.target_kbps(), 80_000);
+        assert_eq!(envelope.hevc_level(), "5.1");
+    }
+
+    #[tokio::test]
+    async fn hdr10_odd_source_rate_prepares_admits_and_replays_the_exact_vbv_peak() {
+        use plurx_core::transcode::dv_processing::DvDestination;
+        let (mut snapshot, mut request, mut options) = hdr10_source_quality_fixture().await;
+        snapshot.file.bitrate = Some(43_567_000);
+        options.video_bitrate_kbps =
+            TranscodeManager::processed_hdr10_video_kbps(&snapshot, &request, &options, true, true)
+                .expect("measured odd source rate");
+        assert_eq!(options.video_bitrate_kbps, 43_567);
+        let audio = u64::from(options.audio_bitrate_kbps) * 1000;
+        let peak = 65_350_000 + audio;
+        request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .canonical_caps
+            .as_mut()
+            .expect("caps")
+            .video[0]
+            .max_bitrate_bps = Some(peak as i64);
+        let root = crate::test_tempdir().expect("odd source-quality plan");
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            root.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let facts = TranscodeManager::quality_facts_from_snapshot(&snapshot).expect("source facts");
+        let plan = manager
+            .resolve_movie_plan_with_facts(
+                &snapshot.file,
+                &options,
+                Encoder::Software,
+                &facts,
+                &AttemptRestrictions::none(),
+            )
+            .expect("odd-rate source plan");
+        let prepared = prepared_processed_candidate(
+            [19; 32],
+            &plan,
+            &options,
+            request
+                .candidate_context
+                .as_ref()
+                .expect("context")
+                .canonical_caps
+                .as_ref()
+                .expect("caps"),
+            &facts,
+            DvDestination::Hdr10,
+            options.audio.as_ref(),
+        )
+        .expect("actual decoder ceiling admits the exact encoder peak");
+        assert_eq!(prepared.peak_bps, Some(peak));
+        let context = request.candidate_context.as_mut().expect("context");
+        context.selected_candidate = prepared;
+        assert_eq!(TranscodeManager::processed_hdr10_video_kbps(
+            &snapshot, &request, &options, true, true,
+        ).expect("cold recipe uses the same nominal VBV arithmetic"), 43_567);
+        request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .selected_candidate
+            .peak_bps = Some(peak + 500);
+        assert!(TranscodeManager::processed_hdr10_video_kbps(
+            &snapshot, &request, &options, true, true,
+        ).is_err(), "legacy fractional-kbps descriptor cannot grant a different recipe");
+    }
+
+    #[tokio::test]
+    async fn hdr10_processed_rate_replay_selects_only_current_recipes_and_canonical_audio_costs() {
+        let (snapshot, mut request, options) = hdr10_source_quality_fixture().await;
+        let audio = u64::from(options.audio_bitrate_kbps) * 1000;
+        for (video, peak) in [(20_000, 30_000_000), (80_000, 120_000_000)] {
+            let row = &mut request
+                .candidate_context
+                .as_mut()
+                .expect("context")
+                .selected_candidate;
+            row.route = CandidateRoute::Encode;
+            row.processed_dv = true;
+            row.planned_codec = Some("hevc".into());
+            row.average_bps = Some(video * 1000 + audio);
+            row.peak_bps = Some(peak + audio);
+            assert_eq!(
+                TranscodeManager::processed_hdr10_video_kbps(
+                    &snapshot, &request, &options, true, true
+                )
+                .expect("fresh legal recipe"),
+                video as u32
+            );
+        }
+        for (avg, peak) in [
+            (60_000_000 + audio, 90_000_000 + audio),
+            (80_000_000, 120_000_000),
+            (80_000_000 + audio, 120_000_001 + audio),
+        ] {
+            let row = &mut request
+                .candidate_context
+                .as_mut()
+                .expect("context")
+                .selected_candidate;
+            row.average_bps = Some(avg);
+            row.peak_bps = Some(peak);
+            assert!(
+                TranscodeManager::processed_hdr10_video_kbps(
+                    &snapshot, &request, &options, true, true
+                )
+                .is_err(),
+                "stale/forged rates grant no recipe"
+            );
+        }
+        let context = request.candidate_context.as_mut().expect("context");
+        context.selected_candidate.processed_dv = false;
+        context.selected_candidate.route = CandidateRoute::Remux;
+        context.canonical_caps.as_mut().expect("caps").video[0].max_bitrate_bps = Some(90_000_000);
+        let envelope = TranscodeManager::processed_enhancement_envelope(
+            &snapshot,
+            &request,
+            &options,
+            true,
+            true,
+            plurx_core::transcode::dv_processing::DvDestination::Hdr10,
+        )
+        .expect("bounded peak preserves target");
+        assert_eq!(envelope.target_kbps(), 80_000);
+        assert_eq!(envelope.peak_bps() + audio, 90_000_000);
+    }
 
     #[tokio::test]
     async fn prepared_sdr_and_hdr_candidates_survive_hints_selection_and_hls_admission() {
@@ -2578,6 +3277,7 @@ mod snapshot_catalog_regression {
             aac: false,
             preserve_dolby_vision: true,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         assert!(manager.processed_hint_key(&snapshot, &query).is_none());
         assert!(matches!(
@@ -3657,6 +4357,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             aac: false,
             preserve_dolby_vision: true,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         assert!(matches!(
             TranscodeManager::vod_dv_processing_from_snapshot(&hdr, &request)
@@ -3667,6 +4368,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             aac: false,
             preserve_dolby_vision: true,
             convert_dolby_vision: true,
+            dual_layer_as_copied: false,
         };
         store
             .put_setting(keys::DV_FEL_REENCODE, "1")
@@ -3755,7 +4457,8 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             .await
             .expect("snapshot")
             .expect("source");
-        assert_eq!(QUALITY_PLANNING_KEYS.len(), 24);
+        assert_eq!(QUALITY_PLANNING_KEYS.len(), 25);
+        assert!(QUALITY_PLANNING_KEYS.contains(&keys::DV_DISPLAY_TARGET));
         assert!(
             QUALITY_PLANNING_KEYS.len() <= 32,
             "one settings statement binds at most 32 keys"
@@ -3951,6 +4654,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             assert!(!TranscodeManager::vod_reorder_from_snapshot(&snapshot));
         }
         let request = SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -4226,6 +4930,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
                 tokio::time::Instant::now() + Duration::from_secs(10),
                 JobKind::CopyOutputPrepare,
             )
+            .await
             .expect("metadata fence");
             (claimed, active)
         }
@@ -4305,6 +5010,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         let unavailable = serde_json::to_value(unavailable_catalog).expect("bounded descriptor");
         let error = manager
@@ -4634,6 +5340,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         for contradictory in [
             wrong_offset,
@@ -4894,6 +5601,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
         context.planning_binding =
             Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
         let mut request = SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -4941,6 +5649,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
                     aac: true,
                     preserve_dolby_vision: false,
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                 },
             ] {
                 request.presentation = presentation;

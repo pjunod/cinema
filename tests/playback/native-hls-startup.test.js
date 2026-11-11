@@ -11,7 +11,7 @@ const policy=require('../../crates/plurxd/src/web/playback-policy.js');
 const master='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200000\nindex.m3u8\n';
 const media='#EXTM3U\n#EXT-X-TARGETDURATION:16\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:8,\nseg_0000.m4s\n#EXTINF:8,\nseg_0001.m4s\n#EXTINF:8,\nseg_0002.m4s\n';
 async function flush(){for(let i=0;i<16;i++)await new Promise(resolve=>setImmediate(resolve));}
-function harness({pendingOpen=false,pendingChange=false,realTransport=false}={}){
+function harness({pendingOpen=false,pendingChange=false,realTransport=false,startAt=0}={}){
  let now=0,ordinal=0;const timers=new Map(),answers=[],requests=[],sources=[],rescues=[],diagnoses=[],positions=[],listeners=new Map(),reopens=[],surfaces=[],stops=[],logs=[];
  const listenerSets=new Map();
  const video={readyState:0,videoWidth:0,currentTime:0,paused:true,currentSrc:'/session/master.m3u8',getAttribute:()=>'/session/master.m3u8',
@@ -26,7 +26,7 @@ function harness({pendingOpen=false,pendingChange=false,realTransport=false}={})
   setTimeout:(fn,ms)=>{const id=++ordinal;timers.set(id,{fn,at:now+ms});return id;},clearTimeout:id=>timers.delete(id),
   fetch:async(url,options)=>{requests.push({url,options});const answer=answers.shift();if(!answer)throw Error('No scripted answer');return typeof answer==='function'?answer(options):answer;},
   bufferTargets:()=>({}),parseSegTimes:text=>text.split('\n').filter(line=>line.startsWith('#EXTINF:')).map((_,i)=>(i+1)*8),
-  setPlaybackMediaSource:(_,url)=>sources.push(url),applyPlaybackTransportIntent(){},applyPlaybackAttachmentPosition(){positions.push(true);},pausePlaybackInternally(){},resetPlaybackTransportEvents(){},
+  setPlaybackMediaSource:(v,url)=>{sources.push(url);v.currentSrc=url;},applyPlaybackTransportIntent(){},pausePlaybackInternally(){},resetPlaybackTransportEvents(){},
   qualityCatalogSelectionCurrent:()=>true,notifyPlaybackControl(){},clearStall(){},playbackContext:()=>({}),clientLog:row=>logs.push(row),tok:x=>x,
   pbTick(){},pbSyncPlayIcon(){},endWait(){},positionForPlaybackIntent:()=>42,stallRecoverySnapshot:(_p,_v,facts)=>facts,seekTo:(...args)=>reopens.push(args),showStallRecoveryFailure(){throw Error('unexpected recovery exhaustion');},playbackIsReal:()=>false,playbackSurfaceSourceIsBlocking:()=>true,stopPlayerForExhaustion:()=>stops.push(true),raisePlaybackSurface:(source,facts)=>surfaces.push(policy.presentSurface(policy.initialSurfaceState(),{raise:source,...facts,now_ms:now})),toast(){},
   startTranscodeFallback:(...args)=>rescues.push(args),stallDiagnose:()=>{diagnoses.push(true);return Promise.resolve();}});
@@ -36,6 +36,10 @@ function harness({pendingOpen=false,pendingChange=false,realTransport=false}={})
  vm.runInContext(shippedFunction("stall-diagnosis.js","playbackOwnsAttachedMedia"),ctx);
  vm.runInContext(shippedFunction("measurements.js","recoverServingFencedAttachment"),ctx);
  vm.runInContext(shippedFunction("transport.js","wirePlayerMedia"),ctx);
+ for(const name of ['applyPlaybackAttachmentPosition','playbackCaptionAttachmentPositionReady'])
+  vm.runInContext(shippedFunction('decode-margin.js',name),ctx);
+ const applyPosition=ctx.applyPlaybackAttachmentPosition;
+ ctx.applyPlaybackAttachmentPosition=(...args)=>{positions.push(true);return applyPosition(...args);};
  if(realTransport){
   Object.assign(ctx,{playerActivity(){},reportTtff(){},settlePlaybackControlSeek(){},samplePlaybackPresentationClock(){},samplePreparedSwitchFrames(){},
    playbackSurfaceStep(){},playbackSurfaceGeneration:()=>player.mediaAttachment,finishStallRecovery(){},streamHasVideo:()=>true,
@@ -50,10 +54,11 @@ function harness({pendingOpen=false,pendingChange=false,realTransport=false}={})
  }
  ctx.wirePlayerMedia(video);
  const response=(text,status=200,type='application/vnd.apple.mpegurl')=>new Response(text,{status,headers:{'Content-Type':type}});
- ctx.attachNativeHls(video,'http://fixture.invalid/session/master.m3u8?token=fixture',0,player,{current:()=>ctx.current!==false});
+ ctx.attachNativeHls(video,'http://fixture.invalid/session/master.m3u8?token=fixture',startAt,player,{token:player.mediaAttachment,current:()=>ctx.current!==false});
  if(!pendingOpen&&!pendingChange){for(const [id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}}
  return {ctx,player,video,answers,requests,sources,rescues,diagnoses,positions,listeners,response,reopens,surfaces,stops,logs,
-  advance(ms){now+=ms;for(const [id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}},
+  advance(ms,runTimers=true){now+=ms;if(!runTimers)return;for(const [id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}},
+  metadata(){video.readyState=Math.max(video.readyState,1);return listeners.get('loadedmetadata')?.();},
   retry(){ctx.runNativeHlsReadiness(video,player,player.hlsStartup);},
   stop(){ctx.cancelHlsStartup(player,'test_done');},
  };
@@ -140,7 +145,7 @@ test('explicit Pause owns preparation and an unknown play cannot undo it',async(
 });
 test('native controls require presentation of this attachment and this element',async()=>{
  const h=harness({realTransport:true});await flush();
- h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
+ h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();await h.metadata();
  let frames=0;h.video.getVideoPlaybackQuality=()=>({totalVideoFrames:frames});
  h.ctx.handlePlaybackPlaying(h.video,h.player);h.ctx.playbackProgressTick(h.video,h.player,true);
  frames++;h.video.currentTime=0.1;h.ctx.playbackProgressTick(h.video,h.player,true);
@@ -244,9 +249,9 @@ test('native readiness metadata ownership survives pause and is retired on cance
  const h=harness();await flush();h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
  const metadata=h.listeners.get('loadedmetadata');assert.equal(typeof metadata,'function');
  h.ctx.pauseHlsStartup(h.player);assert.equal(h.listeners.get('loadedmetadata'),metadata);
- metadata();assert.equal(h.positions.length,1);assert.equal(h.player.hlsStartup.native.metadataListener,null);h.stop();
+ h.video.readyState=1;metadata();assert.equal(h.positions.length,1);assert.equal(h.player.hlsStartup.native.metadataListener,null);h.stop();
  const stale=harness();await flush();stale.answers.push(stale.response(master),stale.response(media));stale.advance(1000);await flush();
- const old=stale.listeners.get('loadedmetadata');stale.stop();assert.equal(stale.player.hlsStartup.native.metadataListener,null);
+ stale.video.readyState=1;const old=stale.listeners.get('loadedmetadata');stale.stop();assert.equal(stale.player.hlsStartup.native.metadataListener,null);
  old();assert.equal(stale.positions.length,0);
 });
 test('native persistent refusal admits one verified encode fallback with an unverified cause',async()=>{
@@ -269,8 +274,8 @@ test('native attached startup expires at its fixed deadline without a new readin
  h.ctx.exhaustHlsStartup(h.player,'duplicate');h.advance(1);await flush();assert.equal(h.diagnoses.length,1);h.stop();
 });
 
-async function readyNativeHarness(){
- const h=harness();await flush();h.answers.push(h.response(master),h.response(media));
+async function readyNativeHarness(options){
+ const h=harness(options);await flush();h.answers.push(h.response(master),h.response(media));
  h.advance(1000);await flush();assert.equal(h.sources.length,1);return h;
 }
 function retireNative(h){
@@ -329,6 +334,90 @@ test('late native authority or auth refusal cannot act on a superseded attachmen
   assert.equal(h.reopens.length,0);assert.equal(h.surfaces.length,0);
   assert.equal(h.stops.length,0);assert.equal(h.rescues.length,0);
   assert.equal(h.player.sessionTerminal,undefined);assert.equal(h.sources.length,1);h.stop();
+ }
+});
+
+test('native pre-metadata diagnostics require the current assigned source and execution',async()=>{
+ for(const change of ['current_source','assigned_source','late_source','execution','attachment','element','assigned_current']){
+  const h=await readyNativeHarness(),episode=h.player.hlsStartup,requests=h.requests.length;
+  assert.equal(h.video.readyState,0);assert.equal(h.player.mediaAttachment.nativePositionPending,true);
+  assert.equal(h.ctx.playbackOwnsAttachedMedia(h.player),false,'no metadata or presentation proof was invented');
+  h.video.getAttribute=()=>episode.native.sourceUrl;
+  if(change==='current_source')h.video.currentSrc='http://fixture.invalid/old/master.m3u8';
+  if(change==='assigned_source'){h.video.currentSrc='';h.video.getAttribute=()=>'/old/master.m3u8';}
+  if(change==='assigned_current')h.video.currentSrc='';
+  if(change==='element'){
+   const lookup=h.ctx.document.getElementById;
+   h.ctx.document.getElementById=id=>id==='video'?{}:lookup(id);
+  }
+  h.video.error={code:4};
+  let release;
+  if(['late_source','execution','attachment'].includes(change)){
+   h.answers.push(()=>new Promise(resolve=>release=resolve));
+   const operation=h.listeners.get('error')();await flush();assert.equal(typeof release,'function');
+   if(change==='late_source')h.video.currentSrc='http://fixture.invalid/old/master.m3u8';
+   if(change==='execution')episode.native.execution++;
+   if(change==='attachment')h.player.mediaAttachment={};
+   release(h.response(JSON.stringify({code:'serving_fenced',message:'old response'}),503,'application/json'));
+   await operation;assert.equal(h.player.sessionTerminal,undefined,'a stale response has no refusal authority');
+  }else{
+   retireNative(h);await h.listeners.get('error')();
+   assert.equal(h.requests.length,requests,'retirement never spends another readiness request');
+  }
+  assert.equal(h.reopens.length,change==='assigned_current'?1:0,change);
+  assert.equal(h.sources.length,1);assert.equal(h.rescues.length,0);assert.equal(h.stops.length,0);
+  assert.equal(episode.native.reloadUsed,false);h.stop();
+ }
+});
+test('native readiness retirement before source assignment requires its current request owner',async()=>{
+ for(const stale of [false,true]){
+  const h=harness();await flush();let release;
+  h.answers.push(()=>new Promise(resolve=>release=resolve));h.advance(1000);await flush();
+  assert.equal(h.sources.length,0);assert.equal(h.video.readyState,0);
+  assert.equal(h.player.mediaAttachment.nativePositionPending,true);
+  if(stale)h.ctx.current=false;
+  release(h.response(JSON.stringify({code:'serving_fenced',message:'authority retired'}),503,'application/json'));
+  await flush();
+  assert.equal(h.reopens.length,stale?0:1);assert.equal(h.sources.length,0);assert.equal(h.rescues.length,0);
+  assert.equal(h.player.mediaAttachment.nativePositionPending,true,'loader recovery does not mint observation authority');
+  if(stale)assert.equal(h.player.sessionTerminal,undefined);
+  h.stop();
+ }
+});
+
+test('native pre-metadata retirement preserves the destination instead of the predecessor clock',async()=>{
+ for(const stage of ['before_assignment','before_metadata'])for(const hinted of [false,true]){
+  const h=stage==='before_metadata'?await readyNativeHarness({startAt:hinted?31:12}):harness({startAt:hinted?31:12});
+  await flush();h.player.offset=hinted?0:19;
+  if(hinted)h.player.controlPositionHintSec=31;
+  h.video.currentTime=87;
+  assert.equal(h.video.readyState,0);assert.equal(h.player.mediaAttachment.nativePositionPending,true);
+  vm.runInContext(shippedFunction('transport.js','positionForPlaybackIntent'),h.ctx);
+  if(stage==='before_metadata'){
+   retireNative(h);h.video.error={code:4};await h.listeners.get('error')();
+  }else{
+   h.answers.push(h.response(JSON.stringify({code:'serving_fenced',message:'retired before assignment'}),503,'application/json'));
+   h.advance(1000);await flush();
+  }
+  assert.equal(h.reopens.length,1);assert.equal(h.reopens[0][0],31,`${stage}, hint=${hinted}`);
+  assert.equal(h.player.recoveringStall.position,31);
+  assert.equal(h.player.mediaAttachment.nativePositionPending,true);assert.equal(h.rescues.length,0);h.stop();
+ }
+});
+test('native readiness rejects delayed bodies after the current video element is replaced',async()=>{
+ for(const refusal of ['retirement','authentication','success']){
+  const h=harness();await flush();let release;
+  h.answers.push(()=>new Promise(resolve=>release=resolve));h.advance(1000);await flush();
+  const requests=h.requests.length,lookup=h.ctx.document.getElementById;
+  h.ctx.document.getElementById=id=>id==='video'?{}:lookup(id);
+  release(refusal==='success'?h.response(master):h.response(JSON.stringify({code:'serving_fenced',message:'stale body'}),
+   refusal==='authentication'?401:503,'application/json'));
+  await flush();
+  assert.equal(h.requests.length,requests,'a replaced element cannot dispatch the child playlist');
+  assert.equal(h.sources.length,0);assert.equal(h.reopens.length,0);assert.equal(h.rescues.length,0);
+  assert.equal(h.surfaces.length,0);assert.equal(h.stops.length,0);
+  assert.equal(h.player.sessionTerminal,undefined);assert.equal(h.player.hlsStartup.latestFailure,null);
+  assert.equal(h.player.mediaAttachment.nativePositionPending,true);h.stop();
  }
 });
 
@@ -666,7 +755,7 @@ test('explicit transport after permission refusal retries Play without turning P
 });
 
 test('presentation reevaluation permission rejection fences the already pending recovery ask',async()=>{
- const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+ const h=await readyNativeHarness({realTransport:true});await h.metadata();installPermissionOwner(h);
  h.player.started=true;h.player.waitAt=1;h.player.waitStartedRunway=5.5;h.video.paused=false;
  h.ctx.performance.now=()=>8001;
  let answer;
@@ -686,7 +775,7 @@ test('presentation reevaluation permission rejection fences the already pending 
 
 test('refilled supply wait permission rejection stops before the same-turn recovery verdict',async()=>{
  for(const rejection of ['throw','promise']){
-  const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+  const h=await readyNativeHarness({realTransport:true});await h.metadata();installPermissionOwner(h);
   h.player.started=true;h.player.waitAt=1;h.player.waitStartedRunway=0;h.video.paused=false;
   let answer,runway=0,now=8001,plays=0;
   h.ctx.performance.now=()=>now;
@@ -714,5 +803,163 @@ test('refilled supply wait permission rejection stops before the same-turn recov
   assert.match(h.surfaces[0].surface.title,/permission/);
   assert.equal(h.reopens.length,0);assert.equal(h.rescues.length,0);
   assert.equal(h.player.hlsStartup.state,'cancelled');
+ }
+});
+
+function nativeObservationSurface(h,{pendingSeek=false}={}){
+ let decoded=0,pauses=0,recoveries=0,settlements=0;
+ const {ctx,player:p,video:v}=h;
+ p.attemptId='native-observer-1';p.started=true;p.source={video_codec:'h264'};
+ p.controlHasFrameCallbacks=true;p.controlPresentedFrames=0;
+ p.mediaAttachment.nativePositionPending=false;
+ if(pendingSeek)p.controlSeek={sequence:7,targetMs:5000,executed:true,executedAt:0,
+  attachment:p.mediaAttachment,element:v,frameFloor:0};
+ Object.assign(v,{paused:false,ended:false,seeking:false,readyState:4,videoWidth:1280,playbackRate:1,
+  getVideoPlaybackQuality:()=>({totalVideoFrames:decoded}),pause(){pauses++;}});
+ ctx.document.hidden=false;
+ Object.assign(ctx,{PERSISTENT_STALL_MS:8000,PLAYBACK_SAMPLING_PERIOD_MS:500,
+  streamHasVideo:()=>true,samplePreparedSwitchFrames(){},watchPlaybackSeekTelemetry(){},
+  bufferRunway:()=>50,persistentWait(){recoveries++;return Promise.resolve();},
+  reportTtff(){},clearStall(){},finishStallRecovery(){},playbackSeekBufferCovers:()=>true,
+  finishPlaybackSeekTelemetry(){settlements++;}});
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../../crates/plurxd/src/web/player/surface.js'),'utf8'),ctx);
+ vm.runInContext('renderPlaybackSurface=()=>{};recordPlaybackSurfaceLog=()=>{};',ctx);
+ ctx.playbackSurfaceStep({attach:p.attemptId});
+ ctx.raisePlaybackSurface('client_preparing',{title:'Preparing native playback'});
+ ctx.raisePlaybackSurface('media_waiting',{context:'attached',title:'Waiting for presentation'});
+ for(const name of ['samplePlaybackPresentationClock','settlePlaybackControlSeek','playbackProgressTick'])
+  vm.runInContext(shippedFunction('transport.js',name),ctx);
+ ctx.playbackProgressTick(v,p);
+ return {
+  progress(){decoded+=12;v.currentTime+=.5;h.advance(500);ctx.playbackProgressTick(v,p);},
+  freeze(){h.advance(500);ctx.playbackProgressTick(v,p);},
+  get surface(){return vm.runInContext('PLAYBACK_SURFACE.surface',ctx);},
+  get state(){return vm.runInContext('PLAYBACK_SURFACE.state',ctx);},
+  get pauses(){return pauses;},get recoveries(){return recoveries;},get settlements(){return settlements;},
+ };
+}
+
+test('native observation deadline leaves advancing transport running with a nonblocking explicit notice',async()=>{
+ const h=await readyNativeHarness(),o=nativeObservationSurface(h,{pendingSeek:true});
+ const originalSeek=h.player.controlSeek,deadline=h.player.hlsStartup.deadlineMs,requests=h.requests.length;
+ const surfaceEvents=[];h.ctx.recordPlaybackSurfaceLog=entry=>surfaceEvents.push(entry);
+ assert.deepEqual(Array.from(o.state.faults,fault=>[fault.source,fault.intent]),
+  [['client_preparing',originalSeek.sequence],['media_waiting',null]],
+  'preparation belongs to the destination while the wait belongs to attached media');
+ while(h.ctx.performance.now()<deadline)o.progress();
+ await flush();
+ assert.equal(h.player.hlsStartup.state,'observation_unavailable');
+ assert.equal(h.player.hlsStartup.deadlineMs,deadline,'the original deadline is consumed once');
+ assert.equal(h.player.controlSeek,originalSeek,'independent progress cannot settle the seek');
+ assert.equal(h.ctx.hlsStartupIncomplete(h.player),false,'the concluded observation is distinct from presentation or exhaustion');
+ assert.equal(o.state.presenting,false);assert.equal(o.state.presentingSince,null);
+ assert.equal(o.surface.kind,'banner');assert.equal(o.surface.class,'degraded');
+ assert.deepEqual(Array.from(o.surface.actions),['retry','close']);
+ assert.equal(o.surface.input_failed,false);
+ assert.equal(o.state.faults.length,1,'the exact owned observational progress faults were withdrawn');
+ assert.deepEqual(surfaceEvents.filter(entry=>entry.event==='surface_cleared')
+  .map(entry=>[entry.source,entry.intent,entry.by]).sort((a,b)=>a[0].localeCompare(b[0])),
+  [['client_preparing',originalSeek.sequence,'observation_unavailable'],
+   ['media_waiting',null,'observation_unavailable']],
+  'the observation owner explicitly withdraws both exact scopes without settling the seek');
+ assert.equal(originalSeek.targetFrame,undefined,'independent decode and clock progress supplies no target-frame proof');
+ assert.equal(h.video.paused,false);assert.ok(h.video.currentTime>0,'transport keeps advancing');
+ assert.equal(o.pauses,0);assert.equal(o.settlements,0);assert.equal(o.recoveries,0);
+ assert.equal(h.stops.length,0);assert.equal(h.diagnoses.length,0);assert.equal(h.sources.length,1);assert.equal(h.requests.length,requests);
+ const logCount=h.logs.filter(row=>row.detail==='observation_unavailable_deadline').length;
+ h.ctx.armNativeHlsDeadline(h.player,h.player.hlsStartup);
+ h.ctx.configureHlsStartupDeadline(h.player,1000);h.advance(1000);await flush();
+ assert.equal(h.logs.filter(row=>row.detail==='observation_unavailable_deadline').length,logCount,'the concluded owner never re-arms its deadline');
+ assert.equal(h.player.hlsStartup.state,'observation_unavailable');
+ h.player.wantsPlayback=false;h.player.controlIntentGeneration++;
+ assert.equal(h.ctx.pauseHlsStartup(h.player),true);
+ h.player.wantsPlayback=true;h.player.controlIntentGeneration++;
+ assert.equal(h.ctx.resumeHlsStartup(h.video,h.player),true);
+ assert.equal(h.player.hlsStartup.state,'observation_unavailable','Pause/Play does not mint a new startup deadline');
+ assert.equal(h.player.hlsStartup.native.deadlineTimer,null);
+ // A queued generic diagnosis from the same original clock is observational too.
+ vm.runInContext('async '+shippedFunction('stall-diagnosis.js','stallDiagnose'),h.ctx);
+ await h.ctx.stallDiagnose();assert.equal(h.stops.length,0);assert.equal(o.pauses,0);
+ h.stop();
+});
+
+test('native observer conclusion preserves later physical-freeze recovery and real element rejection',async()=>{
+ const h=await readyNativeHarness(),o=nativeObservationSurface(h);
+ while(h.ctx.performance.now()<h.player.hlsStartup.deadlineMs)o.progress();
+ assert.equal(o.surface.kind,'banner');
+ for(let i=0;i<18;i++)o.freeze();
+ assert.equal(o.recoveries,1,'a real freeze still spends the normal bounded progress detector');
+ h.video.error={code:3,message:'decoder rejected input'};
+ assert.equal(await h.ctx.classifyNativeHlsError(h.video,h.player,3,h.video.error.message),true);
+ h.advance(1);await flush();
+ assert.equal(h.player.hlsStartup.state,'exhausted');
+ assert.equal(h.diagnoses.length,1,'a real decoder rejection still reaches the existing diagnosis');
+ h.stop();
+});
+
+test('stale native observation identity or freshness never suppresses the real startup deadline',async()=>{
+ for(const change of ['attachment','element','epoch','intent','intentGeneration','stale','permission','server']){
+  const h=await readyNativeHarness(),p=h.player,v=h.video;
+  p.mediaAttachment.nativePositionPending=false;v.paused=false;v.readyState=4;
+  h.ctx.PLAYBACK_SAMPLING_PERIOD_MS=500;
+  const episode=p.hlsStartup;
+  p.controlFrameObservation={unavailable:true,attachment:p.mediaAttachment,element:v,
+   epoch:p.controlPresentationEpoch||0,intent:0,intentGeneration:p.controlIntentGeneration||0,lastAdvanceAt:episode.deadlineMs-1};
+  if(change==='attachment')p.controlFrameObservation.attachment={};
+  if(change==='element')p.controlFrameObservation.element={};
+  if(change==='epoch')p.controlFrameObservation.epoch++;
+  if(change==='intent')p.controlFrameObservation.intent++;
+  if(change==='intentGeneration')p.controlFrameObservation.intentGeneration++;
+  if(change==='stale')p.controlFrameObservation.lastAdvanceAt=0;
+  if(change==='permission')episode.playRejection={name:'NotAllowedError'};
+  if(change==='server')h.ctx.noteStreamFailure(503,JSON.stringify({code:'serving_fenced',message:'authority ended'}),{attachment:p.mediaAttachment});
+  h.advance(episode.deadlineMs-h.ctx.performance.now()+1);await flush();h.advance(0);await flush();
+  assert.equal(episode.state,'exhausted',change);
+  assert.equal(h.diagnoses.length,1,change);
+  h.stop();
+ }
+});
+
+
+test('generic diagnosis racing the original native timer concludes only observation',async()=>{
+ const h=await readyNativeHarness(),o=nativeObservationSurface(h);
+ const deadline=h.player.hlsStartup.deadlineMs;
+ while(h.ctx.performance.now()<deadline-500)o.progress();
+ h.advance(deadline-h.ctx.performance.now(),false);
+ vm.runInContext('async '+shippedFunction('stall-diagnosis.js','stallDiagnose'),h.ctx);
+ await h.ctx.stallDiagnose();
+ assert.equal(h.player.hlsStartup.state,'observation_unavailable');
+ h.advance(0);await flush();
+ assert.equal(h.player.hlsStartup.state,'observation_unavailable');
+ assert.equal(o.surface.kind,'banner');assert.equal(o.state.presenting,false);
+ assert.equal(h.stops.length,0);assert.equal(o.pauses,0);assert.equal(h.rescues.length,0);
+ h.stop();
+});
+
+
+test('resume play rejection after observation conclusion retains transport failure authority',async()=>{
+ for(const retired of [false,true]){
+  const h=await readyNativeHarness({realTransport:true}),o=nativeObservationSurface(h);
+  while(h.ctx.performance.now()<h.player.hlsStartup.deadlineMs)o.progress();
+  const episode=h.player.hlsStartup,deadline=episode.deadlineMs;
+  assert.equal(episode.state,'observation_unavailable');
+  let reject;h.video.play=()=>new Promise((_resolve,no)=>{reject=no;});
+  h.player.wantsPlayback=false;h.player.controlIntentGeneration++;h.ctx.pauseHlsStartup(h.player);
+  h.player.wantsPlayback=true;h.player.controlIntentGeneration++;
+  assert.equal(h.ctx.resumeHlsStartup(h.video,h.player),true);
+  if(retired)h.player.mediaAttachment={};
+  reject(Object.assign(new Error('command refused'),{name:'NotSupportedError'}));await flush();
+  assert.equal(episode.deadlineMs,deadline,'transport rejection cannot mint a new observation budget');
+  assert.equal(episode.native.deadlineTimer,null);
+  if(retired){
+   assert.equal(episode.playRejection,null);assert.equal(episode.state,'observation_unavailable');
+   assert.equal(h.diagnoses.length,0,'a retired Play invocation has no failure authority');
+  }else{
+   assert.equal(episode.playRejection.name,'NotSupportedError');assert.equal(episode.state,'exhausted');
+   assert.match(h.ctx.diagnoseHlsStartup(h.player).title,/browser could not start/);
+   h.advance(1);await flush();assert.equal(h.diagnoses.length,1,'current transport refusal reaches diagnosis immediately');
+   assert.equal(o.state.presenting,false,'a rejected Play never supplies presentation proof');
+  }
+  h.stop();
  }
 });

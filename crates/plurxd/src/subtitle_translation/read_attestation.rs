@@ -1,0 +1,706 @@
+//! Process-local read proof, deliberately separate from inference readiness.
+//!
+//! A persisted inode/boot receipt cannot prove bytes after a process/OS restart.
+//! Authorized readers may trigger this full held-file hash. Its bounded,
+//! exact read-preparation lease participates in the existing source arbiter;
+//! it creates no media session, fake analysis job, or foreground exemption.
+//! The existing task owns custody through every blocking join. Playback source
+//! pressure pauses it; the next authorized read resumes the held prefix.
+use super::runtime::SourceHash;
+use crate::{
+    fragment_index_cluster::{open_source_playback_fence, SourceFence},
+    http::error::ApiError,
+    state::AppState,
+};
+use axum::http::StatusCode;
+use plurx_core::{
+    domain::MediaFile,
+    fs_secure::{std_file_identity, FileIdentity},
+};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{Arc, LazyLock, Mutex, Weak},
+    time::{Duration, Instant},
+};
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
+
+const MAX_ENTRIES: usize = 64;
+static HASH_IO: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
+
+#[derive(Clone, PartialEq, Eq)]
+struct Key {
+    file_id: i64,
+    size: i64,
+    mtime: i64,
+    path: PathBuf,
+    sha256: String,
+    identity: FileIdentity,
+    object_version: String,
+}
+struct Work {
+    fence: SourceFence,
+    hash: SourceHash,
+}
+enum Status {
+    Running,
+    Paused(Work),
+    Ready(SourceFence),
+    Failed { changed: bool, retry_at: Instant },
+}
+struct Entry {
+    slot: u8,
+    key: Key,
+    status: Status,
+}
+pub(crate) struct ReadAttestations {
+    entries: Mutex<VecDeque<Entry>>,
+    cancel: CancellationToken,
+}
+impl Drop for ReadAttestations {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+fn pending() -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::TOO_EARLY,
+        code: "source_verifying",
+        message: "Source bytes are being verified; retry this read".into(),
+        retry_after_seconds: 1,
+    }
+}
+fn changed() -> ApiError {
+    ApiError::typed(StatusCode::GONE, "source_changed", "The source changed")
+}
+impl ReadAttestations {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            entries: Mutex::new(VecDeque::new()),
+            cancel: CancellationToken::new(),
+        })
+    }
+    fn entries(&self) -> std::sync::MutexGuard<'_, VecDeque<Entry>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn lookup(&self, key: &Key) -> Option<Result<(), ApiError>> {
+        let mut entries = self.entries();
+        if let Some(index) = entries.iter().position(|entry| entry.key == *key) {
+            // Every cache hit has already reopened the current pathname and
+            // compared its complete held identity and object version.
+            match &entries[index].status {
+                Status::Ready(fence)
+                    if fence.unchanged()
+                        && std_file_identity(&fence.handle).ok() == Some(key.identity) =>
+                {
+                    if let Some(entry) = entries.remove(index) {
+                        entries.push_back(entry);
+                    }
+                    return Some(Ok(()));
+                }
+                Status::Ready(_) => {
+                    entries.remove(index);
+                }
+                Status::Running => return Some(Err(pending())),
+                Status::Failed { changed: true, .. } => return Some(Err(changed())),
+                Status::Failed { retry_at, .. } if *retry_at > Instant::now() => {
+                    return Some(Err(pending()))
+                }
+                Status::Failed { .. } | Status::Paused(_) => {}
+            }
+        }
+        None
+    }
+    fn start(&self, key: &Key, fresh: Work) -> Result<Work, ApiError> {
+        let mut entries = self.entries();
+        if let Some(index) = entries.iter().position(|entry| entry.key == *key) {
+            match &entries[index].status {
+                Status::Running | Status::Ready(_) => return Err(pending()),
+                Status::Failed { changed: true, .. } => return Err(changed()),
+                Status::Failed { retry_at, .. } if *retry_at > Instant::now() => {
+                    return Err(pending())
+                }
+                _ => {}
+            }
+            return Ok(
+                match std::mem::replace(&mut entries[index].status, Status::Running) {
+                    Status::Paused(work) => work,
+                    _ => fresh,
+                },
+            );
+        }
+        if entries.len() >= MAX_ENTRIES {
+            let idle = entries
+                .iter()
+                .position(|entry| !matches!(entry.status, Status::Running))
+                .ok_or_else(pending)?;
+            entries.remove(idle);
+        }
+        let slot = (0..MAX_ENTRIES as u8)
+            .find(|slot| !entries.iter().any(|entry| entry.slot == *slot))
+            .ok_or_else(pending)?;
+        entries.push_back(Entry {
+            slot,
+            key: key.clone(),
+            status: Status::Running,
+        });
+        Ok(fresh)
+    }
+    /// This method grants no read authority. Both local and grant-bound callers
+    /// must apply their own authorization before and after using this proof.
+    pub(crate) async fn authorize(
+        self: &Arc<Self>,
+        state: &AppState,
+        file: &MediaFile,
+        sha256: &str,
+    ) -> Result<(), ApiError> {
+        if state.shutdown.is_cancelled() || self.cancel.is_cancelled() {
+            return Err(pending());
+        }
+        let opened = tokio::time::timeout(
+            Duration::from_secs(2),
+            open_source_playback_fence(file, None),
+        )
+        .await
+        .map_err(|_| pending())?
+        .map_err(|_| changed())?;
+        let identity = std_file_identity(&opened.handle).map_err(|_| changed())?;
+        if u64::try_from(file.size).ok() != Some(identity.size) || !opened.unchanged() {
+            return Err(changed());
+        }
+        let key = Key {
+            file_id: file.id,
+            size: file.size,
+            mtime: file.mtime,
+            path: file.path.clone(),
+            sha256: sha256.into(),
+            identity,
+            object_version: opened.object_version().into(),
+        };
+        if let Some(result) = self.lookup(&key) {
+            return result;
+        }
+        let limits = state.transcode.read_attestation_limits().await;
+        let lane = Arc::clone(&HASH_IO)
+            .try_acquire_owned()
+            .map_err(|_| pending())?;
+        let permit = state
+            .transcode
+            .admit_read_attestation(limits)
+            .ok_or_else(pending)?;
+        let fresh = Work {
+            hash: SourceHash::new(opened.handle.try_clone().map_err(|_| changed())?, identity)
+                .map_err(|_| changed())?,
+            fence: opened,
+        };
+        let work = self.start(&key, fresh)?;
+        let slot = self
+            .entries()
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| entry.slot)
+            .ok_or_else(pending)?;
+        let node_id = state.node_id.clone();
+        let owner = Arc::downgrade(self);
+        let cancel = self.cancel.child_token();
+        let shutdown = state.shutdown.clone();
+        let store = Arc::clone(&state.store);
+        let transcode = Arc::clone(&state.transcode);
+        // The owned task survives request cancellation. It holds no AppState or
+        // strong cache owner; dropping Runtime cancels it without an Arc cycle.
+        tokio::spawn(async move {
+            use plurx_core::cluster::coordination::{LeaseClaim, StoreCoordinator};
+            use plurx_core::store::background_jobs_resources::{
+                BackgroundSourceOwner, BackgroundSourceRegistration,
+            };
+            let mut work = work;
+            let mut lane = lane;
+            let mut permit = permit;
+            let coordinator = match StoreCoordinator::new(Arc::clone(&store), node_id.clone()) {
+                Ok(value) => value,
+                Err(_) => {
+                    finish(&owner, &key, Status::Paused(work));
+                    return;
+                }
+            };
+            // Slots are process-cache slots, not source keys. Reuse keeps lease
+            // metadata bounded; the coordinator's monotone fence owns each run.
+            let resource = format!("subtitle-read-attest:{node_id}:{slot}");
+            let mut lease = match coordinator
+                .acquire(&resource, Duration::from_secs(30))
+                .await
+            {
+                Ok(LeaseClaim::Acquired(lease)) => lease,
+                _ => {
+                    finish(&owner, &key, Status::Paused(work));
+                    return;
+                }
+            };
+            let source_owner = BackgroundSourceOwner::ReadAttestation {
+                lease: lease.clone(),
+                file_id: key.file_id,
+                source_size: key.size,
+                source_mtime: key.mtime,
+            };
+            let custody = match store
+                .register_background_source_custody(source_owner.clone(), crate::state::clock_ms())
+                .await
+            {
+                Ok(BackgroundSourceRegistration::Registered(receipt)) => receipt,
+                _ => {
+                    settle_read_owner(&store, &source_owner, None, false).await;
+                    finish(&owner, &key, Status::Paused(work));
+                    return;
+                }
+            };
+            if crate::source_custody::activate_background_with_journal(&store, custody.clone())
+                .await
+                .is_err()
+            {
+                settle_read_owner(&store, &source_owner, Some(custody), false).await;
+                finish(&owner, &key, Status::Paused(work));
+                return;
+            }
+            if cancel.is_cancelled()
+                || shutdown.is_cancelled()
+                || crate::state::clock_ms() >= lease.expires_at_unix_ms
+            {
+                // Activation succeeded, but no hash worker or source read was
+                // started. The exact armed custody is physically settled here.
+                settle_activated_without_reader(&store, &source_owner, custody).await;
+                finish(&owner, &key, Status::Paused(work));
+                return;
+            }
+            let budget = crate::background_jobs::SourceReadBudget::from_existing_custody(
+                Arc::clone(&store),
+                &custody,
+                cancel.clone(),
+            );
+            let pressure = budget.wait_pressure();
+            tokio::pin!(pressure);
+            let mut renewal = tokio::time::interval(Duration::from_secs(5));
+            renewal.tick().await;
+            let status = loop {
+                let chunk_cancel = cancel.child_token();
+                let read_cancel = chunk_cancel.clone();
+                let read_budget = Arc::clone(&budget);
+                let mut chunk = tokio::task::spawn_blocking(move || {
+                    let _cpu = permit;
+                    let result = work.hash.step_budgeted(&read_cancel, &read_budget);
+                    (work, result, lane)
+                });
+                let mut pause = false;
+                let joined = loop {
+                    tokio::select! {
+                        biased;
+                        ()=shutdown.cancelled()=>{chunk_cancel.cancel();break chunk.await;},
+                        ()=cancel.cancelled()=>{chunk_cancel.cancel();break chunk.await;},
+                        ()=&mut pressure=>{pause=true;chunk_cancel.cancel();break chunk.await;},
+                        _=renewal.tick()=>{
+                            match coordinator.renew(&lease,Duration::from_secs(30)).await {
+                                Ok(Some(next))=>lease=next,
+                                _=>{pause=true;chunk_cancel.cancel();break chunk.await;}
+                            }
+                        },
+                        result=&mut chunk=>break result,
+                    }
+                };
+                let (next, result, io) = match joined {
+                    Ok(value) => value,
+                    Err(_) => break failed(false),
+                };
+                work = next;
+                lane = io;
+                if cancel.is_cancelled() || shutdown.is_cancelled() {
+                    break failed(false);
+                }
+                match result {
+                    Err(error) if pause && error.to_string().contains("worker_interrupted") => {
+                        break Status::Paused(work)
+                    }
+                    Err(error) => break failed(error.to_string().contains("source_changed")),
+                    Ok(_) if pause => break Status::Paused(work),
+                    Ok(Some(digest)) => {
+                        let valid = digest == key.sha256
+                            && work.fence.unchanged()
+                            && final_source(&*store, &key).await;
+                        break if valid {
+                            Status::Ready(work.fence)
+                        } else {
+                            failed(true)
+                        };
+                    }
+                    Ok(None) => {}
+                }
+                tokio::task::yield_now().await;
+                let Some(next) = transcode.admit_read_attestation(limits) else {
+                    break Status::Paused(work);
+                };
+                permit = next;
+            };
+            // Every hash/read future has physically joined before either its
+            // exact coordinator fence or its source custody can be returned.
+            settle_read_owner(&store, &source_owner, Some(custody), true).await;
+            finish(&owner, &key, status);
+        });
+        Err(pending())
+    }
+}
+async fn settle_activated_without_reader(
+    store: &Arc<dyn plurx_core::store::Store>,
+    owner: &plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
+    receipt: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) {
+    // This scope activated successfully and started no reader. Its physical
+    // join proof must be recorded before the armed receipt can be deleted.
+    settle_read_owner(store, owner, Some(receipt), true).await;
+}
+
+/// This runs inside the pre-existing read owner, never in Drop or a new actor.
+/// Close-before-resolve fences delayed registration/renewal acknowledgements.
+async fn settle_read_owner(
+    store: &Arc<dyn plurx_core::store::Store>,
+    owner: &plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
+    mut receipt: Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
+    physical_joined: bool,
+) {
+    loop {
+        match store
+            .close_read_attestation_source_lease(owner.clone(), crate::state::clock_ms())
+            .await
+        {
+            Ok(_) => break,
+            Err(error) => {
+                tracing::warn!(%error,"read attestation lease settlement pending");
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+    loop {
+        if let Some(held) = receipt.take() {
+            if physical_joined {
+                crate::background_jobs::settle_joined_source_custody(store, held).await;
+            } else {
+                crate::background_jobs::settle_no_reader_source_custody(store, held).await;
+            }
+            return;
+        } else {
+            use plurx_core::store::background_jobs_resources::BackgroundSourceRegistration;
+            match store
+                .register_background_source_custody(owner.clone(), crate::state::clock_ms())
+                .await
+            {
+                Ok(BackgroundSourceRegistration::Registered(held)) => {
+                    receipt = Some(held);
+                    continue;
+                }
+                Ok(
+                    BackgroundSourceRegistration::LostOwnership
+                    | BackgroundSourceRegistration::NotRequired,
+                ) => return,
+                Err(error) => tracing::warn!(%error,"resolving read attestation source receipt"),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn failed(changed: bool) -> Status {
+    Status::Failed {
+        changed,
+        retry_at: Instant::now() + Duration::from_secs(5),
+    }
+}
+fn finish(owner: &Weak<ReadAttestations>, key: &Key, status: Status) {
+    if let Some(owner) = owner.upgrade() {
+        let mut entries = owner.entries();
+        if let Some(entry) = entries.iter_mut().find(|entry| entry.key == *key) {
+            entry.status = status;
+        }
+    }
+}
+async fn final_source(store: &dyn plurx_core::store::Store, key: &Key) -> bool {
+    let Ok(Ok(Some(file))) =
+        tokio::time::timeout(Duration::from_secs(2), store.get_file(key.file_id)).await
+    else {
+        return false;
+    };
+    if file.size != key.size || file.mtime != key.mtime || file.path != key.path {
+        return false;
+    }
+    let Ok(Ok(fence)) = tokio::time::timeout(
+        Duration::from_secs(2),
+        open_source_playback_fence(&file, Some(&key.object_version)),
+    )
+    .await
+    else {
+        return false;
+    };
+    fence.unchanged() && std_file_identity(&fence.handle).ok() == Some(key.identity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    fn file(path: PathBuf) -> MediaFile {
+        let metadata = std::fs::metadata(&path).expect("source metadata");
+        let mtime = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs() as i64;
+        MediaFile {
+            id: 41,
+            item_id: 7,
+            path,
+            size: metadata.len() as i64,
+            mtime,
+            duration_ms: Some(1000),
+            container: Some("mkv".into()),
+            video_codec: None,
+            video_codec_tag: None,
+            field_order: None,
+            video_profile: None,
+            width: None,
+            height: None,
+            bit_depth: None,
+            hdr: None,
+            hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
+            dolby_vision: Default::default(),
+            bitrate: None,
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            downloaded_subtitles: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+        }
+    }
+    async fn work(file: &MediaFile, expected: &str) -> (Key, Work) {
+        let fence = open_source_playback_fence(file, None)
+            .await
+            .expect("held source");
+        let identity = std_file_identity(&fence.handle).expect("identity");
+        let key = Key {
+            file_id: file.id,
+            size: file.size,
+            mtime: file.mtime,
+            path: file.path.clone(),
+            sha256: expected.into(),
+            identity,
+            object_version: fence.object_version().into(),
+        };
+        let hash = SourceHash::new(fence.handle.try_clone().expect("hash handle"), identity)
+            .expect("hash state");
+        (key, Work { fence, hash })
+    }
+    #[tokio::test]
+    async fn restarted_reader_requires_full_hash_and_held_cache_rejects_replacement() {
+        let directory = crate::test_tempdir().expect("directory");
+        let path = directory.path().join("source.mkv");
+        let bytes = vec![37_u8; 128 * 1024 + 17];
+        std::fs::write(&path, &bytes).expect("source");
+        let expected = hex::encode(Sha256::digest(&bytes));
+        // No process boot ID, old producer receipt, admin, demand or model is
+        // available: only the immutable asset's expected full byte digest.
+        let cache = ReadAttestations::new();
+        let media = file(path.clone());
+        let (key, fresh) = work(&media, &expected).await;
+        assert!(cache.lookup(&key).is_none());
+        let mut hashing = cache.start(&key, fresh).expect("single flight");
+        assert!(hashing
+            .hash
+            .step(&cache.cancel)
+            .expect("first chunk")
+            .is_none());
+        finish(&Arc::downgrade(&cache), &key, Status::Paused(hashing));
+        let (_, fresh) = work(&media, &expected).await;
+        let mut resumed = cache.start(&key, fresh).expect("resume held prefix");
+        assert!(resumed
+            .hash
+            .step(&cache.cancel)
+            .expect("last data")
+            .is_none());
+        let digest = resumed
+            .hash
+            .step(&cache.cancel)
+            .expect("EOF")
+            .expect("digest");
+        assert_eq!(
+            digest, expected,
+            "resume must not restart or skip the prefix"
+        );
+        finish(&Arc::downgrade(&cache), &key, Status::Ready(resumed.fence));
+        assert!(cache.lookup(&key).expect("retained proof").is_ok());
+        let replacement = directory.path().join("replacement");
+        std::fs::write(&replacement, &bytes).expect("same-sized replacement");
+        std::fs::rename(replacement, &path).expect("replace named object");
+        let (replacement_key, _) = work(&file(path), &expected).await;
+        assert!(
+            cache.lookup(&replacement_key).is_none(),
+            "same bytes/scan revision do not reuse another physical identity"
+        );
+        let restarted = ReadAttestations::new();
+        assert!(
+            restarted.lookup(&replacement_key).is_none(),
+            "an in-memory proof cannot survive restart as an inode receipt"
+        );
+    }
+    #[tokio::test]
+    async fn concurrent_reads_single_flight_and_cache_budget_preserve_live_work() {
+        let directory = crate::test_tempdir().expect("directory");
+        let mut source = tempfile::NamedTempFile::new_in(directory.path()).expect("source");
+        source.write_all(b"one physical source").expect("bytes");
+        let media = file(source.path().into());
+        let cache = ReadAttestations::new();
+        let (key, fresh) = work(&media, &"a".repeat(64)).await;
+        let _owned = cache.start(&key, fresh).expect("first reader");
+        let (_, duplicate) = work(&media, &key.sha256).await;
+        assert_eq!(
+            cache
+                .start(&key, duplicate)
+                .err()
+                .expect("no duplicate")
+                .code(),
+            Some("source_verifying")
+        );
+        for index in 1..MAX_ENTRIES {
+            let mut other = key.clone();
+            other.file_id += index as i64;
+            cache.entries().push_back(Entry {
+                slot: index as u8,
+                key: other,
+                status: Status::Running,
+            });
+        }
+        let mut extra = key.clone();
+        extra.file_id = 9000;
+        let (_, fresh) = work(&media, &key.sha256).await;
+        assert!(cache.start(&extra, fresh).is_err());
+        assert_eq!(cache.entries().len(), MAX_ENTRIES);
+        assert!(matches!(cache.entries()[0].status, Status::Running));
+        cache.entries()[1].status = failed(false);
+        let (_, fresh) = work(&media, &key.sha256).await;
+        assert!(
+            cache.start(&extra, fresh).is_ok(),
+            "only inactive entries can evict"
+        );
+        assert_eq!(cache.entries().len(), MAX_ENTRIES);
+        finish(&Arc::downgrade(&cache), &key, failed(true));
+        assert_eq!(
+            cache
+                .lookup(&key)
+                .expect("failure")
+                .expect_err("closed")
+                .code(),
+            Some("source_changed")
+        );
+    }
+    #[tokio::test]
+    async fn activated_cancelled_read_scope_settles_exact_armed_receipt() {
+        use plurx_core::cluster::coordination::{LeaseClaim, StoreCoordinator};
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+        use plurx_core::store::background_jobs_resources::{
+            BackgroundSourceOwner, BackgroundSourceRegistration,
+        };
+        use plurx_core::store::{SqliteStore, Store};
+
+        let directory = crate::test_tempdir().expect("database directory");
+        let database = directory.path().join("read-attestation.db");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&database).expect("real store"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "read attestation cancellation".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/attest".into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "source".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = store
+            .upsert_file(item, "/attest/source.mkv", 100, 1, &Default::default())
+            .await
+            .expect("file");
+        let coordinator = StoreCoordinator::new(Arc::clone(&store), "worker").expect("owner");
+        let lease = match coordinator
+            .acquire("subtitle-read-attest:worker:0", Duration::from_secs(30))
+            .await
+            .expect("lease")
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            other => panic!("expected acquired lease, got {other:?}"),
+        };
+        let owner = BackgroundSourceOwner::ReadAttestation {
+            lease,
+            file_id,
+            source_size: 100,
+            source_mtime: 1,
+        };
+        let receipt = match store
+            .register_background_source_custody(owner.clone(), crate::state::clock_ms())
+            .await
+            .expect("custody registration")
+        {
+            BackgroundSourceRegistration::Registered(receipt) => receipt,
+            other => panic!("expected custody receipt, got {other:?}"),
+        };
+        assert!(store
+            .activate_background_source_custody(receipt.clone(), uuid::Uuid::new_v4().to_string())
+            .await
+            .expect("activation"));
+        assert!(!store
+            .release_background_source_custody(receipt.clone(), crate::state::clock_ms())
+            .await
+            .expect("armed receipt must stay charged"));
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(cancelled.is_cancelled(), "cancel before any read starts");
+        settle_activated_without_reader(&store, &owner, receipt.clone()).await;
+        let connection = rusqlite::Connection::open(&database).expect("inspect store");
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM background_source_custody WHERE custody_id=?1",
+                [&receipt.custody_id],
+                |row| row.get(0),
+            )
+            .expect("exact custody count");
+        assert_eq!(
+            remaining, 0,
+            "activated cancelled scope must settle its exact receipt"
+        );
+    }
+
+    #[test]
+    fn dropping_runtime_cancels_owned_read_work_without_strong_owner_cycle() {
+        let cache = ReadAttestations::new();
+        let weak = Arc::downgrade(&cache);
+        let task_cancel = cache.cancel.child_token();
+        drop(cache);
+        assert!(weak.upgrade().is_none());
+        assert!(task_cancel.is_cancelled());
+        assert_eq!(pending().code(), Some("source_verifying"));
+    }
+}

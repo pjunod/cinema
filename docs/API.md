@@ -4,9 +4,9 @@
 
 <!-- agent head: read this section first; the body below is reference. Keep it current when the status changes. -->
 
-- **What this is:** Every endpoint plurxd serves and which credential authorizes it; the specification is this file (no OpenAPI document exists), written from the routers and handlers on 2026-09-07.
+- **What this is:** Every endpoint plurxd serves and which credential authorizes it; the specification is this file (no OpenAPI document exists), written from the routers and handlers on 2026-10-26.
 - **Where it stands:**
-  - Live reference; maintained with behavior changes. The intro states the route inventory as of 2026-10-15.
+  - Live reference; maintained with behavior changes. The intro states the route inventory as of 2026-10-26.
 - **Read further only for:**
   - the five surfaces and credentials: `## 1. Surfaces — five things on one port`; `## 2. Authentication — two bearer kinds and five capabilities`
   - error envelopes: `## 3. Errors — three envelopes, and the gates that answer first`
@@ -29,15 +29,16 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-19, plurx has 386 routes declared by the ordinary listener's
-assembled router. The ordinary listener (`:32400` by default) serves the five
-surfaces below.
+As of 2026-10-28, plurx has 411 routes declared by the ordinary listener's
+assembled router. The ordinary HTTP listener (`:32400` by default) and optional
+HTTPS listener (`:32443`, off by default) serve the identical five surfaces
+below. HTTPS requires restart and explicit client trust.
 Sharing uses a separate private TLS listener with its own peer credentials
 (§24). Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 386 routes across the registered routers.
+plurx has 411 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -48,6 +49,12 @@ count above stops matching.
 ---
 
 ## 1. Surfaces — five things on one port
+
+When native HTTPS is active, public HTTP app/API requests return `307` with
+`Cache-Control: no-store` to the same hostname and reachable HTTPS port;
+path, query, method and body are preserved. HTTPS itself is not redirected.
+Health, discovery, cluster RPC and compatibility exceptions are described in
+[operations](OPERATIONS.md#optional-https-and-persistent-identity).
 
 ```
                          ┌────────────────────────────┐
@@ -109,6 +116,7 @@ prefix, not by the carrier:
 |---|---|---|---|
 | Login token | 64 hex chars (32 random bytes) | `POST /api/v1/auth/login`, `POST /api/v1/setup` | SHA-256 of the secret, in `tokens` |
 | API key | `plx_` + 32 hex chars (16 random bytes) | `POST /api/v1/keys` | SHA-256 of the secret, in `api_keys` |
+| Playback handoff token | 64 hex chars, like a login token | `POST /api/v1/playback-handoffs/redeem` (§13.2) | SHA-256 in `playback_handoffs_tokens` — never in `tokens` |
 
 The `plx_` prefix says which table to look in *before* any lookup, so a key
 and a token are never tried against each other's store and "not found" keeps
@@ -126,6 +134,21 @@ exactly once, at creation.
 
 Admin-ness is re-read from the store on **every** request, so demoting a user
 takes effect on their next request without revoking their token.
+
+**Token audiences.** A login-token-shaped bearer authenticates for exactly one
+audience (`TokenAudience` in `crates/plurx-core/src/store/mod.rs`):
+
+| Audience | Row | Accepted by |
+|---|---|---|
+| `Native` | a `tokens` row with no Jellyfin marker | `AuthUser` and every extractor built on it |
+| `JellyfinCompatibility` | a `tokens` row with a `jellyfin_login_tokens` marker | the Jellyfin façade only (§22) |
+| `PlaybackHandoff` | a `playback_handoffs_tokens` row (not in `tokens`), unexpired, whose minting token still exists | `PlaybackPrincipal` (the decision, HLS create, direct play, text subtitle, item progress and client-log routes, for one file) and `HandoffToken` (self-revocation, restricted context and explicit next-episode advancement) — §13.2 |
+
+`AuthUser` asks for the native audience, so a Jellyfin login or a playback
+handoff token is an unknown bearer there: 401, exactly as for a token that was
+never minted. A handoff token is kept out of `tokens` on purpose: every native
+lookup reads only that table, so even a binary older than the handoff tables,
+still serving during a rolling upgrade, finds nothing and answers 401.
 
 `ScopedKey` returns 401 rather than 403 for a login token because the
 credential is the wrong *kind*, and 403 would suggest the right token could
@@ -237,6 +260,12 @@ Otherwise a token stops working only when its row is deleted:
 | `PUT /api/v1/users/{id}` with a `password` | every token of that user |
 | `DELETE /api/v1/users/{id}` | every token of that user, by cascade |
 | `DELETE /api/v1/keys/{id}` | that API key |
+| `DELETE /api/v1/playback-handoffs/self` | that playback handoff token |
+
+A playback handoff token also stops working, with no delete, six hours after
+redemption or as soon as the token that minted it is deleted by any row above
+(§13.2). It leaves the devices list at that moment and is pruned within the
+hour.
 
 Demotion (`is_admin: false`) deletes no tokens and does not need to, because
 `AdminUser` re-reads the flag per request. Every revoking handler wraps its
@@ -469,6 +498,9 @@ of never storing it.
 | PUT | `/api/v1/system/transcoder` | admin | Saves this node's backend preference for its next restart |
 | POST | `/api/v1/system/transcoder` | admin | Starts an idle-node capability check and benchmark |
 | POST | `/api/v1/system/video-processing/reprobe` | admin | Requests a new node-local video-processing compatibility generation (macOS processing graphs, or Linux strict Dolby graphs with their per-graph refusal reasons) and returns the current reports. Saved preferences and running plans are unchanged |
+| GET | `/api/v1/system/https` | admin | Addressed-node saved, desired and actually active HTTPS configuration, decimal-string revision, environment overrides and loaded public certificate facts; no-store |
+| PUT | `/api/v1/system/https` | admin | Saves restart-only node-local HTTPS intent with required node identity and revision guards; 16 KiB JSON, no forwarding or replicated settings |
+| GET | `/api/v1/system/https/certificate` | admin | Downloads only the loaded active public certificate chain as PEM; no-store, attachment, 404 when inactive |
 | GET | `/api/v1/system/logs` | admin | Tail of the in-memory log ring |
 | GET | `/api/v1/system/playback-events` | admin | Node-local playback observations |
 | GET | `/api/v1/system/library-shape` | admin | Codec and HDR census over the library |
@@ -484,6 +516,7 @@ of never storing it.
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
 | GET | `/api/v1/activity` | bearer | Flat list of what the server is doing |
 | GET | `/api/v1/activity/detail` | bearer; admin sees more | The activity page |
+| GET | `/api/v1/activity/starts` | admin | Query `limit`, `before`. One row per playback start across the cluster, newest first: each media-session create (route `vod` or `rolling`, a retry that replayed its owner's session included) and each direct or progressive request that opened a start (route `direct` or `progressive`, so a `vod_index_pending` fallback to the remux is its own row): time, title, client build, route, refusal, phases, owner node, time to first frame, outcome, index state and the `index now` action (from each title's own newest fragment-index request). `outcome` `unobserved` means no client report reached the node that handled the start (the report may have gone to another node). `before` is the `next_before` cursor of the previous page; a node's page never ends inside a millisecond, so rows sharing one are not skipped. Every committed member is asked, learners included; members that did not answer are listed under `unavailable`; their starts are missing, not absent |
 | DELETE | `/api/v1/activity/sessions/{id}` | admin | Stops one transcode or VOD session |
 | DELETE | `/api/v1/activity/offline/{id}` | admin | Cancels and deletes one visible offline package |
 | DELETE | `/api/v1/activity/producer` | admin | Stops the pre-transcode producer after the current title |
@@ -700,6 +733,56 @@ mapping" and "check Curator's URL and key".
 here because it is a table scan, and `/system` is polled by the settings page
 every few seconds.
 
+### 5.2a Node-local HTTPS — `/api/v1/system/https`
+
+These admin-only routes address the node that receives the request. They do
+not forward to a leader or write replicated settings. Exact GET/PUT intent
+and GET certificate operations remain eligible on learners and in maintenance;
+existing authentication, removal and serving fences still apply.
+
+GET is `Cache-Control: no-store`. Its `saved` configuration precedes explicit
+environment overrides; `desired` is effective at the next boot; `active` and
+`certificate` describe this process's loaded listener and identity. A changed
+file does not change active facts. `restart_required` compares desired with
+active. `overrides` names environment-controlled fields whose underlying saved
+values must be preserved. The configuration fields are `enabled`, `port`,
+`cert_file`, `key_file` and `sans`; paths refer to the server/container's file
+system. Both paths empty select a persistent self-signed identity.
+
+PUT replaces desired intent using a required node and revision guard:
+
+```json
+{"node_id":"addressed-node-id","revision":"9007199254740993","desired":{"enabled":true,"port":32443,"cert_file":"","key_file":"","sans":["localhost","127.0.0.1","::1","media1"]}}
+```
+
+`revision` is a canonical decimal u64 **string**, never a JSON number; the
+node-local file retains an integer. Node/revision mismatch and attempted edits
+to environment-controlled fields return named 409 conflicts. Overflow refuses
+the save. Invalid intent or malformed/unknown JSON fields return sanitized
+400 responses; bodies over 16 KiB return 413. Error text never repeats request
+material. Every successful save increments the published revision, including a
+save that leaves the same choices in place. Reload explicitly after a conflict;
+never retry against another node automatically.
+
+A save changes desired intent only and never restarts, provisions keys or
+reloads the listener. Enabling validates existing material read-only; first
+generated enable defers identity creation to startup. Disabling does not open
+obsolete identity paths. Failure before publication leaves revision and intent
+unchanged. Publication followed by failed directory sync is a committed success
+with `durability_confirmed: false`; the new revision is current, and the UI
+warns that crash durability is unconfirmed. Normal saves return true. The last
+observed outcome remains on GET for this process, including when the original
+HTTP waiter disconnected. Such cancellation cannot interrupt adoption after
+publication.
+
+GET `/api/v1/system/https/certificate` returns an attachment named
+`plurx-https-certificate.pem`, `Content-Type: application/x-pem-file` and
+`Cache-Control: no-store`. It derives only CERTIFICATE blocks from the active
+loaded chain, never the managed private bundle; inactive HTTPS returns 404.
+The JSON facts include mode, leaf DER SHA-256 fingerprint, SANs and expiry.
+Trust installation remains an explicit client operation; downloading the chain
+or displaying a URL does not establish browser or device trust.
+
 ### 5.3 `POST /api/v1/system/storage`
 
 `?sustained=<seconds>` adds continuous reading per mount on top of the quick
@@ -740,7 +823,10 @@ names, and `404` for any other name.
 `?level=` (default `trace`), `?limit=` (default 500, capped at 2000),
 `?scope=cluster` to read the isolated membership and Raft ring instead of the
 general one — two rings, so replication chatter cannot evict playback
-diagnostics. Entries are `{ts_ms, level, target, message}`, oldest first.
+diagnostics. `?scope=sharing` reads a copy of every shared-library event
+(host setup, connection checks, Tailscale shares, pairing), kept so playback
+chatter cannot evict a connection failure; those events also stay in the
+general ring. Entries are `{ts_ms, level, target, message}`, oldest first.
 
 ### 5.5 `POST /api/v1/client-log`
 
@@ -828,6 +914,28 @@ the selected queue filter: up to 100 running and 100 cancelling assignments,
 with the same labels and observation fields as `jobs`. `active_truncated`
 indicates more assignments exist. Lease expiration must still be checked;
 a durable running row does not prove a physical worker is alive.
+
+The same response includes `processing: {window_ms: 300000, nodes:
+[{node_id, succeeded, failed}]}` across all filters. Each row counts terminal
+worker attempts with a finish time in the five minutes ending at
+`observed_at_ms` (start exclusive, end inclusive). Sum the node counts for
+the cluster total and divide by five for jobs per minute. Nodes with zero
+qualifying attempts have no row. Yields, retries, cancellations and expired
+leases are excluded. Counts come from retained attempt history and are lower
+bounds if queue maintenance pruned records inside the window.
+
+Each job-count group includes `overdue_manual`. For queued library scans and
+metadata refreshes this counts jobs with a pending manual or targeted request
+that is at least five minutes old and whose job has been due for dispatch
+for at least five minutes. Joining an older scheduled job starts the clock at
+the time of the manual request. Other groups report zero.
+
+Admin Activity source-holder rows include the original reader's
+`origin_node_id` and, for retained durable jobs, `origin_job_kind` and
+`origin_job_state`. A succeeded job can still have a reader awaiting recovery.
+`plurx_background_source_recovery_pending` counts distinct background readers
+that still occupy shared capacity after authority expired; the metrics sampler
+also logs a warning while recovery is pending.
 
 `DELETE /api/v1/activity/processes/{pid}` kills one listed child through the
 pidfd taken when it was started, so a pid the kernel has since reused for an
@@ -1723,6 +1831,14 @@ rest, in the groups that matter:
   claim about the grade cannot authorize anything),
   `audio_offset_ms` (±15 000, never written back to the file).
 - **Position** — `start` in seconds, negatives clamped to 0.
+- **Source service** — optional `source_telemetry: "film-v1"` declares film-demand
+  reporting separately from `transport`. A capable client receives startup/refill
+  priority before its first control exchange. Omission uses finite transfer
+  service until actual accepted film telemetry permanently establishes rolling
+  service. When ordinary control is off, the server clears the declaration; quality-ledger
+  receipts alone do not supply source-demand freshness. This field
+  does not change media identity or enable a feature; unknown labels retain
+  legacy transfer service.
 - **Evidence** — `caps` (the same v2 document), `overrides`, `presentation`
   (only `"vod"`), `block_budget_secs`, `intent` (the viewer's ask as an
   *orderable* value, recorded durably before anything is built).
@@ -1787,10 +1903,30 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
 | 410 | `live_presentation_removed` | `presentation` is anything but `"vod"` |
 | 410 | `media_session_ended` | the idempotent session was already released |
 | 422 | `hdr_subtitle_burn_refused` | the resolved plan delivers HDR without the burn, so burning would discard that grade. Judged after `resolve_plan`, against the no-burn delivered range — not against the source `hdr` column, and not exempted by a transcode verdict. The M6 preparation candidate is refused the same way |
-| 503 | `media_session_starting` | an identical request is still starting |
+| 503 | `startup_timeout` + `Retry-After` | the create's owner is still working, or an identical request (same `request_id`) is: re-post the same body; the retry joins that owner |
+| 503 | `transcode_capacity_pending` + `Retry-After` | a hardware slot, CPU share or queue position is taken; a retry of the same request can succeed |
+| 503 | `transcode_height_unavailable` | this worker cannot encode the requested height now; ask for a smaller one rather than re-posting (no shipped client re-asks yet: each ends the start on the `create_capacity_terminal` surface row) |
+| 503 | `transcode_scratch_exhausted` | this start's scratch grant is larger than the configured ceiling; no retry can succeed |
+| 503 | `replacement_expired` | the replacement start spent its own deadline before provisional work finished |
 | 503 | `media_session_handoff_pending` | the predecessor owner has not finished handoff |
 | 503 | `media_session_superseded` / `playback_target_superseded` | the client has since settled on a later destination |
-| 503 | — | too many session starts already active for this user |
+| 503 | `media_session_overloaded` + `Retry-After` | too many session starts already active for this user; the caps free as this user's other starts activate or end |
+| 503 | `media_owner_transition` + `Retry-After` | the ingress or the chosen worker lost serving authority, a worker did not answer, or the session's durable owner could not be committed in time; re-post the same body. Every create 503 carries a code; one with no more specific cause carries this one |
+
+**Start budget.** A client sends `X-Plurx-Startup-Remaining-Ms`: what its
+own start sequence has left, in milliseconds, on every attempt. The server
+answers within that or within **10 s, whichever is less** — it never holds one
+create longer than 10 s, whatever the header says — and a create without the
+header gets the 10 s. `0` is answered `startup_timeout` at once. When the
+allowance ends first, the answer is `startup_timeout` with `Retry-After`, but
+the start itself is not abandoned: once the create holds its durable
+`request_id` claim it runs on to activation for as long as the viewer can
+still take the answer — the header's whole remaining time (unclamped) plus one
+re-post, inside the claim's 60 s window — and a re-post of the same body with the same `request_id` — on any
+node — waits for that owner's activation (bounded by the new attempt's own
+allowance) and answers with it, rather than starting a second encoder. A
+client with more time left than 10 s therefore re-posts on `startup_timeout`;
+one with none left stops.
 
 **The deprecated bridge.** `GET /files/{id}/hls/start` accepts `height`,
 `start`, `audio`, `copy=1`, `aac=1`, builds a create body and calls the same
@@ -1955,6 +2091,18 @@ whose playlist is the family's multivariant master, and `quality` is
 `quality-schedule` and `quality-family` paths. Reading the new owner back can
 answer 503 `continuous_family_owner_timeout`, or 409
 `continuous_family_owner_missing` / `continuous_family_owner_changed`.
+
+Version 2 creation requires `controlled: true`. It keeps the same candidate pair
+and response envelope, but prepares only primary video and shared audio for
+startup. The companion begins after the owned primary reports a durable
+`presented` transition. A version 2 family has `family_revision: 1` and one
+video row initially; once the companion init is verified it adds the second
+row at revision 2. Family identity, primary and audio rows remain stable.
+Clients refresh `quality-family` on owned media requests or quality intents,
+accept only additive revisions, and update the existing player levels without
+reloading the source. Version 1 retains its full-pair startup contract.
+A 503 `segment_pending` retains the same family, URL and original preparation
+deadline; it is not permission to delete and recreate the producer.
 
 **`GET /hls/{session}/quality-family`** — `application/json`, `Cache-Control:
 no-store`, at most 32 KiB, relayed to the owner like a playlist: `{version: 1,
@@ -2304,17 +2452,20 @@ codeless 503 on `overlay.json` as a wait, for older servers.
 
 ### Progressive English translation
 
-The initial experimental route uses the attached web direct player with one
-unambiguous source audio stream. Spoken-language confirmation may correct the
-metadata tag. Small multilingual produces independent 30-second cores with
-five seconds of left/right context; clipped boundary repetition and grammar or
-meaning errors remain possible. Native, encoded and multi-audio playback are
-not qualified by this route.
+The speech API exposes same-language transcription and English translation
+for the selected attached audio ordinal on web and native clients. Source
+clock normalization is independent of direct, remux or encoded delivery.
+The two registered Small profiles produce independent30second cores with5seconds
+of left/right context. Transcription and English translation each require their
+own qualification; saved Small choices and immutable profile identities remain
+valid. The optional `default_profile_id` discovery hint reflects the saved
+profile/task choice and defaults to Small English translation when unset.
+Discovery does not grant producer authority or override the saved enable choice.
 
 | Method | Path | Credential | Meaning |
 |---|---|---|---|
 | GET, PUT | `/api/v1/subtitle-translation` | admin bearer | Saved enable/model/profile/language preferences with opaque revision CAS. Readiness never rejects Save. |
-| GET | `/api/v1/subtitle-translation/models` | admin bearer | Immutable profile, bounds and distinct English-translation worker qualification. |
+| GET | `/api/v1/subtitle-translation/models` | admin bearer | The two immutable Small task profiles, bounds, saved-choice hint and independent speech-task qualification. |
 | GET | `/api/v1/files/{id}/subtitle-translation/options` | bearer | Current source revision, supported profile and bounded cached asset list; no work. |
 | POST | `/api/v1/files/{id}/subtitle-translation` | admin bearer | Durable operation and expiring playback demand before source hashing; exact request replay. |
 | GET | `/api/v1/files/{id}/subtitle-translation/assets` | bearer | Explicit cursor page of cached assets. |
@@ -2328,6 +2479,19 @@ not qualified by this route.
 | GET | `/api/v1/subtitle-translation/assets/{id}/coverage` | bearer | Scoped cursor page of accepted overlapping core intervals. |
 | GET | `/api/v1/subtitle-translation/assets/{id}/segments/{segment}` | bearer | Exact bounded canonical UTF-8 JSON bytes; verify the manifest digest before decoding. |
 
+Create, demand renewal and both Retry variants accept an optional UUID
+`continuity_id`, echoed on their demand receipt. Clients retain it during
+ordinary clock advancement, pause/rate changes and continuous attachment
+handoffs; an actual seek/discontinuous traversal replaces it. Range claims
+capture at most16 currently authorizing demand identities. A running range
+may finish while one captured live traversal continues, even after its core
+leaves the scheduling window. A new seek, expired/released demand, Stop,
+source/producer replacement or lost claim/resource authority revokes that
+support. New queued claims still require useful current-window demand.
+Omitted continuity uses the legacy current-window-only lifetime. Exact replay
+includes the original UUID; a client resolves an uncertain renewal before
+sending the next generation with its new traversal identity.
+
 Existing model Install/Test routes also accept strict version 2 translation
 requests with request UUID, intent expiry, purpose, profile ID and named workers.
 Their version 2 responses identify `purpose: "translation"`, `model_id` and
@@ -2339,6 +2503,31 @@ ran. Work mutations require current administrator authority and an unexpired
 first-use intent; retained exact receipts replay without starting fresh work.
 Responses carry a fresh `X-Translation-Server-Now-Ms` even when receipt bodies
 retain their original clock.
+
+### Text subtitle translation and shared captions
+
+Text translation creates a durable job from an existing subtitle track and
+returns its result as a cached subtitle asset. Shared playback exposes only
+committed caption metadata and bounded manifest/segment reads through the
+existing import grant; it does not start work on the Source.
+
+| Method | Path | Credential | Meaning |
+|---|---|---|---|
+| GET, PUT | `/api/v1/subtitle-text-translation/config` | bearer; admin for PUT | Saved enable/model preferences and revision. |
+| GET | `/api/v1/subtitle-text-translation/models` | bearer | Model catalog and worker availability. |
+| POST | `/api/v1/subtitle-text-translation/models/install` | admin bearer | Enqueue model installation. |
+| POST | `/api/v1/subtitle-text-translation/models/verify` | admin bearer | Enqueue model verification. |
+| GET | `/api/v1/files/{id}/subtitle-text-translation/options` | bearer | Current subtitle tracks, supported models and available results. |
+| POST | `/api/v1/files/{id}/subtitles/{index}/translation` | admin bearer | Create a durable text translation job. |
+| GET | `/api/v1/subtitle-text-translation/jobs/{id}` | bearer | Observe a translation job. |
+| POST | `/api/v1/subtitle-text-translation/jobs/{id}/retry` | admin bearer | Retry a failed job. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions` | import grant | Cursor page of committed captions for shared playback. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/manifest` | import grant | Playback-window coverage and segment descriptors; requires `position_ms`. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/segments/{segment}` | import grant | Bounded caption segment; requires the manifest `lease` query value. |
+
+Shared caption reads are grant-bound and revalidate the Source asset authority.
+Expired snapshots require refreshing the caption page and manifest; the reads
+remain independent of playback session creation.
 
 Page and segment requests use `X-Translation-Read-Lease`. A matching ETag/304
 does not renew that lease. Expired leases or moved cursors require resynchronizing
@@ -2568,6 +2757,89 @@ resolved by the same policy watch progress uses: a live write (no
 `recorded_at`) always wins, and a dated offline write older than the stored
 row updates nothing and returns the existing winning row.
 
+### 13.2 Playback handoffs — one title, handed to another app
+
+| Method | Path | Auth | What it does |
+|---|---|---|---|
+| POST | `/api/v1/playback-handoffs` | bearer (native) | Mint a one-time code for one file. Body `{file_id, start_ms?, audio?, subtitle?}` (`audio` and `subtitle` are the stream indexes HLS create takes; `subtitle: -1` is Off, as the decision route reads it); 201 `{id, code, expires_in: 120}`. Unknown file 404; a negative `start_ms` or `audio`, or a `subtitle` below -1, 400 |
+| POST | `/api/v1/playback-handoffs/redeem` | **none** — the code is the credential | Body `{code, device?}`; 200 `{token, handoff_id, file_id, item_id, start_ms, audio, subtitle, user, origin, expires_at}` (`item_id` is the file's item, for progress). A code never minted (or not code-shaped) 404; a code already redeemed, past its 120 s, or minted by a token since revoked 410 `handoff_gone` |
+| GET | `/api/v1/playback-handoffs/{id}` | the minting bearer | `{redeemed: bool}`. Any other bearer, even the same user's, 404 |
+| DELETE | `/api/v1/playback-handoffs/self` | playback handoff token only | Revoke the presented handoff token; 204. A native bearer 401 |
+| GET | `/api/v1/playback-handoffs/self/context` | playback handoff token only | Restricted metadata for the token's current file plus its immediate next episode; 200 context below. No requested item/file id or library browsing; missing current item/file 404 |
+| POST | `/api/v1/playback-handoffs/self/next` | playback handoff token only | Body `{expected_file_id}`. Resolve the immediate next episode on the server and atomically replace the token's file scope; 200 updated context. Stale predecessor 409 `handoff_stale`; no successor/file 404. Native, expired or revoked bearer 401. Unknown body fields are refused |
+
+**Why.** A web session sometimes has to give another local app — the Linux
+player ([LINUX-PLAYER-PLAN.md](clients/LINUX-PLAYER-PLAN.md) §3.1) — playback
+of one title. A bearer in a `plurx-player://` URL would land in shell
+history, `ps` and desktop logs, and any program can register that scheme. So
+the URL carries only a code: 32 random bytes as unpadded base64url (43
+characters), stored as its SHA-256, single use, and dead after 120 s. The code
+is minted against the bearer that asked, and the status read answers only that
+bearer, which is how the web app tells "the player opened" from "the player is
+not installed".
+
+**The token.** Redemption mints a 64-hex token whose audience is
+`PlaybackHandoff` (§2.2), stored as its SHA-256 in `playback_handoffs_tokens`
+with its file, expiry, minting token and `device` label (default `Playback
+handoff`, at most 256 bytes). It is never a row in `tokens`, so no native
+lookup can accept it (§2.2). `GET /api/v1/me/devices` unions the table in, so
+the token is listed there and `DELETE /api/v1/me/devices/{prefix}` revokes it.
+The code's claim and the token are written in one transaction on both stores.
+It lives six hours from redemption and dies
+with the token that minted it — logout, a password change, revoking that
+device — so signing out of the web app stops the player too.
+
+**Player context and next episode.** Context is
+`{file_id, item_id, start_ms: 0, audio: null, subtitle: null, metadata, next}`.
+`metadata` contains only `title`, `series_title`, `kind`, `overview`, `year`,
+`season_number`, `episode_number`, `runtime_ms`, and `air_date`; optional facts
+are `null`. `next` is `null` or `{file_id, item_id, metadata}`. No filesystem
+paths, credentials, sibling lists or generic library access are exposed.
+The next episode follows the existing ordered children within the current
+season, then the first episode of the immediate next season. The selected
+file is the first in the ordinary quality-ordered file list whose bounded
+availability observation is not confirmed missing; an unknown observation
+remains eligible and the source open decides. Movies, a final episode, missing
+hierarchy or a successor without an eligible file have no next entry.
+
+Reading next metadata grants no playback access. Only an explicit Next request
+changes the existing token's one-file scope; it preserves the original expiry,
+login binding and token identity. The expected predecessor is compared inside
+the write, so a repeated request cannot skip another episode. Old-file playback
+and progress requests then fail their scope checks. Clients complete the old
+item's final progress before requesting Next and open the returned file at zero.
+A lost response can be resolved by reading context with the same token.
+
+It is accepted only here, and only for its currently authorized file:
+
+| Route | Scope check |
+|---|---|
+| `GET`, `POST /api/v1/files/{id}/decision` | `id` is the handed-off file |
+| `POST /api/v1/files/{id}/hls/sessions` | `id` is the handed-off file |
+| `GET /api/v1/files/{id}/direct` | `id` is the handed-off file |
+| `GET /api/v1/files/{id}/subs/{subtitle}` | `id` is the handed-off file |
+| `POST /api/v1/items/{id}/progress` | `id` is the handed-off file's item |
+| `POST /api/v1/client-log` | none: reports are attributed to the user |
+| `DELETE /api/v1/playback-handoffs/self` | itself |
+| `GET /api/v1/playback-handoffs/self/context` | current file metadata and the server-resolved successor summary only |
+| `POST /api/v1/playback-handoffs/self/next` | expected current file; only the server-resolved immediate successor can become authorized |
+
+A route above for another file or item answers 403 `handoff_scope`. Every other
+user route answers 401, because the token is not a native bearer. HLS control,
+status, playlists and teardown (`/api/v1/hls/{session}/…`) read no bearer at
+all: the session id is their capability (§2.4), so the player uses them with
+the session it created.
+
+**`origin`.** plurx has no configured canonical origin. The redeem response
+carries the `Origin` header of the mint request when it was a plain
+`http(s)://host[:port]` — the origin the minting web app was served from,
+which is the `server` it puts in the player URL — and `null` otherwise.
+
+Codes and tokens live in the `playback_handoffs*` extension (SQLite v115; the
+replicated store installs the same objects from its current-schema arm) and
+are imported with `tokens` by a SQLite-to-cluster import, so an imported token
+keeps its audience.
+
 ---
 
 ## 14. Watch state
@@ -2657,7 +2929,7 @@ The preparation status read requires an authenticated viewer; every other route 
 | GET | `/api/v1/analysis/jobs/{id}` | One job's exact durable state and attempt history |
 | DELETE | `/api/v1/analysis/jobs/{id}` | Cooperative cancellation |
 | POST | `/api/v1/analysis/jobs/{id}/retry` | Creates a successor for one terminal job |
-| POST | `/api/v1/analysis/reopen` | Bulk reopen; **dry-run by default** |
+| POST | `/api/v1/analysis/reopen` | Bulk reopen; **dry-run by default**; optional `last_error_code` (one of the bounded `plurx_analysis_queue_failed_by_code` codes) selects one cause |
 | POST | `/api/v1/analysis/reconcile` | Preview and replace obsolete unfinished requests; **dry-run by default** |
 | PUT | `/api/v1/files/{id}/timeline-annotations/{kind}` | Writes a durable manual boundary |
 | DELETE | `/api/v1/files/{id}/timeline-annotations/{kind}` | Discards it, with explicit confirmation |
@@ -3747,6 +4019,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | Method | Path | Body limit | What it does |
 |---|---|---|---|
 | GET | `/_internal/v1/activity-snapshot` | — | Node-local delivery snapshot |
+| POST | `/_internal/v1/activity-starts` | — (signed exact request) | This node's own page of start-attempt rows for the fleet `activity/starts` read; response is signed by the node |
 | GET | `/_internal/v1/clock` | — (empty exact request) | Signed `{node_id, received_unix_ms, sent_unix_ms}` for four-timestamp clock observation. Any exact committed member, including a learner; unchanged 30 s auth window. The prober captures the exact signed request timestamp and bounded-body receipt before verifying the response; 1 KiB response budget and 2 s peer deadline. The route itself only measures; since 2026-10-04 (#793) the observations it supplies feed the cluster clock guard, which refuses takeover, the expired-session scan, membership changes and readiness only while the Developer switch `cluster.clock_guard_enforced` is on (default off; see OPERATIONS.md). |
 | GET | `/api/v1/internal/cluster/operations-status` | — | This node's own operations status, for the aggregate |
 | POST | `/api/v1/internal/auth/cache-revocation` | 256 B | Propagates one credential-revocation phase |
@@ -3919,21 +4192,70 @@ including errors, carries `Cache-Control: no-store`.
 | GET / PUT | `/api/v1/sharing/settings` | Read or save the sharing enabled choice. Saving either choice succeeds independently of readiness. |
 | GET | `/api/v1/sharing/status` | Read this serving node's timestamped listener, certificate, egress and import observations. Unobserved host Serve and node-key state are `unknown`. |
 | GET / PUT | `/api/v1/sharing/endpoints` | Read or replace approved source endpoints with `expected_revision` CAS. |
-| POST | `/api/v1/sharing/invitations` | Issue an expiring invitation for selected local movie/show libraries. |
+| GET / PUT | `/api/v1/sharing/network-authorization` | Inspect node-local authorization/cleanup facts or seal a verified user-owned Tailscale API key; never returns the key. GET also returns the key's `tailnet` and, every 30 s, whether each recent device share was `accepted` and `accepted_by` which login (`shares`, `observed_at_ms`, `observation_error`). |
+| POST | `/api/v1/sharing/connection` | Inspect a combined invitation, return bounded Tailscale consent links, or probe pinned reachability with `probe: true`; never accepts provider permissions on behalf of the recipient. |
+| POST | `/api/v1/sharing/invitations` | Issue one expiring Cinema invitation including single-use Tailscale device shares for selected local movie/show libraries. `include_network: false` explicitly issues the legacy format for an existing private connection. |
 | DELETE | `/api/v1/sharing/invitations/{id}` | Cancel the invitation. |
 | GET | `/api/v1/sharing/exports` | List source grants and their pending or active authority. |
 | POST | `/api/v1/sharing/exports/{id}/approve` | Approve the compared pairing code using the expected grant generation. |
 | PUT | `/api/v1/sharing/exports/{id}/libraries` | Replace the selected library scope using the expected generation. |
 | DELETE | `/api/v1/sharing/exports/{id}` | Revoke the source grant. |
 | GET / POST | `/api/v1/sharing/imports` | List imports or begin a pinned, identity-checked invitation claim. |
+| PUT | `/api/v1/sharing/imports/{id}/name` | Rename the recipient's local share label using the expected current name. |
 | POST | `/api/v1/sharing/imports/{id}/re-pair` | Explicitly pair a replacement invitation into the selected import. |
 | POST | `/api/v1/sharing/imports/{id}/rotate` | Persist a replacement credential before the recoverable upstream rotation. |
 | GET / PUT | `/api/v1/sharing/imports/{id}/assignments` | Read the complete assignment snapshot or replace individually assigned local viewers using assignment-generation CAS. |
 | GET | `/api/v1/sharing/imports/{import}/libraries` | Read fresh Source library scope using the current administrator login and import authority, independently of viewer assignments. |
 | PUT | `/api/v1/sharing/imports/{id}/endpoints` | Update recipient-side numeric hints, retaining approved pins unless an owner explicitly confirms replacements. |
+| GET | `/api/v1/sharing/imports/{id}/connection` | Diagnose this serving node's pinned connection to the import's approved source endpoints; read-only, sends no credential. |
 | DELETE | `/api/v1/sharing/imports/{id}` | Disconnect the import and advance its lifecycle. |
 | ANY | `/sharing` | Refuse peer traffic on the ordinary listener with `404 sharing_not_found`. |
 | ANY | `/sharing/{*path}` | Refuse every peer path on the ordinary listener with the same typed 404. |
+
+`POST /api/v1/sharing/imports` accepts an optional `name`. Omit it, pass
+`null`, or leave it blank to use the verified Source Cinema's name. A supplied
+name is trimmed and limited to 128 UTF-8 bytes without control characters.
+This label belongs to the importing household and appears in its shared
+library directory, history and management screens.
+
+`PUT /api/v1/sharing/imports/{id}/name` is administrator-only and accepts
+`{"expected_name":"Alex’s Cinema","name":"Alex’s Weekend Cinema"}`.
+The new name must be nonempty after trimming and meet the same byte and
+character limits. `expected_name` must exactly match the stored label;
+a stale value returns `409 sharing_generation_conflict`, a missing import
+returns `404 sharing_not_found`, and success returns `{"updated":true}`.
+Renaming changes only the local label and update timestamp: Source identity,
+credentials, assignments and authority generations are unchanged. Re-pairing
+preserves the local name.
+
+`POST /api/v1/sharing/connection` returns `name`, bounded `network` consent
+links, `connected`, and `connection_error`. With `probe: true`, a failed
+pinned connection returns one fixed code: `sharing_peer_unavailable`,
+`sharing_identity_mismatch`, `sharing_protocol_unsupported`,
+`sharing_peer_auth_failed`, or `sharing_invalid_peer_response`. Consent
+links remain available when verification fails. An unchecked or successful
+probe returns a null error; unchecked `connected: false` is not evidence
+of a failed connection. This route never persists an import. Probe and
+import failures log their phase, fixed code and local correlation UUIDs,
+without invitation secrets, consent URLs or peer credentials.
+
+A probe also returns `diagnosis`, and `GET /api/v1/sharing/imports/{id}/connection`
+returns the same object for a saved import: `connected`, a fixed `outcome`
+(`connected`, `not_shared`, `no_answer`, `peer_offline`, `blocked`, `refused`,
+`certificate_mismatch`, `tls_failed`, `no_private_source`, `identity_mismatch`,
+`auth_failed`, `protocol_unsupported`, `invalid_response` or `unavailable`),
+an operator `summary` and `next_step`, `checked_at_ms`, `elapsed_ms`, the
+`source` machine name, `this_server` (this host's Tailscale login, tailnet,
+machine name and IPv4 when observable) and one `attempts` row per approved
+numeric address with its dial stage (`connected`, `timed_out`, `refused`,
+`unreachable`, `connect_failed`, `certificate_mismatch`, `tls_failed`,
+`no_private_source`, `invalid_target`), elapsed time and, on native hosts,
+whether the address is in this host's Tailscale netmap (`visible`,
+`peer_online`). `not_shared` means a native receiver's own netmap lacks the
+source: the device share has not been accepted with this host's account.
+The ordinary pinned connection decides `connected`; the diagnosis never
+relaxes a pin. An import whose identity-checked connection fails returns its
+diagnosis in the typed error body.
 
 `GET /api/v1/sharing/endpoints` returns `{ "manifest": null }` before
 initial address setup; a configured manifest contains `revision` and
@@ -3942,6 +4264,25 @@ initial address setup; a configured manifest contains `revision` and
 before Create and offers the existing address editor, retaining the selected
 libraries for return. Address updates remain explicit `expected_revision`
 CAS writes with pin confirmation; no invitation POST is replayed.
+
+`GET /api/v1/sharing/status` also returns node-local `host_setup` with
+`state`, `message` and `checked_at_ms`. When a step failed, `detail` names
+it, quoting the host tool's own words with links removed. `tailscale` carries
+the host's `login_name`, `tailnet`, `dns_name` and `ipv4` when the host's CLI
+could be observed (native hosts; absent inside a container). Optional `tailscale_online` reports the
+host's observed Tailscale control-plane connection (`true` or `false`); absent
+means unknown, including host helper reports that omit this fact. It is independent of forwarding
+readiness and does not prove reachability from another Cinema. States distinguish `pending`,
+`disabled`, `ready`, `tailscale_missing`, `sign_in_required`,
+`permission_required`, `port_conflict`, `host_helper_required`,
+`deployment_required`, `native_setup_required` and `unavailable`.
+`native_setup_required` describes a native installation needing its installed
+service or manual private forwarding, rather than a Docker host helper.
+`ready` confirms local host
+configuration; peer access and two-home reachability still need pairing.
+Managed host reconciliation may CAS-update this node's observed address and
+certificate in the endpoint manifest. Other hosts, custom ports and an existing
+four-host selection are preserved. This never creates or approves an invitation.
 Configuration does not prove reachability. See
 [Cinema address setup](OPERATIONS.md#sharing-cinema-addresses--set-up-before-creating-invitations)
 for the private Serve port and trusted pin source.
@@ -3968,6 +4309,23 @@ Source decimal strings; they are never local catalogue IDs. A full item
 reference contains the import, Source server, catalogue epoch, library and
 item. File references add the Source file, revision and import lifecycle.
 
+Item details include optional `item.presentation`: `runtime_ms`, `air_date`,
+canonical string `tmdb_id`, `imdb_id`, and up to four cached review-site
+`ratings` (`source`, `value`, `scale`, optional `votes`). The Source reads
+these fields from the authorized item snapshot and its existing ratings
+cache; browsing does not call a rating provider. B requests the extension
+with `?presentation=1` on the Source detail read. Older Sources may omit it,
+and requests from older receivers retain the original response shape. This
+extension applies to item details; catalogue pages keep their bounded summary
+records. The web detail page also renders the already-delivered year, genres,
+video, audio and subtitle facts.
+
+Shared Auto decisions use a supported encoded plan when an HEVC remux has no
+usable HLS index: Shared playback cannot use Local's continuous progressive
+remux fallback. The Source selects the plan before initial preparation, with
+the same client capabilities and track choices. Explicit Original requests
+retain their copy semantics; H.264 remux can still build its index on demand.
+
 | Method | Absolute path | Operation |
 |---|---|---|
 | GET | `/api/v1/shared/libraries` | List this viewer's assigned import/library identities and Source names. Availability is explicitly unverified until the Source is read. |
@@ -3980,9 +4338,9 @@ item. File references add the Source file, revision and import lifecycle.
 | GET | `/api/v1/shared/imports/{import}/continue-watching` | Hydrate this Source's current watch items; an unavailable Source is reported without stale title fallback. |
 | POST | `/api/v1/shared/imports/{import}/items/{item}/progress` | Ordered Shared progress `{session_id, sequence, position_ms, duration_ms, watched}` for the viewer's exact published Shared session; `409 sharing_progress_conflict` carries `current_sequence`, and `503 sharing_progress_session_binding_unavailable` answers when no live session binds the beat. |
 | POST | `/api/v1/shared/imports/{import}/items/{item}/watched` | B-private manual watched state `{watched: bool}` for a Shared movie or episode, after one fresh pinned Source membership read under current assignment. The Store write takes the next history sequence, so an earlier beat cannot restore the old position; Source history and Local watch state are untouched. Other item kinds answer `409 sharing_watch_unsupported`. |
-| GET | `/api/v1/shared/imports/{import}/art/{resource}` | Fetch an advertised signed recipient art alias after current account, import and Source-scope checks; no arbitrary Source URL is accepted. |
+| GET | `/api/v1/shared/imports/{import}/art/{resource}` | Signed recipient art alias under current viewer/import/Source scope. Verified snapshots reuse bytes; each delivery checks live scope. Variant or scope-capacity waits answer 429 with `Retry-After`; failed proofs remain 503.
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/decision` | Negotiate the complete existing decision DTO from runtime v2 capabilities, a signed file locator and current account/import/Source authority. The request body is bounded to 128 KiB. |
-| POST | `/api/v1/shared/imports/{import}/files/{locator}/hls/sessions` | Start Shared HLS playback through B's receiver actor from the ordinary `CreateSession` body (at most 128 KiB, initial play/resume only). The answer is the ordinary Start envelope with B's own session, playlist and control URLs; the session then serves `/api/v1/hls/{session}/…`, `status` (the Shared grammar) and `control` (current rendition only). |
+| POST | `/api/v1/shared/imports/{import}/files/{locator}/hls/sessions` | Shared HLS Start from a `CreateSession` body (at most 128 KiB, initial play/resume). The Start envelope uses B's session, playlist/control URLs and Shared status/control grammar.
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/playback` | The same Shared Start, at the typed playback alias. With `"presentation":"direct"` in the `CreateSession` body the Source recomputes the decision with the real caps and admits only direct play; the answer is `{presentation:"direct", session_id, url, length, mime}` where `url` is `{file_base}/direct?session=<B session>`. |
 | GET | `/api/v1/shared/imports/{import}/files/{locator}/subs/{subtitle}` | One text subtitle track as WebVTT (`{n}` or `{n}.vtt`), read fresh from the pinned Source (at most 2 MiB, `text/vtt`, never cached on B). Caller: the signed-in viewer (header or `?token=`), or `?session=` naming a live Shared session that plays exactly this file revision; an account sent alongside a session must be that session's viewer. A bitmap track answers `422 sharing_asset_unsupported`. |
 | GET | `/api/v1/shared/imports/{import}/files/{locator}/subs/{index}/overlay.json` | The track's `pgs-v1` manifest with its generation, cue geometry, source-time intervals and relative object names preserved, the file ID replaced by the canonical Source string plus the full reference (Source body at most 1 MiB). `202 {"state":"preparing","retry_after_ms":1000}` while the Source prepares it. Same callers as the subtitle route. |
@@ -3991,29 +4349,30 @@ item. File references add the Source file, revision and import lifecycle.
 | any | `/api/v1/shared/imports/{import}/files/{locator}/stream.mp4` | Always `422 sharing_resource_unsupported`, for every method and before any import, account or Local lookup: progressive remux is not offered for shared files (Copy HLS covers it). |
 | GET/HEAD | `/api/v1/shared/imports/{import}/files/{locator}/direct` | Shared direct-play bytes. Requires exactly one `session=<B session>` query naming a live direct session bound to this file alias, login and delivery grant; account headers are optional and, when present, must name the session's viewer. Range, If-Range, 206 and 416 behave exactly as `/api/v1/files/{id}/direct`. Never admits a session; an unknown session is 404, a missing one 400. |
 
-Captured recipient scope is revalidated through accepted metadata and
-decision bodies; content fetched from a Source also retains its Source-scope
-checks. A file alias is not login or
-session authority: the decision route verifies its current import lifecycle
-and exact file/revision binding before contacting the pinned Source. Missing
-keys, revoked scope and unavailable Sources refuse delivery. Shared Start is
-registered on the authenticated media router and dispatches through B's
-receiver owner.
+Recipient metadata and decision bodies revalidate captured scope; Source
+content retains its Source-scope checks. File aliases are not login/session
+authority: decisions validate the current import and exact revision before
+dialling the pinned Source. Missing keys, revoked scope and unavailable
+Sources refuse delivery. Shared Start dispatches through B's receiver owner.
 
-Shared HLS accepts embedded subtitle burns and HDR10 requests. The Source
-recomputes the plan from the original capabilities and its own file facts;
-burn extraction and font preparation belong to its admitted operation. A
-burn sidecar is bounded to 64 MiB, and a burn always encodes. B verifies the
-returned HDR grade against the viewer's exact PQ or HLG presentation claim.
-An SDR display declaration overrides a decoder's HDR claim.
+Shared Start reads `x-plurx-startup-remaining-ms`. B forwards it only to peers
+advertising `start_budget_v1`; one ingress clock bounds discovery and answer
+waits. Typed 503 `startup_timeout` or `media_session_overloaded`, with
+`Retry-After`, preserves the request for rejoin. Owned preparation keeps its
+own budget. Ready results without an accepted Start writer retire at the
+fixed rejoin deadline through ordinary End. Clockless peers keep prior bounds.
 
-Dolby Vision preservation, conversion and re-encoding return `422
-sharing_start_dolby_vision_unsupported`. Direct play keeps the original bytes
-when the Source's direct-play decision permits them. Downloaded subtitle
-burns and native subtitle renditions beside HDR remain unsupported. A typed
-Start refusal is not an End receipt or proof that an earlier invocation owns
-no resources. Runtime qualification of these additions remains recorded
-separately in [the sharing status](features/SHARED-LIBRARIES-STATUS.md).
+Shared HLS accepts embedded burns and HDR10. The Source recomputes the plan
+from original caps and its file facts; extraction and fonts belong to the
+admitted operation. Burns encode and sidecars are capped at 64 MiB. B checks
+returned HDR against the viewer's exact PQ/HLG claim; an SDR declaration
+overrides decoder HDR capability.
+
+Non-direct Dolby Vision returns 422 `sharing_start_dolby_vision_unsupported`.
+Direct keeps original bytes when the Source permits it. Downloaded burns and
+native subtitles beside HDR remain unsupported. A typed Start refusal proves
+neither End nor absence of earlier resources. Runtime qualification stays in
+[the sharing status](features/SHARED-LIBRARIES-STATUS.md).
 
 The four pre-session asset routes answer `Cache-Control: no-store` and hold
 no B cache; each body is file-scoped and the current login, import,

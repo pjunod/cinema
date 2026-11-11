@@ -90,6 +90,10 @@ pub struct DvEffectiveProcessingReport {
     hdr10_enhanced: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     sdr_processed: bool,
+    /// The served picture is the reconstructed Profile 8.1: the composed
+    /// picture re-encoded with a rewritten 8.1 RPU. Neither HDR10-E nor SDR.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    profile81_reconstructed: bool,
     creative_trims_applied: bool,
     /// Some, but not every, served frame's display mapping applied creative trims.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -105,6 +109,10 @@ impl DvEffectiveProcessingReport {
     /// Whether the full enhancement layer's residual is in the served picture.
     pub fn sdr_processed(&self) -> bool {
         self.sdr_processed
+    }
+    /// Whether the served picture is the reconstructed Profile 8.1.
+    pub fn profile81_reconstructed(&self) -> bool {
+        self.profile81_reconstructed
     }
     pub fn fel_contributed(&self) -> bool {
         self.fel_contributed
@@ -150,6 +158,8 @@ impl DvEffectiveProcessingReport {
             #[serde(default)]
             sdr_processed: bool,
             #[serde(default)]
+            profile81_reconstructed: bool,
+            #[serde(default)]
             creative_trims_applied: bool,
             #[serde(default)]
             creative_trims_partial: bool,
@@ -159,7 +169,7 @@ impl DvEffectiveProcessingReport {
             gpu_decoded: bool,
         }
         if bytes.len() > 4096
-            || !matches!(delivered, Some("hdr10" | "sdr"))
+            || !matches!(delivered, Some("hdr10" | "sdr" | "dolby_vision"))
             || dv_playback_generation_digest(generation).is_err()
         {
             return None;
@@ -173,6 +183,10 @@ impl DvEffectiveProcessingReport {
             || wire.creative_trims_applied && wire.creative_trims_partial
             || wire.hdr10_enhanced != (delivered == Some("hdr10"))
             || wire.sdr_processed != (delivered == Some("sdr"))
+            || wire.profile81_reconstructed != (delivered == Some("dolby_vision"))
+            // A Dolby Vision carrier is never display targeted.
+            || wire.profile81_reconstructed
+                && operations.iter().any(|op| matches!(op, DvOperation::DisplayTargetMapping { .. }))
             || wire.sdr_processed && (!operations.contains(&DvOperation::Bt709Gamma24Conversion) || !operations.contains(&DvOperation::DisplayTargetMapping { nits: 100 }))
             || wire.applied_operations.len() > 16
             || operations.len() != wire.applied_operations.len()
@@ -188,6 +202,7 @@ impl DvEffectiveProcessingReport {
             generation: wire.generation,
             hdr10_enhanced: wire.hdr10_enhanced,
             sdr_processed: wire.sdr_processed,
+            profile81_reconstructed: wire.profile81_reconstructed,
             creative_trims_applied: wire.creative_trims_applied,
             creative_trims_partial: wire.creative_trims_partial,
             fel_contributed: wire.fel_contributed,
@@ -986,6 +1001,9 @@ pub struct DvProcessingPlan {
     destination: DvDestination,
     graph: DvGraph,
     capability: DvCapabilityEvidence,
+    /// Observed from the validated authored init, never the source DV level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authored_dv_level: Option<u8>,
     /// A completed window's frozen display target: its title mastering peak decides the CM v2.9
     /// trim interpolation. Outside the semantic digest; the window's export policy carries it.
     #[serde(skip)]
@@ -1002,14 +1020,8 @@ impl DvProcessingPlan {
     }
     pub fn profile81_level(&self) -> Option<u8> {
         (self.destination == DvDestination::Profile81 && self.capability.completed_window_checked)
-            .then(|| {
-                self.source
-                    .catalog
-                    .level
-                    .and_then(|level| u8::try_from(level).ok())
-                    .filter(|level| (1..=9).contains(level))
-                    .unwrap_or(1)
-            })
+            .then_some(self.authored_dv_level)
+            .flatten()
     }
     /// Deterministic identity of the selected source/backend/pixel policy.
     pub fn semantic_digest(&self) -> DvDigest {
@@ -1033,9 +1045,13 @@ impl DvProcessingPlan {
             self.capability.max_frames,
             &self.capability.target,
         );
-        DvDigest(hex::encode(Sha256::digest(
-            serde_json::to_vec(&body).expect("validated DV semantic fields serialize"),
-        )))
+        let mut digest = Sha256::new();
+        digest.update(serde_json::to_vec(&body).expect("validated DV semantic fields serialize"));
+        if let Some(level) = self.authored_dv_level {
+            digest.update(b":authored-dv-level-v2:");
+            digest.update([level]);
+        }
+        DvDigest(hex::encode(digest.finalize()))
     }
 }
 #[derive(Debug, Clone, Serialize)]
@@ -1272,11 +1288,41 @@ pub fn dv_validate_encoded_window(
     Ok(payloads)
 }
 
+/// Runtime authoring binds the new RPU/config to the complete frozen budget.
+pub fn dv_author_profile81_window_with_envelope(
+    bytes: &[u8],
+    raster: (u32, u32),
+    timescale: u32,
+    start: u64,
+    frame_ticks: u32,
+    source_rpus: &[Vec<u8>],
+    envelope: super::EnhancementRateEnvelope,
+) -> Result<Vec<u8>, DvContractError> {
+    let invalid = |_| DvContractError::Invalid("frozen P81 coded rate envelope");
+    envelope
+        .validate_picture(raster.0, raster.1, (timescale, frame_ticks))
+        .map_err(invalid)?;
+    super::validate_encoded_enhancement_envelope(bytes, envelope).map_err(invalid)?;
+    let authored = dv_author_profile81_window(
+        bytes,
+        raster,
+        timescale,
+        start,
+        frame_ticks,
+        source_rpus,
+        envelope
+            .dv_level()
+            .ok_or(DvContractError::Invalid("frozen P81 DV level absent"))?,
+    )?;
+    super::validate_encoded_enhancement_envelope(&authored, envelope).map_err(invalid)?;
+    Ok(authored)
+}
+
 /// Author an already encoded, independently checked HDR10 window. Base and
 /// audio samples are reused verbatim; only one associated RPU is appended to
 /// each video sample and the sample entry receives the matching DV record.
-/// The level must come from the held source with unchanged cadence and no
-/// increase in raster. Calling this does not qualify the source graph.
+/// The caller supplies the frozen coded-budget DV level. Calling this does
+/// not qualify the source graph; runtime separately validates its full envelope.
 #[allow(clippy::too_many_arguments)]
 pub fn dv_author_profile81_window(
     bytes: &[u8],
@@ -1299,7 +1345,7 @@ pub fn dv_author_profile81_window(
         source_rpus,
         DvDestination::Hdr10,
     )?;
-    if !(1..=9).contains(&source_level) {
+    if !(1..=13).contains(&source_level) {
         return Err(invalid());
     }
     let mut adapted = Vec::with_capacity(source_rpus.len());
@@ -1604,6 +1650,28 @@ pub struct DvCompletedWindowInput<'a> {
     pub decoder: DecodeBackend,
 }
 
+fn completed_authored_dv_level(
+    bytes: &[u8],
+    destination: DvDestination,
+) -> Result<Option<u8>, DvContractError> {
+    if destination != DvDestination::Profile81 {
+        return Ok(None);
+    }
+    let invalid = || DvContractError::Invalid("completed authored Dolby Vision level");
+    let mut reader = crate::fmp4::FragmentReader::new();
+    reader.push(bytes);
+    let Some(crate::fmp4::Unit::Init(init)) = reader.next_unit().map_err(|_| invalid())? else {
+        return Err(invalid());
+    };
+    let record = crate::fmp4::dolby_vision_record(&init)
+        .map_err(|_| invalid())?
+        .ok_or_else(invalid)?;
+    if record.profile != 8 || !(1..=13).contains(&record.level) {
+        return Err(invalid());
+    }
+    Ok(Some(record.level))
+}
+
 pub fn dv_plan_completed_window(
     input: DvCompletedWindowInput<'_>,
 ) -> Result<DvProcessingPlan, DvContractError> {
@@ -1871,6 +1939,7 @@ pub fn dv_plan_completed_window(
     };
     Ok(DvProcessingPlan {
         display_target: input.export_policy.display_target(),
+        authored_dv_level: completed_authored_dv_level(input.encoded, input.destination)?,
         source: input.source,
         preferences,
         destination: input.destination,
@@ -2017,6 +2086,7 @@ fn resolve_inner(
         destination: input.destination,
         graph,
         capability: cap.clone(),
+        authored_dv_level: None,
         display_target: None,
     })))
 }
@@ -2752,6 +2822,7 @@ impl DvProcessingReceipt {
             generation: active_playback_generation.to_owned(),
             hdr10_enhanced: plan.destination == DvDestination::Hdr10,
             sdr_processed: plan.destination == DvDestination::Sdr,
+            profile81_reconstructed: plan.destination == DvDestination::Profile81,
             // Only when every served frame's display mapping applied creative trims; "partial"
             // when some did.
             creative_trims_applied: common.contains(&DvOperation::CreativeTrimApplication),
@@ -2802,7 +2873,6 @@ impl DvProcessingReceipt {
             && self.observation_complete
             && self.terminal_failure.is_none()
             && !self.served_frames.is_empty()
-            && matches!(plan.destination, DvDestination::Hdr10 | DvDestination::Sdr)
     }
 }
 

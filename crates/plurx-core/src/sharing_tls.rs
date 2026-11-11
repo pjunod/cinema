@@ -160,23 +160,85 @@ pub async fn dial_numeric_peer(
     pin: &str,
     egress: &PinnedEgress,
 ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, StoreError> {
-    crate::sharing::validate_tailnet_name(ts_fqdn).map_err(|_| unavailable())?;
-    if !crate::sharing::is_tailnet_address(address.ip()) || address.port() == 0 {
-        return Err(unavailable());
+    dial_numeric_peer_classified(address, ts_fqdn, pin, egress)
+        .await
+        .map_err(|_| unavailable())
+}
+
+/// Why one pinned dial did not produce a verified TLS stream. Operator-facing
+/// diagnosis only: every variant is a refusal and none relaxes the pin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DialFailure {
+    /// The endpoint or pin is not a valid private Tailnet target.
+    InvalidTarget,
+    /// No private source address or interface could be bound for egress.
+    NoPrivateSource,
+    /// Nothing answered within the connect budget.
+    TimedOut,
+    /// The machine answered, but nothing accepted the connection on the port.
+    Refused,
+    /// The local network stack has no route to the address.
+    Unreachable,
+    /// The TCP connect failed for another reason.
+    ConnectFailed,
+    /// A TLS server answered, but its key is not the approved Cinema pin.
+    CertificateMismatch,
+    /// TCP connected but the TLS handshake did not complete.
+    TlsFailed,
+}
+
+impl DialFailure {
+    fn from_connect(error: &std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        match error.kind() {
+            ErrorKind::TimedOut => Self::TimedOut,
+            ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset => Self::Refused,
+            ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable => Self::Unreachable,
+            ErrorKind::AddrNotAvailable | ErrorKind::AddrInUse => Self::NoPrivateSource,
+            _ => Self::ConnectFailed,
+        }
     }
-    let config = pinned_client(pin)?;
-    let name = ServerName::try_from(ts_fqdn.to_owned()).map_err(|_| unavailable())?;
-    let socket = bound_tcp_socket(address, egress)?;
+    fn from_handshake(error: &std::io::Error) -> Self {
+        let rustls_error = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>());
+        match rustls_error {
+            Some(rustls::Error::InvalidCertificate(_)) => Self::CertificateMismatch,
+            _ => Self::TlsFailed,
+        }
+    }
+}
+
+/// [`dial_numeric_peer`] with the failing stage retained for diagnosis.
+pub async fn dial_numeric_peer_classified(
+    address: std::net::SocketAddr,
+    ts_fqdn: &str,
+    pin: &str,
+    egress: &PinnedEgress,
+) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, DialFailure> {
+    crate::sharing::validate_tailnet_name(ts_fqdn).map_err(|_| DialFailure::InvalidTarget)?;
+    if !crate::sharing::is_tailnet_address(address.ip()) || address.port() == 0 {
+        return Err(DialFailure::InvalidTarget);
+    }
+    let config = pinned_client(pin).map_err(|_| DialFailure::InvalidTarget)?;
+    let name = ServerName::try_from(ts_fqdn.to_owned()).map_err(|_| DialFailure::InvalidTarget)?;
+    let socket = bound_tcp_socket(address, egress).map_err(|_| DialFailure::NoPrivateSource)?;
     tokio::time::timeout(Duration::from_secs(5), async {
-        let stream = socket.connect(address).await.map_err(|_| unavailable())?;
-        stream.set_nodelay(true).map_err(|_| unavailable())?;
+        let stream = socket
+            .connect(address)
+            .await
+            .map_err(|error| DialFailure::from_connect(&error))?;
+        stream
+            .set_nodelay(true)
+            .map_err(|_| DialFailure::ConnectFailed)?;
         tokio_rustls::TlsConnector::from(Arc::new(config))
             .connect(name, stream)
             .await
-            .map_err(|_| unavailable())
+            .map_err(|error| DialFailure::from_handshake(&error))
     })
     .await
-    .map_err(|_| unavailable())?
+    .map_err(|_| DialFailure::TimedOut)?
 }
 
 /// Bind before connecting; also used for the fixed Tailscale DNS TCP retry.
@@ -198,6 +260,10 @@ pub(crate) fn bound_tcp_socket(
             socket
                 .bind(std::net::SocketAddr::new(*ip, 0))
                 .map_err(|_| unavailable())?;
+            #[cfg(target_os = "macos")]
+            if crate::sharing::is_tailnet_address(*ip) {
+                pin_macos_source_interface(&socket, *ip)?;
+            }
         }
         PinnedEgress::Interface(interface) => {
             if interface.is_empty() || interface.len() > 15 || interface.as_bytes().contains(&0) {
@@ -212,6 +278,84 @@ pub(crate) fn bound_tcp_socket(
         }
     }
     Ok(socket)
+}
+
+/// Darwin's source-address bind alone does not pin the outgoing interface.
+/// Bind the socket to the interface currently owning that address as well,
+/// so losing the private route cannot fall back to an ordinary interface.
+#[cfg(target_os = "macos")]
+fn pin_macos_source_interface(
+    socket: &tokio::net::TcpSocket,
+    source: std::net::IpAddr,
+) -> Result<(), StoreError> {
+    use std::os::fd::AsRawFd;
+    struct Addresses(*mut libc::ifaddrs);
+    impl Drop for Addresses {
+        fn drop(&mut self) {
+            // SAFETY: the list came from successful getifaddrs and is freed once.
+            unsafe {
+                libc::freeifaddrs(self.0);
+            }
+        }
+    }
+    let mut head = std::ptr::null_mut();
+    // SAFETY: head is an initialized writable output pointer.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 || head.is_null() {
+        return Err(unavailable());
+    }
+    let addresses = Addresses(head);
+    let mut current = addresses.0;
+    while !current.is_null() {
+        // SAFETY: current belongs to the live OS-provided linked list.
+        let entry = unsafe { &*current };
+        if !entry.ifa_addr.is_null() && !entry.ifa_name.is_null() {
+            // SAFETY: the OS supplies an address with a readable family tag.
+            let family = unsafe { (*entry.ifa_addr).sa_family } as libc::c_int;
+            let matches = match (source, family) {
+                (std::net::IpAddr::V4(ip), libc::AF_INET) => {
+                    // SAFETY: AF_INET identifies a complete sockaddr_in.
+                    let address = unsafe { &*entry.ifa_addr.cast::<libc::sockaddr_in>() };
+                    ip.octets() == address.sin_addr.s_addr.to_ne_bytes()
+                }
+                (std::net::IpAddr::V6(ip), libc::AF_INET6) => {
+                    // SAFETY: AF_INET6 identifies a complete sockaddr_in6.
+                    let address = unsafe { &*entry.ifa_addr.cast::<libc::sockaddr_in6>() };
+                    ip.octets() == address.sin6_addr.s6_addr
+                }
+                _ => false,
+            };
+            if matches {
+                // SAFETY: ifa_name is an OS-provided NUL-terminated interface name.
+                let index = unsafe { libc::if_nametoindex(entry.ifa_name) };
+                if index == 0 {
+                    return Err(unavailable());
+                }
+                let (level, option) = if source.is_ipv4() {
+                    (libc::IPPROTO_IP, libc::IP_BOUND_IF)
+                } else {
+                    (libc::IPPROTO_IPV6, libc::IPV6_BOUND_IF)
+                };
+                // SAFETY: a live socket and initialized interface index are passed
+                // with the exact Darwin option size; no pointer is retained.
+                let result = unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        level,
+                        option,
+                        (&index as *const libc::c_uint).cast(),
+                        std::mem::size_of_val(&index) as libc::socklen_t,
+                    )
+                };
+                return if result == 0 {
+                    Ok(())
+                } else {
+                    Err(unavailable())
+                };
+            }
+        }
+        current = entry.ifa_next;
+    }
+    Err(unavailable())
 }
 
 /// A node-local leaf and server config. Only status fields may be serialized.
@@ -485,6 +629,113 @@ impl SharingTlsListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dial_failures_name_the_stage_that_refused() {
+        use std::io::{Error, ErrorKind};
+        for (kind, expected) in [
+            (ErrorKind::TimedOut, DialFailure::TimedOut),
+            (ErrorKind::ConnectionRefused, DialFailure::Refused),
+            (ErrorKind::HostUnreachable, DialFailure::Unreachable),
+            (ErrorKind::NetworkUnreachable, DialFailure::Unreachable),
+            (ErrorKind::AddrNotAvailable, DialFailure::NoPrivateSource),
+            (ErrorKind::Other, DialFailure::ConnectFailed),
+        ] {
+            assert_eq!(DialFailure::from_connect(&Error::from(kind)), expected);
+        }
+        // tokio-rustls reports a refused certificate as InvalidData wrapping
+        // the verifier's error; a pin mismatch must not read as a dead link.
+        let mismatch = Error::new(
+            ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure),
+        );
+        assert_eq!(
+            DialFailure::from_handshake(&mismatch),
+            DialFailure::CertificateMismatch
+        );
+        assert_eq!(
+            DialFailure::from_handshake(&Error::from(ErrorKind::UnexpectedEof)),
+            DialFailure::TlsFailed
+        );
+    }
+    #[tokio::test]
+    async fn classified_dial_refuses_targets_outside_the_tailnet_before_any_socket() {
+        let egress = PinnedEgress::LocalAddress("100.64.0.9".parse().expect("fixture"));
+        for (address, name, pin) in [
+            (
+                "192.168.1.10:32443",
+                "cinema.tail123.ts.net",
+                "a".repeat(64),
+            ),
+            ("100.64.0.10:32443", "cinema.example.com", "a".repeat(64)),
+            (
+                "100.64.0.10:32443",
+                "cinema.tail123.ts.net",
+                "nodekey".into(),
+            ),
+        ] {
+            assert_eq!(
+                dial_numeric_peer_classified(
+                    address.parse().expect("fixture"),
+                    name,
+                    &pin,
+                    &egress
+                )
+                .await
+                .err(),
+                Some(DialFailure::InvalidTarget)
+            );
+        }
+        let unbound = PinnedEgress::LocalAddress(std::net::Ipv4Addr::UNSPECIFIED.into());
+        assert_eq!(
+            dial_numeric_peer_classified(
+                "100.64.0.10:32443".parse().expect("fixture"),
+                "cinema.tail123.ts.net",
+                &"a".repeat(64),
+                &unbound
+            )
+            .await
+            .err(),
+            Some(DialFailure::NoPrivateSource)
+        );
+    }
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sharing_tls_macos_source_interface_is_pinned_and_missing_sources_refuse() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("synthetic source-interface fixture");
+        let socket = tokio::net::TcpSocket::new_v4().expect("synthetic source-interface fixture");
+        socket
+            .bind(
+                "127.0.0.1:0"
+                    .parse()
+                    .expect("synthetic source-interface fixture"),
+            )
+            .expect("synthetic source-interface fixture");
+        pin_macos_source_interface(
+            &socket,
+            "127.0.0.1"
+                .parse()
+                .expect("synthetic source-interface fixture"),
+        )
+        .expect("synthetic source-interface fixture");
+        socket
+            .connect(
+                listener
+                    .local_addr()
+                    .expect("synthetic source-interface fixture"),
+            )
+            .await
+            .expect("synthetic source-interface fixture");
+        let socket = tokio::net::TcpSocket::new_v4().expect("synthetic source-interface fixture");
+        assert!(pin_macos_source_interface(
+            &socket,
+            "192.0.2.254"
+                .parse()
+                .expect("synthetic source-interface fixture")
+        )
+        .is_err());
+    }
     const NOW: i64 = 1_800_000_000;
     /// `NodeTls` refuses a group- or world-writable key directory by design,
     /// and a temporary directory inherits the runner umask (002 on some

@@ -1,0 +1,9 @@
+# apt-snapshot pins the source-only Cinema build/verification environment.
+# The libplacebo/mpv rows retain historical private-renderer source identities
+# for CPU controls and manual archival rebuilds; the default package neither
+# fetches nor builds these components, and its version is independent of them.
+apt-snapshot 20261025T000000Z
+#
+# name      version  sha256                                                            url
+libplacebo  7.387.0  3bf5d72786682c194387c33d563872f6bfe202a9816f9dde6535a31a9b2e0d74  https://code.videolan.org/videolan/libplacebo/-/archive/v7.387.0/libplacebo-v7.387.0.tar.gz
+mpv         0.41.0+git20261026.e59d90c  68941962a5ad84165c3ebde877a7e2e1acb77c79bf5b06c33abe3d1b24cad34a  https://github.com/mpv-player/mpv/archive/e59d90c843339fe3c22f6e3d032216bb50a06725.tar.gz

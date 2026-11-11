@@ -55,6 +55,216 @@ async fn claimed(store: &SqliteStore, request: ClaimJob) -> BackgroundJob {
 }
 
 #[tokio::test]
+async fn completed_job_with_unreleased_reader_keeps_origin_and_raises_recovery_gauge() {
+    use super::MetricsStore;
+    let dir = tempfile::tempdir().expect("directory");
+    let path = dir.path().join("jobs.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let db = rusqlite::Connection::open(path).expect("fixture connection");
+    let job = enqueue(1000);
+    let id = job.id.clone();
+    store.enqueue_job(job).await.expect("accepted");
+    db.execute(
+        "UPDATE background_jobs SET state='succeeded' WHERE id=?1",
+        [&id],
+    )
+    .expect("completed work");
+    let owner = serde_json::json!({"kind":"job","token":{"node_id":"previous-worker","job_id":id,"fence":1}});
+    db.execute("INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms,settlement_proof)
+        VALUES ('reader','owner',?1,'[\"source_io\"]','job',?2,1,'active',1000,1000,2000,NULL)",rusqlite::params![owner.to_string(),id]).expect("retained physical reader");
+    let holders = store
+        .source_io_holders(3000)
+        .await
+        .expect("source observations");
+    let held = holders
+        .iter()
+        .find(|h| h.work_id == id)
+        .expect("reported even with no running job");
+    assert_eq!(held.origin_node_id.as_deref(), Some("previous-worker"));
+    assert_eq!(
+        held.origin_job_kind.as_deref(),
+        Some("fragment_index_build")
+    );
+    assert_eq!(held.origin_job_state.as_deref(), Some("succeeded"));
+    assert_eq!(held.phase.as_deref(), Some("cleanup_pending"));
+    let metrics = store
+        .prometheus_store_snapshot("observer", 3)
+        .await
+        .expect("sample");
+    assert_eq!(metrics.background_jobs.source_io_reservations, 0);
+    assert_eq!(metrics.background_jobs.source_recovery_pending, 1);
+}
+
+#[tokio::test]
+async fn processing_counts_terminal_attempts_by_worker_and_finish_time() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("processing.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let connection = rusqlite::Connection::open(&path).expect("fixture connection");
+    let now = 400_000;
+    let after = now - JOB_PROCESSING_WINDOW_MS;
+    for (node, outcome, finished) in [
+        ("a", "succeeded", after),
+        ("a", "succeeded", after + 1),
+        ("b", "succeeded", now),
+        ("a", "failed", now),
+        ("b", "succeeded", now + 1),
+        ("c", "retry", now),
+        ("c", "yielded", now),
+        ("c", "cancelled", now),
+        ("c", "lease_expired", now),
+    ] {
+        let mut request = enqueue(1);
+        request.dedupe_key.clone_from(&request.id);
+        let id = request.id.clone();
+        store.enqueue_job(request).await.expect("seed job");
+        connection
+            .execute(
+                "INSERT INTO background_job_attempts
+                (job_id, fence, claim_id, owner_node_id, owner_boot_id,
+                 started_at_ms, resolve_until_ms, finished_at_ms, outcome)
+             VALUES (?1, 1, ?1, ?2, 'boot', 1, 120001, ?3, ?4)",
+                rusqlite::params![id, node, finished, outcome],
+            )
+            .expect("seed attempt");
+    }
+    assert_eq!(
+        store.recent_job_completions(now).await.expect("processing"),
+        vec![
+            NodeJobCompletions {
+                node_id: "a".into(),
+                succeeded: 1,
+                failed: 1
+            },
+            NodeJobCompletions {
+                node_id: "b".into(),
+                succeeded: 1,
+                failed: 0
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn overdue_manual_counts_only_library_work_due_for_five_minutes() {
+    use super::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use super::LibraryStore;
+    use crate::domain::{LibraryKind, NewLibrary};
+
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("overdue.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Movies".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/media".into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let request = |input, now_ms| NewLibraryWork {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        library_id: library.id,
+        input,
+        now_ms,
+    };
+    let full = |refresh, trigger| LibraryWorkInput::Full { refresh, trigger };
+    let started = 400_000;
+    let due = started + JOB_PROCESSING_WINDOW_MS;
+    let scheduled = request(full(false, LibraryTrigger::Scheduled), 1);
+    let EnqueueOutcome::Accepted { job_id: scan, .. } = store
+        .enqueue_library_work(scheduled)
+        .await
+        .expect("scheduled scan")
+    else {
+        panic!("expected new scheduled scan")
+    };
+    let manual = request(full(false, LibraryTrigger::Manual), started);
+    let manual_id = manual.request_id.clone();
+    let outcome = store
+        .enqueue_library_work(manual)
+        .await
+        .expect("manual scan");
+    assert!(matches!(outcome, EnqueueOutcome::Accepted { job_id, .. } if job_id == scan));
+    let refresh = request(full(true, LibraryTrigger::Manual), started);
+    let EnqueueOutcome::Accepted {
+        job_id: refresh_id, ..
+    } = store
+        .enqueue_library_work(refresh)
+        .await
+        .expect("manual refresh")
+    else {
+        panic!("expected new manual refresh")
+    };
+    let counts = |rows: Vec<JobCount>| {
+        rows.into_iter()
+            .map(|row| (row.kind, row.overdue_manual))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = counts(store.job_counts(due - 1).await.expect("before cutoff"));
+    assert_eq!(
+        before["library_scan"], 0,
+        "the manual click cannot inherit the scheduled wait"
+    );
+    assert_eq!(before["metadata_refresh"], 0);
+    let at = counts(store.job_counts(due).await.expect("at cutoff"));
+    assert_eq!(at["library_scan"], 1);
+    assert_eq!(at["metadata_refresh"], 1);
+
+    store
+        .cancel_waiter(CancelWaiter {
+            scope: "library".into(),
+            request_id: manual_id,
+            now_ms: due,
+        })
+        .await
+        .expect("cancel manual interest");
+    let targeted = request(
+        LibraryWorkInput::Targeted {
+            path: "new/movie.mkv".into(),
+            ids: None,
+            book: None,
+            correlation_id: None,
+            source: None,
+        },
+        due,
+    );
+    store
+        .enqueue_library_work(targeted)
+        .await
+        .expect("targeted request");
+    let connection = rusqlite::Connection::open(path).expect("fixture connection");
+    connection
+        .execute(
+            "UPDATE background_jobs SET not_before_ms = ?1 WHERE id = ?2",
+            rusqlite::params![due + 1, refresh_id],
+        )
+        .expect("defer refresh");
+    let later = counts(
+        store
+            .job_counts(due + JOB_PROCESSING_WINDOW_MS - 1)
+            .await
+            .expect("fresh targeted request"),
+    );
+    assert_eq!(
+        later["library_scan"], 0,
+        "only a cancelled manual request is old enough"
+    );
+    let after = counts(
+        store
+            .job_counts(due + JOB_PROCESSING_WINDOW_MS)
+            .await
+            .expect("aged targeted request"),
+    );
+    assert_eq!(after["library_scan"], 1);
+    assert_eq!(
+        after["metadata_refresh"], 0,
+        "refresh has been eligible for less than five minutes"
+    );
+}
+
+#[tokio::test]
 async fn background_job_claim_resource_lookup_does_not_scan_settled_history() {
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("claim-cost.db");
@@ -76,10 +286,62 @@ async fn background_job_claim_resource_lookup_does_not_scan_settled_history() {
             [&request.id],
         )
         .expect("retained history");
-    let attempt = claim(&request.id, 0, 1_001);
+    use super::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use super::LibraryStore;
+    use crate::domain::{LibraryKind, NewLibrary};
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Scan".into(),
+            paths: vec!["/scan".into()],
+            kind: LibraryKind::Movies,
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let EnqueueOutcome::Accepted { job_id, .. } = store
+        .enqueue_library_work(NewLibraryWork {
+            request_id: "manual".into(),
+            library_id: library.id,
+            input: LibraryWorkInput::Full {
+                refresh: false,
+                trigger: LibraryTrigger::Manual,
+            },
+            now_ms: 1000,
+        })
+        .await
+        .expect("manual scan")
+    else {
+        panic!("expected new scan")
+    };
+    assert!(store
+        .advertise_library_turn(
+            &job_id,
+            0,
+            "node-a",
+            &library.paths,
+            LibraryTurnCapacity::Available,
+            1001
+        )
+        .await
+        .expect("advertise"));
     let mut statement = connection
         .prepare(&format!("{CLAIM_SQL} RETURNING {JOB_JSON}"))
         .expect("claim statement");
+    let attempt = claim(&request.id, 0, 1_002);
+    let body = serde_json::to_string(&attempt).expect("claim body");
+    assert!(statement
+        .query([body])
+        .expect("competing claim")
+        .next()
+        .expect("result")
+        .is_none());
+    let steps = statement.reset_status(rusqlite::StatementStatus::FullscanStep);
+    assert!(
+        steps < 512,
+        "contending with a manual scan read unrelated history: {steps} steps"
+    );
+
+    let attempt = claim(&request.id, 0, 8_002);
     let body = serde_json::to_string(&attempt).expect("claim body");
     let rows = statement
         .query_map([body], |row| row.get::<_, String>(0))
@@ -1806,4 +2068,359 @@ async fn preparation_history_uses_source_identity_parent_metadata_and_published_
         .join("\n");
     assert!(plan.contains("background_jobs_file_source"), "{plan}");
     assert!(!plan.contains("SCAN background_jobs"), "{plan}");
+}
+
+#[tokio::test]
+async fn artifact_job_source_registration_is_not_required_during_foreground_startup_but_lost_fence_stays_lost(
+) {
+    use super::background_jobs_resources::{BackgroundSourceOwner, BackgroundSourceRegistration};
+    let store = SqliteStore::open_in_memory().expect("real migrated store");
+    // Simulate an already-admitted global original reader. An artifact-only
+    // job must neither depend on that source file nor acquire source credit.
+    store.queue_sql("INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms) VALUES('active-original','{}','[\"source_io\"]',1,'startup','{\"source_quiescent\":false}',1000,1000,30000) RETURNING CASE WHEN json_valid($1) THEN 'true' ELSE 'false' END AS result_json".into(),"{}".into(),true,true).await.expect("foreground pressure fixture");
+    let mut request = enqueue(1000);
+    request.payload = JobPayload::ArtifactHydrate {
+        artifact_key: format!("fragment:{}", "a".repeat(64)),
+        target_node_id: "node-a".into(),
+    };
+    let id = request.id.clone();
+    store
+        .enqueue_job(request)
+        .await
+        .expect("real artifact work");
+    let mut attempt = claim(&id, 0, 1001);
+    attempt.kind = JobKind::ArtifactHydrate;
+    let job = claimed(&store, attempt).await;
+    let token = job.token.expect("exact live artifact claim");
+    assert!(matches!(
+        store
+            .register_background_source_custody(
+                BackgroundSourceOwner::Job {
+                    token: token.clone()
+                },
+                1002
+            )
+            .await
+            .expect("no original input"),
+        BackgroundSourceRegistration::NotRequired
+    ));
+    assert!(!store
+        .source_io_holders(1002)
+        .await
+        .expect("source holder projection")
+        .iter()
+        .any(|holder| holder.work_id == id));
+    let mut wrong = token;
+    wrong.fence += 1;
+    assert!(matches!(
+        store
+            .register_background_source_custody(BackgroundSourceOwner::Job { token: wrong }, 1003)
+            .await
+            .expect("invalid owner remains distinct"),
+        BackgroundSourceRegistration::LostOwnership
+    ));
+}
+
+#[tokio::test]
+async fn advertised_manual_scan_wins_cross_type_claim_and_expiry_releases_the_turn() {
+    use super::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use super::LibraryStore;
+    use crate::domain::{LibraryKind, NewLibrary};
+    let store = SqliteStore::open_in_memory().expect("store");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Movies".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/movies".into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let enqueue_scan = |trigger| NewLibraryWork {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        library_id: library.id,
+        input: LibraryWorkInput::Full {
+            refresh: false,
+            trigger,
+        },
+        now_ms: 1000,
+    };
+    let EnqueueOutcome::Accepted { job_id, .. } = store
+        .enqueue_library_work(enqueue_scan(LibraryTrigger::Scheduled))
+        .await
+        .expect("scheduled scan")
+    else {
+        panic!("not admitted")
+    };
+    assert!(!store
+        .advertise_library_turn(
+            &job_id,
+            0,
+            "node-a",
+            &library.paths,
+            LibraryTurnCapacity::Available,
+            1001
+        )
+        .await
+        .expect("scheduled intent"));
+    store
+        .enqueue_library_work(enqueue_scan(LibraryTrigger::Manual))
+        .await
+        .expect("manual joined scheduled");
+    let page = store
+        .list_jobs(JobQuery {
+            node_id: None,
+            state: None,
+            kind: None,
+            after_id: None,
+            limit: 16,
+        })
+        .await
+        .expect("page");
+    let revision = page
+        .jobs
+        .iter()
+        .find(|j| j.id == job_id)
+        .expect("joined scan is queued")
+        .revision;
+    let ordinary = enqueue(1000);
+    store.enqueue_job(ordinary.clone()).await.expect("fragment");
+    assert!(!store
+        .advertise_library_turn(
+            &job_id,
+            revision,
+            "node-a",
+            &["/old-root".into()],
+            LibraryTurnCapacity::Available,
+            1001
+        )
+        .await
+        .expect("changed roots"));
+    assert!(store
+        .advertise_library_turn(
+            &job_id,
+            revision,
+            "node-a",
+            &library.paths,
+            LibraryTurnCapacity::Available,
+            1001
+        )
+        .await
+        .expect("verified scan"));
+    assert!(matches!(
+        store
+            .claim_job(claim(&ordinary.id, 0, 1002))
+            .await
+            .expect("racing fragment"),
+        ClaimOutcome::Contended
+    ));
+    // A real playback consumer keeps the protected lane while the manual scan waits.
+    let mut viewer = enqueue(1000);
+    viewer.dedupe_key = "viewer".into();
+    viewer.request.scope = "playback-artifact".into();
+    viewer.request.consumer_kind = "playback_fragment".into();
+    viewer.request.target_node_id = Some("node-a".into());
+    viewer.request.deadline_ms = Some(60_000);
+    store.enqueue_job(viewer.clone()).await.expect("viewer");
+    claimed(&store, claim(&viewer.id, 0, 1003)).await;
+    // The reporting voter vanished. Its expired signal cannot idle the free ordinary slot.
+    let fragment = claimed(&store, claim(&ordinary.id, 0, 8001)).await;
+    assert!(store
+        .advertise_library_turn(
+            &job_id,
+            revision,
+            "node-b",
+            &library.paths,
+            LibraryTurnCapacity::Available,
+            8002
+        )
+        .await
+        .expect("live peer"));
+    let mut manual = claim(&job_id, revision, 8003);
+    manual.kind = JobKind::LibraryScan;
+    assert!(matches!(
+        store
+            .claim_job(manual.clone())
+            .await
+            .expect("preserve live reader"),
+        ClaimOutcome::Contended
+    ));
+    store
+        .settle_job(SettleJob {
+            token: fragment.token.expect("owner"),
+            settlement: JobSettlement::Yield {
+                error_code: None,
+                checkpoint: None,
+                not_before_ms: 8004,
+            },
+            now_ms: 8004,
+        })
+        .await
+        .expect("safe boundary");
+    let next = store
+        .list_jobs(JobQuery {
+            node_id: None,
+            state: None,
+            kind: Some(JobKind::FragmentIndexBuild),
+            after_id: None,
+            limit: 16,
+        })
+        .await
+        .expect("next");
+    let retry = next
+        .jobs
+        .iter()
+        .find(|j| j.id == ordinary.id)
+        .expect("yielded fragment is queued");
+    assert!(matches!(
+        store
+            .claim_job(claim(&ordinary.id, retry.revision, 8005))
+            .await
+            .expect("racing retry"),
+        ClaimOutcome::Contended
+    ));
+    manual.node_id = "node-b".into();
+    manual.now_ms = 8005;
+    manual.dispatched_at_ms = 8005;
+    claimed(&store, manual).await;
+}
+
+#[tokio::test]
+async fn busy_scan_voter_keeps_its_local_turn_without_blocking_a_free_remote_disk(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use super::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use super::background_jobs_resources::StorageDomainMapping;
+    use super::LibraryStore;
+    use crate::domain::{LibraryKind, NewLibrary};
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("busy-voter.sqlite");
+    let store = SqliteStore::open(&path)?;
+    let observed = rusqlite::Connection::open(&path)?;
+    let mut libraries = Vec::new();
+    for name in ["a", "b"] {
+        libraries.push(
+            store
+                .create_library(&NewLibrary {
+                    name: name.into(),
+                    kind: LibraryKind::Movies,
+                    paths: vec![format!("/{name}").into()],
+                    anime: false,
+                })
+                .await?,
+        );
+    }
+    let a = &libraries[0];
+    let b = &libraries[1];
+    store
+        .replace_storage_domains(
+            libraries
+                .iter()
+                .map(|l| StorageDomainMapping {
+                    library_id: l.id,
+                    root_path: l.paths[0].display().to_string(),
+                    domain_id: l.name.clone(),
+                })
+                .collect(),
+            900,
+        )
+        .await?;
+    let enqueue_library = |library_id, trigger| NewLibraryWork {
+        library_id,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        now_ms: 1000,
+        input: LibraryWorkInput::Full {
+            refresh: false,
+            trigger,
+        },
+    };
+    let EnqueueOutcome::Accepted { job_id, .. } = store
+        .enqueue_library_work(enqueue_library(a.id, LibraryTrigger::Manual))
+        .await?
+    else {
+        panic!("manual scan")
+    };
+    let advertise =
+        |capacity, now| store.advertise_library_turn(&job_id, 0, "node-a", &a.paths, capacity, now);
+    let expiry = || {
+        observed.query_row(
+            "SELECT expires_at_ms FROM dispatch_turn_ready WHERE job_id=?1 AND node_id='node-a'",
+            [&job_id],
+            |r| r.get::<_, i64>(0),
+        )
+    };
+    let yield_grant = |token, now_ms| {
+        store.settle_job(SettleJob {
+            token,
+            now_ms,
+            settlement: JobSettlement::Yield {
+                error_code: None,
+                checkpoint: None,
+                not_before_ms: 100_000,
+            },
+        })
+    };
+
+    assert!(advertise(LibraryTurnCapacity::Available, 1000).await?);
+    for now in [1001, 10001, 20001] {
+        // An unrelated task owns the heavy lane on the only readable node.
+        // Explicit manual intent remains true for priority on its local semaphore.
+        assert!(advertise(LibraryTurnCapacity::HeavyOccupied, now).await?);
+        assert_eq!(
+            expiry()?,
+            now,
+            "withdraw an earlier positive observation immediately"
+        );
+        let mut remote = enqueue(now);
+        remote.dedupe_key = format!("remote:{now}");
+        store.enqueue_job(remote.clone()).await?;
+        let mut attempt = claim(&remote.id, 0, now);
+        attempt.node_id = "node-b".into();
+        let job = claimed(&store, attempt).await;
+        assert!(advertise(LibraryTurnCapacity::HeavyOccupied, now + 1).await?);
+        assert_eq!(
+            expiry()?,
+            now + 1,
+            "another node's source lease cannot justify a handoff"
+        );
+        assert!(yield_grant(job.token.expect("running job token"), now + 2).await?);
+    }
+
+    let EnqueueOutcome::Accepted { job_id: other, .. } = store
+        .enqueue_library_work(enqueue_library(b.id, LibraryTrigger::Scheduled))
+        .await?
+    else {
+        panic!("other disk")
+    };
+    let mut attempt = claim(&other, 0, 30000);
+    attempt.kind = JobKind::LibraryScan;
+    let other = claimed(&store, attempt).await;
+    assert!(advertise(LibraryTurnCapacity::HeavyOccupied, 30001).await?);
+    assert_eq!(expiry()?, 30001, "same node but disjoint source");
+    assert!(yield_grant(other.token.expect("running job token"), 30002).await?);
+
+    let mut holder = enqueue(40000);
+    holder.dedupe_key = "turning-over".into();
+    store.enqueue_job(holder.clone()).await?;
+    let holder = claimed(&store, claim(&holder.id, 0, 40000)).await;
+    assert!(advertise(LibraryTurnCapacity::HeavyOccupied, 40001).await?);
+    assert_eq!(
+        expiry()?,
+        44001,
+        "exact live local fence on an overlapping source gives one short handoff"
+    );
+    assert!(yield_grant(holder.token.expect("running job token"), 40002).await?);
+    let mut contender = enqueue(40003);
+    contender.dedupe_key = "racing-release".into();
+    store.enqueue_job(contender.clone()).await?;
+    let mut remote = claim(&contender.id, 0, 40003);
+    remote.node_id = "node-b".into();
+    assert!(matches!(
+        store.claim_job(remote).await?,
+        ClaimOutcome::Contended
+    ));
+    let mut local = claim(&job_id, 0, 40004);
+    local.kind = JobKind::LibraryScan;
+    claimed(&store, local).await;
+    Ok(())
 }

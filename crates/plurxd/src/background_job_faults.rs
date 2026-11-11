@@ -9,6 +9,8 @@ pub(crate) const CLAIM: u8 = 1;
 pub(crate) const RENEW: u8 = 2;
 pub(crate) const PUBLISH: u8 = 4;
 pub(crate) const COMPLETE: u8 = 8;
+pub(crate) const SOURCE_REGISTER: u8 = 16;
+pub(crate) const SOURCE_RELEASE: u8 = 32;
 struct Replies {
     pending: AtomicU8,
     dropped: AtomicU8,
@@ -67,6 +69,8 @@ pub(crate) mod worker {
         Pressure,
         WorkJoined,
         BeforeCompletion,
+        CompletionCommitted,
+        SourcePermissionCheck,
         CompletionReconciled,
         ReleaseStarted,
         ReleaseFinished,
@@ -92,6 +96,25 @@ pub(crate) mod worker {
         observe: mpsc::UnboundedSender<Event>,
         pause: Mutex<Option<(Point, oneshot::Receiver<()>)>>,
         force_pressure: AtomicBool,
+        /// Runs synchronously when the future paused at `pause` is dropped or
+        /// resumed, so a test can observe what is still held at that instant.
+        on_pause_end: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    struct PauseEnd(Arc<Scope>);
+
+    impl Drop for PauseEnd {
+        fn drop(&mut self) {
+            let observe = self
+                .0
+                .on_pause_end
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(observe) = observe {
+                observe();
+            }
+        }
     }
 
     tokio::task_local! { static CURRENT: Arc<Scope>; }
@@ -107,7 +130,15 @@ pub(crate) mod worker {
             observe,
             pause: Mutex::new(pause),
             force_pressure: AtomicBool::new(force_pressure),
+            on_pause_end: std::sync::Mutex::new(None),
         })
+    }
+
+    pub(crate) fn on_pause_end(scope: &Scope, observe: impl FnOnce() + Send + 'static) {
+        *scope
+            .on_pause_end
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(observe));
     }
 
     pub(crate) async fn at(point: Point) {
@@ -135,6 +166,7 @@ pub(crate) mod worker {
             }
         };
         if let Some(receiver) = pause {
+            let _end = PauseEnd(Arc::clone(&scope));
             let _ = receiver.await;
         }
     }

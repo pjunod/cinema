@@ -331,6 +331,7 @@ impl HlsDeliveryFixture {
                 aac: true,
                 preserve_dolby_vision: false,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             };
             raw_session.method = crate::delivery::Method::HlsCopy;
             raw_session.encoder_label = Mutex::new("copy");
@@ -611,6 +612,18 @@ impl HlsDeliveryFixture {
             .arm("control_applied")
     }
 
+    pub(crate) fn worker_retirement_debug(&self, session_id: &str) -> String {
+        format!(
+            "registered={:?} retired={} cleanup_started={} cleanup_finished={} child_present={:?} child_transition_available={}",
+            self.state.transcode.sessions.try_lock().ok().map(|sessions| sessions.contains_key(session_id)),
+            self.session.control.is_retired(),
+            self.session.retirement_cleanup_started.load(Relaxed),
+            self.session.retirement_cleanup_finished.load(Relaxed),
+            self.session.child.try_lock().ok().map(|child| child.is_some()),
+            self.session.child_transition.try_lock().is_ok(),
+        )
+    }
+
     pub(crate) async fn worker_is_registered(&self, session_id: &str) -> bool {
         self.state
             .transcode
@@ -652,6 +665,7 @@ impl HlsDeliveryFixture {
                         since_ms: None,
                         event: None,
                         limit: 50,
+                        ..Default::default()
                     })
                     .await
                     .expect("delivery telemetry query")
@@ -677,6 +691,7 @@ impl HlsDeliveryFixture {
                 since_ms: None,
                 event: None,
                 limit: 50,
+                ..Default::default()
             })
             .await
             .expect("delivery telemetry query")
@@ -713,6 +728,7 @@ fn test_session_with_optional_child(
 ) -> Session {
     let child = stand_in_child.then(|| {
         let child = tokio::process::Command::new("sleep")
+            .process_group(0)
             .arg("30")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -728,6 +744,8 @@ fn test_session_with_optional_child(
         recovery: None,
         response_incarnation: uuid::Uuid::new_v4(),
         frozen_presentation: None,
+        fallback_analysis_interest: std::sync::Mutex::new(None),
+        source_request: None,
         rolling_provenance: None,
         rolling_collection: None,
         rolling_artifact: None,
@@ -761,7 +779,9 @@ fn test_session_with_optional_child(
         cache_manifest: None,
         cache_location: None,
         control,
-        publication: Mutex::new(RollingPublicationClock::default()),
+        // Historical flow/retention controls explicitly retain the old cushion.
+        // Production and new startup regressions bind the short phase below.
+        publication: Mutex::new(RollingPublicationClock::historical_control_for_test()),
         publication_worker_started: AtomicBool::new(false),
         flow_worker_started: AtomicBool::new(false),
         file_id: 1,

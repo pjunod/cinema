@@ -12,6 +12,7 @@ use zip::{CompressionMethod, ZipWriter};
 
 use super::*;
 
+mod playback_handoffs;
 mod public_copy_wire;
 mod subtitle_generation;
 
@@ -2033,7 +2034,7 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
     let coverage = compact_handler(
         browse,
         "pub(crate) async fn vod_index_coverage",
-        "pub(super) fn index_refusal_summary",
+        "pub(crate) fn index_refusal_summary",
     );
     assert!(coverage.contains(".cluster_index_availability(&state.catalogue,&lookups)"));
     // Its two display settings are one bounded read, not two Authority
@@ -2437,6 +2438,337 @@ async fn macos_processing_reprobe_requires_admin_and_preserves_saved_choice() {
     );
 }
 
+#[test]
+fn local_https_route_matrix_is_exact_for_learner_and_maintenance() {
+    for method in [Method::GET, Method::PUT] {
+        assert!(learner_route_eligible(&method, https_admin::PATH));
+        assert!(maintenance_route_eligible(&method, https_admin::PATH));
+    }
+    assert!(learner_route_eligible(
+        &Method::GET,
+        https_admin::CERTIFICATE_PATH
+    ));
+    assert!(maintenance_route_eligible(
+        &Method::GET,
+        https_admin::CERTIFICATE_PATH
+    ));
+    for (method, path) in [
+        (Method::POST, https_admin::PATH),
+        (Method::DELETE, https_admin::PATH),
+        (Method::PATCH, https_admin::PATH),
+        (Method::HEAD, https_admin::PATH),
+        (Method::PUT, https_admin::CERTIFICATE_PATH),
+        (Method::HEAD, https_admin::CERTIFICATE_PATH),
+        (Method::GET, "/api/v1/system/https/other"),
+        (Method::PUT, "/api/v1/system/https/"),
+        (Method::GET, "/api/v1/system/https-other"),
+    ] {
+        assert!(!learner_route_eligible(&method, path), "{method} {path}");
+        assert!(
+            !maintenance_route_eligible(&method, path),
+            "{method} {path}"
+        );
+    }
+}
+
+fn local_https_state(root: &std::path::Path, enabled: bool) -> AppState {
+    let mut state = test_state_without_router();
+    let mut config = plurx_core::config::Config::default();
+    config.storage.data_dir = root.to_path_buf();
+    config.server.https.enabled = enabled;
+    config
+        .resolve_https(Default::default())
+        .expect("local intent");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    let identity = crate::https::Identity::load(&config.server.https, root, now, true)
+        .expect("identity")
+        .map(Arc::new);
+    state.https = Some(Arc::new(
+        crate::https::Control::new(state.node_id.clone(), config, identity).expect("control"),
+    ));
+    state
+}
+
+#[tokio::test]
+async fn local_https_api_requires_admin_and_guards_node_revision_and_input() {
+    let root = crate::test_tempdir().expect("tempdir");
+    let state = local_https_state(root.path(), false);
+    let app = router(state.clone());
+    for path in [https_admin::PATH, https_admin::CERTIFICATE_PATH] {
+        assert_eq!(
+            call(&app, get(path, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        call(&app, put(https_admin::PATH, None, json!({}))).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let admin = setup_admin(&app).await;
+    let response = app
+        .clone()
+        .oneshot(get(https_admin::PATH, Some(&admin)))
+        .await
+        .expect("response");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let (status, before) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(before["revision"], "0");
+    let request = json!({"node_id":before["node_id"],"revision":before["revision"],"desired":before["desired"]});
+    for (field, value, code) in [
+        ("node_id", json!("another-node"), "https_node_conflict"),
+        ("revision", json!("1"), "https_revision_conflict"),
+    ] {
+        let mut wrong = request.clone();
+        wrong[field] = value;
+        let (status, body) = call(&app, put(https_admin::PATH, Some(&admin), wrong)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], code);
+    }
+    for body in [
+        json!({"PRIVATE-PEM-MARKER":true}),
+        json!({"node_id":"x","revision":{"PRIVATE-PEM-MARKER":true},"desired":{}}),
+    ] {
+        let (status, body) = call(&app, put(https_admin::PATH, Some(&admin), body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!body.to_string().contains("PRIVATE-PEM-MARKER"));
+    }
+    let (status, body) = call(
+        &app,
+        put(
+            https_admin::PATH,
+            Some(&admin),
+            json!({"padding":"PRIVATE-PEM-MARKER".repeat(2000)}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(!body.to_string().contains("PRIVATE-PEM-MARKER"));
+    let mut invalid = request.clone();
+    invalid["desired"]["port"] = json!(0);
+    assert_eq!(
+        call(&app, put(https_admin::PATH, Some(&admin), invalid))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut enable = request.clone();
+    enable["desired"]["enabled"] = json!(true);
+    let ((a, one), (b, two)) = tokio::join!(
+        call(&app, put(https_admin::PATH, Some(&admin), enable.clone())),
+        call(&app, put(https_admin::PATH, Some(&admin), enable))
+    );
+    assert!(
+        (a == StatusCode::OK && b == StatusCode::CONFLICT)
+            || (b == StatusCode::OK && a == StatusCode::CONFLICT),
+        "{a} {one} / {b} {two}"
+    );
+    let (_, after) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(after["revision"], "1");
+    assert_eq!(after["active"]["enabled"], false);
+    assert_eq!(after["desired"]["enabled"], true);
+    assert_eq!(after["restart_required"], true);
+    assert!(!root.path().join("https").exists());
+    assert_eq!(
+        call(&app, get(https_admin::CERTIFICATE_PATH, Some(&admin)))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        state
+            .store
+            .get_setting("https")
+            .await
+            .expect("no Store setting"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn local_https_certificate_exports_only_loaded_public_chain_even_after_disk_replacement() {
+    use rustls::pki_types::pem::PemObject;
+    use sha2::Digest;
+    let root = crate::test_tempdir().expect("tempdir");
+    let state = local_https_state(root.path(), true);
+    let app = router(state);
+    let admin = setup_admin(&app).await;
+    let (_, snapshot) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    let source = root
+        .path()
+        .join("https")
+        .join(crate::https::MANAGED_IDENTITY_FILE);
+    std::fs::write(source, "invalid replacement PRIVATE-PEM-MARKER")
+        .expect("replace source after startup");
+    let response = app
+        .clone()
+        .oneshot(get(https_admin::CERTIFICATE_PATH, Some(&admin)))
+        .await
+        .expect("download");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/x-pem-file"
+    );
+    assert!(response.headers()[header::CONTENT_DISPOSITION]
+        .to_str()
+        .expect("attachment")
+        .starts_with("attachment;"));
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let text = std::str::from_utf8(&bytes).expect("PEM");
+    assert!(!text.contains("PRIVATE") && !text.contains("invalid replacement"));
+    let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(&bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("public certificates");
+    assert_eq!(certificates.len(), 1);
+    assert_eq!(
+        hex::encode(sha2::Sha256::digest(&certificates[0])),
+        snapshot["certificate"]["sha256"]
+    );
+    let (_, again) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(again["certificate"], snapshot["certificate"]);
+    let mut desired = snapshot["desired"].clone();
+    desired["enabled"] = json!(false);
+    let (status,disabled)=call(&app,put(https_admin::PATH,Some(&admin),json!({"node_id":snapshot["node_id"],"revision":snapshot["revision"],"desired":desired}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(disabled["saved"]["enabled"], false);
+    assert_eq!(disabled["desired"]["enabled"], false);
+    assert_eq!(disabled["active"]["enabled"], true);
+    assert_eq!(disabled["restart_required"], true);
+    assert_eq!(disabled["certificate"], snapshot["certificate"]);
+    desired["enabled"] = json!(true);
+    assert_eq!(call(&app,put(https_admin::PATH,Some(&admin),json!({"node_id":disabled["node_id"],"revision":disabled["revision"],"desired":desired}))).await.0,StatusCode::BAD_REQUEST);
+    let (_, after) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(after["revision"], disabled["revision"]);
+    assert_eq!(after["certificate"], snapshot["certificate"]);
+}
+
+#[tokio::test]
+async fn local_https_admin_auth_survives_exact_learner_and_maintenance_admission() {
+    let root = crate::test_tempdir().expect("tempdir");
+    let state = local_https_state(root.path(), false);
+    let app = router(state.clone());
+    let admin = setup_admin(&app).await;
+    assert_eq!(
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"https-reader","password":"longenough"})
+            )
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, login) = call(
+        &app,
+        post(
+            "/api/v1/auth/login",
+            None,
+            json!({"username":"https-reader","password":"longenough"}),
+        ),
+    )
+    .await;
+    let reader = login["token"].as_str().expect("reader token");
+    // Inject facts at the same shared decision boundary as the production
+    // gate. No second Hiqlite cluster or alternate authorization is used.
+    for (role, maintenance) in [
+        (LocalServingRole::Unclustered, false),
+        (LocalServingRole::Learner, false),
+        (LocalServingRole::Voter, true),
+    ] {
+        let admitted = app.clone().layer(axum::middleware::from_fn(
+            move |request: Request<Body>, next: Next| async move {
+                if let Some(response) = capacity_maintenance_refusal(
+                    maintenance,
+                    request.method(),
+                    request.uri().path(),
+                ) {
+                    return response;
+                }
+                if let Some(response) =
+                    capacity_role_refusal(Some(role), request.method(), request.uri().path())
+                {
+                    return response;
+                }
+                next.run(request).await
+            },
+        ));
+        for path in [https_admin::PATH, https_admin::CERTIFICATE_PATH] {
+            assert_eq!(
+                call(&admitted, get(path, None)).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                call(&admitted, get(path, Some(reader))).await.0,
+                StatusCode::FORBIDDEN
+            );
+            let expected = if path == https_admin::PATH {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            assert_eq!(call(&admitted, get(path, Some(&admin))).await.0, expected);
+        }
+        let (_, snapshot) = call(&admitted, get(https_admin::PATH, Some(&admin))).await;
+        let request = json!({"node_id":snapshot["node_id"],"revision":snapshot["revision"],"desired":snapshot["desired"]});
+        assert_eq!(
+            call(&admitted, put(https_admin::PATH, None, request.clone()))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                &admitted,
+                put(https_admin::PATH, Some(reader), request.clone())
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&admitted, put(https_admin::PATH, Some(&admin), request))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        if maintenance || matches!(role, LocalServingRole::Learner) {
+            assert_eq!(
+                call(&admitted, get("/api/v1/settings", Some(&admin)))
+                    .await
+                    .0,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+    }
+    // The exception grants nothing to fenced/unknown nodes.
+    for role in [Some(LocalServingRole::Fenced), None] {
+        let response =
+            capacity_role_refusal(role, &Method::GET, https_admin::PATH).expect("fenced");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(body.as_ref(), NODE_REMOVAL_FENCED_JSON.as_bytes());
+    }
+}
+
 fn test_app() -> Router {
     test_app_with_state().0
 }
@@ -2520,12 +2852,19 @@ pub(super) fn test_app_with_state() -> (Router, AppState) {
 
 pub(super) fn test_state_without_router() -> AppState {
     let store = SqliteStore::open_in_memory().expect("store");
+    test_state_with_store(Arc::new(store), "test-node".into())
+}
+
+pub(super) fn test_state_with_store(
+    store: Arc<dyn plurx_core::store::Store>,
+    node_id: String,
+) -> AppState {
     let base = crate::test_temp_path(format!("plurx-test-{}", uuid::Uuid::new_v4()));
     AppState::new(
         "test".into(),
-        Arc::new(store),
+        store,
         test_dirs(&base),
-        "test-node".into(),
+        node_id,
         Default::default(),
         Default::default(),
         Arc::new(crate::logbuf::LogBuffer::new(64)),
@@ -8308,6 +8647,12 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // `met` and the offset and NTP rows `unobservable`.
             "cluster_clock",
             "durable_cluster_work",
+            // C1: what this node's indexer may do while it serves. All four
+            // rows describe an idle standalone node here.
+            "indexing_while_serving",
+            // D1: the processed DV upgrade's per-platform switch
+            // qualification and this node's renderer and slot.
+            "processed_dv_upgrade",
             "bounded_catalogue_reads",
             "cluster_backup",
             "windows_server",
@@ -8383,6 +8728,8 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
     // which a ride-along test in this binary may have driven either way.
     // The local-cache row depends on the host filesystem and whether its
     // classifier is implemented on this platform.
+    // The live FEL slot is reported only on Linux workers. This idle fixture
+    // owns no reconstruction, so its single slot must be available there.
     let green = seen
         .iter()
         .filter(|(_, status)| status.as_str() == "met")
@@ -8397,6 +8744,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
                     | "probe_reporter_named"
                     | "sources_match_their_scan_whole"
                     | "stored_source_self_test"
+                    | "dv_fel_live_slot"
                     | "stored_source_local_cache"
                     | "stored_source_free_space"
                     | "local_cache"
@@ -8405,9 +8753,34 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
                     | "output_node_idle"
                     | "output_storage_ownership"
                     | "retention_same_filesystem"
+                    // D1: the helper is the host's, and the activity row is
+                    // a count rather than a requirement.
+                    | "processed_upgrade_renderer"
+                    | "processed_upgrade_slot"
+                    | "processed_upgrade_activity"
             )
         })
         .collect::<Vec<_>>();
+    let live_slot = items
+        .iter()
+        .find(|item| item["id"] == "dolby_vision_fel_reencode")
+        .expect("live FEL card")["requirements"]
+        .as_array()
+        .expect("live FEL requirements")
+        .iter()
+        .find(|row| row["id"] == "dv_fel_live_slot")
+        .expect("live FEL slot requirement");
+    let slot_evidence = live_slot["evidence"].as_str().expect("slot evidence");
+    if cfg!(target_os = "linux") {
+        assert_eq!(live_slot["status"], "met");
+        assert!(
+            slot_evidence.starts_with("0 of 1 live FEL reconstruction slot"),
+            "the idle fixture has its live reconstruction slot: {slot_evidence}"
+        );
+    } else {
+        assert_eq!(live_slot["status"], "unavailable");
+        assert!(slot_evidence.contains("Linux playback workers only"));
+    }
     // Startup inventory may settle between the two readiness requests.
     // Its status must report the same snapshot as its evidence; this
     // empty fixture owns no preparation media or pending cleanup.
@@ -8466,6 +8839,13 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
         ),
         "the reporter row never claims a build it did not read: {seen:?}"
     );
+    // Live FEL occupancy is a process observation on Linux; other platforms
+    // cannot read it. Its exact verdict is covered by the facts helper tests.
+    let live_slot = seen.get("dv_fel_live_slot").map(String::as_str);
+    #[cfg(target_os = "linux")]
+    assert!(matches!(live_slot, Some("met" | "unmet")));
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(live_slot, Some("unavailable"));
     assert_eq!(
         green,
         vec![
@@ -8484,6 +8864,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "coverage",
             "durable_queue",
             "durable_role",
+            "dv_target_cache",
             // Display-aware Auto on a single node owns every session.
             "local_session_owner",
             // Output preparation and rolling retention: the budget is the
@@ -8502,6 +8883,10 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "rolling_contract_built",
             "runtime",
             "server_preparation_is_real",
+            "serving_cross_node",
+            "serving_domain_readers",
+            "serving_live_waiters",
+            "serving_slots_in_use",
             "source_fencing",
             "stored_source_producer",
             "tuner_reserve",
@@ -8994,6 +9379,14 @@ async fn dv_processing_preferences_roundtrip_without_qualification_or_conversion
         );
     }
     assert_eq!(initial["dolby_vision_convert"], true);
+    #[cfg(target_os = "linux")]
+    let fel_helper_installed = crate::vodencode::dv_runtime::ToolSet::capture()
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    #[cfg(not(target_os = "linux"))]
+    let fel_helper_installed = false;
     // Each new preference can be on or off with either conversion permission.
     // Missing backend evidence never changes the saved choices or permission.
     for convert in [false, true] {
@@ -9039,9 +9432,26 @@ async fn dv_processing_preferences_roundtrip_without_qualification_or_conversion
                     let requirements = item["requirements"]
                         .as_array()
                         .expect("readiness requirements");
-                    assert_eq!(requirements.len(), 4);
-                    assert_eq!(requirements[0]["status"], "unmet");
-                    assert!(requirements.iter().all(|row| row["status"] != "met"));
+                    if field == "dolby_vision_fel_reencode" {
+                        // Computed from this node: the helper and the conversion
+                        // permission decide the backend row, never the saved choice.
+                        assert_eq!(requirements.len(), 6);
+                        assert_eq!(
+                            requirements[0]["status"],
+                            if convert && fel_helper_installed {
+                                "met"
+                            } else {
+                                "unmet"
+                            },
+                            "{requirements:?}"
+                        );
+                        assert_eq!(requirements[1]["id"], "dv_fel_worker_budget");
+                        assert_eq!(requirements[2]["id"], "dv_fel_live_slot");
+                    } else {
+                        assert_eq!(requirements.len(), 4);
+                        assert_eq!(requirements[0]["status"], "unmet");
+                        assert!(requirements.iter().all(|row| row["status"] != "met"));
+                    }
                 }
                 assert_eq!(read["dolby_vision_convert"], convert);
                 assert_eq!(state.transcode.dv_convert_enabled().await, convert);
@@ -10100,6 +10510,68 @@ async fn logs_endpoint_is_admin_only() {
     assert_eq!(body[0]["message"], "cluster-only proof");
 }
 
+/// Review 3 S9: the viewer's first-frame beacon is what starts the processed
+/// upgrade, and only for the session it names. A `ttff` naming one session
+/// takes that session's waiting upgrade and leaves another session's waiting;
+/// a beacon of another kind takes nothing.
+#[tokio::test]
+async fn a_ttff_client_log_schedules_only_the_named_sessions_upgrade() {
+    use super::hls::processed_upgrade::{
+        is_waiting, register, tests::ordinary_request, UpgradeIntent,
+    };
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let user_id = state
+        .store
+        .get_user_by_username("paul")
+        .await
+        .expect("user read")
+        .expect("the admin")
+        .id;
+    let waiting = || {
+        let playback = uuid::Uuid::new_v4().to_string();
+        let session = uuid::Uuid::new_v4().to_string();
+        register(UpgradeIntent {
+            user_id,
+            playback_id: playback.clone(),
+            session_id: session.clone(),
+            incarnation_id: uuid::Uuid::new_v4().to_string(),
+            request: ordinary_request(&playback),
+            hdr10_intent: false,
+            auto_policy: false,
+            network: None,
+            network_prior: None,
+            incumbent_receipt: None,
+        });
+        session
+    };
+    let named = waiting();
+    let other = waiting();
+    let beacon = |event: &str, session: &str| {
+        post(
+            "/api/v1/client-log",
+            Some(&admin),
+            json!({ "level": "info", "event": event, "session_id": session, "file_id": 7, "ms": 850 }),
+        )
+    };
+    let (status, _) = call(&app, beacon("playback_failed", &named)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        is_waiting(&named),
+        "a beacon that is not a first frame takes nothing"
+    );
+    let (status, _) = call(&app, beacon("ttff", &named)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        !is_waiting(&named),
+        "the named session's first frame took its upgrade"
+    );
+    assert!(
+        is_waiting(&other),
+        "another session's upgrade still waits for its own frame"
+    );
+}
+
 #[tokio::test]
 async fn client_log_requires_auth_and_accepts_reports() {
     let app = test_app();
@@ -10332,6 +10804,313 @@ async fn a_first_frame_beacon_settles_the_start_its_direct_play_opened() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(ledger.count("transcode", "failed"), 1);
+}
+
+/// G1: every create leaves one `start_attempt` row in the node-local
+/// sidecar, keyed by the create's claim id (the request's `request_id`), and
+/// the client's first-frame report settles the create it names. Two devices
+/// of one viewer starting one title are two attempts, each settled by its own
+/// session; the (viewer, file)-keyed ledger alone cannot tell them apart.
+#[tokio::test]
+async fn each_create_is_one_start_attempt_and_two_devices_on_a_title_are_two() {
+    use super::test_agents::{CHROME_WINDOWS_UA, FIREFOX_WINDOWS_UA};
+    use plurx_core::domain::PlaybackEventQuery;
+
+    crate::transcode::require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let s = seed_content(&state).await;
+    prepare_vod_copy_fixture(&state, s.file, 16).await;
+    let create = format!("/api/v1/files/{}/hls/sessions", s.file);
+    let with_ua = |mut request: Request<Body>, ua: &'static str| {
+        request.headers_mut().insert(
+            axum::http::header::USER_AGENT,
+            axum::http::HeaderValue::from_static(ua),
+        );
+        request
+    };
+
+    // A refusal with no code of its own is still a row, and says so.
+    let (status, _) = call(
+        &app,
+        post(
+            &create,
+            Some(&admin),
+            json!({ "playback_id": "   ", "request_id": "claim-refused" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let mut sessions = Vec::new();
+    for (device, claim, ua) in [
+        ("device-a", "claim-a", CHROME_WINDOWS_UA),
+        ("device-b", "claim-b", FIREFOX_WINDOWS_UA),
+    ] {
+        let (status, session) = call(
+            &app,
+            with_ua(
+                post(
+                    &create,
+                    Some(&admin),
+                    json!({ "playback_id": device, "request_id": claim, "copy": true }),
+                ),
+                ua,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{session}");
+        sessions.push(session["session_id"].as_str().expect("session").to_owned());
+    }
+
+    let rows_of = |event: &'static str| {
+        let store = std::sync::Arc::clone(&state.store);
+        async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let rows = store
+                    .playback_events(&PlaybackEventQuery {
+                        event: Some(event.to_owned()),
+                        limit: 50,
+                        ..PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("events");
+                let expected = if event == "start_attempt" { 3 } else { 2 };
+                if rows.len() >= expected || tokio::time::Instant::now() > deadline {
+                    return rows;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    };
+    let attempts = rows_of("start_attempt").await;
+    assert_eq!(attempts.len(), 3, "one row per create, refused or not");
+    let by_attempt = |rows: &[plurx_core::domain::PlaybackEvent], claim: &str| {
+        rows.iter()
+            .find(|row| row.attempt.as_deref() == Some(claim))
+            .cloned()
+            .unwrap_or_else(|| panic!("no row for attempt {claim}"))
+    };
+    let refused = by_attempt(&attempts, "claim-refused");
+    assert_eq!(refused.reason.as_deref(), Some("http_400"));
+    assert_eq!(refused.session_id, None);
+    for (claim, session, agent) in [
+        ("claim-a", &sessions[0], "Mozilla"),
+        ("claim-b", &sessions[1], "Mozilla"),
+    ] {
+        let row = by_attempt(&attempts, claim);
+        assert_eq!(row.reason, None, "a served create has no refusal");
+        assert!(matches!(row.method.as_deref(), Some("vod" | "rolling")));
+        assert_eq!(
+            row.session_id,
+            Some(crate::transcode::session_log_id(session)),
+            "the row names the session it answered with"
+        );
+        assert_eq!(row.file_id, Some(s.file));
+        let extra: serde_json::Value =
+            serde_json::from_str(row.extra.as_deref().expect("extra")).expect("extra JSON");
+        assert_eq!(extra["owner_node"], "test-node");
+        assert!(extra["client_build"]
+            .as_str()
+            .expect("client_build")
+            .starts_with(agent));
+        assert!(extra["elapsed_ms"].is_u64() && extra["store_ms"].is_u64());
+        assert!(
+            extra["phases"].as_array().is_some_and(
+                |phases| !phases.is_empty() && phases.iter().all(|p| p["name"].is_string())
+            ),
+            "{extra}"
+        );
+    }
+
+    // Device B's picture arrives first, then A's: each settles its own create.
+    for (session, ms) in [(&sessions[1], 4_200), (&sessions[0], 1_500)] {
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({
+                    "level": "info", "event": "ttff", "file_id": s.file,
+                    "session_id": session, "ms": ms, "reason": "cold-start",
+                    "method": "remux", "attempt": "a1",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    let presented = rows_of("start_presented").await;
+    assert_eq!(presented.len(), 2);
+    assert_eq!(by_attempt(&presented, "claim-a").ms, Some(1_500));
+    assert_eq!(by_attempt(&presented, "claim-b").ms, Some(4_200));
+    // The beacons themselves now carry the create's id, and keep the page's.
+    let beacons = rows_of("ttff").await;
+    let beacon = by_attempt(&beacons, "claim-b");
+    let extra: serde_json::Value =
+        serde_json::from_str(beacon.extra.as_deref().expect("beacon extra")).expect("JSON");
+    assert_eq!(extra["client_attempt"], "a1");
+
+    // The page the Activity tab reads joins them.
+    let rows = super::activity_starts::local_page(
+        &state.store,
+        &state.node_id,
+        None,
+        25,
+        crate::state::clock_ms(),
+    )
+    .await
+    .expect("page");
+    let outcomes = |claim: &str| {
+        let row = rows.iter().find(|row| row.attempt == claim).expect("row");
+        (row.outcome.clone(), row.ttff_ms)
+    };
+    assert_eq!(outcomes("claim-a"), ("presented".to_owned(), Some(1_500)));
+    assert_eq!(outcomes("claim-b"), ("presented".to_owned(), Some(4_200)));
+    assert_eq!(outcomes("claim-refused").0, "refused");
+    for session in &sessions {
+        state.transcode.stop_session(session, "test").await;
+    }
+}
+
+/// Review 2 of G1 (B2, S5). A retry of a create that replays its owner's
+/// session -- here on another ingress, which shares the cluster store but
+/// not the first ingress's ledger -- is tagged like the publishing create,
+/// so the first frame its client reports there settles it. And a direct
+/// request that opens a start writes its own `start_attempt` row (route
+/// `direct`), which the client's first frame settles too.
+#[tokio::test]
+async fn a_replayed_create_and_a_direct_start_are_settled_by_their_first_frame() {
+    use plurx_core::domain::PlaybackEventQuery;
+
+    crate::transcode::require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let s = seed_content(&state).await;
+    prepare_vod_copy_fixture(&state, s.file, 16).await;
+    let ingress = |state: &AppState| {
+        let mut other = state.clone();
+        other.start_attempts = std::sync::Arc::new(crate::playstart::StartAttempts::new());
+        router(other)
+    };
+    let rows_of = |event: &'static str, attempt: String| {
+        let store = std::sync::Arc::clone(&state.store);
+        async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let rows = store
+                    .playback_events(&PlaybackEventQuery {
+                        event: Some(event.to_owned()),
+                        limit: 50,
+                        ..PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("events");
+                let found = rows
+                    .into_iter()
+                    .filter(|row| row.attempt.as_deref() == Some(attempt.as_str()))
+                    .collect::<Vec<_>>();
+                if !found.is_empty() || tokio::time::Instant::now() > deadline {
+                    return found;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    };
+    let ttff = |session: Option<&str>, ms: i64| {
+        let mut body = json!({
+            "level": "info", "event": "ttff", "file_id": s.file, "ms": ms,
+            "reason": "cold-start", "method": "remux",
+        });
+        if let Some(session) = session {
+            body["session_id"] = json!(session);
+        }
+        post("/api/v1/client-log", Some(&admin), body)
+    };
+
+    let create = format!("/api/v1/files/{}/hls/sessions", s.file);
+    let body = json!({ "playback_id": "device-r", "request_id": "claim-r", "copy": true });
+    let (status, first) = call(&app, post(&create, Some(&admin), body.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let session = first["session_id"].as_str().expect("session").to_owned();
+    let retried = ingress(&state);
+    let (status, replay) = call(&retried, post(&create, Some(&admin), body)).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(
+        replay["session_id"], first["session_id"],
+        "the retry replays the owner's session"
+    );
+    let (status, _) = call(&retried, ttff(Some(&session), 2_000)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let presented = rows_of("start_presented", "claim-r".to_owned()).await;
+    assert_eq!(
+        presented.iter().map(|row| row.ms).collect::<Vec<_>>(),
+        [Some(2_000)],
+        "the replayed create's first frame settles it on the ingress that answered it"
+    );
+
+    // A direct start, on an ingress that has seen nothing of this viewer.
+    let direct = ingress(&state);
+    let response = direct
+        .clone()
+        .oneshot(ranged(
+            &format!("/api/v1/files/{}/direct?token={admin}", s.file),
+            0,
+            1_023,
+        ))
+        .await
+        .expect("direct");
+    assert!(response.status().is_success(), "{}", response.status());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let started = loop {
+        let rows = state
+            .store
+            .playback_events(&PlaybackEventQuery {
+                event: Some("start_attempt".to_owned()),
+                limit: 50,
+                ..PlaybackEventQuery::default()
+            })
+            .await
+            .expect("events");
+        if let Some(row) = rows
+            .into_iter()
+            .find(|row| row.method.as_deref() == Some("direct"))
+        {
+            break row;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a direct start writes its row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(started.session_id, None, "a direct start has no session");
+    assert_eq!(started.file_id, Some(s.file));
+    let attempt = started.attempt.clone().expect("attempt");
+    // The direct player's report names no session of this server's.
+    let (status, _) = call(&direct, ttff(None, 900)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let presented = rows_of("start_presented", attempt.clone()).await;
+    assert_eq!(presented.len(), 1, "the direct start is settled");
+    let rows = super::activity_starts::local_page(
+        &state.store,
+        &state.node_id,
+        None,
+        25,
+        crate::state::clock_ms(),
+    )
+    .await
+    .expect("page");
+    let row = rows
+        .iter()
+        .find(|row| row.attempt == attempt)
+        .expect("the direct row");
+    assert_eq!(
+        (row.route.as_deref(), row.outcome.as_str(), row.ttff_ms),
+        (Some("direct"), "presented", Some(900))
+    );
+    state.transcode.stop_session(&session, "test").await;
 }
 
 /// C-08 M5 row 4: a start request the server answers with an error is a
@@ -11073,6 +11852,93 @@ async fn home_previews_are_authenticated_fixed_and_match_library_pages() {
     );
 }
 
+#[tokio::test]
+async fn sharing_connection_probe_reports_failure_preserves_consent_and_does_not_import() {
+    use plurx_core::{
+        config::SharingNetworkConfig,
+        sharing::{ConnectionInvitation, Endpoint, Invitation, NetworkShare, SharingIdentity},
+    };
+    let (_, mut state) = test_app_with_state();
+    state.sharing = Arc::new(crate::sharing::SharingManager::new(
+        state.sharing.key.clone(),
+        crate::test_temp_path(format!("sharing-probe-{}", uuid::Uuid::new_v4())),
+        SharingNetworkConfig {
+            // Missing host custody must fail closed rather than using an
+            // ordinary network route, on every test host.
+            require_host_egress_guard: true,
+            ..Default::default()
+        },
+    ));
+    let app = router(state.clone());
+    let admin = setup_admin(&app).await;
+    let invitation = Invitation {
+        identity: SharingIdentity {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            created_at_ms: crate::state::clock_ms(),
+        },
+        name: "Synthetic source".into(),
+        endpoints: vec![Endpoint {
+            ipv4: "100.101.102.103"
+                .parse()
+                .expect("synthetic tailnet address"),
+            ipv6: None,
+            ts_fqdn: "source.fixture.ts.net".into(),
+            port: 32443,
+            spki_sha256: "a".repeat(64),
+        }],
+        id: uuid::Uuid::new_v4(),
+        secret: plurx_core::sharing::new_secret().expect("synthetic invitation secret"),
+        expires_at_ms: crate::state::clock_ms() + 60_000,
+    };
+    let consent = "https://login.tailscale.com/admin/invite/synthetic_consent";
+    let combined = ConnectionInvitation {
+        invitation: invitation.encode().expect("synthetic invitation"),
+        network: vec![NetworkShare {
+            ts_fqdn: "source.fixture.ts.net".into(),
+            invite_url: consent.into(),
+        }],
+    }
+    .encode()
+    .expect("synthetic combined invitation");
+    for probe in [false, true] {
+        let (status, response) = call(
+            &app,
+            post(
+                "/api/v1/sharing/connection",
+                Some(&admin),
+                json!({"invitation":combined.expose(),"probe":probe}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["name"], "Synthetic source");
+        assert_eq!(response["connected"], false);
+        assert_eq!(response["network"][0]["invite_url"], consent);
+        assert_eq!(
+            response["connection_error"],
+            if probe {
+                json!("sharing_peer_unavailable")
+            } else {
+                Value::Null
+            },
+            "an attempted connection must distinguish failure from an unchecked invitation"
+        );
+        assert!(state
+            .store
+            .sharing_imports()
+            .await
+            .expect("imports")
+            .is_empty());
+        assert!(state
+            .store
+            .sharing_exports(None)
+            .await
+            .expect("exports")
+            .is_empty());
+    }
+}
+
 /// Runs only in a disposable namespace with an assigned CGNAT fixture IP.
 /// The production endpoint validator, DNS, pinned dialer and both routers
 /// remain in the path. This proves protocol recovery, not Tailscale topology.
@@ -11133,7 +11999,8 @@ async fn sharing_pinned_transport_recovers_committed_claim_and_rotation_after_re
         post(
             "/api/v1/sharing/invitations",
             Some(&source_admin),
-            json!({"library_ids":[seeded.lib.to_string()]}),
+            // CGNAT/TLS connectivity is owned by this fixture, not a provider invitation.
+            json!({"library_ids":[seeded.lib.to_string()],"include_network":false}),
         ),
     )
     .await;
@@ -11685,7 +12552,14 @@ async fn sharing_http_rejects_secret_bearing_unknown_fields_and_oversized_claims
 #[tokio::test]
 async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
     use plurx_core::{secrets::Secret, sharing::Invitation};
-    let (app, state) = test_app_with_state();
+    let storage = crate::test_tempdir().expect("private network storage");
+    let (_, mut state) = test_app_with_state();
+    state.sharing = Arc::new(crate::sharing::SharingManager::new(
+        state.sharing.key.clone(),
+        storage.path().join("sharing-tls"),
+        Default::default(),
+    ));
+    let app = router(state.clone());
     let admin = setup_admin(&app).await;
     let seeded = seed_content(&state).await;
     let endpoints = json!([{"ipv4":"100.101.102.103","ipv6":null,"ts_fqdn":"source.fixture.ts.net","port":32443,"spki_sha256":"a".repeat(64)}]);
@@ -11720,7 +12594,18 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1["code"], "sharing_invalid_request");
     }
-    let (status, created) = call(
+    // Production creates the node data directory before network storage.
+    std::fs::create_dir_all(
+        state
+            .sharing
+            .host_directory()
+            .parent()
+            .expect("node data directory"),
+    )
+    .expect("node data directory");
+    // Combined external invitations are the production default. This owned
+    // fixture has no provider authorization and must retain that refusal.
+    let (status, denied) = call(
         &app,
         post(
             "/api/v1/sharing/invitations",
@@ -11729,7 +12614,28 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        denied,
+        json!({"code":"sharing_network_authorization_required","message":"sharing network authorization required"})
+    );
+    // The claim/approval/rotation contract below owns its endpoint manifest;
+    // request the supported Cinema-only invitation without an external share.
+    let (status, created) = call(
+        &app,
+        post(
+            "/api/v1/sharing/invitations",
+            Some(&admin),
+            json!({"library_ids":[seeded.lib.to_string()],"include_network":false}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected invitation code: {:?}",
+        created.get("code")
+    );
     let invitation = Invitation::parse(&Secret::from_cleartext(
         created["invitation"]
             .as_str()
@@ -13632,6 +14538,13 @@ async fn seed_content(state: &AppState) -> Seed {
     const PLACEHOLDER: &[u8] = b"\x00\x00\x00\x18ftypmp42 tiny placeholder bytes";
     std::fs::write(&mpath, PLACEHOLDER).expect("write");
     let placeholder_len = PLACEHOLDER.len() as i64;
+    let placeholder_mtime = std::fs::metadata(&mpath)
+        .expect("fixture metadata")
+        .modified()
+        .expect("fixture mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("fixture epoch")
+        .as_secs() as i64;
     let probe = ProbeResult {
             duration_ms: Some(9_000_000),
             container: Some("mp4".into()),
@@ -13662,7 +14575,13 @@ async fn seed_content(state: &AppState) -> Seed {
         };
     let file = state
         .store
-        .upsert_file(movie, &mpath.to_string_lossy(), placeholder_len, 1, &probe)
+        .upsert_file(
+            movie,
+            &mpath.to_string_lossy(),
+            placeholder_len,
+            placeholder_mtime,
+            &probe,
+        )
         .await
         .expect("file");
     let show = state
@@ -13706,7 +14625,13 @@ async fn seed_content(state: &AppState) -> Seed {
         .expect("ep");
     state
         .store
-        .upsert_file(ep, &mpath.to_string_lossy(), placeholder_len, 1, &probe)
+        .upsert_file(
+            ep,
+            &mpath.to_string_lossy(),
+            placeholder_len,
+            placeholder_mtime,
+            &probe,
+        )
         .await
         .expect("epfile");
     Seed {
@@ -13777,7 +14702,13 @@ async fn seed_home(state: &AppState) -> HomeSeed {
             video,
             &vpath.to_string_lossy(),
             HOME_PLACEHOLDER.len() as i64,
-            1,
+            std::fs::metadata(&vpath)
+                .expect("video metadata")
+                .modified()
+                .expect("video mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("video epoch")
+                .as_secs() as i64,
             &ProbeResult {
                 duration_ms: Some(12_000),
                 container: Some("mp4".into()),
@@ -13799,7 +14730,13 @@ async fn seed_home(state: &AppState) -> HomeSeed {
             photo,
             &ppath.to_string_lossy(),
             photo_bytes.len() as i64,
-            1,
+            std::fs::metadata(&ppath)
+                .expect("photo metadata")
+                .modified()
+                .expect("photo mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("photo epoch")
+                .as_secs() as i64,
             &ProbeResult {
                 container: Some("jpg".into()),
                 width: Some(4032),
@@ -14405,6 +15342,7 @@ async fn the_delivery_plan_carries_a_selected_non_default_audio_track() {
     std::fs::create_dir_all(&dir).expect("media dir");
     let path = dir.join("Dual Language.mp4");
     std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("media file");
+    let metadata = std::fs::metadata(&path).expect("media metadata");
     // Both tracks decode on this client and the container is native, so
     // nothing but the selection can move the verdict off direct play.
     let file = state
@@ -14412,8 +15350,13 @@ async fn the_delivery_plan_carries_a_selected_non_default_audio_track() {
         .upsert_file(
             seeded.movie,
             &path.to_string_lossy(),
-            25,
-            1,
+            metadata.len() as i64,
+            metadata
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix mtime")
+                .as_secs() as i64,
             &ProbeResult {
                 duration_ms: Some(60_000),
                 container: Some("mp4".into()),
@@ -14899,7 +15842,12 @@ async fn android_dv_delivery_http_boundaries_bind_conversion_to_hls_and_narrow_p
             seeded.movie,
             &source.to_string_lossy(),
             metadata.len() as i64,
-            1,
+            metadata
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix mtime")
+                .as_secs() as i64,
             &ProbeResult {
                 duration_ms: Some(12_000),
                 container: Some("mkv".into()),
@@ -18738,6 +19686,135 @@ async fn hls_http_endpoints() {
     );
 }
 
+/// D2 item 3(b): a re-post of a start whose owner (on this or any other
+/// ingress) still holds the durable request claim joins that claim. It waits
+/// for the owner's activation within its own allowance and answers
+/// `startup_timeout` with `Retry-After` when that ends first — leaving the
+/// claim, and so the one owner, in place — instead of the old
+/// `media_session_starting` dead end no client retried; and when the owner
+/// lets go, the waiting re-post becomes the owner and starts the session.
+#[tokio::test]
+async fn a_retry_of_a_start_still_in_flight_joins_its_claim() {
+    use plurx_core::domain::MediaSessionRequestClaim;
+    crate::transcode::require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let s = seed_content(&state).await;
+    state
+        .store
+        .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+        .await
+        .expect("stay on immutable VOD");
+    prepare_vod_copy_fixture(&state, s.file, 16).await;
+    let create = |request_id: &str, remaining_ms: u64| {
+        let mut request = post(
+            &format!("/api/v1/files/{}/hls/sessions", s.file),
+            Some(&admin),
+            json!({"playback_id": "d2-join", "request_id": request_id, "copy": true}),
+        );
+        request.headers_mut().insert(
+            "x-plurx-startup-remaining-ms",
+            remaining_ms.to_string().parse().expect("header"),
+        );
+        request
+    };
+    let (status, first) = call(&app, create("d2-first", 10_000)).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let route = state
+        .store
+        .media_session_route(first["session_id"].as_str().expect("session"))
+        .await
+        .expect("route read")
+        .expect("route");
+    let principal = route.principal.clone();
+    let claim = |incarnation: String| {
+        let state = state.clone();
+        let principal = principal.clone();
+        let fingerprint = route.request_fingerprint.clone();
+        async move {
+            let now = crate::media_sessions::unix_ms();
+            state
+                .store
+                .claim_media_session_request(
+                    &principal,
+                    "d2-joined",
+                    &fingerprint,
+                    "d2-join",
+                    &incarnation,
+                    now,
+                    now + 60_000,
+                )
+                .await
+                .expect("claim")
+        }
+    };
+    // An owner elsewhere holds the request and has not activated yet.
+    let owner = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        claim(owner.clone()).await,
+        MediaSessionRequestClaim::Acquired { .. }
+    ));
+
+    let started = std::time::Instant::now();
+    let response = app
+        .clone()
+        .oneshot(create("d2-joined", 1_500))
+        .await
+        .expect("response");
+    let waited = started.elapsed();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1")
+    );
+    let body: Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("json");
+    assert_eq!(body["code"], "startup_timeout", "{body}");
+    assert!(
+        waited >= std::time::Duration::from_millis(1_000),
+        "the retry waited on the claim for its allowance, not answered at once: {waited:?}"
+    );
+    assert!(
+        matches!(
+            claim(uuid::Uuid::new_v4().to_string()).await,
+            MediaSessionRequestClaim::InFlight { incarnation_id, .. } if incarnation_id == owner
+        ),
+        "the joiner left the owner's claim in place"
+    );
+
+    // The owner lets go while a re-post is waiting: that re-post becomes the
+    // owner and starts the session itself.
+    let joined = tokio::spawn({
+        let app = app.clone();
+        let request = create("d2-joined", 8_000);
+        async move { call(&app, request).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(state
+        .store
+        .fail_media_session_request(
+            &principal,
+            "d2-joined",
+            &owner,
+            crate::media_sessions::unix_ms()
+        )
+        .await
+        .expect("owner lets go"));
+    let (status, joined) = joined.await.expect("joined create");
+    assert_eq!(status, StatusCode::OK, "{joined}");
+    assert!(joined["session_id"].as_str().is_some(), "{joined}");
+}
+
 #[tokio::test]
 async fn unindexed_copy_uses_live_recovery_when_enabled() {
     crate::transcode::require_ffmpeg();
@@ -20461,4 +21538,162 @@ async fn display_target_setting_defaults_off_and_saves_despite_unmet_advice() {
             "targeting never silently enables HDR10-E"
         );
     }
+}
+
+#[tokio::test]
+async fn sharing_http_local_name_is_admin_only_and_validates_before_network() {
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    use plurx_core::{secrets::SharingSecretPurpose, sharing::*};
+    let id = uuid::Uuid::new_v4();
+    let path = format!("/api/v1/sharing/imports/{id}/name");
+    let body = json!({"expected_name":"Source", "name":"Family films"});
+    assert_eq!(
+        call(&app, put(&path, None, body.clone())).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let user = state
+        .store
+        .create_user("name-reader", "synthetic hash", false)
+        .await
+        .expect("user");
+    state
+        .store
+        .create_token(
+            &plurx_core::auth::hash_token("name-reader-token"),
+            user.id,
+            None,
+        )
+        .await
+        .expect("token");
+    assert_eq!(
+        call(&app, put(&path, Some("name-reader-token"), body.clone()))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&app, put(&path, Some(&admin), body)).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let identity = state.store.sharing_identity(1000).await.expect("identity");
+    state
+        .store
+        .create_share_import(NewImport {
+            id,
+            source: SharingIdentity {
+                server_id: uuid::Uuid::new_v4(),
+                catalogue_epoch: uuid::Uuid::new_v4(),
+                created_at_ms: 1000,
+            },
+            source_name: "Source".into(),
+            claim_id: uuid::Uuid::new_v4(),
+            credential: state
+                .sharing
+                .key
+                .seal_sharing(
+                    SharingSecretPurpose::Credential,
+                    identity.server_id,
+                    id,
+                    "name fixture credential",
+                )
+                .expect("credential"),
+            claim_secret: state
+                .sharing
+                .key
+                .seal_sharing(
+                    SharingSecretPurpose::Claim,
+                    identity.server_id,
+                    id,
+                    "name fixture invitation",
+                )
+                .expect("invitation"),
+            endpoints: vec![Endpoint {
+                ipv4: "100.101.102.103".parse().expect("address"),
+                ipv6: None,
+                ts_fqdn: "source.fixture.ts.net".into(),
+                port: 32443,
+                spki_sha256: "a".repeat(64),
+            }],
+            now_ms: 1000,
+        })
+        .await
+        .expect("import");
+    let saved = call(
+        &app,
+        put(
+            &path,
+            Some(&admin),
+            json!({"expected_name":"Source", "name":"  Family films  "}),
+        ),
+    )
+    .await;
+    assert_eq!(saved.0, StatusCode::OK);
+    assert_eq!(saved.1["updated"], true);
+    assert_eq!(
+        state
+            .store
+            .sharing_import(id)
+            .await
+            .expect("stored")
+            .expect("import")
+            .summary
+            .source_name,
+        "Family films"
+    );
+    assert_eq!(
+        call(
+            &app,
+            put(
+                &path,
+                Some(&admin),
+                json!({"expected_name":"Source", "name":"Stale rename"})
+            )
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    for name in [
+        "".to_owned(),
+        "  ".to_owned(),
+        "x\ncontrol".to_owned(),
+        "😀".repeat(33),
+    ] {
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    &path,
+                    Some(&admin),
+                    json!({"expected_name":"Source", "name":name})
+                )
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for body in [
+        json!({"expected_name":"Source"}),
+        json!({"expected_name":"Source", "name":"Name", "source_server_id":uuid::Uuid::new_v4()}),
+    ] {
+        assert_eq!(
+            call(&app, put(&path, Some(&admin), body)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        call(
+            &app,
+            post(
+                "/api/v1/sharing/imports",
+                Some(&admin),
+                json!({"invitation":"invalid", "name":"😀".repeat(33)})
+            )
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
 }

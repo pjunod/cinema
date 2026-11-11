@@ -31,6 +31,7 @@ mod live_tv_resource;
 mod media;
 mod offline;
 mod outbox;
+mod playback_handoffs;
 mod pretranscode;
 mod publication;
 mod reading;
@@ -1309,11 +1310,31 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v111: managed subtitle jobs and media-independent model reservations.
     super::subtitle_managed_schema::SCHEMA,
     // v112: independently recognized progressive translation operations and cues.
-    super::subtitle_translation_schema::SCHEMA,
+    super::subtitle_translation_schema::SCHEMA_V1,
     // v113: item ratings and per-person item lists (watchlist, favorites).
     super::library_annotations_schema::SCHEMA,
     // v114: source-revision title acquisition, independent of ordinary probes.
     super::dv_title_jobs::SCHEMA,
+    // v115: one-time playback handoff codes and their file-scoped tokens.
+    super::playback_handoffs::SCHEMA,
+    // v116: centrally fenced recomputable text subtitle translation slices.
+    super::subtitle_text_translation_schema::SCHEMA,
+    // v117: grant-bound read-only progressive caption retention.
+    super::shared_caption_schema::SCHEMA,
+    // v118: exact progressive v1 producer-incarnation trigger upgrade, preserving cached assets and leases.
+    super::subtitle_translation_schema::RETARGET_MIGRATION,
+    // v119: explicit playback continuity grants captured by exact range claims.
+    super::subtitle_translation_schema::CONTINUITY_MIGRATION,
+    // v120: artifact-only text model setup does not reserve media source readers.
+    super::subtitle_managed_schema::RESOURCE_MIGRATION,
+    // v121: artifact-only text translation does not reserve media source readers.
+    super::subtitle_managed_schema::ARTIFACT_MIGRATION,
+    // v122: foreground source custody, exact paused owners and durable source checkpoints.
+    super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA,
+    // v123: prepared artifact operations do not read original media.
+    super::subtitle_managed_schema::PREPARED_MIGRATION,
+    // v124: shared dispatch turns for interactive library work.
+    super::background_job_turns::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1767,6 +1788,15 @@ impl SqliteStore {
     ) -> Result<(), StoreError> {
         let tx = conn.unchecked_transaction()?;
         if !already_applied {
+            if version == super::subtitle_managed_schema::RESOURCE_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_resource_predecessor(&tx)?;
+            }
+            if version == super::subtitle_managed_schema::ARTIFACT_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_artifact_predecessor(&tx)?;
+            }
+            if version == super::subtitle_managed_schema::PREPARED_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_prepared_predecessor(&tx)?;
+            }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
         }
@@ -1842,7 +1872,11 @@ impl SqliteStore {
                 || (version == 46 && Self::attempt_errors_column_exists(conn)?)
                 || (version == 47 && Self::video_identity_column_exists(conn)?)
                 || (version == 51 && Self::drain_deadline_column_exists(conn)?)
-                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?);
+                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?)
+                || (version == 118
+                    && super::subtitle_translation_schema::retarget_already_applied(conn)?)
+                || (version == 119
+                    && super::subtitle_translation_schema::continuity_already_applied(conn)?);
             let applied = Self::apply_migration_step(conn, version, sql, already_applied);
             conn.pragma_update(None, "foreign_keys", "ON")?;
             applied?;
@@ -1853,6 +1887,9 @@ impl SqliteStore {
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;
         super::dv_title_jobs_schema::verify_sqlite(conn)?;
+        super::subtitle_text_translation_schema::verify_sqlite(conn)?;
+        super::shared_caption_schema::verify_sqlite(conn)?;
+        super::playback_handoffs::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn
@@ -2097,15 +2134,18 @@ impl SqliteStore {
 
 #[async_trait]
 impl MetricsStore for SqliteStore {
-    async fn prometheus_store_snapshot(
+    async fn prometheus_store_snapshot_with(
         &self,
         node_id: &str,
         now: i64,
+        live_fragment_engines: Option<&super::LiveAnalysisEngines>,
     ) -> Result<PrometheusStoreSnapshot, StoreError> {
         let node_id = node_id.to_owned();
+        let live = super::live_engines_param(live_fragment_engines);
+        let request_health = super::analysis_request_health_sql("?2", "?3");
         self.with_read(move |conn| {
             conn.query_row(
-                "SELECT
+                &(String::from("SELECT
                     (SELECT COUNT(*) FROM libraries),
                     (SELECT COUNT(*) FROM users),
                     COALESCE(SUM(state = 'queued'), 0),
@@ -2146,7 +2186,7 @@ impl MetricsStore for SqliteStore {
                        FROM (SELECT component,
                               CASE
                                 WHEN last_error_code = 'source_superseded' THEN 'stale'
-                                WHEN state = 'queued' AND not_before_ms > ?2 THEN 'retry_wait'
+                                WHEN state = 'queued' AND not_before_ms > ?2 * 1000 THEN 'retry_wait'
                                 WHEN state = 'running' THEN 'claimed'
                                 WHEN state = 'submitted' THEN 'staged'
                                 WHEN state = 'ready' THEN 'published'
@@ -2154,8 +2194,8 @@ impl MetricsStore for SqliteStore {
                                 ELSE state END AS durable_state,
                               priority, trigger,
                               COUNT(*) AS depth,
-                              CASE WHEN ?2 > MIN(created_at_ms)
-                                THEN (?2 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds
+                              CASE WHEN ?2 * 1000 > MIN(created_at_ms)
+                                THEN (?2 * 1000 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds
                          FROM (
                            SELECT component, state, last_error_code, not_before_ms,
                                   priority, trigger, created_at_ms
@@ -2233,9 +2273,11 @@ impl MetricsStore for SqliteStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)
                             + (SELECT COUNT(*) FROM analysis_source_reservations
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
-                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import')))
-                 FROM offline_packages WHERE node_id = ?1",
-                params![node_id, now],
+                        'source_recovery_pending', (SELECT COUNT(DISTINCT custody_id) FROM source_io_occupancy WHERE custody_id IS NOT NULL AND active_occupancy=1 AND expires_at_ms <= ?2 * 1000),
+                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))), ")
+                    + &request_health
+                    + " FROM offline_packages WHERE node_id = ?1"),
+                params![node_id, now, live],
                 |row| {
                     Ok(PrometheusStoreSnapshot {
                         background_jobs: super::background_jobs_observation::background_job_metrics(&row.get::<_, String>(24)?)
@@ -2259,14 +2301,18 @@ impl MetricsStore for SqliteStore {
                             &row.get::<_, String>(15)?,
                             &row.get::<_, String>(16)?,
                             &row.get::<_, String>(17)?,
-                            super::AnalysisQueueHealth {
-                                ready_24h: row.get(18)?,
-                                attempt_limit_24h: row.get(19)?,
-                                claimed_24h: row.get(20)?,
-                                claimable: row.get(21)?,
-                                running_past_lease: row.get(22)?,
-                                last_ready_at_ms: row.get(23)?,
-                            },
+                            &row.get::<_, String>(29)?,
+                            super::AnalysisQueueHealth::with_requests(
+                                [
+                                    row.get(18)?,
+                                    row.get(19)?,
+                                    row.get(20)?,
+                                    row.get(21)?,
+                                    row.get(22)?,
+                                    row.get(23)?,
+                                ],
+                                [row.get(25)?, row.get(26)?, row.get(27)?, row.get(28)?],
+                            ),
                         ),
                     })
                 },

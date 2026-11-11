@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -21,7 +23,333 @@ def load(name):
     return module
 
 
+class MacOSDeveloperEnvironmentTests(unittest.TestCase):
+    def setUp(self):
+        self.media = load("build-macos-source-media")
+        setup = mock.patch.object(self.media, "initialize_xcode")
+        self.initialize = setup.start()
+        self.addCleanup(setup.stop)
+
+    def test_active_xcode_preserves_explicit_developer_directory(self):
+        with mock.patch.dict(os.environ, {"DEVELOPER_DIR": "/custom/Xcode.app/Contents/Developer"}), \
+                mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=0)) as probe, \
+                mock.patch.object(Path, "glob") as discover:
+            env = self.media.developer_environment()
+        self.assertEqual(env["DEVELOPER_DIR"], "/custom/Xcode.app/Contents/Developer")
+        self.assertEqual(probe.call_args.kwargs["env"], env)
+        discover.assert_not_called()
+
+    def test_clt_selection_discovers_xcode_without_global_changes(self):
+        with tempfile.TemporaryDirectory() as work:
+            app = Path(work) / "Xcode Fixture.app"
+            executable = app / "Contents/Developer/usr/bin/xcodebuild"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            original = {"PATH": "/usr/bin:/bin"}
+            with mock.patch.dict(os.environ, original, clear=True), \
+                    mock.patch.object(Path, "glob", return_value=[app]), \
+                    mock.patch.object(self.media.subprocess, "run", side_effect=[
+                        mock.Mock(returncode=1), mock.Mock(returncode=0)]) as probe:
+                env = self.media.developer_environment()
+                self.assertEqual(dict(os.environ), original)
+            self.assertEqual(env["DEVELOPER_DIR"], str(app / "Contents/Developer"))
+            self.assertEqual(probe.call_args.kwargs["env"], env)
+            self.assertTrue(all(call.args[0] == ["/usr/bin/xcodebuild", "-version"]
+                                for call in probe.call_args_list))
+
+    def test_clt_selection_discovers_renamed_xcode_outside_applications(self):
+        with tempfile.TemporaryDirectory() as work:
+            app = Path(work) / "External Tools/Apple Developer Suite.app"
+            executable = app / "Contents/Developer/usr/bin/xcodebuild"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            stale = Path(work) / "Removed.app"
+            with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
+                    mock.patch.object(Path, "glob", return_value=[]), \
+                    mock.patch.object(self.media.subprocess, "check_output",
+                                      return_value=str(stale) + "\0" + str(app) + "\0") as lookup, \
+                    mock.patch.object(self.media.subprocess, "run", side_effect=[
+                        mock.Mock(returncode=1), mock.Mock(returncode=0)]) as probe:
+                env = self.media.developer_environment()
+            self.assertEqual(env["DEVELOPER_DIR"], str(app / "Contents/Developer"))
+            self.assertEqual(probe.call_count, 2, "ignore stale index entries")
+            lookup.assert_called_once_with(
+                ["/usr/bin/mdfind", "-0", "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode*'"],
+                text=True, stderr=subprocess.DEVNULL, timeout=10)
+
+    def test_unavailable_application_index_still_attempts_install(self):
+        for error in [FileNotFoundError(), subprocess.CalledProcessError(1, "mdfind"),
+                      subprocess.TimeoutExpired("mdfind", 10)]:
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
+                    mock.patch.object(Path, "glob", return_value=[]), \
+                    mock.patch.object(self.media.subprocess, "check_output", side_effect=error), \
+                    mock.patch.object(self.media, "install_xcode", side_effect=ValueError("fixture installer failed")) as install, \
+                    mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)):
+                with self.assertRaisesRegex(ValueError, "fixture installer failed"):
+                    self.media.developer_environment()
+                install.assert_called_once_with()
+
+    def test_invalid_explicit_developer_directory_is_not_overridden(self):
+        with mock.patch.dict(os.environ, {"DEVELOPER_DIR": "/custom/invalid"}), \
+                mock.patch.object(Path, "glob") as discover, \
+                mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)):
+            with self.assertRaisesRegex(ValueError, "correct or unset"):
+                self.media.developer_environment()
+        discover.assert_not_called()
+
+    def test_failed_xcode_install_stops_before_downloads_or_dependency_builds(self):
+        with tempfile.TemporaryDirectory() as work, \
+                mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
+                mock.patch.object(self.media.platform, "system", return_value="Darwin"), \
+                mock.patch.object(self.media, "install_xcode", side_effect=subprocess.CalledProcessError(7, "xcodes")), \
+                mock.patch.object(self.media.subprocess, "check_output", return_value=""), \
+                mock.patch.object(Path, "glob", return_value=[]), \
+                mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)), \
+                mock.patch.object(self.media, "recipe") as recipe, \
+                mock.patch.object(self.media, "build_tool_environment") as tools:
+            destination = Path(work) / "not-created/package"
+            with self.assertRaises(subprocess.CalledProcessError) as failure:
+                self.media.build(destination, 4)
+            self.assertEqual(failure.exception.returncode, 7)
+            self.assertFalse(destination.parent.exists())
+        recipe.assert_not_called()
+        tools.assert_not_called()
+
+    def test_missing_xcode_install_resumes_the_native_build(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            app = root / "Xcode-new.app"
+            events = []
+
+            def install():
+                events.append("install")
+                executable = app / "Contents/Developer/usr/bin/xcodebuild"
+                executable.parent.mkdir(parents=True)
+                executable.touch()
+
+            helper = mock.Mock()
+            helper.acquire.side_effect = lambda *args: events.append("download")
+
+            def build_environment(prepared, env):
+                self.assertEqual(env["DEVELOPER_DIR"], str(app / "Contents/Developer"))
+                events.append("environment")
+                return env
+
+            def native_build(argv, **kwargs):
+                self.assertEqual(argv[0], "/bin/bash")
+                self.assertEqual(kwargs["env"]["DEVELOPER_DIR"], str(app / "Contents/Developer"))
+                events.append("native-build")
+                raise RuntimeError("fixture reached native build")
+
+            with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
+                    mock.patch.object(self.media.platform, "system", return_value="Darwin"), \
+                    mock.patch.object(self.media, "xcode_applications", side_effect=[iter([]), iter([app])]), \
+                    mock.patch.object(self.media.subprocess, "run", side_effect=[
+                        mock.Mock(returncode=1), mock.Mock(returncode=0)]), \
+                    mock.patch.object(self.media, "install_xcode", side_effect=install) as installer, \
+                    mock.patch.object(self.media, "recipe", return_value=helper), \
+                    mock.patch.object(self.media, "build_environment", side_effect=build_environment), \
+                    mock.patch.object(self.media, "run", side_effect=native_build):
+                with self.assertRaisesRegex(RuntimeError, "fixture reached native build"):
+                    self.media.build(root / "package", 4)
+            self.assertEqual(events, ["install", "download", "environment", "native-build"])
+            installer.assert_called_once_with()
+
+    def test_successful_installer_without_usable_xcode_is_rejected(self):
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
+                mock.patch.object(self.media, "xcode_applications", return_value=[]), \
+                mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)), \
+                mock.patch.object(self.media, "install_xcode") as installer:
+            with self.assertRaisesRegex(ValueError, "no usable developer directory"):
+                self.media.developer_environment()
+        installer.assert_called_once_with()
+
+    def test_selected_xcode_reaches_metal_component_and_build_environment(self):
+        for status in ["installed", "not installed"]:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as work:
+                prepared = Path(work)
+                (prepared / "bin").mkdir()
+                metal = prepared / "metal"
+                metal.with_name("metallib").touch()
+                facts = json.dumps({"status": status, "toolchainIdentifier": "com.apple.Metal"})
+                outputs = [facts]
+                if status != "installed":
+                    outputs.append(json.dumps({"status": "installed", "toolchainIdentifier": "com.apple.Metal"}))
+                outputs.extend([str(metal), "/private/build/site-packages"])
+                developer = {"DEVELOPER_DIR": "/custom/Xcode.app/Contents/Developer"}
+                with mock.patch.object(self.media, "build_tool_environment", return_value={"PATH": "/usr/bin:/bin"}), \
+                        mock.patch.object(self.media, "source_generation_tools"), \
+                        mock.patch.object(self.media.shutil, "which", return_value="/usr/bin/true"), \
+                        mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)) as probe, \
+                        mock.patch.object(self.media.subprocess, "check_output", side_effect=outputs) as output, \
+                        mock.patch.object(self.media, "run") as run:
+                    env = self.media.build_environment(prepared, developer)
+                self.assertEqual(env["DEVELOPER_DIR"], developer["DEVELOPER_DIR"])
+                commands = probe.call_args_list + output.call_args_list + run.call_args_list
+                apple_calls = [call for call in commands if call.args[0][0] in
+                               ["/usr/bin/xcrun", "/usr/bin/xcodebuild"]]
+                for call in apple_calls:
+                    self.assertEqual(call.kwargs["env"]["DEVELOPER_DIR"], developer["DEVELOPER_DIR"])
+                downloads = [call for call in run.call_args_list if "-downloadComponent" in call.args[0]]
+                self.assertEqual(len(downloads), int(status != "installed"))
+                self.assertIn(str(metal.with_name("metallib")), (prepared / "bin/xcrun").read_text())
+
+
+class MacOSXcodeInstallationTests(unittest.TestCase):
+    def test_homebrew_xcodes_install_inherits_prompt_input(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            prefix = root / "brew"
+            (prefix / "bin").mkdir(parents=True)
+            marker = root / "answered"
+            template = root / "xcodes-template"
+            template.write_text(
+                '#!/bin/sh\n[ "$*" = "install --latest --directory /Applications --no-superuser" ] || exit 2\n'
+                'printf "Apple authentication fixture prompt: "\nIFS= read -r answer\n'
+                '[ "$answer" = "fixture-code" ] || exit 3\n'
+                + 'touch "' + str(marker) + '"\n')
+            template.chmod(0o755)
+            brew = prefix / "bin/brew"
+            brew.write_text('#!/bin/sh\n[ "$*" = "install xcodesorg/made/xcodes" ] || exit 4\n'
+                            + 'cp "' + str(template) + '" "' + str(prefix / "bin/xcodes") + '"\n')
+            brew.chmod(0o755)
+            harness = (
+                "import importlib.machinery; from pathlib import Path; from unittest import mock; "
+                "m = importlib.machinery.SourceFileLoader('media', "
+                + repr(str(ROOT / "scripts/build-macos-source-media")) + ").load_module(); "
+                "m.BREW_PREFIXES = [Path(" + repr(str(prefix)) + ")]; "
+                "m.recipe = lambda name: mock.Mock(ensure_homebrew=lambda: " + repr(str(brew)) + "); "
+                "m.install_xcode()")
+            result = subprocess.run([sys.executable, "-c", harness], input="fixture-code\n",
+                                    env=dict(os.environ, PATH="/usr/bin:/bin"),
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(marker.is_file(), "the installer must receive inherited stdin")
+            self.assertIn("Apple authentication fixture prompt", result.stdout)
+
+    def test_existing_xcodes_skips_homebrew_install(self):
+        media = load("build-macos-source-media")
+        with mock.patch.object(media.shutil, "which", return_value="/custom/bin/xcodes"), \
+                mock.patch.object(media, "recipe") as recipe, mock.patch.object(media, "run") as run:
+            media.install_xcode()
+        recipe.assert_not_called()
+        self.assertEqual(run.call_args.args[0], ["/custom/bin/xcodes", "install", "--latest",
+                                                "--directory", "/Applications", "--no-superuser"])
+        self.assertEqual(set(run.call_args.kwargs), {"env"}, "inherit all three terminal streams")
+
+    def test_pending_first_launch_presents_license_and_finishes_before_continuing(self):
+        media = load("build-macos-source-media")
+        env = {"DEVELOPER_DIR": "/custom/Developer Tools.app/Contents/Developer"}
+        with mock.patch.object(media.subprocess, "run", return_value=mock.Mock(returncode=1)), \
+                mock.patch.object(media, "run") as run:
+            media.initialize_xcode(env)
+        binary = Path(env["DEVELOPER_DIR"]) / "usr/bin/xcodebuild"
+        self.assertEqual(run.call_args_list, [
+            mock.call(["/usr/bin/sudo", binary, "-license"], env=env),
+            mock.call(["/usr/bin/sudo", binary, "-runFirstLaunch"], env=env),
+            mock.call(["/usr/bin/xcodebuild", "-checkFirstLaunchStatus"], env=env)])
+
+    def test_declined_license_stops_first_launch(self):
+        media = load("build-macos-source-media")
+        env = {"DEVELOPER_DIR": "/custom/Xcode.app/Contents/Developer"}
+        with mock.patch.object(media.subprocess, "run", return_value=mock.Mock(returncode=1)), \
+                mock.patch.object(media, "run", side_effect=subprocess.CalledProcessError(1, "license")) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                media.initialize_xcode(env)
+        run.assert_called_once_with(
+            ["/usr/bin/sudo", Path(env["DEVELOPER_DIR"]) / "usr/bin/xcodebuild", "-license"], env=env)
+
+    def test_initialized_xcode_needs_no_setup_prompts(self):
+        media = load("build-macos-source-media")
+        with mock.patch.object(media.subprocess, "run", return_value=mock.Mock(returncode=0)), \
+                mock.patch.object(media, "run") as run:
+            media.initialize_xcode({})
+        run.assert_not_called()
+
+
 class MediaSupportMatrixTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("autoconf") and shutil.which("make"),
+                         "requires autoconf and make")
+    def test_cold_generation_tools_build_through_symlinked_temporary_directory(self):
+        media = load("build-macos-source-media")
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work).resolve()
+            fixture = root / "fixture"
+            fixture.mkdir()
+            # Exercise Automake's real Autoconf link handling, without downloading
+            # upstream archives or building the full media dependency tree.
+            (fixture / "configure.ac").write_text(
+                "AC_INIT([generation-tool-fixture], [1])\n"
+                "AC_CONFIG_SRCDIR([GNUmakefile])\n"
+                "AC_CONFIG_LINKS([GNUmakefile:GNUmakefile])\n"
+                "AC_OUTPUT\n")
+            makefile = "all:\n\t@touch built\ninstall: all\n\t@touch installed\n"
+            (fixture / "GNUmakefile").write_text(makefile)
+            subprocess.run(["autoconf"], cwd=fixture, check=True, capture_output=True)
+            physical = root / "physical"
+            physical.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(physical, target_is_directory=True)
+            prepared = alias / "prepared"
+            prepared.mkdir()
+
+            def extract_fixture(archive, destination):
+                destination.mkdir()
+                for name in ("configure", "GNUmakefile"):
+                    shutil.copyfile(fixture / name, destination / name)
+
+            helper = mock.Mock()
+            helper.extract.side_effect = extract_fixture
+            with mock.patch.object(media, "recipe", return_value=helper):
+                media.source_generation_tools(prepared, dict(os.environ))
+
+            sources = list((prepared / "source-generation-tools").glob("*/installed"))
+            self.assertEqual(len(sources), 2, "both generation tools must install")
+            for installed in sources:
+                source = installed.parent
+                self.assertTrue((source / "built").is_file())
+                self.assertFalse((source / "GNUmakefile").is_symlink())
+                self.assertEqual((source / "GNUmakefile").read_text(), makefile)
+
+    @unittest.skipUnless(shutil.which("aclocal") and shutil.which("autoconf"),
+                         "requires aclocal and autoconf")
+    def test_source_aclocal_discovers_homebrew_and_inherited_macro_directories(self):
+        media = load("build-macos-source-media")
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            brew = root / "brew"
+            brew_macros = brew / "share/aclocal"
+            inherited = root / "caller-aclocal"
+            empty_system = root / "source-prefix-aclocal"
+            project = root / "project"
+            prepared = root / "prepared"
+            for directory in [brew_macros, inherited, empty_system, project, prepared]:
+                directory.mkdir(parents=True)
+            for directory, name in [(brew_macros, "BREW"), (inherited, "CALLER")]:
+                (directory / (name.lower() + ".m4")).write_text(
+                    "AC_DEFUN([AC_PLURX_" + name + "_MACRO], "
+                    "[AC_DEFINE([PLURX_" + name + "_VISIBLE], [1], [macro found])])\n")
+            (project / "configure.ac").write_text(
+                "AC_INIT([aclocal-path-fixture], [1])\n"
+                "AC_PLURX_BREW_MACRO\nAC_PLURX_CALLER_MACRO\nAC_OUTPUT\n")
+            env = dict(os.environ, ACLOCAL_PATH=str(inherited))
+            with mock.patch.object(media, "BREW_PREFIXES", [brew, root / "absent-brew"]), \
+                    mock.patch.object(media, "recipe", return_value=mock.Mock()), \
+                    mock.patch.object(media, "run"):
+                media.source_generation_tools(prepared, env)
+            # Reproduce source-built aclocal's empty third-party system prefix:
+            # only the environment can expose the two external macro owners.
+            subprocess.run([shutil.which("aclocal"), "--system-acdir=" + str(empty_system)],
+                           cwd=project, env=env, check=True, capture_output=True)
+            subprocess.run([shutil.which("autoconf")], cwd=project, env=env,
+                           check=True, capture_output=True)
+            subprocess.run(["/bin/sh", "./configure"], cwd=project, env=env,
+                           check=True, capture_output=True)
+            configured = (project / "config.log").read_text()
+            self.assertIn("#define PLURX_BREW_VISIBLE 1", configured)
+            self.assertIn("#define PLURX_CALLER_VISIBLE 1", configured)
+
     def test_cold_build_discovers_homebrew_and_new_tools_with_system_only_path(self):
         media = load("build-macos-source-media")
         with tempfile.TemporaryDirectory() as work:
@@ -194,7 +522,7 @@ class StaticVulkanSourceTests(unittest.TestCase):
     def test_source_lock_includes_moltenvk_binary_source_and_static_shader_dependencies(self):
         lock = json.loads((ROOT / "scripts/macos-vulkan-sources.json").read_text())
         roles = {source["role"] for source in lock["sources"]}
-        self.assertTrue({"moltenvk-binary", "moltenvk-source", "vulkan-headers", "shaderc", "glslang", "spirv-tools", "spirv-headers", "libplacebo"}.issubset(roles))
+        self.assertTrue({"moltenvk-binary", "moltenvk-source", "vulkan-headers", "shaderc", "glslang", "spirv-tools", "spirv-headers", "libplacebo", "fast-float"}.issubset(roles))
         for source in lock["sources"]:
             self.assertRegex(source["sha256"], r"^[0-9a-f]{64}$")
             self.assertTrue(source["url"].startswith("https://"))

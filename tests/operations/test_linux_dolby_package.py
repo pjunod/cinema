@@ -21,6 +21,21 @@ def recipe():
 
 
 class LinuxDolbyPackageCase(unittest.TestCase):
+    def test_download_checksum_failure_identifies_only_public_input_and_hashes(self):
+        module = recipe()
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "fc-source.tar.gz"
+            archive.write_bytes(b"wrong downloaded payload")
+            actual = module.sha(archive)
+            module.verify_source_download(archive, actual)
+            expected = "a" * 64
+            with self.assertRaises(ValueError) as failure:
+                module.verify_source_download(archive, expected)
+            self.assertEqual(str(failure.exception),
+                "immutable source download checksum mismatch: "
+                f"fc-source.tar.gz expected={expected} actual={actual}")
+            self.assertNotIn(str(archive.parent), str(failure.exception))
+
     def test_git_source_offer_fetches_pinned_commit_instead_of_repository_html(self):
         import hashlib
         import time
@@ -571,9 +586,8 @@ printf '%s\n' "$cc" "$cxx" "$pkg_config"
             result = subprocess.run(["make", "-s", "-C", str(root), "docker"], env=env, capture_output=True, text=True, timeout=60)
             return result, calls.read_text().splitlines() if calls.exists() else []
 
-    def test_normal_docker_caller_builds_runtime_without_package_and_installs_supplied_amd64_package(self):
-        # The package is an input, never a precondition: amd64 without one
-        # builds the same runtime stage Compose and arm64 build.
+    def test_normal_docker_caller_always_reuses_pinned_runtime(self):
+        # Both architectures use the published base; package maintenance is separate.
         for machine, platform in [("x86_64", "linux/amd64"), ("aarch64", "linux/arm64")]:
             result, calls = self.run_make_docker(machine)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -583,36 +597,103 @@ printf '%s\n' "$cc" "$cxx" "$pkg_config"
         result, calls = self.run_make_docker("x86_64", package="/srv/audited-package")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(calls), 1, calls)
-        self.assertTrue(calls[0].startswith("package scripts/build-linux-dolby-ffmpeg --step docker-build "), calls)
-        self.assertIn("--output /srv/audited-package", calls[0])
-        # docker-build compiles plurxd; a package-phase deadline would kill it.
+        self.assertTrue(calls[0].startswith("docker build --target runtime --platform linux/amd64 "), calls)
+        self.assertNotIn("--build-context", calls[0])
         root = Path(__file__).resolve().parents[2]
-        docker = (root / "Dockerfile").read_text()
-        builder = (root / "scripts/build-linux-dolby-ffmpeg").read_text()
-        invocation = builder.split('"docker", "buildx", "build"', 1)[1].split("\n    elif", 1)[0]
-        assert "timeout=" not in invocation
-        assert "FROM runtime AS runtime-dolby-amd64" in docker
+        docker = (root / "Dockerfile.media-runtime").read_text()
         assert "--mount=from=linux-dolby-package" in docker
         assert "--step install-shipping" in docker
+
+    def test_removed_application_dolby_build_fails_before_package_validation(self):
+        module = recipe()
+        with patch("sys.argv", [str(module.__file__), "--step", "docker-build",
+                                "--root", "/missing/checkout", "--output", "/missing/package"]), \
+             patch.object(module, "validate_shipping_package") as validate, \
+             patch("sys.stderr") as stderr:
+            with self.assertRaises(SystemExit) as error:
+                module.main()
+        self.assertEqual(error.exception.code, 2)
+        validate.assert_not_called()
+        message = "".join(call.args[0] for call in stderr.write.call_args_list)
+        for instruction in ("scripts/media-runtime build", "runtime-assets-dolby-amd64",
+                            "--platforms linux/amd64", "docker buildx imagetools create",
+                            "reviewed arm64", "scripts/media-runtime pin", "multi-platform index"):
+            self.assertIn(instruction, message)
 
 
     def test_docker_install_tools_are_temporary_and_build_identity_arguments_survive(self):
         root = Path(__file__).resolve().parents[2]
-        docker = (root / "Dockerfile").read_text()
-        installer = docker.split("FROM runtime-assets AS linux-dolby-install", 1)[1].split("FROM runtime AS runtime-dolby-amd64", 1)[0]
-        final = docker.split("FROM runtime AS runtime-dolby-amd64", 1)[1].split("FROM runtime AS default-runtime", 1)[0]
+        docker = (root / "Dockerfile.media-runtime").read_text()
+        installer = docker.split("FROM runtime-assets AS linux-dolby-install", 1)[1].split("FROM runtime-assets AS runtime-assets-dolby-amd64", 1)[0]
+        final = docker.split("FROM runtime-assets AS runtime-assets-dolby-amd64", 1)[1].split("\nFROM ", 1)[0]
         assert installer.index("USER root") < installer.index("--step install-shipping")
         assert "apt-get install -y --no-install-recommends python3" in installer
         assert "COPY --from=linux-dolby-install /usr/lib/jellyfin-ffmpeg" in final
-        assert final.index("USER root") < final.index("COPY --from=") < final.index("USER plurx")
+        assert final.index("USER root") < final.index("COPY --from=")
         assert "python3" not in final
         make = (root / "Makefile").read_text()
-        for option, variable in [("plurx-build-ref", "BUILD_REF"), ("plurx-build-sha", "BUILD_SHA"), ("source-date-epoch", "SOURCE_DATE_EPOCH")]:
-            assert '--' + option + ' "$(' + variable + ')"' in make
-        builder = (root / "scripts/build-linux-dolby-ffmpeg").read_text()
-        assert '*build_arguments' in builder
-        assert 'argument + "=" + getattr(args, argument.lower())' in builder
+        for variable in ("BUILD_REF", "BUILD_SHA", "SOURCE_DATE_EPOCH"):
+            assert "$(" + variable + ")" in make
+        # Application identity arguments remain in the normal Make build;
+        # the media-only installer never compiles the application.
+        self.assertNotIn("runtime-dolby-amd64", (root / "Dockerfile").read_text())
 
+
+    def shipping_runtime_fixture(self, module, package):
+        (package / "provenance").mkdir()
+        (package / "lib").mkdir()
+        for name in ("ffmpeg", "ffprobe", "sealed-ffprobe", "lib/libprovider.so"):
+            (package / name).write_bytes(b"installed fixture bytes: " + name.encode())
+        system_path = "/usr/lib/x86_64-linux-gnu/libc.so.6"
+        facts = {
+            "schema_version": 1,
+            "source": {
+                "archive_sha256": "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140",
+                "commit": "253db2a7b0a8045c54ce68ce33d7f601229b1822",
+                "local_patch_sha256": "467cecbbf0e70a406cb6bc47130ad49cdda2d81adcdf4d6d4e2d960c5e3b9fe8",
+            },
+            "executables": {
+                key: module.sha(package / name)
+                for name, key in (("ffmpeg", "ffmpeg_sha256"), ("ffprobe", "ffprobe_sha256"),
+                                  ("sealed-ffprobe", "sealed_parser_sha256"))
+            },
+            "distributed_objects": {"lib/libprovider.so": {"sha256": module.sha(package / "lib/libprovider.so")}},
+            "elf_closure": {system_path: {"distributed": False, "sha256": "a" * 64}},
+        }
+        (package / "provenance/linux-dolby-package.json").write_text(json.dumps(facts))
+        for name, digest in (("system-elf-sha256.txt", "a" * 64),
+                             ("shipping-system-elf-sha256.txt", "b" * 64)):
+            (package / "provenance" / name).write_text(digest + "  " + system_path + "\n")
+        return facts, system_path
+
+    def test_installed_runtime_verification_binds_bytes_source_and_system_provider_inventory(self):
+        module = recipe()
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            facts, _ = self.shipping_runtime_fixture(module, package)
+            self.assertEqual(module.verify_shipping_runtime(package), facts)
+            (package / "ffmpeg").write_bytes(b"changed executable")
+            with self.assertRaisesRegex(ValueError, "shipping executable changed"):
+                module.verify_shipping_runtime(package)
+
+    def test_installed_runtime_verification_refuses_missing_changed_or_ambiguous_provider_manifests(self):
+        module = recipe()
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            _, system_path = self.shipping_runtime_fixture(module, package)
+            shipping = package / "provenance/shipping-system-elf-sha256.txt"
+            valid = shipping.read_text()
+            for contents in ("", valid + valid, "c" * 64 + "  /tmp/foreign.so\n"):
+                shipping.write_text(contents)
+                with self.assertRaisesRegex(ValueError, "shipping system ELF manifest"):
+                    module.verify_shipping_runtime(package)
+            shipping.write_text(valid)
+            (package / "provenance/system-elf-sha256.txt").write_text("c" * 64 + "  " + system_path + "\n")
+            with self.assertRaisesRegex(ValueError, "differs from the audited capsule"):
+                module.verify_shipping_runtime(package)
+            (package / "provenance/linux-dolby-package.json").unlink()
+            with self.assertRaises(FileNotFoundError):
+                module.verify_shipping_runtime(package)
 
     def test_shipping_retirement_preserves_audited_system_elf_closure(self):
         module = recipe()
@@ -639,11 +720,10 @@ printf '%s\n' "$cc" "$cxx" "$pkg_config"
                 module.shipping_system_objects(package)
 
     def test_only_dolby_shipping_targets_retire_the_competing_debian_media_sdk(self):
-        docker = (Path(__file__).resolve().parents[2] / "Dockerfile").read_text()
+        docker = (Path(__file__).resolve().parents[2] / "Dockerfile.media-runtime").read_text()
         incumbent = docker.split("FROM runtime-assets AS runtime-assets-dolby-amd64", 1)[0]
         self.assertNotIn("apt-get purge -y libmfx1", incumbent)
-        for marker in ["FROM runtime-assets AS runtime-assets-dolby-amd64",
-                       "FROM runtime AS runtime-dolby-amd64"]:
+        for marker in ["FROM runtime-assets AS runtime-assets-dolby-amd64"]:
             stage = docker.split(marker, 1)[1].split("\nFROM ", 1)[0]
             self.assertIn("apt-get purge -y libmfx1", stage)
             self.assertNotIn("apt-get autoremove", stage)
@@ -653,7 +733,7 @@ printf '%s\n' "$cc" "$cxx" "$pkg_config"
             for name in ["ffmpeg", "ffprobe"]:
                 self.assertIn(f"ln -sfn /usr/lib/jellyfin-ffmpeg/{name} /usr/bin/{name}", stage)
             self.assertIn("media-runtime-packages.txt", stage)
-        self.assertIn("FROM runtime AS default-runtime", docker)
+        self.assertIn("FROM runtime AS default-runtime", (Path(__file__).resolve().parents[2] / "Dockerfile").read_text())
 
     def test_package_export_observes_official_configuration_and_reuses_only_matched_parser(self):
         root = Path(__file__).resolve().parents[2]
@@ -665,7 +745,7 @@ printf '%s\n' "$cc" "$cxx" "$pkg_config"
         assert pipeline.index('helper.generate(') < pipeline.index('for step in ["configure", "compile", "install"]')
         assert pipeline.index('validate_parser_union(') < pipeline.index('shutil.copy2(retained_binary')
         assert pipeline.index('assemble(') < pipeline.index('return verify_closure(')
-        docker = (root / "Dockerfile").read_text()
+        docker = (root / "Dockerfile.media-runtime").read_text()
         stage = docker.split('FROM runtime-assets AS linux-dolby-package-build', 1)[1].split('FROM runtime-assets AS linux-dolby-install', 1)[0]
         assert 'test "$TARGETARCH" = amd64' in stage
         assert '--step pipeline' in stage

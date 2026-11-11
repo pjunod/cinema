@@ -74,9 +74,44 @@ impl TranscodeManager {
             currently_suspended: suspended,
             scratch_grant_exhausted,
         });
+        let source_observation = |held: bool| {
+            let rate = rolling_playback_rate(lease.demand.as_ref());
+            let (low, high) = rolling_source_watermarks(rate);
+            let fresh = lease
+                .demand_observation_age
+                .is_some_and(|age| age <= Duration::from_secs(5))
+                && !lease.startup.protects_from_time_hold();
+            let lead = lease
+                .demand
+                .as_ref()
+                .zip(produced_end_ms)
+                .map(|(demand, end)| {
+                    let position = crate::playback_control::rolling_estimated_position_ms(
+                        demand,
+                        lease.demand_observation_age.unwrap_or_default(),
+                    );
+                    ((session.media_origin_seconds * 1_000.0).round() as i64)
+                        .saturating_add(end)
+                        .saturating_sub(position)
+                        .max(0) as u64
+                });
+            (held, fresh, lead, low, high)
+        };
         let hold = evaluation.hold;
         let want_suspend = hold.is_some();
         if want_suspend == suspended {
+            if let Some(child) = session.child.lock().await.as_ref() {
+                if let Some(observer) = &child.source_observer {
+                    if lease.mode == crate::playback_control::RollingLeaseMode::Explicit
+                        && observer.declare_rolling_policy().await.is_err()
+                    {
+                        return;
+                    }
+                    let (held, fresh, lead, low, high) = source_observation(suspended);
+                    let held = held && crate::source_custody::stopped_group(child.id()).await;
+                    let _ = observer.rolling(lead, low, high, held, fresh).await;
+                }
+            }
             if let Some(hold) = hold {
                 let mut suspended_at = session.suspended_at.lock().await;
                 if let Some(previous) = suspended_at.as_mut() {
@@ -140,6 +175,20 @@ impl TranscodeManager {
             | crate::playback_control::ProducerFlowIntentionOutcome::Settled
             | crate::playback_control::ProducerFlowIntentionOutcome::Rejected => return,
         }
+        if !want_suspend {
+            if let Some(child) = session.child.lock().await.as_ref() {
+                if let Some(observer) = &child.source_observer {
+                    if lease.mode == crate::playback_control::RollingLeaseMode::Explicit
+                        && observer.declare_rolling_policy().await.is_err()
+                    {
+                        return;
+                    }
+                    if observer.refill().await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
         let signal = if want_suspend {
             crate::process_control::ProcessSignal::Suspend
         } else {
@@ -168,6 +217,13 @@ impl TranscodeManager {
                 )
                 .await;
             return;
+        }
+        if let Some(child) = session.child.lock().await.as_ref() {
+            if let Some(observer) = &child.source_observer {
+                let (held, fresh, lead, low, high) = source_observation(want_suspend);
+                let held = held && crate::source_custody::stopped_group(child.id()).await;
+                let _ = observer.rolling(lead, low, high, held, fresh).await;
+            }
         }
         if !want_suspend {
             // Before the flag flips, so the actor can never observe
@@ -365,7 +421,13 @@ impl TranscodeManager {
                     holders = ?self.scratch_ledger.describe(6),
                     "refusing a rolling start: scratch budget is full"
                 );
-                capacity_error(refusal.to_string())
+                // A grant larger than the whole ceiling waits for nothing:
+                // no session ending can make room for it.
+                if refusal.configured > 0 && refusal.requested > refusal.configured {
+                    terminal_capacity_error(TRANSCODE_SCRATCH_EXHAUSTED, refusal.to_string())
+                } else {
+                    capacity_error(refusal.to_string())
+                }
             })
     }
 

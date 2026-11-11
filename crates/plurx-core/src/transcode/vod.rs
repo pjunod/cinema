@@ -424,13 +424,20 @@ pub struct VodVideoFamily {
 }
 
 impl VodVideoFamily {
-    pub fn new(mut rungs: Vec<VodVideoRung>) -> Result<Self, crate::fmp4::Fmp4Error> {
+    pub fn new(rungs: Vec<VodVideoRung>) -> Result<Self, crate::fmp4::Fmp4Error> {
+        Self::build(rungs, 2)
+    }
+    /// A controlled attachment can publish its primary before its optional rung.
+    pub fn continuous(rungs: Vec<VodVideoRung>) -> Result<Self, crate::fmp4::Fmp4Error> {
+        Self::build(rungs, 1)
+    }
+    fn build(mut rungs: Vec<VodVideoRung>, minimum: usize) -> Result<Self, crate::fmp4::Fmp4Error> {
         let refuse = || {
             crate::fmp4::Fmp4Error::Unsupported(
                 "continuous rungs do not form one verified family".into(),
             )
         };
-        if !(2..=8).contains(&rungs.len()) {
+        if !(minimum..=8).contains(&rungs.len()) {
             return Err(refuse());
         }
         let id = rungs[0].compatibility_id.clone();
@@ -679,6 +686,26 @@ impl VodPresentationFamily {
             video,
             audio,
         })
+    }
+    /// Stable controlled attachment authority is anchored to its verified primary
+    /// and soundtrack. Optional membership is an additive durable descriptor.
+    pub fn continuous(
+        video: VodVideoFamily,
+        audio: Option<VodSharedAudioRendition>,
+        primary: &str,
+    ) -> Result<Self, crate::fmp4::Fmp4Error> {
+        let anchor = video
+            .rungs()
+            .iter()
+            .find(|rung| rung.rendition_id() == primary)
+            .ok_or_else(|| {
+                crate::fmp4::Fmp4Error::Unsupported("continuous primary missing".into())
+            })?
+            .clone();
+        let identity = Self::new(VodVideoFamily::continuous(vec![anchor])?, audio.clone())?;
+        let mut family = Self::new(video, audio)?;
+        family.id = identity.id;
+        Ok(family)
     }
     pub fn id(&self) -> &str {
         &self.id
@@ -1391,6 +1418,13 @@ pub fn vod_completed_reconstructed_pipe_args(
     }
     let (width, height) = super::output_size(source, plan.options().target_height)
         .ok_or("reconstructed output raster unavailable")?;
+    if let Some(envelope) = plan.enhancement_rate_envelope() {
+        envelope.validate_picture(
+            u32::try_from(width).map_err(|_| "enhancement width")?,
+            u32::try_from(height).map_err(|_| "enhancement height")?,
+            (grid.numerator, grid.denominator),
+        )?;
+    }
     // The source soundtrack keeps the held demux origin the Encoding froze,
     // exactly as on the ordinary route; the reconstructed video input that
     // replaces the source decoder below carries its own verified origin.
@@ -1506,14 +1540,7 @@ pub fn vod_completed_reconstructed_pipe_args(
             duration + VOD_AAC_FRAME_SAMPLES as f64 / f64::from(VOD_AUDIO_RATE)
         );
     }
-    let pixel_format = if matches!(
-        output.encoder(),
-        super::Encoder::Nvenc | super::Encoder::Vaapi
-    ) {
-        "p010le"
-    } else {
-        "yuv420p10le"
-    };
+    let pixel_format = output.codec_contract().pixel_format();
     // The helper already delivers BT.2020 NCL limited 4:2:0 10-bit PQ at
     // the output raster: colour conversion and resampling happened on the
     // GPU. The encoder only repacks for its upload format and restamps.
@@ -1537,7 +1564,8 @@ pub fn vod_completed_reconstructed_pipe_args(
     if matches!(
         output.encoder(),
         super::Encoder::Nvenc | super::Encoder::Vaapi
-    ) {
+    ) || plan.enhancement_rate_envelope().is_some()
+    {
         let mut index = args
             .iter()
             .rposition(|arg| arg == "-i")
@@ -1572,7 +1600,7 @@ pub fn vod_completed_reconstructed_pipe_args(
         }
         let at = args.len().saturating_sub(1);
         let mut encode = output.encode_args(plan.options().video_bitrate_kbps, true);
-        if output.encoder() == super::Encoder::Vaapi {
+        if output.encoder() == super::Encoder::Vaapi && plan.enhancement_rate_envelope().is_none() {
             // The shared VAAPI HDR10 recipe names level 4 (the ordinary
             // ladder's 1080p30 envelope). A reconstructed window carries the
             // level of its own raster and cadence, up to 4K60 and beyond.
@@ -1590,31 +1618,36 @@ pub fn vod_completed_reconstructed_pipe_args(
             encode[index + 1] = level.to_owned();
         }
         args.splice(at..at, encode);
-    } else if let Some(index) = args.iter().position(|arg| arg == "-x265-params") {
-        let mut parameters: Vec<_> = args[index + 1]
-            .split(':')
-            .filter(|item| {
-                !item.starts_with("pools=")
-                    && !item.starts_with("frame-threads=")
-                    && !item.starts_with("wpp=")
-            })
-            .map(str::to_owned)
-            .collect();
-        parameters.extend([
-            "pools=none".into(),
-            "frame-threads=1".into(),
-            "wpp=0".into(),
-        ]);
-        args[index + 1] = parameters.join(":");
-    } else {
-        let at = args.len().saturating_sub(1);
-        args.splice(
-            at..at,
-            [
-                "-x265-params".into(),
-                "pools=none:frame-threads=1:wpp=0".into(),
-            ],
-        );
+    }
+    if output.encoder() == super::Encoder::Software {
+        // A frozen rate envelope replaces the encoder options above. Apply
+        // software admission bounds to that final recipe as well.
+        if let Some(index) = args.iter().position(|arg| arg == "-x265-params") {
+            let mut parameters: Vec<_> = args[index + 1]
+                .split(':')
+                .filter(|item| {
+                    !item.starts_with("pools=")
+                        && !item.starts_with("frame-threads=")
+                        && !item.starts_with("wpp=")
+                })
+                .map(str::to_owned)
+                .collect();
+            parameters.extend([
+                "pools=none".into(),
+                "frame-threads=1".into(),
+                "wpp=0".into(),
+            ]);
+            args[index + 1] = parameters.join(":");
+        } else {
+            let at = args.len().saturating_sub(1);
+            args.splice(
+                at..at,
+                [
+                    "-x265-params".into(),
+                    "pools=none:frame-threads=1:wpp=0".into(),
+                ],
+            );
+        }
     }
     let at = args.len().saturating_sub(1);
     args.splice(at..at, ["-threads:v".into(), "1".into()]);
@@ -2106,6 +2139,77 @@ mod tests {
     }
 
     #[test]
+    fn completed_software_envelope_keeps_bounded_x265_policy_and_planar_input() {
+        use crate::transcode::*;
+        let source = encoded_recipe_source(true);
+        let options = TranscodeOptions {
+            pipeline: Pipeline::Hdr10Passthrough,
+            video_bitrate_kbps: 300_000,
+            ..Default::default()
+        };
+        let (plan, execution, _, _) = recipe_fixture_parts(&source, &options);
+        let (width, height) = output_size(&source, plan.options().target_height)
+            .expect("effective reconstructed raster");
+        let envelope = EnhancementRateEnvelope::resolve(
+            300_000,
+            EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+            u32::try_from(width).expect("width"),
+            u32::try_from(height).expect("height"),
+            (24, 1),
+            false,
+            Default::default(),
+        )
+        .expect("high-rate software envelope");
+        assert_eq!(envelope.hevc_level(), "6.2");
+        let plan = plan
+            .with_enhancement_rate_envelope(envelope)
+            .expect("bound envelope");
+        let output = plan
+            .completed_reconstructed_output(Encoder::Software)
+            .expect("typed software output");
+        let args = vod_completed_reconstructed_pipe_args(
+            &source,
+            &output,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            0.25,
+            "/dev/fd/3",
+            "/dev/fd/4",
+            VodSourceClock::ReportedOrigin(0),
+        )
+        .expect("final reconstructed software recipe");
+        let parameters: Vec<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-x265-params")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(parameters.len(), 1, "{args:?}");
+        for (key, value) in [
+            ("pools", "none"),
+            ("frame-threads", "1"),
+            ("wpp", "0"),
+            ("high-tier", "1"),
+            ("level-idc", "6.2"),
+            ("hrd", "1"),
+        ] {
+            let actual: Vec<_> = parameters[0]
+                .split(':')
+                .filter_map(|parameter| parameter.split_once('='))
+                .filter(|(name, _)| *name == key)
+                .collect();
+            assert_eq!(actual, [(key, value)], "{args:?}");
+        }
+        let filters: Vec<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-vf")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(filters.len(), 1);
+        assert!(filters[0].contains("format=yuv420p10le"), "{args:?}");
+        assert!(!filters[0].contains("format=p010le"), "{args:?}");
+    }
+
+    #[test]
     fn reconstructed_nvenc_keeps_verified_hardware_encoder_and_bounded_surfaces() {
         use crate::transcode::*;
         let (source, plan, execution, _, _) = encoded_recipe_fixture(true);
@@ -2201,6 +2305,95 @@ mod tests {
             None,
             "ordinary Software source policy remains scoped"
         );
+    }
+
+    #[test]
+    fn the_reconstructed_profile81_rate_preserves_source_average_and_unknown_is_unresolved() {
+        let (mut source, ..) = encoded_recipe_fixture(true);
+        for kbps in [48_000, 95_000, 200] {
+            source.bitrate = Some(i64::from(kbps) * 1000);
+            assert_eq!(
+                crate::transcode::reconstructed_p81_video_kbps(&source),
+                Ok(kbps)
+            );
+        }
+        source.bitrate = None;
+        source.size = 45_000_000_000;
+        source.duration_ms = Some(7_200_000);
+        assert_eq!(
+            crate::transcode::reconstructed_p81_video_kbps(&source),
+            Ok(50_000)
+        );
+        source.duration_ms = None;
+        assert!(crate::transcode::reconstructed_p81_video_kbps(&source).is_err());
+    }
+
+    #[test]
+    fn the_reconstructed_profile81_route_alone_drops_vbaq_and_never_caps_qp() {
+        use crate::transcode::*;
+        let (source, plan, execution, _, _) = encoded_recipe_fixture(true);
+        let recipe = |output: &CompletedReconstructedOutputPlan<'_>| {
+            vod_completed_reconstructed_pipe_args(
+                &source,
+                output,
+                &execution,
+                VodFrameGrid::new(24, 1).expect("grid"),
+                0.25,
+                "/dev/fd/3",
+                "/dev/fd/4",
+                VodSourceClock::ReportedOrigin(0),
+            )
+            .expect("actual graph")
+        };
+        let value = |args: &[String], flag: &str| {
+            args.windows(2)
+                .filter(|pair| pair[0] == flag)
+                .map(|pair| pair[1].clone())
+                .collect::<Vec<_>>()
+        };
+        let output = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("completed VAAPI")
+            .with_vaapi_hdr_policy(Some(VaapiHdrPolicy::MesaRadeonsiVbaq));
+        let ordinary = recipe(&output);
+        let profile81 = recipe(&output.with_reconstructed_profile81());
+        assert_eq!(value(&ordinary, "-compression_level"), ["19"]);
+        assert_eq!(value(&profile81, "-compression_level"), ["0"]);
+        // radeonsi obeys -qmax over -maxrate: a QP cap would break the VBV
+        // the variant's advertised peak is computed from.
+        assert!(!profile81.iter().any(|arg| arg == "-qmax"));
+        assert_eq!(value(&profile81, "-bf"), ["0"]);
+        let rate = |flag: &str| {
+            value(&profile81, flag)[0]
+                .trim_end_matches('k')
+                .parse::<u32>()
+                .expect("kbit/s")
+        };
+        let bitrate = rate("-b:v");
+        assert_eq!(
+            rate("-maxrate"),
+            vbv_maxrate_kbps(bitrate),
+            "the advertised peak"
+        );
+        assert_eq!(rate("-bufsize"), bitrate * 2);
+        // Only the policy flags differ.
+        let strip = |args: &[String]| {
+            args.join(" ")
+                .replace("-compression_level 19", "")
+                .replace("-compression_level 0", "")
+        };
+        assert_eq!(strip(&ordinary), strip(&profile81));
+        // Other encoders are untouched by the route.
+        for encoder in [Encoder::Software, Encoder::Nvenc] {
+            let output = plan
+                .completed_reconstructed_output(encoder)
+                .expect("supported encoder")
+                .with_vaapi_hdr_policy(Some(VaapiHdrPolicy::MesaRadeonsiVbaq));
+            assert_eq!(
+                recipe(&output),
+                recipe(&output.with_reconstructed_profile81())
+            );
+        }
     }
 
     #[test]

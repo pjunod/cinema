@@ -801,6 +801,9 @@ struct SubtitleTrack: Codable, Identifiable {
     /// Optional application-rendered bitmap protocol. It is deliberately
     /// separate from `native`, which continues to mean an HLS text rendition.
     var overlay: String?
+    /// Stable acquired-caption identity; ordinary menu indices can move after
+    /// another caption is removed or published.
+    var downloadedSubtitleId: String? = nil
 
     /// Formats the server can expose losslessly enough as an HLS WebVTT
     /// rendition. Styled ASS/SSA remains a burn even though it contains text.

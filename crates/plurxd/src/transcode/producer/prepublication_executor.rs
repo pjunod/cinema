@@ -214,9 +214,18 @@ pub(super) async fn execute_prepublication_transcode_retry(
         }
 
         session
-            .spawn_and_install_prepublication_child(producer_attempt, || {
+            .spawn_and_install_prepublication_child(producer_attempt, |source_input| {
                 spawn_ffmpeg(
-                    retry.args.as_ref(),
+                    &crate::source_input::source_args(
+                        retry.args.as_ref(),
+                        session
+                            .frozen_presentation
+                            .as_ref()
+                            .map(|presentation| presentation.file.path.as_path())
+                            .unwrap_or(std::path::Path::new("")),
+                        &[3],
+                        source_input,
+                    ),
                     crate::process_control::ChildWork::realtime("playback transcode"),
                     retry.encoder.label(),
                     sid,
@@ -232,6 +241,7 @@ pub(super) async fn execute_prepublication_transcode_retry(
                             session
                                 .rolling_provenance
                                 .as_ref()
+                                .filter(|_| source_input.is_none())
                                 .map(|proof| proof.source_fd()),
                             None,
                             session
@@ -379,9 +389,18 @@ async fn execute_prepublication_copy_retry(
             .bind_retry_compatibility_attempt(producer_attempt)
             .await;
         session
-            .spawn_and_install_prepublication_child(producer_attempt, || {
+            .spawn_and_install_prepublication_child(producer_attempt, |source_input| {
                 spawn_ffmpeg(
-                    retry.args.as_ref(),
+                    &crate::source_input::source_args(
+                        retry.args.as_ref(),
+                        session
+                            .frozen_presentation
+                            .as_ref()
+                            .map(|presentation| presentation.file.path.as_path())
+                            .unwrap_or(std::path::Path::new("")),
+                        &[3],
+                        source_input,
+                    ),
                     crate::process_control::ChildWork::realtime("playback copy HLS"),
                     "copy",
                     sid,
@@ -397,6 +416,7 @@ async fn execute_prepublication_copy_retry(
                             session
                                 .rolling_provenance
                                 .as_ref()
+                                .filter(|_| source_input.is_none())
                                 .map(|proof| proof.source_fd()),
                             None,
                             None,

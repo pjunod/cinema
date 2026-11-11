@@ -242,6 +242,7 @@ pub(crate) fn held_source_clock(
 /// Exact selected-video origin from this held probe, bound to the FORMAT
 /// clock already frozen for soundtrack production. Never infer it from the
 /// first picture returned by a window seek.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn held_dv_source_origin(
     stream: &serde_json::Value,
     tick: (u32, u32),
@@ -396,25 +397,68 @@ pub(crate) fn start_source_probe(
     }
 }
 
+enum SourceChildFailure {
+    OutputBound(&'static str),
+    ChildFailed,
+    Deadline,
+    Other(String),
+}
+impl From<String> for SourceChildFailure {
+    fn from(reason: String) -> Self {
+        Self::Other(reason)
+    }
+}
+impl From<&str> for SourceChildFailure {
+    fn from(reason: &str) -> Self {
+        Self::Other(reason.to_owned())
+    }
+}
+impl SourceChildFailure {
+    fn reason(self) -> String {
+        match self {
+            Self::OutputBound(reason) => reason.to_owned(),
+            Self::ChildFailed => "Source probe child failed".into(),
+            Self::Deadline => "Source probe deadline".into(),
+            Self::Other(reason) => reason,
+        }
+    }
+}
+/// A failed cue-index conversion can fall back to demux. Bounds, authority
+/// failures and deadlines retain their typed meaning across that fallback.
+pub(super) enum SourceResourceChildFailure {
+    Work(super::source_actor::SourceWorkerError),
+    Conversion,
+}
+impl SourceResourceChildFailure {
+    pub(super) fn worker_error(self) -> super::source_actor::SourceWorkerError {
+        match self {
+            Self::Work(error) => error,
+            Self::Conversion => super::source_actor::SourceWorkerError::Unsupported,
+        }
+    }
+}
+
 /// Copy a child's stdout into an owned file, refusing past `cap`. The file is
 /// handed back so the caller keeps the only descriptors.
 async fn bounded_into(
     input: impl AsyncRead + Unpin,
     cap: usize,
     mut sink: tokio::fs::File,
-) -> Result<tokio::fs::File, String> {
+) -> Result<tokio::fs::File, SourceChildFailure> {
     use tokio::io::AsyncWriteExt;
     let copied = tokio::io::copy(&mut input.take(cap as u64 + 1), &mut sink)
         .await
         .map_err(|e| e.to_string())?;
     if copied > cap as u64 {
-        return Err("Source child output exceeded its byte bound".into());
+        return Err(SourceChildFailure::OutputBound(
+            "Source child output exceeded its byte bound",
+        ));
     }
     sink.flush().await.map_err(|e| e.to_string())?;
     Ok(sink)
 }
 
-async fn bounded(input: impl AsyncRead + Unpin, cap: usize) -> Result<Vec<u8>, String> {
+async fn bounded(input: impl AsyncRead + Unpin, cap: usize) -> Result<Vec<u8>, SourceChildFailure> {
     let mut bytes = Vec::new();
     input
         .take(cap as u64 + 1)
@@ -422,7 +466,9 @@ async fn bounded(input: impl AsyncRead + Unpin, cap: usize) -> Result<Vec<u8>, S
         .await
         .map_err(|e| e.to_string())?;
     if bytes.len() > cap {
-        return Err("Source probe exceeded its byte bound".into());
+        return Err(SourceChildFailure::OutputBound(
+            "Source probe exceeded its byte bound",
+        ));
     }
     Ok(bytes)
 }
@@ -654,6 +700,77 @@ pub(super) async fn run_child(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Physical work is authorized at the lifecycle boundary that owns it.
+/// A published resource cannot use the pre-activation preparation permission.
+enum SourceChildAuthority<'a> {
+    Preparation {
+        proof: &'a SourceSessionWriteAuthority,
+        store: &'a dyn Store,
+    },
+    Resource(&'a super::source_actor::resource::SourceResourceReadCustody),
+}
+impl SourceChildAuthority<'_> {
+    async fn cancelled(&self) {
+        match self {
+            Self::Preparation { .. } => std::future::pending::<()>().await,
+            Self::Resource(custody) => custody.cancelled().await,
+        }
+    }
+    fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Preparation { .. } => false,
+            Self::Resource(custody) => custody.is_cancelled(),
+        }
+    }
+}
+
+/// Runs inside the Source's detached, counted resource factory. Its caller
+/// retains CPU admission until this returns after actual reap and pipe joins.
+pub(super) async fn run_resource_child(
+    file: &MediaFile,
+    custody: &super::source_actor::resource::SourceResourceReadCustody,
+    deadline: Instant,
+    command: tokio::process::Command,
+    cap: usize,
+    hooks: &SourceProbeHookOwner,
+) -> Result<crate::ffmpeg::BoundedOutput, SourceResourceChildFailure> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    run_authorized_child(
+        file,
+        custody.source().map_err(|_| {
+            SourceResourceChildFailure::Work(super::source_actor::SourceWorkerError::Unavailable)
+        })?,
+        SourceChildAuthority::Resource(custody),
+        deadline,
+        &cancel,
+        command,
+        cap,
+        hooks,
+        None,
+    )
+    .await
+    .map(|(output, _)| output)
+    .map_err(|error| {
+        use super::source_actor::SourceWorkerError;
+        match error {
+            SourceChildFailure::OutputBound(_) => {
+                SourceResourceChildFailure::Work(SourceWorkerError::Unsupported)
+            }
+            SourceChildFailure::ChildFailed if custody.is_cancelled() => {
+                SourceResourceChildFailure::Work(SourceWorkerError::Unavailable)
+            }
+            SourceChildFailure::ChildFailed => SourceResourceChildFailure::Conversion,
+            SourceChildFailure::Deadline => {
+                SourceResourceChildFailure::Work(SourceWorkerError::Deadline)
+            }
+            SourceChildFailure::Other(_) => {
+                SourceResourceChildFailure::Work(SourceWorkerError::Unavailable)
+            }
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_child_with(
     file: &MediaFile,
     source: &crate::fragment_index_cluster::SourceFence,
@@ -661,43 +778,85 @@ async fn run_child_with(
     store: &dyn Store,
     deadline: Instant,
     cancel: &tokio_util::sync::CancellationToken,
-    mut command: tokio::process::Command,
+    command: tokio::process::Command,
     cap: usize,
     hooks: &SourceProbeHookOwner,
     sink: Option<tokio::fs::File>,
 ) -> Result<(crate::ffmpeg::BoundedOutput, Option<tokio::fs::File>), String> {
+    run_authorized_child(
+        file,
+        source,
+        SourceChildAuthority::Preparation { proof, store },
+        deadline,
+        cancel,
+        command,
+        cap,
+        hooks,
+        sink,
+    )
+    .await
+    .map_err(SourceChildFailure::reason)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_authorized_child(
+    file: &MediaFile,
+    source: &crate::fragment_index_cluster::SourceFence,
+    authority: SourceChildAuthority<'_>,
+    deadline: Instant,
+    cancel: &tokio_util::sync::CancellationToken,
+    mut command: tokio::process::Command,
+    cap: usize,
+    hooks: &SourceProbeHookOwner,
+    sink: Option<tokio::fs::File>,
+) -> Result<(crate::ffmpeg::BoundedOutput, Option<tokio::fs::File>), SourceChildFailure> {
     hooks.slot.get().before_spawn().await;
     let current = crate::fragment_index_cluster::open_source_playback_fence(
         file,
         Some(source.object_version()),
     )
     .await?;
-    if Instant::now() >= deadline
-        || cancel.is_cancelled()
+    if cancel.is_cancelled()
+        || authority.is_cancelled()
         || !source.unchanged()
         || !current.unchanged()
     {
         return Err("Source probe cancelled or file changed before spawn".into());
     }
-    proof
-        .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
-        .map_err(|_| "Source probe observation expired".to_owned())?;
-    if !store
-        .authorize_source_media_preparation(proof)
-        .await
-        .map_err(|_| "Source probe authority write failed".to_owned())?
-    {
-        return Err("Source probe current authority unavailable".into());
+    if Instant::now() >= deadline {
+        return Err(SourceChildFailure::Deadline);
     }
-    proof
-        .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
-        .map_err(|_| "Source probe observation expired at spawn".to_owned())?;
-    if Instant::now() >= deadline
-        || cancel.is_cancelled()
+    let generation = match &authority {
+        SourceChildAuthority::Preparation { proof, store } => {
+            proof
+                .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+                .map_err(|_| "Source probe observation expired".to_owned())?;
+            if !store
+                .authorize_source_media_preparation(proof)
+                .await
+                .map_err(|_| "Source probe authority write failed".to_owned())?
+            {
+                return Err("Source probe current authority unavailable".into());
+            }
+            proof
+                .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+                .map_err(|_| "Source probe observation expired at spawn".to_owned())?;
+            None
+        }
+        SourceChildAuthority::Resource(custody) => Some(custody.authorize_work().await?),
+    };
+    if let Some(generation) = generation.as_ref() {
+        generation.validate_before_spawn()?;
+    }
+    if cancel.is_cancelled()
+        || authority.is_cancelled()
         || !source.unchanged()
         || !current.unchanged()
     {
         return Err("Source probe expired at spawn".into());
+    }
+    if Instant::now() >= deadline {
+        return Err(SourceChildFailure::Deadline);
     }
     command
         .stdin(std::process::Stdio::null())
@@ -736,21 +895,22 @@ async fn run_child_with(
                 async {
                     let result = out.await;
                     output_joined = true;
-                    result.map_err(|e| e.to_string())?
+                    result.map_err(|e| SourceChildFailure::Other(e.to_string()))?
                 },
                 async {
                     let result = err.await;
                     diagnostics_joined = true;
-                    result.map_err(|e| e.to_string())?
+                    result.map_err(|e| SourceChildFailure::Other(e.to_string()))?
                 },
             )?;
-            Ok::<_, String>((crate::ffmpeg::BoundedOutput { stdout, stderr }, sink))
+            Ok::<_, SourceChildFailure>((crate::ffmpeg::BoundedOutput { stdout, stderr }, sink))
         };
         tokio::pin!(collect);
         tokio::select! {
             result=&mut collect=>result,
-            ()=tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))=>Err("Source probe deadline".into()),
+            ()=tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))=>Err(SourceChildFailure::Deadline),
             ()=cancel.cancelled()=>Err("Source probe cancelled".into()),
+            ()=authority.cancelled()=>Err("Source resource retired".into()),
         }
     };
     if collected.is_err() {
@@ -795,10 +955,12 @@ async fn run_child_with(
     if wait_failed {
         return Err("Source probe initial wait did not confirm reap".into());
     }
-    if !status.success() {
-        return Err("Source probe child failed".into());
-    }
+    // Killing an oversized writer changes its exit status; preserve the
+    // deterministic byte-bound failure after all real resources settled.
     let collected_output = collected?;
+    if !status.success() {
+        return Err(SourceChildFailure::ChildFailed);
+    }
     if !source.unchanged() || !current.unchanged() {
         return Err("Source file changed during probe".into());
     }
@@ -872,5 +1034,16 @@ mod dv_source_origin_tests {
             held_dv_source_origin(&serde_json::json!({"start_pts":0}), (0, 1000), observed)
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod source_child_bounds_tests {
+    #[tokio::test]
+    async fn source_child_output_bound_has_a_typed_failure_before_presentation_mapping() {
+        assert!(matches!(
+            super::bounded(&b"oversized"[..], 4).await,
+            Err(super::SourceChildFailure::OutputBound(_))
+        ));
     }
 }

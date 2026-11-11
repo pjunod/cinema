@@ -6,6 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use plurx_core::store::background_jobs::{
     BackgroundJob, CancelJob, EnqueueOutcome, JobKind, JobPayload, JobQuery, JobState, WaiterQuery,
+    JOB_PROCESSING_WINDOW_MS,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -79,7 +80,7 @@ pub async fn list(
         ));
     }
     let now_ms = crate::state::clock_ms();
-    let (page, counts, migration, repairs, running, cancelling) = tokio::try_join!(
+    let (page, counts, completions, migration, repairs, running, cancelling) = tokio::try_join!(
         state.store.list_jobs(JobQuery {
             node_id: query.node_id,
             state: query.state,
@@ -88,6 +89,7 @@ pub async fn list(
             limit
         }),
         state.store.job_counts(now_ms),
+        state.store.recent_job_completions(now_ms),
         state.store.job_migration_status(),
         state.store.artifact_repairs(false),
         state.store.list_jobs(JobQuery {
@@ -141,6 +143,7 @@ pub async fn list(
     })).collect::<Vec<_>>();
     Ok(Json(json!({"jobs": jobs, "repairs":repairs,
         "active_jobs": active_jobs, "active_truncated": active_truncated,
+        "processing": {"window_ms": JOB_PROCESSING_WINDOW_MS, "nodes": completions},
         "counts": counts, "migration": migration, "next_cursor": page.next_after_id, "observed_at_ms": now_ms})))
 }
 
@@ -290,24 +293,28 @@ pub async fn retry(
                 "the original video identity is ambiguous; request a specific analysis".into(),
             ));
         }
+        let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
         let request = state
             .store
-            .enqueue_analysis_request(&plurx_core::store::NewAnalysisRequest {
-                request_id: request_id.clone(),
-                file_id,
-                source_size,
-                source_mtime,
-                component: "fragment_index".into(),
-                pipeline_version: engine,
-                video_identity,
-                requested_generation: request_id.clone(),
-                priority: "forced".into(),
-                trigger: "admin".into(),
-                force_rebuild: true,
-                target_node_id: state.node_id.clone(),
-                not_before_ms: now_ms,
-                created_at_ms: now_ms,
-            })
+            .enqueue_analysis_request_with(
+                &plurx_core::store::NewAnalysisRequest {
+                    request_id: request_id.clone(),
+                    file_id,
+                    source_size,
+                    source_mtime,
+                    component: "fragment_index".into(),
+                    pipeline_version: engine,
+                    video_identity,
+                    requested_generation: request_id.clone(),
+                    priority: "forced".into(),
+                    trigger: "admin".into(),
+                    force_rebuild: true,
+                    target_node_id: state.node_id.clone(),
+                    not_before_ms: now_ms,
+                    created_at_ms: now_ms,
+                },
+                live.as_deref(),
+            )
             .await?;
         if request.request_id != request_id {
             return Err(ApiError::Conflict(

@@ -447,6 +447,7 @@ pub(super) fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
 
 fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
     SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -466,6 +467,7 @@ fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
             aac: true,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds,
         audio_index: None,
@@ -787,6 +789,83 @@ async fn insert_control_session(
     );
 }
 
+#[tokio::test]
+async fn continuous_private_readers_share_source_from_exact_parent_control() {
+    let base = crate::test_tempdir().expect("base");
+    let serve = bare_serve(base.path());
+    let root = synthetic_rendition(base.path()).await;
+    let video = synthetic_rendition(base.path()).await;
+    let audio = synthetic_rendition(base.path()).await;
+    let companion = synthetic_rendition(base.path()).await;
+    insert_control_session(&serve, "parent", Arc::clone(&root), Instant::now()).await;
+    let children = [
+        ("video-reader", Arc::clone(&video), false),
+        ("audio-reader", Arc::clone(&audio), false),
+        ("companion-reader", Arc::clone(&companion), true),
+    ];
+    for (id, rendition, _) in &children {
+        rendition.attach_reader(id, 0).await;
+    }
+    {
+        let mut sessions = serve.shared.sessions.lock().await;
+        let parent = sessions.get_mut("parent").expect("parent");
+        parent.control_observed_at = Some(Instant::now());
+        parent.last_control_snapshot = Some(
+            crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Apple,
+            ),
+        );
+        for (id, rendition, companion_bootstrap) in &children {
+            parent.children.push(ParentMediaReader {
+                versioned_family: true,
+                companion_bootstrap: *companion_bootstrap,
+                controlled: true,
+                candidate_id: None,
+                reader_id: (*id).into(),
+                rendition: Arc::clone(rendition),
+                _reservation: None,
+            });
+        }
+        for (id, rendition, _) in &children {
+            let owner = driver::source_control_session(&sessions, rendition, id)
+                .expect("private reader resolves its parent");
+            assert!(owner.last_control_snapshot.is_some());
+            assert!(Arc::ptr_eq(&owner.incarnation, &sessions["parent"].incarnation));
+        }
+        assert!(driver::source_control_session(&sessions, &root, "parent").is_some());
+    }
+    serve.shared.sessions.lock().await.remove("parent");
+    let replacement = synthetic_rendition(base.path()).await;
+    insert_control_session(&serve, "parent", Arc::clone(&replacement), Instant::now()).await;
+    let sessions = serve.shared.sessions.lock().await;
+    for (id, rendition, _) in &children {
+        assert!(driver::source_control_session(&sessions, rendition, id).is_none(),
+            "old private reader cannot inherit same-ID replacement control");
+    }
+    assert!(driver::source_control_session(&sessions, &root, "parent").is_none());
+}
+
+#[tokio::test]
+async fn companion_source_purpose_follows_selected_and_optional_generations() {
+    let base = crate::test_tempdir().expect("base");
+    let rendition = synthetic_rendition(base.path()).await;
+    let mut companion = Reader::with_priority(0, crate::admission::Priority::Speculative);
+    companion.companion_bootstrap = true;
+    rendition.readers.lock().await.insert("companion".into(), companion);
+    assert!(driver::source_readers_are_optional(&rendition).await);
+    rendition.readers.lock().await.get_mut("companion").expect("reader")
+        .admission_priority = crate::admission::Priority::Live;
+    assert!(!driver::source_readers_are_optional(&rendition).await,
+        "accepted selection makes every subsequent generation required");
+    rendition.readers.lock().await.get_mut("companion").expect("reader")
+        .admission_priority = crate::admission::Priority::Speculative;
+    assert!(driver::source_readers_are_optional(&rendition).await,
+        "supersession restores optional service on the same rendition");
+    rendition.readers.lock().await.insert("other-selected".into(), Reader::new(0));
+    assert!(!driver::source_readers_are_optional(&rendition).await,
+        "a second actual required reader keeps the shared producer required");
+}
+
 async fn insert_finished_terminal_session(
     serve: &VodServe,
     session_id: &str,
@@ -893,6 +972,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         key: "synthetic-rendition".to_string(),
         dir,
         recipe: Recipe {
+            source_telemetry:false,
             retained_logical: None,
             measured_candidate: None,
             file: media_file_at(PathBuf::from("unused.mkv"), ms),
@@ -1248,6 +1328,7 @@ async fn stored_marker_prewarm_is_subordinate_and_hits_only_its_own_production()
             aac: true,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         hit,
     );
@@ -2153,6 +2234,7 @@ async fn marker_prewarm_placeholder_correlates_without_a_client_session_id() {
             aac: true,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
     }
 

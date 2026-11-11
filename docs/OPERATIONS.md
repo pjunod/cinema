@@ -9,6 +9,7 @@
   - Live reference; maintained with behavior changes. No overall status line.
 - **Read further only for:**
   - install and run (Docker, service, bare metal): `## Running it`
+  - upgrading a cluster one node at a time: `## Rolling upgrades`
   - settings, ports and listeners: `## Configuration surface`; `## Ports`
   - what a pill, scan state, storage number or the stats overlay means: `## Reading the activity pill`; `## Reading library scan status`; `## Reading playback (and the stats overlay)`
   - runbooks: sharing addresses, Curator, channels, Jellyfin, Live TV: `## Sharing Cinema addresses — set up before creating invitations`; `## Pairing another application (Curator) — the runbook`; `## Library channels — the runbook`; `## Jellyfin client compatibility`; `## Live TV (HDHomeRun) — the runbook`
@@ -89,6 +90,104 @@ an operator choice.
 
 Installation, firewall, upgrade, and removal commands are in the
 [Windows deploy runbook](../deploy/README.md#run-as-a-service--windows).
+
+### Optional HTTPS and persistent identity
+
+HTTPS is off by default. In Settings → Developer → HTTPS, edit the addressed
+node, save, then restart that node to activate the desired configuration.
+The TLS listener defaults to port `32443` on `server.bind`'s IP. While active,
+HTTP app/API requests return a temporary `307` redirect to HTTPS, preserving
+hostname, path, query, request method and body. Redirects use `no-store` so
+turning HTTPS off does not leave a permanent browser redirect. Saving alone
+changes neither the listener nor redirects; apply at restart.
+
+Health/readiness, metrics, discovery, internal cluster RPC and Plex/Jellyfin
+compatibility stay on their existing HTTP paths. The separate Jellyfin
+listener is unchanged. These exceptions keep machine clients operational;
+this is not a blanket ban on plaintext service traffic. TLS requests never
+redirect to themselves. Forwarded scheme headers do not bypass this policy;
+a TLS-terminating proxy should use the native HTTPS upstream when it is enabled.
+The card distinguishes saved intent, environment-overridden desired intent,
+and the listener/certificate actually loaded in this process. It remains
+usable when replicated settings cannot load, subject to ordinary admin auth
+and the node's existing removal/serving fences.
+
+Leave both certificate paths empty for a persistent self-signed identity. Add
+every DNS name and concrete IP clients will use before first enable; startup
+creates the identity, and saving alone creates no key. Alternatively, enter
+absolute paths to a leaf-first PEM chain and matching unencrypted private key.
+These are paths on the server or inside its container, never on the browser's
+computer. Supplied material is loaded at restart. Docker rollout targets
+publish HTTPS conditionally and forward a remapped host port for redirects.
+Mount supplied files read-only; see
+[deployment instructions](../deploy/README.md#optional-native-https).
+
+After restart, verify the active fingerprint and download the **active public
+certificate chain** from the card. A generated self-signed certificate needs
+explicit client trust and matching SAN coverage. A supplied chain needs the
+appropriate issuing CA trust. Browser and native trust stores differ; the
+unverified address link neither installs trust nor tests connectivity and opens
+a new origin that needs its own sign-in. No credential is copied into it.
+Physical browser/native trust and real playback qualification remain open in
+[the build ledger](server/HTTPS-BUILD.md); the permanent switch stays Developer
+until that acceptance is recorded, then moves to System.
+
+`[server.https]` accepts `enabled`, `port` (default `32443`), absolute
+`cert_file`/`key_file` paths and `sans`. Both paths empty select a generated
+identity; both supplied select a leaf-first PEM chain and one unencrypted
+private key. Settings are node-local and never enter the replicated Store.
+Existing HTTP, Bonjour/GDM discovery and internal cluster transports keep
+their current addresses. HTTPS is manually selected by URL; enabling it does
+not force clients to use encryption or add a redirect/HSTS policy.
+
+Precedence is defaults → TOML → `<data_dir>/https-settings.json` → explicitly
+present HTTPS environment variables. `PLURX_DATA_DIR` selects the directory
+before the local file is read. The HTTPS variables are `PLURX_HTTPS_ENABLED`,
+`PLURX_HTTPS_PORT`, `PLURX_HTTPS_CERT_FILE`, `PLURX_HTTPS_KEY_FILE` and
+`PLURX_HTTPS_SANS` (comma-separated). Empty path variables deliberately select
+generated mode when both are empty. An override masks its stored choice;
+saving another field must not copy the override into that stored choice.
+
+The admin API uses a canonical decimal-string revision; manual file edits use
+an integer u64. The local file is at most 16 KiB and has this exact versioned envelope:
+
+```json
+{"version":1,"revision":1,"settings":{"enabled":false,"port":32443,"cert_file":"","key_file":"","sans":["localhost","127.0.0.1","::1"]}}
+```
+
+Stop the service before manual editing and increment `revision` on every
+edit. Malformed envelopes and unsupported versions are errors. Do not reset
+the revision: it fences stale administrator requests across restarts.
+A save that publishes its new revision but cannot confirm directory sync is
+committed with `durability_confirmed: false`. Reload and investigate storage;
+do not retry as if nothing changed. A crash may lose that unconfirmed rename.
+Only failures before publication leave desired state and revision unchanged.
+
+The generated identity is `<data_dir>/https/identity.pem`, a combined private
+bundle. Back it up as a secret. Its Unix directory and file permissions are
+`0700` and `0600`. Managed descendants refuse symlinks; the configured data
+root itself retains its existing symlink semantics. Unix supplied certificate
+manager symlinks are supported, but the opened targets must be regular files
+of at most 1 MiB each. Windows supplied material must be regular local disk
+PEM files: device, pipe and UNC namespaces and certificate-manager symlinks
+are rejected before traversal. Windows uses the repository's private-path ACL helper
+at creation; Windows compilation and physical ACL acceptance are not claimed
+by this milestone.
+
+Generated certificates retain the exact leaf and key through restart and
+off/on. They last 365 days and never renew silently. If expiry or SAN changes
+require replacement, stop the service, edit stored SANs and any controlling
+environment value, increment the local revision, securely back up and remove
+`https/identity.pem`, then restart. Removing only the identity recreates the
+old SAN coverage. Verify the replacement public fingerprint and explicitly
+re-trust its certificate. Never install or distribute the combined private
+bundle as a public trust certificate; the admin download exports only
+the loaded public chain. Supplied renewals are loaded on restart.
+
+To recover from enabled TLS with broken material, stop the service, set
+`PLURX_HTTPS_ENABLED=false`, and restart using existing HTTP. Repair intent
+or file references before removing the override. Disabling never opens
+obsolete certificate paths or deletes an identity.
 
 ### Duplicate-show identity repair
 
@@ -1240,7 +1339,11 @@ vote: it changes no majority, adds no failure tolerance, and is not a substitute
 for the third voter this section asks for.
 
 `make cluster-check` now creates
-`target/validation/cluster-topology-semantic.json`. It starts fresh independent
+`target/validation/cluster-topology-semantic.json`. Raw schema/workload v3 pins
+256 bounded catalogue operations to exactly 512 local queries: one saved
+local-read preference lookup and one catalogue lookup per operation, with zero
+consistent queries or errors. Raw v2 evidence is rejected rather than reinterpreted;
+the unchanged outer campaign v2 also validates each retained raw v3 pair. It starts fresh independent
 three- and four-process clusters, sends the same 64 quorum-acknowledged setting
 writes to each elected leader, and records raw controller-to-node acknowledged
 write round trips in microseconds, type-7 p50/p95/p99 values, quorum size,
@@ -1785,7 +1888,7 @@ and cleanup authority. Its control arm disables only the Store operation timer
 through a validation-only hook compiled into `plurx-cluster-check`; production
 `plurxd` has no switch and always instruments Store calls. The runner
 counterbalances control/instrumented order independently from 3/4-voter order,
-retains one ordinary topology-v2 artifact for every arm, and compares aggregate
+retains one ordinary topology-v3 artifact for every arm, and compares aggregate
 CPU and wall time for both topologies against the registered 2% budget:
 
 ```bash
@@ -3205,6 +3308,40 @@ that its Raft id is no longer a voter and refuses. To add that machine again,
 stop it, discard its old plurx data directory, and join from a fresh directory
 with a newly issued token. Never copy the removed directory back into service.
 
+## Rolling upgrades
+
+Media placement between nodes compares three facts **independently**, and
+Settings → Cluster shows all three on every node card: the **build** the node
+reports, its **media protocol** (`PROTOCOL_VERSION` in
+`crates/plurxd/src/media_pool.rs`; placement requires an exact match), and
+whether the node you are looking from would place on it now (**eligible
+owner** — a fresh, exact-protocol advertisement with an available egress and
+an encoder; the card names the reason when it is not). A node on another
+protocol never appears in placement at all, so during a protocol-changing
+upgrade the fleet is two placement cohorts: old nodes place among old nodes,
+new among new.
+
+The rule for a rolling upgrade:
+
+1. Upgrade one serving cohort at a time — one node, then confirm on the
+   Cluster card that it reads ready, its new build and protocol, and
+   *eligible owner* before the next.
+2. Keep at least one eligible owner in each cohort. While any old-build
+   ingress still takes requests, at least one old-protocol worker must stay
+   eligible, or that ingress can only start locally.
+3. Drain old ingress before upgrading the last old node: its sessions finish
+   or move first, because no new-protocol worker will accept its placement.
+
+A build skew with the same protocol is ordinary and needs none of this; the
+card flags it so it is noticed, not because placement refuses it.
+
+Protocol changes, newest first. `tests/operations/test_media_pool_wire.py`
+(run by `make paperwork`) refuses a change to a strict media-pool envelope
+without a `PROTOCOL_VERSION` bump and a dated line here naming it:
+
+- 2026-11-07 (recorded): protocol 9 — resolved audio claim and delivery on
+  `SessionRequest`, `QualityCatalogRequest` and `RemoteStartResponse`.
+
 ## Configuration surface
 
 Precedence, lowest to highest: **built-in defaults → TOML file → `PLURX_*` env**.
@@ -3218,6 +3355,12 @@ membership addresses and token-file paths are intentionally file-only:
 | Env var | TOML | Default | What it does |
 |---|---|---|---|
 | `PLURX_BIND` | `server.bind` | `0.0.0.0:32400` | Address the HTTP API binds to |
+| `PLURX_HTTPS_ENABLED` | `server.https.enabled` | `false` | Public HTTPS after restart; HTTP app/API requests temporarily redirect while active |
+| `PLURX_HTTPS_PORT` | `server.https.port` | `32443` | HTTPS port on `server.bind`'s IP; must not collide with configured listeners |
+| `PLURX_HTTPS_REDIRECT_PORT` | — | active HTTPS port | Reachable public HTTPS port for HTTP redirects; Docker rollout derives it from the published mapping. Set explicitly for a proxy or ambiguous manual mappings. Changes apply at restart |
+| `PLURX_HTTPS_CERT_FILE` | `server.https.cert_file` | empty | Absolute server/container leaf-first certificate-chain PEM path; empty with key empty selects persistent generated identity |
+| `PLURX_HTTPS_KEY_FILE` | `server.https.key_file` | empty | Absolute server/container matching unencrypted private-key PEM path; never returned in API responses |
+| `PLURX_HTTPS_SANS` | `server.https.sans` | localhost and loopback IPs | Comma-separated generated DNS names/IPs; concrete bind IP is also added. Existing generated SAN changes require explicit replacement while stopped |
 | `PLURX_JELLYFIN_PORT` | `server.jellyfin_port` | `8096` | Port on `PLURX_BIND`'s address where Jellyfin clients reach the compatibility facade at the server root, so a host name alone is enough; `0` = off. Best-effort: a taken port is logged and shown in Settings → Developer, and `/jellyfin` on the main port still works |
 | `PLURX_TRUSTED_PROXIES` | `server.trusted_proxies` | empty | Comma-separated proxy CIDRs whose appended `X-Forwarded-For` hops the login throttle may trust. Keep empty unless those peers overwrite or append the header correctly |
 | `PLURX_SERVER_NAME` | `server.name` | `plurx` | Bootstrap seed for the human-visible server name. The replicated setting is authoritative after first boot; rename it through the admin API |
@@ -3329,6 +3472,7 @@ turn it off and start playback again.
 | Port | Proto | Purpose |
 |---|---|---|
 | 32400 | TCP | HTTP API + web app (and the Plex-compat façade) |
+| 32443 | TCP + TLS | Optional additional public HTTPS API/web listener; off by default, restart required; HTTP/discovery retained |
 | 32401 | TCP + TLS | Raft replication between voters; never expose it as public cleartext |
 | 32402 | TCP + TLS | Authenticated internal cluster API; never expose it as public cleartext |
 | 32414 | UDP | GDM discovery so Plex/Kodi clients find the server on the LAN |
@@ -5002,37 +5146,64 @@ is not a reason to overwrite the saved enable choice.
 
 ## Sharing Cinema addresses — set up before creating invitations
 
-Settings → Sharing always lists the observed local TLS listener and sharing
-certificate, whether private addresses are configured, and the host network
-setup that remains unverified. A listening socket inside the container is
-not evidence that Tailscale is installed on the host or that another Cinema
-can reach it. Missing address information and a failed address read are
-shown separately. The Developer switch remains available.
+Managed native installations discover their Tailscale address and configure
+private forwarding after sharing is enabled. Settings → Sharing shows setup
+progress and required sign-in, permission or port-conflict actions. No router
+configuration is needed. Pairing still requires explicit approval and scope.
 
-Settings → Sharing → Create invitation reads this Cinema's saved address
-manifest before allowing Create. If it is absent, choose **Configure this
-Cinema’s addresses**. Your selected movie/show libraries stay in the draft;
-**Return to invitation** reloads current address information and retains that
-selection. Saving addresses does not create an invitation or verify that the
-recipient can connect. Create remains an explicit action.
+**Connect Tailscale account** appears at the top of Sharing. Its saved API-key
+status is separate from this host's Tailscale connection, private forwarding
+and Cinema listener status. Connected uses the host's current Tailscale online
+observation, not just configured forwarding; a host helper report without that fact
+reports an unconfirmed connection. A saved key is not a live provider-authorization
+check. The page continues checking host setup after it becomes ready so a later
+disconnect appears; stale or failed checks become unconfirmed.
 
-Get each host's Tailscale IPv4 address (`100.64.0.0/10`), optional Tailscale
-IPv6 address and private `.ts.net` name from that host's Tailscale setup.
-Enter the published private TCP Serve port, normally **32443**, rather than
-the internal TLS listener port **32444**. Ask the Cinema administrator for
-the sharing certificate's SHA-256 public-key (SPKI) pin: its authenticated
-`GET /api/v1/sharing/status` exposes `certificate.spki_sha256` when that
-serving node has a certificate. Match each address to that host's certificate
-and verify the pin through a trusted channel. The form neither installs
-Tailscale nor configures Serve; follow the private transport setup in
+Cluster members share one Cinema identity, library grants and gateway address
+list. Host Tailscale state, listener certificates, the saved account API key and
+provider-invitation cleanup records currently belong to each node. Create external
+invitations through the node where the account key was saved; configuring it on
+one member does not install that key on the other members.
+
+Linux Compose uses the separately installed component in
+[the host setup guide](features/SHARING-HOST-SETUP.md). Its one-time local
+administrator installation prepares the private bridge and worker; the worker
+then follows the sharing switch. Ordinary deploys do not install host components.
+**Advanced addresses** supports custom or older setups.
+
+Sharing lists the local listener, certificate, saved addresses and setup status.
+A listening socket cannot prove another Cinema can connect. Missing addresses
+and failed reads are distinct; the Developer switch stays available.
+
+
+Create invitation reads this Cinema's saved addresses. If absent, choose
+**Advanced addresses** (or **Configure this Cinema’s addresses** on older
+servers), then **Return to invitation**; your
+movie/show library selection is kept. Saving addresses neither creates an
+invitation nor tests connectivity. Choose **Create** explicitly.
+
+**Save QR code** saves the invitation PNG; **Share QR code** opens the device
+share sheet where available. On the receiving Cinema,
+choose **Import invitation**, then upload the image or scan it with a phone
+camera. Scanning only fills the draft: choose **Save** to import, then compare
+the pairing code with the source owner before approval. **Invitation text**
+expands for copying and pasting, and is the fallback for invitations too large
+for one QR code. QR encoding and image decoding run locally. Camera scanning
+on the web needs HTTPS and camera permission; image upload and text remain
+available. Use a phone for camera scanning. QR and text contain the same secret. Leaving
+Sharing clears the draft; saved copies remain on the device.
+
+Get each host's Tailscale IPv4 (`100.64.0.0/10`), optional IPv6 and private
+`.ts.net` name from Tailscale. Use the published TCP Serve port,
+normally **32443**, rather than the internal listener port **32444**. Verify
+the certificate's SHA-256 SPKI pin with the Cinema owner through a trusted
+channel; authenticated `GET /api/v1/sharing/status` reports
+`certificate.spki_sha256` when the serving node has a certificate. To install Tailscale and configure Serve, follow
 [Shared libraries implementation §2.1](features/SHARED-LIBRARIES-IMPLEMENTATION.md).
 
-A `409 sharing_endpoints_unavailable` during invitation creation means the
-address manifest was absent when the server handled the request. The form
-offers the same configuration action and keeps the draft. It never retries
-an invitation POST automatically. Other failures retain their error and
-require a fresh read before another mutation. API details are in
-[Sharing administration](API.md#24-sharing-administration--local-owners-manage-private-peer-authority).
+A `409 sharing_endpoints_unavailable` during Create offers address setup and
+retains the draft. The form never retries an invitation POST automatically.
+Other failures require a fresh read before another mutation. See [Sharing administration](API.md#24-sharing-administration--local-owners-manage-private-peer-authority).
 
 ## Pairing another application (Curator) — the runbook
 
@@ -5831,6 +6002,80 @@ A `dead` or `degraded` verdict warns at most once an hour, and the hour only
 re-arms after the verdict has been clean for several consecutive samples — a
 queue that flaps between `degraded` and `healthy` logs on the hour, not on every
 sample.
+
+### Indexing while serving
+
+A node no longer stops indexing because one of its encoders is in use. The
+analysis worker claims requests one after another for as long as the claim's
+source-capacity rule admits one (two readers per storage domain; without a live
+viewer, a background read takes only a domain no other reader holds), and the
+rule is asked again before the read starts, while it reads (every 2 s; the
+node-local "viewer queuing" check every 0.5 s) and before the result is
+submitted — a foreground stream that takes the source in between makes
+the request yield, back to the queue uncharged, as `foreground_preempted`. A
+viewer queuing for this node's encoder limits claims to requests a playback is
+waiting on.
+
+An idle node (no encoder in use, nobody queuing) also claims other nodes'
+fragment-index requests that asked for exactly its engine. Work a viewer is
+waiting on comes first wherever it is targeted, then the node's own requests,
+then other nodes'. A request naming a copy-video pipeline the executor cannot
+produce (Dolby Vision tooling it lacks, a Profile 7 conversion it has turned
+off) goes back uncharged once, and that executor then leaves requests naming
+that pipeline to other nodes for 15 minutes rather than taking them back on
+every pass. The request keeps its target: the executor builds the index and publishes its own
+copy, delivery hydrates the node that asked, and the request is `ready` only
+once that node holds it. A target membership has removed is never worked for.
+`plurx_analysis_completed_total{node}` counts, per executing node, the
+fragment-index requests it ran that reached their target since the process
+started (it reads the attempt history, so pruning after 30 days can lower it,
+which reads as a counter reset). **Settings → Developer → Indexing while
+serving** shows what this node's indexer may do right now; it is advisory and
+switches nothing.
+
+### Processed Dolby Vision as an upgrade after the first frame
+
+A create no longer renders or verifies processed Dolby Vision / HDR10-E before
+it answers: it resolves the ordinary plan, and a declined upgrade (setting off,
+no `hvc1` HLS fMP4, burned subtitles, the continuous route) is named on the
+start's enhancement details as before. When the upgrade applies, the node that
+owns the session waits for the viewer's first frame (the `ttff` beacon naming
+the session), then runs one bounded trial (8 s) in its one processed-preparation
+slot. The trial verifies its window where the viewer is (the session's latest
+accepted control position advanced by its age, plus the trial's budget), and
+the successor is staged at the viewer's position when the trial ends, so the
+client's alignment finds it at the playhead. When this node has already
+described the processed recipe, this playback's recovery evidence and Auto's
+link evidence are read before the trial, and a refused recipe costs no GPU.
+The control exchange offers the successor like any other prepared switch; the
+client aligns it, proves a decoded frame and switches, or keeps the ordinary
+session. Every refusal — slot busy, trial failure, this playback's recovery
+evidence, Auto's link evidence, a viewer's own quality change taking the
+playback's preparation slot, a release, a newer session — leaves the ordinary
+session playing untouched. A create that names a processed candidate (a reopen
+of a processed session), and a viewer who picks the processed rung on an
+ordinary session, get the ordinary rung it enhances, and are upgraded after
+that session's first frame. An ordinary prepared successor this node owns is
+upgraded the same way once committed (the commit is the client's proof of the
+successor's frame). A start the ingress placed on another node is not
+upgraded: the owner does not hold the create's catalog scope (see the plan's
+open gaps).
+
+`plurx_playback_preparation_processed_upgrades_total{outcome}` counts the
+upgrades (`scheduled`, `staged`, `not_staged`, `declined`,
+`admission_refused`, `not_applicable`, `cancelled`).
+`plurx_playback_preparation_seams_total{platform,processed,outcome}` counts the
+prepared switches the clients reported at their seam (`committed`, `refused`,
+`switched_without_a_frame`) and
+`plurx_playback_preparation_seams_qualified_total{platform,processed}` the
+committed ones with complete ±2 s frame samples, zero dropped frames,
+independently observed audio continuity and no reopen (a reopen the change
+actually took within the window, as each client observed it). `processed` is
+read from the durable recipe of the session the report names: `true` for a
+switch to a processed successor. **Settings → Developer → Processed DV upgrade**
+reads the `processed="true"` counts per platform against Paul's bar of twenty; until a platform has
+them its row reads `unqualified`. The rows are advisory: the upgrade runs
+either way. The counts are this node's since it started.
 
 ### Putting a failed queue back to work
 

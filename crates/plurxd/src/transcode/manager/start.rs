@@ -192,6 +192,7 @@ impl TranscodeManager {
             None,
             None,
             None,
+            false,
         )
         .await
     }
@@ -228,6 +229,7 @@ impl TranscodeManager {
             Some(claim),
             None,
             None,
+            false,
         )
         .await
     }
@@ -338,13 +340,21 @@ impl TranscodeManager {
                     return Err(capacity_error(why));
                 }
 
-                if let Some(waiting) = queued.as_mut() {
-                    waiting.mark_capacity_blocked();
-                }
-                let now = Instant::now();
-                if now < deadline {
-                    tokio::time::sleep(ADMISSION_POLL.min(deadline - now)).await;
-                    continue;
+                // Poll only while the answer can still become hardware
+                // without this start doing anything: a background encoder
+                // that has not yet checkpointed. `Software` and `Refused` are
+                // already the answer this start will get — sleeping out the
+                // queue window on them only spent the viewer's allowance and
+                // then returned the same thing.
+                if matches!(decision, Admission::WaitingForBackground) {
+                    if let Some(waiting) = queued.as_mut() {
+                        waiting.mark_capacity_blocked();
+                    }
+                    let now = Instant::now();
+                    if now < deadline {
+                        tokio::time::sleep(ADMISSION_POLL.min(deadline - now)).await;
+                        continue;
+                    }
                 }
 
                 return match decision {
@@ -644,6 +654,7 @@ impl TranscodeManager {
         audio_claim: Option<&plurx_core::playback::audio::AudioClaim>,
         retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
         sdr_master_codecs: Option<bool>,
+        source_telemetry: bool,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
         // Cluster replacements are provisional until their durable pointer CAS
@@ -1008,14 +1019,7 @@ impl TranscodeManager {
             )
             .await?;
         encoder = admission.encoder;
-        if grade == OutputGrade::Hdr10
-            && target_height == HDR10_4K_HEIGHT
-            && encoder != Encoder::Qsv
-        {
-            return Err(capacity_error(
-                "the proved 4K HDR10 QuickSync slot is busy; retry at 1080p",
-            ));
-        }
+        hdr10_4k_encoder_refusal(grade, target_height, encoder)?;
         let hw_slot = admission.hw_slot;
         let sw_permit = admission.sw_permit;
         let session_id = takeover
@@ -1489,6 +1493,13 @@ impl TranscodeManager {
             dir: dir.clone(),
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
+            fallback_analysis_interest: std::sync::Mutex::new(None),
+            source_request: self.foreground_source_request(
+                &file,
+                &session_id,
+                uuid::Uuid::new_v4(),
+                if source_telemetry {plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling} else {plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::RollingOrTransfer},
+            ),
             rolling_provenance,
             rolling_collection,
             rolling_artifact: None,
@@ -1639,7 +1650,7 @@ impl TranscodeManager {
             }
         }
         if let Err(reason) = session
-            .spawn_and_install_prepublication_child(generation, || {
+            .spawn_and_install_prepublication_child(generation, |source_input| {
                 spawn_ffmpeg_at_with_env(
                     macos_executable
                         .as_ref()
@@ -1651,7 +1662,7 @@ impl TranscodeManager {
                                 .map(|proof| proof.executable_path())
                         })
                         .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
-                    &args,
+                    &crate::source_input::source_args(&args, &file.path, &[3], source_input),
                     crate::process_control::ChildWork::realtime("playback transcode"),
                     encoder.label(),
                     &session_id,
@@ -1667,6 +1678,7 @@ impl TranscodeManager {
                             session
                                 .rolling_provenance
                                 .as_ref()
+                                .filter(|_| source_input.is_none())
                                 .map(|proof| proof.source_fd()),
                             None,
                             session
@@ -1735,6 +1747,7 @@ impl TranscodeManager {
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
+            processing_note: None,
             retained_output: None,
             audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -1787,6 +1800,7 @@ impl TranscodeManager {
             false,
             None,
             None,
+            false,
         )
         .await
     }
@@ -1808,6 +1822,7 @@ impl TranscodeManager {
         automatic: bool,
         audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
         sdr_master_codecs: Option<bool>,
+        source_telemetry: bool,
     ) -> Result<StartInfo, String> {
         // One Store read for the file, its probe and its settings (D4).
         let RollingStartInputs {
@@ -1918,6 +1933,7 @@ impl TranscodeManager {
                 asked_preserve = asked.preserve_dolby_vision,
                 asked_convert = asked.convert_dolby_vision,
                 dual_layer = plurx_core::playback::dolby_vision_is_dual_layer(&file),
+                dual_layer_as_copied = asked.dual_layer_as_copied,
                 served_preserve = preserve,
                 "this copy cannot convert Dolby Vision, so it serves the source's base \
                  layer rather than a stream that names a profile it did not produce"
@@ -1967,6 +1983,7 @@ impl TranscodeManager {
                 aac: options.transcode_audio,
                 preserve_dolby_vision: options.preserve_dolby_vision,
                 convert_dolby_vision: options.convert_dolby_vision,
+                dual_layer_as_copied: options.dual_layer_as_copied,
             },
             "audio_index": audio_index,
             "audio": audio_delivery,
@@ -2059,6 +2076,7 @@ impl TranscodeManager {
             aac: served.transcode_audio,
             preserve_dolby_vision: served.preserve_dolby_vision,
             convert_dolby_vision: served.convert_dolby_vision,
+            dual_layer_as_copied: served.dual_layer_as_copied,
         };
         // Frozen with the rest of the presentation: this session's master
         // keeps one shape whatever the setting does later.
@@ -2235,6 +2253,13 @@ impl TranscodeManager {
             dir: dir.clone(),
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
+            fallback_analysis_interest: std::sync::Mutex::new(None),
+            source_request: self.foreground_source_request(
+                &file,
+                &session_id,
+                uuid::Uuid::new_v4(),
+                if source_telemetry {plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling} else {plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::RollingOrTransfer},
+            ),
             rolling_provenance,
             rolling_collection,
             rolling_artifact: None,
@@ -2366,14 +2391,19 @@ impl TranscodeManager {
         session.bind_retry_compatibility_attempt(generation).await;
         let pipe_stdout = if segmenting {
             match session
-                .spawn_and_install_prepublication_pipe_child(generation, || {
+                .spawn_and_install_prepublication_pipe_child(generation, |source_input| {
                     spawn_ffmpeg_pipe_at(
                         session
                             .rolling_provenance
                             .as_ref()
                             .map(|proof| proof.executable_path())
                             .unwrap_or(std::path::Path::new(&ffmpeg_bin())),
-                        &initial_args,
+                        &crate::source_input::source_args(
+                            &initial_args,
+                            &file.path,
+                            &[3],
+                            source_input,
+                        ),
                         crate::process_control::ChildWork::realtime("playback transcode"),
                         &session_id,
                         FfmpegProgressObserver::rolling(
@@ -2415,14 +2445,19 @@ impl TranscodeManager {
             }
         } else {
             if let Err(reason) = session
-                .spawn_and_install_prepublication_child(generation, || {
+                .spawn_and_install_prepublication_child(generation, |source_input| {
                     spawn_ffmpeg_at(
                         session
                             .rolling_provenance
                             .as_ref()
                             .map(|proof| proof.executable_path())
                             .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
-                        &initial_args,
+                        &crate::source_input::source_args(
+                            &initial_args,
+                            &file.path,
+                            &[3],
+                            source_input,
+                        ),
                         crate::process_control::ChildWork::realtime("playback copy HLS"),
                         "copy",
                         &session_id,
@@ -2526,6 +2561,7 @@ impl TranscodeManager {
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
+            processing_note: None,
             retained_output: None,
             audio_delivery: audio_delivery.cloned(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -2545,6 +2581,7 @@ impl TranscodeManager {
                 aac: served.transcode_audio,
                 preserve_dolby_vision: served.preserve_dolby_vision,
                 convert_dolby_vision: served.convert_dolby_vision,
+                dual_layer_as_copied: served.dual_layer_as_copied,
             },
             encoder: "copy",
             // A copy session encodes nothing; its dynamic range is the
@@ -2577,4 +2614,23 @@ pub(crate) fn rolling_copy_video_options(
     } else {
         options
     }
+}
+
+/// A 4K HDR10 output is proved on QuickSync only, so a start for one that
+/// admission placed on any other encoder (the QuickSync slot busy, software
+/// admitted instead) is refused, terminally: the same request can only be
+/// served on that one slot again, and the viewer's client has to ask for a
+/// smaller height.
+pub(super) fn hdr10_4k_encoder_refusal(
+    grade: OutputGrade,
+    target_height: i64,
+    encoder: Encoder,
+) -> Result<(), String> {
+    if grade == OutputGrade::Hdr10 && target_height == HDR10_4K_HEIGHT && encoder != Encoder::Qsv {
+        return Err(terminal_capacity_error(
+            TRANSCODE_HEIGHT_UNAVAILABLE,
+            "the proved 4K HDR10 QuickSync slot is busy; retry at 1080p",
+        ));
+    }
+    Ok(())
 }

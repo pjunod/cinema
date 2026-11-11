@@ -149,6 +149,22 @@ fn singleton_retry_requires_the_explicit_trial_marker() {
 }
 
 #[test]
+fn real_node_identities_satisfy_exact_reduction_transport() {
+    let ids = [1, 2, 3, u64::MAX].map(harness_node_identity);
+    assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
+    for (raft_id, target_node_id) in [1, 2, 3, u64::MAX].into_iter().zip(ids) {
+        let reference = hiqlite::ReductionFenceReference {
+            version: 1,
+            target_node_id,
+            target_raft_id: raft_id,
+            attempt_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            barrier_index: 1,
+        };
+        assert!(reference.has_valid_shape(), "{reference:?}");
+    }
+}
+
+#[test]
 fn membership_harness_retries_only_typed_leader_changes() {
     assert!(matches!(
         membership_error_response(MembershipError::LeaderChanged("routing".to_owned())),
@@ -448,4 +464,36 @@ fn an_invalid_snapshot_threshold_is_rejected_without_changing_production() {
             "an invalid launch must fail before creating voter state"
         );
     }
+}
+
+#[test]
+fn future_learner_ports_remain_reserved_until_their_own_start() {
+    let allocation = super::allocate_learner_membership_ports().expect("owned membership ports");
+    let super::LearnerMembershipPorts {
+        voters,
+        learner,
+        promoted,
+        specs,
+    } = allocation;
+    drop(voters);
+    for node in &specs[3..] {
+        for address in [&node.raft, &node.api] {
+            assert_eq!(
+                std::net::TcpListener::bind(address)
+                    .expect_err("future learner still owns its socket")
+                    .kind(),
+                std::io::ErrorKind::AddrInUse
+            );
+        }
+    }
+    drop(learner);
+    for address in [&specs[4].raft, &specs[4].api] {
+        assert_eq!(
+            std::net::TcpListener::bind(address)
+                .expect_err("starting learner4 must not release learner5")
+                .kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+    }
+    drop(promoted);
 }

@@ -29,6 +29,7 @@ impl TranscodeManager {
                     .map(|_| 8),
                 processed_fel: encoding.and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
+                processing_note: None,
                 retained_output: facts.response_owner.retained_output_facts(),
                 audio_delivery: facts.audio_delivery,
                 playlist_url: format!("/api/v1/hls/{}/index.m3u8", recovered.start.session_id),
@@ -63,6 +64,7 @@ impl TranscodeManager {
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
+            processing_note: None,
             retained_output: None,
             audio_delivery: session.audio_delivery.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -608,9 +610,22 @@ impl TranscodeManager {
         target_height: i64,
         subtitle_burn: bool,
     ) -> Result<EffectiveRateControl, String> {
-        let encoder = self
-            .encoder_for_file(file, crate::process_control::ChildClass::Background)
-            .await?;
+        // This captures queued package configuration; it is not an actual
+        // source-reading operation. The durable package owner proves pixels
+        // when its cache-miss worker starts.
+        let preference = self
+            .store
+            .get_setting(keys::HWACCEL)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let encoder = if Self::needs_dovi_reshape(file)? {
+            self.dovi_reshape_encoder_advisory_with_preference(file, &preference)
+                .await
+        } else {
+            self.encoder_for_preference(&preference)
+        };
         let baseline = self.effective_rate_control(encoder);
         if subtitle_burn {
             return Ok(baseline);

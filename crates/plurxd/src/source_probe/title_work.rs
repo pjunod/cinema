@@ -53,10 +53,12 @@ impl TitleTask {
         let Some(probe_pipeline) = plurx_core::scan::probe::pipeline_digest().await else {
             return Ok(None);
         };
-        let scanner = tools.scanner_digest();
+        let scanner = tools.title_scanner_digest();
         let demands = state.store.dv_title_demands(&scanner, *after).await?;
         if demands.is_empty() {
             *after = 0;
+            #[cfg(target_os = "linux")]
+            requalify_stale_fel_titles(state, &tools, &scanner).await;
             return Ok(None);
         }
         for mut demand in demands {
@@ -71,6 +73,32 @@ impl TitleTask {
             {
                 continue;
             }
+            #[cfg(target_os = "linux")]
+            {
+                let pending = plurx_core::transcode::dv_fel_qualification::pending_recipes(
+                    &demand.probe_json,
+                    file.size,
+                    file.mtime,
+                );
+                if !pending.is_empty() {
+                    let backend = state
+                        .transcode
+                        .fel_identity(&tools.backend_digest())
+                        .await
+                        .ok();
+                    if !pending
+                        .iter()
+                        .any(|request| Some(&request.backend_identity) == backend.as_ref())
+                    {
+                        continue;
+                    }
+                }
+            }
+            // The local index pass reads this title next, and reads its RPUs
+            // in that same read: do not read the file twice.
+            if state.jobs.title_scan_awaits_index_pass(file.id) {
+                continue;
+            }
             let Some(revision) = state
                 .store
                 .bind_dv_title_demand(demand.probe_revision, &scanner)
@@ -78,53 +106,69 @@ impl TitleTask {
             else {
                 continue;
             };
+            let reused = reusable_aggregate(&demand, revision);
             demand.probe_revision = revision;
             use sha2::{Digest, Sha256};
+            let mut fel_requests: Vec<_> =
+                plurx_core::transcode::dv_fel_qualification::pending_recipes(
+                    &demand.probe_json,
+                    file.size,
+                    file.mtime,
+                )
+                .into_iter()
+                .map(|r| r.identity)
+                .collect();
+            fel_requests.sort();
             let identity = hex::encode(Sha256::digest(
                 serde_json::to_vec(&(
-                    "dv-title-v1",
+                    "dv-title-v2-exact-fel-recipes",
                     demand.file_id,
                     demand.probe_revision,
                     &scanner,
+                    &fel_requests,
                 ))
                 .expect("title request identity"),
             ));
             let now = now_ms();
-            let outcome = state
-                .store
-                .enqueue_job(EnqueueJob {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    payload: JobPayload::DvTitleScan {
-                        file_id: file.id,
-                        source_size: file.size,
-                        source_mtime: file.mtime,
-                        probe_revision: demand.probe_revision,
-                        scanner_digest: scanner.clone(),
-                    },
-                    dedupe_key: format!("dv-title:{identity}"),
-                    priority: 0,
-                    not_before_ms: now,
-                    now_ms: now,
-                    request: JobRequest {
-                        scope: "dv-title".into(),
-                        request_id: identity.clone(),
-                        request_digest: identity,
-                        consumer_kind: "dv_title_scan".into(),
-                        consumer_ref: file.id.to_string(),
-                        target_node_id: None,
-                        deadline_ms: None,
-                        retain_identity: false,
-                    },
-                })
-                .await?;
-            let id = match outcome {
-                EnqueueOutcome::Accepted { job_id, .. }
-                | EnqueueOutcome::Existing {
-                    job_id,
-                    cancelled: false,
-                    ..
-                } => job_id,
-                _ => continue,
+            let id = if let Some(id) = demand.queued_job_id.clone() {
+                id
+            } else {
+                let outcome = state
+                    .store
+                    .enqueue_job(EnqueueJob {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        payload: JobPayload::DvTitleScan {
+                            file_id: file.id,
+                            source_size: file.size,
+                            source_mtime: file.mtime,
+                            probe_revision: demand.probe_revision,
+                            scanner_digest: scanner.clone(),
+                        },
+                        dedupe_key: format!("dv-title:{identity}"),
+                        priority: 0,
+                        not_before_ms: now,
+                        now_ms: now,
+                        request: JobRequest {
+                            scope: "dv-title".into(),
+                            request_id: identity.clone(),
+                            request_digest: identity,
+                            consumer_kind: "dv_title_scan".into(),
+                            consumer_ref: file.id.to_string(),
+                            target_node_id: None,
+                            deadline_ms: None,
+                            retain_identity: false,
+                        },
+                    })
+                    .await?;
+                match outcome {
+                    EnqueueOutcome::Accepted { job_id, .. }
+                    | EnqueueOutcome::Existing {
+                        job_id,
+                        cancelled: false,
+                        ..
+                    } => job_id,
+                    _ => continue,
+                }
             };
             let Some(candidate) = state.store.background_job(&id).await? else {
                 continue;
@@ -158,12 +202,14 @@ impl TitleTask {
                 token,
                 deadline,
                 JobKind::DvTitleScan,
-            )?;
+            )
+            .await?;
             let cancel = CancellationToken::new();
             let work = execute(
                 state.clone(),
                 file,
                 demand,
+                reused,
                 tools,
                 admission,
                 job,
@@ -246,6 +292,53 @@ impl TitleTask {
     }
 }
 
+/// A renderer, recipe or encoder change leaves every FEL verdict measured
+/// under the old identity. While no title work waits, ask for a bounded batch
+/// of those titles again: their demand is rebound, and the title job rescans
+/// and re-qualifies them. Title demand no longer follows the renderer, so this
+/// is what keeps "a changed renderer re-qualifies every title" true; the
+/// request is throttled per title like a play's.
+#[cfg(target_os = "linux")]
+async fn requalify_stale_fel_titles(state: &AppState, tools: &ToolSet, scanner: &str) {
+    if !state.transcode.fel_qualification_capable() {
+        return;
+    }
+    let identity = match state.transcode.fel_identity(&tools.backend_digest()).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::debug!(%error, "FEL identity unavailable for re-qualification");
+            return;
+        }
+    };
+    match state.store.dv_fel_stale_titles(&identity, 16).await {
+        Ok(titles) => {
+            for file_id in titles {
+                state
+                    .transcode
+                    .request_fel_qualification(file_id, scanner, &identity)
+                    .await;
+            }
+        }
+        Err(error) => tracing::warn!(%error, "listing FEL titles to re-qualify"),
+    }
+}
+
+/// The aggregate this title's job may settle with instead of reading the
+/// file: one stored under the generation the worker's bind left unchanged.
+/// Only a publisher bound to that generation's scanner stores one (an index
+/// pass's ride-along, or an earlier job), and a bind to another scanner
+/// rotates the generation and drops it in the same transaction — so a
+/// generation that moved, or a document read before it moved, reuses nothing.
+pub(super) fn reusable_aggregate(
+    demand: &TitleDemand,
+    bound_revision: i64,
+) -> Option<plurx_core::scan::dv_title::DvTitleStats> {
+    if bound_revision != demand.probe_revision {
+        return None;
+    }
+    plurx_core::scan::dv_title::DvTitleStats::from_probe_json(&demand.probe_json)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one owned title attempt retains source, tools, physical and durable admission"
@@ -254,6 +347,7 @@ async fn execute(
     state: AppState,
     file: plurx_core::domain::MediaFile,
     demand: TitleDemand,
+    reused: Option<plurx_core::scan::dv_title::DvTitleStats>,
     tools: Arc<ToolSet>,
     admission: crate::transcode::FragmentAdmission,
     job: plurx_core::store::background_jobs::BackgroundJob,
@@ -262,15 +356,47 @@ async fn execute(
 ) -> bool {
     let fence = active.fence();
     let cancel = fence.loss_token().child_token();
-    let result = super::run_admitted_probe(
-        &state.transcode,
-        &admission,
-        &cancel,
-        &shutdown,
-        None,
-        super::dv_title::scan(&file, &demand.probe_json, &tools),
-    )
-    .await;
+    let reused = reused.or_else(|| {
+        job.checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.get("fel_title_aggregate"))
+            .and_then(|value| serde_json::from_value::<TitleOutput>(value.clone()).ok())
+            .filter(|out| {
+                out.file_id == file.id
+                    && out.probe_revision == demand.probe_revision
+                    && out.source_size == file.size
+                    && out.source_mtime == file.mtime
+                    && out.scanner_digest == tools.title_scanner_digest()
+                    && out.stats.complete
+            })
+            .map(|out| out.stats)
+    });
+    let source_version = crate::fragment_index_cluster::inspect_source(&file)
+        .await
+        .ok();
+    let result = match reused {
+        Some(stats) => Ok(stats),
+        None => {
+            super::run_source_admitted_probe(
+                &state.transcode,
+                &admission,
+                &cancel,
+                &shutdown,
+                None,
+                &fence,
+                || async {
+                    source_version.is_some()
+                        && tools.is_current().await
+                        && crate::fragment_index_cluster::inspect_source(&file)
+                            .await
+                            .ok()
+                            == source_version
+                },
+                super::dv_title::scan(&file, &demand.probe_json, &tools),
+            )
+            .await
+        }
+    };
     let mut published = false;
     let settlement = if shutdown.is_cancelled() || cancel.is_cancelled() {
         // A manual cancel/source supersession has already invalidated our token,
@@ -288,33 +414,98 @@ async fn execute(
     } else {
         match result {
             Ok(stats) => {
+                // A Profile 7 FEL title is qualified for the reconstructed
+                // 8.1 here, once, while this job holds it. Foreground work
+                // preempts only the qualification: the aggregate is still
+                // published, and the verdict stays missing until a later play
+                // asks again.
+                let qualification = cancel.child_token();
+                match super::run_source_admitted_probe(
+                    &state.transcode,
+                    &admission,
+                    &qualification,
+                    &shutdown,
+                    None,
+                    &fence,
+                    || async {
+                        source_version.is_some()
+                            && tools.is_current().await
+                            && crate::fragment_index_cluster::inspect_source(&file)
+                                .await
+                                .ok()
+                                == source_version
+                    },
+                    super::fel_qualification::qualify_if_due(
+                        &state,
+                        &file,
+                        &demand.probe_json,
+                        &tools,
+                        &admission,
+                        &qualification,
+                    ),
+                )
+                .await
+                {
+                    Ok(super::fel_qualification::Qualification::Stored(verdict)) => {
+                        tracing::debug!(target: "plurxd::dv", file_id = file.id,
+                            admitted = verdict.admitted, "FEL qualification stored");
+                    }
+                    Ok(outcome) => {
+                        tracing::debug!(target: "plurxd::dv", file_id = file.id, ?outcome, "FEL qualification");
+                    }
+                    Err(error) => {
+                        tracing::warn!(target: "plurxd::dv", file_id = file.id, %error,
+                            "FEL qualification did not complete; the title keeps the plain conversion");
+                    }
+                }
                 let output = TitleOutput {
                     file_id: file.id,
                     probe_revision: demand.probe_revision,
                     source_size: demand.source_size,
                     source_mtime: demand.source_mtime,
-                    scanner_digest: tools.scanner_digest(),
+                    scanner_digest: tools.title_scanner_digest(),
                     stats,
                 };
-                match fence.publish_dv_title(output).await {
-                    Ok(true) => {
-                        published = true;
-                        None
+                let pending_here = match (
+                    state.store.get_file_probe_json(file.id).await,
+                    state.transcode.fel_identity(&tools.backend_digest()).await,
+                ) {
+                    (Ok(Some(document)), Ok(backend)) => {
+                        plurx_core::transcode::dv_fel_qualification::pending_recipes(
+                            &document, file.size, file.mtime,
+                        )
+                        .iter()
+                        .any(|request| request.backend_identity == backend)
                     }
-                    Ok(false) => Some(JobSettlement::Stop {
-                        error_code: "title_publication_fenced".into(),
-                    }),
-                    Err(error) => {
-                        tracing::warn!(%error,"title publication unavailable");
-                        Some(JobSettlement::Retry {
-                            error_code: "title_publication_failed".into(),
-                            not_before_ms: now_ms().saturating_add(
-                                crate::background_jobs::retry_delay_ms(
-                                    &job.id,
-                                    job.failed_attempts,
+                    _ => true,
+                };
+                if pending_here {
+                    Some(JobSettlement::Yield {
+                        error_code: Some("fel_recipe_pending".into()),
+                        not_before_ms: now_ms().saturating_add(5000),
+                        checkpoint: Some(serde_json::json!({"fel_title_aggregate":output})),
+                    })
+                } else {
+                    match fence.publish_dv_title(output).await {
+                        Ok(true) => {
+                            published = true;
+                            None
+                        }
+                        Ok(false) => Some(JobSettlement::Stop {
+                            error_code: "title_publication_fenced".into(),
+                        }),
+                        Err(error) => {
+                            tracing::warn!(%error,"title publication unavailable");
+                            Some(JobSettlement::Retry {
+                                error_code: "title_publication_failed".into(),
+                                not_before_ms: now_ms().saturating_add(
+                                    crate::background_jobs::retry_delay_ms(
+                                        &job.id,
+                                        job.failed_attempts,
+                                    ),
                                 ),
-                            ),
-                        })
+                            })
+                        }
                     }
                 }
             }

@@ -655,6 +655,7 @@ mod tests {
         assert_eq!((stored.size, stored.mtime), (size, mtime));
         let body = "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nPRIVATE CAPTION BODY\n";
         let provider = DownloadedSubtitle {
+            text_translation: None,
             source_size: size,
             source_mtime: mtime,
             provider_file_id: 42,

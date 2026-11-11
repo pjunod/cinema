@@ -921,13 +921,16 @@
     async fn retention_keeps_a_reload_margin_above_the_observed_fetch_lead() {
         let dir = crate::test_tempdir().expect("tempdir");
         let p = dir.path();
-        // 100 segments of 4s = 400s of media.
-        seeded_session_dir(p, 100, 4.0).await;
+        // Begin with the already-served 300s window this steady-state
+        // retention regression observes, then extend writer inventory to 400s.
+        seeded_session_dir(p, 75, 4.0).await;
         tokio::fs::write(p.join("init.mp4"), b"i")
             .await
             .expect("write init");
 
         let session = Arc::new(test_session(p.to_path_buf()));
+        install_seeded_served_playlist(&session, 0).await;
+        seeded_session_dir(p, 100, 4.0).await;
         session.refresh_segments().await;
         assert_eq!(
             session.segments.lock().await.produced_playable_end_ms(),
@@ -936,11 +939,11 @@
 
         // Physical-iPad regression: AVPlayer fetched through 300s while its
         // playhead was around 180s, despite a 60s preferred forward buffer.
-        // The retained window must still leave 60s behind that playhead for
-        // back-buffering and a retry.
+        // The final published window must preserve the configured back buffer
+        // plus the control exchange guard behind that playhead.
         let observed_playhead_ms = 180_000;
         let observed_fetched_end_ms = 300_000;
-        let required_reload_margin_ms = 60_000;
+        let required_reload_margin_ms = CLIENT_BACK_BUFFER_SECS * 1_000 + ROLLING_PUBLICATION_GUARD_MS;
         session
             .fetched_end_ms
             .store(observed_fetched_end_ms, Relaxed);
@@ -957,6 +960,9 @@
             commit_rolling_publication_media(&session, 74, observed_fetched_end_ms).await,
             "download frontier must reach the publication actor"
         );
+        // This regression starts after presentation; the hand-built segment
+        // inventory does not emit the actor's real advancing frame reports.
+        session.control.mark_startup_presented_for_test().await;
         expire_seeded_prefix(&session, 30).await;
         gc_expired_segments(&session).await;
         // This fixture expires files directly instead of advancing them
@@ -971,23 +977,19 @@
             .await
             .expect("retention boundary reaches the served snapshot");
 
-        // The retained/pruned segment boundary is the behavior under test.
-        // Segment 30 begins at 120s, leaving 60s behind the observed 180s
-        // playhead even though the download frontier had reached 300s.
+        // Publication may advance the window beyond the download-retention
+        // request. Its combined boundary must still protect C - G - B.
         let (first_retained, retained_start_ms) = {
             let index = session.segments.lock().await;
             let first = index.first_retained_index().expect("retained segment");
             let (start, _) = index.window_ms_of(first).expect("retained window");
             (first, start)
         };
-        assert_eq!(first_retained, 30);
-        assert_eq!(
-            observed_playhead_ms - retained_start_ms,
-            required_reload_margin_ms,
-            "the actual retained set leaves the required reload margin"
-        );
+        assert!(first_retained >= 30, "the expired prefix cannot reappear");
+        assert!(observed_playhead_ms - retained_start_ms >= required_reload_margin_ms,
+            "the actual retained set must preserve the configured back buffer and guard");
         assert!(!p.join("seg00029.ts").exists(), "just before the boundary");
-        assert!(p.join("seg00030.ts").exists(), "retention boundary");
+        assert!(p.join(format!("seg{first_retained:05}.ts")).exists(), "retention boundary");
         assert!(p.join("seg00074.ts").exists(), "just inside the window");
         // …and only what is older goes.
         assert!(!p.join("seg00000.ts").exists());
@@ -1020,10 +1022,11 @@
             .map_err(|error| error.error)
             .expect("served playlist");
         let served = String::from_utf8(served).expect("playlist utf8");
-        assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:30"), "{served}");
+        assert!(served.contains(&format!("#EXT-X-MEDIA-SEQUENCE:{first_retained}")), "{served}");
         assert!(!served.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{served}");
         assert!(!served.contains("seg00029.ts"), "{served}");
-        assert!(served.contains("seg00030.ts"), "{served}");
+        assert!(served.contains(&format!("seg{first_retained:05}.ts")), "{served}");
+        assert!(!served.contains(&format!("seg{:05}.ts", first_retained - 1)), "{served}");
         for name in served.lines().filter(|line| line.ends_with(".ts")) {
             assert!(p.join(name).exists(), "served segment must exist: {name}");
         }
@@ -1204,7 +1207,11 @@
                 ..Default::default()
             },
         ).await;
-        store.put_setting(keys::HLS_READRATE, "0").await.expect("readrate");
+        // Retention is optional: a busy capture refuses rather than slowing
+        // ordinary publication. Pace this positive fixture without the default
+        // 90-second initial burst, just like d3_copy_session below.
+        store.put_setting(keys::HLS_READRATE, "1").await.expect("paced retention");
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("retained allowance");
         // Rolling retention is a Developer switch, off by default (D3).
         store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
@@ -1216,6 +1223,7 @@
         manager.record_retained_headroom(1 << 50);
         let options = CopySessionOptions {
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
             transcode_audio: false,
             preserve_dolby_vision: false,
         };
@@ -1230,9 +1238,40 @@
                 if let Some(artifact) = manager.vod.acquire_rolling_output(production) {
                     break artifact;
                 }
+                assert!(
+                    !first.failed.load(Acquire),
+                    "copy failed before retained completion: {:?}",
+                    first.failure_reason()
+                );
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-        }).await.expect("normal child and reader completion publish retained inventory");
+        }).await;
+        let artifact = match artifact {
+            Ok(artifact) => artifact,
+            Err(elapsed) => {
+                // Diagnose only after the unchanged completion deadline. Do
+                // not poll/reap the child or wait indefinitely on its owners.
+                let actor = tokio::time::timeout(
+                    Duration::from_secs(1), first.control.snapshot(),
+                ).await;
+                let child = first.child.try_lock()
+                    .map_err(|_| "child slot locked")
+                    .map(|child| child.as_ref().map(|child| (
+                        child.producer_attempt, child.id(), child.terminal_exit_snapshot(),
+                    )));
+                let collection = first.rolling_collection.as_ref()
+                    .map(|collection| (collection.abandoned(), collection.directory_for_test()));
+                let failed = first.failed.load(Acquire);
+                let failure = failed.then(|| first.failure_reason());
+                panic!(
+                    "normal child and reader completion publish retained inventory: {elapsed:?}; \
+                     failed={failed}; failure={failure:?}; actor={actor:?}; \
+                     child(attempt,pid,exit)={child:?}; \
+                     collection(abandoned,directory)={collection:?}; retained={:?}",
+                    manager.vod.retained_snapshot(),
+                );
+            }
+        };
         let rates = artifact.bandwidth().expect("complete mux rates");
         assert!(rates.average_bps > 0 && rates.peak_bps >= rates.average_bps);
         let next = manager.start_copy(file_id, 0.0, None, options, "owner", "second")
@@ -1278,6 +1317,7 @@
         manager.record_retained_headroom(1 << 50);
         let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "refused-proof").await.expect("ordinary copy");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("owner");
         let production = session.rolling_provenance.as_ref().expect("actual source binding");
@@ -1373,14 +1413,17 @@
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
         // Rolling retention is a Developer switch, off by default (D3).
         store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
-        store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
+        // Obtain the complete retained fixture before testing its revocation;
+        // optional capture contention belongs to the dedicated busy-owner test.
+        store.put_setting(keys::HLS_READRATE, "1").await.expect("paced retention");
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
             work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu));
         // No sampler runs in a test: publish the headroom it would have.
         manager.record_retained_headroom(1 << 50);
         let options = CopySessionOptions { convert_dolby_vision: false,
-            transcode_audio: false, preserve_dolby_vision: false };
+            transcode_audio: false, preserve_dolby_vision: false, dual_layer_as_copied: false };
         let first = manager.start_copy(file_id, 0.0, None, options, "owner", "integrity-first")
             .await.expect("real producer");
         let incumbent = manager.sessions.lock().await.get(&first.session_id).cloned().expect("first");
@@ -1447,6 +1490,7 @@
         manager.record_retained_headroom(1 << 50);
         let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "busy-proof").await.expect("ordinary start");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
         let collection = session.rolling_collection.as_ref().expect("optional reservation");
@@ -1506,6 +1550,7 @@
         manager.record_retained_headroom(1 << 50);
         let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "d3").await.expect("ordinary start");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
         (manager, session, info, file_id, media, work)
@@ -1664,6 +1709,7 @@
         manager.store.put_setting(keys::HLS_READRATE, "1").await.expect("paced");
         let second_info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "d3-second").await.expect("second start");
         let second = manager.sessions.lock().await.get(&second_info.session_id).cloned()
             .expect("second");
@@ -1897,6 +1943,7 @@
                 None,
                 CopySessionOptions {
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                     transcode_audio: false,
                     preserve_dolby_vision: false,
                 },
@@ -2062,19 +2109,13 @@
             EncoderCaps::default(),
             Pipeline::Cpu,
         ));
-        // Burst then crawl, sized so this legacy (no-demand) viewer earns its
-        // first snapshot from the burst instead of at ENDLIST. The legacy
-        // publication clock wants `ROLLING_INITIAL_RUNWAY_MS` (48 s) ahead of
-        // the wall clock since bootstrap; at a 1x crawl the producer never
-        // gains on that clock, so the runway has to come from the burst. A
-        // 50 s burst closes the 6 s copy segment past 48 s at once; the next
-        // segments then close at 1x, 6 s apart, so the served window (capped
-        // at 48 s until a fetch) stays a full publication batch ahead of the
-        // staged frontier for about twelve seconds -- the window in which the
-        // assertions below run. A larger burst stages a complete next batch
-        // immediately and is held by the publication clock, correctly. The
-        // 180 s clip keeps ENDLIST out of the test entirely.
-        store.put_setting(keys::HLS_READRATE, "1").await.expect("s");
+        // The publication control needs a sustainable producer. A nominal
+        // 1x input pace measures below 1x once real startup/I/O overhead is
+        // included and correctly fails admission on a busy host. Use 2x so
+        // that overhead cannot decide the behavior under test. The 50 s
+        // initial burst supplies the first snapshot's runway; the 180 s
+        // source keeps ENDLIST outside the first snapshot/fetch assertions.
+        store.put_setting(keys::HLS_READRATE, "2").await.expect("s");
         store
             .put_setting(keys::HLS_BURST_SECS, "50")
             .await
@@ -2099,6 +2140,7 @@
                 None,
                 CopySessionOptions {
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                     transcode_audio: false,
                     preserve_dolby_vision: false,
                 },
@@ -2240,7 +2282,7 @@
             mgr.flow_control(&session, &info.session_id).await;
             assert!(!session.suspended.load(Relaxed));
             let status = mgr.session_status(&info.session_id).await.expect("status");
-            assert_eq!(status.readrate, 1.0, "HLS exposes its effective input pace");
+            assert_eq!(status.readrate, 2.0, "HLS exposes its effective input pace");
             assert_eq!(status.production_policy, "publication_clock_legacy");
             assert_eq!(status.hold_reason, None);
             assert_eq!(status.resume_below_bytes, None);
@@ -2830,6 +2872,92 @@
             "{error}"
         );
         drop(producer);
+        assert_eq!(mgr.admissions.in_use(), 0);
+    }
+
+    /// D2 item 4: with hardware full of live viewers, `Software` and
+    /// `Refused` are already the answer — no background encoder can yield a
+    /// slot to this start. Admission returns them at the first decision
+    /// instead of sleeping out the whole queue window and then returning the
+    /// same thing.
+    #[tokio::test]
+    async fn final_admission_decisions_return_without_waiting_out_the_queue() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps {
+                nvenc: true,
+                ..Default::default()
+            },
+            Pipeline::Cpu,
+        );
+        let viewers = (0..DEFAULT_MAX_HW_SESSIONS)
+            .map(|_| {
+                mgr.admissions
+                    .try_acquire(DEFAULT_MAX_HW_SESSIONS, Priority::Live)
+                    .expect("live hardware permit")
+            })
+            .collect::<Vec<_>>();
+        let window = Duration::from_secs(5);
+        let started = std::time::Instant::now();
+        let admission = mgr
+            .admit_live(
+                Encoder::Nvenc,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                window,
+                Priority::Live,
+            )
+            .await
+            .expect("a class software carries starts there");
+        assert_eq!(admission.encoder, Encoder::Software);
+        assert!(
+            started.elapsed() < ADMISSION_POLL,
+            "a Software decision is final: {:?}",
+            started.elapsed()
+        );
+        drop(admission);
+
+        let started = std::time::Instant::now();
+        let error = mgr
+            .admit_live(
+                Encoder::Nvenc,
+                None,
+                Workload {
+                    source_height: 2160,
+                    codec: "hevc",
+                    hdr: Some("pq"),
+                    target_height: 2160,
+                },
+                window,
+                Priority::Live,
+            )
+            .await
+            .err()
+            .expect("software cannot carry 4K HDR");
+        assert!(
+            started.elapsed() < ADMISSION_POLL,
+            "a Refused decision is final: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(
+                capacity_refusal(&error),
+                Some((CapacityRefusal::Waitable { .. }, _))
+            ),
+            "a full hardware pool frees when a viewer leaves: {error}"
+        );
+        assert!(!mgr.admissions.live_is_waiting(), "the waiter was released");
+        drop(viewers);
         assert_eq!(mgr.admissions.in_use(), 0);
     }
 

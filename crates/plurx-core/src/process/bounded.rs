@@ -1,4 +1,4 @@
-//! Bounded ownership for short-lived media inspection processes.
+//! Bounded ownership for short-lived helper processes.
 //!
 //! Startup probes are evidence, not services. They receive a small explicit
 //! environment, bounded output and wall time, and one owner that kills and
@@ -12,6 +12,14 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
+
+mod pause;
+#[cfg(target_os = "linux")]
+pub use pause::verified_group as source_group_quiescent;
+pub use pause::{
+    pausable, source_pause_controller, ChildPauseGuard, SourcePauseController,
+    SourcePauseObservation, SourcePausePhase, SourceQuotaWait,
+};
 
 tokio::task_local! {
     static WORK_CANCELLATION: CancellationToken;
@@ -27,7 +35,10 @@ pub async fn cancellable<T>(
     WORK_CANCELLATION.scope(cancellation, operation).await
 }
 
-pub(crate) fn cancellation() -> Option<CancellationToken> {
+/// Capture the current operation's cancellation for explicitly owned blocking
+/// helpers. Task-local scopes do not automatically propagate into worker threads;
+/// callers must keep awaiting those helpers until their reads have settled.
+pub fn cancellation() -> Option<CancellationToken> {
     WORK_CANCELLATION.try_with(Clone::clone).ok()
 }
 
@@ -75,6 +86,33 @@ impl OwnedChild {
             .await?;
         self.child = None;
         Ok(status)
+    }
+
+    async fn wait_pausable(
+        &mut self,
+        guard: &ChildPauseGuard,
+        active_budget: Duration,
+    ) -> io::Result<ExitStatus> {
+        let process_id = self
+            .child
+            .as_ref()
+            .and_then(Child::id)
+            .ok_or_else(|| io::Error::other("source child has no live process identity"))?;
+        guard
+            .run_group(process_id, active_budget, self.wait())
+            .await
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn wait_group_settled(group: Option<i32>) {
+        if let Some(group) = group {
+            // Returning a killed leader is not proof that a D-state helper
+            // stopped reading. Keep the cleanup owner until all group threads
+            // are dead or gone; neither a timeout nor SIGKILL invents credit.
+            while !pause::verified_group(group, false).await.unwrap_or(false) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
     }
 
     async fn kill_and_reap(&mut self) {
@@ -138,7 +176,15 @@ pub async fn output_command(
     max_output_bytes: usize,
     work: super::ChildWork,
 ) -> io::Result<Output> {
-    output_command_environment(command, wall_time, max_output_bytes, work, true).await
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Service,
+        None,
+    )
+    .await
 }
 
 /// Bounded CPU child with held descriptors and an LC_ALL-only environment.
@@ -155,7 +201,70 @@ pub async fn output_command_clean_env(
             "managed child executable must be absolute",
         ));
     }
-    output_command_environment(command, wall_time, max_output_bytes, work, false).await
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Clean,
+        None,
+    )
+    .await
+}
+
+/// Native host tools may require their existing user/IPC environment. Keep
+/// that environment intact while using the same bounded process-group owner.
+/// Inspection probes must continue using the service or clean environment APIs.
+pub async fn output_command_inherited_env(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+) -> io::Result<Output> {
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Inherited,
+        None,
+    )
+    .await
+}
+
+/// A clean-environment child whose stderr retains only selected complete lines.
+/// The selector receives each line with its original newline, if present. All
+/// stderr is drained; selected overflow or any line above 8 KiB fails at EOF.
+/// Stdout and child lifetime/cancellation retain the ordinary bounded semantics.
+pub async fn output_command_clean_env_selected_stderr(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+    select: fn(&[u8]) -> bool,
+) -> io::Result<Output> {
+    if !std::path::Path::new(command.as_std().get_program()).is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "managed child executable must be absolute",
+        ));
+    }
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Clean,
+        Some(select),
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum Environment {
+    Service,
+    Clean,
+    Inherited,
 }
 
 async fn output_command_environment(
@@ -163,18 +272,24 @@ async fn output_command_environment(
     wall_time: Duration,
     max_output_bytes: usize,
     work: super::ChildWork,
-    inherit_service_environment: bool,
+    environment: Environment,
+    stderr_selector: Option<fn(&[u8]) -> bool>,
 ) -> io::Result<Output> {
     check_cancellation()?;
     let cancellation = cancellation().unwrap_or_default();
+    if !matches!(environment, Environment::Inherited) {
+        let descriptor_handoff = super::source_lifetime::has_descriptor_handoff(command.as_std());
+        command.env_clear().env("LC_ALL", "C");
+        if descriptor_handoff {
+            super::source_lifetime::tag_descriptor_handoff(command);
+        }
+    }
     command
-        .env_clear()
-        .env("LC_ALL", "C")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    if inherit_service_environment {
+    if matches!(environment, Environment::Service) {
         for name in [
             "PATH",
             "LD_LIBRARY_PATH",
@@ -194,6 +309,18 @@ async fn output_command_environment(
     #[cfg(unix)]
     command.process_group(0);
 
+    let controller = source_pause_controller();
+    #[cfg(not(target_os = "linux"))]
+    if controller.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "source pause requires verified Linux process groups",
+        ));
+    }
+    let pause_guard = match controller.as_ref() {
+        Some(controller) => Some(controller.enlist(&cancellation).await?),
+        None => None,
+    };
     let (mut child, job) = super::spawn_job_owned(command, work)?;
     let stdout = child
         .stdout
@@ -204,18 +331,34 @@ async fn output_command_environment(
         .take()
         .ok_or_else(|| io::Error::other("probe stderr was not piped"))?;
     let mut stdout = tokio::spawn(drain_capped(stdout, max_output_bytes));
-    let mut stderr = tokio::spawn(drain_capped(stderr, max_output_bytes));
+    let mut stderr = tokio::spawn(async move {
+        match stderr_selector {
+            Some(select) => drain_selected_lines(stderr, max_output_bytes, select).await,
+            None => drain_capped(stderr, max_output_bytes).await,
+        }
+    });
     let mut child = OwnedChild::new(child, job);
+    #[cfg(target_os = "linux")]
+    let source_group = pause_guard.as_ref().and(child.process_group);
+    let deadline = controller.as_ref().map_or_else(
+        || tokio::time::Instant::now() + wall_time,
+        |controller| controller.hard_deadline(wall_time),
+    );
 
     let completed = tokio::select! {
         biased;
         () = cancellation.cancelled() => Ok(Err(io::Error::new(
             io::ErrorKind::Interrupted, "work cancelled"))),
-        result = tokio::time::timeout(wall_time, async {
-        let status = child.wait().await?;
+        result = tokio::time::timeout_at(deadline, async {
+        let status = match pause_guard.as_ref() {
+            Some(guard) => child.wait_pausable(guard, wall_time).await?,
+            None => child.wait().await?,
+        };
         // A short-lived probe may not daemonize. Once its leader exits, kill
         // any descendant left in the owned group before waiting for pipe EOF.
         child.kill_process_group();
+        #[cfg(target_os = "linux")]
+        OwnedChild::wait_group_settled(source_group).await;
         let stdout = (&mut stdout)
             .await
             .map_err(|error| io::Error::other(error.to_string()))??;
@@ -233,6 +376,8 @@ async fn output_command_environment(
         Ok(Ok(output)) => Ok(output),
         Ok(Err(error)) => {
             child.kill_and_reap().await;
+            #[cfg(target_os = "linux")]
+            OwnedChild::wait_group_settled(source_group).await;
             if !stdout.is_finished() {
                 stdout.abort();
                 let _ = stdout.await;
@@ -245,6 +390,8 @@ async fn output_command_environment(
         }
         Err(_) => {
             child.kill_and_reap().await;
+            #[cfg(target_os = "linux")]
+            OwnedChild::wait_group_settled(source_group).await;
             if !stdout.is_finished() {
                 stdout.abort();
                 let _ = stdout.await;
@@ -276,11 +423,168 @@ pub(super) async fn drain_capped(
     }
 }
 
+const SELECTED_STDERR_LINE_BYTES: usize = 8 * 1024;
+
+/// Retention is bounded independently of ignored metadata. Invalid input is
+/// remembered until EOF so no early error can close a full child pipe.
+async fn drain_selected_lines(
+    mut reader: impl AsyncRead + Unpin,
+    max_output_bytes: usize,
+    select: fn(&[u8]) -> bool,
+) -> io::Result<Vec<u8>> {
+    let mut retained = Vec::with_capacity(max_output_bytes.min(SELECTED_STDERR_LINE_BYTES));
+    let mut line = Vec::with_capacity(SELECTED_STDERR_LINE_BYTES);
+    let mut chunk = [0_u8; 8 * 1024];
+    let mut discarding_line = false;
+    let mut invalid = None;
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            if !discarding_line && !line.is_empty() && select(&line) {
+                if line.len() > max_output_bytes.saturating_sub(retained.len()) {
+                    invalid = Some("selected stderr exceeds retained byte limit");
+                } else {
+                    retained.reserve_exact(line.len());
+                    retained.extend_from_slice(&line);
+                }
+            }
+            return match invalid {
+                Some(reason) => Err(io::Error::new(io::ErrorKind::InvalidData, reason)),
+                None => Ok(retained),
+            };
+        }
+        for byte in &chunk[..read] {
+            if !discarding_line {
+                if line.len() == SELECTED_STDERR_LINE_BYTES {
+                    invalid = Some("stderr line exceeds 8 KiB");
+                    discarding_line = true;
+                    line.clear();
+                } else {
+                    line.push(*byte);
+                }
+            }
+            if *byte == b'\n' {
+                if !discarding_line && select(&line) {
+                    if line.len() > max_output_bytes.saturating_sub(retained.len()) {
+                        invalid = Some("selected stderr exceeds retained byte limit");
+                    } else {
+                        retained.reserve_exact(line.len());
+                        retained.extend_from_slice(&line);
+                    }
+                }
+                line.clear();
+                discarding_line = false;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const TEST_WORK: super::super::ChildWork = super::super::ChildWork::background("bounded test");
+
+    fn selected_record(line: &[u8]) -> bool {
+        line.starts_with(b"frame:")
+    }
+
+    #[tokio::test]
+    async fn selected_stderr_ignores_large_metadata_and_preserves_split_records() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(11);
+        let writing = tokio::spawn(async move {
+            writer.write_all(b"frame: first\n").await?;
+            for _ in 0..32768 {
+                writer
+                    .write_all(b"ignored metadata continuation and side data\n")
+                    .await?;
+            }
+            writer.write_all(b"frame: final without newline").await
+        });
+        let retained = tokio::time::timeout(
+            Duration::from_secs(10),
+            drain_selected_lines(reader, 64, selected_record),
+        )
+        .await
+        .expect("reader reaches EOF")
+        .expect("selected bounded records");
+        writing
+            .await
+            .expect("writer joined")
+            .expect("all metadata drained");
+        assert_eq!(retained, b"frame: first\nframe: final without newline");
+    }
+
+    #[tokio::test]
+    async fn selected_stderr_overflow_and_overlong_lines_drain_before_refusal() {
+        use tokio::io::AsyncWriteExt;
+        for (bytes, cap) in [
+            (b"frame: over cap\n".to_vec(), 3),
+            (
+                [
+                    vec![b'x'; SELECTED_STDERR_LINE_BYTES + 1],
+                    b"\nframe: valid\n".to_vec(),
+                ]
+                .concat(),
+                64,
+            ),
+            (vec![b'x'; SELECTED_STDERR_LINE_BYTES + 1], 64),
+        ] {
+            let (mut writer, reader) = tokio::io::duplex(7);
+            let writing = tokio::spawn(async move {
+                writer.write_all(&bytes).await?;
+                if bytes.last() == Some(&b'\n') {
+                    writer.write_all(b"ignored tail\n").await?;
+                }
+                Ok::<_, io::Error>(())
+            });
+            let failure = tokio::time::timeout(
+                Duration::from_secs(5),
+                drain_selected_lines(reader, cap, selected_record),
+            )
+            .await
+            .expect("refusal waits for EOF")
+            .expect_err("incomplete records cannot be accepted");
+            assert_eq!(failure.kind(), io::ErrorKind::InvalidData);
+            writing
+                .await
+                .expect("writer joined")
+                .expect("overflow did not close the pipe early");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selected_stderr_child_uses_existing_clean_environment_owner() {
+        let relative = output_command_clean_env_selected_stderr(
+            &mut Command::new("sh"),
+            Duration::from_secs(5),
+            64,
+            TEST_WORK,
+            selected_record,
+        )
+        .await
+        .expect_err("absolute executable required");
+        assert_eq!(relative.kind(), io::ErrorKind::InvalidInput);
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'ignored\\nframe: final\\n' >&2; printf '%s' \"$LC_ALL\"",
+        ]);
+        let output = output_command_clean_env_selected_stderr(
+            &mut command,
+            Duration::from_secs(5),
+            64,
+            TEST_WORK,
+            selected_record,
+        )
+        .await
+        .expect("owned selected output");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"C");
+        assert_eq!(output.stderr, b"frame: final\n");
+    }
 
     #[tokio::test]
     async fn excessive_output_is_drained_and_retained_at_the_cap() {
@@ -295,6 +599,33 @@ mod tests {
         .expect("bounded output");
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_helper_environment_preservation_is_explicit() {
+        for inherited in [false, true] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "printf %s \"$PLURX_NATIVE_HELPER_FIXTURE\""])
+                .env("PLURX_NATIVE_HELPER_FIXTURE", "native-host-value");
+            let output = if inherited {
+                output_command_inherited_env(&mut command, Duration::from_secs(5), 1024, TEST_WORK)
+                    .await
+            } else {
+                output_command(&mut command, Duration::from_secs(5), 1024, TEST_WORK).await
+            }
+            .expect("bounded native helper");
+            assert!(output.status.success());
+            assert_eq!(
+                output.stdout,
+                if inherited {
+                    b"native-host-value".as_slice()
+                } else {
+                    b"".as_slice()
+                }
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -413,6 +744,111 @@ mod tests {
             "unreaped child outlived its admission"
         );
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn owned_group_pause_preserves_active_budget_and_cancel_reaps_the_stopped_group() {
+        let directory = tempfile::tempdir().expect("source pause fixture");
+        let leader = directory.path().join("leader.pid");
+        let helper = directory.path().join("helper.pid");
+        let progress = directory.path().join("progress");
+        let control = SourcePauseController::new(Duration::from_secs(8));
+        let cancellation = CancellationToken::new();
+        let worker_control = control.clone();
+        let worker_cancel = cancellation.clone();
+        let args=vec!["-c".to_owned(),
+            "echo $$ > \"$1\"; (while :; do printf x >> \"$2\"; sleep 0.02; done) & echo $! > \"$3\"; wait".to_owned(),
+            "pause-fixture".to_owned(),leader.to_string_lossy().into_owned(),progress.to_string_lossy().into_owned(),helper.to_string_lossy().into_owned()];
+        let child = tokio::spawn(async move {
+            pausable(
+                worker_control,
+                cancellable(
+                    worker_cancel,
+                    output("/bin/sh", &args, Duration::from_secs(2), 1024, TEST_WORK),
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !leader.exists() || !helper.exists() || !progress.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the owned group is reading");
+        let pid: i32 = tokio::fs::read_to_string(&leader)
+            .await
+            .expect("leader")
+            .trim()
+            .parse()
+            .expect("pid");
+        let first = control.request_pause();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while control.observation().phase != SourcePausePhase::Paused {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("every group thread stopped");
+        assert!(source_group_quiescent(pid, true)
+            .await
+            .expect("whole group observation"));
+        let before = tokio::fs::metadata(&progress)
+            .await
+            .expect("progress")
+            .len();
+        tokio::time::sleep(Duration::from_millis(2200)).await;
+        assert_eq!(
+            before,
+            tokio::fs::metadata(&progress)
+                .await
+                .expect("held progress")
+                .len()
+        );
+        assert!(
+            !child.is_finished(),
+            "verified holds do not consume the two-second active budget"
+        );
+        assert!(!control.resume(first + 1));
+        assert!(control.resume(first));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&progress)
+                .await
+                .expect("resumed progress")
+                .len()
+                == before
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the same helper resumes progress");
+        let second = control.request_pause();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while control.observation().phase != SourcePausePhase::Paused {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("second owned pause");
+        assert!(!control.resume(first));
+        assert!(second > first);
+        cancellation.cancel();
+        let failure = tokio::time::timeout(Duration::from_secs(5), child)
+            .await
+            .expect("stopped group cleanup")
+            .expect("owner joined")
+            .expect_err("cancelled while paused");
+        assert_eq!(failure.kind(), io::ErrorKind::Interrupted);
+        assert!(source_group_quiescent(pid, false)
+            .await
+            .expect("no live reading thread"));
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "leader reaped before ownership returns"
+        );
     }
 
     #[tokio::test]

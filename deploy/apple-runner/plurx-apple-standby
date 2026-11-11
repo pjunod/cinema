@@ -3,10 +3,224 @@
 import argparse
 import fcntl
 import json
+import os
+import re
+import shutil
 import signal
 import subprocess
 import threading
+import tempfile
+import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+class UserJanitor:
+    """The standby controller owns both maintenance and runner spawning.
+
+    A separate janitor cannot safely borrow the operator pause marker: Resume
+    could remove it during deletion. This state runs under apple-standby.lock
+    and never changes that marker or forcibly stops a job.
+    """
+    GIB = 1024 ** 3
+
+    def __init__(self, config, clock=time.time, processes=None, remove=shutil.rmtree):
+        self.config = config
+        self.policy = config["janitor"]
+        self.root = Path(config["runner_directory"])
+        self.cache = self.root / "cache"
+        self.clock = clock
+        self.processes = processes or self.process_snapshot
+        self.remove = remove
+        self.next_check = 0
+        self.pending = False
+        self.pressure = False
+        self.descendants = set()
+        self.used = 0
+        self.free = 0
+
+    @staticmethod
+    def process_snapshot():
+        # Only this user's processes; another user's runner is outside this
+        # controller's authority. Unreadable output fails closed in tick().
+        output = subprocess.check_output(
+            ["ps", "-U", str(os.getuid()), "-o", "pid=,ppid=,comm="],
+            text=True, timeout=5
+        )
+        rows = []
+        for line in output.splitlines():
+            pid, parent, command = line.strip().split(None, 2)
+            rows.append((int(pid), int(parent), command))
+        if not rows:
+            raise RuntimeError("process snapshot is empty")
+        return rows
+
+    def busy(self, child):
+        rows = self.processes()
+        pids = {pid for pid, _, _ in rows}
+        runner_pids = {pid for pid, _, command in rows
+                       if Path(command).name.startswith("forgejo-runner")}
+        if child is None:
+            return bool(runner_pids or self.descendants & pids)
+        if child.pid not in pids:
+            raise RuntimeError("runner missing from process snapshot")
+        tree = {child.pid}
+        while True:
+            expanded = tree | {pid for pid, parent, _ in rows if parent in tree}
+            if expanded == tree:
+                break
+            tree = expanded
+        self.descendants.update(tree - {child.pid})
+        return bool(tree - {child.pid} or runner_pids - {child.pid})
+
+    def quiet(self):
+        work = self.root / "_work"
+        return not work.exists() or (
+            self.clock() - work.stat().st_mtime >= self.policy["quiet_seconds"]
+        )
+
+    @staticmethod
+    def unreadable(error):
+        raise error
+
+    def safe_cache(self):
+        retired = self.root / "cache.janitor-retired"
+        if retired.exists() or retired.is_symlink():
+            raise RuntimeError("retired cache remains; inspect it before another reset")
+        if self.root.resolve() != self.root or self.root.stat().st_uid != os.getuid():
+            raise ValueError("runner directory must be canonical and owned by this user")
+        if self.cache.is_symlink():
+            raise ValueError("cache directory must not be a symlink")
+        if self.cache.exists():
+            if not self.cache.is_dir() or self.cache.stat().st_uid != os.getuid():
+                raise ValueError("cache directory must be owned by this user")
+            if not ((self.cache / "bolt.db").is_file() or (self.cache / "cache").is_dir()):
+                raise ValueError("cache-server index or blob directory is missing")
+
+    def record(self, state, error=None, reset=0, reclaimed=0):
+        receipt = {
+            "finished": datetime.fromtimestamp(self.clock(), timezone.utc).isoformat(),
+            "instances": 1, "state": state, "over_budget": int(self.pressure),
+            "reset": reset, "reclaimed_gb": reclaimed // self.GIB,
+            "budget_gb": self.policy["budget_gb"],
+            "reserve_gb": self.policy["reserve_gb"], "recovered": 0,
+            "failures": int(error is not None), "cache_bytes": self.used,
+            "free_bytes": self.free, "runner_directory": str(self.root),
+        }
+        if error is not None:
+            receipt["error"] = str(error)
+        directory = Path(self.policy["state_dir"])
+        directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(receipt, stream)
+            stream.write("\n")
+        try:
+            temporary.replace(directory / "last-run.json")
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def tick(self, controller):
+        if not self.pending and self.clock() < self.next_check:
+            return False
+        try:
+            self.safe_cache()
+            if not self.pending:
+                self.used = sum(
+                    (Path(folder) / name).lstat().st_size
+                    for folder, _, files in os.walk(self.cache, onerror=self.unreadable)
+                    for name in files
+                )
+                self.free = shutil.disk_usage(self.root).free
+                pressure = (self.used > self.policy["budget_gb"] * self.GIB or
+                            self.free < self.policy["reserve_gb"] * self.GIB)
+                self.pressure = pressure
+                if not pressure or self.used < self.GIB:
+                    self.record("healthy" if not pressure else "below_reserve_small_cache")
+                    self.next_check = self.clock() + self.policy["interval_seconds"]
+                    return False
+                self.pending = True
+            if self.busy(controller.child) or not self.quiet():
+                self.record("waiting_for_idle")
+                # Normal health recovery/operator pause may still drain an
+                # active job gracefully; no new runner starts while pending.
+                return controller.child is None or controller.draining
+            if controller.child is not None:
+                controller.drain("cache maintenance")
+                self.record("waiting_for_exit")
+                return True
+            # The complete index/blob pair leaves the active namespace at
+            # once. Even a failed deletion or interrupted controller cannot
+            # restart a cache server over a partially removed bolt database.
+            retired = self.root / "cache.janitor-retired"
+            if retired.exists() or retired.is_symlink():
+                raise RuntimeError("retired cache remains; inspect it before another reset")
+            self.safe_cache()
+            self.cache.rename(retired)
+            try:
+                self.remove(retired)
+            except OSError as error:
+                self.record("error", error=error, reset=1)
+            else:
+                self.record("reset", reset=1, reclaimed=self.used)
+            self.pending = False
+            self.descendants.clear()
+            self.next_check = self.clock() + self.policy["interval_seconds"]
+            return False
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            try:
+                self.record("error", error=error)
+            except OSError as receipt_error:
+                controller.log("janitor receipt failed: %s" % receipt_error, flush=True)
+            controller.log("janitor deferred: %s" % error, flush=True)
+            self.next_check = self.clock() + self.policy["interval_seconds"]
+            return self.pending
+
+
+def configure_janitor(config):
+    policy = config.get("janitor")
+    if policy is None:
+        return
+    if not isinstance(policy, dict):
+        raise ValueError("janitor must be an object")
+    defaults = {"budget_gb": 20, "reserve_gb": 25, "quiet_seconds": 120,
+                "interval_seconds": 3600,
+                "state_dir": str(Path.home() / ".local/state/plurx-ci-janitor")}
+    policy = dict(defaults, **policy)
+    for key in ("budget_gb", "reserve_gb", "quiet_seconds", "interval_seconds"):
+        if not isinstance(policy[key], int) or isinstance(policy[key], bool) or policy[key] <= 0:
+            raise ValueError("janitor.%s must be a positive integer" % key)
+    if policy["quiet_seconds"] < 120:
+        raise ValueError("janitor.quiet_seconds must be at least 120")
+    if not isinstance(policy["state_dir"], str) or not Path(policy["state_dir"]).is_absolute():
+        raise ValueError("janitor.state_dir must be an absolute path")
+    root = Path(config["runner_directory"])
+    if not root.is_absolute() or root.resolve() != root:
+        raise ValueError("janitor runner_directory must be an absolute canonical path")
+    state = Path(policy["state_dir"]).resolve()
+    if state == root or root in state.parents:
+        raise ValueError("janitor receipt must be outside the runner directory")
+    command = config["runner_command"]
+    path = next((command[index + 1] for index, arg in enumerate(command[:-1])
+                 if arg in ("--config", "-c")), None)
+    if path is None:
+        raise ValueError("janitor requires the runner's explicit config path")
+    section = None
+    cache = None
+    shutdown = None
+    for line in Path(path).read_text().splitlines():
+        if line and not line[0].isspace() and not line.startswith("#"):
+            section = line.split(":", 1)[0]
+        if section == "runner" and line.strip().startswith("shutdown_timeout:"):
+            shutdown = line.split(":", 1)[1].strip().strip('"\'')
+        if section == "cache" and line.strip().startswith("dir:"):
+            cache = line.split(":", 1)[1].strip().strip('"\'')
+    if not (shutdown and re.fullmatch(r"(?:[0-9]+(?:\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))+", shutdown)
+            and any(float(number) > 0 for number in re.findall(r"[0-9]+(?:\.[0-9]+)?", shutdown))):
+        raise ValueError("janitor requires a nonzero runner.shutdown_timeout")
+    if cache != str(root / "cache"):
+        raise ValueError("janitor requires cache.dir to be runner_directory/cache")
+    config["janitor"] = policy
 
 
 class Standby:
@@ -19,6 +233,7 @@ class Standby:
         self.failures = 0
         self.recoveries = 0
         self.health = None
+        self.janitor = UserJanitor(config) if config.get("janitor") is not None else None
 
     def drain(self, reason="primary recovered"):
         if self.child is not None and not self.draining:
@@ -26,11 +241,23 @@ class Standby:
             self.child.terminate()
             self.draining = True
 
+    def paused(self):
+        """An operator's ci-fleet Drain: offer no backup slot until Resume."""
+        marker = self.config.get("pause_marker")
+        return bool(marker) and Path(marker).exists()
+
     def step(self, healthy):
         if self.child is not None and self.child.poll() is not None:
             self.log("backup daemon exited: %s" % self.child.returncode, flush=True)
             self.child = None
             self.draining = False
+        paused = self.paused()
+        if paused:
+            self.failures = self.recoveries = 0
+            self.drain("paused by an operator")
+        maintenance = self.janitor.tick(self) if self.janitor is not None else False
+        if paused or maintenance:
+            return
         if healthy != self.health:
             self.log("primary health: %s" % ("available" if healthy else "unavailable"), flush=True)
             self.health = healthy
@@ -58,16 +285,19 @@ class Standby:
 
 
 def probe(config):
+    expected = config.get("probe_expected_stdout")
     try:
         result = subprocess.run(
             config["probe_command"],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if expected is not None else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=config["probe_timeout_seconds"],
             check=False,
         )
-        return result.returncode == 0
+        return result.returncode == 0 and (
+            expected is None or result.stdout == expected.encode("utf-8")
+        )
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -83,8 +313,11 @@ def load_config(path):
     for key in ("interval_seconds", "probe_timeout_seconds", "failure_checks", "recovery_checks"):
         if not isinstance(config[key], int) or isinstance(config[key], bool) or config[key] <= 0:
             raise ValueError("%s must be a positive integer" % key)
+    if "probe_expected_stdout" in config and not isinstance(config["probe_expected_stdout"], str):
+        raise ValueError("probe_expected_stdout must be a string")
     if not Path(config["runner_directory"]).is_dir():
         raise ValueError("runner_directory must exist")
+    configure_janitor(config)
     return config
 
 

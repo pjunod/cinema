@@ -365,6 +365,7 @@ async fn downloaded_captions_rebuild_cache_without_embedded_streams_or_provider(
         ..Default::default()
     }];
     file.downloaded_subtitles = vec![plurx_core::domain::DownloadedSubtitle {
+        text_translation: None,
         source_size: file.size,
         source_mtime: file.mtime,
         provider_file_id: 1,
@@ -1206,4 +1207,179 @@ async fn a_sidecar_published_after_the_cache_read_is_joined_not_re_extracted() {
         Flight::Join(_)
     ));
     extractions().lock().await.remove(&missing);
+}
+
+async fn ffmpeg_and_ffprobe_present() -> bool {
+    for tool in [ffmpeg_bin(), crate::ffmpeg::ffprobe_bin()] {
+        let present = tokio::process::Command::new(tool)
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|status| status.success());
+        if !present {
+            return false;
+        }
+    }
+    true
+}
+
+fn subtitle(index: i64, codec: &str) -> plurx_core::domain::SubtitleStream {
+    plurx_core::domain::SubtitleStream {
+        index,
+        codec: codec.into(),
+        language: Some("eng".into()),
+        title: None,
+        default: false,
+        forced: false,
+        hearing_impaired: false,
+    }
+}
+
+/// A Matroska file whose picture blocks are 20 KB of filler and whose two
+/// subtitle tracks are cued block by block, written to disk.
+fn cue_indexed_file(
+    dir: &Path,
+    id: i64,
+    fixture: crate::mkv_sparse::fixture::Fixture,
+) -> MediaFile {
+    let bytes = fixture.build();
+    let path = dir.join(format!("cue-indexed-{id}.mkv"));
+    std::fs::write(&path, &bytes).expect("fixture file");
+    let mut file = media_file(path);
+    file.id = id;
+    file.size = bytes.len() as i64;
+    file.mtime = modified_seconds(&file.path);
+    file.subtitle_streams = vec![subtitle(0, "subrip"), subtitle(1, "hdmv_pgs_subtitle")];
+    file
+}
+
+/// The scanner identity a source fence checks a reopened file against.
+fn modified_seconds(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_secs() as i64)
+}
+
+const TEST_WORK: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::realtime("subtitle cue-index test");
+
+/// The defect: every embedded-subtitle reader demuxed the picture to find
+/// the subtitle packets, so a 4K remux's whole track ran for the length of
+/// a source pass. A track whose cues provably name every block is read
+/// through them, and the answer is the one the demux gives.
+#[tokio::test]
+async fn a_cue_indexed_track_is_extracted_without_demuxing_the_source() {
+    if !ffmpeg_and_ffprobe_present().await {
+        eprintln!("skipping: ffmpeg/ffprobe not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("dir");
+    let indexed = cue_indexed_file(dir.path(), 9_101, Default::default());
+    let sparse = dir.path().join("sparse.vtt");
+    extract_vtt(&sparse, &indexed, 0, TEST_WORK)
+        .await
+        .expect("cue-indexed extraction");
+    assert_eq!(vtt_routes_for_test(indexed.id), ["cue-index"]);
+    let sparse = std::fs::read_to_string(&sparse).expect("sparse vtt");
+    for cue in ["first line", "second line", "third line"] {
+        assert!(sparse.contains(cue), "missing {cue:?} in {sparse}");
+    }
+    // Use the provisioned demuxer's timeline as the reference: its treatment
+    // of a container's codec delay can differ across supported FFmpeg builds.
+    // The same bytes without the proof take the demux, and agree.
+    let unproven = cue_indexed_file(
+        dir.path(),
+        9_102,
+        crate::mkv_sparse::fixture::Fixture {
+            frames: Vec::new(),
+            ..Default::default()
+        },
+    );
+    let demuxed = dir.path().join("demuxed.vtt");
+    extract_vtt(&demuxed, &unproven, 0, TEST_WORK)
+        .await
+        .expect("demux extraction");
+    assert_eq!(vtt_routes_for_test(unproven.id), ["demux"]);
+    assert_eq!(
+        std::fs::read_to_string(&demuxed).expect("demuxed vtt"),
+        sparse,
+        "the cue index changes how the track is read, not what it says"
+    );
+}
+
+/// A window costs the reads for its own cues wherever it sits in the file;
+/// the demuxed window read the container up to the span's end.
+#[tokio::test]
+async fn a_cue_indexed_window_reads_only_its_span() {
+    use crate::mkv_sparse::fixture::{Block, Fixture};
+    if !ffmpeg_and_ffprobe_present().await {
+        eprintln!("skipping: ffmpeg/ffprobe not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("dir");
+    let fixture = || Fixture {
+        clusters: vec![
+            (0, vec![Block::media(0), Block::text(2, 100, "before", 900)]),
+            (
+                250_000,
+                vec![Block::media(0), Block::text(2, 10, "inside", 1_500)],
+            ),
+            (
+                520_000,
+                vec![Block::media(0), Block::text(2, 20, "after", 700)],
+            ),
+        ],
+        frames: vec![(2, 3), (3, 0)],
+        ..Default::default()
+    };
+    let file = cue_indexed_file(dir.path(), 9_103, fixture());
+    let window = dir.path().join("window.vtt");
+    extract_vtt_window(&window, &file, 0, 200, 200)
+        .await
+        .expect("cue-indexed window");
+    assert_eq!(vtt_routes_for_test(file.id), ["cue-index-window"]);
+    let window = std::fs::read_to_string(&window).expect("window vtt");
+    let unproven = cue_indexed_file(
+        dir.path(),
+        9_104,
+        Fixture {
+            frames: Vec::new(),
+            ..fixture()
+        },
+    );
+    let reference = dir.path().join("demux-window.vtt");
+    extract_vtt_window(&reference, &unproven, 0, 200, 200)
+        .await
+        .expect("reference demux window");
+    assert_eq!(
+        std::fs::read_to_string(&reference).expect("reference VTT"),
+        window,
+        "the indexed window must retain the provisioned demuxer's source timeline"
+    );
+    assert!(
+        !window.contains("before") && !window.contains("after"),
+        "{window}"
+    );
+}
+
+#[tokio::test]
+async fn canceled_sparse_attempt_cannot_turn_into_full_source_demux() {
+    let directory = tempfile::tempdir().expect("subtitle fixture");
+    let file = media_file(directory.path().join("must-not-open-source.mkv"));
+    let output = directory.path().join("must-not-publish.vtt");
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+    let result = plurx_core::process::bounded::cancellable(
+        cancellation,
+        super::extract_vtt(&output, &file, 0, super::TEST_TRACK),
+    )
+    .await;
+    assert!(result
+        .expect_err("cancellation must stop rather than demux")
+        .contains("cancelled"));
+    assert!(!output.exists());
 }

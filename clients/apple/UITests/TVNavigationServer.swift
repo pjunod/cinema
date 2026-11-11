@@ -22,6 +22,8 @@ final class TVNavigationServer: @unchecked Sendable {
     func allowSearchSuccess() { queue.sync { failSearch = false } }
     private var requestCounts: [String: Int] = [:]
     private let epoch = Int64(Date().timeIntervalSince1970 * 1000)
+    // Stay beyond the 240-second native case budget, including authentication and focus setup.
+    private let channelProgrammeDurationMs: Int64 = 600_000
 
     func requestCount(_ path: String) -> Int { queue.sync { requestCounts[path, default: 0] } }
 
@@ -277,22 +279,22 @@ final class TVNavigationServer: @unchecked Sendable {
                       "active_epoch_ms": epoch, "favourite": false, "created_at_ms": epoch,
                       "updated_at_ms": epoch, "source": "local"]]
         case "/api/v1/library-channels/guide":
-            value = [programme(title: "On now fixture", ordinal: 0, start: epoch - 1000, end: epoch + 119000),
-                     programme(title: "Future fixture", ordinal: 1, start: epoch + 119000, end: epoch + 239000)]
+            value = [programme(title: "On now fixture", ordinal: 0, start: epoch - 1000, end: epoch + channelProgrammeDurationMs - 1000),
+                     programme(title: "Future fixture", ordinal: 1, start: epoch + channelProgrammeDurationMs - 1000, end: epoch + 2 * channelProgrammeDurationMs - 1000)]
         case "/api/v1/library-channels/fixture-channel/resolve":
             value = ["source": "local", "channel_id": "fixture-channel", "definition_revision": 1,
                      "generation_id": "g", "occurrence": ["cycle": 0, "ordinal": 0], "server_now_ms": epoch,
-                     "starts_at_ms": epoch - 1000, "ends_at_ms": epoch + 119000, "item_id": 1, "file_id": 1,
+                     "starts_at_ms": epoch - 1000, "ends_at_ms": epoch + channelProgrammeDurationMs - 1000, "item_id": 1, "file_id": 1,
                      "position_ms": 1000, "capabilities": ["join_schedule": true, "watch_from_start": true,
                                                           "seek_while_following": false, "record": false]]
         case "/api/v1/files/1/decision":
             value = ["file_id": 1, "method": "direct_play", "play_url": "/fixture.mp4"]
         case "/api/v1/library-channels/fixture-channel/sessions":
-            value = ["playback": ["session_id": "fixture", "playlist_url": "/fixture.mp4", "duration_ms": 120000,
+            value = ["playback": ["session_id": "fixture", "playlist_url": "/fixture.mp4", "duration_ms": channelProgrammeDurationMs,
                                   "media_origin_ms": 1000],
                      "library_channel": ["channel_id": "fixture-channel", "generation_id": "g", "cycle": 0,
                                          "ordinal": 0, "tune_sequence": requestBody["tune_sequence"] ?? 1,
-                                         "starts_at_ms": epoch - 1000, "ends_at_ms": epoch + 119000]]
+                                         "starts_at_ms": epoch - 1000, "ends_at_ms": epoch + channelProgrammeDurationMs - 1000]]
         case "/api/v1/libraries/1/items":
             let query = Dictionary(uniqueKeysWithValues: (url.queryItems ?? []).map { ($0.name, $0.value ?? "") })
             let offset = Int(query["offset"] ?? "0") ?? 0

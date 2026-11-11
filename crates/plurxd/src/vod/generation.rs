@@ -11,6 +11,32 @@ pub(super) async fn spawn_generation(
     if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
         return;
     }
+    let companion_source = {
+        let readers = rendition.readers.lock().await;
+        readers
+            .values()
+            .any(|reader| reader.companion_bootstrap && !reader.draining_after_prepared_commit)
+    };
+    let source_request = shared
+        .source_identity
+        .lock()
+        .expect("source identity")
+        .as_ref()
+        .map(|identity| {
+            identity.request(
+                Arc::clone(&shared.store),
+                &rendition.recipe.file,
+                &rendition.key,
+                uuid::Uuid::new_v4(),
+                if companion_source {
+                    plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Companion
+                } else if rendition.recipe.source_telemetry || rendition.source_owners.has_source_telemetry() {
+                    plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling
+                } else {
+                    plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::RollingOrTransfer
+                },
+            )
+        });
     let generation_epoch = rendition.gen_epoch.load(Relaxed);
     let generation_current = || {
         !rendition.closed.load(Relaxed)
@@ -138,6 +164,112 @@ pub(super) async fn spawn_generation(
         return;
     }
     #[cfg(target_os = "linux")]
+    let source_needed = !recipe
+        .encoding
+        .as_ref()
+        .and_then(|encoding| encoding.dv_runtime.as_ref())
+        .is_some_and(|runtime| {
+            runtime
+                .prepared
+                .lock()
+                .expect("DV prepared window")
+                .as_ref()
+                .is_some_and(|(index, _)| *index == at)
+        });
+    #[cfg(not(target_os = "linux"))]
+    let source_needed = true;
+    let source_custody = if !source_needed {
+        None
+    } else if let Some(preparation) = rendition.preparation() {
+        let source = match rendition.source.as_ref() {
+            Some(source) => crate::fragment_index_cluster::SourceFence::clone_held(
+                &source.handle,
+                source.object_version(),
+            ),
+            None => Err("background rendition has no held source capability".into()),
+        };
+        match source {
+            Ok(source) => match crate::source_input::SourceInput::open_background_held(
+                source,
+                crate::http::stream::file_content_type(&rendition.recipe.file.path),
+                preparation.fence.source_budget(),
+            )
+            .await
+            {
+                Ok(input) => Some(input),
+                Err(cause) => {
+                    record_failure(
+                        shared,
+                        rendition,
+                        crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                        cause,
+                    );
+                    return;
+                }
+            },
+            Err(cause) => {
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::SourceChanged,
+                    cause,
+                );
+                return;
+            }
+        }
+    } else {
+        match source_request {
+            Some(request) => match if companion_source {
+                let rendition = Arc::downgrade(rendition);
+                let required: crate::source_input::SourceRequired = Arc::new(move || {
+                    let rendition = rendition.clone();
+                    Box::pin(async move {
+                        let Some(rendition) = rendition.upgrade() else {
+                            return false;
+                        };
+                        let readers = rendition.readers.lock().await;
+                        readers.values().any(|reader| {
+                            !reader.authority_only
+                                && !reader.draining_after_prepared_commit
+                                && reader.admission_priority
+                                    != crate::admission::Priority::Speculative
+                        })
+                    })
+                });
+                crate::source_input::SourceInput::open_companion(
+                    request,
+                    format!("vod-{}", generation_epoch),
+                    Arc::clone(&shared.store),
+                    required,
+                )
+                .await
+            } else {
+                crate::source_input::SourceInput::open(request, format!("vod-{}", generation_epoch))
+                    .await
+            } {
+                Ok(custody) => Some(custody),
+                Err(cause) => {
+                    record_failure(
+                        shared,
+                        rendition,
+                        crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                        cause,
+                    );
+                    return;
+                }
+            },
+            None => None,
+        }
+    };
+    if let Some(observer) = source_custody
+        .as_ref()
+        .and_then(|input| input.foreground_observer())
+    {
+        rendition
+            .source_owners
+            .set_source_observer(generation_epoch, observer);
+    }
+    #[cfg(target_os = "linux")]
     if let Some((encoding, runtime)) = recipe.encoding.as_ref().and_then(|encoding| {
         encoding
             .dv_runtime
@@ -179,6 +311,13 @@ pub(super) async fn spawn_generation(
                 .source_owners
                 .registered(&source_dispatch, &prepared.registration);
             drop(source_dispatch);
+            if let Some(custody) = source_custody {
+                let registration = prepared.registration.clone();
+                tokio::spawn(async move {
+                    let _ = registration.wait_confirmed_reap().await;
+                    drop(custody);
+                });
+            }
             if !runtime.source.unchanged() || !runtime.tools.is_current().await {
                 Err("DV source/backend changed before prepared publication".into())
             } else {
@@ -207,8 +346,17 @@ pub(super) async fn spawn_generation(
                     .registered(&source_dispatch, registration);
                 drop(source_dispatch);
             });
+            let Some(source_custody) = source_custody else {
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    "processed generation has no original source read owner".into(),
+                );
+                return;
+            };
             runtime
-                .execute(
+                .execute_with_source_input(
                     &recipe.file,
                     &encoding.plan,
                     &encoding.options,
@@ -219,6 +367,8 @@ pub(super) async fn spawn_generation(
                     Arc::clone(&rendition.slot),
                     tokio_util::sync::CancellationToken::new(),
                     Some(hook),
+                    source_custody,
+                    None,
                 )
                 .await
                 .and_then(|outcome| match outcome {
@@ -456,7 +606,20 @@ pub(super) async fn spawn_generation(
         if !generation_current() {
             return;
         }
-        let mut args = recipe_pipe_args(recipe, start_seconds, attested);
+        let mut args = crate::source_input::source_args(
+            &recipe_pipe_args(recipe, start_seconds, attested),
+            &recipe.file.path,
+            if attested {
+                if audio_source.is_some() {
+                    &[3, 4]
+                } else {
+                    &[3]
+                }
+            } else {
+                &[]
+            },
+            source_custody.as_ref().map(|input| input.url()),
+        );
         if rendition.key.starts_with("source-") && recipe.encoding.is_none() {
             bound_source_copy_threads(&mut args);
         }
@@ -468,8 +631,15 @@ pub(super) async fn spawn_generation(
             .flatten();
         #[cfg(unix)]
         let descriptors = crate::producer_spawn::Descriptors::from_files(
-            rendition.source.as_ref().map(|source| &source.handle),
-            audio_source.as_ref().map(|audio| &audio.handle),
+            rendition
+                .source
+                .as_ref()
+                .filter(|_| source_custody.is_none())
+                .map(|source| &source.handle),
+            audio_source
+                .as_ref()
+                .filter(|_| source_custody.is_none())
+                .map(|audio| &audio.handle),
             recipe
                 .encoding
                 .as_ref()
@@ -545,11 +715,12 @@ pub(super) async fn spawn_generation(
             rendition.hooks.before_producer_registration().await;
             let (registration, writers) = rendition
                 .slot
-                .attach_registered_job_owned(
+                .attach_registered_source_job_owned(
                     child,
                     child_job,
                     at,
                     permit.map(|permit| Box::new(permit) as Box<dyn Send>),
+                    source_custody,
                 )
                 .await;
             rendition
@@ -1982,10 +2153,8 @@ impl RenditionSink {
         // Reserve before publication/dependency locks: making room can retire
         // a different rendition through the same locking protocol.
         let already_present = self
-            .rendition
-            .manifest
-            .lock()
-            .await
+            .publication_lock(self.rendition.manifest.lock())
+            .await?
             .state(entry)
             .is_some_and(|state| state.is_materialized());
         self.shared

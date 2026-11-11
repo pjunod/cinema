@@ -442,7 +442,35 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     assert!(names.contains(&"jellyfin_login_tokens"));
     assert!(names.contains(&"jellyfin_entity_ids"));
     assert!(names.contains(&"jellyfin_plays"));
-    assert_eq!(names.len(), 92, "review every imported durable table");
+    // v113 adds three durable annotation tables; the schema authority marker
+    // is installed locally and is not an imported catalogue row population.
+    for table in [
+        "library_annotations_lists",
+        "library_annotations_ratings",
+        "library_annotations_rating_fetches",
+    ] {
+        assert!(names.contains(&table), "durable annotation table: {table}");
+    }
+    assert!(!names.contains(&"library_annotations_schema"));
+    // Playback handoff codes and tokens are durable account state.
+    assert!(names.contains(&"playback_handoffs"));
+    assert!(names.contains(&"playback_handoffs_tokens"));
+    // SQLite v122 preserves source reservations, suspended work and its service credits.
+    for name in [
+        "foreground_source_owners",
+        "background_source_pauses",
+        "background_source_custody",
+        "background_source_service_epochs",
+        "background_source_service_grants",
+        "analysis_source_checkpoints",
+        "playback_analysis_suspensions",
+    ] {
+        assert!(
+            names.contains(&name),
+            "durable source arbitration table: {name}"
+        );
+    }
+    assert_eq!(names.len(), 104, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its
@@ -1026,6 +1054,10 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 "background_predictions" => 79,
                 "background_embeddings" => 80,
                 "background_artifact_repairs" => 82,
+                "background_source_pauses"
+                | "background_source_custody"
+                | "background_source_service_epochs"
+                | "background_source_service_grants" => 122,
                 _ => 71,
             };
             assert_eq!(table.minimum_schema, introduced, "{}", table.name);

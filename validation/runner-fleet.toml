@@ -2,9 +2,8 @@
 #
 # This roster mirrors `pjunod/ansible`'s `github-runners/inventory/` —
 # `group_vars/all.yml` for the Incus guests and the macOS runner, and
-# `host_vars/<host>.yml` for the standalone Linux hosts — plus the two
-# hand-registered ARM64 laptop VMs (`gha-maca-linux-arm-01`,
-# `gha-macb-linux-arm-01`) that were provisioned outside that inventory. Only
+# `host_vars/<host>.yml` for the standalone Linux hosts — plus the
+# hand-registered ARM64 laptop VMs provisioned outside that inventory. Only
 # the runners registered to `pjunod/plurx` are listed; the same hosts also run
 # runner services scoped to other repositories, and those can never answer a
 # job in this one.
@@ -22,7 +21,7 @@
 # neither was visible to any check.
 #
 # So: **adding a label to a workflow means adding it to a runner first.** Change
-# the ansible inventory, apply it, then add the runner here in the change that
+# the applicable provisioning authority, apply it, then add the runner here in the change that
 # teaches a workflow to ask for the label. A `runs-on` no rostered runner can
 # satisfy now fails `make operations-check` at preflight — in seconds, on the
 # pull request that introduced it — instead of at 3am in a queue nobody is
@@ -34,6 +33,11 @@
 # and each runner's own operating-system and architecture labels, which never
 # appear in the ansible inventory, so they are derived from `os` and `arch`
 # rather than repeated by hand.
+#
+# Exception: the existing dedicated Forgejo media1 registration is managed by
+# its persistent runner configuration, as documented in RUNNER-DISK.md. Its
+# labels/child bounds must not be provisioned through the older GitHub Ansible
+# registration. The roster records placement; it does not activate a daemon.
 #
 # Runner names carry their host: `gha-<host>-<role>-<NN>`. Host names here
 # are the fleet's neutral names (`lab1`…`lab6`, `media1`, `maca`, `macb`); the
@@ -61,11 +65,12 @@ voter_hosts = ["lab6", "lab3", "lab4", "media1"]
 # `ci-store` slots rather than chosen freely: a surplus shard cannot be given a
 # second runner on a host that already holds one, so it serialises behind a
 # busy runner and buys a more complicated failure instead of wall time. The
-# fleet carries three slots today, on `lab1`, `lab5` and `lab2` — one per
-# physical non-voter host. That number is an eligibility fact rather than a
-# capacity decision: a runner counts as a slot only once the Store lane has
-# passed on it. See `gha-lab2-android-01` below for what that cost to learn.
-host_exclusive_labels = ["ci-store", "ci-topology"]
+# legacy `ci-store` rows below record the previously advertised labels on
+# `lab1`, `lab5` and `lab2`. Store workflows now request `ci-nonvoter-store`;
+# legacy labels grant no eligibility for that alias. Record its two physical
+# nonvoter carriers only after actual registration and Store qualification.
+# See `gha-lab2-android-01` below for what a false eligibility claim cost.
+host_exclusive_labels = ["ci-nonvoter-store", "ci-topology"]
 
 # --- lab1: Incus guest host, non-voter -------------------------------------
 [[runners]]
@@ -73,7 +78,16 @@ name = "gha-lab1-general-01"
 host = "lab1"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "ci-store"]
+implicit_labels = false
+labels = ["maintenance-lab1-exclusive"]
+
+[[runners]]
+name = "gha-lab1-plurx-heavy-01"
+host = "lab1"
+os = "Linux"
+arch = "X64"
+implicit_labels = false
+labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-store", "incus"]
 
 # --- lab2: Incus guest host, non-voter --------------------------------------
 # A `ci-store` slot, and the entry to read before adding or removing one.
@@ -110,7 +124,7 @@ name = "gha-lab2-android-01"
 host = "lab2"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "android-kvm", "ci-store"]
+labels = ["lab", "incus", "ubuntu-24.04", "android-kvm", "ci-store", "ci-nonvoter-store"]
 
 [[runners]]
 name = "gha-lab2-android-02"
@@ -119,7 +133,8 @@ os = "Linux"
 arch = "X64"
 labels = ["lab", "incus", "ubuntu-24.04", "android-kvm"]
 
-# --- lab5 (`asus` in the ansible inventory): baremetal, non-voter ----------
+# --- lab5 (`asus` in the ansible inventory): baremetal, active voter -------
+# Do not place uncapped SDK builds here; nightly media jobs use lab1/lab2 VMs.
 [[runners]]
 name = "gha-lab5-general-01"
 host = "lab5"
@@ -139,7 +154,9 @@ name = "gha-lab5-general-03"
 host = "lab5"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+# Provisioned proof owner from codex/async-store-refinement (f14b400bc).
+# Keep its reserved label; the branch owns proof admission and qualification.
+labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04", "async-proof-owned"]
 
 [[runners]]
 name = "gha-lab5-general-04"
@@ -172,37 +189,19 @@ labels = ["lab", "android-kvm", "baremetal", "ubuntu-26.04"]
 
 # --- lab6, lab3, lab4: Incus guest hosts, production plurx voters -------------
 [[runners]]
-name = "gha-lab6-general-01"
-host = "lab6"
-os = "Linux"
-arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
-
-[[runners]]
 name = "gha-lab6-general-02"
 host = "lab6"
 os = "Linux"
 arch = "X64"
 # Reserved diagnostic VM. No general/high-cpu label: coverage never occupies
 # a merge slot. One daemon per 8 GiB guest; duplicate services are disabled.
-labels = ["lab", "incus", "ubuntu-24.04", "ci-coverage", "ffmpeg-6"]
+labels = ["lab", "incus", "ubuntu-24.04", "ci-coverage"]
 
 # lab3 runners are retired (2026-10-11): observability and production share
 # its disk. boot.autostart=false and no recovery allowlist entry keep them off.
 
-[[runners]]
-name = "gha-lab4-general-01"
-host = "lab4"
-os = "Linux"
-arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
-
-[[runners]]
-name = "gha-lab4-general-02"
-host = "lab4"
-os = "Linux"
-arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
+# The former lab6 general and lab4 guests are retired; recovery must not
+# recreate the obsolete FFmpeg capability. The diagnostic guest remains.
 
 # --- media1: baremetal, production plurx voter -------------------------------
 [[runners]]
@@ -210,7 +209,11 @@ name = "gha-media1-general-01"
 host = "media1"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+# Dedicated full unit capacity: one 16 GiB resident / 18 GiB combined job.
+# Retain the former 12g capability for existing consumers.
+# Keep the sole selector available after qualification; general jobs use the
+# other registrations. This grants no heavy replicated-cluster eligibility.
+labels = ["lab", "unit-memory-12g", "unit-memory-16g", "baremetal", "ubuntu-26.04"]
 
 [[runners]]
 name = "gha-media1-general-02"
@@ -236,31 +239,50 @@ labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
 # --- maca / macb: laptops, non-voters -----------------------------------------
 # Apple CI uses the M4 Air (`maca`) as primary and the M3 Max Pro (`macb`)
 # as standby; deploy/apple-runner controls eligibility during outages. The two
-# Linux ARM64 guests are Lima VMs registered by hand rather than by ansible, and
-# they are
-# the required `ci-arm64` packaging pool: `macb` is primary, `maca` is backup.
+# Linux ARM64 guests are Lima VMs registered by hand rather than by ansible.
+# Their Forgejo roles are separate: `maca` serves release-arm64 only; `macb`
+# supplies ci-arm64. The release guest has no qualified CI fallback role.
 [[runners]]
 name = "gha-maca-apple-01"
 host = "maca"
 os = "macOS"
 arch = "ARM64"
-labels = ["lab", "apple", "xcode-27", "primary"]
+labels = ["lab", "apple", "xcode-27", "primary", "xcode-27.2"]
 
 [[runners]]
 name = "gha-macb-apple-01"
 host = "macb"
 os = "macOS"
 arch = "ARM64"
-labels = ["lab", "apple", "xcode-27", "backup", "xcode-27.1"]
+labels = ["lab", "apple", "xcode-27", "backup", "xcode-27.2"]
 
-# This VM also runs a Forgejo runner carrying `release-arm64`: the release
-# image's arm64 leg builds there natively instead of under QEMU on X64.
+# Repository-scoped Forgejo signing registration, provisioned 2026-11-03.
+# The signing user's separate LaunchAgent and private config are documented
+# in docs/PUBLISHING.md. Capacity one; no general Apple CI eligibility.
+[[runners]]
+name = "gha-macb-mobile-signing-01"
+host = "macb"
+os = "macOS"
+arch = "ARM64"
+labels = ["mobile-release"]
+
+# The existing Forgejo registration is release-only: the release image's
+# arm64 leg builds natively instead of under QEMU on X64. Do not add ci-arm64
+# or backup eligibility without separately qualifying that workload here.
 [[runners]]
 name = "gha-maca-linux-arm-01"
 host = "maca"
 os = "Linux"
 arch = "ARM64"
-labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "backup", "release-arm64"]
+labels = ["lab", "ubuntu-26.04", "release-arm64"]
+
+# Capacity-one native CI guest on the release runner's physical host.
+[[runners]]
+name = "gha-maca-linux-arm-02"
+host = "maca"
+os = "Linux"
+arch = "ARM64"
+labels = ["lab", "ubuntu-26.04", "ci-arm64"]
 
 [[runners]]
 name = "gha-macb-linux-arm-01"

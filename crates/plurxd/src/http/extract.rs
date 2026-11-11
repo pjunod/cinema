@@ -642,7 +642,7 @@ fn key_activity_refresh_due(key: &ApiKey, now: Option<i64>) -> bool {
 /// (e.g. logout). Does not validate the token against the store.
 pub struct RawToken(pub String);
 
-fn token_from_parts(parts: &Parts) -> Option<String> {
+pub(crate) fn token_from_parts(parts: &Parts) -> Option<String> {
     // Authorization: Bearer <token>
     if let Some(value) = parts.headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(s) = value.to_str() {

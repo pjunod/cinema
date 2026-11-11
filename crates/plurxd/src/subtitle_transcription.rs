@@ -605,12 +605,18 @@ impl Pipeline<'_> {
             return Err(StoreError::Task("worker_interrupted".into()));
         }
         if let Some(attempt) = &self.managed {
-            if !attempt
-                .state
-                .transcode
-                .fragment_worker_idle(attempt.admission)
-                || !attempt.fence.observe_subtitle(phase).await?
-            {
+            let available = if self.purpose == Purpose::SelfTest {
+                attempt
+                    .state
+                    .transcode
+                    .speech_capacity_available(attempt.admission)
+            } else {
+                attempt
+                    .state
+                    .transcode
+                    .fragment_worker_idle(attempt.admission)
+            };
+            if !available || !attempt.fence.observe_subtitle(phase).await? {
                 return Err(StoreError::Task("worker_interrupted".into()));
             }
         }
@@ -1003,7 +1009,33 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         )
     })?;
     let wav = scratch.path().join("audio.wav");
+    let decode_threads = if input.purpose == Purpose::SelfTest {
+        "1"
+    } else {
+        "2"
+    };
+    let source_budget = if input.purpose == Purpose::Generation {
+        crate::background_jobs::source_budget()
+    } else {
+        None
+    };
+    let source_input = match source_budget.as_ref() {
+        Some(budget) => Some(
+            crate::source_input::SourceInput::open_background_held(
+                crate::fragment_index_cluster::SourceFence::clone_current_held(source)
+                    .map_err(StoreError::Task)?,
+                "application/octet-stream",
+                Arc::clone(budget),
+            )
+            .await
+            .map_err(StoreError::Task)?,
+        ),
+        None => None,
+    };
     let mut decode = tokio::process::Command::new(decoder);
+    if input.purpose == Purpose::SelfTest {
+        decode.args(["-filter_threads", "1"]);
+    }
     decode.args([
         "-nostdin",
         "-v",
@@ -1015,21 +1047,29 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         "-copyts",
         "-start_at_zero",
         "-protocol_whitelist",
-        "file,pipe",
+        if source_input.is_some() {
+            "file,pipe,http,tcp"
+        } else {
+            "file,pipe"
+        },
         "-threads",
-        "2",
+        decode_threads,
         "-i",
     ]);
-    #[cfg(unix)]
-    {
-        decode.arg("/dev/fd/3");
-        crate::ffmpeg::inherit_file_descriptors(&mut decode, &[(source, 3)]);
-    }
-    #[cfg(windows)]
-    {
-        crate::ffmpeg::verify_windows_source_path(source, input.source_path)
-            .map_err(StoreError::Task)?;
-        decode.arg(input.source_path);
+    if let Some(source_input) = source_input.as_ref() {
+        decode.arg(source_input.url());
+    } else {
+        #[cfg(unix)]
+        {
+            decode.arg("/dev/fd/3");
+            crate::ffmpeg::inherit_file_descriptors(&mut decode, &[(source, 3)]);
+        }
+        #[cfg(windows)]
+        {
+            crate::ffmpeg::verify_windows_source_path(source, input.source_path)
+                .map_err(StoreError::Task)?;
+            decode.arg(input.source_path);
+        }
     }
     decode
         .args([
@@ -1041,7 +1081,7 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
             "-af",
             PCM_CLOCK_FILTER,
             "-threads",
-            "2",
+            decode_threads,
             "-ac",
             "1",
             "-ar",
@@ -1059,7 +1099,7 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
                 &format!("bounded transcription output unavailable: {error}"),
             )
         })?;
-    let output = pipeline_output(
+    let decoding = pipeline_output(
         &input,
         &mut decode,
         if input.purpose == Purpose::SelfTest {
@@ -1069,9 +1109,21 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         },
         256 * 1024,
         plurx_core::process::ChildWork::background("subtitle transcription audio"),
-    )
-    .await
-    .map_err(|error| input.child_failure(error, false))?;
+    );
+    tokio::pin!(decoding);
+    let output = tokio::select! {
+        output=&mut decoding=>output,
+        ()=async {match source_budget.as_ref() {Some(budget)=>budget.wait_pressure().await,None=>std::future::pending().await}}=>{
+            cancel.cancel(); decoding.await
+        },
+    };
+    if let Some(source_input) = source_input {
+        source_input
+            .close_and_wait()
+            .await
+            .map_err(|_| input.source_failure())?;
+    }
+    let output = output.map_err(|error| input.child_failure(error, false))?;
     // Under -v error any diagnostic is an error, even if a demuxer/decoder
     // tolerates partial corruption and exits zero. Never let that partial
     // waveform become complete captions that suppress later discovery.
@@ -1336,6 +1388,7 @@ fn model_supports_language(model: &Model, language: &str) -> bool {
 }
 
 async fn managed_pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
+    let self_test = input.purpose == Purpose::SelfTest;
     let cancel = input.cancel.clone();
     let attempt = input.managed.as_ref().expect("managed attempt");
     let state = attempt.state;
@@ -1344,7 +1397,7 @@ async fn managed_pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
     tokio::pin!(operation);
     tokio::select! {
         result = &mut operation => result,
-        () = watch_capacity(&state.transcode, admission) => { cancel.cancel(); operation.await }
+        () = watch_capacity_until(|| if self_test { state.transcode.speech_capacity_available(admission) } else { state.transcode.fragment_worker_idle(admission) }) => { cancel.cancel(); operation.await }
     }
 }
 
@@ -1446,6 +1499,7 @@ pub(crate) async fn transcribe_managed(
     }
     managed_source(file, Some(source.object_version())).await?;
     Ok(DownloadedSubtitle {
+        text_translation: None,
         source_size: *source_size,
         source_mtime: *source_mtime,
         provider_file_id: 0,
@@ -1695,6 +1749,14 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 false
             }
         };
+        let translating_text =
+            match crate::subtitle_text_translation::manager::worker_pass(&state, &shutdown).await {
+                Ok(active) => active,
+                Err(error) => {
+                    tracing::debug!(%error,"text subtitle worker pass stopped");
+                    false
+                }
+            };
         if tokio::time::Instant::now() >= slow_due {
             if let Err(error) = crate::subtitle_models::worker_pass(&state, &shutdown).await {
                 tracing::debug!(%error, "managed subtitle worker pass stopped");
@@ -1706,7 +1768,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         }
         // Live translation demand is served each second; otherwise the loop
         // sleeps until the 15 s passes are due or a translation mutation wakes it.
-        let idle = if translating {
+        let idle = if translating || translating_text {
             Duration::from_secs(1)
         } else {
             slow_due.saturating_duration_since(tokio::time::Instant::now())
@@ -1855,7 +1917,8 @@ async fn pass(
                 .ok_or_else(|| StoreError::Task("transcription claim missing token".into()))?,
             deadline,
             JobKind::SubtitleTranscribe,
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let Some(file) = file else {
             let _ = fence
@@ -1892,6 +1955,7 @@ async fn pass(
             )
             .await
         };
+        let operation = crate::background_jobs::budgeted(fence.source_budget(), operation);
         let result =
             await_claimed_inference(operation, &state.transcode, &admission, shutdown, &cancel)
                 .await;
@@ -1907,6 +1971,7 @@ async fn pass(
             match result {
                 Ok(vtt) => {
                     let caption = DownloadedSubtitle {
+                        text_translation: None,
                         source_size,
                         source_mtime,
                         provider_file_id: 0,
@@ -1973,13 +2038,23 @@ pub(crate) async fn watch_capacity(
     transcode: &crate::transcode::TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,
 ) {
+    watch_capacity_until(|| transcode.fragment_worker_idle(admission)).await
+}
+pub(crate) async fn watch_speech_capacity(
+    transcode: &crate::transcode::TranscodeManager,
+    admission: &crate::transcode::FragmentAdmission,
+) {
+    watch_capacity_until(|| transcode.speech_capacity_available(admission)).await
+}
+async fn watch_capacity_until(available: impl Fn() -> bool) {
     loop {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        if !transcode.fragment_worker_idle(admission) {
+        if !available() {
             return;
         }
     }
 }
+
 async fn automatic_page(
     state: &AppState,
     config: &Settings,
@@ -3433,14 +3508,20 @@ mod tests {
             deadline,
             JobKind::SubtitleModelOperation,
         )
+        .await
         .expect("active claim");
         let fence = active.fence();
         let manager_cancel = fence.loss_token().child_token();
+        store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+            .await
+            .expect("two-thread speech budget");
         let admission = state
             .transcode
-            .admit_fragment()
+            .admit_speech()
             .await
-            .expect("idle admission");
+            .expect("idle speech admission");
+        assert!(state.transcode.speech_capacity_available(&admission));
         let mut operation = Box::pin(self_test_managed(
             &state,
             &engine,

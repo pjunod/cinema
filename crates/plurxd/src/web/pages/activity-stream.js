@@ -41,8 +41,8 @@ function activityStreamState(session){
     if(o.control_demand!=="hold"&&o.render_state!=="rendering")return {cls:"wait",label:"Client waiting",why:o.producer_hold?`producer held · ${o.producer_hold}`:""};
   }
   // `lease_state` is "active" for a live lease and "unavailable" for a legacy
-  // viewer with no actor at all; only the three terminal verdicts are news.
-  const terminal=({ended:"ended",expired:"expired",startup_expired:"startup expired",pause_expired:"pause expired",authority_fenced:"authority fenced"})[session.lease_state];
+  // viewer with no actor at all; only the terminal verdicts are news.
+  const terminal=({ended:"ended",expired:"expired",startup_expired:"startup expired",pause_expired:"pause expired",authority_fenced:"authority fenced",released:"released",stopped:"stopped"})[session.lease_state];
   if(terminal) return {cls:"bad",label:`Lease ${terminal}`};
   const hold=!session.suspended?""
     :({demand:"viewer has enough",time:"reserve full",bytes:"per-stream byte limit",
@@ -182,6 +182,10 @@ function activityStreamCell(de,session,open){
     .filter(Boolean).join(" · ");
   const head=`<div class="stream-head">${presentation?`<span class="mode-chip ${de.presentation==="vod"?'vod':'live'}">${esc(presentation)}</span>`:""}${
     state?`<span class="stream-state ${state.cls}">${esc(state.label)}${state.why?` <span class="why">· ${esc(state.why)}</span>`:""}</span>`:""}<span class="stream-method">${esc(activityMethodLabel(de.method,encoder))}${sub?` <span class="sub">· ${esc(sub)}</span>`:""}</span></div>`;
+  // What the GPU is doing for this stream and why, in plain view: the
+  // attribution a processed graph owes the operator (Stop playback ends it).
+  const proc=(session&&session.vod_observation&&session.vod_observation.processing)||(de.vod_observation&&de.vod_observation.processing);
+  const processing=proc?`<div class="stream-processing" data-processing="${esc(proc.delivered)}"><b>${esc(proc.delivered)}</b> <span class="sub">· ${esc(proc.work)}</span><div class="muted">Why: ${esc(proc.reason)}${proc.live_rendering?" · live rendering":""}${proc.fel_composed?" · FEL composed":""}</div></div>`:"";
   const meters=activityStreamMeters(de,session);
   const strip=meters.length?`<div class="stream-meters">${meters.map(meter=>`<div class="stream-meter ${meter.tone||""}"><span class="k">${esc(meter.k)}</span><span class="v">${esc(meter.v)}${meter.of?`<span class="of">${esc(meter.of)}</span>`:""}</span>${
     meter.bar!=null?`<span class="stream-bar" aria-hidden="true"><i style="width:${Math.round(meter.bar*100)}%"></i></span>`:""}</div>`).join("")}</div>`:"";
@@ -189,7 +193,7 @@ function activityStreamCell(de,session,open){
   const key=de.session_id?String(de.session_id):"";
   const diag=details.length?`<details class="stream-diag" data-stream="${esc(key)}"${open&&open.has(key)?" open":""}><summary>Technical details</summary><div class="stream-diag-grid">${
     details.map(([label,value])=>`<div><b>${esc(label)}</b><span>${esc(value)}</span></div>`).join("")}</div></details>`:"";
-  return head+strip+diag;
+  return head+processing+strip+diag;
 }
 async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity"||document.visibilityState==="hidden"||ACTIVITY_DETAIL_BUSY===generation) return;
@@ -220,6 +224,7 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
   const d=detail;
   ACTIVITY_SNAPSHOT=d;
+  if(ME?.is_admin&&ACTIVITY_VIEW.tab==="starts")refreshActivityStarts();
   try{
     if(d.dvr){dvrSetOverview(d.dvr);ACTIVITY_DVR.rows=d.dvr.active||[];}
     else ACTIVITY_DVR.rows=[];
@@ -318,6 +323,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     <h2 class="section">Happening now · Watching</h2>
     ${missing.length?`<div class="clrefusal" role="status" aria-live="polite"><b>Activity is incomplete</b> ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Streams on those nodes may be missing.</div>`:""}
     ${activityWatchingHtml(dels,d.live_tv,nodeNames,sessionsById,open)}
+    ${activitySourceRecoveryHtml(d)}
     ${activityTabsHtml()}
     <section id="activity-status" ${ME?.is_admin?'role="tabpanel" aria-labelledby="activity-tab-status"':'aria-label="Activity status"'}${ACTIVITY_VIEW.tab!=="status"?" hidden":""}>
     ${activityBlockedScansHtml(d)}
@@ -335,7 +341,8 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     ${section("processes","Processes on this server",activityProcessesHtml(d.processes))}
     <div class="activity-idle">${[!d.scans.length?"No scans running":"",!p?"No media preparation running":"",!offline.length?"No downloads in progress":""].filter(Boolean).join(" · ")}</div>
     ${section("trakt","Trakt",trakt)}</section>
-    ${ME?.is_admin?`<section id="activity-jobs" role="tabpanel" aria-labelledby="activity-tab-jobs"${ACTIVITY_VIEW.tab!=="jobs"?" hidden":""}><div id="durable-activity">${durableQueueHtml(nodeNames)}</div></section>`:""}`;
+    ${ME?.is_admin?`<section id="activity-jobs" role="tabpanel" aria-labelledby="activity-tab-jobs"${ACTIVITY_VIEW.tab!=="jobs"?" hidden":""}><div id="durable-activity">${durableQueueHtml(nodeNames)}</div></section>`:""}
+    ${activityStartsPaneHtml(nodeNames)}`;
   dvrRestoreUi(m,dvrUi);
   paintActivityInspector();
   if(durableFocus)restoreDurableFocus(m,durableFocus);

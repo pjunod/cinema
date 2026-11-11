@@ -8,7 +8,153 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- Android TV devices whose HEVC decoder declares performance points (Google TV
+  Streamer) now report HLS fMP4 HEVC support, so processed Dolby Vision
+  (HDR10-E) upgrades reach them instead of being declined at every start.
+
+- Linux Cinema now defaults to the system mpv and no longer ships a duplicate
+  renderer, so qualified system HDR/DV updates reach Cinema. Explicit binary
+  overrides, isolated configuration and Cinema controls remain available.
+  Mapper diagnostics validate the shared renderer’s physical-target success
+  against its current eligibility and generation.
+
+- Cinema application images reuse a separately published, digest-pinned media
+  runtime instead of downloading Debian packages and recompiling bundled tools.
+
+- Digest-keyed analysis requests can register their source custody,
+  allowing the index queue to progress instead of renewing a rejected request
+  indefinitely while holding its shared source-I/O slot.
+
+- A client releasing a rolling stream, or an operator stopping it from
+  Activity, now retires it as `released` / `stopped` instead of an authority
+  fence. Metrics and session-end events no longer report every ordinary
+  release as failover, and a control request racing the stop is answered with
+  the existing `deleted` / `admin_stop` reason rather than `authority_fenced`,
+  which clients treat as recoverable.
+- New daemon-mediated source readers retain kernel lifetime witnesses on
+  native macOS, Linux and containers, allowing exact-owner recovery after
+  Cinema exits without rebooting the server. Legacy readers without this
+  evidence remain held pending a separate physical stop proof.
+- Jobs includes fresh CPU, GPU and heavy-worker capacity from learner nodes.
+  Worker observations use the member-scoped operations channel and remain
+  independent of voter-only playback and recording authority.
+- Pending native HLS segments advertise their bounded Retry-After interval.
+
+- Subtitle workers preserve a completed publication when a concurrent pressure
+  check observes that its source authority has retired. Changed original files
+  retain the existing not-found response instead of returning an internal error.
+- Source-retirement and deferred-companion diagnostics remain in their parent
+  operator log channels. Verified fleet publication checks the exact reviewed
+  image configuration before advancing the main tag.
+
+- Original HDR enhancements preserve their measured video bitrate budget, select
+  legal HEVC/Dolby Vision levels and bind quality receipts to the actual
+  encoder recipe instead of lowering the source budget.
+
+- Linux Dolby Vision reconstruction avoids inherited display adjustments and
+  preserves software planar 10-bit samples. Its final Vulkan RGB cache rounds
+  to the exact nearest 16-bit value. Shared PQ mapping retains small
+  intermediates, and RGB48 export avoids double rounding while preserving the
+  caller's rounding mode.
+
+- CI retains authenticated successful Android and Node command results when
+  their consumed sources are unchanged, preserving whole-command accounting.
+- Historical queue fixtures preserve managed receipts while rewinding the
+  published source and dispatch extensions, and source audits cover nested
+  replicated-store modules and their required authority reads.
+
+- Manual library scans and explicit refreshes get the next eligible shared
+  read slot across job types. A scan finishing under a pressure check can
+  release its reader and let the next scan start.
+- Activity shows blocked shared reads above both tabs, identifies the originating
+  worker and job when available, and reports overdue manual scans alongside
+  five-minute completion and failure rates for the cluster and each worker.
+
+- macOS source installs discover full Xcode when Command Line Tools are selected,
+  find renamed or relocated copies through the macOS application index,
+  preserve explicit developer-directory overrides, and install missing Xcode
+  through Homebrew/xcodes. Apple authentication, license and first-launch setup
+  stay in the terminal; the media build continues after setup completes.
+
+
+- Subtitle workers keep polling pending writes during pressure checks, avoiding
+  a deadlock that retained source-reader reservations and blocked library scans.
+
+- Docker builds fetch snapshot-pinned Debian packages from regular mirrors with
+  automatic snapshot fallback and bounded retries for download failures.
+
+- Library scans avoid async stack exhaustion on ordinary worker threads, and
+  repeated startup recognizes the current canonical managed subtitle schema.
+
+- Apple and Android media waits retire when their destination intent settles
+  or is superseded, matching the shared playback-surface contract.
+
+- Source-reader recovery preserves exact ownership evidence across crashes and
+  can settle abandoned custody after a verified reboot of the same Linux host.
+  Activity explains expired reader reservations that block queued library scans.
+
+- Rolling HLS startup measures coverage from the requested position and starts
+  legacy consumption on actual media delivery. Web Resume retires destination
+  waits at proven seek completion and preserves attached-media fault ownership.
+
+- Web Local and Shared playback resume partial rewatches even when watched
+  history is already recorded.
+- Enhanced DV preparation overlaps bounded source reads and optional cache
+  inventory with full validation.
+- Playback source readers share fenced storage budgets, yield background scans
+  during startup, and retain physical custody through cancellation and cleanup.
+  Continuous quality starts primary video and audio before its companion;
+  rolling HLS publishes its first reload window before banking the steady reserve.
+- Web Resume retains the current playback owner, native source changes fence
+  predecessor clocks and buffers, and all frame consumers share one callback
+  subscription per video element with discontinuity renewal.
+
+- Nightly deep validation and mutation tests use the app's shipped FFmpeg
+  package; obsolete FFmpeg 6 runner capacity and recovery entries are retired.
+
+- Web copy/remux playback keeps decision and session-creation quality identities
+  consistent when selecting alternate audio tracks or applying audio offsets.
+- Weekly release readiness validates the shipped Jellyfin FFmpeg runtime in
+  a candidate-built CI image instead of waiting for obsolete FFmpeg 6 runners.
+
+- Apple clients remember selected self-signed server identities and use them
+  for HTTPS sign-in, artwork and playback without a manually installed certificate.
+- Apple TV Settings enters each category at its first setting and restores the
+  category when returning with Back. Picker controls expose their names and
+  selected values to accessibility.
+
+## [0.8.0] — 2026-10-29
+
 ### Added
+
+- Shared imports can have a household-friendly name when imported and can be
+  renamed from Shared libraries or Settings → Sharing. Names stay local and
+  survive re-pairing.
+
+- Progressive text subtitle translation can create and observe durable jobs,
+  and shared playback can read committed caption assets from the Source under
+  its existing import grant. Apple build 277, Android versionCode 182.
+
+- Optional HTTPS, off by default, serves the existing public router with a
+  persistent generated self-signed identity or supplied PEM certificate/key
+  files. Enable it in Settings → Developer; saved changes apply after restart.
+  Physical trust and playback acceptance remain open.
+- plurx Player (Linux) maps Dolby Vision profile 5 and 8 itself, with the
+  server's closed-form CM v4.0 and CM v2.9 display management compiled into
+  its private mpv, for the compositor's reported luminance and the largest
+  standard gamut inside the panel's primaries. Each playback logs which
+  mapper ran and for what target. Profile 7 FEL titles play from the
+  original stream with their full enhancement layer composed on the laptop's
+  GPU, so nothing is re-encoded. Package 0.3.0 (libplacebo 7.387.0, linked
+  into mpv master e59d90c84).
+
+- Server playback handoff for the Linux player: a signed-in client mints a
+  one-time code (`POST /api/v1/playback-handoffs`, single use, 120 s) that
+  another local app redeems for a token limited to one title's decision, HLS
+  create, direct play, text subtitles, progress and client log. The token lives six hours, shows in the
+  account's devices list, and is revoked with the session that minted it.
 
 - Optional display-targeted HDR10-E selects a supported downward bucket from
   the viewer's reported peak, with platform/viewer provenance, complete-title
@@ -35,6 +181,30 @@ bump may break compatibility and a **patch** bump never does.
 - A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
 
 ### Changed
+
+- Shared libraries has a searchable share directory with compact library
+  cards, availability filters and one bounded Continue Watching row labelled
+  by share. The layout adapts to desktop and phone screens.
+
+- Credential sign-in screens omit Report a problem. Connection setup, saved-
+  session recovery, and signed-in reporting keep their entry points.
+
+- Cinema sharing invitations open as QR codes with expandable text. Save or
+  share the PNG, then upload or scan it on the receiving Cinema; import and
+  pairing approval remain explicit. Web, Apple, and Android clients retain
+  text fallback for oversized invitations.
+
+- Linux player 0.4.0 uses Cinema-style playback controls with scoped library
+  metadata and next episode, saved autoplay, and Auto/Original/advertised
+  quality choices that retain playback position and paused state.
+
+- The closed-form CM v2.9 display management (`tools/dv_processing/dv_dm.h`)
+  evaluates its output lattice once per frame instead of eight vertices per
+  pixel, and CM v4.0 and CM v2.9 compile as separate shaders. The output is
+  the same (the shader parity controls pass unchanged); a 4K CM v2.9 frame
+  takes about 17 ms instead of 28 ms on an Intel Arc iGPU, which now plays 4K
+  Dolby Vision in the Linux player without dropped frames, and the server's
+  display-targeted renders spend less GPU time.
 
 - Reconstruct CM v2.9 near-black color from analytic IPT gamut interpolation
   and colorfulness compensation, replacing fitted target gain tables. Preserve
@@ -78,6 +248,167 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Apple TV settings keep each setting name visible beside its selected value,
+  including Playback, Appearance and Live TV choices.
+
+- Playback cache admission reconciles concurrent cancelled writes instead of
+  failing a video producer as disk-full while capacity remains, preventing
+  repeated Apple TV buffering and stream retries.
+
+- **HTTP app addresses forward to HTTPS while it is active.** Temporary,
+  non-cached redirects preserve the requested path, query, method and body,
+  including remapped Docker HTTPS ports. Health, discovery, cluster RPC and
+  compatibility traffic keep working over their existing HTTP paths.
+
+- Shared libraries across Tailscale accounts: a Cinema running as the macOS
+  LaunchAgent can now observe its own Tailscale, so it binds its private
+  source address and can connect to other Cinemas (the Tailscale app answered
+  launchd-started CLI calls as its GUI and every check failed silently).
+  Settings → Sharing shows a connection checklist naming the host's Tailscale
+  account, the exact failing setup step, whether each saved connection is
+  reachable and — on Check connection — why not (share not accepted by this
+  account, source offline, port refused, certificate mismatch, no private
+  source address). The import form names the account that must accept the
+  Tailscale share; senders see whether, and by whom, each share was accepted.
+  A dedicated sharing activity log (`/api/v1/system/logs?scope=sharing`)
+  records setup changes, checks, shares and cleanup failures.
+
+- Embedded text subtitles in Matroska files are read through the file's own
+  cue index when it provably names every subtitle frame, instead of demuxing
+  the whole picture: a 4K remux's track takes a few thousand small reads
+  rather than a full-file scan, so windows land ahead of the playhead and the
+  whole track no longer times out. Other files keep the full demux.
+
+- Shared HDR10 playback builds a missing HEVC copy index instead of forcing
+  video encoding and SDR on hosts without an HDR10 encoder. Unsupported EAC3
+  audio converts to AAC while the HDR10 video and static metadata stay intact.
+
+- Sharing hides revoked recipients by default, explains pairing and viewer
+  assignment steps, and refreshes incoming requests automatically. Invitation
+  imports verify an existing private connection immediately, show actionable
+  failures with bounded retries, and log connection/import failure codes
+  without exposing invitation secrets or credentials.
+  Native Mac setup recognizes legacy installed services and no longer treats
+  ordinary native daemons as Docker containers. Shared playback accepts the
+  current audio downmix plans and excludes public-only output advisories from
+  peer decisions instead of reporting an unexplained preparation failure.
+  HTTP browser sessions generate UUID request identities even without
+  `crypto.randomUUID`, allowing shared playback to start. Source connection
+  failures have a distinct message and catalogue-stage diagnostics.
+
+- Progressive subtitle translation keeps FFmpeg progress updates out of source
+  clock evidence, preventing valid decoded ranges from failing before inference.
+
+- Shared playback handoff and quality reopen accept the producer's bounded
+  playlist start hint instead of returning 503 when playback resumes after zero.
+- Update the macOS source parser runtime to fix an abort in native exception
+  handling, preserving its deadline, memory, stack and capability limits.
+
+- Sharing-host setup reaps its helper before timeout or cancellation returns,
+  while retaining the helper's native user/IPC environment. The lifecycle
+  inventory now records the sharing-host and invitation owners and their tests.
+- Existing-text subtitle inference consumes verified caption artifacts without
+  waiting for unrelated media readers; legacy extraction jobs remain fenced.
+- Progressive captions decode valid surround audio without treating FFmpeg
+  side-data logs as malformed timestamps or losing the final window to log caps.
+- Progressive captions recover an existing stopped operation through a validated
+  read before explicit Resume, including operations without a published asset.
+  Current nonretryable range failures are visible without hiding available
+  coverage or offering unsupported retries.
+- Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
+- Sharing setup shows the Tailscale connection and saved account authorization
+  up front, confirms key saves by reading them back, and refreshes connection
+  status after setup. Cluster gateway addresses and node-local setup are labeled
+  separately.
+
+
+
+- Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
+- Progressive subtitle decoding resolves the normal PATH-based media tools to
+  canonical executables before launching its clean, descriptor-bound children.
+
+- Cluster maintenance commits its release intent with the elected coordinator's
+  exact lease, acknowledges the current process, and counts active sessions
+  before allowing maintenance exit.
+
+- Recording lists bind paging, state filters, and capture boundaries independently
+  instead of returning a database error.
+- Model and media-tool verification detects immediate same-size byte changes
+  even when filesystem timestamps coincide.
+- Cinema invitations now include external Tailscale device consent and resume import when the private connection is ready; account authorization, endpoint discovery and invitation cleanup are managed in Sharing.
+- Fresh macOS Vulkan media builds include libplacebo's pinned fast_float
+  headers, allowing floating-point parsing with the macOS 12 deployment target.
+
+- Fresh macOS media builds retain caller macro paths and expose Homebrew
+  aclocal macros to the source-built Automake tools used by libass.
+
+- macOS source upgrades wait through transient process-inspection failures,
+  recover interrupted clean shutdowns, and print a directly runnable recovery
+  command with the complete executable path.
+
+- Fresh macOS source installs build Automake without creating a circular
+  GNUmakefile symlink when the temporary directory uses a symlinked path.
+
+- Live TV keeps playing while the HTTP output writer uploads a segment or
+  waits to publish its next playlist; valid temporary upload files no longer
+  terminate the stream a few seconds after startup.
+
+- Shared library browsing uses responsive poster grids instead of overlapping
+  inline panels. Shared details show artwork, year, genres, runtime, cached
+  review-site ratings, and video, audio and subtitle facts. Playback failures
+  retain their typed preparation error instead of reporting every refusal as
+  an unavailable decision.
+- Shared Auto playback selects a supported encoded plan when an HEVC remux
+  lacks a usable HLS index, avoiding a Source startup refusal for titles that
+  local playback can serve through its progressive fallback.
+- Sharing can configure a managed native host's private Tailscale connection,
+  discover its addresses and certificate, and report sign-in or setup problems.
+  A separately installed Linux Compose host component manages private forwarding
+  and a scoped egress guard without giving the server host-control sockets.
+  Native Mac sharing binds the actual private interface instead of requiring a
+  Linux interface name. The address form explains that no router changes are needed.
+
+- Restrict the Linux external player preference to Dolby Vision files on Linux;
+  other formats and operating systems retain web playback, including mixed-version titles.
+
+- Shared playback retries closure acknowledgements after concurrent updates to
+  the same owner's custody ledger. Actual driver closure and authority fences
+  remain required.
+
+- A Dolby Vision client playing a Profile 7 FEL title now receives the
+  reconstructed Profile 8.1 (FEL composed into the picture, re-encoded, an
+  8.1 RPU per frame) on a 12-thread worker. The renderer was debited eight
+  software decoder threads it does not run when the GPU decodes, so every
+  FEL graph (10 + 5 threads against a budget of 11) was refused there. Its
+  debit now follows a proved VA-API HEVC Main10 decode; a window that
+  decodes in software anyway is refused rather than served over budget. One
+  live FEL reconstruction runs per worker; the next play gets the plain
+  conversion and its FEL row names why. The Developer tab's FEL rows are
+  read from the node (helper, conversion permission, CPU debit against the
+  budget, the slot) instead of a fixed "not yet available".
+- The reconstructed Profile 8.1 says "FEL used" only from its served-window
+  receipt or selected plan, never from the source's tags, and publishes an
+  `effective_processing` report (`profile81_reconstructed`) that existing
+  clients ignore. Activity names a processed stream's delivered picture, GPU
+  work and reason beside its Stop.
+- The reconstructed Profile 8.1 is served only for a title whose enhancement
+  layer adds more to the picture than re-encoding loses. Each Profile 7 FEL
+  title is measured once, in its Dolby Vision title scan, on the server's GPU
+  (eight 2 s windows, Delta E ITP against the FEL master inside the
+  letterbox): the reconstruction must beat the plain conversion by at least
+  10% on the mean and be no worse at the 99th percentile. Until a title is
+  measured, or when it fails, plays get the plain conversion and their FEL row
+  says why. The verdict is kept with the title's Dolby Vision facts and is
+  measured again when the helper, the route's recipe, the FFmpeg build, the
+  VA driver or the GPU changes. The measurement runs as a claim on its title
+  job's own admission (so it is not cancelled by its own GPU step), yields
+  the reconstruction slot to a live play, is charged the threads its
+  children run, and replaces dark sample windows with alternates. The route
+  encodes at the source's average rate up to 60 Mb/s with VBAQ off on
+  radeonsi, and its HLS peak is advertised from that rate; other encodes keep
+  their policy. One live reconstruction per worker applies to the Profile 8.1
+  route only. The VA-API Main10 decode check runs off the boot path, decodes
+  a shipped clip, and retries a failure with backoff.
 - Apple TV physical focus updates no longer invalidate the app shell and every
   registered control; focus bookmarks and remote-command freshness remain intact.
 
@@ -134,6 +465,7 @@ bump may break compatibility and a **patch** bump never does.
   explains failures and capacity waits, and recovers model choices after a
   failed status load without losing unsaved settings. Model tests keep a FIFO
   place for background capacity so repeated library work cannot skip them.
+- Transcoding settings show the selected encoder in parentheses beside Auto.
 
 - All playback caches share one disk budget with reader-safe global eviction,
   pre-write capacity reservations and a filesystem free-space reserve, preventing
@@ -263,6 +595,16 @@ bump may break compatibility and a **patch** bump never does.
 - Apple Playback info reports the installed Auto rung after a prepared quality
   switch, so an encoded 720p stream no longer retains the original Remux label.
 
+- GitHub macOS releases sign and notarize the complete install archive in a
+  protected job before publication, retaining component hashes and the stapled
+  app ticket. A single canonical WASM parser is shared by both native slices
+  so host-specific floating-point folding cannot prevent universal assembly.
+  Manual installers publish independently of in-app upgrade
+  qualification; unqualified releases omit update metadata. Dry-run builds
+  remain available without Apple credentials. Linux release smoke tests force
+  reinstall before removal, preserve the missing-guard refusal, and retain
+  package-manager diagnostics on failure.
+
 ## [0.7.0] — 2026-10-17
 
 ### Added
@@ -319,6 +661,11 @@ bump may break compatibility and a **patch** bump never does.
     docs/API.md §7.4.
 
 ### Fixed
+
+- **Docker publishes native HTTPS only when enabled.** The supported Docker
+  startup targets derive the HTTPS mapping from the node's desired settings,
+  including its configured port, and remove the generated mapping on disable.
+  `PLURX_HTTPS_HOST_PORT` selects an independent host port when needed.
 
 - **Consistent reads on a cluster no longer wait 40 ms each.** Every
   linearizable read opens a stream to each other voter to confirm leadership,
@@ -3520,7 +3867,8 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/pjunod/plurx/compare/v0.3.0...v0.7.0
 [0.3.0]: https://github.com/pjunod/plurx/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/pjunod/plurx/compare/v0.2.7...v0.2.8

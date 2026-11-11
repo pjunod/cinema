@@ -119,6 +119,11 @@ rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 # The fast CI Rust lane owns formatting, Clippy, unit tests, and SQLite
 # contracts. Cluster jobs own WAL, replicated Store, topology, and daemon
 # contracts. Explicit test features keep those processes out of this lane.
+.PHONY: dv-rgb-conversion-check
+dv-rgb-conversion-check: ## Check HDR measurement colour conversion with an explicitly selected FFmpeg
+	@test -n "$(PLURX_FFMPEG)" || { echo >&2 "Set PLURX_FFMPEG to the supported media executable"; exit 1; }
+	PLURX_FFMPEG="$(PLURX_FFMPEG)" python3 -m unittest discover -s tests/media -p test_dv_rgb_conversion.py -v
+
 .PHONY: ci-rust-gate
 ci-rust-gate: fmt-check spike-lock-check lint test-socket-permission-check ## CI Rust gate: format, Clippy, and fast workspace tests
 	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
@@ -161,8 +166,19 @@ history-check: ## Verify every corrective commit has current regression evidence
 operations-check: ## Verify deploy, CI, container, and client shipping contracts
 	@python3 -m unittest discover -s tests/operations -p 'test_*.py'
 
+.PHONY: linux-player-check
+linux-player-check: ## Test the plurx Player launcher against a fake server and a fake mpv (LINUX-PLAYER-PLAN M4); a skipped test fails
+	@python3 -B clients/linux-player/packaging/run-tests clients/linux-player/tests
+
+# Not in CI: builds the Python/Lua frontend twice in disposable containers,
+# verifies the package against system mpv and checks byte-identical artifacts.
+# Output goes to target/linux-player-deb/, or to PLURX_DEB_OUT.
+.PHONY: linux-player-deb
+linux-player-deb: ## Build and verify the Cinema frontend .deb against system mpv
+	@clients/linux-player/packaging/build-deb.sh
+
 .PHONY: check
-check: validation-lint history-check operations-check benchmark-check rust-check ## History + operations + catalog + benchmark + Rust baseline
+check: validation-lint history-check operations-check linux-player-check benchmark-check rust-check ## History + operations + launcher + catalog + benchmark + Rust baseline
 
 .PHONY: spike-lock-check
 spike-lock-check: ## Prove the isolated spike's lockfile still resolves
@@ -1176,7 +1192,7 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=72 \
+	PLURX_EXPECT_TEST_COUNT=76 \
 	  PLURX_EXPECT_TEST_NAMES='transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly,transport_recovery::tests::two_early_acknowledgements_cannot_hide_a_long_recovery_gap,transport_recovery::tests::writer_must_cover_the_end_of_recovery,transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline,transport_recovery::tests::worst_transfer_duration_covers_the_complete_source_series,transport_recovery::tests::artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result,transport_recovery::tests::owned_async_task_growth_has_no_resource_slack' \
 	  scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery --lib
@@ -1551,6 +1567,7 @@ web-check: web-unit-check ## Test playback policy, embedded JS, and every shippe
 web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/playback/frame-drop-recorder.test.js
 	@node --test tests/web/diagnostics-wire.test.js tests/web/diagnostics-recorder.test.js
+	@node --test tests/web/cinema-remote-browser-support.test.js
 	@node --test tests/web/cinema-remote-client.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
 	@node --test tests/web/cinema-remote-guard.test.js
@@ -1583,6 +1600,8 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/web/theme-family.test.js
 	@node tests/web/meridian.test.js
 	@node tests/web/activity-node-names.test.js
+	# Activity → Starts: one row per create, the nodes that did not answer, Index now.
+	@node tests/web/activity-starts.test.js
 	# Every child process is listed with its priority class and a stop (P-02 §3.2).
 	@node tests/web/activity-processes.test.js
 	@node tests/web/analysis-node-names.test.js
@@ -1590,11 +1609,15 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/analysis-coverage.test.js
 	@node tests/web/settings-sections.test.js
 	@node --test tests/web/subtitle-generation.test.js tests/web/subtitle-translation.test.js
+	@node --test tests/web/subtitle-text-translation.test.js tests/web/shared-subtitle-captions.test.js
+	@node --test tests/web/caption-controls.test.js
 	# HDR10-E appears only for an accepted current-generation processing report.
 	@node --test tests/web/dv-processing-badge.test.js
 	@node --test tests/web/hdr-display-peak.test.js
 	# The HDR display claim follows (dynamic-range: high) after boot (Linux Chrome, monitor moves).
 	@node --test tests/web/hdr-display-change.test.js
+	# Settings → Playback → Open titles in, and the plurx Player handoff (LINUX-PLAYER-PLAN M3).
+	@node --test tests/web/linux-player-handoff.test.js
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js
@@ -1629,6 +1652,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/file-context.test.js
 	@node --test tests/web/shared-decision.test.js
 	@node --test tests/web/shared-libraries.test.js
+	@node --test tests/web/resume-position.test.js
 	@node --test tests/web/sharing-protocol-cases.test.js
 	@node --test tests/web/shared-artwork.test.js
 	@node --test tests/web/sharing-management.test.js
@@ -1659,29 +1683,21 @@ BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null)
 # `make docker SOURCE_DATE_EPOCH=<seconds>`, which Make lets win.
 SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git log -1 --format=%ct 2>/dev/null))
 HOST_SHORTNAME := $(shell hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)
+# Public, independently published media assets; mirrors are explicit repository overrides.
+PLURX_MEDIA_RUNTIME_REPOSITORY ?= ghcr.io/pjunod/cinema-media-runtime
 
 .PHONY: version
 version: ## Print the version and git build stamp a build would report
 	@echo "$(VERSION) ($(BUILD_REF))"
 
 .PHONY: docker
-#
-# Without PLURX_LINUX_DOLBY_PACKAGE this builds the `runtime` stage on either
-# architecture: the same image `make docker-up` (Compose) builds and the fleet
-# runs. The audited amd64 Dolby media package is an input, not a precondition:
-# its producer (`linux-dolby-package-export`) is not yet qualified, so a node
-# cannot make one, and a `make docker` that refuses until it can is a build
-# nobody can run. When the package is supplied, amd64 installs it through
-# scripts/build-linux-dolby-ffmpeg --step docker-build.
-docker: ## Build the container image (amd64 + PLURX_LINUX_DOLBY_PACKAGE adds the audited Dolby media package)
+# Media tools and drivers are published separately. Application builds always
+# consume the immutable runtime base committed in Dockerfile.
+docker: ## Build the application on its pinned media runtime
 	@set -eu; platform="$${DOCKER_DEFAULT_PLATFORM:-linux/$$(uname -m)}"; \
 	case "$$platform" in linux/amd64|linux/x86_64) arch=amd64 ;; linux/arm64|linux/aarch64) arch=arm64 ;; \
 	*) echo "Unsupported container platform $$platform" >&2; exit 1 ;; esac; \
-	if test "$$arch" = amd64 && test -n "$${PLURX_LINUX_DOLBY_PACKAGE:-}"; then \
-	  python3 scripts/build-linux-dolby-ffmpeg --step docker-build --root "$$(pwd)" --output "$$PLURX_LINUX_DOLBY_PACKAGE" --image plurx/plurxd:latest --plurx-build-ref "$(BUILD_REF)" --plurx-build-sha "$(BUILD_SHA)" --source-date-epoch "$(SOURCE_DATE_EPOCH)"; \
-	else \
-	  docker build --target runtime --platform "linux/$$arch" --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .; \
-	fi
+	docker build --target runtime --platform "linux/$$arch" --build-arg PLURX_MEDIA_RUNTIME_REPOSITORY="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .
 
 .PHONY: container-smoke
 container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
@@ -1760,7 +1776,7 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 	  && compose_files="$$(python3 ../scripts/docker-hardware --prepare-pi --output "$$hardware")" \
 	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
-	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
+	  && PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe
@@ -2125,3 +2141,9 @@ ripwire-smoke:
 .PHONY: web-shared-artwork-browser-check
 web-shared-artwork-browser-check: ## Qualify actual Shared artwork decode and retirement in isolated Chromium
 	@python3 tests/web/shared-artwork.browser.py
+
+.PHONY: web-shared-library-browser-check
+web-shared-library-browser-check: ## Check Shared browse and enriched details at desktop and phone widths
+	@PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}" \
+		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
+		--test tests/web/shared-libraries.browser.cjs

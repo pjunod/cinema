@@ -39,6 +39,8 @@ CONFIG_ORDER = (
     "witness-precommit-rollback.cfg",
     "witness-displacement.cfg",
     "control-bind-before-work.cfg",
+    "source-pause.cfg",
+    "witness-source-pause.cfg",
 )
 SMOKE_CONFIGS = (
     "smoke.cfg",

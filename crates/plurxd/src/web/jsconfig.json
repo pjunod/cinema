@@ -51,6 +51,7 @@
     "detail/edit.js",
     "player/player.js",
     "player/continuous-media.js",
+    "player/video-frames.js",
     "player/continuous-quality.js",
     "player/session.js",
     "player/prepared-replacement.js",
@@ -66,6 +67,8 @@
     "player/menus.js",
     "player/audio-sync.js",
     "player/subtitle-translation.js",
+    "player/subtitle-text-translation.js",
+    "player/shared-subtitle-captions.js",
     "player/stats.js",
     "player/watch-presentation.js",
     "detail/watch-browser.js",
@@ -96,6 +99,7 @@
     "pages/library-channels-page.js",
     "pages/shared-artwork.js",
     "pages/shared-libraries.js",
+    "pages/sharing-qr.js",
     "pages/sharing-management.js",
     "core/remote-navigation.js",
     "core/remote-router.js",
@@ -107,6 +111,7 @@
     "pages/settings-remote.js",
     "pages/remote.js",
     "pages/diagnostics.js",
+    "pages/activity-starts.js",
     "router.js"
   ]
 }

@@ -845,9 +845,7 @@ test("the rejection report carries the join, whatever the path built it", () => 
 
   // And both call sites go through it, so neither can drift back to spelling
   // the fields out — which is what made the old test a grep in the first place.
-  const wire = SHIPPED_UI.slice(
-    SHIPPED_UI.indexOf('v.addEventListener("error"'),
-  ).slice(0, 4000);
+  const wire = shippedSource("wirePlayerMedia");
   for (const [name, source] of [
     ["hls.js", shippedSource("onHlsError")],
     ["<video>", wire],
@@ -4054,9 +4052,10 @@ test("the waiting listener raises one fault per wait, not one per boundary", () 
   const handler = new PlaybackContextFunction(
     "PLAYER", "PlaybackPolicy", "playbackOwnsAttachedMedia", "playbackSurfacePromptUp",
     "beginWait", "bufferRunway", "playbackWaitCopy", "raisePlaybackSurface",
-    "notifyPlaybackControl", "v",
+    "notifyPlaybackControl", "v", "document",
     match[1],
   );
+  const video = {};
   const call = () => handler(
     { started: true, health: null }, policy, () => true, () => false, () => {}, () => 3,
     () => ({ title: "Buffering…", detail: "3.0 s client loaded" }),
@@ -4066,7 +4065,7 @@ test("the waiting listener raises one fault per wait, not one per boundary", () 
       raised.push({ source, options });
       return null;
     },
-    () => {}, {},
+    () => {}, video, {getElementById:()=>video},
   );
   call();
   call();
@@ -5159,7 +5158,7 @@ test("a pre-play burn rides the first session open rather than a restart", () =>
   });
 });
 
-test("a default subtitle in a transcode decision rides the first session recipe", () => {
+test("a default subtitle rides the first session recipe on every route", () => {
   const decision={...PGS_DECISION,
     subtitles:PGS_DECISION.subtitles.map(s=>({...s,default:s.index===2}))};
   const h=detailHarness();
@@ -5170,8 +5169,25 @@ test("a default subtitle in a transcode decision rides the first session recipe"
   }
   assert.equal(h.prePlayApplication(decision,{subtitle:-1}).burnedSub,null,
     "explicit Off overrides the server default");
-  assert.equal(h.prePlayApplication({...decision,method:'remux'},null).burnedSub,null,
-    "a default must not force a copy decision into transcode");
+  assert.equal(h.prePlayApplication({...decision,method:'remux'},null).burnedSub,2,
+    "a selected bitmap default belongs to the first burn recipe, not a late restart");
+  assert.equal(h.prePlayApplication(decision,null,{skipDefaultSub:true}).subtitle,-1,
+    "leaving a burned subtitle must not restore its default");
+  assert.equal(h.prePlayApplication(decision,{subtitle:2},{skipDefaultSub:true}).subtitle,2,
+    "an explicit choice still owns the recipe");
+});
+
+test("Gran Turismo's default forced text subtitle is admitted before a cold create", () => {
+  const h=detailHarness();
+  for(const method of ["direct_play","remux","transcode"]){
+    const decision={method,delivered_dynamic_range:"dolby_vision",
+      subtitles:[{index:0,codec:"subrip",text:true,default:true}],
+      selection:{subtitle_index:0,subtitle_requires_burn_in:false}};
+    assert.deepEqual(h.prePlayApplication(decision,null),{
+      subtitle:0,blockedByHdr:false,burnedSub:null,textSub:0});
+    assert.equal(h.prePlayApplication(decision,{subtitle:-1}).textSub,null);
+    assert.equal(h.prePlayApplication({...decision,subtitles:[]},null).textSub,null);
+  }
 });
 
 test("a pre-play text subtitle is a <track>, not a second session", () => {
@@ -5990,6 +6006,13 @@ test("a session that lands on a different range repaints the badge", () => {
   assert.equal(player.deliveredRange, "sdr");
   assert.ok(repaints > before, "every attach repaints");
 
+  // Caption projection follows the actual attachment origin, including VOD
+  // zero and signed preroll, instead of the requested seek position.
+  for (const [origin, legacy, expected] of [[0, 90, 0], [81250, 90, 81.25], [-250, 0, -.25], [NaN, 12, 12], [undefined, NaN, 0]]) {
+    attachSession({}, player, {media_origin_ms:origin, start_seconds:legacy, playlist_url:"/x.m3u8"}, 90);
+    assert.equal(player.offset, expected, "the backend's finite media origin owns cue projection");
+  }
+
   // A superseded playback must not repaint over the live one.
   const stale = { deliveredRange: "hdr10" };
   const settled = repaints;
@@ -6585,13 +6608,14 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
   // Anchored inside the branch: `player.prepare()` appears at eight other
   // sites in that file, so asserting the bare call pinned nothing. What has to
   // be true is that the owner hands the recovery a seek target on the PLAYER's
-  // timeline and the player's own seek and prepare. This source inventory can
+  // timeline and the player's own seek and prepare. Caption ownership keeps
+  // recovery from becoming a viewer discontinuity. This source inventory can
   // establish ownership and call shape, but not frame continuity or
   // cancellation cleanup. BehindLiveWindowRecoveryTest drives `attached()`
   // behaviorally and proves that a spent budget gets exactly one fresh use.
   assert.match(
     androidController,
-    /seekTargetMs = \{ playerTimelinePositionMs\(filmPositionMs\) \},\s*\n\s*seekTo = \{ target -> player\.seekTo\(target\) \},\s*\n\s*prepare = \{ player\.prepare\(\) \},/,
+    /seekTargetMs = \{ playerTimelinePositionMs\(filmPositionMs\) \},\s*\n\s*seekTo = \{ target -> progressiveCaptions\.ownedMediaMutation \{ player\.seekTo\(target\) \} \},\s*\n\s*prepare = \{ player\.prepare\(\) \},/,
     "the recovery seeks on the player's timeline and prepares again",
   );
   assert.match(
@@ -7499,4 +7523,14 @@ test("completed video transfer evidence survives a full browser resource timing 
   timing.complete(xhr,url,{start:100,end:130},140,100000);
   assert.equal(timing.size(),128);
   assert.equal(timing.complete(xhr,url,{start:100,end:130},140,100000),undefined);
+});
+
+test('initial multi-audio selection binds audio even when the chosen ordinal is zero',()=>{
+ assert.equal(policy.initialRoute({method:'direct_play',selectedAudioIndex:0,audioTrackCount:2}),'progressive_remux');
+ assert.equal(policy.initialRoute({method:'direct_play',selectedAudioIndex:0,audioTrackCount:2,nativeHls:true}),'copy_hls');
+ assert.equal(policy.initialRoute({method:'direct_play',selectedAudioIndex:3,audioTrackCount:4,segmentedRemux:true}),'copy_hls');
+ assert.equal(policy.initialRoute({method:'direct_play',selectedAudioIndex:0,audioTrackCount:1}),'direct');
+ assert.equal(policy.initialRoute({method:'transcode',selectedAudioIndex:0,audioTrackCount:2}),'transcode_hls');
+ const choose=shippedSource('choosePlayRoute');assert.match(choose,/initialRoute==='direct'&&\(decision\.audio\?\.length\|\|0\)<=1/,'shared raw bytes need an unambiguous single audio stream');
+ const supplied=shippedSource('playbackInitialRoute');assert.match(supplied,/audioTrackCount:decision\.audio\?\.length\|\|1/);
 });

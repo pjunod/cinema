@@ -1,6 +1,416 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1378: native media-wait retirement matches the existing shared fixture.
+[[fixes]]
+id = "apple.media-wait-intent-retirement-parity"
+commits = ["8fb5bab8f226b451c95e0cfaf8be3139386ed7ba"]
+source = "clients/apple/Sources/PlaybackSurfaceModel.swift"
+source_anchor = 'SourceRow("media_waiting", .attached, .buffering, retiredBy:'
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testTheSwiftSurfaceTablesAreTheFixtureVerbatim()"
+
+[[fixes]]
+id = "android.media-wait-intent-retirement-parity"
+commits = []
+supplements = "apple.media-wait-intent-retirement-parity"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.kt"
+source_anchor = "SurfaceSources.MEDIA_WAITING,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceReducerTest.kt"
+test_anchor = "fun sourcesAreTheFixtureVerbatimAndInOrder()"
+
+[[fixes]]
+id = "apple.tv-settings-category-input-adapter"
+commits = ["91f218139058f527d89b031a3c6d86d69d561535"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "private struct TVSettingsCategoryEntryAdapter: ViewModifier"
+test = "tests/operations/test_player_input_fence.py"
+test_anchor = "def test_the_fence_passes_the_repository_as_it_stands"
+
+[[fixes]]
+id = "apple.tv-settings-category-entry"
+commits = ["ffcc6d5e63b935d3b18efec376849c21b0f7b104"]
+source = "clients/apple/Sources/SettingsView.swift"
+source_anchor = "focusedEntry = category"
+test = "clients/apple/UITests/TVSecondaryNavigationTests.swift"
+test_anchor = "func testSettingsPickerHelpReportAndExactReturn"
+
+[[fixes]]
+id = "apple.tv-settings-distinct-accessible-picker-controls"
+commits = []
+supplements = "apple.tv-settings-category-entry"
+source = "clients/apple/Sources/SettingsView.swift"
+source_anchor = "self.controlIdentifier = identifier ?? \"settings-control-\" + title"
+test = "clients/apple/UITests/TVSecondaryNavigationTests.swift"
+test_anchor = "func testSettingsPickerHelpReportAndExactReturn"
+
+# Issue #1352: private server identity is persisted, not a global TLS exception.
+[[fixes]]
+id = "apple.self-signed-server-identity"
+commits = ["5bbfc8eb123bd352397d980d950002417be12d05"]
+source = "clients/apple/Sources/ServerTrust.swift"
+source_anchor = "func disposition(for challenge: URLAuthenticationChallenge)"
+test = "clients/apple/Tests/ServerTrustTests.swift"
+test_anchor = "func testSelectedSelfSignedServerEnrollsWithoutMatchingDNSName"
+
+[[fixes]]
+id = "apple.self-signed-http-upgrade-before-credentials"
+commits = []
+supplements = "apple.self-signed-server-identity"
+source = "clients/apple/Sources/PlurxAPI.swift"
+source_anchor = "func connectionOrigin() async throws -> String"
+test = "clients/apple/Tests/AuthSessionSafetyTests.swift"
+test_anchor = "func testConnectPromotesHTTPBeforeLoginAndNoRedirectAPIReads"
+
+[[fixes]]
+id = "apple.self-signed-native-media-bridge"
+commits = []
+supplements = "apple.self-signed-server-identity"
+source = "clients/apple/Sources/PlayerTrustProxy.swift"
+source_anchor = "func originalURL(for local: URL) -> URL?"
+test = "clients/apple/Tests/PlayerTrustProxyTests.swift"
+test_anchor = "func testCiphertextTamperingCannotRecoverOrFetchTheUpstream"
+
+# PR #1351 omitted the client inventory row; these are its existing source/test.
+[[fixes]]
+id = "apple.tv-settings-visible-picker-names"
+commits = ["969d22611974bd79616ad36cda09e27e049bcd05"]
+source = "clients/apple/Sources/SettingsView.swift"
+source_anchor = "struct SettingsPicker<Selection: Hashable, Content: View>: View"
+test = "clients/apple/UITests/TVSecondaryNavigationTests.swift"
+test_anchor = "func testSettingsPickerHelpReportAndExactReturn"
+
+# Issue #1348: one native held direction keeps previewing until it releases.
+[[fixes]]
+id = "apple.tv-held-timeline-preview"
+commits = ["bbee797e4f656ffb25880d3f2dc3371075c22b47"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "func begin(_ input: PlayerContractInput, preview:"
+test = "clients/apple/Tests/PlayerTimelineHoldTests.swift"
+test_anchor = "func testHoldKeepsPreviewingAndReleaseFencesLateTicks"
+
+[[fixes]]
+id = "apple.tv-native-held-timeline-preview"
+commits = []
+supplements = "apple.tv-held-timeline-preview"
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "recognizer.minimumPressDuration = 0.35"
+test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
+test_anchor = "func testLocalMovieTimelineHoldKeepsPreviewMovingUntilRelease"
+
+# Issue #1347: real tvOS background entry releases the paused player before wake.
+[[fixes]]
+id = "apple.tv-sleep-title-return"
+commits = ["bbecc63c938e4973b260e7c0ec3f33a358987262"]
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "func sceneChanged("
+test = "clients/apple/Tests/PlayerLifecycleTests.swift"
+test_anchor = "func testBackgroundRetiresTVPlayerBeforeReturningToTitle"
+
+[[fixes]]
+id = "apple.tv-background-pending-autoplay"
+commits = []
+supplements = "apple.tv-sleep-title-return"
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "if self.isBackgrounded, let backgroundCompletion"
+test = "clients/apple/Tests/PlayerLifecycleTests.swift"
+test_anchor = "func testBackgroundReplacesPendingAutoplayWithDismissal"
+
+# PR #1331: stop releases the captured HLS session through its configured owner.
+[[fixes]]
+id = "apple.stop-captured-hls-session-owner"
+commits = ["7acfa41eb3a172735b5dc71c7df5a7672a0eba46"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = 'Task { if let model { await releaseHlsSession(model, sessionId) } }'
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testStopReleasesTheAttachedSessionThroughItsConfiguredOwnerExactlyOnce"
+# PR #1332: native journey harness anchors; execution remains in separate receipts.
+[[fixes]]
+id = "apple.tv-navigation-success-capture-idle-budget"
+commits = ["dd8b896e8e5f293b0e3117c92bde5f1574540cd2"]
+source = "clients/apple/UITests/TVNavigationTestCase.swift"
+source_anchor = "if result != .completed || captureOnSuccess {"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "testLiveFullscreenRevealMoreReportAndBackRetainSession"
+
+[[fixes]]
+id = "apple.meridian-tv-rail-setup-steering"
+commits = []
+supplements = "apple.tv-navigation-success-capture-idle-budget"
+source = "clients/apple/UITests/TVNavigationTestCase.swift"
+source_anchor = 'let targetIsRail = target.identifier.hasPrefix("viewer-tab-")'
+test = "clients/apple/UITests/TVMeridianNavigationTests.swift"
+test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"
+
+# Issue #1329: client recovery/status anchors; execution remains in separate receipts.
+[[fixes]]
+id = "subtitles.apple-stopped-operation-recovery"
+commits = ["9996d26f4b57643f097c4b10864ca929353d81a1"]
+source = "clients/apple/Sources/ProgressiveCaptionSession.swift"
+source_anchor = "private func recoverStopped("
+test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
+test_anchor = "testStoppedCreateDiscoversUnpreparedOperationAndRequiresExplicitResume"
+
+[[fixes]]
+id = "subtitles.apple-current-core-failure"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "clients/apple/Sources/ProgressiveCaptionModels.swift"
+source_anchor = "func currentFailure(position:"
+test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
+test_anchor = "testRecoveredOperationIdentityAndNonretryableCoreStatusStayFenced"
+
+[[fixes]]
+id = "subtitles.android-stopped-operation-recovery"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ProgressiveCaptions.kt"
+source_anchor = "internal fun captionValidateRecovery("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ProgressiveCaptionsTest.kt"
+test_anchor = "stoppedCreateRecoveryRequiresItsExactSourceProfileAndLanguage"
+
+[[fixes]]
+id = "subtitles.android-current-core-failure"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ProgressiveCaptions.kt"
+source_anchor = "internal fun captionCurrentFailure("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ProgressiveCaptionsTest.kt"
+test_anchor = "currentNonretryableFailureDoesNotHideCoverageOrRelevantActiveProgress"
+
+[[fixes]]
+id = "subtitles.web-stopped-operation-recovery"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "async function translationRecoverStopped("
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "stopped Create discovers its exact operation without demand until explicit Resume"
+
+[[fixes]]
+id = "subtitles.web-stopped-operation-identity"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "function translationValidateOperation("
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "stopped Create discovery refuses mismatched observations and stale selection"
+
+[[fixes]]
+id = "subtitles.web-current-core-failure"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "function translationCurrentFailure("
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "current nonretryable range failure preserves coverage and relevant active progress"
+
+# PR #1326: abandoned completed provider jobs retain durable cleanup intent.
+[[fixes]]
+id = "sharing.abandoned-network-invitation-cleanup"
+commits = ["e94b4f7af012d2e94dd95b5f68484fb14fa3e2f4"]
+source = "crates/plurxd/src/sharing_network.rs"
+source_anchor = "fn abandon_file(path: &Path) -> Result<()>"
+test = "crates/plurxd/src/sharing_network.rs"
+test_anchor = "fn abandoned_completed_network_job_keeps_durable_cleanup_intent()"
+
+# PR #1326: external recipients explicitly authorize the private connection before import.
+[[fixes]]
+id = "sharing.external-recipient-consent"
+commits = ["ecba33b56a852a57d00ceb12339ec16e56530f67"]
+source = "crates/plurxd/src/web/pages/sharing-management.js"
+source_anchor = 'if(e.text.startsWith("cinema-connect-v1:")&&!e.connectionVerified)'
+test = "tests/web/sharing-management.test.js"
+test_anchor = "combined invitation waits for private consent then imports once automatically"
+
+# Issue #1321: credential sign-in omits reporting while connection recovery retains it.
+[[fixes]]
+id = "apple.sign-in-report-action-removed"
+commits = ["28c2d4ace2257bb51bb423bb046711cf72be4678"]
+source = "clients/apple/Sources/AuthViews.swift"
+source_anchor = 'AuthScaffold(subtitle: model.serverName ?? model.origin, error: model.authError, showReport: false,'
+test = "clients/apple/UITests/TVConnectionNavigationTests.swift"
+test_anchor = "testSignInCanChooseAnotherServerAndReconnectWithNativeRemote"
+
+[[fixes]]
+id = "web.sign-in-report-action-removed"
+commits = []
+supplements = "apple.sign-in-report-action-removed"
+source = "crates/plurxd/src/web/core/auth.js"
+source_anchor = "function authShell(title, sub, fields, btn, onsubmit, showReport=true)"
+test = "tests/web/session-expiry.test.js"
+test_anchor = "credential sign-in omits the reporting action"
+
+
+# PR #1316: QR-first invitation exchange preserves explicit import and approval.
+[[fixes]]
+id = "sharing.invitation-qr-exchange"
+commits = ["0d0deb6ec0a21de665b3707c328c52676321cec5"]
+source = "crates/plurxd/src/web/pages/sharing-qr.js"
+source_anchor = "function sharingQRMatrix(text){"
+test = "tests/web/sharing-management.test.js"
+test_anchor = "sharing QR codes round trip the exact invitation including maximum capacity and retain a quiet zone"
+
+[[fixes]]
+id = "sharing.apple-invitation-qr-roundtrip"
+commits = []
+supplements = "sharing.invitation-qr-exchange"
+source = "clients/apple/Sources/SharedSharingInvitationQR.swift"
+source_anchor = "static func image(for invitation: String)"
+test = "clients/apple/Tests/SharedSharingManagementTests.swift"
+test_anchor = "testSavedInvitationQRCodeRoundTripsExactPayload"
+
+[[fixes]]
+id = "sharing.android-invitation-qr-roundtrip"
+commits = []
+supplements = "sharing.invitation-qr-exchange"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedSharingInvitationQR.kt"
+source_anchor = "internal fun sharingInvitationQR(text: String)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/SharingInvitationQRTest.kt"
+test_anchor = "invitationPngRoundTripPreservesTheExactSecretAtTypicalAndMaximumSizes"
+
+[[fixes]]
+id = "sharing.apple-first-use-camera-permission"
+commits = []
+supplements = "sharing.invitation-qr-exchange"
+source = "clients/apple/Sources/SharedSharingInvitationQR.swift"
+source_anchor = "enum SharedSharingQRCameraPermission"
+test = "clients/apple/Tests/SharedSharingManagementTests.swift"
+test_anchor = "testInvitationQRScanRequestsFirstCameraPermissionBeforeAvailability"
+
+[[fixes]]
+id = "sharing.android-independent-file-providers"
+commits = []
+supplements = "sharing.invitation-qr-exchange"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedSharingInvitationTools.kt"
+source_anchor = "class SharingInvitationFileProvider : FileProvider()"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/SharingInvitationFileProviderTest.kt"
+test_anchor = "sharingPngAndDiagnosticsZipResolveThroughIndependentProvidersAndPaths"
+
+[[fixes]]
+id = "sharing.android-immutable-export-uri"
+commits = ["458b6cb4ae66faabed1e7016a7761576f6b0f99f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedSharingInvitationTools.kt"
+source_anchor = "internal fun writeSharingInvitationImage(directory: File, bitmap: Bitmap)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/SharingInvitationFileProviderTest.kt"
+test_anchor = "laterSharesCannotReplaceTheInvitationVisibleThroughAnEarlierGrantedUri"
+
+# PR #1311: both Cinema Info buttons expose current playback observations.
+[[fixes]]
+id = "linux-player.cinema-playback-info"
+commits = ["19561df4270b306c6e03c1a60a6aece7747d993c", "11db1c5c8656c95b5f9c553061f42f5748c04fba"]
+source = "clients/linux-player/plurx_player/scripts/cinema.lua"
+source_anchor = "local function playback_info()"
+test = "clients/linux-player/tests/test_cinema.lua"
+test_anchor = "test_info_buttons_report_live_observations"
+
+[[fixes]]
+id = "linux-player.cinema-playback-info-presentation-boundary"
+commits = []
+supplements = "linux-player.cinema-playback-info"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = '"playback": {"mode": self.mode if self.mode in ("direct", "remux", "transcode") else None,'
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "test_playback_info_publishes_only_whitelisted_delivery_facts"
+
+[[fixes]]
+id = "linux-player.cinema-playback-info-sync-sample"
+commits = []
+supplements = "linux-player.cinema-playback-info"
+source = "clients/linux-player/plurx_player/scripts/cinema.lua"
+source_anchor = "local sync, delay=prop('avsync'),prop('audio-delay')"
+test = "clients/linux-player/tests/test_cinema.lua"
+test_anchor = "test_info_reads_each_sync_sample_once"
+
+[[fixes]]
+id = "linux-player.cinema-playback-info-range-observation"
+commits = []
+supplements = "linux-player.cinema-playback-info"
+source = "clients/linux-player/plurx_player/scripts/cinema.lua"
+source_anchor = "elseif sdr[p.gamma] then range='SDR (mpv transfer)' end"
+test = "clients/linux-player/tests/test_cinema.lua"
+test_anchor = "test_info_dynamic_range_requires_transfer"
+
+# PR #1307: Cinema quality and next episode retain native playback ownership.
+[[fixes]]
+id = "linux-player.cinema-quality-transition"
+commits = ["ab880ed254a09b5f822e7048f8b3248528e31b29"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def change_quality(self, choice):"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "test_quality_preserves_absolute_position_pause_and_heartbeat_selection"
+
+[[fixes]]
+id = "linux-player.cinema-next-transition"
+commits = []
+supplements = "linux-player.cinema-quality-transition"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def next_episode(self):"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "test_explicit_next_finishes_predecessor_then_opens_resolved_successor"
+
+# PR #1306: native handoff is limited to the selected Dolby Vision file on Linux.
+[[fixes]]
+id = "web.linux-dolby-vision-player-handoff"
+commits = ["2cbb69f9959e599b3d5c4d06ecded593ac9b3eec"]
+source = "crates/plurxd/src/web/detail/preplay-selection.js"
+source_anchor = 'if(openInPreference()!=="player"||meta?.source_dynamic_range!=="dolby_vision") return false;'
+test = "tests/web/linux-player-handoff.test.js"
+test_anchor = "only Dolby Vision on Linux can mint a handoff despite a saved player preference"
+
+[[fixes]]
+id = "web.linux-dolby-vision-selected-version"
+commits = []
+supplements = "web.linux-dolby-vision-player-handoff"
+source = "crates/plurxd/src/web/detail/preplay-selection.js"
+source_anchor = "m.source_dynamic_range=file?sourceDynamicRange(file):null;"
+test = "tests/web/linux-player-handoff.test.js"
+test_anchor = "every layout's Play and Start over buttons route the clicked version only"
+
+# The semantic in-session seek regression exercises the real playback event path.
+[[fixes]]
+id = "linux-player.seek-inside-session-event-path"
+commits = ["7bec1b236eb7c2acd590d7ad20890ac73d3f2501"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def on_seek(self):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "test_seek_inside_the_range_stays_in_the_session"
+
+# HTTPS qualification: current Apple unit contracts, with execution recorded separately.
+[[fixes]]
+id = "https.apple-unit-current-contracts"
+commits = ["88ab6e0d03e90e7e323495b9f3795160f20e68ff"]
+source = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+source_anchor = 'XCTAssertEqual(pick(processed(grade: "sdr")), 720)'
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testProcessedHdr10PreferenceRequiresQualifiedProductionAndCodec"
+
+[[fixes]]
+id = "https.apple-developer-graduation-fixture"
+commits = []
+supplements = "https.apple-unit-current-contracts"
+source = "clients/apple/Tests/LiveTvTests.swift"
+source_anchor = 'XCTAssertTrue(card.contains("graduates from Developer after those checks pass"), title)'
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+
+[[fixes]]
+id = "https.apple-native-adaptive-sidebar-fixture"
+commits = []
+supplements = "https.apple-unit-current-contracts"
+source = "clients/apple/Tests/MeridianTests.swift"
+source_anchor = "let nativeSidebarHidden = nativeTabs.sidebar.isHidden"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts"
+
+# HTTPS qualification: retain one native accessibility snapshot per guide move.
+[[fixes]]
+id = "https.apple-guide-native-snapshot-poll"
+commits = ["13bb201e8f5672150867522d70ccac7db330593c"]
+source = "clients/apple/UITests/TVLiveNavigationTests.swift"
+source_anchor = 'guard let snapshot = try? target.snapshot() else { return false }'
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "testGuide77ChannelsKeepsNativeFocusVisibleAndResponsive"
 # PR #1286: native input authority must not invalidate the shell and all controls.
 [[fixes]]
 id = "apple.tv-focus-observation-isolation"
@@ -69,7 +479,7 @@ test_anchor = "testPortraitLiveGuideShowsMultipleChannelsDespiteLegacySchedulePr
 id = "apple.tv-timeline-native-select"
 commits = ["3cf3d19948eccf2efb459adbbdc9f765d6f92db2"]
 source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
-source_anchor = "Button { dispatch(.select) } label: { content }"
+source_anchor = "Button { timelineHold?.cancel(); dispatch(.select) } label: { content }"
 test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
 test_anchor = "testLocalMovieTimelineSelectCommitsForwardAndBackwardPreview"
 
@@ -235,6 +645,14 @@ source = "clients/apple/Sources/PlaybackControlReporter.swift"
 source_anchor = "guard value == \"unavailable\", toldIntent != intent else { return false }"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testUnavailableSubtitleNotifiesOncePerIntentWithoutConsumingReadyRetry"
+
+[[fixes]]
+id = "subtitles.translation-bound-to-captured-context"
+commits = ["030b0293bf9bd6d0f95f44b08e892f51cb227b20"]
+source = "crates/plurxd/src/web/player/subtitle-text-translation.js"
+source_anchor = "function textTranslationSourceCurrent(state){"
+test = "tests/web/subtitle-text-translation.test.js"
+test_anchor = "replacing a captured Local context refuses new work and fences a held create response"
 
 # Reviewed Mac completion client changes: source/test anchors, not execution receipts.
 [[fixes]]
@@ -513,8 +931,8 @@ test_anchor = "transcode_capacity_pending"
 [[fixes]]
 id = "web.frame-callback-registration-lifecycle"
 commits = ["790ffc9da", "4c8830b2c", "b217c615e", "85b177a1b", "3d22d5ee2"]
-source = "crates/plurxd/src/web/player/decode-tiers.js"
-source_anchor = "if(id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;"
+source = "crates/plurxd/src/web/player/video-frames.js"
+source_anchor = "function requestPlaybackVideoFrame(video,callback){"
 test = "tests/playback/web-control.test.js"
 test_anchor = "loadeddata during the initial seek must not strand a frame request"
 
@@ -596,7 +1014,7 @@ test_anchor = "testColdCommandsComposeIntoTheActualSessionRequestAndRejectStaleD
 id = "web.bounded-preparation-and-retained-observers"
 commits = ["0a70d6fb"]
 source = "crates/plurxd/src/web/player/stall-diagnosis.js"
-source_anchor = "function playbackOwnsAttachedMedia(p)"
+source_anchor = "function playbackOwnsAttachedMedia(p,sourceAuthority=false){"
 test = "tests/playback/web-control.test.js"
 test_anchor = "HLS callbacks cannot replace the original preparation deadline"
 
@@ -6430,7 +6848,7 @@ commits = ["8d6008c903bf644c223c7abcbd7c766d64e736fa"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "val processed = candidates.filter { it.processed_hdr10 && it.hasValidIdentity &&"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
-test_anchor = "processedHdr10PreferenceRequiresQualifiedProductionAndCodec"
+test_anchor = "processedDvPreferenceRequiresQualifiedProductionAndCodecForBothGrades"
 
 [[fixes]]
 id = "apple.processed-hdr10-qualified-auto"
@@ -7220,6 +7638,73 @@ source_anchor = "case autoMissingCostCatalogRefresh"
 test = "clients/apple/Tests/AttemptScopesTests.swift"
 test_anchor = "testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle"
 
+
+# Qualification commit 30a94b90 includes one Android behavior correction and
+# Apple registry/source-contract/callback-fixture corrections. The supplemental
+# fixture rows name the actual changed observation/holding code, not a new
+# production reporter behavior.
+[[fixes]]
+id = "https.qualification-client-corrections"
+commits = ["30a94b90456924f556be7903f7f92c960b9f8c34"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "// Keep the shared transport options contiguous in their contract"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
+test_anchor = "transportOptionsFollowTheSharedContractOrder"
+
+[[fixes]]
+id = "https.apple-developer-registry-matches-shipped-diagnostics"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Sources/LiveTvSettingsView.swift"
+source_anchor = '"Remote diagnostics · advisory readiness",'
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+
+[[fixes]]
+id = "https.apple-auto-tick-source-contract-retains-parameterized-function"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func tickDisplayAwareAuto(pressureOnly: Bool = false)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testArmedBoundaryReplanEndsWithStallRecoveryAndSkipsBlockedCandidates"
+
+[[fixes]]
+id = "https.apple-terminal-fixture-holds-actual-captured-response"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = 'XCTAssertEqual(controlExchanges.firstResponse(withReadiness: "ready"), 1)'
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testEndRevokesATerminalPublicationAlreadyPastTheCaptureGuard"
+
+# The duplicate helper blocked both full Swift unit-test targets; compile and
+# queued callback execution receipts are separate from these source anchors.
+[[fixes]]
+id = "https.apple-subtitle-callback-helper-defined-once"
+commits = ["ae0348cdc171d3448a7dbcd15dd7ad1e34931ef2"]
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = "func takeAll() -> [@MainActor @Sendable () -> Void] {"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testQueuedSubtitleFailureIsDeliveredOnlyToItsCurrentIntent"
+
+[[fixes]]
+id = "https.apple-subtitle-failure-fixture-holds-complete-readiness-batch"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = "let queuedBatch = callbacks.takeAll()"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testQueuedSubtitleFailureIsDeliveredOnlyToItsCurrentIntent"
+
+[[fixes]]
+id = "https.apple-subtitle-ready-fixture-holds-complete-readiness-batch"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = "let queuedBatch = callbacks.takeAll()"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testQueuedSubtitleReadinessIsDeliveredForItsCurrentSession"
 [[fixes]]
 id = "apple.tv-full-guide-lazy-viewport"
 commits = ["18577692c30128a49541d290d43463c2a7eeb11c"]
@@ -7609,3 +8094,386 @@ source = "crates/plurxd/src/web/player/decode-tiers.js"
 source_anchor = "function watchDisplayDynamicRange(){"
 test = "tests/web/hdr-display-change.test.js"
 test_anchor = "test(\"a display that turns HDR after boot is claimed for the next session\""
+
+# Subtitle completion client corrections: each row keeps the shipped behavior
+# tied to the focused regression added or strengthened by that corrective commit.
+[[fixes]]
+id = "web.subtitle-caption-manifest-window-delta"
+commits = ["90f6b40d401c07eb57d528070591c04dd43c0de8"]
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "const track=video._translationTrack,Cue=window.VTTCue||window.TextTrackCue,desired=new Map();"
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "test('manifest refresh preserves unchanged cue objects and applies only the window delta',()=>"
+
+[[fixes]]
+id = "android.subtitle-caption-owned-demand-polling"
+commits = ["13a81038698f8dd1d3faabbc24c6ab588b24c69a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ProgressiveCaptions.kt"
+source_anchor = "internal class CaptionDemandAttempt {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/CaptionPollingLifecycleTest.kt"
+test_anchor = "@Test fun demandRenewalContinuesWhileOneWindowReadIsHeldBeyondItsTtl() = runBlocking {"
+
+[[fixes]]
+id = "android.subtitle-shared-caption-read-owner"
+commits = ["e0af4a57ae07de0ecee57f8b7f06fac37c50d4a0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedProgressiveCaptions.kt"
+source_anchor = "internal class SharedProgressiveCaptions("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedProgressiveCaptionsTest.kt"
+test_anchor = "@Test fun sharedReadsUseOnlyClosedOpaqueGetResourcesAndNeverEnqueue(): Unit = runBlocking {"
+
+[[fixes]]
+id = "apple.subtitle-continuous-traversal"
+commits = []
+supplements = "android.subtitle-pending-producer-handoff"
+source = "clients/apple/Sources/ProgressiveCaptionSession.swift"
+source_anchor = "func mediaChanged(seek: Bool = false, positionMs: Int? = nil) {"
+test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
+test_anchor = "func testAdvancingPlaybackKeepsContinuityAcrossCoreBoundaryPauseRateAndAttachment("
+
+[[fixes]]
+id = "android.subtitle-pending-producer-handoff"
+commits = ["ec8dc68b3ff24ce680c799127417387fa9b9f3e0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/CaptionProducerMutations.kt"
+source_anchor = "internal class CaptionProducerMutations<T>(private val ownership: CaptionProducerOwnership) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/CaptionProducerMutationsTest.kt"
+test_anchor = "fun heldCreateReplacementSettlesExactBodyBeforeSuccessorMutationAndCannotReleaseSuccessor("
+
+[[fixes]]
+id = "web.subtitle-seek-continuity-replay"
+commits = []
+supplements = "android.subtitle-pending-producer-handoff"
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "function translationRotateContinuity(state){state.continuityId=translationUuid();return state.continuityId;}"
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "test('uncertain old heartbeat replays exact bytes after seek, then renews once without a failure loop',async()=>"
+
+[[fixes]]
+id = "claude.linux-player-signal-during-redeem-revokes"
+commits = ["cb621c7dfd5053461c95ab93e04c333940a9cb74"]
+source = "clients/linux-player/plurx_player/launcher.py"
+source_anchor = "class SignalGate:"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_sigterm_while_redeeming_still_revokes_the_issued_token(self):"
+
+[[fixes]]
+id = "claude.linux-player-default-picker-policy-tracks"
+commits = ["752ac01107eee2c9cabcc09b8702e7f9377e6f50"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def apply_policy_defaults(self):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_default_audio_is_selected_for_direct_play(self):"
+
+[[fixes]]
+id = "claude.linux-player-package-removes-launcher-bytecode"
+commits = ["9bacd0bcfdb9159252b02de48f07434b7c9f0188"]
+source = "clients/linux-player/debian/rules"
+source_anchor = "override_dh_python3:"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_private_launcher_bytecode_is_owned_by_dh_python3(self):"
+
+[[fixes]]
+id = "claude.linux-player-mpv-without-loader-overrides"
+commits = ["beed7b4d7d222b52670129f1b72b472a50232383"]
+source = "clients/linux-player/plurx_player/mpv.py"
+source_anchor = "LOADER_OVERRIDES = (\"LD_LIBRARY_PATH\", \"LD_PRELOAD\", \"LD_AUDIT\")"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_mpv_gets_no_dynamic_loader_overrides(self):"
+
+[[fixes]]
+id = "claude.linux-player-packaging-review"
+commits = ["986310e245f534d4ddf84e4c42e5b3678b579a69"]
+source = "clients/linux-player/packaging/apply-series.sh"
+source_anchor = "echo \"apply-series: $dir/series and the directory disagree\" >&2"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_verification_never_lets_a_failed_check_fall_through_to_pass(self):"
+
+# PR #1291: the private libplacebo shares no symbol names with the system one libavfilter loads.
+[[fixes]]
+id = "claude.linux-player-libplacebo-renamed-and-hidden"
+commits = ["35326ed6892e214e3bba31444d16057356490d96"]
+source = "clients/linux-player/packaging/build-private.sh"
+source_anchor = 'objcopy --redefine-syms="$out/libplacebo.rename" "$archive"'
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_libplacebo_is_linked_in_renamed_and_hidden(self):"
+
+# PR #1291: CM v2.9 evaluates its output lattice once per frame (real time on an Intel Arc iGPU).
+[[fixes]]
+id = "claude.dv-dm-cm29-lattice-once-per-frame"
+commits = []
+supplements = "claude.linux-player-libplacebo-renamed-and-hidden"
+source = "tools/dv_processing/dv_dm.h"
+source_anchor = "static const char dv_dm_body_lattice[]"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_cm29_evaluates_its_lattice_once_per_frame(self):"
+
+# The launcher's control exchanges carry its capabilities (400/409 before), and the server knows a Linux client.
+[[fixes]]
+id = "claude.linux-player-control-capabilities"
+commits = ["484fbf97e51601a0d4dbfc309ec39cefdcbfc9e8"]
+source = "clients/linux-player/plurx_player/caps.py"
+source_anchor = "def control_capabilities(native_dovi=False):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_the_first_control_exchange_is_the_one_the_server_validates(self):"
+
+[[fixes]]
+id = "claude.playback-control-linux-platform"
+commits = []
+supplements = "claude.linux-player-control-capabilities"
+source = "crates/plurxd/src/playback_control.rs"
+source_anchor = "pub(crate) const CLIENT_PLATFORMS: usize = 4;"
+test = "crates/plurxd/src/playback_control/tests.rs"
+test_anchor = "fn the_linux_player_first_exchange_is_a_valid_v1_request()"
+
+# mpv patch 0004: Wayland swapchains start pass-through, so the NVIDIA driver never holds the window's colour surface.
+[[fixes]]
+id = "claude.linux-player-wayland-swapchain-pass-through"
+commits = ["9623ac095dddbe1c49d460c5af9153097af2214c"]
+source = "clients/linux-player/packaging/patches/mpv/series"
+source_anchor = "0004-vulkan-context-start-Wayland-swapchains-pass-through.patch"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_the_first_wayland_swapchain_is_pass_through(self):"
+
+# A portal-started launcher takes the session's display; a title with no window fails instead of playing audio only.
+[[fixes]]
+id = "claude.linux-player-session-display"
+commits = ["68e3273848098ef87a27cb93f5e3d2e28f0f40cb"]
+source = "clients/linux-player/plurx_player/launcher.py"
+source_anchor = "def adopt_session_display(environ, read_session_environment):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_a_portal_started_launcher_gives_mpv_the_sessions_display(self):"
+
+[[fixes]]
+id = "claude.linux-player-no-video-window"
+commits = []
+supplements = "claude.linux-player-session-display"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def require_video_output(self):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_a_title_with_video_but_no_window_fails_instead_of_playing_audio_only(self):"
+
+# A copy hands dual-layer Dolby Vision over intact to a client whose own caps name the profile.
+[[fixes]]
+id = "claude.plurxd-dual-layer-as-copied"
+commits = ["29b0893726abe3929e0f60af388a01b953a9c46e"]
+source = "crates/plurxd/src/transcode/hls_codecs.rs"
+source_anchor = "|| options.dual_layer_as_copied);"
+test = "crates/plurxd/src/transcode/tests/chunk_04.rs"
+test_anchor = "fn a_copy_hands_dual_layer_over_intact_only_when_the_plan_says_the_client_named_it()"
+
+[[fixes]]
+id = "claude.plurxd-dual-layer-review"
+commits = []
+supplements = "claude.plurxd-dual-layer-as-copied"
+source = "crates/plurxd/src/http/hls/create.rs"
+source_anchor = "review.dual_layer_as_copied = review.preserve_dolby_vision"
+test = "crates/plurxd/src/http/hls/tests/chunk_06.rs"
+test_anchor = "fn a_client_that_names_profile_7_is_handed_the_dual_layer_as_copied()"
+
+[[fixes]]
+id = "claude.plurxd-dual-layer-fingerprint"
+commits = []
+supplements = "claude.plurxd-dual-layer-as-copied"
+source = "crates/plurxd/src/transcode/session_request.rs"
+source_anchor = 'format!("{base}+dl")'
+test = "crates/plurxd/src/transcode/tests/chunk_02.rs"
+test_anchor = "fn a_converting_copy_fingerprints_apart_from_the_copy_it_replaces()"
+
+# The no-window check asks whether the title has video, since mpv deselects the video track it cannot show.
+[[fixes]]
+id = "claude.linux-player-no-window-review"
+commits = ["7aae21cc17c95ccf9c24dd00aebbd9a1fe8763fd"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = 'and not t.get("albumart")'
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_mpvs_vo_error_line_is_a_failure_too(self):"
+
+# Package builds share a snapshot apt cache and retry 503s from snapshot.ubuntu.com.
+[[fixes]]
+id = "claude.linux-player-snapshot-apt-cache"
+commits = ["9dc49c361ed42688a01766c2777e643e1ff61183"]
+source = "clients/linux-player/packaging/apt-snapshot.sh"
+source_anchor = 'marker=/apt-cache/lists/.plurx-snapshot-$ts'
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_every_container_shares_the_snapshot_apt_cache(self):"
+
+# mpv patch 0002 reads the hvcC demux_lavf keeps in lav_codecpar, so Profile 7's enhancement layer is split from HLS streams.
+[[fixes]]
+id = "claude.linux-player-fel-over-hls"
+commits = ["cf6801a2494f8a11c3af2128c286d99a4984a3a7"]
+source = "clients/linux-player/packaging/patches/mpv/0002-demux-dovi_split-split-the-enhancement-layer-without.patch"
+source_anchor = "+    if ((!x || size <= 0) && c->lav_codecpar) {"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_the_split_reads_the_hvcc_that_demux_lavf_keeps(self):"
+
+# Review of #1298: a partial apt index fails the build rather than being marked complete; one build per cache.
+[[fixes]]
+id = "claude.linux-player-apt-cache-review"
+commits = ["fb447e521465e33ae5017b3d11afe10c01784b53"]
+source = "clients/linux-player/packaging/apt-snapshot.sh"
+source_anchor = "apt-get -q -o APT::Update::Error-Mode=any update"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_every_container_shares_the_snapshot_apt_cache(self):"
+
+# A live session shows the whole film on mpv's OSC (patch 0005) and seeks outside the stream restart it there.
+[[fixes]]
+id = "claude.linux-player-film-timeline"
+commits = ["d1acb127c26c09b0674eba96bf7b051790bd698a"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def show_film_timeline(self):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_a_film_seek_outside_the_stream_recreates_the_session_there(self):"
+
+[[fixes]]
+id = "claude.mpv-osc-film-timeline"
+commits = []
+supplements = "claude.linux-player-film-timeline"
+source = "clients/linux-player/packaging/patches/mpv/0005-osc-draw-a-film-timeline-the-application-provides.patch"
+source_anchor = "+-- A film timeline the embedding application sets in user-data/osc/film as"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_the_osc_reads_the_film_timeline_and_hands_back_outside_seeks(self):"
+
+# PR #1366: missing native-frame callbacks may retire only the observation claim; real playback failures keep authority.
+[[fixes]]
+id = "web.native-hls-observation-deadline-ownership"
+commits = ["dac9e2c7e"]
+source = "crates/plurxd/src/web/player/player.js"
+source_anchor = "function concludeNativeHlsObservation(player,episode){"
+test = "tests/playback/native-hls-startup.test.js"
+test_anchor = "native observer conclusion preserves later physical-freeze recovery and real element rejection"
+
+[[fixes]]
+id = "linux-player.dolby-final-unorm16-rounding"
+commits = ["28f2cb9a968f16425a42dc4201e9c3165192d31e"]
+source = "clients/linux-player/packaging/patches/mpv/0008-vo_gpu_next-round-the-final-DV-UNORM16-cache-exactly.patch"
+source_anchor = "+static const char dv_unorm16_glsl[] ="
+test = "clients/linux-player/tests/test_dv_unorm16.py"
+test_anchor = "def test_exact_terminal_shader_against_rational_reference(self):"
+
+[[fixes]]
+id = "linux-player.dolby-reconstruction-color-metadata"
+commits = []
+supplements = "linux-player.dolby-final-unorm16-rounding"
+source = "clients/linux-player/packaging/patches/mpv/0006-vo_gpu_next-normalize-DV-reconstruction-metadata.patch"
+source_anchor = "+    image.color = plurx_dv_reconstruction_color();"
+test = "clients/linux-player/tests/dv_render_controls.c"
+test_anchor = "struct pl_color_space got=plurx_dv_reconstruction_color();"
+
+[[fixes]]
+id = "linux-player.dolby-hdr10-planar-10bit-upload"
+commits = []
+supplements = "linux-player.dolby-final-unorm16-rounding"
+source = "clients/linux-player/packaging/patches/mpv/0007-vo_gpu_next-preserve-DV-software-sampling-precision.patch"
+source_anchor = "+static bool frame_needs_precise_sw10(const struct pl_frame *frame)"
+test = "clients/linux-player/tests/dv_render_controls.c"
+test_anchor = "assert(upload_planes_sw(&vo,&gpu,&mpi,&hdr10,tex,frame_needs_precise_sw10(&hdr10)));"
+
+# Playback start Phase 1 (effort/playback-start, PR #1454): D1 prepared-switch seams.
+[[fixes]]
+id = "android.prepared-seam-reopen-on-every-refusal"
+commits = ["3b1a05c241e3fddb1886a75924420fa685068baa"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun reportPreparedSeam("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSwitchMeasurementTest.kt"
+test_anchor = "fun theSeamReportNamesEachOutcomeAndOnlyACommitCanCount()"
+
+[[fixes]]
+id = "apple.shared-alignment-one-budget"
+commits = ["d686e9d8b1812f3d2f6605ab3188a573ccaec8ce"]
+source = "clients/apple/Sources/SharedPlayerController.swift"
+source_anchor = "let alignmentDeadlineMs = Int(ProcessInfo.processInfo.systemUptime * 1_000)"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "func testSharedCommitShowsADecodedFrameBeforeExposingTheSuccessor() throws {"
+
+[[fixes]]
+id = "apple.prepared-seam-reopen-from-window"
+commits = ["c13ff41721ad555dcbb3f4f845805c98e8f4037d"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let reopensAtOutcome = reopensStarted"
+test = "clients/apple/Tests/PreparedSwitchMeasurementTests.swift"
+test_anchor = "func testSeamBeaconNamesEachOutcomeAndCountsOnlyACommit() throws {"
+
+[[fixes]]
+id = "clients.prepared-successor-decoded-frame-first"
+commits = ["6e970ed36e57d96e5b1b478f79be6e95647c53f0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private var mediaSessionRebindAwaitsFrame = false"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSwitchMeasurementTest.kt"
+test_anchor = "fun mediaSessionMovesToTheSuccessorOnlyAfterItsFrame()"
+
+[[fixes]]
+id = "playback.create-codes-in-surface-contract"
+commits = ["b452e7756ed67e7c06e27b093e08f64fb308dd5a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.kt"
+source_anchor = 'const val CREATE_CAPACITY_TERMINAL = "create_capacity_terminal"'
+test = "tests/validation/test_control_wire_conformance.py"
+test_anchor = "def test_every_code_a_create_answers_with_is_in_the_contract(self) -> None:"
+
+# PR #1483: one system renderer, truthful format negotiation and current physical facts.
+
+[[fixes]]
+id = "linux-player.system-mpv-default"
+commits = ["37435a672570e209b2953a1962b4589038d08290"]
+source = "clients/linux-player/plurx_player/mpv.py"
+source_anchor = "DEFAULT_BINARY = \"/usr/bin/mpv\""
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_system_mpv_wins_even_when_legacy_bundle_is_executable(self):"
+
+[[fixes]]
+id = "linux-player.system-mpv-native-capability"
+commits = []
+supplements = "linux-player.system-mpv-default"
+source = "clients/linux-player/plurx_player/mpv.py"
+source_anchor = "def native_dovi_capable(binary):"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_version_names_partial_markers_and_failed_probes_are_not_capabilities(self):"
+
+[[fixes]]
+id = "linux-player.system-mpv-frontend-package"
+commits = []
+supplements = "linux-player.system-mpv-default"
+source = "clients/linux-player/debian/control"
+source_anchor = "Depends: ${misc:Depends}, ${python3:Depends}, mpv, python3 (>= 3.10), zenity"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_package_ships_only_the_frontend_and_depends_on_system_mpv(self):"
+
+[[fixes]]
+id = "linux-player.frontend-verification-compiler"
+commits = ["c427d1e67b06452ea6c3eacbd9f04027b9452abe"]
+source = "clients/linux-player/packaging/verify-in-container.sh"
+source_anchor = "build-essential desktop-file-utils lintian binutils git lua5.2"
+test = "clients/linux-player/tests/test_dv_unorm16.py"
+test_anchor = "def test_exact_terminal_shader_against_rational_reference(self):"
+
+[[fixes]]
+id = "linux-player.shared-native-physical-target"
+commits = ["3cb2b008d0c2ca48680d63c1cd8aa9121533574a"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "NATIVE_MAPPER = \"shared native Dolby renderer\""
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_authoritative_success_reports_physical_peak_in_existing_fact_fields(self):"
+
+[[fixes]]
+id = "linux-player.shared-native-authoritative-state"
+commits = ["3024053e09c8d606724c82fb219567d7b86a7b1f"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def read_native_target_state(self):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_success_requires_current_active_matching_backend_generation(self):"
+
+[[fixes]]
+id = "linux-player.shared-native-state-lifecycle"
+commits = []
+supplements = "linux-player.shared-native-authoritative-state"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def invalidate_native_target(self, state):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_load_source_and_changed_target_policy_require_a_fresh_success(self):"
+
+# PR #1489: the Android decoder envelope claims only what Media3's selector admits.
+[[fixes]]
+id = "android.decoder-envelope-media3-admits"
+commits = ["a7b9ad4e35c52c1fc0a0819bcbcb9bf094c28f57", "b195904dd0fbe7c1707c0726115b2aab383a6ca0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Caps.kt"
+source_anchor = "selector.isVideoSizeAndRateSupportedV21(width, height, rate)"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "fun decoderEnvelopeAsksMedia3AtEveryRectangleAndRate()"

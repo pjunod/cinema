@@ -181,7 +181,7 @@
     "private_receipt_sha256": "7b34b20973496801e798b03a3397f3f37b25251963dfe2eddfb9649eda5e0a0b",
     "scope": "All48 native metadata rawRPUbound;0/24semanticsmatch. No latticeRGB orcandidate metrics."
   },
-  "handoff": "docs/streaming/FEL-CLAUDE-HANDOFF.md",
+  "handoff": "docs/streaming/FEL-PICTURE-QUALITY-INVESTIGATION.md#resuming",
   "roi_control": {
     "protocol": "protocol-roi-20261111.json",
     "harness": "roi_encode.c",
