@@ -559,7 +559,6 @@ impl CopyRangeFiles {
             .map_err(|_| "copy_manifest_pointer_failed".to_owned())?;
         let checkpoint = Arc::new(CopyRangeCheckpoint {
             manifest_path: self.observation_path.join(&name),
-            manifest_file: Arc::clone(&file),
             manifest_sha256: sha256,
             timescale,
             canonical_title_start: self.canonical_title_start,

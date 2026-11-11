@@ -86,7 +86,6 @@ impl CopyNormalizationContract {
             canonical,
             av,
             raw_parameters: self.raw_parameters.clone(),
-            promotion: self.promotion.clone(),
             failed: false,
         })
     }
@@ -133,7 +132,6 @@ pub(crate) struct CopyNormalizers {
     canonical: PipeNormalizer,
     av: PipeNormalizer,
     raw_parameters: PromotionInputs,
-    promotion: PromotionInputs,
     failed: bool,
 }
 impl CopyNormalizers {
@@ -143,10 +141,6 @@ impl CopyNormalizers {
     pub(crate) fn av_init(&self) -> &Init {
         &self.av.served_init
     }
-    pub(crate) fn promotion(&self) -> &PromotionInputs {
-        &self.promotion
-    }
-
     pub(crate) fn normalize_pair(
         &mut self,
         canonical: &mut Fragment,

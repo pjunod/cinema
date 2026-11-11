@@ -134,7 +134,7 @@ impl ObservedCopyMux {
     }
     fn feed_inner(&mut self, event: CopyPipeEvent) -> Result<Vec<CopyMuxEvent>, String> {
         match event {
-            CopyPipeEvent::Failed(_, error) => return Err(error),
+            CopyPipeEvent::Failed(kind, error) => return Err(format!("{error}: {kind:?}")),
             CopyPipeEvent::Data(kind, bytes) => match kind {
                 CopyPipeKind::Av => {
                     if self.av_eof
@@ -380,10 +380,7 @@ impl ObservedCopyMux {
         if self.kernel.is_none() {
             return Ok(());
         }
-        loop {
-            let Some((canonical, clock)) = self.canonical.front() else {
-                break;
-            };
+        while let Some((canonical, clock)) = self.canonical.front() {
             let Some(av) = self.av.front() else {
                 break;
             };

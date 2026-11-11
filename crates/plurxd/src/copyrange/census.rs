@@ -9,7 +9,7 @@ use crate::{
 };
 use plurx_core::{
     domain::MediaFile,
-    fmp4::{Fragment, FragmentReader, Init, PromotionInputs, Unit},
+    fmp4::{Fragment, FragmentReader, Init, Unit},
     segplan::{
         packet_clock::{PacketClockParser, SourcePacketObservation},
         ranges::SourceTimestamp,
@@ -30,7 +30,6 @@ pub(crate) struct CopyClockCensus {
     pub(crate) raw_canonical_init: Init,
     pub(crate) raw_canonical_fragment: Fragment,
     pub(crate) raw_av_init: Init,
-    pub(crate) promotion: PromotionInputs,
 }
 impl CopyClockCensus {
     pub(crate) fn verify_seek_landing(
@@ -352,7 +351,6 @@ pub(crate) async fn run_source_census(
     {
         return Err("copy_head_clock_sample_mismatch".into());
     }
-    let promotion = PromotionInputs::from_fragment(&raw_canonical_fragment, &raw_canonical_init);
     Ok(CopyClockCensus {
         source_object_version: object,
         first_dts: SourceTimestamp {
@@ -365,7 +363,6 @@ pub(crate) async fn run_source_census(
         raw_canonical_init,
         raw_canonical_fragment,
         raw_av_init,
-        promotion,
     })
 }
 

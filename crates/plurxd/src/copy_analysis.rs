@@ -33,7 +33,6 @@ pub(crate) struct CopyRowInspection {
 /// An observer message follows that commit and never substitutes for it.
 pub(crate) struct CopyRangeCheckpoint {
     pub(crate) manifest_path: PathBuf,
-    pub(crate) manifest_file: Arc<std::fs::File>,
     pub(crate) manifest_sha256: String,
     pub(crate) timescale: u32,
     pub(crate) canonical_title_start: u64,
@@ -46,10 +45,10 @@ pub(crate) struct CopyRangeCheckpoint {
     pub(crate) promotion: PromotionInputs,
 }
 
-/// Local demand and Shared Source grants remain different authority paths.
-/// A Source observation can never mint a Local principal to join Analysis.
+/// The authority an observation arrived under. Only Shared Source ranges
+/// produce observations today; local playback will add its own typed demand
+/// variant, and a Source observation can never mint a Local principal.
 pub(crate) enum CopyObservationAuthority {
-    Local(crate::state::PlaybackViewerDemand),
     Source {
         assignment: SourceDispatchAssignment,
         authority: AnalysisSourceInterestAuthority,
@@ -88,20 +87,15 @@ impl Default for CopyAnalysisRegistry {
     }
 }
 impl CopyAnalysisRegistry {
-    pub(crate) fn inbox(&self) -> CopyAnalysisInbox {
-        self.sender.clone()
-    }
     /// Deliver one committed range and wake the existing Analysis dispatcher.
-    /// A full inbox returns the message; the producer retries on its own
-    /// next lease or production event.
-    pub(crate) fn notify(&self, message: CompletedCopyRange) -> Result<(), CompletedCopyRange> {
-        match self.sender.try_send(message) {
-            Ok(()) => {
-                crate::state::wake_fragment_analysis();
-                Ok(())
-            }
-            Err(error) => Err(error.into_inner()),
+    /// A full inbox refuses; the producer rebuilds the latest durable
+    /// checkpoint's message on its own next lease or production event.
+    pub(crate) fn notify(&self, message: CompletedCopyRange) -> bool {
+        let sent = self.sender.try_send(message).is_ok();
+        if sent {
+            crate::state::wake_fragment_analysis();
         }
+        sent
     }
     /// At most one pass at a time; a concurrent wake finds it held.
     pub(crate) fn begin_pass(&self) -> Option<tokio::sync::MutexGuard<'_, work::PendingSources>> {
@@ -243,15 +237,9 @@ impl CopyObservationSet {
         {
             return Err(CopyObservationError::Binding);
         }
-        match &message.authority {
-            CopyObservationAuthority::Local(demand) => demand
-                .require_local_authority()
-                .map_err(|_| CopyObservationError::Binding)?,
-            CopyObservationAuthority::Source { assignment, .. } => {
-                if assignment.owner_node_id() != self.source.origin_node_id {
-                    return Err(CopyObservationError::Binding);
-                }
-            }
+        let CopyObservationAuthority::Source { assignment, .. } = &message.authority;
+        if assignment.owner_node_id() != self.source.origin_node_id {
+            return Err(CopyObservationError::Binding);
         }
         if message.source != self.source
             || message.catalog_namespace != self.catalog_namespace

@@ -35,6 +35,7 @@ pub(crate) struct CopyRangeProduction {
 impl CopyRangeProduction {
     /// Must be retained by the actual serving actor until wait_stopped joins
     /// every physical operation. HTTP waiter cancellation does not own it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
         files: CopyRangeFiles,
         running: RunningCopyGeneration,

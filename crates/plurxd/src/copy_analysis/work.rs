@@ -34,6 +34,9 @@ const MAX_PENDING_SOURCES: usize = 64;
 pub(crate) struct PendingSource {
     file: Arc<plurx_core::domain::MediaFile>,
     set: CopyObservationSet,
+    /// The most recent Source authority this source was observed under. It
+    /// joins the coordinator as metadata demand only, never as a read grant.
+    interest: plurx_core::store::analysis_coordination::AnalysisSourceInterestAuthority,
     observed: Instant,
     /// Not before this instant: a busy source domain or a contended claim
     /// waits for the next dispatch wake after it, never a private timer.
@@ -55,16 +58,20 @@ impl PendingSources {
         ) else {
             return;
         };
+        let super::CopyObservationAuthority::Source { authority, .. } = &message.authority;
+        let interest = authority.clone();
         if let Some(pending) = self.sources.get_mut(&key) {
             if let Err(error) = pending.set.observe(&message) {
                 tracing::warn!(
                     file_id = message.source.file_id,
+                    range_id = %message.range_id,
                     ?error,
                     "copy observations of one source disagree; discarding them"
                 );
                 self.sources.remove(&key);
             } else {
                 pending.observed = Instant::now();
+                pending.interest = interest;
             }
             return;
         }
@@ -85,6 +92,7 @@ impl PendingSources {
                     PendingSource {
                         file: Arc::clone(&message.file),
                         set,
+                        interest,
                         observed: Instant::now(),
                         retry_after: None,
                     },
@@ -92,6 +100,7 @@ impl PendingSources {
             }
             Err(error) => tracing::debug!(
                 file_id = message.source.file_id,
+                range_id = %message.range_id,
                 ?error,
                 "copy observation refused"
             ),
@@ -210,6 +219,15 @@ async fn publish_source(
         Ok(None) => return Attempt::Busy,
         Err(reason) => return Attempt::Retry(reason),
     };
+    // Record the Source demand on the coordinator. A route that has since
+    // ended simply fails to join; the committed observations stay valid.
+    if let Err(error) = context
+        .store
+        .join_source_analysis_coordination(&request.request_id, &source, &pending.interest)
+        .await
+    {
+        tracing::debug!(%error, "Source demand did not join the copy coordinator");
+    }
     let now = crate::state::clock_ms();
     let claim = match context
         .store

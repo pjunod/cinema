@@ -477,6 +477,11 @@ impl TranscodeManager {
         if census.format_start.is_none() {
             return Err(SourceWorkerError::CopyClockUnknown);
         }
+        // Every later generation reads this same held object; a census of a
+        // different witness cannot establish its clock or normalization.
+        if census.source_object_version != source.object_version() {
+            return Err(SourceWorkerError::RescanRequired);
+        }
         let contract = Arc::new(
             crate::copy_normalization::CopyNormalizationContract::from_head(
                 &file,
@@ -737,7 +742,7 @@ impl TranscodeManager {
                     .file
                     .height
                     .ok_or(SourceWorkerError::RescanRequired)?,
-                kind: prepared.request().kind.clone(),
+                kind: prepared.request().kind,
                 encoder: "copy",
                 grade: OutputGrade::Sdr,
                 vod: false,
@@ -901,16 +906,15 @@ impl TranscodeManager {
                             checkpoint.first_frame_rendered
                                 && notified_manifest.as_ref() != Some(&checkpoint.manifest_sha256)
                         })
-                        .and_then(|checkpoint| {
-                            files.canonical_init().map(|init| (init, checkpoint))
-                        })
+                        .zip(files.canonical_init())
+                        .map(|(checkpoint, init)| (init, checkpoint))
                 };
                 if let Some((init, checkpoint)) = candidate {
                     match owner.gate.current_owned(&owner.assignment).await {
                         Ok(authority) => {
                             let manifest = checkpoint.manifest_sha256.clone();
                             let message=crate::copy_analysis::CompletedCopyRange{file:Arc::clone(&backing.file),catalog_namespace:backing.catalog_namespace.clone(),source:backing.observation_source.clone(),authority:crate::copy_analysis::CopyObservationAuthority::Source{assignment:owner.assignment.clone(),authority:plurx_core::store::analysis_coordination::AnalysisSourceInterestAuthority::Active(authority)},range_id:backing.range_id,range_epoch:backing.range_epoch,init,checkpoint};
-                            if state.copy_analysis.notify(message).is_ok() {
+                            if state.copy_analysis.notify(message) {
                                 notified_manifest = Some(manifest);
                             }
                         }

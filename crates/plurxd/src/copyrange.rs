@@ -7,9 +7,7 @@ pub(crate) use census::{run_source_census, CopyClockCensus};
 #[cfg(unix)]
 mod pipes;
 #[cfg(unix)]
-pub(crate) use pipes::{
-    spawn_source_generation, CopyPipeEvent, CopyPipeKind, CopyPipeReaders, RunningCopyGeneration,
-};
+pub(crate) use pipes::{spawn_source_generation, RunningCopyGeneration};
 #[cfg(unix)]
 mod observed;
 #[cfg(unix)]
@@ -19,7 +17,7 @@ mod census_format;
 #[cfg(unix)]
 mod storage;
 #[cfg(unix)]
-pub(crate) use storage::{CopyRangeFiles, CopyRangePublisher, StoredCopySegment};
+pub(crate) use storage::{CopyRangeFiles, CopyRangePublisher};
 
 #[cfg(unix)]
 mod production;

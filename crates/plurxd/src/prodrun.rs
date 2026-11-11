@@ -112,9 +112,6 @@ impl ConfirmedProducerReap {
     pub(crate) fn exit_success(&self) -> bool {
         self.exit_status.success()
     }
-    pub(crate) fn exit_status(&self) -> std::process::ExitStatus {
-        self.exit_status
-    }
     pub(crate) fn matches(&self, generation: &ProducerRegistration) -> bool {
         Arc::ptr_eq(&self.identity, &generation.0.identity)
     }
@@ -200,6 +197,7 @@ impl ProducerReapHooks for ActualProducerWait {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn owned_reap(
     mut child: Child,
     child_job: Option<crate::process_control::ChildJob>,
