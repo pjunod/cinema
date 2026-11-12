@@ -8233,6 +8233,15 @@ source_anchor = "0004-vulkan-context-start-Wayland-swapchains-pass-through.patch
 test = "clients/linux-player/tests/test_packaging.py"
 test_anchor = "def test_the_first_wayland_swapchain_is_pass_through(self):"
 
+# mpv patch 0009: a dead Wayland display closes the player instead of spinning the vo thread at 100% CPU.
+[[fixes]]
+id = "claude.linux-player-wayland-display-error-spin"
+commits = ["c08b026720c286c0a3c989bca4de8b384c335fc9", "364aadcb4148cea8e70798b38536fdd0109e4c59"]
+source = "clients/linux-player/packaging/patches/mpv/0009-wayland-stop-dispatching-after-a-fatal-display-error.patch"
+source_anchor = "+static bool wayland_display_failed(struct vo_wayland_state *wl, int ret)"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_a_fatal_display_error_closes_the_window_instead_of_spinning(self):"
+
 # A portal-started launcher takes the session's display; a title with no window fails instead of playing audio only.
 [[fixes]]
 id = "claude.linux-player-session-display"
