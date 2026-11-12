@@ -206,7 +206,11 @@ impl Shared {
         }
         tokio::time::timeout(
             TERMINAL_ROUTE_CONFIRM_TIMEOUT,
-            self.store.media_session_route(session_id),
+            crate::media_sessions::read_media_session_route(
+                &*self.store,
+                crate::media_sessions::RouteReadSite::Verdict,
+                session_id,
+            ),
         )
         .await
         .ok()

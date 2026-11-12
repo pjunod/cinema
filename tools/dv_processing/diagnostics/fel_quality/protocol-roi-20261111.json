@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "written_utc": "2026-11-11T16:20:00Z",
+  "author": "Claude Opus 5.5, session_01BCWLA1yYosvau4xhfH6R4S",
+  "status": "Fixed before any luma-map output exists. One arm; no threshold, amplitude or geometry refit after outcomes.",
+  "hypothesis": "The broad shadow tail is a UV coding-allocation loss in dark blocks. x265 AQ2 sets block QP from texture energy only, and the PPS chroma offset is one global value; Main10 has no per-CU chroma QP offset. A source-derived negative QP offset on dark blocks lowers luma QP and, through QpC derivation, chroma QP exactly where the tail lives, paid for by bits elsewhere at the unchanged ABR target.",
+  "baseline": {
+    "policy": "Retained single-pass115: HDRopt0, Cb/Cr -9, AQ2/strength1, psy-RD2, RDOQ2/psy-RDOQ1, SAO1, slow, no B frames, CU-tree, qg32, 48-frame closed GOP, TopLeft type2, 24000/1001, target115/max125/buffer136.",
+    "recipes": "$FEL_SHADOW_ROOT/corrected-encodes/{michael5400,michael1800}-hdr-off-chroma9-budget115-recipe.json",
+    "encoder_options": "translated verbatim from the baseline argv by encode_roi_control.py; unknown tokens refuse"
+  },
+  "gates": {
+    "E0_none": "Harness without ROI side data: HEVC elementary stream byte-identical to the baseline, both fixtures.",
+    "E1_zero": "Harness with one full-frame region of qoffset 0: elementary stream byte-identical to the baseline, Michael5400.",
+    "unused_options": "Harness unused-option set must equal the CLI's own 'has not been used' set.",
+    "failure_meaning": "A failed gate is an invalid harness, not a quality outcome; the luma arm does not run."
+  },
+  "arm_S": {
+    "map_input": "The encoder's own input frame (calibrated top-left point export Y'), every frame independently. No reference, F or C error enters the map.",
+    "geometry": "16x16 grid (libx265.c: 16 unless qg-size is 8), horizontal runs merged into rectangles; identical per-block effect.",
+    "luminance": "Block mean of 10-bit limited Y', normalized (Y'-64)/876, ST 2084 EOTF to nits.",
+    "threshold": "block mean < 1.0 nit (the protocol's existing dark-aggregate upper bound)",
+    "amplitude": "AVRegionOfInterest.qoffset = -3/63, i.e. -3 QP after libx265.c scaling by qp_range 63 for 10-bit",
+    "fixtures": ["michael5400", "michael1800"],
+    "prefix": "<fixture>-roi-dark1nit-qpm3"
+  },
+  "qualification": "Same qualifier (qualify_spatial_control.py --qg-size 32): AQ tuple 2/1.0/32/1, SPS/PPS effective QP group 32, frozen Rust author, all-48 VCL/RPU/clock checks, native frames 0/24, colour/siting syntax.",
+  "bar": "Unchanged: full active-ROI mean advantage vs F and reference<0.1-nit mean and p99 strictly better than F, frames 0/24, both fixtures, all four models; actual authored video-packet average <= 130 Mb/s as a coarse screen only. All other bands and maxima reported.",
+  "rate": "ABR target, max rate and buffer unchanged. The rate screen is not raised to rescue the arm.",
+  "not_claimed": ["perceptual distortion metric", "HRD/CPB or Dolby peak-rate conformance", "held-out scenes", "normative Dolby composition", "playback, packaging or live change"],
+  "references": {
+    "ffmpeg_roi": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n9.0.2/libavcodec/libx265.c (libx265_encode_set_roi)",
+    "x265_aq": "https://raw.githubusercontent.com/Multicorewareinc/x265/e9b8812/source/encoder/slicetype.cpp (qp_adj += quantOffsets[blockXY])"
+  }
+}

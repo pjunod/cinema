@@ -1128,6 +1128,107 @@ fn first_forbidden_identifier(sql: &str) -> Option<String> {
     None
 }
 
+/// The identifiers of `sql` in order, lowercased, as `(start, end, name)`
+/// byte ranges: bare words and `"…"`, `` `…` `` and `[…]` quoted names.
+/// String literals and comments are skipped.
+pub(crate) fn sql_identifiers(sql: &str) -> Vec<(usize, usize, String)> {
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    let mut out = Vec::new();
+    while index < bytes.len() {
+        let start = index;
+        let (from, to) = match bytes[index] {
+            b'\'' => {
+                index = skip_quoted(bytes, index + 1, b'\'');
+                continue;
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index = skip_line_comment(bytes, index + 2);
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = skip_block_comment(bytes, index + 2);
+                continue;
+            }
+            quote @ (b'"' | b'`' | b'[') => {
+                let from = index + 1;
+                index = if quote == b'[' {
+                    skip_bracket_identifier(bytes, from)
+                } else {
+                    skip_quoted(bytes, from, quote)
+                };
+                let close = if quote == b'[' { b']' } else { quote };
+                let to = if index > from && bytes[index - 1] == close {
+                    index - 1
+                } else {
+                    index
+                };
+                (from, to)
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                index += 1;
+                while bytes
+                    .get(index)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                {
+                    index += 1;
+                }
+                (start, index)
+            }
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        out.push((start, index, sql[from..to].to_ascii_lowercase()));
+    }
+    out
+}
+
+/// Whether `sql` may write rows of `table`: an `INSERT … INTO`, `REPLACE
+/// INTO`, `UPDATE [OR …]` or `DELETE FROM` naming it, anywhere in the text —
+/// a trigger body or a CTE included. String literals and comments are
+/// skipped; quoted identifiers count; a `schema.` qualifier (spaced or not)
+/// is ignored.
+///
+/// An over-approximation by design: its caller (the applied view's settings
+/// floor) only closes a node-local view for about one watermark period on a
+/// false positive, while a false negative would let a lagging replica answer
+/// a read this process's own write must already show.
+pub(crate) fn writes_table(sql: &str, table: &str) -> bool {
+    let bytes = sql.as_bytes();
+    // Most statements never name the table: one scan, no allocation.
+    if !bytes
+        .windows(table.len().max(1))
+        .any(|window| window.eq_ignore_ascii_case(table.as_bytes()))
+    {
+        return false;
+    }
+    // The three identifiers before the current one, nearest first.
+    let mut previous: [&str; 3] = [""; 3];
+    let identifiers = sql_identifiers(sql);
+    for (_, end, identifier) in &identifiers {
+        let qualifier = sql[*end..].trim_start().starts_with('.');
+        if qualifier {
+            // `main.settings`, `main . settings`: not a keyword.
+            continue;
+        }
+        if identifier == table {
+            let [p1, p2, p3] = previous;
+            if p1 == "into"
+                || p1 == "update"
+                || (p1 == "from" && p2 == "delete")
+                || (p2 == "or" && p3 == "update")
+            {
+                return true;
+            }
+        }
+        previous.rotate_right(1);
+        previous[0] = identifier.as_str();
+    }
+    false
+}
+
 fn skip_quoted(bytes: &[u8], mut index: usize, quote: u8) -> usize {
     while index < bytes.len() {
         if bytes[index] == quote {

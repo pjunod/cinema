@@ -1,7 +1,6 @@
 # streaming/ — delivery: VOD, Dolby Vision, capabilities, reliability
 
-Delivery, Dolby Vision, capabilities and playback reliability. The
-[docs index](../README.md) defines status words and documentation rules.
+The [docs index](../README.md) defines status words and documentation rules.
 Add each document's row here in the same commit.
 
 Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
@@ -10,7 +9,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 |---|---|---|
 | [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |
-| [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 build contract (local-replica reads). | open |
+| [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 contract; build record: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md). | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Playback-start effort: rulings, lanes, reviews, lane status. | open |
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions; current state is in the plan. | live |
@@ -20,10 +19,11 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold publication and Resume fault repair: review and merge ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs; review and acceptance. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
+| [FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL quality findings. | open |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Shared playback cache: reservations, eviction and protected readers. | built |
 | [WEB-PREPARED-SEEK-INCIDENT.md](WEB-PREPARED-SEEK-INCIDENT.md) | October 20 ROG seek failure: subtitle cancellation, Auto repair and qualification. | open |
-| [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Close/Resume HDR downgrade, lost DV cancellation, Safari startup intent corruption, lifecycle ownership and remaining stale-session evidence. | open |
-| [TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md) | Why TCL Auto rejects Android capability counts, the catalog read-budget failure, and the reviewed plan for one catalog per create with legacy-client compatibility. | open |
+| [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Close/Resume HDR downgrade, lost DV cancellation, Safari intent corruption and lifecycle ownership. | open |
+| [TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md) | Why TCL Auto rejects capability counts; catalog read-budget failure and one-catalog-per-create fix. | open |
 | [TCL-CATALOG-REPAIR-STATUS.md](TCL-CATALOG-REPAIR-STATUS.md) | Implementation decisions, commit milestones, compile and review evidence, and remaining physical TCL acceptance. | open |
 | [COLD-PLAYBACK-AC3-RETEST-RCA.md](COLD-PLAYBACK-AC3-RETEST-RCA.md) | AC3 retest, Resume and startup repair; Fable client-binding and shared-classifier dispositions. | open |
 | [COLD-PLAYBACK-SOURCE-SHARING.md](COLD-PLAYBACK-SOURCE-SHARING.md) | Source-sharing evidence and bounded M1 handoff. | open |
