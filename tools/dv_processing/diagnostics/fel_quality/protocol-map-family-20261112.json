@@ -1,0 +1,12 @@
+{"schema":1,"id":"protocol-map-family-20261112","status":"Fixed before any output; the v8 harness is rebuilt and re-gated (none, zero byte-identical) first (designed by Fable 5.2 from the Zx/Zr/Zf readout).",
+ "baseline":"protocol-roi-zeromean-qpm6-20261111.json arm_Z6 (identical_to protocol-roi-zeromean-20261111.json; dark block < 1.0 nit; zero-mean)",
+ "dark_offset":"-6 QP (qoffset -6/63) for Zfn and Zfn1; Z4 -4 QP (qoffset -4/63); Z3 -3 QP (qoffset -3/63)",
+ "arms":{"Z4":"Z6 map with -4 dark, +min(4,4c/(1-c))","Z3":"Z6 map with -3 dark, +min(3,3c/(1-c))",
+  "Zfn":"Zf weighting, flat blocks kept in selection and c",
+  "Zfn1":"Zfn with span 0.5 octave: offset = -6*clamp(1-2*log2(d/d0),0,1)"},
+ "harness_modes":{"Z4":{"mode":"lumazm","threshold_nits":1.0,"qp_offset":-4},"Z3":{"mode":"lumazm","threshold_nits":1.0,"qp_offset":-3},
+  "Zfn":{"mode":"lumazfn","threshold_nits":1.0,"qp_offset":-6},"Zfn1":{"mode":"lumazfs","threshold_nits":1.0,"qp_offset":-6}},
+ "map_inputs":"encoder input and, for Zfn/Zfn1, the canonical BL planes; no R, no decoded candidate, no scoring model",
+ "rate_rule":"as protocol-aq-psy-20261112.json",
+ "readouts":"as protocol-aq-psy-20261112.json plus map statistics per frame",
+ "accept":"as protocol-aq-psy-20261112.json; shadow-p99 frames beating F must not drop below Z6 in any model. If both Z4 and Z3 pass, take the lower pooled mean"}

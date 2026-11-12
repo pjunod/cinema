@@ -88,7 +88,7 @@ p.add_argument('--baseline-mp4', required=True, type=Path)
 p.add_argument('--harness', required=True, type=Path)
 p.add_argument('--output-root', required=True, type=Path)
 p.add_argument('--prefix', required=True)
-p.add_argument('--mode', choices=['none', 'zero', 'luma', 'lumazm', 'lumazx', 'lumazr', 'lumazf'], required=True)
+p.add_argument('--mode', choices=['none', 'zero', 'luma', 'lumazm', 'lumazx', 'lumazr', 'lumazf', 'lumazfn', 'lumazfs'], required=True)
 p.add_argument('--grid', type=int, default=16)
 p.add_argument('--threshold-nits', type=float, default=0.0)
 p.add_argument('--qp-offset', type=int, default=0)
@@ -128,8 +128,8 @@ if a.source:
     src = a.source.resolve()
 num, den = pos['rate']
 assert pos['frames'] == 48
-REFINED = ('lumazx', 'lumazr', 'lumazf')
-assert (a.mode == 'lumazf') == bool(a.bl_planes), 'BL planes are required by lumazf and refused otherwise'
+REFINED = ('lumazx', 'lumazr', 'lumazf', 'lumazfn', 'lumazfs')
+assert (a.mode in ('lumazf', 'lumazfn', 'lumazfs')) == bool(a.bl_planes), 'BL planes are required by the lumazf family and refused otherwise'
 if a.bl_planes:
     assert a.bl_sha256 and sha(a.bl_planes) == a.bl_sha256, 'BL planes hash mismatch'
 if a.mode in REFINED:

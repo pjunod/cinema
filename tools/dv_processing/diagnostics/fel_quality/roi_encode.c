@@ -25,7 +25,9 @@
  *           pixels; d0 = the frame's dark-set median (arm Zf). The BL planes
  *           arrive as the option roi_bl=PATH (raw yuv420p10le, one frame per
  *           picture), which is removed before the encoder sees the options.
- *   For lumazx/zr/zf the balancing offset is min(|QP_OFFSET|, sum|offset| /
+ *   lumazfn - lumazf with flat blocks kept in the selection and in c.
+ *   lumazfs - lumazfn with a 0.5-octave span: QP_OFFSET*clamp(1 - 2*log2(d/d0), 0, 1).
+ *   For lumazx/zr/zf/zfn/zfs the balancing offset is min(|QP_OFFSET|, sum|offset| /
  *   unselected non-flat blocks): zero mean over non-flat blocks.
  *
  * Grid follows libx265.c: 8 when qg-size is 8, otherwise 16.
@@ -102,7 +104,9 @@ int main(int argc, char **argv) {
     const char *movflags = argv[12], *tag = argv[13];
     int m_none = !strcmp(mode, "none"), m_zero = !strcmp(mode, "zero"), m_zm = !strcmp(mode, "lumazm"),
         m_luma = !strcmp(mode, "luma") || m_zm, m_zx = !strcmp(mode, "lumazx"), m_zr = !strcmp(mode, "lumazr"),
-        m_zf = !strcmp(mode, "lumazf"), m_ref = m_zx || m_zr || m_zf;
+        m_zfn = !strcmp(mode, "lumazfn"), m_zfs = !strcmp(mode, "lumazfs"),
+        m_zf = !strcmp(mode, "lumazf") || m_zfn || m_zfs, m_ref = m_zx || m_zr || m_zf, keep_flat = m_zfn || m_zfs;
+    double span = m_zfs ? 0.5 : 2.0;
     if (!(m_none || m_zero || m_luma || m_ref) || (grid != 8 && grid != 16) || strlen(tag) != 4) die("bad arguments", 0);
     if (m_zr && !(thresh > RAMP_LOW_NITS)) die("ramp needs THRESH_NITS above the 0.3-nit floor", 0);
 
@@ -178,7 +182,7 @@ int main(int argc, char **argv) {
     fprintf(mj, "{\"mode\":\"%s\",\"grid\":%d,\"threshold_nits\":%.9g,\"qp_offset\":%d,\"qp_range\":63,"
                 "\"luminance\":\"block mean of encoder-input Y' (10-bit limited, (Y-64)/876) -> ST2084 EOTF nits\",%s\"frames\":[",
             mode, grid, thresh, qpoff,
-            m_zr ? "\"ramp_low_nits\":0.3,\"flat\":\"max-min Y' <= 1 code\"," : m_ref ? "\"flat\":\"max-min Y' <= 1 code\"," : "");
+            m_zr ? "\"ramp_low_nits\":0.3,\"flat\":\"max-min Y' <= 1 code\"," : keep_flat ? (m_zfs ? "\"flat\":\"kept\",\"span_octaves\":0.5," : "\"flat\":\"kept\",\"span_octaves\":2,") : m_ref ? "\"flat\":\"max-min Y' <= 1 code\"," : "");
 
     AVPacket *ipkt = av_packet_alloc();
     AVFrame *fr = av_frame_alloc();
@@ -296,7 +300,7 @@ int main(int argc, char **argv) {
                         }
                     }
                     size_t b = (size_t)by * bw + bx;
-                    if (mx - mn <= 1) {
+                    if (!keep_flat && mx - mn <= 1) {
                         cls[b] = 2, flat++;
                         continue;
                     }
@@ -318,7 +322,7 @@ int main(int argc, char **argv) {
                 double d0 = ndark % 2 ? dd[ndark / 2] : 0.5 * (dd[ndark / 2 - 1] + dd[ndark / 2]);
                 for (size_t b = 0; b < nb; b++)
                     if (cls[b] == 1) {
-                        double t = (dv[b] <= 0 || d0 <= 0) ? 1 : 1 - log2(dv[b] / d0) / 2;
+                        double t = (dv[b] <= 0 || d0 <= 0) ? 1 : 1 - log2(dv[b] / d0) / span;
                         if (t > 1) t = 1;
                         if (t < 0) t = 0;
                         off[b] = qpoff * t;
