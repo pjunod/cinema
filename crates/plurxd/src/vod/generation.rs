@@ -1057,6 +1057,77 @@ pub(super) fn copy_video_pipeline(
         .with_dolby_vision_conversion(convert_dolby_vision)
 }
 
+/// Which stored probe evidence a copy pipeline is derived from. The caller
+/// says what kind of start it is; the evidence follows from that here, not
+/// at each call site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CopyProbeEvidence {
+    /// A local user's copy start: the stored probe, with the file's HEVC
+    /// parameter-set census measured and recorded first when this revision
+    /// has none.
+    RecordingCensus,
+    /// The stored probe as it stands, with the census record when one
+    /// exists. Shared (Source) playback and every planning read use this:
+    /// they never measure a census, which would start a child the start does
+    /// not own and change the revision a Source grant was witnessed against.
+    Stored,
+    /// No probe at all: an encoded Source rendition, whose identity is its
+    /// held-probe recipe and which carries none of the source's parameter
+    /// sets.
+    Unread,
+}
+
+/// A copy pipeline and the probe evidence it was derived from.
+pub(crate) struct NodeCopyPipeline {
+    pub(crate) video: CopyVideoOptions,
+    pub(crate) probe_json: Option<String>,
+}
+
+/// The video pipeline of a copy this node cuts of `file` for playback: the
+/// one place the three inputs of a copy's identity meet.
+///
+/// - **The recipe**, as the session asked for it.
+/// - **The node's capability** to strip Dolby Vision, `dv_strippable`: the
+///   boot measurement the transcode manager was built with, handed to the
+///   VOD server by it. No caller asks FFmpeg, and none answers for the node.
+/// - **The probe evidence**, read here from the one stored record
+///   (`files.probe_json`) under the caller's [`CopyProbeEvidence`].
+///
+/// A local rendition, a Source rendition, the growing Source range and the
+/// planning hint all derive here, so for one file, recipe, node and stored
+/// probe they produce one argv fingerprint, one fragment-index identity and
+/// one copy-index source key, and an index one of them published is the
+/// index the others find.
+///
+/// What is not unified, by decision: only a local copy start records a
+/// missing census. A Source start of a file nobody has played locally
+/// derives without one, and if the census a later local start records says
+/// the in-band parameter sets vary, that file's key changes once, for both.
+pub(crate) async fn node_copy_video_pipeline(
+    store: &dyn Store,
+    file: &MediaFile,
+    evidence: CopyProbeEvidence,
+    dv_strippable: bool,
+    preserve_dolby_vision: bool,
+    convert_dolby_vision: bool,
+) -> Result<NodeCopyPipeline, plurx_core::error::StoreError> {
+    let probe_json = match evidence {
+        CopyProbeEvidence::RecordingCensus => {
+            crate::hevc_census::probe_json_for_copy(store, file).await?
+        }
+        CopyProbeEvidence::Stored => store.get_file_probe_json(file.id).await?,
+        CopyProbeEvidence::Unread => None,
+    };
+    let video = copy_video_pipeline(
+        file,
+        probe_json.as_deref(),
+        dv_strippable,
+        preserve_dolby_vision,
+        convert_dolby_vision,
+    );
+    Ok(NodeCopyPipeline { video, probe_json })
+}
+
 /// How to ask where a repositioned copy generation's demuxer landed.
 ///
 /// The producer's own output cannot say: `-avoid_negative_ts make_zero`

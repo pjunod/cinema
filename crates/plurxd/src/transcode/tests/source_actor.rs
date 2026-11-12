@@ -171,6 +171,235 @@ async fn source_copy_cold_hdr10_index_survives_cancelled_waiter_and_settles_on_r
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_and_local_copy_starts_share_one_source_key_with_the_strip_filter() {
+    Box::pin(source_copy_preadmission_fixture_configured(
+        0,
+        SourceFixtureVideo::H264,
+        Some(true),
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_and_local_copy_starts_share_one_source_key_without_the_strip_filter() {
+    Box::pin(source_copy_preadmission_fixture_configured(
+        0,
+        SourceFixtureVideo::H264,
+        Some(false),
+    ))
+    .await;
+}
+
+/// On a real Source session: the Source rendition through its whole
+/// preparation, the local rendition through its whole recipe preparation and
+/// the growing Source range's own derivation produce the same copy pipeline
+/// for the fixture's file, with the capability the manager was built with
+/// and the stored probe, and therefore one copy-index source key.
+///
+/// The step's other checks that need a real assignment run here too: a
+/// Source range owner through its real binding, and a local generation
+/// refused on a rendition a Source viewer has attached to.
+#[allow(clippy::too_many_arguments)]
+async fn source_and_local_copy_starts_share_one_source_key(
+    state: &crate::state::AppState,
+    manager: &TranscodeManager,
+    admitted: &crate::vodserve::AdmittedSourceVodRendition,
+    prepared: &crate::http::hls::PreparedSourcePlayback,
+    assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    media: &plurx_core::domain::MediaFile,
+    settings: &crate::vodserve::VodSettings,
+    dv_strippable: bool,
+) {
+    use plurx_core::transcode::CopyVideoOptions;
+    let SessionKind::Copy {
+        preserve_dolby_vision,
+        convert_dolby_vision,
+        ..
+    } = prepared.request().kind
+    else {
+        panic!("the fixture prepares a copy");
+    };
+    assert_eq!(manager.dv_strippable(), dv_strippable);
+    let namespace = state
+        .store
+        .instance_id()
+        .await
+        .expect("catalogue namespace");
+    let object_version = crate::fragment_index_cluster::inspect_source(media)
+        .await
+        .expect("the file's object version");
+    let source_key = |video: CopyVideoOptions| {
+        let source = crate::copy_analysis::source_for_copy(
+            &namespace,
+            media,
+            &crate::fragindex::identity_for(media, video).argv_fingerprint,
+            &object_version,
+            assignment.owner_node_id(),
+        )
+        .expect("a copy source");
+        plurx_core::store::copy_index_v3_source_key(&namespace, &source).expect("a source key")
+    };
+    let probe = state
+        .store
+        .get_file_probe_json(media.id)
+        .await
+        .expect("the stored probe");
+    let expected = CopyVideoOptions::from_probe(
+        media,
+        probe.as_deref(),
+        dv_strippable,
+        preserve_dolby_vision,
+    )
+    .with_dolby_vision_conversion(convert_dolby_vision);
+
+    let source_rendition = admitted.copy_video();
+    let local_rendition = manager
+        .vod
+        .local_recipe_copy_video(prepared.request(), media, settings)
+        .await
+        .expect("the local rendition's recipe");
+    let source_range = manager
+        .source_range_copy_pipeline(media, preserve_dolby_vision, convert_dolby_vision)
+        .await
+        .expect("the Source range's pipeline")
+        .video;
+    for (start, video) in [
+        ("Source rendition", source_rendition),
+        ("local rendition", local_rendition),
+        ("Source range", source_range),
+    ] {
+        // The whole pipeline, capability included, not only what this
+        // file's argv happens to show of it.
+        assert_eq!(video, expected, "{start}");
+        assert_eq!(source_key(video), source_key(expected), "{start}");
+    }
+    assert_eq!(source_key(source_rendition), source_key(local_rendition));
+    assert_eq!(source_key(source_range), source_key(local_rendition));
+
+    #[cfg(unix)]
+    crate::copyrange::a_source_owner_through_its_real_binding(assignment).await;
+    crate::source_generation::local_registration_tests::a_source_viewer_attached_after_capture_refuses_the_local_registration(assignment);
+}
+
+/// A Dolby Vision HEVC file served stripped is the copy whose identity the
+/// node's strip filter decides. With the capability injected either way, the
+/// growing Source range, a Source rendition and a local rendition derive one
+/// copy-index source key for it, and the two capabilities give two keys: the
+/// answer reaches every path, including a VOD server the manager replaced
+/// after it was told.
+#[tokio::test]
+async fn a_stripped_dolby_vision_copy_has_one_source_key_per_node_capability() {
+    use crate::vodserve::CopyProbeEvidence;
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let directory = crate::test_tempdir().expect("work directory");
+    let file = plurx_core::domain::MediaFile {
+        downloaded_subtitles: Vec::new(),
+        id: 7,
+        item_id: 7,
+        // Never opened: a census that cannot be measured records nothing.
+        path: directory.path().join("absent.mkv"),
+        size: 4096,
+        mtime: 77,
+        duration_ms: Some(12_000),
+        container: Some("mkv".into()),
+        video_codec: Some("hevc".into()),
+        video_codec_tag: None,
+        field_order: None,
+        video_profile: Some("Main 10".into()),
+        width: Some(3840),
+        height: Some(2160),
+        bit_depth: Some(10),
+        hdr: Some("dolby_vision".into()),
+        hdr_format: None,
+        max_cll: None,
+        max_fall: None,
+        mastering_max_luminance: None,
+        luminance_source: None,
+        bitrate: Some(1_000_000),
+        audio_streams: Vec::new(),
+        subtitle_streams: Vec::new(),
+        scanned_at: 1,
+        audio_offset_ms: 0,
+        probed: true,
+        dolby_vision: Default::default(),
+    };
+    let source_key = |video: plurx_core::transcode::CopyVideoOptions| {
+        let source = crate::copy_analysis::source_for_copy(
+            "catalogue",
+            &file,
+            &crate::fragindex::identity_for(&file, video).argv_fingerprint,
+            "object-version",
+            "origin-node",
+        )
+        .expect("a copy source");
+        plurx_core::store::copy_index_v3_source_key("catalogue", &source).expect("a source key")
+    };
+    let mut per_capability = Vec::new();
+    for (dv_strippable, replace_vod) in [(true, false), (true, true), (false, false)] {
+        let work = directory
+            .path()
+            .join(format!("manager-{dv_strippable}-{replace_vod}"));
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            work.join("workers"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        )
+        .with_dv_strippable(dv_strippable);
+        let manager = if replace_vod {
+            manager.with_cache(work.join("cache"), "fixture".into(), "origin-node".into())
+        } else {
+            manager
+        };
+        let range = manager
+            .source_range_copy_pipeline(&file, false, false)
+            .await
+            .expect("the Source range's pipeline")
+            .video;
+        let source_rendition = manager
+            .vod
+            .rendition_copy_pipeline(&file, CopyProbeEvidence::Stored, false, false)
+            .await
+            .expect("the Source rendition's pipeline")
+            .video;
+        let local_rendition = manager
+            .vod
+            .rendition_copy_pipeline(&file, CopyProbeEvidence::RecordingCensus, false, false)
+            .await
+            .expect("the local rendition's pipeline")
+            .video;
+        assert_eq!(range, local_rendition, "{dv_strippable} {replace_vod}");
+        assert_eq!(
+            source_rendition, local_rendition,
+            "{dv_strippable} {replace_vod}"
+        );
+        assert_eq!(source_key(range), source_key(local_rendition));
+        assert_eq!(source_key(source_rendition), source_key(local_rendition));
+        // A preserved copy runs no strip, whatever the node can do.
+        let preserved = manager
+            .vod
+            .rendition_copy_pipeline(&file, CopyProbeEvidence::Stored, true, false)
+            .await
+            .expect("a preserved pipeline")
+            .video;
+        per_capability.push((
+            dv_strippable,
+            source_key(local_rendition),
+            source_key(preserved),
+        ));
+    }
+    let (with_filter, replaced, without_filter) =
+        (&per_capability[0], &per_capability[1], &per_capability[2]);
+    assert_eq!(with_filter.1, replaced.1);
+    assert_ne!(
+        with_filter.1, without_filter.1,
+        "the capability decides a stripped Dolby Vision copy's key"
+    );
+    assert_eq!(with_filter.2, without_filter.2);
+}
+
 #[derive(Clone, Copy)]
 enum SourceFixtureVideo {
     H264,
@@ -215,6 +444,21 @@ async fn source_fixture_probe(file: &std::path::Path) -> std::process::Output {
 }
 
 async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixtureVideo) {
+    Box::pin(source_copy_preadmission_fixture_configured(
+        mode, video, None,
+    ))
+    .await;
+}
+
+/// `one_key` builds the fixture's manager with that answer for the node's
+/// Dolby Vision strip filter and, once the Source rendition is admitted,
+/// holds every copy start of the fixture's file to one copy-index source key
+/// and runs the Source-owner checks that need a real assignment.
+async fn source_copy_preadmission_fixture_configured(
+    mode: u8,
+    video: SourceFixtureVideo,
+    one_key: Option<bool>,
+) {
     let hdr10 = !matches!(video, SourceFixtureVideo::H264);
     use crate::http::hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget};
     use plurx_core::{
@@ -715,6 +959,10 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         EncoderCaps::default(),
         Pipeline::Cpu,
     );
+    let manager = match one_key {
+        Some(dv_strippable) => manager.with_dv_strippable(dv_strippable),
+        None => manager,
+    };
     let manager = Arc::new(if hdr10 {
         manager.with_cache(
             directory.path().join("cache"),
@@ -809,6 +1057,19 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         "owned Source preadmission future must stay bounded"
     );
     let admitted = admission.await.expect("actual preadmission");
+    if let Some(dv_strippable) = one_key {
+        Box::pin(source_and_local_copy_starts_share_one_source_key(
+            &state,
+            &manager,
+            &admitted,
+            &prepared,
+            &assignment,
+            &media,
+            &settings,
+            dv_strippable,
+        ))
+        .await;
+    }
     admitted.assert_no_demand_or_child().await;
     assert_eq!(manager.admissions.software_in_use(), 4);
     assert!(manager.vod.session_ids().await.is_empty());

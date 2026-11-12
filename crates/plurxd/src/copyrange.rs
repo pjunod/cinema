@@ -1,6 +1,7 @@
 //! One-input observed copy runtime shared by Source playback, Analysis gap
-//! fills and later local playback. Whole-source attestation and publication
-//! remain Analysis work.
+//! fills and local playback, whose owner of a range and of a generation
+//! exists but which no local session uses yet. Whole-source attestation and
+//! publication remain Analysis work.
 #[cfg(unix)]
 mod census;
 #[cfg(unix)]
@@ -20,8 +21,10 @@ pub(crate) use observed::{
 mod census_format;
 #[cfg(unix)]
 mod storage;
+#[cfg(all(test, unix))]
+pub(crate) use storage::a_source_owner_through_its_real_binding;
 #[cfg(unix)]
-pub(crate) use storage::{CopyRangeFiles, CopyRangePublisher};
+pub(crate) use storage::{CopyRangeFiles, CopyRangeOwner, CopyRangePublisher};
 
 #[cfg(unix)]
 mod fill;

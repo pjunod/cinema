@@ -1,8 +1,9 @@
-//! Source-private payloads and independent durable cumulative observations.
+//! Owner-private payloads and independent durable cumulative observations.
 //! Completed bytes precede ONE atomic manifest containing refs, rows and
 //! checkpoint. Inflight observers own the opened immutable manifest itself.
+//! A range's owner is typed: shared Source playback or a local user's own.
 use super::ObservedCopySegment;
-use crate::copy_analysis::{CopyRangeCheckpoint, CopyRowInspection};
+use crate::copy_analysis::{CopyRangeCheckpoint, CopyRowInspection, LocalPlaybackOwner};
 use plurx_core::{
     fmp4::{Init, PromotionInputs},
     fs_secure::SecureDirectory,
@@ -67,9 +68,23 @@ struct Manifest<'a> {
     version: u32,
     catalog_namespace: &'a str,
     source: &'a AnalysisCoordinationSource,
-    source_incarnation: String,
-    source_request: &'a str,
-    source_owner_key: String,
+    // A Source owner writes exactly these three and none of the four after
+    // them, which is the manifest every earlier binary wrote, byte for byte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_incarnation: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_request: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_owner_key: Option<&'a str>,
+    // Additive. A manifest without `owner` is a Source owner's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_session: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_user_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_playback_id: Option<&'a str>,
     range_id: uuid::Uuid,
     range_epoch: u64,
     checkpoint_sequence: u64,
@@ -103,6 +118,87 @@ struct Current<'a> {
 struct OldManifest {
     name: String,
     file: Weak<std::fs::File>,
+}
+
+/// Who owns one range's files. The payload directory, the observation
+/// directory and the manifest's binding all come from it. Neither owner can
+/// be made from the other: a Source owner is its grant-scoped assignment and
+/// holds no local authority, and a local owner is a local user's own named
+/// playback in one VOD session ([`LocalPlaybackOwner`], which only a live
+/// viewer makes) and holds no assignment, gate or grant.
+pub(crate) enum CopyRangeOwner {
+    Source(Box<SourceDispatchAssignment>),
+    // Constructed by tests until a local VOD session attaches a range.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no local VOD session creates a range yet")
+    )]
+    Local {
+        /// The local VOD session the range is the rendition of.
+        session: String,
+        viewer: LocalPlaybackOwner,
+    },
+}
+impl CopyRangeOwner {
+    fn binding(&self) -> Result<OwnerBinding, String> {
+        match self {
+            Self::Source(assignment) => Ok(OwnerBinding::Source {
+                incarnation: assignment.binding().incarnation_id().to_string(),
+                request: assignment.binding().request_id().to_owned(),
+                owner_key: assignment.binding().principal().owner_key(),
+            }),
+            Self::Local { session, viewer } => {
+                // The session names a directory.
+                let plain = !session.is_empty()
+                    && session.len() <= 128
+                    && session
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+                if !plain {
+                    return Err("copy_range_binding_invalid".into());
+                }
+                let viewer = viewer.authority();
+                Ok(OwnerBinding::Local {
+                    session: session.clone(),
+                    user_id: viewer.user_id(),
+                    playback_id: viewer.playback_id().to_owned(),
+                })
+            }
+        }
+    }
+}
+
+/// What a range's directories and manifests record of its owner.
+enum OwnerBinding {
+    Source {
+        incarnation: String,
+        request: String,
+        owner_key: String,
+    },
+    Local {
+        session: String,
+        user_id: i64,
+        playback_id: String,
+    },
+}
+impl OwnerBinding {
+    /// The payload namespace under the work directory and the owner's own
+    /// directory in it; the range's payload is `<namespace>/<owner>/<range>`.
+    fn payload(&self) -> (&'static str, &str) {
+        match self {
+            Self::Source { incarnation, .. } => ("source-copy-ranges", incarnation),
+            Self::Local { session, .. } => ("local-copy-ranges", session),
+        }
+    }
+    /// The manifest directory beside `copy-ranges/observations`. A local
+    /// range's manifests are kept apart from the Source ones, in a directory
+    /// no binary that knows only Source manifests ever opens.
+    fn observations(&self) -> &'static str {
+        match self {
+            Self::Source { .. } => "observations",
+            Self::Local { .. } => "local-observations",
+        }
+    }
 }
 /// One range's physical writer epoch. Retirement and each final rename use
 /// the same lock, so a cancelled publisher cannot win a post-retirement commit.
@@ -144,7 +240,7 @@ pub(crate) struct CopyRangeFiles {
     observation_parent: SecureDirectory,
     catalog_namespace: String,
     source: AnalysisCoordinationSource,
-    assignment: SourceDispatchAssignment,
+    owner: OwnerBinding,
     range_id: uuid::Uuid,
     range_epoch: u64,
     sequence: u64,
@@ -175,7 +271,7 @@ impl CopyRangeFiles {
         observation_root: &Path,
         catalog_namespace: String,
         source: AnalysisCoordinationSource,
-        assignment: SourceDispatchAssignment,
+        owner: CopyRangeOwner,
         range_id: uuid::Uuid,
         range_epoch: u64,
         source_origin: SourceTimestamp,
@@ -190,20 +286,21 @@ impl CopyRangeFiles {
         {
             return Err("copy_range_binding_invalid".into());
         }
+        let owner = owner.binding()?;
+        let (payload_namespace, payload_owner) = owner.payload();
         let work = SecureDirectory::open(payload_root)
             .await
             .map_err(|_| "copy_payload_root_unavailable".to_owned())?;
         let ranges = work
-            .create_child_directory("source-copy-ranges")
+            .create_child_directory(payload_namespace)
             .await
             .map_err(|_| "copy_payload_namespace_unavailable".to_owned())?;
-        let incarnation = assignment.binding().incarnation_id().to_string();
         let range = range_id.to_string();
-        let owner = ranges
-            .create_child_directory(&incarnation)
+        let payload_parent = ranges
+            .create_child_directory(payload_owner)
             .await
             .map_err(|_| "copy_payload_owner_unavailable".to_owned())?;
-        let payload = owner
+        let payload = payload_parent
             .create_child_directory(&range)
             .await
             .map_err(|_| "copy_payload_range_unavailable".to_owned())?;
@@ -218,9 +315,11 @@ impl CopyRangeFiles {
         {
             return Err("copy_observation_root_invalid".into());
         }
-        let data = observation_root
+        let copy_ranges = observation_root
             .parent()
-            .and_then(Path::parent)
+            .ok_or("copy_observation_root_invalid")?;
+        let data = copy_ranges
+            .parent()
             .ok_or("copy_observation_root_invalid")?;
         let data = SecureDirectory::open(data)
             .await
@@ -229,36 +328,34 @@ impl CopyRangeFiles {
             .create_child_directory("copy-ranges")
             .await
             .map_err(|_| "copy_observation_root_unavailable".to_owned())?
-            .create_child_directory("observations")
+            .create_child_directory(owner.observations())
             .await
             .map_err(|_| "copy_observation_root_unavailable".to_owned())?;
         let observation = metadata
             .create_child_directory(&range)
             .await
             .map_err(|_| "copy_observation_range_unavailable".to_owned())?;
+        let observation_path = copy_ranges.join(owner.observations()).join(&range);
         let payload_path = payload_root
-            .join("source-copy-ranges")
-            .join(&incarnation)
+            .join(payload_namespace)
+            .join(payload_owner)
             .join(&range);
         let payload_pin = crate::playback_cache::pin(&payload_path)
             .map_err(|_| "copy_payload_pin_failed".to_owned())?;
         Ok(Self {
-            payload_parent: owner,
-            payload_name: range.clone(),
+            payload_parent,
+            payload_name: range,
             payload_pin,
             payload_retired: false,
             publisher: CopyRangePublisher::default(),
             payload,
-            payload_path: payload_root
-                .join("source-copy-ranges")
-                .join(incarnation)
-                .join(&range),
+            payload_path,
             observation,
-            observation_path: observation_root.join(&range),
+            observation_path,
             observation_parent: metadata,
             catalog_namespace,
             source,
-            assignment,
+            owner,
             range_id,
             range_epoch,
             sequence: 0,
@@ -501,41 +598,7 @@ impl CopyRangeFiles {
                 .is_some_and(|row| row.dts == self.canonical_title_start),
             eof: self.eof,
         };
-        let manifest = Manifest {
-            version: 1,
-            catalog_namespace: &self.catalog_namespace,
-            source: &self.source,
-            source_incarnation: self.assignment.binding().incarnation_id().to_string(),
-            source_request: self.assignment.binding().request_id(),
-            source_owner_key: self.assignment.binding().principal().owner_key(),
-            range_id: self.range_id,
-            range_epoch: self.range_epoch,
-            checkpoint_sequence: self.sequence,
-            init_contract_sha256: &self.contract,
-            canonical_init_sha256: &self.canonical_init_sha256,
-            av_init_sha256: &self.av_init_sha256,
-            source_origin_dts: self.source_origin.dts,
-            source_time_base_num: self.source_origin.time_base_num,
-            source_time_base_den: self.source_origin.time_base_den,
-            canonical_title_start: self.canonical_title_start,
-            timescale,
-            media_origin_ms: origin,
-            target_duration: 16,
-            begins_title: boundaries.begins_title,
-            eof: boundaries.eof,
-            first_frame_rendered: self.rendered,
-            rows: &self.rows,
-            segments: &self.segments,
-            row_inspections: &self.row_inspections,
-            inspection_packets: self.inspection.as_ref().map(|proof| proof.packets),
-            inspection_slices: self.inspection.as_ref().map(|proof| proof.slices),
-            inspection_configuration_sha256: self
-                .inspection
-                .as_ref()
-                .map(|proof| proof.configuration_sha256.as_str()),
-            promotion: &self.promotion,
-        };
-        let bytes = serde_json::to_vec(&manifest).map_err(|_| "copy_manifest_encode".to_owned())?;
+        let bytes = self.manifest(timescale, origin, boundaries)?;
         if bytes.len() > MAX_MANIFEST {
             return Err("copy_manifest_limit".into());
         }
@@ -619,6 +682,77 @@ impl CopyRangeFiles {
         Ok(checkpoint)
     }
 }
+impl CopyRangeFiles {
+    /// The immutable checkpoint manifest of everything held, bound to the
+    /// range's owner.
+    fn manifest(
+        &self,
+        timescale: u32,
+        media_origin_ms: i64,
+        boundaries: RangeBoundaries,
+    ) -> Result<Vec<u8>, String> {
+        let mut manifest = Manifest {
+            version: 1,
+            catalog_namespace: &self.catalog_namespace,
+            source: &self.source,
+            source_incarnation: None,
+            source_request: None,
+            source_owner_key: None,
+            owner: None,
+            local_session: None,
+            local_user_id: None,
+            local_playback_id: None,
+            range_id: self.range_id,
+            range_epoch: self.range_epoch,
+            checkpoint_sequence: self.sequence,
+            init_contract_sha256: &self.contract,
+            canonical_init_sha256: &self.canonical_init_sha256,
+            av_init_sha256: &self.av_init_sha256,
+            source_origin_dts: self.source_origin.dts,
+            source_time_base_num: self.source_origin.time_base_num,
+            source_time_base_den: self.source_origin.time_base_den,
+            canonical_title_start: self.canonical_title_start,
+            timescale,
+            media_origin_ms,
+            target_duration: 16,
+            begins_title: boundaries.begins_title,
+            eof: boundaries.eof,
+            first_frame_rendered: self.rendered,
+            rows: &self.rows,
+            segments: &self.segments,
+            row_inspections: &self.row_inspections,
+            inspection_packets: self.inspection.as_ref().map(|proof| proof.packets),
+            inspection_slices: self.inspection.as_ref().map(|proof| proof.slices),
+            inspection_configuration_sha256: self
+                .inspection
+                .as_ref()
+                .map(|proof| proof.configuration_sha256.as_str()),
+            promotion: &self.promotion,
+        };
+        match &self.owner {
+            OwnerBinding::Source {
+                incarnation,
+                request,
+                owner_key,
+            } => {
+                manifest.source_incarnation = Some(incarnation);
+                manifest.source_request = Some(request);
+                manifest.source_owner_key = Some(owner_key);
+            }
+            OwnerBinding::Local {
+                session,
+                user_id,
+                playback_id,
+            } => {
+                manifest.owner = Some("local");
+                manifest.local_session = Some(session);
+                manifest.local_user_id = Some(*user_id);
+                manifest.local_playback_id = Some(playback_id);
+            }
+        }
+        serde_json::to_vec(&manifest).map_err(|_| "copy_manifest_encode".to_owned())
+    }
+}
 fn fmp4_name(index: u32) -> String {
     plurx_core::fmp4::segment_name(u64::from(index))
 }
@@ -661,3 +795,9 @@ mod publisher_tests {
         assert!(!renamed);
     }
 }
+
+#[cfg(test)]
+#[path = "storage_tests.rs"]
+mod owner_tests;
+#[cfg(test)]
+pub(crate) use owner_tests::a_source_owner_through_its_real_binding;

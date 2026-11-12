@@ -292,6 +292,37 @@ impl SourceRenditionOwners {
             .flatten()
     }
 
+    /// Whether a Source viewer's assignment has been attached to this
+    /// rendition, read under the ledger lock.
+    pub(crate) fn is_source_assigned(&self) -> bool {
+        self.state
+            .lock()
+            .expect("Source rendition owners")
+            .assigned_namespace
+    }
+
+    /// Record a local playback's generation. A local owner registers only on
+    /// the ledger its dispatch was captured from, and only while no Source
+    /// viewer is attached to it. That is decided here, under the ledger
+    /// lock, not from what the dispatch saw when it was captured: an
+    /// assignment attached in between refuses the registration, and the
+    /// caller retires the child it just attached.
+    pub(crate) fn registered_local(
+        &self,
+        dispatch: &SourceGenerationDispatch,
+        token: &ProducerRegistration,
+    ) -> Result<(), &'static str> {
+        let mut state = self.state.lock().expect("Source rendition owners");
+        if !Arc::ptr_eq(&dispatch.ledger, &self.state)
+            || state.assigned_namespace
+            || !dispatch.owners.is_empty()
+        {
+            return Err("a local generation cannot register on a Source rendition");
+        }
+        state.current = Some(token.clone());
+        Ok(())
+    }
+
     /// Called only with the token returned by actual job-owned producer attach.
     pub(crate) fn registered(
         &self,
@@ -509,5 +540,57 @@ impl Drop for SourceGenerationDispatch {
                 .in_flight -= 1;
             owner.changed.notify_waiters();
         }
+    }
+}
+
+/// A local playback's generation and a Source viewer never share a ledger.
+/// The half that needs a Source viewer takes a real assignment, which only a
+/// Source session yields; the Source actor fixture calls it with its own.
+#[cfg(test)]
+pub(crate) mod local_registration_tests {
+    use super::*;
+
+    #[test]
+    fn a_local_generation_registers_only_on_its_own_unassigned_ledger() {
+        let owners = SourceRenditionOwners::default();
+        let token = crate::prodrun::unattached_registration();
+        let dispatch = owners.begin_generation().expect("a local dispatch");
+        assert!(!owners.is_source_assigned());
+        owners
+            .registered_local(&dispatch, &token)
+            .expect("an unassigned ledger records a local generation");
+        // Another rendition's ledger does not take this dispatch.
+        let other = SourceRenditionOwners::default();
+        assert!(other.registered_local(&dispatch, &token).is_err());
+    }
+
+    /// The branch `registered_local` exists for: an assignment attached
+    /// after a local dispatch was captured. The dispatch still says what it
+    /// saw; the ledger, asked under its lock, refuses.
+    pub(crate) fn a_source_viewer_attached_after_capture_refuses_the_local_registration(
+        assignment: &SourceDispatchAssignment,
+    ) {
+        let owners = SourceRenditionOwners::default();
+        let token = crate::prodrun::unattached_registration();
+        let dispatch = owners
+            .begin_generation()
+            .expect("a local dispatch captured before any Source viewer");
+        assert!(!dispatch.assigned_namespace);
+        // The attach itself waits for the unresolved dispatch, but the
+        // rendition is a Source one from this moment.
+        assert!(owners.attach(assignment).is_err());
+        assert!(owners.is_source_assigned());
+        assert!(
+            owners.registered_local(&dispatch, &token).is_err(),
+            "the snapshot the dispatch carries must not decide"
+        );
+        drop(dispatch);
+        // With the viewer attached, a dispatch captured now is refused too.
+        owners
+            .attach(assignment)
+            .expect("the Source viewer attaches");
+        let dispatch = owners.begin_generation().expect("a Source dispatch");
+        assert!(owners.registered_local(&dispatch, &token).is_err());
+        assert!(owners.terminal_registration().is_none());
     }
 }

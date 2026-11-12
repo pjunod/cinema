@@ -169,8 +169,13 @@ impl TranscodeManager {
     /// Record what the boot probe found out about this daemon's ffmpeg.
     /// Independent of the cache: the capabilities it gates are the daemon's,
     /// not the cache's.
+    ///
+    /// The VOD server derives every rendition's copy pipeline with the same
+    /// answer, so it is handed over here and again wherever that server is
+    /// replaced.
     pub fn with_dv_strippable(mut self, dv_strippable: bool) -> Self {
         self.dv_strippable = dv_strippable;
+        self.vod.set_dv_strippable(dv_strippable);
         self
     }
 
@@ -380,6 +385,7 @@ impl TranscodeManager {
         if let Some(identity) = &self.source_identity {
             self.vod.set_source_identity(identity.clone());
         }
+        self.vod.set_dv_strippable(self.dv_strippable);
         self.cache = Some(CacheConfig {
             dir: cache_dir,
             ffmpeg_build,

@@ -1209,6 +1209,10 @@ struct Shared {
     /// A live directory iterator makes discovery itself bounded, not merely
     /// deletion. It advances across ticks and begins a fresh pass at EOF.
     encoded_generation_scanner: Arc<StdMutex<EncodedGenerationScanner>>,
+    /// Whether this node's FFmpeg can strip Dolby Vision: the boot
+    /// measurement, handed over by the transcode manager that owns this
+    /// server. Every rendition's copy pipeline is derived with it.
+    dv_strippable: AtomicBool,
     cluster_node_id: Option<String>,
     cluster_index_root: Option<PathBuf>,
     cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
@@ -1569,6 +1573,7 @@ use marker_dispatch::*;
 #[path = "vod/generation.rs"]
 mod generation;
 use generation::*;
+pub(crate) use generation::{node_copy_video_pipeline, CopyProbeEvidence, NodeCopyPipeline};
 #[path = "vod/stream_format.rs"]
 mod stream_format;
 pub use stream_format::StreamFormat;

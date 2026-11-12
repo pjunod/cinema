@@ -2516,21 +2516,27 @@ async fn decision_for_file(
     // Only a copy needs the census; an encode never carries the source's
     // parameter sets, and a direct play serves them untouched.
     let local_derivation = matches!(marker_policy, PlanningReadPolicy::LocalDerivation);
-    let probe_json = if local_derivation && decision.method == playback::PlaybackMethod::Remux {
-        crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?
-    } else {
-        // Source planning must not mutate its revision witness or launch an
-        // anonymous census. Actual Source preparation owns physical work.
-        state.store.get_file_probe_json(id).await?
-    };
-    let have_dovi = local_derivation && crate::ffmpeg::has_dovi_rpu().await;
-    let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
+    // The hint is derived as the rendition it describes will be, so
+    // `vod_indexed` names the index that rendition would use.
+    let crate::vodserve::NodeCopyPipeline {
+        video: vod_video,
+        probe_json,
+    } = crate::vodserve::node_copy_video_pipeline(
+        state.store.as_ref(),
         &file,
-        probe_json.as_deref(),
-        have_dovi,
+        if local_derivation && decision.method == playback::PlaybackMethod::Remux {
+            crate::vodserve::CopyProbeEvidence::RecordingCensus
+        } else {
+            // Source planning must not mutate its revision witness or launch
+            // an anonymous census. Actual Source preparation owns physical
+            // work.
+            crate::vodserve::CopyProbeEvidence::Stored
+        },
+        state.transcode.dv_strippable(),
         decision.preserve_dolby_vision,
+        decision.convert_dolby_vision,
     )
-    .with_dolby_vision_conversion(decision.convert_dolby_vision);
+    .await?;
     let vod_identity = crate::fragindex::identity_for(&file, vod_video);
     let vod_indexed = state
         .store

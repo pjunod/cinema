@@ -10,6 +10,24 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared and local playback of one file now use one copy index. A copy
+  start's pipeline is derived in one place from the recipe, the stored probe
+  and the server's measured ability to strip Dolby Vision. Shared playback
+  used to answer "no" for that ability whatever the server's FFmpeg could do,
+  so a Dolby Vision title played with its Dolby Vision layers removed kept two
+  indexes on a server that can strip, one per kind of playback, and neither
+  found the other's. What follows on such a server, for such titles only:
+  - Indexes and cached renditions shared playback built for them are no
+    longer found; the index is rebuilt on the next shared play unless local
+    playback already built one.
+  - Shared playback may now find an index local playback built and start as
+    indexed VOD where it used to start cold.
+  - While servers of one cluster disagree on that ability (a rolling FFmpeg
+    upgrade), a server does not adopt the other kind's index for such a
+    title. Local playback already behaved this way.
+  Still different, by design: only a local start measures a file's HEVC
+  parameter-set census. Shared playback uses the census once one is recorded
+  and never measures one itself.
 - Job retention no longer deletes a settled job whose source custody is still
   charged. That job is the custody's only exact source binding, and a dead
   owner's custody could not be released once it was gone. The job is kept

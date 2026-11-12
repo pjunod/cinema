@@ -334,6 +334,12 @@ impl EmptyProducerSlot {
 fn registered_generation() -> (ProducerRegistration, ProducerWriters) {
     registered_generation_with_source(None)
 }
+/// A registration no child was attached under, for a ledger test that only
+/// records one.
+#[cfg(test)]
+pub(crate) fn unattached_registration() -> ProducerRegistration {
+    registered_generation().0
+}
 fn registered_generation_with_source(
     source_input: Option<crate::source_input::SourceInput>,
 ) -> (ProducerRegistration, ProducerWriters) {

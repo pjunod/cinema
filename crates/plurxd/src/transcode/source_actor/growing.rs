@@ -372,6 +372,27 @@ impl SourceViewerActor {
 }
 
 impl TranscodeManager {
+    /// The copy pipeline of a growing Source range of `file`: the one
+    /// derivation a Source rendition and a local rendition use, from the
+    /// stored probe and this node's measured capability, so the range's rows
+    /// are keyed as theirs are. It never measures a census.
+    pub(crate) async fn source_range_copy_pipeline(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        preserve_dolby_vision: bool,
+        convert_dolby_vision: bool,
+    ) -> Result<crate::vodserve::NodeCopyPipeline, plurx_core::error::StoreError> {
+        crate::vodserve::node_copy_video_pipeline(
+            self.store.as_ref(),
+            file,
+            crate::vodserve::CopyProbeEvidence::Stored,
+            self.dv_strippable(),
+            preserve_dolby_vision,
+            convert_dolby_vision,
+        )
+        .await
+    }
+
     async fn prepare_source_growing(
         &self,
         owner: &Arc<SourceViewerInner>,
@@ -382,9 +403,8 @@ impl TranscodeManager {
     ) -> Result<Arc<SourceGrowingBacking>, SourceWorkerError> {
         use crate::copyrange::{
             run_source_census, spawn_source_generation, CopyGenerationOwner, CopyRangeFiles,
-            ObservedCopyMux,
+            CopyRangeOwner, ObservedCopyMux,
         };
-        use plurx_core::transcode::CopyVideoOptions;
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
@@ -394,18 +414,18 @@ impl TranscodeManager {
         else {
             return Err(SourceWorkerError::Unsupported);
         };
-        let authority = owner.gate.current_preparation(&owner.assignment).await?;
-        let probe = self
-            .store
-            .source_index_probe_evidence(&authority)
+        owner.gate.current_preparation(&owner.assignment).await?;
+        let crate::vodserve::NodeCopyPipeline {
+            video,
+            probe_json: probe,
+        } = self
+            .source_range_copy_pipeline(
+                prepared.file(),
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            )
             .await
             .map_err(|_| SourceWorkerError::Unresolved)?;
-        if probe
-            .as_ref()
-            .is_some_and(|probe| probe.len() > 1024 * 1024)
-        {
-            return Err(SourceWorkerError::Unsupported);
-        }
         // The native master presents the same probe this copy was planned from.
         if let Some(tracks) = owner
             .state
@@ -416,13 +436,6 @@ impl TranscodeManager {
         {
             tracks.set_presentation_probe(probe.as_deref());
         }
-        let video = CopyVideoOptions::from_probe(
-            prepared.file(),
-            probe.as_deref(),
-            false,
-            preserve_dolby_vision,
-        )
-        .with_dolby_vision_conversion(convert_dolby_vision);
         let permit = self.admit_source_copy(deadline).await?;
         let owners = Arc::new(SourceRenditionOwners::default());
         let source_owner = owners
@@ -546,7 +559,7 @@ impl TranscodeManager {
             observation_root,
             namespace.clone(),
             observation_source.clone(),
-            owner.assignment.clone(),
+            CopyRangeOwner::Source(Box::new(owner.assignment.clone())),
             range_id,
             1,
             census.first_dts,
