@@ -80,6 +80,42 @@ The mode needs no GPU, so any node can fit. The NLQ arithmetic is ported from
 `fel_renderer.h`'s shader, and the port is checked against the frozen tools
 (acceptance in §6).
 
+As built (milestone 2; `tools/dv_processing/refit_mode.h`, arithmetic in
+`refit_compose.h`):
+
+```sh
+segment_decode_render --refit-stats SOURCE VIDEO_INDEX [--frames FIRST LAST]
+segment_decode_render --dump-composed SOURCE VIDEO_INDEX FIRST LAST
+```
+
+- **Output:** `--refit-stats` prints one `refit_scene` JSON line per pooled
+  scene (`first_frame`, `frames`, `first_pts` in `time_base` ticks, and `fit`
+  and `held_out` in `RefitStats`' serde layout), then a `refit_summary` line
+  (`frames`, `scenes`, `rpu_scenes`, `median_scene_frames` of the RPU's own
+  scenes before pooling, `degenerate` when that median is under 24,
+  `fit_samples`, `held_out_samples`). Diagnostics go to stderr; exit 0 only
+  after a complete read; any refusal is exit 1 and the output is void.
+  `--dump-composed` writes the lattice samples as binary records (format in
+  `refit_mode.h`), which
+  `diagnostics/fel_quality/compare_composed.py` checks against the frozen
+  tools.
+- **Composition:** each frame's own mapping (polynomial or MMR, pivots and
+  clamps as signalled; input code/1024) plus the LINEAR_DZ residual
+  sign(d)·((|d| − ½)·S + T)/2²³, rounded as floor(v·4096 + ½) and clipped.
+  RPUs go through the playback path's own admission (`map_fel_rpu`).
+- **Lattices:** stride 8 over the RPU's L5 active area (else the full
+  frame); fit at phase 0, held out at phase 4 in x and y. The diagnostic
+  `--area LEFT RIGHT TOP BOTTOM` replaces L5 to reproduce an offline region.
+  The offline Michael5400 and Beekeeper fixtures used regions that are not
+  their L5 areas (32 vs 42 rows; 272/275 vs 276/276), so their production
+  statistics differ from the fixtures' by design; with `--area` they are the
+  same samples.
+- **Decoding:** software only, four frame threads per layer (the window
+  path's reservation); the source is read whole, as `scan_title` reads it.
+  The playback window path is unchanged: the modes are dispatched before its
+  arguments are parsed, and a window rendered before and after the change is
+  byte-identical.
+
 ### 3.3 The job
 
 `JobKind::DvRefit` copies `DvTitleScan`'s shape (`source_probe/title_work.rs`):
@@ -188,7 +224,7 @@ green fast lane.
        fixtures;
      - the composer domain within 1e-6;
      - a real P7 RPU round trip exact to 2⁻²³.
-2. **Helper `--refit-stats`:**
+2. **Helper `--refit-stats`:** built (branch `claude/fel-refit-helper`).
    - **Contents:** CPU composition, the lattice, and per-scene JSON.
    - **Acceptance:**
      - on the Michael5400 window, curves solved from the helper's stats
