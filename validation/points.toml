@@ -638,6 +638,8 @@ paths = [
   "crates/plurx-core/src/store/file_grants.rs",
   "crates/plurx-core/src/store/playback_handoffs.rs",
   "crates/plurx-core/src/store/applied_view.rs",
+  "crates/plurx-core/src/store/playback_input_keys.rs",
+  "crates/plurx-core/src/store/playback_input_keys.sql",
   "crates/plurx-core/src/store/playback_handoffs.sql",
   "crates/plurx-core/src/store/hiqlite_playback_handoffs.rs",
   "crates/plurx-core/src/store/sqlite/playback_handoffs.rs",
