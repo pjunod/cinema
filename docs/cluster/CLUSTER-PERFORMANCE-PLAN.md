@@ -167,6 +167,22 @@ boundary in code and documentation.
 | `BoundedReplica` | local query only with a fresh quorum-confirmed leader watermark and applied lag within the declared budget | catalogue browse · item/file metadata · genre/filter facts · dashboard aggregates | auth · locks · admission · ownership · schema state |
 | `NodeLocal` | process or node-local storage | playback telemetry · transcode scratch · regenerable indexes and caches | any acknowledged user or library fact |
 
+> **Correction (2026-11-11, playback-start E1b).** "Settings that gate work"
+> is no longer an `Authority` example for every such read. Playback-start
+> plan §1 rules that settings are node-local views of the applied raft log and
+> only fences are consistent reads; the E1 build contract
+> ([`PLAYBACK-START-E1-BUILD.md`](../streaming/PLAYBACK-START-E1-BUILD.md)
+> §4.2-§4.3, §6.3, decision §12-1) moves the request-path settings reads whose
+> answer only chooses how to serve or present to `AppliedView` — a local read under
+> a held quorum-watermark proof, at most one 1-second lease old, with the
+> saving node's read-your-write kept by a floor — and keeps on `Authority`
+> every settings read that precedes a write or reservation in the same
+> operation, sits under a lock a settings save takes, decides authentication,
+> trust, membership or ownership, builds a save response, runs before the
+> node serves, or runs in a background worker; planning reads move with D3. The pinned inventory is
+> `crates/plurxd/src/http/applied_settings_inventory.rs`. Cost: a saved
+> setting can reach another node's requests up to one second late.
+
 The code should name the class at the call site. A generic helper named only
 `query` or `query_map` is insufficient once two correctness contracts exist.
 

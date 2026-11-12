@@ -78,8 +78,8 @@ where
 /// wants it off, a marginal Wi-Fi bridge wants it lower.
 async fn readrate_setting(state: &AppState) -> f64 {
     match state
-        .store
-        .get_setting(plurx_core::store::keys::STREAM_READRATE)
+        .applied
+        .setting(plurx_core::store::keys::STREAM_READRATE)
         .await
     {
         Ok(Some(v)) => parse_readrate(&v),
@@ -2285,7 +2285,8 @@ pub async fn decision(
         ));
     }
     let network_prior =
-        super::network::stored_prior(state.store.as_ref(), identity.as_ref()).await?;
+        super::network::stored_prior(state.store.as_ref(), &state.applied, identity.as_ref())
+            .await?;
     let file = load_file(&state, id).await?;
     decision_for_file(
         &state,
@@ -2491,8 +2492,8 @@ async fn decision_for_file(
         q.caps_v2.as_ref(),
         plurx_core::store::stored_switch(
             state
-                .store
-                .get_setting(plurx_core::store::keys::DV_HDR_PROCESSING)
+                .applied
+                .setting(plurx_core::store::keys::DV_HDR_PROCESSING)
                 .await?
                 .as_deref(),
             false,
@@ -2643,8 +2644,8 @@ async fn decision_for_file(
     // it. Missing evidence is Unknown; it never refuses the decision.
     let mut advisory = None;
     let quality_candidates = if state
-        .store
-        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        .applied
+        .setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
         .await?
         .is_some_and(|value| value.trim() == "1")
     {

@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "3f2adf8c778287f329829ef3d5ce8758229cac4965c2463a6b2159df0fdac959"
+        "sha256": "0899acbf5258ffc27b7cc7313a66efc70c28523af187bf6ee7917621065c2953"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "3f2adf8c778287f329829ef3d5ce8758229cac4965c2463a6b2159df0fdac959"
+        "sha256": "0899acbf5258ffc27b7cc7313a66efc70c28523af187bf6ee7917621065c2953"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "3f2adf8c778287f329829ef3d5ce8758229cac4965c2463a6b2159df0fdac959"
+        "sha256": "0899acbf5258ffc27b7cc7313a66efc70c28523af187bf6ee7917621065c2953"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -165,7 +165,7 @@
         "table": "27 vendor serial SQLite transaction",
         "source": "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs",
         "anchor": "Query::Transaction(req) => {",
-        "sha256": "1ab742f0eb9354d5a83d83a526f7d76184e7e94dbd421b44a11639d451b21440"
+        "sha256": "f8a650550c2f8c8fb35d642b903d97cf01fb3f71e3a3ded454c4b217f67ccd73"
       },
       {
         "table": "28 library completion conditional update",
@@ -189,19 +189,19 @@
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "1a3afc7abd5f5c1d06574a8812beff81efe0f86200597be4cdfe7bce3ff4a798"
+        "sha256": "d7e6c60e4da8517ef47efd695a1a79eec28f4439a71ee93769d366f3fad2c85b"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "1a3afc7abd5f5c1d06574a8812beff81efe0f86200597be4cdfe7bce3ff4a798"
+        "sha256": "d7e6c60e4da8517ef47efd695a1a79eec28f4439a71ee93769d366f3fad2c85b"
       },
       {
         "table": "33 local raft metrics authority",
         "source": "vendor/hiqlite/src/client/mgmt.rs",
         "anchor": "pub async fn metrics_db(&self) -> Result<RaftMetrics<NodeId, Node>, Error> {",
-        "sha256": "57692b5030198b18825d7be9c9641dfb2f9e353cdafd22a9ea6673c5a2a16298"
+        "sha256": "5e78ddcbe108eb1a1f4f27b2d23d51f4a360d899307df5deb69a84951a706178"
       },
       {
         "table": "34 scanner page capacity",
@@ -255,19 +255,19 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "8c38ad39d15d28b28e0d307a2b8ab67245c048844ddc2ea0b71ea62d76cb3ff2"
+        "sha256": "9063667cbd68ece243c3853b8a94c7701bfdf9a995fc2a80a561d7d9cb2719ee"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "8c38ad39d15d28b28e0d307a2b8ab67245c048844ddc2ea0b71ea62d76cb3ff2"
+        "sha256": "9063667cbd68ece243c3853b8a94c7701bfdf9a995fc2a80a561d7d9cb2719ee"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "e0cc39699dfea66db9fe3666e0685a141be4f2e65d5475a7c5513775b12949ba"
+        "sha256": "b1343a521c98281d308f183313be57a0cb0fa835cd790a2ba90d9d0bfbaa9df5"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",

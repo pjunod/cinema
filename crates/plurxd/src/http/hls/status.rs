@@ -36,7 +36,12 @@ async fn status_local_answer(
     // lingering actor do work or leak whether it still exists.
     let resolution = state
         .media_sessions
-        .authoritative_media_route_resolution_before(session, &state.node_id, request_deadline)
+        .status_media_route_resolution_before(
+            crate::media_sessions::RouteReadSite::StatusFirst,
+            session,
+            &state.node_id,
+            request_deadline,
+        )
         .await
         .map_err(|_| response_publication_timeout())?;
     let mut route = match resolution {
@@ -61,7 +66,8 @@ async fn status_local_answer(
             .map_err(|_| response_publication_timeout())?;
             match state
                 .media_sessions
-                .authoritative_media_route_resolution_before(
+                .status_media_route_resolution_before(
+                    crate::media_sessions::RouteReadSite::StatusBracket,
                     session,
                     &state.node_id,
                     request_deadline,
@@ -138,7 +144,12 @@ async fn status_local_answer(
         }
         let resolution = state
             .media_sessions
-            .authoritative_media_route_resolution_before(session, &state.node_id, request_deadline)
+            .status_media_route_resolution_before(
+                crate::media_sessions::RouteReadSite::StatusReclassify,
+                session,
+                &state.node_id,
+                request_deadline,
+            )
             .await
             .map_err(|_| response_publication_timeout())?;
         match resolution {

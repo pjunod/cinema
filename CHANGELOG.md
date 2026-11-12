@@ -10,6 +10,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- On a laptop with NVIDIA beside Intel or AMD integrated graphics, VA-API now
+  uses the integrated GPU's render node instead of the NVIDIA one, which has
+  no VA-API driver. Dolby Vision processing there decodes on the GPU again
+  instead of in software, so reconstructed Profile 8.1 keeps up with playback.
+  Its Dolby Vision implementation identity names the new node, so that node
+  qualifies once after the upgrade. `PLURX_VAAPI_DEVICE` still overrides.
 - Dolby Vision on Safari, web and mobile no longer stops at dynamic metadata
   when the server's GPU can do better: AMD, Intel and NVIDIA reconstruction is
   qualified with each vendor's actual production encoder, and a recipe that
@@ -174,6 +180,19 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Each cluster node keeps a lock-free account of what its own replica has
+  applied, and Settings → Developer shows an advisory Applied view card with
+  the node's replica proof, image state and view reads. `/metrics` adds the
+  route-read baseline by site, applied-view reads and reloads, table changes
+  and read-pool wait (playback-start E1a).
+- Settings that only choose how to serve or present a request are read from
+  the node's own replica when it can prove that replica current, instead of
+  a quorum read per request: the playback request path and the polled
+  Settings, System, Features and Developer pages. A node that saves a
+  setting reads it back from quorum until its replica has applied the save;
+  other nodes see it within about a second. Planning, encoder admission,
+  background workers, the save response, fences, auth, membership, ownership
+  and pre-mutation reads stay quorum reads (playback-start E1b).
 - Pipeline contract v2 at the scan seam (docs/features/PIPELINE-CONTRACT.md):
   `POST /api/v1/scan` accepts `request_key` (a repeated key returns the same
   request and result), `wait_ms` (hold the answer up to 15 s for a `200` with

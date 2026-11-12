@@ -1276,10 +1276,7 @@ async fn qualify_generation(
     .await
     .map_err(|_| "preparation_timed_out")??;
     let mut package = capture_package().await?;
-    let device = std::env::var("PLURX_VAAPI_DEVICE")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "/dev/dri/renderD128".to_owned());
+    let device = plurx_core::transcode::vaapi_device();
     let kernel = capture_kernel_device(std::path::Path::new(&device)).await?;
     let node = std::path::Path::new(&device)
         .file_name()

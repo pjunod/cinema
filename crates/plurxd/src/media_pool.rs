@@ -1320,8 +1320,8 @@ impl MediaPool {
         );
         nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
         let remote_placement_enabled = state
-            .store
-            .get_setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)
+            .applied
+            .setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)
             .await
             .ok()
             .flatten()
@@ -1330,8 +1330,8 @@ impl MediaPool {
         let remote_placement_rollout_ready = self.remote_rollout_ready().await;
         let remote_placement_ready = remote_placement_enabled;
         let session_takeover_enabled = state
-            .store
-            .get_setting(plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+            .applied
+            .setting(plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
             .await
             .ok()
             .flatten()
@@ -1353,6 +1353,10 @@ impl MediaPool {
 
     /// The saved operator preference controls placement. Compatibility and
     /// capacity are evaluated for each candidate, independently of other peers.
+    ///
+    /// Quorum, not the applied view (E1b, contract §6.3): this read admits a
+    /// forwarded start on the worker and chooses the ingress placement before
+    /// either allocates, so it precedes a reservation in the same operation.
     pub(crate) async fn remote_placement_ready(&self, state: &AppState) -> bool {
         state
             .store

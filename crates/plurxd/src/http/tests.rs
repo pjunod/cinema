@@ -8656,6 +8656,10 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // qualification and this node's renderer and slot.
             "processed_dv_upgrade",
             "bounded_catalogue_reads",
+            // E1a: the applied view. No switch; on this standalone fixture
+            // the proof is met, the image is unobservable and there are no
+            // readers yet.
+            "applied_view",
             "cluster_backup",
             "windows_server",
             // D-01 adds the Android TV display-mode card. Its one row is
@@ -8851,6 +8855,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
     assert_eq!(
         green,
         vec![
+            "applied_view_proof",
             "authoritative_store",
             "backfill_bytes",
             "backfill_enqueued",

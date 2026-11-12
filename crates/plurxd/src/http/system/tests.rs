@@ -498,6 +498,9 @@ fn the_roster_reader_has_exactly_these_callers() {
     assert_eq!(
         found,
         vec![
+            // Activity → Starts (playback start G1): admin-only, `AdminUser`
+            // is extracted before the body runs, so `true` is that proof.
+            ("activity_starts.rs".to_owned(), "true".to_owned()),
             // Admin-only route: `AdminUser` was extracted before the body
             // ran, so `true` is that proof handed on.
             ("analysis.rs".to_owned(), "true".to_owned()),
@@ -1884,4 +1887,58 @@ fn a_prepared_seam_counts_toward_graduation_only_when_clean_and_fully_measured()
     ));
     assert!(metrics
         .contains("plurx_playback_preparation_processed_upgrades_total{outcome=\"scheduled\"}"));
+}
+
+/// E1a: the applied view's families render from one observation, the mark's
+/// rows only where there is a mark, and the read-pool wait as a cumulative
+/// histogram in seconds.
+#[test]
+fn applied_view_metrics_render_reads_reloads_mark_and_pool_wait() {
+    let store: Arc<dyn plurx_core::store::Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let standalone = plurx_core::store::AppliedView::authority(store).observation();
+    let wait = hiqlite::DbReadPoolWait {
+        count: 3,
+        sum_nanos: 1_500_000,
+        cumulative_buckets: [1, 2, 2, 3, 3, 3, 3, 3],
+    };
+    let rendered = render_applied_view_metrics(&standalone, &wait);
+    for line in [
+        "# TYPE plurx_applied_view_reads_total counter\n",
+        "plurx_applied_view_reads_total{view=\"settings\",source=\"view\",reason=\"ok\"} 0\n",
+        "plurx_applied_view_reads_total{view=\"route\",source=\"authority\",reason=\"floor\"} 0\n",
+        "plurx_applied_view_reloads_total{view=\"route\"} 0\n",
+        "plurx_applied_view_proof{mode=\"standalone\"} 1\n",
+        "# TYPE plurx_hiqlite_read_pool_wait_seconds histogram\n",
+        "plurx_hiqlite_read_pool_wait_seconds_bucket{le=\"0.0001\"} 1\n",
+        "plurx_hiqlite_read_pool_wait_seconds_bucket{le=\"0.0005\"} 2\n",
+        "plurx_hiqlite_read_pool_wait_seconds_bucket{le=\"+Inf\"} 3\n",
+        "plurx_hiqlite_read_pool_wait_seconds_sum 0.001500000\n",
+        "plurx_hiqlite_read_pool_wait_seconds_count 3\n",
+    ] {
+        assert!(rendered.contains(line), "missing {line:?} in\n{rendered}");
+    }
+    assert!(
+        !rendered.contains("plurx_applied_view_image_stable"),
+        "SQLite has no replica image"
+    );
+
+    let mut replicated = standalone;
+    replicated.mode = "replicated";
+    replicated.proof_present = false;
+    replicated.generation = Some(3);
+    replicated.applied_index = Some(41);
+    replicated.failed_replacements = 1;
+    replicated.revisions = vec![("settings", 7), ("route", 9)];
+    let rendered = render_applied_view_metrics(&replicated, &wait);
+    for line in [
+        "plurx_applied_view_proof{mode=\"replicated\"} 0\n",
+        "plurx_applied_view_image_stable 0\n",
+        "plurx_applied_view_applied_index 41\n",
+        "plurx_applied_view_failed_replacements_total 1\n",
+        "plurx_applied_view_table_changes_total{view=\"settings\"} 7\n",
+        "plurx_applied_view_table_changes_total{view=\"route\"} 9\n",
+    ] {
+        assert!(rendered.contains(line), "missing {line:?} in\n{rendered}");
+    }
 }

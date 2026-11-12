@@ -4433,6 +4433,108 @@ async fn a_worker_terminal_capacity_refusal_crosses_to_the_ingress_by_code() {
     }
 }
 
+/// E1a baseline: every session-keyed route read in production names the site
+/// that made it, so `plurx_media_session_route_reads_total` accounts for all of
+/// them. A new direct `media_session_route` call would be an uncounted read.
+#[test]
+fn every_session_keyed_route_read_names_its_site() {
+    fn walk(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(directory).expect("source directory") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    let mut direct = Vec::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(&root)
+            .expect("under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let file = relative.rsplit('/').next().unwrap_or_default();
+        if relative.contains("/tests/")
+            || relative.starts_with("tests/")
+            || file == "tests.rs"
+            || file.ends_with("_tests.rs")
+            || relative.contains("fixture")
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read source");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or_default();
+        for (line, text) in production.lines().enumerate() {
+            if text.contains(".media_session_route(") {
+                direct.push(format!("{relative}:{}", line + 1));
+            }
+        }
+    }
+    assert_eq!(direct.len(), 1, "uncounted route reads: {direct:?}");
+    assert!(direct[0].starts_with("media_sessions.rs:"), "{direct:?}");
+    let helper = include_str!("../media_sessions.rs")
+        .split_once("pub(crate) async fn read_media_session_route")
+        .expect("the counted read")
+        .1
+        .split_once("\n}\n")
+        .expect("end of the counted read")
+        .0;
+    assert!(helper.contains("ROUTE_READS[site.index()][0].fetch_add(1, Ordering::Relaxed);"));
+    assert!(helper.contains("store.media_session_route(session_id).await"));
+}
+
+#[test]
+fn route_reads_are_exposed_for_every_site_and_source() {
+    // Each variant owns its own label and its own counter row.
+    let labels: Vec<&str> = RouteReadSite::ALL.iter().map(|site| site.label()).collect();
+    for (position, site) in RouteReadSite::ALL.iter().enumerate() {
+        assert_eq!(site.index(), position, "{site:?} indexes its own row");
+    }
+    let mut unique = labels.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        labels.len(),
+        "labels are distinct: {labels:?}"
+    );
+    crate::media_sessions::ROUTE_READS[RouteReadSite::ReceiptFence.index()][0]
+        .fetch_add(1, Ordering::Relaxed);
+    let exposition = crate::media_sessions::prometheus();
+    assert!(exposition.contains("# TYPE plurx_media_session_route_reads_total counter\n"));
+    for site in [
+        "routing",
+        "status_first",
+        "status_bracket",
+        "status_reclassify",
+        "control",
+        "verdict",
+        "receipt_fence",
+        "receipt_candidate",
+        "observer",
+    ] {
+        for source in ["authority", "view"] {
+            assert!(
+                exposition.contains(&format!(
+                    "plurx_media_session_route_reads_total{{site=\"{site}\",source=\"{source}\"}} "
+                )),
+                "{site}/{source}"
+            );
+        }
+    }
+    assert!(!exposition.contains(
+        "plurx_media_session_route_reads_total{site=\"receipt_fence\",source=\"authority\"} 0\n"
+    ));
+}
+
 #[tokio::test]
 async fn skipped_processing_owner_reason_survives_relay_only_for_its_generation() {
     let request = terminal_relay_request();
