@@ -290,15 +290,16 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
         let error = result.expect_err(reason);
         assert!(error.contains(reason), "expected {reason:?}, got {error:?}");
     };
-    let with_slice = |namespace: u64, init: bool, preexisting: u32, slice: u32, foreign: u32| {
+    let with_daemons = |namespace: u64, init: bool, preexisting: u32, others: u32, foreign: u32| {
         let mut proof = dead.proof(0);
         for pass in &mut proof.passes {
             pass.owner_teardown = Some(Teardown {
                 pid_namespace: namespace,
                 daemon_is_namespace_init: init,
                 preexisting,
-                preexisting_in_daemon_slice: slice,
+                other_daemons: others,
                 foreign_storage_holders: foreign,
+                foreign_media_tools: 0,
                 unreadable: 0,
                 storage_devices: vec![STORAGE, dead.source.dev()],
             });
@@ -306,7 +307,7 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
         proof
     };
     let with = |namespace: u64, init: bool, preexisting: u32, foreign: u32| {
-        with_slice(namespace, init, preexisting, 0, foreign)
+        with_daemons(namespace, init, preexisting, 0, foreign)
     };
     // Without the job, the exact source binding is gone: a census alone refuses.
     refused(
@@ -342,14 +343,25 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
             .await,
         "census job unavailable",
     );
-    // An earlier daemon container still alive in the deployment slice refuses.
+    // Another `plurxd run` anywhere on the host refuses.
     refused(
         dead.apply_in(
-            &with_slice(NAMESPACE, true, 0, 1, 0),
+            &with_daemons(NAMESPACE, true, 0, 1, 0),
             started,
             Some(NAMESPACE),
         )
         .await,
+        "census job unavailable",
+    );
+    // An idle FFmpeg or plurx helper outside the namespace refuses.
+    let mut idle = with(NAMESPACE, true, 0, 0);
+    idle.passes[1]
+        .owner_teardown
+        .as_mut()
+        .expect("teardown")
+        .foreign_media_tools = 1;
+    refused(
+        dead.apply_in(&idle, started, Some(NAMESPACE)).await,
         "census job unavailable",
     );
     // A process the helper could not read is never assumed harmless.

@@ -108,16 +108,14 @@ struct Pass {
 /// The host's view of the dead owner's process tree, used only when the
 /// owner's job row is gone and with it the exact source binding.
 ///
-/// The live daemon is PID 1 of its PID namespace. Every process in that
+/// The live daemon is PID 1 of its PID namespace, and every process in that
 /// namespace started after the owner's lease ended, so none of them is the
-/// owner or a survivor of it. When the owner's own namespace init exited, the
-/// kernel killed every process in that namespace. A survivor could therefore
-/// only live in another namespace whose init is still running: an earlier
-/// daemon container would still sit in the daemon's deployment slice, where
-/// nothing older than the owner's death may remain. No process outside the
-/// daemon's namespace has any file, working directory, root, executable or
-/// mapping on any of the daemon's media storage, so no survivor is reading
-/// any file there, whichever file the owner read.
+/// owner or a survivor of it. A survivor could only live in another
+/// namespace. There, no process may be another `plurxd run`, an FFmpeg tool
+/// or a plurx helper, or hold any file, working directory, root, executable
+/// or mapping on media storage: any network or FUSE superblock in any mount
+/// namespace, every library root this daemon serves, and the census's. That
+/// holds whichever file the owner read.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 struct Teardown {
@@ -128,17 +126,18 @@ struct Teardown {
     /// Processes in that namespace that started at or before the owner's
     /// lease expiry.
     preexisting: u32,
-    /// Processes outside that namespace but in the daemon's parent cgroup
-    /// (its deployment slice, where an earlier daemon container would still
-    /// be) that started before the daemon itself.
-    preexisting_in_daemon_slice: u32,
+    /// Other `plurxd run` processes anywhere on the host.
+    other_daemons: u32,
     /// Open descriptors, cwd, root, exe or mappings on any storage superblock
     /// held by processes outside that namespace (the helper excluded).
     foreign_storage_holders: u32,
+    /// FFmpeg tools or plurx helpers outside that namespace: an idle survivor
+    /// between opens holds nothing yet.
+    foreign_media_tools: u32,
     /// Processes that existed but could not be read; never skipped.
     unreadable: u32,
-    /// Every superblock the helper scanned: the census's, and every network
-    /// or FUSE filesystem mounted for the daemon.
+    /// Every superblock the helper scanned: the census's, every network or
+    /// FUSE filesystem in any mount namespace, and named library roots.
     storage_devices: Vec<u64>,
 }
 
@@ -196,8 +195,9 @@ impl Proof {
                     teardown.pid_namespace == namespace
                         && teardown.daemon_is_namespace_init
                         && teardown.preexisting == 0
-                        && teardown.preexisting_in_daemon_slice == 0
+                        && teardown.other_daemons == 0
                         && teardown.foreign_storage_holders == 0
+                        && teardown.foreign_media_tools == 0
                         && teardown.unreadable == 0
                         && storage
                             .iter()
@@ -361,6 +361,24 @@ pub(super) async fn replay(
         return Ok(());
     }
     let kernel = reader::kernel_instance().ok_or("source census kernel identity unavailable")?;
+    // Library roots on local disk must also have been scanned; an unreadable
+    // root leaves the teardown path unavailable rather than narrower.
+    let storage = match (storage_devices(), store.list_libraries().await) {
+        (Some(mut devices), Ok(libraries)) => libraries
+            .iter()
+            .flat_map(|library| &library.paths)
+            .try_for_each(|root| {
+                use std::os::unix::fs::MetadataExt;
+                devices.push(std::fs::metadata(root).ok()?.dev());
+                Some(())
+            })
+            .map(|()| {
+                devices.sort_unstable();
+                devices.dedup();
+                devices
+            }),
+        _ => None,
+    };
     let started = crate::source_custody::process_started_ms()
         .or_else(process_started_ms)
         .ok_or("daemon process start time unavailable")?;
@@ -376,7 +394,7 @@ pub(super) async fn replay(
                 process_started_ms: started,
                 now_ms: crate::state::clock_ms(),
                 namespace_init: namespace_init(),
-                storage_devices: storage_devices(),
+                storage_devices: storage.clone(),
             },
             &proof,
         )
@@ -396,7 +414,8 @@ pub(super) struct Context<'a> {
     pub(super) now_ms: i64,
     /// This daemon's PID namespace inode when it is that namespace's init.
     pub(super) namespace_init: Option<u64>,
-    /// Every network or FUSE superblock mounted for this daemon.
+    /// Every network or FUSE superblock mounted for this daemon, and the
+    /// superblock of every library root it serves.
     pub(super) storage_devices: Option<Vec<u64>>,
 }
 

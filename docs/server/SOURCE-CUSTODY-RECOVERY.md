@@ -193,39 +193,37 @@ It then uses the ordinary typed settlement and clears only its own witness.
 **When the owner's job row is gone.** Retention can delete a settled job while
 its custody is still charged. That row is the custody's only exact source
 binding, so the census alone cannot release it. The helper, running in the
-host's PID namespace, also records an `owner_teardown` view for each pass:
+host's PID namespace, records an `owner_teardown` view in each pass:
 
 - the PID namespace of the `plurxd run` that is PID 1 of its namespace;
 - processes in that namespace that started at or before the owner's lease
   expiry;
-- processes in the daemon's parent cgroup (its deployment slice) that started
-  before the daemon. An earlier daemon container that is still running would
-  be there.
-- descriptors, cwd, root, executable or mappings held by processes outside the
-  namespace. This covers every network or FUSE superblock mounted for the
-  daemon, plus the census's own, so it does not matter which file the owner
-  read.
-- processes that exist but cannot be read. They count against release, never
-  as harmless.
+- any other `plurxd run` on the host;
+- the following, counted only for processes outside that namespace:
+  - anything held (a descriptor, cwd, root, executable or mapping) on media
+    storage. Media storage means every network or FUSE superblock in any mount
+    namespace on the host, the census's superblock, and any `--library-root`
+    on local disk.
+  - FFmpeg tools or plurx helpers. An idle survivor between opens holds
+    nothing, so it is caught here instead.
+  - processes that cannot be read. These are never skipped.
 
-Zombie thread-group leaders are read through their live tasks.
+The helper reads zombie leaders through their live tasks. It names every
+holder on stderr so a refusal can be acted on.
 
-The daemon accepts the census only when all of these hold:
+The daemon accepts the view only when all of these hold:
 
-- it is PID 1 of that same namespace;
+- it is PID 1 of that namespace;
 - both passes were taken after this daemon started;
 - every count is zero in both passes;
-- the scanned set includes every network or FUSE superblock in its own mount
-  table;
-- if the owner recorded the source inode it opened, that inode is the census
-  inode.
+- the scanned set covers every network or FUSE superblock in its own mount
+  table and the superblock of every library root it serves;
+- the owner's recorded source inode, if any, is the census inode.
 
-When the owner's namespace init exited, the kernel killed that whole namespace.
-Any survivor would sit outside the daemon's namespace, and nothing there
-touches the media storage.
-
-A hung network mount can stall the helper's scan. Interrupting it publishes
-nothing.
+The owner died before this daemon started, so its survivors are outside this
+namespace. None of them is reading any media file, whichever file the owner
+read. A hung network mount can stall the helper's scan; interrupting it
+publishes nothing.
 The operator removes the proof file after release. The model never repairs a
 nonce, rewrites a witness or treats lease expiry as stop evidence. A future
 unmediated launch still poisons live witnesses; reducing those launches
