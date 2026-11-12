@@ -10,4 +10,6 @@
  "harness_notes":"roi_encode.c lumazx/lumazr/lumazf. Ramp floor 0.3 nit is a source constant (RAMP_LOW_NITS). Zf's RMS is per luma pixel: each chroma sample's weighted error counts for its four pixels. Zf's BL planes are the canonical layer-capture bl.yuv, bound by sha256 in each recipe. Unselected = non-flat blocks outside the selection; flat blocks still sit under the full-frame balancing region, where they code at no cost.",
  "map_inputs":"encoder input and, for Zf only, the canonical BL planes; no R, no decoded candidate, no scoring model",
  "rate_rule":"as protocol-aq-psy-20261112.json","readouts":"as protocol-aq-psy-20261112.json plus map statistics per frame",
- "accept":"as protocol-aq-psy-20261112.json and michael5400 ModelB frames-beating-F >= 46"}
+ "accept":"as protocol-aq-psy-20261112.json and michael5400 ModelB frames-beating-F >= 46",
+ "erratum_1":"Recorded after outputs (PR #1518 review, 2026-11-12): the same harness v8 defect applies to Zf, where it affects dark blocks with d >= 4*d0. Zf was rejected either way (it lost shadow frames to the flat exclusion)."}
+

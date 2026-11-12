@@ -88,7 +88,8 @@ p.add_argument('--baseline-mp4', required=True, type=Path)
 p.add_argument('--harness', required=True, type=Path)
 p.add_argument('--output-root', required=True, type=Path)
 p.add_argument('--prefix', required=True)
-p.add_argument('--mode', choices=['none', 'zero', 'luma', 'lumazm', 'lumazx', 'lumazr', 'lumazf', 'lumazfn', 'lumazfs'], required=True)
+p.add_argument('--mode', choices=['none', 'zero', 'luma', 'lumazm', 'lumazx', 'lumazr', 'lumazf', 'lumazfn', 'lumazfs', 'lumazfsp'], required=True)
+p.add_argument('--arm', help='refined modes: the protocol arm (harness_modes key) this encode is')
 p.add_argument('--grid', type=int, default=16)
 p.add_argument('--threshold-nits', type=float, default=0.0)
 p.add_argument('--qp-offset', type=int, default=0)
@@ -128,16 +129,16 @@ if a.source:
     src = a.source.resolve()
 num, den = pos['rate']
 assert pos['frames'] == 48
-REFINED = ('lumazx', 'lumazr', 'lumazf', 'lumazfn', 'lumazfs')
-assert (a.mode in ('lumazf', 'lumazfn', 'lumazfs')) == bool(a.bl_planes), 'BL planes are required by the lumazf family and refused otherwise'
+REFINED = ('lumazx', 'lumazr', 'lumazf', 'lumazfn', 'lumazfs', 'lumazfsp')
+assert (a.mode in ('lumazf', 'lumazfn', 'lumazfs', 'lumazfsp')) == bool(a.bl_planes), 'BL planes are required by the lumazf family and refused otherwise'
 if a.bl_planes:
     assert a.bl_sha256 and sha(a.bl_planes) == a.bl_sha256, 'BL planes hash mismatch'
 if a.mode in REFINED:
     # A refined map must be declared, with these exact arguments, by the committed protocol's harness_modes.
     assert a.protocol, 'refined map needs a committed protocol'
     hm = json.loads(a.protocol.read_text()).get('harness_modes', {})
-    assert any(v == {'mode': a.mode, 'threshold_nits': a.threshold_nits, 'qp_offset': a.qp_offset} for v in hm.values()), \
-        'refused: mode/threshold/offset not declared in the protocol harness_modes'
+    assert a.arm and hm.get(a.arm) == {'mode': a.mode, 'threshold_nits': a.threshold_nits, 'qp_offset': a.qp_offset}, \
+        'refused: --arm must name a harness_modes entry declaring exactly this mode, threshold and offset'
 if a.mode in ('luma', 'lumazm') + REFINED:
     assert a.protocol and a.threshold_nits > 0 and a.qp_offset != 0, 'luma map needs a committed protocol and nonzero settings'
     own = text = a.protocol.read_text()
@@ -146,7 +147,7 @@ if a.mode in ('luma', 'lumazm') + REFINED:
         if (a.protocol.parent / ref).exists():
             text += (a.protocol.parent / ref).read_text()
     # The arguments must be the ones the committed protocol declares.
-    assert f'{a.qp_offset}/63' in own, 'qp offset not declared by this protocol itself'
+    assert re.search(rf'(?<![\w+-]){a.qp_offset}/63', own), 'qp offset not declared by this protocol itself'
     if a.mode not in REFINED:
         assert f'< {a.threshold_nits} nit' in text, 'threshold not declared by the protocol'
     assert (a.mode != 'luma') == ('zero-mean' in text or 'zero frame mean' in text), 'zero-mean mode does not match the protocol'
@@ -155,6 +156,7 @@ if a.mode in ('luma', 'lumazm') + REFINED:
     for g in a.gate_receipt:
         gr = json.loads(g.read_text())
         assert gr.get('equivalence_gate') == 'pass' and gr['harness']['sha256'] == sha(a.harness), f'refused: {g} is not a passing gate for this binary'
+        assert gr['baseline_mp4_sha256'] == base['sha256'], f'refused: {g} gates another fixture\'s baseline'
         modes.add(gr['mode'])
     assert modes >= {'none', 'zero'}, 'refused: need both the none and the zero gate for this binary'
 grid = 8 if ':qg-size=8' in opts['x265-params'] else 16

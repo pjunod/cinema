@@ -27,6 +27,13 @@
  *           picture), which is removed before the encoder sees the options.
  *   lumazfn - lumazf with flat blocks kept in the selection and in c.
  *   lumazfs - lumazfn with a 0.5-octave span: QP_OFFSET*clamp(1 - 2*log2(d/d0), 0, 1).
+ *   lumazfsp - lumazfs exactly as harness v8 executed it: a dark block whose
+ *           offset rounds to 0 gets no region, so it falls under the
+ *           full-frame balancing region (+balance), while still counting as
+ *           selected in the balance. v8 did this for every lumazf* mode (a
+ *           defect found in review); v9 gives those blocks an explicit 0 QP
+ *           region in lumazf/lumazfn/lumazfs and keeps the v8 behaviour only
+ *           under this name, so the v8 arms stay reproducible.
  *   For lumazx/zr/zf/zfn/zfs the balancing offset is min(|QP_OFFSET|, sum|offset| /
  *   unselected non-flat blocks): zero mean over non-flat blocks.
  *
@@ -104,7 +111,7 @@ int main(int argc, char **argv) {
     const char *movflags = argv[12], *tag = argv[13];
     int m_none = !strcmp(mode, "none"), m_zero = !strcmp(mode, "zero"), m_zm = !strcmp(mode, "lumazm"),
         m_luma = !strcmp(mode, "luma") || m_zm, m_zx = !strcmp(mode, "lumazx"), m_zr = !strcmp(mode, "lumazr"),
-        m_zfn = !strcmp(mode, "lumazfn"), m_zfs = !strcmp(mode, "lumazfs"),
+        m_zfp = !strcmp(mode, "lumazfsp"), m_zfn = !strcmp(mode, "lumazfn"), m_zfs = !strcmp(mode, "lumazfs") || m_zfp,
         m_zf = !strcmp(mode, "lumazf") || m_zfn || m_zfs, m_ref = m_zx || m_zr || m_zf, keep_flat = m_zfn || m_zfs;
     double span = m_zfs ? 0.5 : 2.0;
     if (!(m_none || m_zero || m_luma || m_ref) || (grid != 8 && grid != 16) || strlen(tag) != 4) die("bad arguments", 0);
@@ -273,6 +280,7 @@ int main(int argc, char **argv) {
             if (m_zf) {
                 size_t fbsz = (size_t)W * H * 3 / 2;
                 blbuf = malloc(fbsz * 2);
+                if (fseeko(blf, 0, SEEK_END) || ftello(blf) != (off_t)frames * fbsz * 2) die("roi_bl size is not FRAMES frames of the input geometry", 0);
                 if (fseeko(blf, (off_t)n * fbsz * 2, SEEK_SET) || fread(blbuf, 2, fbsz, blf) != fbsz) die("read roi_bl frame", 0);
             }
             double elo = pq_inverse(RAMP_LOW_NITS), ehi = pq_inverse(thresh);
@@ -328,9 +336,9 @@ int main(int argc, char **argv) {
                         off[b] = qpoff * t;
                     }
             }
-            int unsel = 0;
+            int unsel = 0, zeroed = 0;
             for (size_t b = 0; b < nb; b++) {
-                if (cls[b] == 1) selected++, negsum += fabs(off[b]);
+                if (cls[b] == 1) selected++, negsum += fabs(off[b]), zeroed += lround(off[b] * 1e6) == 0;
                 if (cls[b] == 0) unsel++;
             }
             double pos = unsel ? negsum / unsel : 0;
@@ -343,7 +351,7 @@ int main(int argc, char **argv) {
             for (int by = 0; by < bh; by++)
                 for (int bx = 0; bx < bw; bx++) {
                     size_t b = (size_t)by * bw + bx;
-                    if (cls[b] == 1 && mq[b] && !(bx && cls[b - 1] == 1 && mq[b - 1] == mq[b])) runs++;
+                    if (cls[b] == 1 && (mq[b] || !m_zfp) && !(bx && cls[b - 1] == 1 && mq[b - 1] == mq[b])) runs++;
                 }
             int extra = pos > 0 ? 1 : 0;
             if (runs + extra) {
@@ -354,10 +362,12 @@ int main(int argc, char **argv) {
                 for (int by = 0; by < bh; by++)
                     for (int bx = 0; bx < bw; bx++) {
                         size_t b = (size_t)by * bw + bx;
-                        if (cls[b] != 1 || !mq[b] || (bx && cls[b - 1] == 1 && mq[b - 1] == mq[b])) continue;
+                        if (cls[b] != 1 || (!mq[b] && m_zfp) || (bx && cls[b - 1] == 1 && mq[b - 1] == mq[b])) continue;
                         int ex = bx;
                         while (ex + 1 < bw && cls[b + ex + 1 - bx] == 1 && mq[b + ex + 1 - bx] == mq[b]) ex++;
-                        AVRational q = mq[b] == (long)qpoff * 1000000 ? (AVRational){qpoff, 63} : (AVRational){(int)mq[b], 63000000};
+                        AVRational q = mq[b] == (long)qpoff * 1000000 ? (AVRational){qpoff, 63}
+                                     : mq[b] == 0                          ? (AVRational){0, 1}
+                                                                           : (AVRational){(int)mq[b], 63000000};
                         r[k++] = (AVRegionOfInterest){.self_size = sizeof *r, .top = by * grid, .bottom = (by + 1) * grid,
                                                       .left = bx * grid, .right = (ex + 1) * grid, .qoffset = q};
                     }
@@ -369,8 +379,9 @@ int main(int argc, char **argv) {
             free(off), free(dv), free(dd), free(cls), free(mq), free(blbuf);
         }
         if (m_ref)
-            fprintf(mj, "%s{\"frame\":%d,\"selected_blocks\":%d,\"flat_blocks\":%d,\"blocks\":%d,\"mean_selected_qp_offset\":%.6f,\"positive_qp_offset\":%.6f}",
-                    n ? "," : "", n, selected, flat, bw * bh, selected ? -negsum / selected : 0.0, positive);
+            fprintf(mj, "%s{\"frame\":%d,\"selected_blocks\":%d,\"flat_blocks\":%d,\"blocks\":%d,\"mean_selected_qp_offset\":%.6f,\"positive_qp_offset\":%.6f,"
+                        "\"selected_zero_offset_blocks\":%d,\"zero_offset_blocks_coded_at\":\"%s\"}",
+                    n ? "," : "", n, selected, flat, bw * bh, selected ? -negsum / selected : 0.0, positive, zeroed, m_zfp ? "balance" : "0");
         else
             fprintf(mj, "%s{\"frame\":%d,\"selected_blocks\":%d,\"blocks\":%d,\"positive_qp_offset\":%.6f}", n ? "," : "", n,
                     selected, bw * bh, positive);

@@ -9,4 +9,6 @@
  "map_inputs":"encoder input and, for Zfn/Zfn1, the canonical BL planes; no R, no decoded candidate, no scoring model",
  "rate_rule":"as protocol-aq-psy-20261112.json",
  "readouts":"as protocol-aq-psy-20261112.json plus map statistics per frame",
- "accept":"as protocol-aq-psy-20261112.json; shadow-p99 frames beating F must not drop below Z6 in any model. If both Z4 and Z3 pass, take the lower pooled mean"}
+ "accept":"as protocol-aq-psy-20261112.json; shadow-p99 frames beating F must not drop below Z6 in any model. If both Z4 and Z3 pass, take the lower pooled mean",
+ "erratum_1":"Recorded after outputs (PR #1518 review, 2026-11-12): harness v8 gave dark blocks whose Zf/Zfn/Zfn1 offset clamps to 0 no region, so they were coded at the positive balance and still counted as selected. The Zfn/Zfn1 results above are therefore of that executed map (named lumazfsp from v9), not of the map declared here. protocol-map-fix-20261112.json runs the declared map."}
+

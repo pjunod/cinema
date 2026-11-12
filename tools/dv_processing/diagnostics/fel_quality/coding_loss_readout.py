@@ -32,6 +32,9 @@ for spec in specs:
                     rows = (d.get('selected_frame_bar') or {}).get(arm, {}).get('rows')
                     if arm != 'F' and rows:
                         v['bar_rows_passing'] = [sum(all(r['bar'].values()) for r in rows), len(rows)]
+                    cand = (d.get('candidates') or {}).get(arm) or {}
+                    if 'authored_video_packet_mbps' in cand:
+                        v['authored_video_packet_mbps'] = cand['authored_video_packet_mbps']
                 else:
                     v = {'pooled_full_mean': {m: sum(R[k][m][arm]['full']['mean'] for k in fr) / len(fr) for m in 'ABCD'}, 'frames': len(fr)}
                     if arm != 'F':
@@ -44,13 +47,17 @@ for spec in specs:
         lj = Path(ldir) / f'{fx}-{arm}-landing.json'
         if lj.exists():
             l = json.loads(lj.read_text()); ch = [t for t in l['attempts'] if t['prefix'] == l['chosen']]
-            a['landing'] = {'chosen': l['chosen'], 'attempts': len(l['attempts']), 'predicted_authored_mbps': ch[0]['predicted_authored_mbps'] if ch else None}
+            a['landing'] = {'chosen': l['chosen'], 'attempts': len(l['attempts']), 'band': l.get('band'),
+                            'predicted_authored_mbps': ch[0]['predicted_authored_mbps'] if ch else None}
     rec['fixtures'][fx] = {'arms': arms, 'sources': sources}
 
 # Each arm is judged against its protocol's control: Qbase (plane-domain export, no map) against base, the rest against Z6.
 CONTROL = {'Qbase': 'base'}
 verdict = {}
 HELDOUT = {fx for fx in rec['fixtures'] if not fx.startswith('michael')}
+MICHAEL = {'michael5400', 'michael1800'}
+STACK = {'NP1', 'NP2', 'P1'}  # protocol-stack-20261112.json: the held-out rule is part of their accept
+BAND, ROWS = [128.5, 130.0], 8
 for arm in sorted(set().union(*[v['arms'] for v in rec['fixtures'].values()]) - {'F', 'Z6', 'base'}):
     per = {}
     for fx, v in rec['fixtures'].items():
@@ -60,17 +67,22 @@ for arm in sorted(set().union(*[v['arms'] for v in rec['fixtures'].values()]) - 
         if not a or 'lattice' not in a or 'fullres' not in a:
             per[fx] = 'not scored'; continue
         c = v['arms'][CONTROL.get(arm, 'Z6')]
-        bar = a['fullres'].get('bar_rows_passing', [0, 1]); dm = {m: a['lattice']['pooled_full_mean'][m] - c['lattice']['pooled_full_mean'][m] for m in 'ABCD'}
+        land = a.get('landing') or {}
+        landed = bool(land.get('chosen')) and land.get('band') == BAND and BAND[0] <= (land.get('predicted_authored_mbps') or 0) <= BAND[1]
+        bar = a['fullres'].get('bar_rows_passing', [0, ROWS]); dm = {m: a['lattice']['pooled_full_mean'][m] - c['lattice']['pooled_full_mean'][m] for m in 'ABCD'}
         wins = {m: a['lattice']['frames_beating_F'][m]['dark_p99_below_F'] - c['lattice']['frames_beating_F'][m]['dark_p99_below_F'] for m in 'ABCD'}
-        per[fx] = {'bar_all_pass': bar[0] == bar[1], 'pooled_mean_minus_control': dm, 'shadow_wins_minus_control': wins,
-                   'pass': bar[0] == bar[1] and all(x <= -0.02 for x in dm.values()) and all(x >= 0 for x in wins.values())}
+        per[fx] = {'landed_in_band': landed, 'bar_all_pass': bar == [ROWS, ROWS], 'pooled_mean_minus_control': dm, 'shadow_wins_minus_control': wins,
+                   'pass': landed and bar == [ROWS, ROWS] and all(x <= -0.02 for x in dm.values()) and all(x >= 0 for x in wins.values())}
     if all(isinstance(p, str) for p in per.values()):
         continue  # scored on held-out scenes only
-    verdict[arm] = {'control': CONTROL.get(arm, 'Z6'), 'per_fixture': per, 'accept': all(isinstance(p, dict) and p['pass'] for p in per.values())}
+    verdict[arm] = {'control': CONTROL.get(arm, 'Z6'), 'per_fixture': per,
+                    'accept': set(per) >= MICHAEL and all(isinstance(p, dict) and p['pass'] for p in per.values())}
 # Held-out scene (protocol-stack-20261112.json): pooled mean below F in all four models, frames 0 and 24 below F,
 # shadow-p99 frames beating F at least the landed Z6's.
 for fx in HELDOUT:
-    v = rec['fixtures'][fx]['arms']; F, Z = v['F'], v['Z6']; hv = {}
+    v = rec['fixtures'][fx]['arms']
+    assert 'Z6' in v and 'lattice' in v['Z6'], f'{fx}: held-out rule needs a landed Z6 control'
+    F, Z = v['F'], v['Z6']; hv = {}
     for arm, a in v.items():
         if arm == 'F' or 'lattice' not in a or 'fullres' not in a:
             continue
@@ -82,7 +94,12 @@ for fx in HELDOUT:
     rec.setdefault('heldout_verdicts', {})[fx] = hv
     for arm, h in hv.items():
         print(fx, arm, 'PASS' if h['pass'] else 'fail', {'dF_B': round(h['pooled_mean_minus_F']['B'], 4), 'wins_vs_Z6_B': h['shadow_wins_minus_Z6']['B']})
-rec['accept_rule'] = 'strict bar rows all pass; pooled full mean <= landed control (Z6; base for Qbase) - 0.02 in all four models on every fixture; shadow-p99 frames beating F >= the control in every model'
+for arm in STACK & set(verdict):
+    held = [rec['heldout_verdicts'][fx][arm]['pass'] for fx in HELDOUT if arm in rec.get('heldout_verdicts', {}).get(fx, {})]
+    verdict[arm]['michael_bar_pass'] = verdict[arm]['accept']
+    verdict[arm]['heldout_pass'] = held and all(held)
+    verdict[arm]['accept'] = verdict[arm]['accept'] and bool(held) and all(held)
+rec['accept_rule'] = 'landed in band; strict bar 8/8 rows on each Michael fixture; pooled full mean <= landed control (Z6; base for Qbase) - 0.02 in all four models on every fixture; shadow-p99 frames beating F >= the control in every model'
 rec['verdicts'] = verdict
 out.write_text(json.dumps(rec, indent=1) + '\n')
 for arm, v in verdict.items():

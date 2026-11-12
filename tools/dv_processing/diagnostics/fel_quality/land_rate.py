@@ -39,7 +39,8 @@ attempts, b = [], a.b0
 for k in range(1, 5):
     pre = f'{a.prefix}-L{k}'
     r = subprocess.run([sys.executable, a.driver, *rest, '--prefix', pre, '--override', f'b={b}k'])
-    rec = json.loads((root / 'corrected-encodes' / f'{pre}-recipe.json').read_text())
+    rp = root / 'corrected-encodes' / f'{pre}-recipe.json'
+    rec = json.loads(rp.read_text()) if rp.exists() else {'status': f'driver refused (exit {r.returncode}, no recipe)'}
     if r.returncode or rec['status'] != 'encoded':
         attempts.append({'prefix': pre, 'b_kbps': b, 'status': rec['status']}); break
     enc = packet_mbps(root / 'corrected-encodes' / f'{pre}-hdr.mp4', rec); pred = enc + a.overhead
@@ -53,7 +54,10 @@ for k in range(1, 5):
         p0, p1 = attempts[-2], attempts[-1]
         slope = (p1['predicted_authored_mbps'] - p0['predicted_authored_mbps']) / (p1['b_kbps'] - p0['b_kbps'])
         nb = b + (TARGET - pred) / slope if slope > 0 else b * TARGET / pred
-    b = int(round(nb))
+    nb = int(round(nb))
+    if nb == b:  # the secant cannot move b any further; record and stop rather than repeat an encode
+        break
+    b = nb
 chosen = next((x['prefix'] for x in reversed(attempts) if x.get('in_band')), None)
 out = {'rule': f'secant on b only, <=4 encodes, predicted authored average in [{LO},{HI}]', 'band': [LO, HI], 'target': TARGET,
        'overhead_mbps': a.overhead, 'attempts': attempts, 'chosen': chosen, 'landed': chosen is not None}
