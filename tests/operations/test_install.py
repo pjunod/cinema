@@ -489,7 +489,8 @@ class InstallerCase(unittest.TestCase):
         self.assertIn("Intel Macs are not supported", result.stderr)
         self.assertFalse(prefix.exists())
         self.assertFalse((self.host.home / "Library/LaunchAgents/com.plurx.plurxd.plist").exists())
-        self.assertFalse([c for c in self.host.calls() if c.startswith(("launchctl", "xattr", "curl", "tar"))])
+        # The refusal comes before every other step, ownership checks included.
+        self.assertEqual({call.split()[0] for call in self.host.calls()}, {"uname"}, self.host.calls())
 
     def test_macos_release_archive_installs_its_own_plurxd_and_clears_quarantine(self):
         # The GitHub release's macOS archive is this script, the agent template

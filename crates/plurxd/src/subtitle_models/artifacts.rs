@@ -319,8 +319,7 @@ mod local {
             return Ok(None);
         }
         // Only x86_64 Linux carries an x86_64 CPU variant; macOS is arm64 only.
-        if !["linux-x86_64", "linux-amd64"].contains(&platform)
-        {
+        if !["linux-x86_64", "linux-amd64"].contains(&platform) {
             return Err("packaged_engine_variants_unqualified".into());
         }
         if variants.len() != 1 {
