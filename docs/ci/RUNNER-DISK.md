@@ -83,12 +83,13 @@ those registrations and their private rollback backups.
 
 #### Compile pool: `ci-nonvoter-compile-amd64`
 
-The three `rust_compile` gates, `check` and `cluster_daemon` request this
-pool. Their `container.options` and first-step cgroup check pin the same
+The three `rust_compile` gates and `cluster_daemon` request this pool. Their `container.options` and first-step cgroup check pin the same
 4-CPU / 20 GiB box on any carrier: lab1's heavy worker (which carries both
 labels) and the capacity-one `gha-lab5-plurx-compile-01` (lab5 is a
-nonvoter). Host-mode, package, publish and release-image jobs, and the
-disk-gated `web_layout`/`vod_web` pair, stay on lab1-only
+nonvoter). Host-mode, package, publish and release-image jobs, the
+receipt-pinned unit suite `check` (its job block digest is
+`validation/workspace_rust_continuation.py` `CURRENT_JOB`) and the disk-gated
+`web_layout`/`vod_web` pair stay on lab1-only
 `ci-nonvoter-heavy-amd64`. lab5 shares 30 GiB and cores 0-3 with other runners
 and a `plurxd`; its worker adds `--oom-score-adj=500` so the kernel picks a CI
 container before `plurxd`. Watch lab5 memory and root disk.

@@ -467,9 +467,8 @@ jobs:
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
     if: needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true'
-    # The 20-GiB unit container runs on the nonvoter compile pool; the
-    # workflow pins its bounds, so either compile carrier gives it the same box.
-    runs-on: [ci-nonvoter-compile-amd64]
+    # The 20-GiB unit container shares a capacity-one build slot on a nonvoter.
+    runs-on: [ci-nonvoter-heavy-amd64]
     # Private, smoke-tested CI target; never expose the management credential.
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855

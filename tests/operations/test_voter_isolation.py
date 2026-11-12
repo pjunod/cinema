@@ -222,7 +222,7 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
     # Jobs whose container the workflow bounds run on the two-carrier
     # compile pool; host-mode and publishing jobs stay on the heavy host.
     COMPILE_ROUTE = "[ci-nonvoter-compile-amd64]"
-    COMPILE_JOBS = frozenset({"rust_compile", "check", "cluster_daemon"})
+    COMPILE_JOBS = frozenset({"rust_compile", "cluster_daemon"})
     CAPS = {"--memory": "20g", "--memory-swap": "20g", "--cpus": "4",
             "--cpuset-cpus": "0-3", "--pids-limit": "4096"}
     EFFECTIVE = {"memory.max": "21474836480", "memory.swap.max": "0",

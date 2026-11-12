@@ -3344,7 +3344,7 @@ assert.equal(context.ACT_TIMER, null);
         job = workflow_job_blocks(".github/workflows/ci.yml")["check"]
         header = job.split("    steps:\n", 1)[0]
         self.assertIn(
-            "    runs-on: [ci-nonvoter-compile-amd64]\n",
+            "    runs-on: [ci-nonvoter-heavy-amd64]\n",
             header,
         )
         self.assertIn(
@@ -4697,7 +4697,7 @@ assert.equal(context.ACT_TIMER, null);
                 elif path == ".github/workflows/release-readiness.yml" and name == "release-check":
                     expected = local("Linux", "X64", "lab", "unit-memory-16g")
                 elif path == ".github/workflows/ci.yml" and name == "check":
-                    expected = "    runs-on: [ci-nonvoter-compile-amd64]"
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
                     # The pinned image retains shipped FFmpeg 8; placement is
                     # the bounded nonvoter compile pool.
