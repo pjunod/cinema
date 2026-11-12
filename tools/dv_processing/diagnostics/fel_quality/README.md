@@ -1,6 +1,7 @@
 # FEL quality diagnostics — offline measurements and retained source deltas
 
 These tools accompany the [investigation ledger](../../../../docs/streaming/FEL-PICTURE-QUALITY-INVESTIGATION.md).
+The no-encode RPU re-fit result is in [RPU-REFIT.md](RPU-REFIT.md).
 They do not change live playback or implement the separate packaging repair.
 The evidence index records exact historical source hashes and private archive
 locations. Media, decoded frames and binaries stay outside Git.
@@ -29,6 +30,11 @@ locations. Media, decoded frames and binaries stay outside Git.
 | `roi_encode.c` | In-process libavcodec/libx265 encode carrying a per-frame quantOffsets map as ROI side data; options pass verbatim as one dictionary. Modes `lumazm` (zero-mean dark map) and the refinements `lumazx`/`lumazr`/`lumazf`/`lumazfn`/`lumazfs` (flat exclusion, ramp, FEL-benefit weighting from the BL planes). |
 | `coding_loss_readout.py` | Portable per-arm readout of the iso-rate coding-loss arms and the protocols' accept rules, including the held-out stack rule. |
 | `grain_ratio.py` | Report-only grain proxy: high-pass luma energy of the decode over the encoder input on 1–100 nit blocks. |
+| `rpu_refit_eval.py` | RPU re-fit: fits single-layer 8.1 mapping curves (luma polynomial, chroma MMR; the safe monotone, continuous, ridge-regularised form is what ships) to the FEL composition on the untouched BL and scores them, plus the parsed-back curves of real RPUs, through the frozen four models. |
+| `rpu_refit_write/` | Rust (dolby_vision 3.3.1): converts each source RPU to 8.1, writes the re-fitted curves, and prints them as parsed back from the written bytes. |
+| `inject_rpu.py` | Puts one RPU NAL at the end of each access unit of an Annex B HEVC stream without B-frames (test clips only). |
+| `dv_display_check.swift` | macOS: renders an AVPlayerLayer offscreen and reports mean linear RGB (optionally dumping the texture), to check whether the platform display path applies an 8.1 RPU's mapping. |
+| `dv_patch_check.py`, `dv_patch_clips.sh` | Flat-patch decoder check: 48 patches played with the re-fit RPU, pre-mapped with the identity RPU, and unmapped; tells whether a decoder applies the curves as libplacebo does. |
 | `encode_roi_control.py` | Translates a retained CLI recipe into the ROI harness, runs the byte-identity gates and the predeclared source-luma map arm. |
 | `encode_spatial_control.py` | Fixed qg-size8 spatial-allocation control at the retained single-pass115/125 budget. |
 | `encode_two_pass_control.py` | Two-pass allocation control with fresh 48-record statistics and identical requested coding settings across passes. |

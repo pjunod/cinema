@@ -190,6 +190,7 @@ async fn source_generation_registration_close_and_cancel_retain_actual_resources
                     video: CopyVideoOptions::new(false, false),
                     source_object_version: Some(encoding.source_object_version.clone()),
                     cluster_cache_key: None,
+                    copy_index_init_contract: None,
                     encoding: Some(Arc::clone(&encoding)),
                 },
                 encoding.grid.plan(96_000, 428_000),
@@ -313,6 +314,7 @@ async fn source_physical_build_and_spawn_refuse_identity_drift_and_symlinks() {
         video: CopyVideoOptions::new(false, false),
         source_object_version: Some(encoding.source_object_version.clone()),
         cluster_cache_key: None,
+        copy_index_init_contract: None,
         encoding: Some(Arc::clone(&encoding)),
     };
     let mut wrong = file.clone();
@@ -408,6 +410,7 @@ async fn source_missing_cached_init_refuses_before_head_regeneration() {
         video: CopyVideoOptions::new(false, false),
         source_object_version: Some(encoding.source_object_version.clone()),
         cluster_cache_key: None,
+        copy_index_init_contract: None,
         encoding: Some(Arc::clone(&encoding)),
     };
     let plan = encoding.grid.plan(96_000, 428_000);
@@ -516,6 +519,7 @@ async fn source_copy_actual_cpu_admission_and_bounded_argv_retain_until_reap() {
         video: CopyVideoOptions::new(false, false),
         source_object_version: None,
         cluster_cache_key: None,
+        copy_index_init_contract: None,
         encoding: None,
     };
     let ordinary = recipe_pipe_args(&recipe, 0.0, false);

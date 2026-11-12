@@ -431,12 +431,28 @@ impl ObservedCopyMux {
                         .checked_add(packet.slices)
                         .ok_or("copy_inspection_overflow")?;
                 }
+                // Every sample of the canonical fragment, as the legacy index
+                // pass scans it. Legacy scans after Dolby Vision conversion;
+                // conversion rewrites only RPU NAL units (type 62), never the
+                // prefix SEI that carries 137/144, so before is the same scan.
+                // An unreadable SEI is a fact about the row, not a reason to
+                // end this viewer's copy: only the seal refuses it.
+                let mut hdr10 = fmp4::Hdr10IndexMetadata::default();
+                let hdr10_conflict = hdr10
+                    .observe_fragment(canonical, normalizers.canonical_init())
+                    .is_err();
+                if hdr10_conflict {
+                    hdr10 = fmp4::Hdr10IndexMetadata::default();
+                }
                 inspection = Some(CopyRowInspection {
                     dts: clock.canonical_dts,
                     duration: clock.duration,
                     packets: packets as u64,
                     slices,
                     configuration_sha256: configuration.ok_or("copy_inspection_missing")?,
+                    hdr10_mastering: hdr10.mastering().map(hex::encode),
+                    hdr10_light: hdr10.light(),
+                    hdr10_conflict,
                 });
             }
             let (mut canonical, clock) = self.canonical.pop_front().ok_or("copy_pair_missing")?;

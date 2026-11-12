@@ -4,13 +4,65 @@ use super::*;
 /// Binds both local and shared indexes to the full-sample metadata scan.
 pub const HDR10_INDEX_METADATA_REVISION: u8 = 1;
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Hdr10IndexMetadata {
     mastering: Option<Vec<u8>>,
     light: Option<[u16; 2]>,
 }
 
+/// One title's content-light maximum. Zero means unspecified, not a measured
+/// zero, so a partly unknown film cannot claim a known maximum.
+fn combine_light(old: Option<[u16; 2]>, next: [u16; 2]) -> [u16; 2] {
+    match old {
+        None => next,
+        Some(old) => std::array::from_fn(|i| {
+            if old[i] == 0 || next[i] == 0 {
+                0
+            } else {
+                old[i].max(next[i])
+            }
+        }),
+    }
+}
+
 impl Hdr10IndexMetadata {
+    /// The facts a previously observed span recorded: the 24-byte mastering
+    /// display payload and the content-light maxima, each absent when that
+    /// span carried no such SEI.
+    pub fn from_parts(
+        mastering: Option<Vec<u8>>,
+        light: Option<[u16; 2]>,
+    ) -> Result<Self, Fmp4Error> {
+        if mastering
+            .as_ref()
+            .is_some_and(|payload| payload.len() != 24)
+        {
+            return malformed("mastering-display metadata is not 24 bytes");
+        }
+        Ok(Self { mastering, light })
+    }
+    pub fn mastering(&self) -> Option<&[u8]> {
+        self.mastering.as_deref()
+    }
+    pub fn light(&self) -> Option<[u16; 2]> {
+        self.light
+    }
+    /// Fold another span's facts into this title's. The result does not depend
+    /// on the order or on overlap, so separately observed spans of one title
+    /// reach the same answer as one sequential scan of every sample.
+    pub fn merge(&mut self, other: &Self) -> Result<(), Fmp4Error> {
+        if let Some(payload) = &other.mastering {
+            if self.mastering.as_ref().is_some_and(|v| v != payload) {
+                return malformed("mastering-display metadata changes within the title");
+            }
+            self.mastering = Some(payload.clone());
+        }
+        if let Some(next) = other.light {
+            self.light = Some(combine_light(self.light, next));
+        }
+        Ok(())
+    }
+
     /// Inspect every sample, including non-random-access pictures. Samples are
     /// never rewritten; their per-sequence SEIs remain authoritative in-band.
     pub fn observe_fragment(&mut self, fragment: &Fragment, init: &Init) -> Result<(), Fmp4Error> {
@@ -69,18 +121,7 @@ impl Hdr10IndexMetadata {
                         u16::from_be_bytes([bytes[0], bytes[1]]),
                         u16::from_be_bytes([bytes[2], bytes[3]]),
                     ];
-                    self.light = Some(match self.light {
-                        None => next,
-                        Some(old) => std::array::from_fn(|i| {
-                            // Zero means unspecified, not a measured zero. A
-                            // partly unknown film cannot claim a known maximum.
-                            if old[i] == 0 || next[i] == 0 {
-                                0
-                            } else {
-                                old[i].max(next[i])
-                            }
-                        }),
-                    });
+                    self.light = Some(combine_light(self.light, next));
                 }
                 _ => {}
             }
@@ -594,6 +635,34 @@ fn resize_box(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn merging_spans_matches_one_scan_in_any_order_and_with_overlap() {
+        let mastering = vec![7u8; 24];
+        let a = Hdr10IndexMetadata::from_parts(Some(mastering.clone()), Some([1000, 400]))
+            .expect("span a");
+        let b = Hdr10IndexMetadata::from_parts(None, Some([800, 600])).expect("span b");
+        let unknown = Hdr10IndexMetadata::from_parts(None, Some([0, 500])).expect("span c");
+        let mut forward = Hdr10IndexMetadata::default();
+        for span in [&a, &b, &a] {
+            forward.merge(span).expect("forward");
+        }
+        let mut backward = Hdr10IndexMetadata::default();
+        for span in [&b, &a] {
+            backward.merge(span).expect("backward");
+        }
+        assert_eq!(forward, backward);
+        assert_eq!(forward.light(), Some([1000, 600]));
+        assert_eq!(forward.mastering(), Some(mastering.as_slice()));
+        forward.merge(&unknown).expect("unspecified light");
+        assert_eq!(forward.light(), Some([0, 600]));
+        let other = Hdr10IndexMetadata::from_parts(Some(vec![8u8; 24]), None).expect("other");
+        assert!(
+            forward.merge(&other).is_err(),
+            "a title has one mastering display"
+        );
+        assert!(Hdr10IndexMetadata::from_parts(Some(vec![0u8; 3]), None).is_err());
+    }
+
     use super::*;
 
     const P3: [u16; 8] = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
@@ -1087,7 +1156,7 @@ mod tests {
             panic!("init");
         };
         let mut early = muxer.clone();
-        let mut late = muxer;
+        let mut late = muxer.clone();
         promote_hdr10_static_metadata_from(&mut early, &[light(230, 197)])
             .expect("valid HDR fixture");
         promote_hdr10_static_metadata_from(&mut late, &[light(283, 200)])
@@ -1112,6 +1181,11 @@ mod tests {
         let same = early.bytes.clone();
         promote_from(&mut early, &inputs).expect("valid HDR fixture");
         assert_eq!(early.bytes, same, "canonical promotion is idempotent");
+        // A copy seal promotes the head-frozen init it observed; the legacy
+        // index promotes the raw muxer init. Both must serve the same bytes.
+        let mut raw = muxer;
+        promote_from(&mut raw, &inputs).expect("valid HDR fixture");
+        assert_eq!(raw.bytes, same, "the raw muxer init promotes identically");
         let location = locate_hvcc(&early.bytes)
             .expect("valid HDR fixture")
             .expect("valid HDR fixture");

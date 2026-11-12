@@ -982,6 +982,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
             video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
+            copy_index_init_contract: None,
             encoding: None,
         },
         source: None,

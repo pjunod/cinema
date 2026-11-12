@@ -861,3 +861,176 @@ INSERT INTO background_job_commands(id,operation,request_json,result_json)
 "#
     )
 }
+
+/// One verified holder of a variant's exact bytes: its publisher, or a node
+/// that hydrated the blob and checked its digest before recording itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CopyIndexV3Location {
+    pub contract_key: String,
+    pub blob_sha256: String,
+    pub node_id: String,
+    pub bytes: i64,
+    pub verified_at_ms: i64,
+    pub last_seen_at_ms: i64,
+}
+impl CopyIndexV3Location {
+    pub fn validate(&self) -> Result<(), StoreError> {
+        if !digest(&self.contract_key)
+            || !digest(&self.blob_sha256)
+            || !identifier(&self.node_id)
+            || !(1..=MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES as i64).contains(&self.bytes)
+            || self.verified_at_ms < 0
+            || self.last_seen_at_ms < self.verified_at_ms
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+
+/// Healthy heads returned for one catalogue file; a file has one head per
+/// origin object, so this bound is far above any real fleet.
+const MAX_FILE_HEADS: usize = 16;
+/// Holders listed for one variant, most recently seen first.
+const MAX_VARIANT_LOCATIONS: usize = 128;
+
+const ARTIFACT_JSON: &str = "json_object('blob_sha256',artifact.blob_sha256,'contract_key',artifact.contract_key,'catalog_namespace',artifact.catalog_namespace,'file_id',artifact.file_id,'source_sha256',artifact.source_sha256,'contract_version',artifact.contract_version,'output_contract_sha256',artifact.output_contract_sha256,'init_contract_sha256',artifact.init_contract_sha256,'bytes',artifact.bytes,'built_by_node_id',artifact.built_by_node_id,'built_at_ms',artifact.built_at_ms,'producer_engine_sha256',artifact.producer_engine_sha256)";
+
+/// A head a consumer may read: healthy, and published for the generation it
+/// still desires. A quarantine moves the desire before any successor exists.
+const HEAD_READABLE: &str =
+    "head.state='healthy' AND head.published_generation=head.desired_generation";
+
+fn variant_body(contract_key: &str, blob_sha256: &str) -> Result<serde_json::Value, StoreError> {
+    if !digest(contract_key) || !digest(blob_sha256) {
+        return Err(invalid());
+    }
+    Ok(serde_json::json!({"contract_key":contract_key,"blob_sha256":blob_sha256}))
+}
+
+/// One head by its source key with the variant row it points at and whether
+/// `node_id` is a recorded holder of those bytes: everything a consumer or
+/// the peer route needs, from primary keys only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CopyIndexV3Variant {
+    pub head: CopyIndexV3Head,
+    pub artifact: Option<CopyIndexV3Artifact>,
+    pub held: bool,
+}
+impl CopyIndexV3Variant {
+    /// The variant a consumer may read or a holder may serve: its head is
+    /// healthy at the generation it desires and the pointed-at row exists.
+    pub fn readable(&self) -> Option<&CopyIndexV3Artifact> {
+        (self.head.state == CopyIndexV3HeadState::Healthy
+            && self.head.published_generation.as_deref()
+                == Some(self.head.desired_generation.as_str()))
+        .then_some(self.artifact.as_ref())
+        .flatten()
+    }
+}
+
+/// Read one head and its variant by primary key. A pending or quarantined
+/// head is returned as it is, so the caller can tell absent from unreadable;
+/// nothing here locates bytes or makes a pointer media-readable.
+pub(super) async fn read_variant<T: super::background_jobs::QueueSql>(
+    store: &T,
+    source_key: &str,
+    node_id: &str,
+) -> Result<Option<CopyIndexV3Variant>, StoreError> {
+    if !digest(source_key) || !identifier(node_id) {
+        return Err(invalid());
+    }
+    let body = super::background_jobs::encode(
+        &serde_json::json!({"source_key":source_key,"node_id":node_id}),
+    )?;
+    let rows = store.queue_sql(format!("SELECT json_object('head',{HEAD_JSON},'artifact',json(CASE WHEN artifact.contract_key IS NULL THEN NULL ELSE {ARTIFACT_JSON} END),'held',json(CASE WHEN EXISTS(SELECT 1 FROM copy_index_v3_locations location WHERE location.contract_key=head.contract_key AND location.blob_sha256=head.blob_sha256 AND location.node_id=json_extract($1,'$.node_id')) THEN 'true' ELSE 'false' END)) AS result_json FROM copy_index_v3_heads head LEFT JOIN copy_index_v3_artifacts artifact ON artifact.contract_key=head.contract_key AND artifact.blob_sha256=head.blob_sha256 WHERE head.source_key=json_extract($1,'$.source_key')"), body, false, true).await?;
+    let variant: Option<CopyIndexV3Variant> = rows
+        .first()
+        .map(|row| super::background_jobs::decode(row))
+        .transpose()?;
+    if let Some(variant) = &variant {
+        variant.head.validate()?;
+        if let Some(artifact) = &variant.artifact {
+            artifact.validate()?;
+        }
+    }
+    Ok(variant)
+}
+
+/// Readable heads other origins (or other objects) published for the same
+/// catalogue file, size, mtime, video identity and contract as `source`,
+/// newest first. The filters run before the bound. A consumer must prove
+/// content equivalence before using one; this read grants nothing. The table
+/// has no `(catalog_namespace, file_id)` index yet, so callers reach this
+/// only after an exact-key miss.
+pub(super) async fn healthy_heads_for_file<T: super::background_jobs::QueueSql>(
+    store: &T,
+    catalog_namespace: &str,
+    source: &AnalysisCoordinationSource,
+) -> Result<Vec<CopyIndexV3Head>, StoreError> {
+    if !namespace(catalog_namespace) || !source.valid() {
+        return Err(invalid());
+    }
+    let body = super::background_jobs::encode(
+        &serde_json::json!({"catalog_namespace":catalog_namespace,"source":source}),
+    )?;
+    let rows = store.queue_sql(format!("SELECT {HEAD_JSON} AS result_json FROM copy_index_v3_heads head WHERE head.catalog_namespace=json_extract($1,'$.catalog_namespace') AND head.file_id=json_extract($1,'$.source.file_id') AND head.source_size=json_extract($1,'$.source.source_size') AND head.source_mtime=json_extract($1,'$.source.source_mtime') AND head.raw_video_identity=json_extract($1,'$.source.video_identity') AND head.contract_version=json_extract($1,'$.source.contract_version') AND {HEAD_READABLE} ORDER BY head.updated_at_ms DESC,head.source_key LIMIT {MAX_FILE_HEADS}"), body, false, true).await?;
+    rows.iter().map(|row| decode_head(row)).collect()
+}
+
+/// Advisory holder list for one variant. A listed node is asked for the exact
+/// bytes and its answer is verified by digest; the row itself proves nothing.
+pub(super) async fn list_locations<T: super::background_jobs::QueueSql>(
+    store: &T,
+    contract_key: &str,
+    blob_sha256: &str,
+) -> Result<Vec<CopyIndexV3Location>, StoreError> {
+    let body = super::background_jobs::encode(&variant_body(contract_key, blob_sha256)?)?;
+    let rows = store.queue_sql(format!("SELECT json_object('contract_key',location.contract_key,'blob_sha256',location.blob_sha256,'node_id',location.node_id,'bytes',location.bytes,'verified_at_ms',location.verified_at_ms,'last_seen_at_ms',location.last_seen_at_ms) AS result_json FROM copy_index_v3_locations location WHERE location.contract_key=json_extract($1,'$.contract_key') AND location.blob_sha256=json_extract($1,'$.blob_sha256') ORDER BY location.last_seen_at_ms DESC,location.node_id LIMIT {MAX_VARIANT_LOCATIONS}"), body, false, false).await?;
+    rows.iter()
+        .map(|row| {
+            let location: CopyIndexV3Location = super::background_jobs::decode(row)?;
+            location.validate()?;
+            Ok(location)
+        })
+        .collect()
+}
+
+/// Record a node that holds the exact verified bytes of a published variant.
+/// The row is written only when the head named by `source_key` is readable
+/// and points at exactly this variant with these bytes; a pending,
+/// quarantined, superseded or unknown variant gains no holder. Every lookup
+/// is by primary key. Verifying the bytes is the caller's obligation.
+pub(super) async fn put_location<T: super::background_jobs::QueueSql>(
+    store: &T,
+    source_key: &str,
+    location: CopyIndexV3Location,
+) -> Result<bool, StoreError> {
+    location.validate()?;
+    if !digest(source_key) {
+        return Err(invalid());
+    }
+    let mut body = serde_json::to_value(&location).map_err(|_| invalid())?;
+    body["source_key"] = source_key.into();
+    let rows = store.queue_sql(format!("INSERT INTO copy_index_v3_locations(contract_key,blob_sha256,node_id,bytes,verified_at_ms,last_seen_at_ms) SELECT artifact.contract_key,artifact.blob_sha256,json_extract($1,'$.node_id'),artifact.bytes,json_extract($1,'$.verified_at_ms'),json_extract($1,'$.last_seen_at_ms') FROM copy_index_v3_heads head JOIN copy_index_v3_artifacts artifact ON artifact.contract_key=head.contract_key AND artifact.blob_sha256=head.blob_sha256 WHERE head.source_key=json_extract($1,'$.source_key') AND {HEAD_READABLE} AND head.contract_key=json_extract($1,'$.contract_key') AND head.blob_sha256=json_extract($1,'$.blob_sha256') AND artifact.bytes=json_extract($1,'$.bytes') ON CONFLICT(contract_key,blob_sha256,node_id) DO UPDATE SET verified_at_ms=excluded.verified_at_ms,last_seen_at_ms=excluded.last_seen_at_ms RETURNING 'true' AS result_json"), super::background_jobs::encode(&body)?, true, true).await?;
+    Ok(!rows.is_empty())
+}
+
+/// Drop one holder whose bytes were missing or failed verification. Only that
+/// node's row is removed; the variant and its head are untouched.
+pub(super) async fn forget_location<T: super::background_jobs::QueueSql>(
+    store: &T,
+    contract_key: &str,
+    blob_sha256: &str,
+    node_id: &str,
+) -> Result<bool, StoreError> {
+    if !identifier(node_id) {
+        return Err(invalid());
+    }
+    let mut body = variant_body(contract_key, blob_sha256)?;
+    body["node_id"] = node_id.into();
+    let rows = store.queue_sql("DELETE FROM copy_index_v3_locations WHERE contract_key=json_extract($1,'$.contract_key') AND blob_sha256=json_extract($1,'$.blob_sha256') AND node_id=json_extract($1,'$.node_id') RETURNING 'true' AS result_json".into(), super::background_jobs::encode(&body)?, true, true).await?;
+    Ok(!rows.is_empty())
+}

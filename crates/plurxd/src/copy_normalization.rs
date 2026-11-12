@@ -56,10 +56,7 @@ impl CopyNormalizationContract {
         // Later in-band sequence CLL stays in samples. This is not the legacy
         // whole-title maximum scan and never sets indexed_hdr10_metadata.
         raw_parameters.hdr10_sei.clear();
-        let mut served = head_init.clone();
-        normalize_init(&mut served, &promotion)?;
-        let init_contract_sha256 = fmp4::copy_video_init_contract_sha256(&served)
-            .map_err(|error| CopyNormalizationError::Init(error.to_string()))?;
+        let init_contract_sha256 = served_init_contract_sha256(head_init, &promotion)?;
         Ok(Self {
             promotion,
             raw_parameters,
@@ -112,6 +109,19 @@ impl CopyNormalizationContract {
             converter,
         })
     }
+}
+
+/// The decoder/timing contract of `init` once `promotion` is applied: the one
+/// recipe for a live copy's frozen head metadata and for a sealed index's
+/// whole-title promotion alike.
+pub(crate) fn served_init_contract_sha256(
+    init: &Init,
+    promotion: &PromotionInputs,
+) -> Result<String, CopyNormalizationError> {
+    let mut served = init.clone();
+    normalize_init(&mut served, promotion)?;
+    fmp4::copy_video_init_contract_sha256(&served)
+        .map_err(|error| CopyNormalizationError::Init(error.to_string()))
 }
 
 fn normalize_init(

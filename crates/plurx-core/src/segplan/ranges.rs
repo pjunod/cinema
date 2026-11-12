@@ -116,6 +116,15 @@ pub struct RangeBoundaries {
     pub eof: bool,
 }
 
+/// The first span this accumulator has not observed. `start` is the end tick
+/// of the rows before it, or None when the title's beginning is unobserved.
+/// `end` is the next observed row's first tick, or None when only EOF follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeGap {
+    pub start: Option<u64>,
+    pub end: Option<u64>,
+}
+
 /// Sorted nonoverlapping canonical rows with gaps allowed between batches.
 /// Storage is bounded by `max_rows`; insertion is atomic on all refusals.
 #[derive(Debug)]
@@ -268,6 +277,31 @@ impl SparseIndexRows {
         Ok(())
     }
 
+    /// The earliest unobserved span, or None exactly when [`Self::is_complete`].
+    pub fn first_gap(&self) -> Option<RangeGap> {
+        let first = self.rows.first();
+        if !self.observed_beginning || first.is_none_or(|row| row.dts != self.title_start) {
+            return Some(RangeGap {
+                start: None,
+                end: first.map(|row| row.dts),
+            });
+        }
+        for pair in self.rows.windows(2) {
+            let end = pair[0].dts + pair[0].duration;
+            if end != pair[1].dts {
+                return Some(RangeGap {
+                    start: Some(end),
+                    end: Some(pair[1].dts),
+                });
+            }
+        }
+        let end = self.rows.last().map(|row| row.dts + row.duration);
+        (end != self.eof_end).then_some(RangeGap {
+            start: end,
+            end: None,
+        })
+    }
+
     /// Complete only after explicit beginning/EOF observations and gap-free
     /// coverage from the caller's canonical title start through that EOF.
     pub fn is_complete(&self) -> bool {
@@ -389,6 +423,70 @@ mod tests {
         assert!(index.is_complete());
         assert_eq!(index.rows(), &[row(7), row(17), row(27)]);
         assert_eq!(index.eof_end_ticks(), Some(37));
+    }
+
+    #[test]
+    fn first_gap_walks_beginning_then_interior_then_eof_and_ends_with_completeness() {
+        let key = binding();
+        let mut index =
+            SparseIndexRows::new(key.clone(), 100, 7, 8).expect("valid sparse-range fixture");
+        assert_eq!(
+            index.first_gap(),
+            Some(RangeGap {
+                start: None,
+                end: None
+            })
+        );
+        index
+            .insert(&key, &[row(27)], RangeBoundaries::default())
+            .expect("valid sparse-range fixture");
+        assert_eq!(
+            index.first_gap(),
+            Some(RangeGap {
+                start: None,
+                end: Some(27)
+            })
+        );
+        index
+            .insert(
+                &key,
+                &[row(7)],
+                RangeBoundaries {
+                    begins_title: true,
+                    ..Default::default()
+                },
+            )
+            .expect("valid sparse-range fixture");
+        assert_eq!(
+            index.first_gap(),
+            Some(RangeGap {
+                start: Some(17),
+                end: Some(27)
+            })
+        );
+        index
+            .insert(&key, &[row(17), row(27)], RangeBoundaries::default())
+            .expect("valid sparse-range fixture");
+        assert_eq!(
+            index.first_gap(),
+            Some(RangeGap {
+                start: Some(37),
+                end: None
+            })
+        );
+        assert!(!index.is_complete());
+        index
+            .insert(
+                &key,
+                &[row(37)],
+                RangeBoundaries {
+                    eof: true,
+                    ..Default::default()
+                },
+            )
+            .expect("valid sparse-range fixture");
+        assert_eq!(index.first_gap(), None);
+        assert!(index.is_complete());
     }
 
     #[test]
