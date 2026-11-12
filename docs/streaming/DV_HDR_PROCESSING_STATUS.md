@@ -12,40 +12,27 @@ remaining milestones stay in the build handoff. The
 
 ## 1. Current boundary
 
-**CM4 active-area repair candidate (2026-11-09):** source inspection and a
-24-point offline model isolate a missing L5 boundary in the spatial filter.
-The measured horizontal stage reproduces the native edge error in binary64;
-clamping its vertical neighbors to the source active rows matches all 54
-sampled active RGB codes from the separately labeled licensed expanded-XML
-render. This does not qualify a whole frame or replace the frozen P7/P8
-references. The candidate carries checked L5 offsets through the shared DM
-header and filters inside the uncropped native active rectangle. Pixels
-outside it keep their source content and take the pointwise mapping without
-the detail pass (revised 2026-11-11 after adversarial review): writing PQ
-black there would have erased burned-in subtitles in the bars and real
-picture under a stale or wrong L5, and put bars below the target floor that
-in-picture black reaches. C/native compilation and three crop-domain CPU
-controls pass on this header; the bar oracle is the pointwise map of the
-uncropped frame. No-L5 and zero/full-frame L5 retain the original shader
-literals byte for byte (`dv_dm_active_partial` owns that selection and is
-tested); the PQ equations remain unchanged. `run_dm_parity.py` gains L5 GPU
-cases. Native-GPU parity and full picture/display/performance acceptance
-remain open.
+**CM4 active area (2026-11-09, merged #1481):** checked L5 offsets bound the
+CM4 detail filter to the uncropped native active rectangle, with vertical
+neighbours clamped to the active rows. This matches all 54 sampled codes of
+the licensed expanded-XML render. Outside the rectangle, pixels take the
+pointwise map without the detail pass. Bars keep their content (burned-in
+subtitles), never PQ black. No-L5 and full-frame L5 keep the original shader
+literals byte for byte (`dv_dm_active_partial`). Three crop-domain CPU
+controls and L5 GPU parity cases cover it. Whole-frame qualification and
+display/performance acceptance remain open.
 
 **CM v2.9 active area (2026-11-12):** L5 now bounds the CM v2.9 detail
 filter too. It had blended bars into two boundary rows: on four native frames,
 up to 27,652 pixels and 4.32 dE ITP worse than P8 (CPU reference with the
 fix: 1,658 to 3). Bars map pointwise; no partial L5, no change.
 
-**CM v2.9 detail at the top clip (2026-11-12):** where the mapped intensity
-sits on the tone curve's top clip, `cm_offline` restores no detail; the model
-restored it from the unclipped source. The detail input is now held at the
-clip point (`dm_cm29_detail_in`, shader `c29din`), top only: the same hold at
-the bottom of the curve moved 258 Godfather II pixels away from the reference.
-Synthetic fields above the clip: pixels over 0.05 dE ITP 12,443 to 0 (0.72 and
-0.76 PQ), 6,180 to 0 (0.69). Smile w33 and Godfather II w28 have no pixel
-above their clip points and render byte-identically. The chroma-weighted plane
-follows by construction and is not measured.
+**CM v2.9 detail at the top clip (2026-11-12):** `cm_offline` restores no
+detail on the tone curve's top clip; the model did. The detail input is now
+held at the clip point (`dm_cm29_detail_in`, shader `c29din`), at the top only,
+because holding it at the bottom moved 258 Godfather II pixels away from the
+reference. On synthetic fields above the clip, pixels over 0.05 dE ITP went
+from 6,180–12,443 to 0. Smile w33 and Godfather II w28 render byte-identically.
 
 **CM4 transfer precision (2026-11-11):** CM4 point and final passes now use
 the normative ST 2084 helpers (candidate C: precise split-float PQ OETF/EOTF,
