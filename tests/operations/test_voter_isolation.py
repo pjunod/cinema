@@ -423,17 +423,35 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                         next(i for i, line in enumerate(code) if "cargo build " in line))
         # So no voter-isolation bound rides on it: every CI build of a target
         # that copies from the build stage replaces that stage with a context.
-        dependent = {"runtime", "default-runtime"}
+        # The dependent stages are read from the Dockerfile: any stage that
+        # copies from `build`, and any stage built FROM one of those.
+        dependent = set()
+        stage = None
+        for line in dockerfile.splitlines():
+            header = re.match(r"FROM\s+(\S+)\s+AS\s+(\S+)\s*$", line, re.I)
+            if header:
+                stage = header.group(2)
+                if header.group(1) in dependent:
+                    dependent.add(stage)
+            elif stage and re.match(r"COPY\s+--from=build\s", line):
+                dependent.add(stage)
+        self.assertIn("runtime", dependent)
+        self.assertIn("default-runtime", dependent)
         checked = 0
         for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
             steps = re.split(r"(?m)^\s+- (?:name|uses):", workflow.read_text())
             for step in steps:
-                if not re.search(r"(?m)^\s+file: (?:release-source/)?Dockerfile\s*$", step):
+                named = re.search(r"(?m)^\s+file: ['\"]?(?:\./)?(?:release-source/)?Dockerfile['\"]?\s*$", step)
+                # build-push-action reads <context>/Dockerfile when no file is named.
+                implicit = "docker/build-push-action" in step and not re.search(r"(?m)^\s+file:", step)
+                if not (named or implicit):
                     continue
-                target = re.search(r"(?m)^\s+target: (\S+)\s*$", step)
-                if target and target.group(1) in dependent:
+                target = re.search(r"(?m)^\s+target: ['\"]?([^'\"\s]+)", step)
+                # With no target, BuildKit builds the last stage.
+                built = target.group(1) if target else stage
+                if built in dependent:
                     checked += 1
-                    with self.subTest(workflow=workflow.name, target=target.group(1)):
+                    with self.subTest(workflow=workflow.name, target=built):
                         self.assertRegex(step, r"(?m)^\s+build=\S")
         self.assertGreater(checked, 0)
 
