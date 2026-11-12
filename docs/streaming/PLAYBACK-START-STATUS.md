@@ -349,136 +349,29 @@ order, into that same maximum, and publishes the init contract of the
 promotion it seals. A v3 index from before this fold lacks the flag; never
 bridge one into `put_fragment_index`.
 
-### 4. v3 consumer and peer hydration — built
+### 4. v3 consumer and peer hydration — built, on main (#1525, #1531)
 
-- VOD planning (local and Source renditions) asks
-  `copy_index_v3::resolve` first, unless the fragment-index engine changed,
-  in which case it keeps the node-local order as v2 does. Without a usable
-  head the v2 cluster and node-local order is unchanged.
-- The start path costs one primary-key read: `copy_index_v3_variant` returns
-  this node's own head (this node as origin, its own `inspect_source` object
-  version), the variant row it points at and whether this node is a listed
-  holder. The catalogue namespace is cached in VOD shared state.
-- Only on a miss, and only when this node holds its own full-source receipt
-  (a full v2 receipt or a regime-1 attestation, as the publication accepts),
-  the per-file listing runs. Another origin's head is used only when that
-  receipt names the variant's source digest, and never when this node's own
-  head is quarantined for the same blob.
-- The blob is read from this node's v3 root, or hydrated from a holder in
-  `copy_index_v3_locations` over
-  `GET /internal/media/copy-index-v3/{source_key}/{blob_sha256}` (the v2
-  route's peer auth, read permits, size bound and learner-matrix entry). The
-  route serves only a readable head's variant. It is verified by size and
-  SHA-256 and installed with the publisher's staged write and disk budget.
-- Holders: a hydration records this node best-effort, and so does a verified
-  local hit the head read showed as unlisted, so the common start writes
-  nothing. A peer's row is retired only on the route's own positive 404
-  (`copy-index-v3-variant-absent`); a node without the route, a refusal or a
-  damaged transfer retires nothing. A corrupt local blob (read in full, wrong
-  digest or size) is removed after the read pin is dropped; a stat or read
-  error deletes and retires nothing.
-- Decode is `decode_cluster_fragment_index_blob_v3` against the artifact row's
-  source and output identity, and the planning digest is recomputed with the
-  row's init contract. A blob without `indexed_hdr10_metadata` is refused and
-  planning falls back; item 5 quarantines it.
-- Serve time: the recipe carries the sealed init contract. Each generation
-  computes `served_init_contract_sha256(muxer init, index.promotion)` as soon
-  as its muxer init exists, before any identity or init is written. A
-  mismatch fails that generation as `SealedInit` (`rendition_init_changed`)
-  and marks the contract unserved for this process, so the reopened session
-  plans from its next index.
-- A readable head is healthy and published for the generation it still
-  desires, so a head repaired after a quarantine is readable too.
+VOD planning reads the exact v3 head by key and prefers a healthy, current
+variant. It reads the variant locally or hydrates it from a listed holder
+over the signed internal route, verifying the digest before install. It
+refuses a pre-fold blob and checks the served init against the sealed
+contract. Any miss falls back to v2, then the node-local index. #1525's
+description records the review fixes and known limits.
 
-Known limits, for the items that follow:
+### 5. Discrepancy quarantine — built, on main (#1532, #1540)
 
-- `copy_index_v3_heads` has no `(catalog_namespace, file_id)` index, so the
-  per-file listing scans. It belongs in the next schema version; this batch
-  adds no migration and reaches the listing only behind the receipt check.
-- A healthy head whose listed holders cannot be reached falls back to the
-  next index, as a miss does. Only a head with no holder at all is rebuilt
-  (item 5).
-- A rendition planned from v3 is keyed by the contract key, for Source
-  renditions as well. A session re-prepared after a v3 publication therefore
-  gets a new rendition and re-cuts its segments once. The retained-manifest
-  check compares the delivery recipe (`LogicalOutput`), not the index or
-  plan, so it does not cover a plan change on resurrection; the same holds
-  for the existing node-local to v2 switch. Equal rows give an equal plan.
-  Binding a resurrected session to its original plan needs the plan's digest
-  on the durable route and is not built.
+The worker quarantines a head under its claim, only on evidence about the
+variant and only under the producer's engine:
+- a contradicting range or fill;
+- reader defects (an unindexed HDR10 blob, no holder, a same-engine
+  sealed-init mismatch).
 
-### 5. Discrepancy quarantine — built
-
-Only the Analysis worker quarantines, through
-`quarantine_copy_index_v3_head` under a coordination claim on the head's
-deterministic repair generation (`copy_index_v3_rebuild_generation`).
-
-- Contradiction. Before a healthy head is called done, `publish_source`
-  compares the set's fresh rows with the head's decoded variant from this
-  node's own v3 root (`reconcile_with_head`): every observed row must be in
-  the published table unchanged. Only when this node's engine digest is the
-  variant's producer engine; two ffmpeg builds may cut the same bytes
-  differently. A blob that is absent, unreadable or refused proves nothing.
-  A contradicted head is quarantined with `copy_observation_contradiction`
-  whether or not a viewer holds the source. Cost: one local blob read, hash
-  and decode per completed range of a title that already has a healthy
-  head.
-- Adoption. The set then seals for the repair generation, so items 1–2
-  rebuild it. A set that meets a quarantined head adopts its desire only
-  when that is exactly the repair generation of the blob and epoch the head
-  still records. Playback rows keep arriving under their own generation and
-  still fold in.
-- Reader defects. The VOD reader cannot claim. It hands the worker a typed
-  `CopyIndexDefect` (head epoch and blob) through a new variant of the
-  existing copy-analysis inbox; the pass that folds the inbox handles it.
-  - `copy_index_hdr10_unindexed`: the worker re-checks its own verified copy.
-  - `copy_index_no_holder`: this node has no copy and no other holder is
-    listed, or every listed one answered the route's positive 404. A node
-    the replicated removal fence ejected is not listed at all; an
-    unreachable member still counts. The worker re-reads the list first.
-  - `copy_index_sealed_init_mismatch`: only when this node's engine digest
-    is the variant's producer engine. Another engine's init says nothing
-    about the variant, so the generation's own refusal is all that happens.
-    The blob is banned and the producer engine does not rebuild it (it
-    would seal the same bytes): the head stays quarantined and readers
-    keep the v2 or node-local index, which still plays. A node with
-    another engine may rebuild it.
-  A refusal with no computed contract to compare (the promotion failed)
-  fails the generation and reports nothing. The claim the worker borrowed
-  is ended as a stranded coordinator, uncharged; the origin's next
-  observation of the source enqueues its own request. Defects share the
-  two-slot inbox with committed ranges: a full inbox drops the report and
-  the next start that meets the head makes it again.
-- Eviction. `CopyIndexCacheOwner` registers the v3 root with the playback
-  cache budget as `FragmentCacheOwner` does for v2. Evicting a blob drops
-  this node's holder rows for those bytes under every contract. It refuses
-  the blob of a readable head this node is the last member holding, so
-  cache pressure cannot turn a healthy head into a rebuild loop. Coldness
-  is the file's access time, as for v2; neither owner touches it.
-- Stranded coordinators. The first copy-analysis pass of a process retires
-  this node's queued coordination requests created before the process made
-  its registry (`cancelled`, `coordination_stranded`), in one store
-  statement. A request whose role still names a physical custody is left
-  for the claimant that must settle it. The request that replaces a retired
-  one inherits its attempt count, so a restart never resets the attempt
-  limit.
-
-Known limits:
-
-- A quarantined head is unreadable everywhere until the origin next
-  observes the source: only the origin rebuilds, and only from observations
-  it holds in memory. Until then readers use their next index, as before.
-- A last-holder blob is never evicted, so the v3 root's floor is one blob
-  per head this node alone holds.
-- `forget_copy_index_v3_blob_holder` and `copy_index_v3_last_blob_holder`
-  read their tables by blob, which no index covers. Only eviction calls
-  them.
-- A sealed-init refusal names its head through a per-process map of the
-  last variant planned for each rendition key; a restart forgets it.
-- Not unit tested: `publish_source` end to end (its `PendingSource` needs a
-  Source authority only plurx-core's session store builds), the budget
-  calling the eviction owner, and the hiqlite backend of the new store
-  operations (generic statements) and of the enqueue changes.
+The set adopts the exact successor generation and rebuilds it. A doubt
+quarantine (contradiction, no holder) never bans the same bytes; a
+sealed-init mismatch does. `CopyIndexCacheOwner` evicts v3 blobs but never
+the last holder of a readable head. Stranded coordination rows are retired,
+carrying their attempts. #1532's description records the review fixes and
+known limits.
 
 ### 6. Local playback observations — first step built
 
