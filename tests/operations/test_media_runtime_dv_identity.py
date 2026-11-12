@@ -33,7 +33,7 @@ def daemon_identity() -> str:
 
 class PinnedRuntimeDvIdentity(unittest.TestCase):
     def test_pinned_runtime_carries_the_dv_helpers_this_tree_expects(self):
-        recorded = re.findall(r"^# dv-helper-source-sha256: ([0-9a-f]{64})$",
+        recorded = re.findall(r'^ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="([0-9a-f]{64})"$',
                               (ROOT / "Dockerfile").read_text(encoding="utf-8"), re.MULTILINE)
         self.assertEqual(len(recorded), 1, "Dockerfile must record the pinned runtime's DV helper identity")
         self.assertEqual(recorded[0], daemon_identity(),
