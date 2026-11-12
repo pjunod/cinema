@@ -127,7 +127,7 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 | A2 | — | 3 | unclaimed | HW/SW transcode TTFF → |
 | A3 | — | 3 | unclaimed | — |
 | B1 | — | 3 | unclaimed (design with A1) | artifacts matched across a deploy → |
-| D3 | — | 3 | unclaimed | create elapsed p99 → |
+| D3 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | [contract](PLAYBACK-START-D3-BUILD.md) drafted, not reviewed | create elapsed p99 → |
 | E1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | [contract](PLAYBACK-START-E1-BUILD.md), review applied | settings/playback authority reads per request → |
 | F1 | — | 3 | unclaimed | retries per attempt; overshoot → |
 

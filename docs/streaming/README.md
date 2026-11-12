@@ -11,6 +11,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |
 | [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 build contract. | open |
 | [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 contract; build record: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md). | open |
+| [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) | D3 create-collapse contract. | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Effort plan: rulings, lanes, status. | open |
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |
@@ -39,7 +40,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-STARTUP-ASTRA-IMPLEMENTATION-REVIEW.md](PLAYBACK-STARTUP-ASTRA-IMPLEMENTATION-REVIEW.md) | Astra's final implementation review of frozen candidate `2bc1e54e1`; seven findings and the request-changes verdict. | done |
 | [PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md](PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md) | Source dispositions and outstanding review and qualification evidence for Astra's seven startup findings. | open |
 | [PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md](PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md) | Bounded October 1 repair: periodic quorum-loss diagnosis, startup/retirement/recovery correctness, VOD delivery truth, agent/Opus review dispositions, and one fast-lane PR. | open |
-| [PLAYBACK-START-FAILURES-2026-10-13.md](PLAYBACK-START-FAILURES-2026-10-13.md) | Standalone reader contention, unpublished native attachment, stale inventory/error ownership and separate Apple TV audio evidence; fixes built, deployment and physical acceptance open. | open |
+| [PLAYBACK-START-FAILURES-2026-10-13.md](PLAYBACK-START-FAILURES-2026-10-13.md) | Reader contention, unpublished native attachment, stale inventory/error ownership, Apple TV audio; fixes built, acceptance open. | open |
 | [BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md](BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md) | Five Apple TV remux interruptions from deploy restarts, quorum fences, rolling retirement and whole-file re-attestation (fixed). | open |
 | [HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md](HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md) | S1E5 outage: WAL correlations and SQL reproduction establish the missing lookup index; reviewed proposal covers migrations, cadence, and web recovery. | open |
 | [Heated Rivalry quorum build status](HEATED-RIVALRY-S1E5-QUORUM-STATUS.html) | Current implementation phase, review, validation, PR, decisions, and cleanup for the quorum repair. | open |
@@ -95,7 +96,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [HDR-CONTENT-LIGHT-INDEX.md](HDR-CONTENT-LIGHT-INDEX.md) | Why changing HDR light-level metadata forced rolling startup, and the indexed-copy metadata repair. | open |
 | [PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md](PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md) | Phase origins, incident replay, index/resource observations, transport limits, and the A-M0 startup lab with its decision rule. | open |
 | [PLAYBACK-STARTUP-LATENCY-BUILD.md](PLAYBACK-STARTUP-LATENCY-BUILD.md) | Sol handoff: clone, CI/CD rulings, milestones, one reviewed PR, fast lane, merge, cleanup. | open |
-| [PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md](PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md) | Reviewed runtime build contract for the measured 14.2-second start, index availability, qualified publication policy and cross-client acceptance. | open |
+| [PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md](PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md) | Runtime contract: measured 14.2 s start, index availability, publication policy, client acceptance. | open |
 | [STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md) | Reviewed rev 6 handoff: 8 s encoded rolling target, fewer create-path quorum reads and operator tone-map census before changes. | open |
 | [PLAYBACK-STARTUP-PATH-FINDINGS.md](PLAYBACK-STARTUP-PATH-FINDINGS.md) | Play-to-first-frame waits across routes: fixed 40 ms consistent-read ACK stall and web scrim, plus ranked remaining waits and owners. | open |
 | [PLAYBACK-STARTUP-LATENCY-REVIEW.md](PLAYBACK-STARTUP-LATENCY-REVIEW.md) | Independent adversarial plan review, three findings and verified dispositions. | open |
