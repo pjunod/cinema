@@ -687,7 +687,23 @@ impl VodServe {
             None => crate::fragindex::identity_for(file, video),
         };
         let cluster_cache_enabled = prepared.encoding.is_none() && settings.index_cluster_cache;
-        let cluster_index = if prepared.encoding.is_some() {
+        // A published v3 copy index is preferred over the v2 cluster artifact
+        // and the node-local index; without one the order below is unchanged.
+        let copy_index = if prepared.encoding.is_none() {
+            self.try_copy_index_v3(file, video).await
+        } else {
+            None
+        };
+        let copy_index_init_contract = copy_index
+            .as_ref()
+            .map(|found| found.init_contract_sha256.clone());
+        let cluster_index = if let Some(found) = copy_index {
+            Ok(Some((
+                found.index,
+                found.object_version,
+                found.rendition_cache_key,
+            )))
+        } else if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
             self.try_cluster_fragment_index(file, video, viewer).await
@@ -909,6 +925,7 @@ impl VodServe {
             video,
             source_object_version,
             cluster_cache_key,
+            copy_index_init_contract,
             encoding: prepared.encoding.take(),
         };
         Ok(PreparedVodRecipe {
@@ -2665,7 +2682,23 @@ impl VodServe {
                         "1" | "true" | "yes" | "on"
                     )
                 });
-        let cluster_index = if prepared.encoding.is_some() || source_binding.is_some() {
+        // The origin's published v3 copy index serves a Source rendition too:
+        // reading it queues nothing and joins no local viewer interest.
+        let copy_index = if prepared.encoding.is_none() {
+            self.try_copy_index_v3(file, video).await
+        } else {
+            None
+        };
+        let copy_index_init_contract = copy_index
+            .as_ref()
+            .map(|found| found.init_contract_sha256.clone());
+        let cluster_index = if let Some(found) = copy_index {
+            Ok(Some((
+                found.index,
+                found.object_version,
+                found.rendition_cache_key,
+            )))
+        } else if prepared.encoding.is_some() || source_binding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
             self.try_cluster_fragment_index(file, video, fences.viewer.as_ref())
@@ -2880,6 +2913,7 @@ impl VodServe {
             video,
             source_object_version,
             cluster_cache_key,
+            copy_index_init_contract,
             encoding: prepared.encoding,
         };
         let key = source_binding.map_or_else(

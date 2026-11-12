@@ -165,6 +165,7 @@
            video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
+            copy_index_init_contract: None,
             encoding: None,
         };
         let key = rendition_key(&recipe, &identity);
@@ -263,6 +264,7 @@
            video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
+            copy_index_init_contract: None,
             encoding: None,
         };
         let key = rendition_key(&recipe, &identity);
@@ -1603,6 +1605,10 @@
                 Reason::EngineChanged,
             ),
             (
+                Failure::SealedInit("sealed".to_owned()),
+                Reason::RenditionInitChanged,
+            ),
+            (
                 Failure::Landing("landing".to_owned()),
                 Reason::MediaLandingFailed,
             ),
@@ -1641,6 +1647,59 @@
                 describe_failure(&failure)
             );
         }
+    }
+
+    /// A recipe planned from a v3 copy index serves only when this
+    /// generation's own promoted muxer init has the contract the index was
+    /// sealed with; any other recipe is not asked.
+    #[test]
+    fn a_v3_recipe_serves_only_the_init_contract_its_index_was_sealed_with() {
+        let mut reader = plurx_core::fmp4::FragmentReader::new();
+        reader.push(&testfixtures::pipe("closed-gop"));
+        let Some(plurx_core::fmp4::Unit::Init(mut muxer)) =
+            reader.next_unit().expect("fixture pipe")
+        else {
+            panic!("fixture init");
+        };
+        crate::copyseg::sanitize_stale_dolby_brand(&mut muxer);
+        let mut index = synthetic_index(4);
+        index.promotion.indexed_hdr10_metadata = true;
+        let sealed =
+            crate::copy_normalization::served_init_contract_sha256(&muxer, &index.promotion)
+                .expect("the seal's init contract");
+        let mut recipe = Recipe {
+            source_telemetry: false,
+            retained_logical: None,
+            measured_candidate: None,
+            file: media_file_at(PathBuf::from("unused.mkv"), 12_000),
+            audio_index: None,
+            aac: true,
+            audio_delivery: None,
+            video: CopyVideoOptions::new(false, false),
+            source_object_version: None,
+            cluster_cache_key: Some("copy-index-v3:fixture".to_owned()),
+            copy_index_init_contract: Some(sealed.clone()),
+            encoding: None,
+        };
+        assert_eq!(sealed_init_refusal(&recipe, Some(&index), &muxer), None);
+
+        // The publisher's engine sealed another init than this one emits.
+        let other = "0".repeat(64);
+        recipe.copy_index_init_contract = Some(other.clone());
+        let refusal = sealed_init_refusal(&recipe, Some(&index), &muxer)
+            .expect("an init nobody sealed is refused");
+        assert!(
+            refusal.contains(&sealed) && refusal.contains(&other),
+            "{refusal}"
+        );
+        assert!(
+            sealed_init_refusal(&recipe, None, &muxer).is_some(),
+            "a sealed contract without its index cannot be checked, so it is refused"
+        );
+
+        // Legacy and v2 recipes carry no sealed contract.
+        recipe.copy_index_init_contract = None;
+        assert_eq!(sealed_init_refusal(&recipe, Some(&index), &muxer), None);
     }
 
     #[tokio::test]

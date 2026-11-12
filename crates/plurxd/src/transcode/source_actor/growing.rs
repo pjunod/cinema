@@ -39,6 +39,7 @@ pub(crate) struct SourceGrowingBacking {
     source: crate::fragment_index_cluster::SourceFence,
     catalog_namespace: String,
     observation_source: plurx_core::store::analysis_coordination::AnalysisCoordinationSource,
+    recipe: crate::copy_analysis::CopyRecipe,
     range_id: uuid::Uuid,
     range_epoch: u64,
 }
@@ -380,12 +381,10 @@ impl TranscodeManager {
         deadline: Instant,
     ) -> Result<Arc<SourceGrowingBacking>, SourceWorkerError> {
         use crate::copyrange::{
-            run_source_census, spawn_source_generation, CopyRangeFiles, ObservedCopyMux,
+            run_source_census, spawn_source_generation, CopyGenerationOwner, CopyRangeFiles,
+            ObservedCopyMux,
         };
-        use plurx_core::{
-            segplan::TrackDurations,
-            transcode::{CopyVideoOptions, Pacing},
-        };
+        use plurx_core::transcode::CopyVideoOptions;
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
@@ -479,12 +478,14 @@ impl TranscodeManager {
                 source.object_version().to_owned(),
                 &file,
                 video,
-                &owners,
-                dispatch,
-                permission,
+                CopyGenerationOwner::Source {
+                    owners: &owners,
+                    dispatch,
+                    authority: permission,
+                },
                 Arc::new(crate::prodrun::ProducerSlot::new()),
                 &self.runtime_cache,
-                deadline,
+                Some(deadline),
                 &preparing.stop,
             )
             .await
@@ -555,41 +556,26 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
-        let audio_rate = prepared
-            .request()
-            .audio_delivery
-            .as_ref()
-            .and_then(|audio| audio.bitrate_kbps())
-            .map(|rate| rate.saturating_mul(1000))
-            .unwrap_or(if aac { 256000 } else { 640000 });
-        // The planner reserves conservative audio headroom; actual AV bytes
-        // and repaired presentation span are still checked by the kernel.
-        let tracks = TrackDurations {
-            video_ms: file.duration_ms.unwrap_or(0),
-            audio_ms: file.duration_ms.unwrap_or(0),
-            audio_bits_per_second: audio_rate,
+        // The one recipe of this range. An Analysis gap fill of the same
+        // source repeats it, so its rows are comparable with these.
+        let recipe = crate::copy_analysis::CopyRecipe {
+            video,
+            audio_index: prepared.request().audio_index,
+            transcode_audio: aac,
+            audio_delivery: prepared.request().audio_delivery.clone(),
         };
         let mux = ObservedCopyMux::new(
             Arc::clone(&contract),
             census.first_dts,
             0,
-            tracks,
+            recipe.tracks(&file),
             video.retains_hevc_parameter_sets(),
             file.video_codec.as_deref() == Some("hevc"),
         )
         .map_err(|_| SourceWorkerError::Unsupported)?;
-        let args = plurx_core::transcode::copy_pipe_args_with_index_and_packet_clock(
-            &file,
-            prepared.request().start_seconds,
-            prepared.request().audio_index,
-            aac,
-            Pacing::unpaced(),
-            video,
-            prepared.request().audio_delivery.as_ref(),
-            "pipe:6",
-            "pipe:7",
-        )
-        .map_err(|_| SourceWorkerError::Unsupported)?;
+        let args = recipe
+            .args(&file, prepared.request().start_seconds)
+            .map_err(|_| SourceWorkerError::Unsupported)?;
         let dispatch = owners
             .begin_generation()
             .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -624,9 +610,11 @@ impl TranscodeManager {
             &file.path,
             &args,
             &self.runtime_cache,
-            &owners,
-            dispatch,
-            permission,
+            CopyGenerationOwner::Source {
+                owners: &owners,
+                dispatch,
+                authority: permission,
+            },
             Arc::new(crate::prodrun::ProducerSlot::new()),
         )
         .await
@@ -657,6 +645,7 @@ impl TranscodeManager {
             source,
             catalog_namespace: namespace,
             observation_source,
+            recipe,
             range_id,
             range_epoch: 1,
         });
@@ -931,7 +920,7 @@ impl TranscodeManager {
                     // notification; authority loss is the renewal tick's call.
                     if let Ok(authority) = owner.gate.current_owned(&owner.assignment).await {
                         let manifest = checkpoint.manifest_sha256.clone();
-                        let message=crate::copy_analysis::CompletedCopyRange{file:Arc::clone(&backing.file),catalog_namespace:backing.catalog_namespace.clone(),source:backing.observation_source.clone(),authority:crate::copy_analysis::CopyObservationAuthority::Source{assignment:owner.assignment.clone(),authority:plurx_core::store::analysis_coordination::AnalysisSourceInterestAuthority::Active(authority)},range_id:backing.range_id,range_epoch:backing.range_epoch,init,checkpoint};
+                        let message=crate::copy_analysis::CompletedCopyRange{file:Arc::clone(&backing.file),catalog_namespace:backing.catalog_namespace.clone(),source:backing.observation_source.clone(),authority:crate::copy_analysis::CopyObservationAuthority::Source{assignment:owner.assignment.clone(),authority:plurx_core::store::analysis_coordination::AnalysisSourceInterestAuthority::Active(authority)},range_id:backing.range_id,range_epoch:backing.range_epoch,init,checkpoint,recipe:backing.recipe.clone()};
                         if state.copy_analysis.notify(message) {
                             notified_manifest = Some(manifest);
                         }

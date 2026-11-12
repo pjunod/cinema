@@ -3881,8 +3881,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # runs, reader tests) joined or aborted before the test returns.
 # A1/B1 batch (#1495), +6 owned spawns:
 # - The fragments loop spawns one copy-observation pass only when this node may
-#   execute fragment_index_publish. The registry admits one pass at a time, and
-#   the pass ends when its coalesced pending sources drain.
+#   execute fragment_index_publish. The pass folds the inbox under the pending
+#   lock and returns; it does not wait on any source.
 # - The claimed Analysis lease heartbeat ends on its stop token (any publish
 #   outcome) or on a lost lease, which it records.
 # - The copy pipe reader returns its JoinHandle to the pipe set that joins it;
@@ -3893,7 +3893,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 #   actor's stop token.
 # - source_resource's spawn_blocking reads the opened held file's metadata and
 #   is awaited inline.
-expected_occurrences = 1142
+# #1520 review fix, +2: the pass gives each ready source one unit task (a
+# source in `working` has exactly one), bounded by MAX_PENDING_SOURCES, which
+# ends when publish_source returns. Its supervisor task awaits that unit's
+# JoinHandle and always returns the key, a panic included, then ends.
+expected_occurrences = 1144
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5736,6 +5740,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 #   production).
 # - A route-change `timeout_at` and a 10 s lease-renewal interval in the growing
 #   actor, both owned by that actor's lifetime.
+# 2202 -> 2201 with A1/B1 gap filling: the head census's two startup-deadline
+# sleeps become one `expired` helper, and an Analysis census passes no deadline
+# (only its phase's lease-loss token ends it, because foreground pressure may
+# pause its budget indefinitely).
+# 2201 -> 2202 with the gap-fill end-to-end test: one `tokio::time::timeout` in
+# `copy_analysis/gap_fill_tests.rs` bounding its three real fills (seven ffmpeg
+# children with their censuses). `#[cfg(test)]`-only; an elapsed bound cancels
+# the fills' stop token, awaits the running fill's own settlement (child, pipe
+# tasks, Input and reap are joined by `fill_copy_gap` itself) and then fails
+# the test. It settles nothing itself. The v3 consumer and its peer route add no timer: hydration reuses
+# the peer transport's per-request deadline, as the v2 read does.
 expected_occurrences = 2202
 
 

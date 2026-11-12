@@ -1,5 +1,6 @@
-//! One-input observed copy runtime shared by Source playback and later local
-//! playback. Canonical metadata/whole-source attestation remain Analysis work.
+//! One-input observed copy runtime shared by Source playback, Analysis gap
+//! fills and later local playback. Whole-source attestation and publication
+//! remain Analysis work.
 #[cfg(unix)]
 mod census;
 #[cfg(unix)]
@@ -7,7 +8,7 @@ pub(crate) use census::{run_source_census, CopyClockCensus};
 #[cfg(unix)]
 mod pipes;
 #[cfg(unix)]
-pub(crate) use pipes::{spawn_source_generation, RunningCopyGeneration};
+pub(crate) use pipes::{spawn_source_generation, CopyGenerationOwner, RunningCopyGeneration};
 #[cfg(unix)]
 mod observed;
 #[cfg(unix)]
@@ -19,6 +20,10 @@ mod storage;
 #[cfg(unix)]
 pub(crate) use storage::{CopyRangeFiles, CopyRangePublisher};
 
+#[cfg(unix)]
+mod fill;
+#[cfg(unix)]
+pub(crate) use fill::{fill_copy_gap, CopyGapFill, CopyGapFillError};
 #[cfg(unix)]
 mod production;
 #[cfg(unix)]
