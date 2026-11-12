@@ -3052,6 +3052,7 @@ async fn graph_holding(
         source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
         source_mastering: Ok(None),
         source_mastering_minimum: Ok(None),
+        source_master_metadata: None,
         source_frame_probe: None,
         preferences: Default::default(),
         destination: DvDestination::Profile81,

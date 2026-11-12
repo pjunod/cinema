@@ -98,6 +98,13 @@ pub enum Failure {
     /// its own class directly and `record_failure` is first-wins, so the
     /// consequence vodgen reports afterwards cannot overwrite it.
     EngineChanged(String),
+    /// The rendition was planned from a v3 copy index, and this generation's
+    /// promoted muxer init does not have the init contract that index was
+    /// sealed with: this node's engine emits another init than the one the
+    /// publisher observed. Nothing is published. The contract is remembered
+    /// as unserved by this process, so a reopened session plans from its
+    /// next index.
+    SealedInit(String),
 }
 
 /// How a generation ended.

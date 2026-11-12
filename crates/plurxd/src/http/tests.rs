@@ -1523,6 +1523,27 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
     ] {
         assert!(learner_route_eligible(&method, path), "{method} {path}");
     }
+    // Peer hydration of a v3 copy index uses the same learner-inclusive
+    // directory, and admits exactly one source key and one blob digest.
+    let contract_key = "a".repeat(64);
+    let blob_sha256 = "b".repeat(64);
+    let copy_index = crate::copy_index_v3::peer_path(&contract_key, &blob_sha256);
+    assert_eq!(
+        copy_index,
+        format!("/internal/media/copy-index-v3/{contract_key}/{blob_sha256}")
+    );
+    assert!(learner_route_eligible(&Method::GET, &copy_index));
+    assert!(!learner_route_eligible(&Method::POST, &copy_index));
+    for path in [
+        crate::copy_index_v3::PEER_PATH_PREFIX.to_owned(),
+        format!("/internal/media/copy-index-v3/{contract_key}"),
+        format!("/internal/media/copy-index-v3/{contract_key}/"),
+        format!("/internal/media/copy-index-v3/{contract_key}/{blob_sha256}/extra"),
+        format!("/internal/media/copy-index-v3/{contract_key}/../{blob_sha256}"),
+        "/internal/media/copy-index-v3/abc123/def456".to_owned(),
+    ] {
+        assert!(!learner_route_eligible(&Method::GET, &path), "{path}");
+    }
     // The prefix admits exactly one key and nothing deeper or emptier.
     for path in [
         crate::fragment_index_cluster::PEER_PATH_PREFIX,

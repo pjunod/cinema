@@ -6668,8 +6668,11 @@ impl JobManager {
                             retry_ms: policy.backoff_base_ms,
                             metrics: Arc::clone(&jobs.analysis_metrics),
                         };
-                        crate::copy_analysis::work_copy_observations(&jobs.copy_analysis, &context)
-                            .await;
+                        crate::copy_analysis::work_copy_observations(
+                            &jobs.copy_analysis,
+                            Arc::new(context),
+                        )
+                        .await;
                     });
                 }
                 if self

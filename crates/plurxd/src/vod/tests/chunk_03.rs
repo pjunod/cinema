@@ -2300,6 +2300,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
                    video: CopyVideoOptions::new(false, false),
                     source_object_version: Some(encoding.source_object_version.clone()),
                     cluster_cache_key: None,
+                    copy_index_init_contract: None,
                     encoding: Some(Arc::clone(&encoding)),
                 },
                 plan,
@@ -4159,6 +4160,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
            video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
+            copy_index_init_contract: None,
             encoding: None,
         };
         let video_ms = index_video_ms(&index);

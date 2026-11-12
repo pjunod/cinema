@@ -88,6 +88,11 @@ static inline pl_tex dv_target_render(pl_log log, pl_gpu gpu, pl_tex source,
                                       int frame) {
   if (!dv_target.nits) return source;
   require(dv_target.frame_valid, "fresh RPU display metadata required for targeted export");
+  // Both families refuse an L5 active area that does not fit the reconstructed
+  // master, and say so: the renderers refuse the same metadata before mapping.
+  dv_dm_rect active;
+  require(dv_dm_active_rect(&dv_target.dm, source->params.w, source->params.h, &active),
+          "display-target-l5-invalid: active area outside the reconstructed master");
   pl_tex out = dv_dm_render(log, gpu, source, &dv_target.dm);
   require(out != NULL, "targeted display-management shader");
   printf("{\"kind\":\"display_target_frame\",\"frame\":%d,\"nits\":%u,"

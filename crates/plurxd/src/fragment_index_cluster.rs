@@ -664,13 +664,23 @@ pub(crate) async fn open_verified_local_blob(
     let Some(path) = cache_path(root, &artifact.cache_key) else {
         return Err("invalid fragment-index cache key".to_owned());
     };
-    let pin = crate::playback_cache::pin(&path).map_err(|error| error.to_string())?;
-    let mut file = match plurx_core::fs_secure::open_read_nofollow(&path).await {
+    open_verified_blob_at(&path, artifact.bytes, &artifact.blob_sha256).await
+}
+
+/// The descriptor verification shared by every content-addressed index blob:
+/// the exact catalogued size and SHA-256, read through the handle returned.
+pub(crate) async fn open_verified_blob_at(
+    path: &Path,
+    bytes: i64,
+    blob_sha256: &str,
+) -> Result<Option<PinnedFragmentBlob>, String> {
+    let pin = crate::playback_cache::pin(path).map_err(|error| error.to_string())?;
+    let mut file = match plurx_core::fs_secure::open_read_nofollow(path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("open {}: {error}", path.display())),
     };
-    let expected = u64::try_from(artifact.bytes)
+    let expected = u64::try_from(bytes)
         .ok()
         .filter(|bytes| *bytes <= MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES as u64)
         .ok_or_else(|| "fragment-index catalog has an invalid blob size".to_owned())?;
@@ -704,9 +714,7 @@ pub(crate) async fn open_verified_local_blob(
         seen = seen.saturating_add(read as u64);
         digest.update(&buffer[..read]);
     }
-    if seen != expected
-        || !hex::encode(digest.finalize()).eq_ignore_ascii_case(&artifact.blob_sha256)
-    {
+    if seen != expected || !hex::encode(digest.finalize()).eq_ignore_ascii_case(blob_sha256) {
         return Err("fragment-index blob checksum or size mismatch".to_owned());
     }
     file.seek(SeekFrom::Start(0))
@@ -934,6 +942,12 @@ fn is_hevc(file: &MediaFile) -> bool {
 }
 
 pub(crate) const FULL_COPY_PREFIX: &str = "hevc-full-v1:";
+
+/// The object-version spelling a full-file (not sampled) v2 receipt is stored
+/// under; the v3 publication accepts exactly these receipts too.
+pub(crate) fn full_copy_object_version(version: &str) -> String {
+    format!("{FULL_COPY_PREFIX}{version}")
+}
 
 pub(crate) fn local_object_version(version: &str) -> &str {
     version.strip_prefix(FULL_COPY_PREFIX).unwrap_or(version)

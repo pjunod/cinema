@@ -1087,6 +1087,8 @@ contract = "Every supported source reaches a client through the intended direct,
 paths = [
   "crates/plurxd/src/copy_analysis.rs",
   "crates/plurxd/src/copy_analysis/*.rs",
+  "crates/plurxd/src/copy_index_v3.rs",
+  "crates/plurxd/src/copy_index_v3/*.rs",
   "crates/plurxd/src/copy_normalization.rs",
   "crates/plurxd/src/copy_normalization/*.rs",
   "crates/plurxd/src/copyrange.rs",

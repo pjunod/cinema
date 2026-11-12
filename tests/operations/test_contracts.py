@@ -3699,7 +3699,9 @@ assert.equal(context.ACT_TIMER, null);
         self.assertLess(publisher.index("- id: media-builder"), publisher.index(guard))
         builds = [step for step in workflow_step_blocks(publisher).values()
                   if "uses: https://github.com/docker/build-push-action@" in step]
-        self.assertEqual(len(builds), 2)
+        # The audited package export, the runtime, the DV build dependencies and
+        # the application helper qualification all compile on the bounded builder.
+        self.assertEqual(len(builds), 4)
         for build in builds:
             self.assertLess(publisher.index(guard), publisher.index(build))
             self.assertEqual(re.findall(r"(?m)^          builder: ([^\n]+)$", build),

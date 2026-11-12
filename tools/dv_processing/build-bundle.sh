@@ -14,7 +14,7 @@ placebo_pc=$(find "$deps/placebo/lib" -name libplacebo.pc -print)
 [ "$(printf '%s\n' "$placebo_pc" | wc -l)" -eq 1 ] && [ -f "$placebo_pc" ]
 sh "$source_dir/build.sh" "$deps/ffmpeg" "$(dirname "$placebo_pc")" "$deps" "$out/bin"
 placebo_lib=$(PKG_CONFIG_PATH="$(dirname "$placebo_pc")" pkg-config --variable=libdir libplacebo)
-cp -L "$placebo_lib/libplacebo.so.374" "$out/lib/libplacebo.so.374"
+cp -L "$placebo_lib/libplacebo.so.387" "$out/lib/libplacebo.so.387"
 cp "$deps/lib/libdovi.a" "$out/sources/libdovi.a"
 # Static FFmpeg decode libraries must never resolve against Jellyfin/system headers.
 ffmpeg_flags=$(PKG_CONFIG_PATH="$deps/ffmpeg/lib/pkgconfig" pkg-config --static --cflags --libs libavformat libavcodec libavutil)
@@ -49,9 +49,9 @@ cp "$source_dir/build-requirements.txt" "$out/sources/build-requirements.txt"
 inputs=${PLURX_DV_BUILD_INPUTS:-"$source_dir/../dv_quality/backends"}
 mkdir -p "$out/sources/build-inputs/parsed-rpu" "$out/sources/build-inputs/libplacebo"
 cp "$inputs/parsed-rpu/fetch_parser.py" "$inputs/parsed-rpu/resolved-Cargo.lock" "$out/sources/build-inputs/parsed-rpu/"
-cp "$inputs/libplacebo/fetch_sources.py" "$out/sources/build-inputs/libplacebo/"
+cp "$source_dir/fetch_renderer_sources.py" "$out/sources/build-inputs/libplacebo/"
 cp -R "$deps/licenses/rust-crates" "$out/licenses/"
-for component in "FFmpeg-bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa" "dovi_tool-83e1fdad6dcd5995556235946e7c5c0f9010d5a1" "libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f" "Vulkan-Headers-74d8a6cb930c68ef617b202c3ff3c59d919e086b"; do
+for component in "FFmpeg-bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa" "dovi_tool-83e1fdad6dcd5995556235946e7c5c0f9010d5a1" "libplacebo-v7.387.0" "Vulkan-Headers-74d8a6cb930c68ef617b202c3ff3c59d919e086b"; do
     mkdir -p "$out/licenses/$component"
     find "$deps/sources/$component" -maxdepth 1 -type f \
         \( -iname 'license*' -o -iname 'copying*' \) -exec cp {} "$out/licenses/$component/" \;

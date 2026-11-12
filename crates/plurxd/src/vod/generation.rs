@@ -1384,6 +1384,30 @@ async fn run_generation(
     (Some(outcome), completed.then_some((sink, all_fresh)))
 }
 
+/// Why this generation's muxer init cannot serve a recipe planned from a v3
+/// copy index, or `None` when it can (or the recipe has no sealed contract).
+/// The served init is `promote_from(muxer, index.promotion)`; the seal
+/// published the contract of that same promotion.
+pub(super) fn sealed_init_refusal(
+    recipe: &Recipe,
+    index: Option<&FragmentIndex>,
+    muxer: &Init,
+) -> Option<String> {
+    let sealed = recipe.copy_index_init_contract.as_deref()?;
+    let Some(index) = index else {
+        return Some("the recipe names a sealed init contract but carries no index".to_owned());
+    };
+    match crate::copy_normalization::served_init_contract_sha256(muxer, &index.promotion) {
+        Ok(served) if served == sealed => None,
+        Ok(served) => Some(format!(
+            "this engine's promoted init has contract {served}, and the index was sealed with {sealed}"
+        )),
+        Err(error) => Some(format!(
+            "this engine's init cannot be promoted with the sealed inputs: {error}"
+        )),
+    }
+}
+
 /// The identity half of a pre-read generation. `false` means the generation
 /// is over (drift handled or failure recorded) and the caller must return.
 async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result<(), Outcome> {
@@ -1395,6 +1419,22 @@ async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result
         return Err(Outcome::Failed(Failure::EngineChanged(
             "the immutable media engine changed before init publication".to_owned(),
         )));
+    }
+    // A v3 copy index promises the init its seal published. Checked against
+    // this generation's own muxer init before any identity or init is
+    // established or written, so an engine that emits another init serves
+    // nothing from this plan.
+    if let Some(refused) = sealed_init_refusal(&rendition.recipe, rendition.index.as_ref(), muxer) {
+        if let Some(key) = rendition.recipe.cluster_cache_key.as_deref() {
+            crate::copy_index_v3::refuse_on_this_engine(key);
+        }
+        tracing::warn!(
+            target: "plurxd::vodserve",
+            rendition = %rendition.key,
+            file_id = rendition.recipe.file.id,
+            "{refused}; this process will plan the title from its next index"
+        );
+        return Err(Outcome::Failed(Failure::SealedInit(refused)));
     }
     if let Some(audio) = rendition
         .recipe
@@ -1774,6 +1814,9 @@ pub(super) fn classify_failure(
         // with the same local class that path records.
         Failure::InitDrift(_) => Reason::RenditionInitChanged,
         Failure::EngineChanged(_) => Reason::EngineChanged,
+        // Local to this rendition's plan, not a process-wide engine verdict:
+        // the reopened session plans from another index.
+        Failure::SealedInit(_) => Reason::RenditionInitChanged,
         Failure::Landing(_) | Failure::Unplaced { .. } => Reason::MediaLandingFailed,
         Failure::Stream(_) => Reason::ReaderFailed,
         Failure::Sink(_) => Reason::ProducerWriteFailed,
@@ -1784,6 +1827,7 @@ pub(super) fn describe_failure(failure: &Failure) -> String {
     match failure {
         Failure::InitDrift(why) => format!("init drift: {why}"),
         Failure::EngineChanged(why) => format!("engine changed: {why}"),
+        Failure::SealedInit(why) => format!("copy index v3 sealed init: {why}"),
         Failure::Landing(why) | Failure::Unplaced { why, .. } => format!("landing failed: {why}"),
         Failure::Stream(why) => format!("stream failed: {why}"),
         Failure::Sink(error) => format!("sink refused: {error}"),

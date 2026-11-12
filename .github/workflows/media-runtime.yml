@@ -138,9 +138,54 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
           outputs: type=image,name=${{ env.RUNTIME_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      # The helper bundle is application source and is not built here. Only
+      # the dependencies it compiles and links against are published.
+      - name: Build and publish DV helper build dependencies
+        id: dv-dependencies
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          builder: ${{ steps.media-builder.outputs.name }}
+          context: .
+          file: Dockerfile.media-runtime
+          target: dv-processing-dependencies
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=image,name=${{ env.RUNTIME_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Stand in for the daemon binaries the candidate qualification does not build
+        run: |
+          set -euo pipefail
+          mkdir media-qualification-build
+          for name in plurxd plurxd.dwp plurx-cluster-check plurx-cluster-check.dwp; do
+            printf '#!/bin/sh\n# media qualification placeholder, never shipped\nexit 0\n' > "media-qualification-build/$name"
+          done
+          # The image build asks the daemon to accept the bundle. No daemon is
+          # built here, so the placeholder answers; application builds ask the real one.
+          chmod 0755 media-qualification-build/plurxd
+      # The application recipe, unchanged, against both candidates: the bundle
+      # must compile from this revision's tools/dv_processing against the new
+      # dependencies and every helper must load in the new runtime.
+      - name: Qualify the application helper bundle against both candidates
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          builder: ${{ steps.media-builder.outputs.name }}
+          context: .
+          file: Dockerfile
+          target: runtime
+          build-contexts: |
+            dv-processing-dependencies=docker-image://${{ env.RUNTIME_IMAGE }}@${{ steps.dv-dependencies.outputs.digest }}
+            runtime-assets=docker-image://${{ env.RUNTIME_IMAGE }}@${{ steps.runtime.outputs.digest }}
+            build=./media-qualification-build
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          outputs: type=cacheonly
       - name: Smoke the published media platform
         env:
           RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+          DV_DEPENDENCIES_DIGEST: ${{ steps.dv-dependencies.outputs.digest }}
           AUDITED_AMD64: ${{ matrix.arch == 'amd64' && inputs.audited_amd64 }}
         run: |
           set -euo pipefail
@@ -162,13 +207,9 @@ jobs:
               fi
             '
           fi
-          # The application pin records which renderer sources this bundle was
-          # built from; plurxd refuses a bundle from any other sources.
-          dv_source=$(docker run --rm --entrypoint python3 "$image" -c 'import json; print(json.load(open("/usr/lib/plurx/dv-processing/build-identity.json"))["source_sha256"])')
-          [[ "$dv_source" =~ ^[0-9a-f]{64}$ ]]
           mkdir -p media-digests
           printf '%s\n' "$RUNTIME_DIGEST" > 'media-digests/${{ matrix.arch }}.digest'
-          printf '%s\n' "$dv_source" > 'media-digests/${{ matrix.arch }}.dv-source'
+          printf '%s\n' "$DV_DEPENDENCIES_DIGEST" > 'media-digests/${{ matrix.arch }}.dv-dependencies.digest'
       - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: media-digest-${{ matrix.arch }}
@@ -208,20 +249,26 @@ jobs:
           arm64=$(cat media-digests/arm64.digest)
           [[ "$amd64" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
-          dv_source=$(cat media-digests/amd64.dv-source)
-          [[ "$dv_source" =~ ^[0-9a-f]{64}$ ]]
-          test "$(cat media-digests/arm64.dv-source)" = "$dv_source"
-          # ... and both must be this commit's renderer sources, not a cached layer.
-          test "$(python3 tools/dv_processing/bundle-manifest.py --identity tools/dv_processing)" = "$dv_source"
           tag="$RUNTIME_IMAGE:source-$GITHUB_SHA"
           docker manifest create --insecure --amend "$tag" "$RUNTIME_IMAGE@$amd64" "$RUNTIME_IMAGE@$arm64"
           digest=$(docker manifest push --insecure --purge "$tag" | tail -1)
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          dv_amd64=$(cat media-digests/amd64.dv-dependencies.digest)
+          dv_arm64=$(cat media-digests/arm64.dv-dependencies.digest)
+          [[ "$dv_amd64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$dv_arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          dv_tag="$RUNTIME_IMAGE:dv-dependencies-source-$GITHUB_SHA"
+          docker manifest create --insecure --amend "$dv_tag" "$RUNTIME_IMAGE@$dv_amd64" "$RUNTIME_IMAGE@$dv_arm64"
+          dv_digest=$(docker manifest push --insecure --purge "$dv_tag" | tail -1)
+          [[ "$dv_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           mkdir -p media-candidate
-          printf 'Source-Revision: %s\nMedia-Runtime: %s@%s\nAudited-amd64: %s\namd64: %s\narm64: %s\nDV-Source-SHA256: %s\n' \
-            "$GITHUB_SHA" "$RUNTIME_IMAGE" "$digest" "$AUDITED_AMD64" "$amd64" "$arm64" "$dv_source" > media-candidate/receipt.txt
-          printf '\nNext: run the public media-runtime copy workflow for this exact source index.\n' >> media-candidate/receipt.txt
-          printf 'After anonymous public verification, run: scripts/media-runtime pin ghcr.io/pjunod/cinema-media-runtime@%s --dv-source-sha256 %s\n' "$digest" "$dv_source" >> media-candidate/receipt.txt
+          printf 'Source-Revision: %s\nMedia-Runtime: %s@%s\nAudited-amd64: %s\namd64: %s\narm64: %s\n' \
+            "$GITHUB_SHA" "$RUNTIME_IMAGE" "$digest" "$AUDITED_AMD64" "$amd64" "$arm64" > media-candidate/receipt.txt
+          printf 'DV-Build-Dependencies: %s@%s\ndv-dependencies-amd64: %s\ndv-dependencies-arm64: %s\n' \
+            "$RUNTIME_IMAGE" "$dv_digest" "$dv_amd64" "$dv_arm64" >> media-candidate/receipt.txt
+          printf '\nNext: run the public media-runtime copy workflow once for each of the two source indexes above.\n' >> media-candidate/receipt.txt
+          printf 'After anonymous public verification, run: scripts/media-runtime pin ghcr.io/pjunod/cinema-media-runtime@%s\n' "$digest" >> media-candidate/receipt.txt
+          printf 'and, from the published source revision: scripts/media-runtime pin-dv-dependencies ghcr.io/pjunod/cinema-media-runtime@%s\n' "$dv_digest" >> media-candidate/receipt.txt
           printf 'Do not commit a Dockerfile pin that is available only in the private registry.\n' >> media-candidate/receipt.txt
       - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:

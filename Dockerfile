@@ -48,10 +48,53 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
     && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check \
     && cp target-cluster-check/release/plurx-cluster-check.dwp /plurx-cluster-check.dwp
 
+# The DV helper bundle is application source: plurxd compiles the identity of
+# tools/dv_processing into itself and refuses a bundle built from any other
+# sources, so the bundle is compiled here, from this build context, and never
+# taken from a published image. Only its expensive dependencies are published:
+# FFmpeg, libplacebo and libdovi built from pinned sources, with the compiler
+# and headers the helpers need. `scripts/media-runtime pin-dv-dependencies`
+# writes this digest and the dependency input identity below together.
+# The line below identifies the dependency stage of Dockerfile.media-runtime
+# (its base, Debian snapshot and package list included) that this image was
+# published from. A contract fails when that recipe changes without a pin.
+# dv-dependency-recipe-sha256: a96a1717d7c66025e783e12e1e8c384d954d77a3fe4bdbb6352f93d8ff04bb4c
+FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:9130f0ce818833dea3361c93b50eaa4d25ceef3f0275593a2ab57877a389a050 AS dv-processing-dependencies
+
+# These stages sit before runtime-assets so release packaging keeps them
+# (validation/release_dockerfile.py); they see no daemon source.
+FROM dv-processing-dependencies AS dv-processing-helpers
+ARG PLURX_DV_DEPENDENCY_INPUTS="sha256:9c76fad57add425e5f0311165f8378dba071e8a79df361a8f6016a2f3476c102"
+COPY tools/dv_quality/backends/parsed-rpu/fetch_parser.py tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock /build-inputs/parsed-rpu/
+COPY tools/dv_processing /build-inputs/dv_processing
+COPY LICENSE NOTICE /build-inputs/project-notices/
+ENV PLURX_DV_PROJECT_NOTICES=/build-inputs/project-notices
+# The published prefix records the files it was built from. Refuse it when
+# this tree's decoder patch, source pins or dependency recipe differ: the
+# answer is a new dependency publication, never a bundle that claims sources
+# its libraries were not built from.
+RUN sh /build-inputs/dv_processing/dependency-inputs.sh > /build-inputs/application-inputs.sha256 \
+    && { cmp /build-inputs/application-inputs.sha256 /opt/dv-dependencies/build-inputs.sha256 \
+      && test "sha256:$(sha256sum < /opt/dv-dependencies/build-inputs.sha256 | cut -d' ' -f1)" = "$PLURX_DV_DEPENDENCY_INPUTS" \
+      || { echo 'FATAL: the pinned DV build dependencies were built from other inputs than this tree.' >&2; \
+           diff /opt/dv-dependencies/build-inputs.sha256 /build-inputs/application-inputs.sha256 >&2; \
+           echo 'Publish new dependencies and pin them: docs/ci/MEDIA-RUNTIME.md.' >&2; exit 1; }; } \
+    && sh /build-inputs/dv_processing/build-bundle.sh /opt/dv-dependencies /opt/dv-bundle \
+    && python3 /opt/dv-bundle/sources/bundle-manifest.py /opt/dv-bundle/sources /opt/dv-bundle --verify
+# The display-management active-area controls (CM v2.9 and CM v4.0 L5) are C
+# against the same headers the helpers compile. Nothing else in CI has those
+# headers, so they run here: a failing control fails the image. CPU only.
+RUN placebo_pc=$(dirname "$(find /opt/dv-dependencies/placebo/lib -name libplacebo.pc -print)") \
+    && cc -std=c11 -O2 -Wall -Wextra -Werror -I/opt/dv-dependencies/include \
+        /build-inputs/dv_processing/controls/test_dm_active_area.c \
+        $(PKG_CONFIG_PATH="$placebo_pc" pkg-config --cflags --libs libplacebo) -lm \
+        -o /build-inputs/test_dm_active_area \
+    && LD_LIBRARY_PATH=/opt/dv-bundle/lib /build-inputs/test_dm_active_area
+
 # Published media dependencies are independent of application source.
-# The pinned runtime carries the DV helper bundle, so it must be republished
-# whenever tools/dv_processing changes; the runtime stage records and checks the
-# bundle's source identity (PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256).
+# A base published before 2026-11-12 still carries a DV helper bundle of its
+# own. The runtime stage below discards it and installs the one built from
+# this context, so this pin never needs to follow tools/dv_processing.
 FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67 AS runtime-assets
 
 # M5's CI image uses the shipped runtime's media assets, not a second ffmpeg
@@ -78,7 +121,12 @@ COPY licenses/ /usr/share/doc/plurx/licenses/
 # Keep both the daemon's explicit path and shell-invoked fixture generation on
 # jellyfin-ffmpeg 8. Debian bookworm's /usr/bin/ffmpeg remains the release
 # fallback, but must never answer an M5 CI job's bare `ffmpeg` invocation.
-RUN ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
+# A media base published before 2026-11-12 carries a DV helper bundle from
+# other sources than any checkout this image will test. Nothing here builds
+# one, so the stale directory goes: an absent bundle is ordinary, a refused
+# one is not.
+RUN rm -rf /usr/lib/plurx/dv-processing \
+    && ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
     && ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe \
     && apt-get -o Acquire::Retries=3 update \
     && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
@@ -104,14 +152,6 @@ FROM runtime-assets AS runtime
 ARG PLURX_BUILD_SHA=""
 ARG PLURX_MEDIA_RUNTIME_DIGEST="sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67"
 ENV PLURX_MEDIA_RUNTIME_DIGEST=${PLURX_MEDIA_RUNTIME_DIGEST}
-# The pinned runtime's Dolby Vision helpers must come from the renderer sources
-# plurxd is compiled with: plurxd refuses any other bundle, and processed Dolby
-# Vision is then off on every node. Record that identity beside the pin and fail
-# the build here rather than in production. tests/operations/test_media_runtime.py
-# holds the recorded value to this tree; docs/ci/MEDIA-RUNTIME.md says how to
-# republish and re-pin when renderer sources change.
-ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="0ae1fc25613537752ae7a9e0e632b82bb9269603208f1994694377c499486e50"
-RUN python3 -c 'import json, sys; built = json.load(open("/usr/lib/plurx/dv-processing/build-identity.json"))["source_sha256"]; sys.exit(None if built == sys.argv[1] else "pinned media runtime DV helpers were built from renderer sources " + built + ", not " + sys.argv[1] + ": republish the media runtime and re-pin (docs/ci/MEDIA-RUNTIME.md)")' "$PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256"
 # The fleet rollout inspects this label on the pulled image ID before it trusts
 # checkout-owned deployment policy. Redeclare the build arg in this final stage:
 # Docker build args are stage-scoped, and a label inherited only by the build
@@ -139,6 +179,20 @@ COPY --from=build /plurxd.dwp /usr/local/bin/plurxd.dwp
 # that produced the on-disk state without installing Rust on the host.
 COPY --from=build /plurx-cluster-check /usr/local/bin/plurx-cluster-check
 COPY --from=build /plurx-cluster-check.dwp /usr/local/bin/plurx-cluster-check.dwp
+# The DV helper bundle built above from this context's tools/dv_processing.
+# This stage owns the directory outright: a media base that still carries a
+# bundle of its own contributes no file to it. Each helper must then load
+# against this image's own libraries and report its usage; that check writes
+# nothing, so it adds no bytes to the image.
+RUN rm -rf /usr/lib/plurx/dv-processing
+COPY --from=dv-processing-helpers /opt/dv-bundle /usr/lib/plurx/dv-processing
+RUN test -n "$(find /usr/share/vulkan/icd.d -name '*.json' -print -quit)" \
+    && for helper in segment_decode_render mux_rgb author_p81 scan_title; do \
+      status=0; message=$(LD_LIBRARY_PATH=/usr/lib/plurx/dv-processing/lib \
+        /usr/lib/plurx/dv-processing/bin/$helper 2>&1 >/dev/null) || status=$?; \
+      { test "$status" -eq 1 && printf '%s\n' "$message" | grep -q 'usage:'; } \
+        || { echo "FATAL: DV helper $helper does not load in this runtime: $message" >&2; exit 1; }; \
+    done
 
 # NVIDIA Container Toolkit must also mount the video encode/decode libraries.
 # This default covers direct Docker users; GPU device access is still runtime
@@ -158,6 +212,10 @@ ENV PLURX_BIND=0.0.0.0:32400 \
 EXPOSE 32400
 VOLUME ["/var/lib/plurx"]
 USER plurx
+# The daemon's own verdict on the bundle installed above, as the service
+# account: the same capture the worker performs at startup. An image whose
+# daemon would refuse its helpers fails here, on every architecture built.
+RUN ["plurxd", "dv-helper-identity"]
 
 # The default replicated startup may spend 45s reaching Hiqlite health, 45s
 # awaiting admission, then a 1,200s snapshot transfer plus a 120s final install
