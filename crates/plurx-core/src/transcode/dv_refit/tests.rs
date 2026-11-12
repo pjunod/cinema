@@ -586,8 +586,47 @@ fn a_malformed_helper_scene_is_refused() {
     negative["csq"][0] = serde_json::json!(-1.0);
     assert!(serde_json::from_value::<RefitStats>(negative).is_err());
     let mut uncounted = scene["fit"].clone();
-    uncounted["xtx"][0] = serde_json::json!(1.0);
+    uncounted["xtx_upper"][0] = serde_json::json!(1.0);
     assert!(serde_json::from_value::<RefitStats>(uncounted).is_err());
+    // Moments the samples cannot have: a luma sum of squares below sum²/n,
+    // a sum of squares where no sample landed, Σ target² above the count,
+    // a fractional count, an XᵀX entry above the count, and moments under a
+    // flag that says there are none.
+    let code = scene["fit"]["ycnt"]
+        .as_array()
+        .expect("ycnt")
+        .iter()
+        .position(|c| c.as_f64() > Some(10.0))
+        .expect("a populated code");
+    let empty = scene["fit"]["ycnt"]
+        .as_array()
+        .expect("ycnt")
+        .iter()
+        .position(|c| c.as_f64() == Some(0.0))
+        .expect("an empty code");
+    let mut low = scene["fit"].clone();
+    low["ysq"][code] = serde_json::json!(1.0);
+    let mut phantom = scene["fit"].clone();
+    phantom["ysq"][empty] = serde_json::json!(5.0);
+    let mut over = scene["fit"].clone();
+    over["csq"][1] = serde_json::json!(1e12);
+    let mut fractional = scene["fit"].clone();
+    let c = fractional["ycnt"][code].as_f64().expect("count");
+    fractional["ycnt"][code] = serde_json::json!(c + 0.5);
+    let mut big = scene["fit"].clone();
+    big["xtx_upper"][5] = serde_json::json!(1e12);
+    let mut unflagged = scene["fit"].clone();
+    unflagged["second_moments"] = serde_json::json!(false);
+    for (name, bad) in [
+        ("low", low),
+        ("phantom", phantom),
+        ("over", over),
+        ("fractional", fractional),
+        ("big", big),
+        ("unflagged", unflagged),
+    ] {
+        assert!(serde_json::from_value::<RefitStats>(bad).is_err(), "{name}");
+    }
     let mut missing = scene["fit"].clone();
     missing
         .as_object_mut()
@@ -649,4 +688,117 @@ fn the_helper_maps_a_nonidentity_p7_base_layer_as_reshape_does() {
         moved += usize::from([s[3], s[4], s[5]] != base.map(|c| 4 * c));
     }
     assert!(moved > samples.len() / 2, "the mapping is not identity");
+}
+
+/// A whole `--refit-stats` run of the 311-frame Michael5400 clip (no
+/// `--frames`, ends at EOF): five scenes, the RPU's own, and the summary.
+fn helper_run() -> Vec<&'static str> {
+    include_str!("../../../tests/fixtures/dv-refit/helper-run-michael5400.jsonl")
+        .lines()
+        .collect()
+}
+
+#[test]
+fn a_whole_helper_run_parses_and_checks() {
+    let lines = helper_run();
+    let (summary, scenes) = lines.split_last().expect("lines");
+    let scenes: Vec<RefitScene> = scenes
+        .iter()
+        .map(|l| RefitScene::from_line(l).expect("scene"))
+        .collect();
+    let summary = RefitSummary::from_line(summary).expect("summary");
+    check_refit_run(&scenes, &summary).expect("consistent run");
+    assert_eq!(
+        (summary.frames, summary.scenes, summary.rpu_scenes),
+        (311, 5, 5)
+    );
+    assert_eq!(
+        scenes
+            .iter()
+            .map(|s| (s.first_frame, s.frames))
+            .collect::<Vec<_>>(),
+        [(0, 51), (51, 41), (92, 79), (171, 115), (286, 25)]
+    );
+    assert_eq!((summary.first_pts, summary.end_pts), (125, 13179));
+    // Every frame of every scene carries the same L5 lattice: 480 × 260 fit
+    // and 480 × 259 held-out samples.
+    for s in &scenes {
+        assert_eq!(s.fit.samples(), s.frames as f64 * 480.0 * 260.0);
+        assert_eq!(s.held_out.samples(), s.frames as f64 * 480.0 * 259.0);
+        s.fit.solve().expect("each scene fits");
+    }
+
+    // Disagreements with the summary, a gap, a short pooled scene, a bad
+    // kind and an over-long line are refused.
+    let mut wrong = summary.clone();
+    wrong.fit_samples += 1;
+    assert!(check_refit_run(&scenes, &wrong).is_err());
+    let mut gap = scenes.clone();
+    gap[2].first_frame += 1;
+    assert!(check_refit_run(&gap, &summary).is_err());
+    let mut short = scenes.clone();
+    short[4].frames = 20;
+    assert!(check_refit_run(&short, &summary).is_err());
+    assert!(RefitScene::from_line(lines[5]).is_err());
+    assert!(RefitSummary::from_line(lines[0]).is_err());
+    let long = format!("{}{}", lines[0], " ".repeat(MAX_REFIT_LINE_BYTES));
+    assert_eq!(
+        RefitScene::from_line(&long),
+        Err(RefitError::Output("line longer than the cap"))
+    );
+    let mut extra: Value = serde_json::from_str(lines[5]).expect("json");
+    extra["degenerate"] = serde_json::json!(true);
+    assert!(RefitSummary::from_line(&extra.to_string()).is_err());
+}
+
+/// The same nonidentity mapping with a nonzero LINEAR_DZ residual (offset
+/// 500, slope and threshold 3000 and 1000 / 2^23): the helper's composition
+/// equals the mapped value of [`ComposerCurves::reshape`]'s arithmetic plus
+/// sign(d)·((|d| − ½)·S + T)/2^23, rounded at 2^12.
+#[test]
+fn the_helper_adds_the_residual_to_a_nonidentity_mapping() {
+    let v: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/dv-refit/composer-p7-mapping.json"
+    ))
+    .expect("vectors");
+    let luma = floats(&v["luma"]);
+    let chroma = floats(&v["chroma"]);
+    let nlq: Vec<i64> = floats(&v["residual"]["nlq"])
+        .into_iter()
+        .map(|x| x as i64)
+        .collect();
+    let (offset, slope, threshold) = (nlq[0], nlq[1], nlq[2]);
+    let samples = v["residual"]["samples"].as_array().expect("samples");
+    assert!(samples.len() > 400);
+    let mut residuals = 0;
+    for sample in samples {
+        let s: Vec<i64> = floats(sample).into_iter().map(|x| x as i64).collect();
+        let x: Vec<f64> = s[..3].iter().map(|&c| c as f64 / 1024.0).collect();
+        let piece = (s[0] as usize / 128).min(LUMA_PIECES - 1);
+        let mapped_y =
+            luma[3 * piece] + luma[3 * piece + 1] * x[0] + luma[3 * piece + 2] * x[0] * x[0];
+        let basis = mmr_basis(x[0], x[1], x[2]);
+        let mapped_c: Vec<f64> = (0..2)
+            .map(|ch| {
+                (0..MMR_TERMS)
+                    .map(|i| basis[i] * chroma[MMR_TERMS * ch + i])
+                    .sum()
+            })
+            .collect();
+        for (c, mapped) in [mapped_y, mapped_c[0], mapped_c[1]].into_iter().enumerate() {
+            let d = s[3 + c] - offset;
+            let r = if d == 0 {
+                0.0
+            } else {
+                d.signum() as f64 * ((2 * d.abs() - 1) * slope + 2 * threshold) as f64
+                    / 16_777_216.0
+            };
+            residuals += usize::from(d != 0);
+            let want = ((mapped.clamp(0.0, 1.0) + r) * 4096.0 + 0.5)
+                .floor()
+                .clamp(0.0, 4095.0);
+            assert_eq!(s[6 + c] as f64, want, "sample {s:?} component {c}");
+        }
+    }
+    assert!(residuals > samples.len());
 }

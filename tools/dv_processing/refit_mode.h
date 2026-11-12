@@ -17,11 +17,14 @@
 //
 // --refit-stats writes JSON lines to stdout: one per pooled scene,
 //   {"kind":"refit_scene","first_frame":N,"frames":K,"first_pts":TICKS,
-//    "time_base":"NUM/DEN","fit":RefitStats,"held_out":RefitStats}
-// in presentation order, then one
+//    "end_pts":TICKS,"time_base":"NUM/DEN","fit":RefitStats,
+//    "held_out":RefitStats}
+// in presentation order (end_pts: the scene's last frame's pts plus its
+// duration), then one
 //   {"kind":"refit_summary","frames":N,"scenes":S,"rpu_scenes":R,
 //    "median_scene_frames":M,"degenerate":BOOL,"fit_samples":F,
-//    "held_out_samples":H}
+//    "held_out_samples":H,"first_pts":TICKS,"end_pts":TICKS,
+//    "time_base":"NUM/DEN"}
 // where M is the median length of the RPU's own scenes before pooling and
 // degenerate is M < 24 (scene_refresh_flag too frequent to mean scene cuts).
 // RefitStats is plurx-core's dv_refit::RefitStats serde layout. Exit 0 only
@@ -43,12 +46,14 @@
 
 #include "refit_compose.h"
 
-#define REFIT_MAX_TITLE_FRAMES 100000000
+// About 11.5 hours at 24 frames per second.
+#define REFIT_MAX_TITLE_FRAMES 1000000
 #define REFIT_MAX_PACKET_BYTES (16 * 1024 * 1024)
 
 static bool refit_dump, refit_area_override;
 static int refit_area[4];
 static int64_t refit_first, refit_last = INT64_MAX, refit_paired, refit_composed;
+static int64_t refit_first_pts, refit_end_pts;
 static struct refit_scene *refit_raw;
 static struct refit_pool *refit_pooled;
 static struct refit_stats *refit_frame_stats[2];
@@ -63,9 +68,9 @@ static AVIOContext *refit_avio;
 static bool refit_emit(const struct refit_scene *scene, void *unused) {
   (void)unused;
   return printf("{\"kind\":\"refit_scene\",\"first_frame\":%lld,\"frames\":%lld,"
-                "\"first_pts\":%lld,\"time_base\":\"%d/%d\",\"fit\":",
+                "\"first_pts\":%lld,\"end_pts\":%lld,\"time_base\":\"%d/%d\",\"fit\":",
                 (long long)scene->first_frame, (long long)scene->frames,
-                (long long)scene->first_pts, source_time_base.num,
+                (long long)scene->first_pts, (long long)scene->end_pts, source_time_base.num,
                 source_time_base.den) > 0 &&
          refit_stats_json(stdout, &scene->fit) && fputs(",\"held_out\":", stdout) != EOF &&
          refit_stats_json(stdout, &scene->held_out) && fputs("}\n", stdout) != EOF;
@@ -75,6 +80,7 @@ static bool refit_emit(const struct refit_scene *scene, void *unused) {
 static void refit_close_raw(void) {
   if (!refit_raw->frames)
     return;
+  need(refit_lengths_count < REFIT_MAX_TITLE_FRAMES, "bounded scene count");
   if (refit_lengths_count == refit_lengths_capacity) {
     size_t capacity = refit_lengths_capacity ? 2 * refit_lengths_capacity : 1024;
     int64_t *grown = realloc(refit_lengths, capacity * sizeof(*grown));
@@ -93,7 +99,77 @@ static inline uint16_t refit_code(const AVFrame *frame, int plane, int x, int y)
   return v;
 }
 
+// The decoder's parsed mapping (what the composition uses) against the raw
+// RPU's own parse: every pivot and coefficient must agree. Also the frame's
+// scene_refresh_flag, which must come from this RPU's own DM data.
+static inline int64_t refit_fixed(int64_t integer, uint64_t fraction) {
+  return integer * (INT64_C(1) << 23) + (int64_t)fraction;
+}
+static bool refit_scene_refresh(const uint8_t *nalu, size_t size, const AVDOVIMetadata *data) {
+  DoviRpuOpaque *rpu = dovi_parse_unspec62_nalu(nalu, size);
+  need(rpu != NULL && dovi_rpu_get_error(rpu) == NULL, "RPU parser cross-check");
+  const DoviRpuDataMapping *raw = dovi_rpu_get_data_mapping(rpu);
+  const DoviVdrDmData *dm = dovi_rpu_get_vdr_dm_data(rpu);
+  need(raw != NULL && dm != NULL, "fresh RPU mapping and DM data");
+  const AVDOVIDataMapping *parsed = av_dovi_get_mapping(data);
+  bool same = true;
+  for (int c = 0; c < 3 && same; c++) {
+    const DoviReshapingCurve *k = &raw->curves[c];
+    const AVDOVIReshapingCurve *f = &parsed->curves[c];
+    int pieces = f->num_pivots - 1;
+    same = k->pivots.len == f->num_pivots && k->pivots.data;
+    for (int i = 0; same && i < f->num_pivots; i++)
+      same = k->pivots.data[i] == f->pivots[i];
+    for (int i = 0; same && i < pieces; i++)
+      same = (int)k->mapping_idc == (int)f->mapping_idc[i];
+    if (same && k->mapping_idc == 0) {
+      const DoviPolynomialCurve *poly = k->polynomial;
+      same = poly && poly->poly_order_minus1.len == (size_t)pieces &&
+             poly->poly_coef_int.len == (size_t)pieces && poly->poly_coef.len == (size_t)pieces;
+      for (int i = 0; same && i < pieces; i++) {
+        int order = (int)poly->poly_order_minus1.data[i] + 1;
+        const DoviI64Data *integer = poly->poly_coef_int.list[i];
+        const DoviU64Data *fraction = poly->poly_coef.list[i];
+        same = order == f->poly_order[i] && integer && fraction &&
+               integer->len == (size_t)order + 1 && fraction->len == (size_t)order + 1;
+        for (int j = 0; same && j <= order; j++)
+          same = refit_fixed(integer->data[j], fraction->data[j]) == f->poly_coef[i][j];
+      }
+    } else if (same) {
+      const DoviMMRCurve *mmr = k->mmr;
+      same = mmr && mmr->mmr_order_minus1.len == (size_t)pieces &&
+             mmr->mmr_constant_int.len == (size_t)pieces &&
+             mmr->mmr_constant.len == (size_t)pieces && mmr->mmr_coef_int.len == (size_t)pieces &&
+             mmr->mmr_coef.len == (size_t)pieces;
+      for (int i = 0; same && i < pieces; i++) {
+        int order = (int)mmr->mmr_order_minus1.data[i] + 1;
+        same = order == f->mmr_order[i] &&
+               refit_fixed(mmr->mmr_constant_int.data[i], mmr->mmr_constant.data[i]) ==
+                   f->mmr_constant[i] &&
+               mmr->mmr_coef_int.list[i] && mmr->mmr_coef.list[i] &&
+               mmr->mmr_coef_int.list[i]->len == (size_t)order &&
+               mmr->mmr_coef.list[i]->len == (size_t)order;
+        for (int j = 0; same && j < order; j++) {
+          const DoviI64Data *integer = mmr->mmr_coef_int.list[i]->list[j];
+          const DoviU64Data *fraction = mmr->mmr_coef.list[i]->list[j];
+          same = integer && fraction && integer->len == 7 && fraction->len == 7;
+          for (int t = 0; same && t < 7; t++)
+            same = refit_fixed(integer->data[t], fraction->data[t]) == f->mmr_coef[i][j][t];
+        }
+      }
+    }
+  }
+  bool refresh = dm->scene_refresh_flag != 0;
+  bool agree = same && refresh == (av_dovi_get_color(data)->scene_refresh_flag != 0);
+  dovi_rpu_free_vdr_dm_data(dm);
+  dovi_rpu_free_data_mapping(raw);
+  dovi_rpu_free(rpu);
+  need(agree, "decoder and RPU parser mappings agree");
+  return refresh;
+}
+
 static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
+  need(bl->pts <= INT64_MAX - bl->duration, "frame end overflow");
   AVFrameSideData *raw = av_frame_get_side_data(bl, AV_FRAME_DATA_DOVI_RPU_BUFFER);
   need(raw && raw->size > 0 && raw->size < 4096,
        "fresh decoder-attached RPU required; cached metadata insufficient");
@@ -108,9 +184,11 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
   struct refit_mapping mapping;
   const char *refused = refit_mapping_from_dovi(data, &mapping);
   need(refused == NULL, refused ? refused : "");
-  bool refresh = av_dovi_get_color(data)->scene_refresh_flag != 0;
+  bool refresh = refit_scene_refresh(nalu, raw->size + 2, data);
 
   int w = bl->width, h = bl->height, ew = el->width, eh = el->height;
+  // The frozen pairing covers a half-resolution EL only.
+  need(2 * ew == w && 2 * eh == h, "half-resolution enhancement layer");
   need(bl->format == AV_PIX_FMT_YUV420P10LE && el->format == AV_PIX_FMT_YUV420P10LE &&
            bl->linesize[0] >= 2 * w && bl->linesize[1] >= w && bl->linesize[2] >= w &&
            el->linesize[0] >= 2 * ew && el->linesize[1] >= ew && el->linesize[2] >= ew,
@@ -150,7 +228,7 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
     int64_t taken = 0;
     for (int y = y0 + phases[k]; y < y1; y += REFIT_STRIDE) {
       for (int x = x0 + phases[k]; x < x1; x += REFIT_STRIDE) {
-        struct refit_sites s = refit_pair(x, y, w, h, ew, eh);
+        struct refit_sites s = refit_pair(x, y, w, h);
         const uint16_t base[3] = {
             refit_code(bl, 0, x, y), refit_code(bl, 1, s.bl_chroma[0], s.bl_chroma[1]),
             refit_code(bl, 2, s.bl_chroma[0], s.bl_chroma[1])};
@@ -195,12 +273,16 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
       refit_raw->first_frame = ordinal;
       refit_raw->first_pts = bl->pts;
     }
+    refit_raw->end_pts = bl->pts + bl->duration;
     for (int k = 0; k < 2; k++)
       refit_stats_finish_frame(refit_frame_stats[k]);
     refit_stats_merge(&refit_raw->fit, refit_frame_stats[0]);
     refit_stats_merge(&refit_raw->held_out, refit_frame_stats[1]);
     refit_raw->frames++;
   }
+  if (!refit_composed)
+    refit_first_pts = bl->pts;
+  refit_end_pts = bl->pts + bl->duration;
   refit_composed++;
 }
 
@@ -224,6 +306,55 @@ static void refit_pairs(void) {
       refit_frame(bl, el, ordinal);
     drop_pair();
   }
+}
+
+// receive()'s admission of one decoded frame, without its drain loop.
+static void refit_queue(struct layer *layer, AVFrame *frame) {
+  need(layer->count < PAIR_WINDOW, "pair window capacity");
+  if (layer->index == 1 && discover_el && expected_w[1] == 0) {
+    need(frame->width >= 32 && frame->height >= 32 && frame->width % 2 == 0 &&
+             frame->height % 2 == 0 &&
+             ((frame->width == expected_w[0] && frame->height == expected_h[0]) ||
+              (2 * (int64_t)frame->width == expected_w[0] &&
+               2 * (int64_t)frame->height == expected_h[0])),
+         "unsupported observed enhancement raster ratio");
+    expected_w[1] = frame->width;
+    expected_h[1] = frame->height;
+  }
+  need(frame->format == AV_PIX_FMT_YUV420P10LE && frame->width == expected_w[layer->index] &&
+           frame->height == expected_h[layer->index] && frame->pts != AV_NOPTS_VALUE &&
+           !(frame->flags & AV_FRAME_FLAG_CORRUPT),
+       "decoded geometry/representation/PTS or corrupt frame");
+  for (int i = 0; i < layer->count; i++)
+    need(layer->queue[i]->pts != frame->pts, "duplicate decoded layer PTS");
+  layer->queue[layer->count++] = av_frame_clone(frame);
+  need(layer->queue[layer->count - 1] != NULL, "bounded queued frame reference");
+  av_frame_unref(frame);
+}
+
+// End of title: flush both decoders, then take one frame from each in turn,
+// so neither layer's queue runs ahead of its partner's.
+static void refit_drain(void) {
+  for (int k = 0; k < 2; k++)
+    need(avcodec_send_packet(layers[k].decoder, NULL) >= 0, "decoder drain");
+  AVFrame *frame = av_frame_alloc();
+  need(frame != NULL, "decode frame allocation");
+  bool done[2] = {false, false};
+  while (!window_done && !(done[0] && done[1])) {
+    for (int k = 0; k < 2 && !window_done; k++) {
+      if (done[k])
+        continue;
+      int result = avcodec_receive_frame(layers[k].decoder, frame);
+      if (result == AVERROR_EOF) {
+        done[k] = true;
+        continue;
+      }
+      need(result >= 0, "decoder drain receive");
+      refit_queue(&layers[k], frame);
+      refit_pairs();
+    }
+  }
+  av_frame_free(&frame);
 }
 
 static int refit_main(int argc, char **argv) {
@@ -264,7 +395,11 @@ static int refit_main(int argc, char **argv) {
   // source only, as scan_title does.
   need(movie_source_open(&refit_io, argv[2]) >= 0,
        "held regular title source or private source capability");
-  refit_io.read_limit = UINT64_MAX;
+  // A demuxer reads a title about once; allow four reads plus room for
+  // probing and index seeks, and refuse anything that needs more.
+  need(refit_io.length > 0 && (uint64_t)refit_io.length <= (UINT64_C(1) << 56),
+       "bounded title length");
+  refit_io.read_limit = 4 * (uint64_t)refit_io.length + (UINT64_C(64) << 20);
   uint8_t *buffer = av_malloc(65536);
   need(buffer != NULL, "bounded title IO buffer");
   refit_avio = avio_alloc_context(buffer, 65536, 0, &refit_io, movie_read, NULL, movie_seek);
@@ -345,10 +480,7 @@ static int refit_main(int argc, char **argv) {
   }
   if (!window_done) {
     need(result == AVERROR_EOF, "complete title read");
-    for (int k = 0; k < 2 && !window_done; k++) {
-      need(avcodec_send_packet(layers[k].decoder, NULL) >= 0, "decoder drain");
-      receive(&layers[k]);
-    }
+    refit_drain();
   }
   if (!window_done)
     need(layers[0].count == 0 && layers[1].count == 0, "complete pair coverage");
@@ -366,11 +498,13 @@ static int refit_main(int argc, char **argv) {
     int64_t scenes = refit_pooled->emitted;
     need(printf("{\"kind\":\"refit_summary\",\"frames\":%lld,\"scenes\":%lld,"
                 "\"rpu_scenes\":%lld,\"median_scene_frames\":%.17g,\"degenerate\":%s,"
-                "\"fit_samples\":%.0f,\"held_out_samples\":%.0f}\n",
+                "\"fit_samples\":%.0f,\"held_out_samples\":%.0f,\"first_pts\":%lld,"
+                "\"end_pts\":%lld,\"time_base\":\"%d/%d\"}\n",
                 (long long)refit_composed, (long long)scenes,
                 (long long)refit_pooled->rpu_scenes, median,
                 median < REFIT_MIN_SCENE_FRAMES ? "true" : "false", refit_samples[0],
-                refit_samples[1]) > 0,
+                refit_samples[1], (long long)refit_first_pts, (long long)refit_end_pts,
+                source_time_base.num, source_time_base.den) > 0,
          "refit summary write");
   }
   need(fflush(stdout) == 0, "observations flush");

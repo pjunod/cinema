@@ -82,8 +82,8 @@ class MetadataAdmission(unittest.TestCase):
             binary = Path(directory) / "refit-compose"
             vectors = Path(directory) / "vectors.json"
             subprocess.run([os.environ.get("CC", "cc"), "-O2", "-fno-math-errno",
-                            "-frounding-math", "-std=c11", "-Wall", "-Wextra",
-                            "-Werror", str(source), "-o", str(binary), *flags,
+                            "-frounding-math", "-ffp-contract=off", "-std=c11", "-Wall",
+                            "-Wextra", "-Werror", str(source), "-o", str(binary), *flags,
                             "-lm", "-lpthread", "-ldl"], check=True, timeout=120)
             subprocess.run([str(binary), str(vectors)], check=True, timeout=60)
             self.assertEqual(vectors.read_bytes(), fixture.read_bytes())

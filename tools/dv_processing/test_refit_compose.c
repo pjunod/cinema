@@ -105,6 +105,79 @@ static void pieces_and_pivot_clamps(void) {
          refit_piece(k, 700) == 2 && refit_piece(k, 960) == 2);
 }
 
+static double dyadic(int k) { return k / 256.0; }
+
+// Independent evaluation of one piece in long double: the MMR written out
+// term by term with powl.
+static long double direct_mmr(const struct refit_curve *k, int piece, const long double x[3]) {
+  long double y = x[0], u = x[1], v = x[2], s = k->mmr_constant[piece];
+  for (int order = 1; order <= k->mmr_order[piece]; order++) {
+    const long double t[7] = {powl(y, order),     powl(u, order),     powl(v, order),
+                              powl(y * u, order), powl(y * v, order), powl(u * v, order),
+                              powl(y * u * v, order)};
+    for (int j = 0; j < 7; j++)
+      s += k->mmr[piece][order - 1][j] * t[j];
+  }
+  return s < 0 ? 0 : s > 1 ? 1 : s;
+}
+// The composed code of a mapped value, or -1 within 1e-9 of a rounding tie,
+// where two correct evaluation orders may round differently.
+static int round12(long double s) {
+  long double v = s * 4096 + 0.5L, f = v - floorl(v);
+  if (f < 1e-9L || f > 1 - 1e-9L)
+    return -1;
+  return v >= 4096 ? 4095 : (int)floorl(v);
+}
+
+// MMR of orders 1, 2 and 3 in one multi-piece chroma curve, and a
+// polynomial chroma curve with interior pivots, against direct evaluation.
+static void mmr_orders_pieces_and_polynomial_chroma(void) {
+  struct refit_mapping m = identity(512, 0, 0);
+  struct refit_curve *cb = &m.curve[1], *cr = &m.curve[2];
+  cb->num_pivots = 4;
+  const uint16_t cb_pivots[] = {16, 300, 640, 1000};
+  memcpy(cb->pivots, cb_pivots, sizeof(cb_pivots));
+  for (int i = 0; i < 3; i++) {
+    cb->method[i] = REFIT_MMR;
+    cb->mmr_order[i] = i + 1;
+    cb->mmr_constant[i] = dyadic(3 + i);
+    for (int o = 0; o <= i; o++)
+      for (int j = 0; j < 7; j++)
+        cb->mmr[i][o][j] = dyadic((j % 2 ? -1 : 1) * (17 * (o + 1) + 5 * j + 9 * i) % 97);
+  }
+  cr->num_pivots = 3;
+  const uint16_t cr_pivots[] = {64, 512, 960};
+  memcpy(cr->pivots, cr_pivots, sizeof(cr_pivots));
+  const double cr_poly[2][3] = {{dyadic(2), dyadic(250), dyadic(3)}, {dyadic(-5), dyadic(270), dyadic(-9)}};
+  memcpy(cr->poly, cr_poly, sizeof(cr_poly));
+  unsigned checked = 0;
+  for (int y = 0; y <= 1023; y += 31)
+    for (int u = 0; u <= 1023; u += 7)
+      for (int v = 0; v <= 1023; v += 29) {
+        const uint16_t base[3] = {y, u, v}, el[3] = {512, 512, 512};
+        uint16_t out[3];
+        refit_compose(&m, base, el, out);
+        double mapped[3];
+        refit_map(&m, base, mapped);
+        // Clamp each input to its own component's pivot range first.
+        int cu = u < 16 ? 16 : u > 1000 ? 1000 : u, cv = v < 64 ? 64 : v > 960 ? 960 : v;
+        const long double x[3] = {y / 1024.0L, cu / 1024.0L, cv / 1024.0L};
+        int piece = cu >= 640 ? 2 : cu >= 300 ? 1 : 0;
+        long double want_cb = direct_mmr(cb, piece, x);
+        int p = cv >= 512 ? 1 : 0;
+        long double xv = cv / 1024.0L;
+        long double want_cr = cr_poly[p][0] + cr_poly[p][1] * xv + cr_poly[p][2] * xv * xv;
+        want_cr = want_cr < 0 ? 0 : want_cr > 1 ? 1 : want_cr;
+        assert(fabsl(mapped[1] - want_cb) < 1e-12L && fabsl(mapped[2] - want_cr) < 1e-12L);
+        int code_cb = round12(want_cb), code_cr = round12(want_cr);
+        assert(code_cb < 0 || out[1] == code_cb);
+        assert(code_cr < 0 || out[2] == code_cr);
+        assert(out[0] == round12(y / 1024.0L));
+        checked++;
+      }
+  assert(checked > 5000);
+}
+
 static void write_number(FILE *f, double v, bool comma) {
   assert(isfinite(v));
   fprintf(f, comma ? ",%.17g" : "%.17g", v);
@@ -172,7 +245,22 @@ static void nonidentity_p7_mapping(const char *vectors) {
         refit_compose(&m, base, el, out);
         fprintf(f, ",[%u,%u,%u,%u,%u,%u]", base[0], base[1], base[2], out[0], out[1], out[2]);
       }
-  fputs("]}\n", f);
+  // A nonzero residual on the same mapping, with other LINEAR_DZ parameters.
+  for (int c = 0; c < 3; c++)
+    m.nlq[c] = (struct refit_nlq){500, 3000, 1000};
+  fputs("],\"residual\":{\"nlq\":[500,3000,1000],\"samples\":[", f);
+  first = true;
+  for (int a = 0; a <= 1023; a += 73)
+    for (int e = 0; e <= 1023; e += 31) {
+      const uint16_t base[3] = {a, (a * 7 + 100) % 1024, (a * 3 + 900) % 1024};
+      const uint16_t enhancement[3] = {e, (e + 300) % 1024, (1023 - e)};
+      uint16_t out[3];
+      refit_compose(&m, base, enhancement, out);
+      fprintf(f, "%s[%u,%u,%u,%u,%u,%u,%u,%u,%u]", first ? "" : ",", base[0], base[1], base[2],
+              enhancement[0], enhancement[1], enhancement[2], out[0], out[1], out[2]);
+      first = false;
+    }
+  fputs("]}}\n", f);
   assert(fclose(f) == 0);
 }
 
@@ -186,15 +274,13 @@ static void lattice_and_pairing(void) {
         assert(refit_axis_count(start, end, phase) == n);
       }
   // The frozen pairing for a half-resolution EL, including its clamps.
-  struct refit_sites s = refit_pair(3839, 2159, 3840, 2160, 1920, 1080);
+  struct refit_sites s = refit_pair(3839, 2159, 3840, 2160);
   assert(s.bl_chroma[0] == 1919 && s.bl_chroma[1] == 1079);
   assert(s.el_luma[0] == 1919 && s.el_luma[1] == 1079);
   assert(s.el_chroma[0] == 959 && s.el_chroma[1] == 539);
-  s = refit_pair(5, 7, 3840, 2160, 1920, 1080);
+  s = refit_pair(5, 7, 3840, 2160);
   assert(s.bl_chroma[0] == 3 && s.bl_chroma[1] == 4 && s.el_luma[0] == 3 &&
          s.el_luma[1] == 3 && s.el_chroma[0] == 1 && s.el_chroma[1] == 2);
-  s = refit_pair(5, 7, 1920, 1080, 1920, 1080);
-  assert(s.el_luma[0] == 5 && s.el_luma[1] == 7 && s.el_chroma[0] == 3 && s.el_chroma[1] == 4);
 }
 
 static void statistics(void) {
@@ -224,7 +310,7 @@ static void statistics(void) {
   text[length] = 0;
   fclose(f);
   assert(!strncmp(text, "{\"ysum\":[0,", 11));
-  assert(strstr(text, "],\"ycnt\":[") && strstr(text, "],\"xtx\":[3,") &&
+  assert(strstr(text, "],\"ycnt\":[") && strstr(text, "],\"xtx_upper\":[3,") &&
          strstr(text, "],\"xty\":[") && strstr(text, "],\"ysq\":[") &&
          strstr(text, "],\"csq\":[") && strstr(text, "],\"second_moments\":true}"));
   // Every value round-trips through its %.17g text.
@@ -243,6 +329,9 @@ static bool collect(const struct refit_scene *scene, void *unused) {
   (void)unused;
   emitted[emitted_count][0] = scene->first_frame;
   emitted[emitted_count][1] = scene->frames;
+  assert(scene->first_pts == 1000 + 42 * scene->first_frame &&
+         scene->end_pts == 1000 + 42 * (scene->first_frame + scene->frames) &&
+         scene->fit.ycnt[0] == (double)scene->frames);
   emitted_count++;
   return true;
 }
@@ -256,6 +345,8 @@ static void pool(const int64_t *lengths, int n, const int64_t (*want)[2], int wa
     memset(&s, 0, sizeof(s));
     s.first_frame = at;
     s.frames = lengths[i];
+    s.first_pts = 1000 + 42 * at;
+    s.end_pts = 1000 + 42 * (at + lengths[i]);
     s.fit.ycnt[0] = (double)lengths[i];
     at += lengths[i];
     assert(refit_pool_close(&p, &s, collect, NULL));
@@ -266,17 +357,22 @@ static void pool(const int64_t *lengths, int n, const int64_t (*want)[2], int wa
     assert(emitted[i][0] == want[i][0] && emitted[i][1] == want[i][1]);
 }
 static void scene_pooling(void) {
+  // One scene; a short first scene pools forward; a short last one back.
   pool((const int64_t[]){30}, 1, (const int64_t[][2]){{0, 30}}, 1);
-  pool((const int64_t[]){10, 30, 5, 40, 3}, 5, (const int64_t[][2]){{0, 45}, {45, 43}}, 2);
-  pool((const int64_t[]){5, 5, 5}, 3, (const int64_t[][2]){{0, 15}}, 1);
+  pool((const int64_t[]){10, 30}, 2, (const int64_t[][2]){{0, 40}}, 1);
   pool((const int64_t[]){30, 10}, 2, (const int64_t[][2]){{0, 40}}, 1);
+  pool((const int64_t[]){10, 30, 5, 40, 3}, 5, (const int64_t[][2]){{0, 45}, {45, 43}}, 2);
+  // Short scenes do not chain: a run of them becomes a group at 24 frames.
+  pool((const int64_t[]){48, 10, 10, 10, 48}, 5,
+       (const int64_t[][2]){{0, 48}, {48, 30}, {78, 48}}, 3);
+  pool((const int64_t[]){48, 10, 10, 48}, 4, (const int64_t[][2]){{0, 68}, {68, 48}}, 2);
   pool((const int64_t[]){24, 23, 24}, 3, (const int64_t[][2]){{0, 47}, {47, 24}}, 2);
-  pool((const int64_t[]){48, 48, 1, 48}, 4,
-       (const int64_t[][2]){{0, 48}, {48, 49}, {97, 48}}, 3);
+  pool((const int64_t[]){5, 5, 5}, 3, (const int64_t[][2]){{0, 15}}, 1);
+  // Every frame flagged: 24-frame groups, the remainder joins the last.
   int64_t ones[100];
   for (int i = 0; i < 100; i++)
     ones[i] = 1;
-  pool(ones, 100, (const int64_t[][2]){{0, 100}}, 1);
+  pool(ones, 100, (const int64_t[][2]){{0, 24}, {24, 24}, {48, 24}, {72, 28}}, 4);
   int64_t lengths[] = {5, 1, 30, 24};
   assert(refit_median(lengths, 4) == 14.5);
   int64_t odd[] = {30, 1, 2};
@@ -288,6 +384,7 @@ int main(int argc, char **argv) {
   general_formula_reduces_to_the_frozen_composition();
   general_residual_is_exact();
   pieces_and_pivot_clamps();
+  mmr_orders_pieces_and_polynomial_chroma();
   nonidentity_p7_mapping(argc == 2 ? argv[1] : NULL);
   lattice_and_pairing();
   statistics();

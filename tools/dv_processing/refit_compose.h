@@ -8,6 +8,14 @@
 // pooling of FEL-RPU-REFIT-BUILD.md §3.1. Arithmetic only: FFmpeg's public
 // Dolby Vision metadata struct is the one dependency, and no GPU. The decoding
 // side is refit_mode.h; test_refit_compose.c checks this file.
+//
+// Statistics must not depend on the node's compiler or architecture: every
+// expression here is binary64 with no fused multiply-add. GCC does not
+// implement the STDC pragma (and ISO C mode already disables contraction);
+// every build of this header also passes -ffp-contract=off.
+#if defined(__clang__)
+#pragma STDC FP_CONTRACT OFF
+#endif
 #include <libavutil/dovi_meta.h>
 #include <math.h>
 #include <stdbool.h>
@@ -112,10 +120,24 @@ static inline int refit_piece(const struct refit_curve *c, unsigned code) {
   return piece;
 }
 
-// The RPU's mapping of one base-layer pixel, before the residual: each
-// component's code clamped to its own pivot range (also where another
-// component's MMR reads it), x = code / 2^10, the piece chosen by code against
-// the signalled pivots, and the result clamped to [0, 1].
+// The RPU's mapping of one base-layer pixel, before the residual, as the
+// helper's GPU renderer (libplacebo v7.387.0, the master reconstruction)
+// computes it:
+// - input x = code / 2^10. fel_renderer.h samples each plane as UNORM16 of
+//   code << 6 (sample_depth 16, colour depth 10, bit_shift 6), and
+//   pl_shader_decode_color rescales it by (2^16 - 1) / 2^6 / 2^10
+//   (src/shaders/colorspace.c:349-352, pl_color_repr_code_scale in
+//   src/colorspace.c:228-245);
+// - pivots are codes / 2^10 too (pl_map_dovi_metadata,
+//   src/include/libplacebo/utils/libav_internal.h:985), so choosing the piece
+//   by `s >= pivot` (colorspace.c:274) is choosing it by code >= pivot;
+// - every component is clamped to its own pivot range before any piece is
+//   evaluated, so an MMR reads the other components clamped to theirs
+//   (`sig = clamp(color.rgb, pivot_lo, pivot_hi)`, colorspace.c:178);
+// - each mapped component is clamped to [0, 1] before the residual is added
+//   (colorspace.c:326).
+// The renderer evaluates in binary32 on the GPU; this is the same expression
+// in binary64. FFmpeg parses the mapping but has no reshaping of its own.
 static inline void refit_map(const struct refit_mapping *m, const uint16_t base[3],
                              double out[3]) {
   unsigned code[3];
@@ -162,8 +184,12 @@ static inline double refit_residual(const struct refit_nlq *n, uint16_t el) {
 }
 
 // The 12-bit FEL composition: clip(floor((mapped + r)·4096 + ½), 0, 4095).
-// vdr_in_max is not applied: the admission (nlq_clip_is_nonbinding) only
-// accepts limits that cannot bind for any EL code.
+// The renderer adds clamp(r, ±hdr_in_max) to the clamped mapped value and
+// clamps the sum to [0, 1] (sh_dovi_compose_nlq, colorspace.c:147-150, with
+// the EL read as the integer codes it holds); rounding that at 2^12 is this
+// expression. hdr_in_max is not applied here: the admission
+// (nlq_clip_is_nonbinding) only accepts limits that cannot bind for any EL
+// code.
 static inline void refit_compose(const struct refit_mapping *m, const uint16_t base[3],
                                  const uint16_t el[3], uint16_t out[3]) {
   double mapped[3];
@@ -175,28 +201,22 @@ static inline void refit_compose(const struct refit_mapping *m, const uint16_t b
 }
 
 // Sample positions, exactly as the frozen four_model_audit.sample_codes pairs
-// them for a half-resolution EL: BL chroma at ((x+1)/2, (y+1)/2), EL luma at
+// them for a half-resolution EL (the only kind it covers, and the only kind
+// the caller admits): BL chroma at ((x+1)/2, (y+1)/2), EL luma at
 // ((x+1)/2, y/2), EL chroma at ((x+2)/4, (y+1)/4), each clamped to its plane.
-// A full-resolution EL takes BL's positions (no frozen reference covers it).
 struct refit_sites {
   int bl_chroma[2], el_luma[2], el_chroma[2];
 };
 static inline int refit_min(int a, int b) { return a < b ? a : b; }
-static inline struct refit_sites refit_pair(int x, int y, int w, int h, int ew, int eh) {
+static inline struct refit_sites refit_pair(int x, int y, int w, int h) {
+  int ew = w / 2, eh = h / 2;
   struct refit_sites s;
   s.bl_chroma[0] = refit_min((x + 1) / 2, w / 2 - 1);
   s.bl_chroma[1] = refit_min((y + 1) / 2, h / 2 - 1);
-  if (ew == w && eh == h) {
-    s.el_luma[0] = x;
-    s.el_luma[1] = y;
-    s.el_chroma[0] = s.bl_chroma[0];
-    s.el_chroma[1] = s.bl_chroma[1];
-  } else {
-    s.el_luma[0] = refit_min((x + 1) / 2, ew - 1);
-    s.el_luma[1] = refit_min(y / 2, eh - 1);
-    s.el_chroma[0] = refit_min((x + 2) / 4, ew / 2 - 1);
-    s.el_chroma[1] = refit_min((y + 1) / 4, eh / 2 - 1);
-  }
+  s.el_luma[0] = refit_min((x + 1) / 2, ew - 1);
+  s.el_luma[1] = refit_min(y / 2, eh - 1);
+  s.el_chroma[0] = refit_min((x + 2) / 4, ew / 2 - 1);
+  s.el_chroma[1] = refit_min((y + 1) / 4, eh / 2 - 1);
   return s;
 }
 
@@ -206,9 +226,9 @@ static inline int refit_axis_count(int start, int end, int phase) {
   return first >= end ? 0 : (end - 1 - first) / REFIT_STRIDE + 1;
 }
 
-// dv_refit::RefitStats, field for field (its serde layout): per luma code
-// the sum, count and sum of squares of composed luma; the chroma MMR's
-// normal equations XᵀX (22×22 row-major) and XᵀY (22×2, Cb and Cr
+// dv_refit::RefitStats: per luma code the sum, count and sum of squares of
+// composed luma; the chroma MMR's normal equations XᵀX (22×22 row-major, held
+// whole here, written as its upper triangle) and XᵀY (22×2, Cb and Cr
 // interleaved) on base codes / 1023 and composed / 4095; Σ(composed/4095)²
 // per chroma channel.
 struct refit_stats {
@@ -284,62 +304,102 @@ static inline bool refit_json_array(FILE *f, const char *name, const double *v, 
   }
   return fputc(']', f) != EOF;
 }
+#define REFIT_UPPER (REFIT_TERMS * (REFIT_TERMS + 1) / 2)
+// RefitStats' serde layout: xtx_upper is XᵀX's upper triangle, row by row
+// (row i from column i), 253 values; plurx-core mirrors it.
 static inline bool refit_stats_json(FILE *f, const struct refit_stats *s) {
+  double upper[REFIT_UPPER];
+  int at = 0;
+  for (int i = 0; i < REFIT_TERMS; i++)
+    for (int j = i; j < REFIT_TERMS; j++)
+      upper[at++] = s->xtx[i * REFIT_TERMS + j];
   return fputc('{', f) != EOF && refit_json_array(f, "ysum", s->ysum, REFIT_CODES) &&
          fputc(',', f) != EOF && refit_json_array(f, "ycnt", s->ycnt, REFIT_CODES) &&
-         fputc(',', f) != EOF &&
-         refit_json_array(f, "xtx", s->xtx, REFIT_TERMS * REFIT_TERMS) &&
+         fputc(',', f) != EOF && refit_json_array(f, "xtx_upper", upper, REFIT_UPPER) &&
          fputc(',', f) != EOF && refit_json_array(f, "xty", s->xty, REFIT_TERMS * 2) &&
          fputc(',', f) != EOF && refit_json_array(f, "ysq", s->ysq, REFIT_CODES) &&
          fputc(',', f) != EOF && refit_json_array(f, "csq", s->csq, 2) &&
          fputs(",\"second_moments\":true}", f) != EOF;
 }
 
-// A scene: a run of frames in presentation order, and its statistics on
-// both lattices.
+// A scene: a run of frames in presentation order, [first_pts, end_pts) in
+// source ticks (end_pts is its last frame's pts plus duration), and its
+// statistics on both lattices.
 struct refit_scene {
-  int64_t first_frame, frames, first_pts;
+  int64_t first_frame, frames, first_pts, end_pts;
   struct refit_stats fit, held_out;
 };
-static inline void refit_scene_absorb(struct refit_scene *into, const struct refit_scene *from) {
-  into->frames += from->frames;
-  refit_stats_merge(&into->fit, &from->fit);
-  refit_stats_merge(&into->held_out, &from->held_out);
+// Appends `later`, which starts where `into` ends.
+static inline void refit_scene_absorb(struct refit_scene *into, const struct refit_scene *later) {
+  into->frames += later->frames;
+  into->end_pts = later->end_pts;
+  refit_stats_merge(&into->fit, &later->fit);
+  refit_stats_merge(&into->held_out, &later->held_out);
 }
 
-// Scene pooling, online. Each RPU scene (a run starting at a
-// scene_refresh_flag) closes into refit_pool_close: one shorter than 24
-// frames joins the scene before it; a short first scene instead takes the
-// scene after it. A pooled scene is emitted once the next long scene
-// starts, so at most two scenes are ever held.
+// Scene pooling, online (FEL-RPU-REFIT-BUILD.md §3.1). Each RPU scene (a run
+// starting at a scene_refresh_flag) closes into refit_pool_close:
+// - a scene of 24+ frames is a group of its own;
+// - consecutive shorter scenes collect in a pending run, which becomes a
+//   group of its own once it reaches 24 frames;
+// - a pending run still short when a long scene follows joins the group
+//   before it, or, at the very start of the range, the group after it;
+// - a pending run still short at the end joins the last group.
+// So groups are never shorter than 24 frames unless the whole range is, and
+// a title that flags every frame gets 24-frame groups, not one scene. A
+// group is emitted once the next one exists; at most three scenes are held.
 struct refit_pool {
-  struct refit_scene group;
-  bool have_group;
+  struct refit_scene group, pending;
+  bool have_group, have_pending;
   int64_t rpu_scenes, emitted;
 };
 typedef bool (*refit_emit_fn)(const struct refit_scene *scene, void *context);
 
+static inline bool refit_pool_start(struct refit_pool *p, const struct refit_scene *group,
+                                    refit_emit_fn emit, void *context) {
+  if (p->have_group) {
+    if (!emit(&p->group, context))
+      return false;
+    p->emitted++;
+  }
+  p->group = *group;
+  p->have_group = true;
+  return true;
+}
 static inline bool refit_pool_close(struct refit_pool *p, const struct refit_scene *scene,
                                     refit_emit_fn emit, void *context) {
   p->rpu_scenes++;
-  if (!p->have_group) {
-    p->group = *scene;
-    p->have_group = true;
-    return true;
+  if (scene->frames < REFIT_MIN_SCENE_FRAMES) {
+    if (p->have_pending) {
+      refit_scene_absorb(&p->pending, scene);
+    } else {
+      p->pending = *scene;
+      p->have_pending = true;
+    }
+    if (p->pending.frames < REFIT_MIN_SCENE_FRAMES)
+      return true;
+    p->have_pending = false;
+    return refit_pool_start(p, &p->pending, emit, context);
   }
-  bool short_scene = scene->frames < REFIT_MIN_SCENE_FRAMES;
-  bool short_first = !p->emitted && p->group.frames < REFIT_MIN_SCENE_FRAMES;
-  if (short_scene || short_first) {
-    refit_scene_absorb(&p->group, scene);
-    return true;
+  if (p->have_pending) {
+    p->have_pending = false;
+    if (p->have_group) {
+      refit_scene_absorb(&p->group, &p->pending);
+    } else {
+      refit_scene_absorb(&p->pending, scene);
+      return refit_pool_start(p, &p->pending, emit, context);
+    }
   }
-  if (!emit(&p->group, context))
-    return false;
-  p->emitted++;
-  p->group = *scene;
-  return true;
+  return refit_pool_start(p, scene, emit, context);
 }
 static inline bool refit_pool_finish(struct refit_pool *p, refit_emit_fn emit, void *context) {
+  if (p->have_pending) {
+    p->have_pending = false;
+    if (p->have_group)
+      refit_scene_absorb(&p->group, &p->pending);
+    else if (!refit_pool_start(p, &p->pending, emit, context))
+      return false;
+  }
   if (!p->have_group)
     return true;
   p->have_group = false;
