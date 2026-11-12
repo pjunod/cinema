@@ -197,7 +197,7 @@ fn a_qualified_retry_keeps_auto_original_and_manual_as_the_user_actually_selecte
         },
     ] {
         let mut asked = selection();
-        asked.quality = quality.clone();
+        asked.quality = quality;
         let pinned = super::super::super::preparation::qualified_upgrade_selection(&asked, 1080);
         match quality {
             QualitySelection::Auto { .. } => assert!(matches!(
