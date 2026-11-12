@@ -874,7 +874,7 @@ async fn a_previous_processs_queued_coordinators_are_retired_and_stay_coordinabl
     let retire = || async {
         fixture
             .store
-            .retire_stranded_analysis_coordination(NODE, boot, NOW + 400)
+            .retire_stranded_analysis_coordination(NODE, boot, NOW + 400, &[])
             .await
             .expect("retire")
     };
@@ -916,7 +916,7 @@ async fn a_previous_processs_queued_coordinators_are_retired_and_stay_coordinabl
     );
     assert!(fixture
         .store
-        .retire_stranded_analysis_coordination("bad node", boot, NOW)
+        .retire_stranded_analysis_coordination("bad node", boot, NOW, &[])
         .await
         .is_err());
 
@@ -1169,13 +1169,13 @@ async fn the_last_member_holding_a_readable_heads_bytes_is_known_and_removed_nod
     );
 }
 
-/// Covers the SQLite backend of the durable-demand listing: only this
-/// node's queued coordination requests created before the boot mark under
-/// the given id prefix are returned, each with the exact source its role
-/// coordinates. A claimed request, another node's, a later one and one
-/// under another id are not.
+/// Covers the SQLite backend of durable demand: the coordination requests a
+/// previous process left under one id prefix are listed (queued for this
+/// node or running under it, not another node's, a later one or another
+/// id), the ones taken up are kept by the stranded retirement, and a
+/// dropped one is retired by id.
 #[tokio::test]
-async fn a_restarted_worker_lists_the_queued_coordinations_of_one_id_prefix() {
+async fn a_restarted_worker_lists_what_its_predecessor_left_and_keeps_what_it_takes_up() {
     let fixture = fixture(true).await;
     let boot = NOW + 200;
     let asked = queued_as(
@@ -1205,7 +1205,7 @@ async fn a_restarted_worker_lists_the_queued_coordinations_of_one_id_prefix() {
     .await;
     let listed = fixture
         .store
-        .queued_analysis_coordination_with_prefix(NODE, boot, "local-play.")
+        .predecessor_analysis_coordination_with_prefix(NODE, boot, "local-play.")
         .await
         .expect("listing");
     assert_eq!(listed.len(), 1, "{listed:?}");
@@ -1214,21 +1214,95 @@ async fn a_restarted_worker_lists_the_queued_coordinations_of_one_id_prefix() {
     expected.requested_generation = "d".repeat(64);
     assert_eq!(listed[0].source, expected);
 
-    // Retired with the rest, it is no longer listed.
+    // A claim the dead predecessor held is listed too: nothing holds it.
+    let held = queued_as(
+        &fixture.store,
+        "local-play.u7.playback-9.aa00",
+        '8',
+        NODE,
+        NOW + 100,
+    )
+    .await;
+    let mut claimed = source();
+    claimed.requested_generation = "8".repeat(64);
     fixture
         .store
-        .retire_stranded_analysis_coordination(NODE, boot, NOW + 400)
+        .claim_analysis_coordination(&held, claimed, NODE, 0, NOW + 150, NOW + 600_000)
         .await
-        .expect("retire");
-    assert!(fixture
+        .expect("claim")
+        .expect("the predecessor's claim");
+    let mut both = fixture
         .store
-        .queued_analysis_coordination_with_prefix(NODE, boot, "local-play.")
+        .predecessor_analysis_coordination_with_prefix(NODE, boot, "local-play.")
         .await
         .expect("listing")
-        .is_empty());
+        .into_iter()
+        .map(|row| row.request_id)
+        .collect::<Vec<_>>();
+    both.sort();
+    let mut expected_ids = vec![asked.clone(), held.clone()];
+    expected_ids.sort();
+    assert_eq!(
+        both, expected_ids,
+        "queued for the node, or running under it"
+    );
+    let db = sql(&fixture);
+
+    // Taken up, it is kept by the stranded retirement; the rest go.
+    assert_eq!(
+        fixture
+            .store
+            .retire_stranded_analysis_coordination(
+                NODE,
+                boot,
+                NOW + 400,
+                std::slice::from_ref(&asked)
+            )
+            .await
+            .expect("retire"),
+        1,
+        "the other queued coordinator of this node"
+    );
+    let state: String = db
+        .query_row(
+            "SELECT state FROM analysis_requests WHERE request_id=?1",
+            [&asked],
+            |row| row.get(0),
+        )
+        .expect("kept request");
+    assert_eq!(state, "queued");
+
+    // Dropped by its worker, it is retired by id; only a queued one is.
     assert!(fixture
         .store
-        .queued_analysis_coordination_with_prefix(NODE, boot, "")
+        .retire_queued_analysis_coordination(&asked, NOW + 500)
+        .await
+        .expect("retire by id"));
+    assert!(!fixture
+        .store
+        .retire_queued_analysis_coordination(&asked, NOW + 501)
+        .await
+        .expect("retire by id again"));
+    fixture
+        .store
+        .retire_stranded_analysis_coordination(NODE, boot, NOW + 600, &[])
+        .await
+        .expect("retire");
+    let left = fixture
+        .store
+        .predecessor_analysis_coordination_with_prefix(NODE, boot, "local-play.")
+        .await
+        .expect("listing");
+    assert_eq!(
+        left.iter()
+            .map(|row| row.request_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![held.as_str()],
+        "the claimed one is never retired as queued"
+    );
+    assert!(fixture
+        .store
+        .predecessor_analysis_coordination_with_prefix(NODE, boot, "")
         .await
         .is_err());
 }
