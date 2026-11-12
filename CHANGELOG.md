@@ -10,6 +10,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Job retention no longer deletes a settled job whose source custody is still
+  charged. That job is the custody's only exact source binding, and a dead
+  owner's custody could not be released once it was gone. The job is kept
+  until the custody is released, then expires as usual (SQLite v129; a
+  shape-verified hiqlite extension).
 - On Android TV, switching a playing title to its Dolby Vision-enhanced
   version no longer freezes the picture and falls back. The prepared second
   player no longer uses tunneled playback, so it can't take the television's

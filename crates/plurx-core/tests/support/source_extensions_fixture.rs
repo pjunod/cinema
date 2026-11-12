@@ -550,10 +550,69 @@ pub(crate) fn within_fixture_savepoint(connection: &rusqlite::Connection, body: 
     }
 }
 
+/// The published trigger `name` from one migration's own statements.
+fn published_trigger(migration: &str, name: &str) -> String {
+    let mut statements = migration
+        .split("-- next statement")
+        .filter(|statement| statement.contains(&format!("CREATE TRIGGER IF NOT EXISTS {name}\n")));
+    let statement = statements
+        .next()
+        .expect("published trigger")
+        .trim()
+        .to_owned();
+    assert!(statements.next().is_none(), "one published {name}");
+    statement
+}
+
+/// Rewind v129 (retention keeps a charged custody's owner job) to v128: the
+/// exact marker is required; the v85 enqueue and v86 upkeep triggers return.
+fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture custody retention ordinal");
+    if version != 129 {
+        return;
+    }
+    let marker: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM background_custody_retention_schema WHERE singleton=1 AND version=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("custody retention marker");
+    assert_eq!(marker, 1, "custody retention requires its exact marker");
+    let plan = [
+        "DROP TABLE background_custody_retention_schema;".to_owned(),
+        "DROP TRIGGER background_job_enqueue_command;".to_owned(),
+        "DROP TRIGGER background_job_maintenance_command;".to_owned(),
+        format!(
+            "{};",
+            published_trigger(
+                include_str!("../../src/store/background_jobs_retention.sql"),
+                "background_job_enqueue_command"
+            )
+            .trim_end_matches(';')
+        ),
+        format!(
+            "{};",
+            published_trigger(
+                include_str!("../../src/store/background_jobs_receipt_pressure.sql"),
+                "background_job_maintenance_command"
+            )
+            .trim_end_matches(';')
+        ),
+        "PRAGMA user_version=128;".to_owned(),
+    ];
+    connection
+        .execute_batch(&plan.join("\n"))
+        .expect("published custody retention rewind");
+}
+
 /// Rewind an owned, empty v127/v128 coordination tail to published v126;
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
+    rewind_custody_retention_to_v128(connection);
     if let Some(plan) = coordination_tail_rewind_plan(connection) {
         connection
             .execute_batch(&plan)

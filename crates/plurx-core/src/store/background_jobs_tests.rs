@@ -1741,14 +1741,20 @@ fn receipt_pressure_literals_match_constants() {
         })
         .map(|(index, _)| index)
         .collect();
+    // v129 replaces it once more, adding only the custody clause (pinned in
+    // custody_retention's own test); nothing after it redefines it.
     assert_eq!(
         creators.len(),
-        3,
+        4,
         "another migration redefines the maintenance trigger"
     );
     assert!(std::ptr::eq(
         super::sqlite::MIGRATIONS[creators[2]],
         migration
+    ));
+    assert!(std::ptr::eq(
+        super::sqlite::MIGRATIONS[creators[3]],
+        super::custody_retention::SCHEMA
     ));
 }
 
@@ -2423,4 +2429,80 @@ async fn busy_scan_voter_keeps_its_local_turn_without_blocking_a_free_remote_dis
     local.kind = JobKind::LibraryScan;
     claimed(&store, local).await;
     Ok(())
+}
+
+#[tokio::test]
+async fn retention_keeps_a_job_that_still_owns_charged_source_custody() {
+    // 2026-11-12, nuc3: custody 4170fe8e outlived its dead owner, and
+    // retention then deleted the owner's settled job row. That row was the
+    // custody's only exact source binding, so the host census could no longer
+    // release it. A job is retained while any custody it owns is charged.
+    let store = SqliteStore::open_in_memory().expect("store");
+    let owner = enqueue(1_000);
+    let other = enqueue(1_000);
+    for job in [&owner, &other] {
+        store.enqueue_job(job.clone()).await.expect("enqueue");
+        store
+            .cancel_job(CancelJob {
+                job_id: job.id.clone(),
+                now_ms: 1_001,
+            })
+            .await
+            .expect("settle");
+    }
+    let custody = |sql: &'static str| {
+        QueueSql::queue_sql(
+            &store,
+            sql.into(),
+            serde_json::json!({"job": owner.id}).to_string(),
+            true,
+            true,
+        )
+    };
+    custody(
+        "INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,
+            owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms)
+         VALUES('4170fe8e-c89f-462e-a68e-6b8726958640','dead-owner','{}','[\"source_io\"]',
+            'job',json_extract($1,'$.job'),1,'active',1000,1000,2000)",
+    )
+    .await
+    .expect("charged custody");
+    // Eight days later both jobs are past the seven-day receipt window.
+    let later = 1_001 + 8 * 86_400_000;
+    let mut passes = 0;
+    while store.maintain_jobs(later + passes).await.expect("upkeep") {
+        passes += 1;
+        assert!(passes < 8, "upkeep converges");
+    }
+    assert!(
+        store
+            .background_job(&owner.id)
+            .await
+            .expect("read")
+            .is_some(),
+        "the custody owner's job keeps its source binding"
+    );
+    assert!(
+        store
+            .background_job(&other.id)
+            .await
+            .expect("read")
+            .is_none(),
+        "ordinary settled history still expires"
+    );
+    custody("DELETE FROM background_source_custody WHERE work_id=json_extract($1,'$.job')")
+        .await
+        .expect("release");
+    while store.maintain_jobs(later + passes).await.expect("upkeep") {
+        passes += 1;
+        assert!(passes < 16, "upkeep converges");
+    }
+    assert!(
+        store
+            .background_job(&owner.id)
+            .await
+            .expect("read")
+            .is_none(),
+        "a released owner's job expires like any other"
+    );
 }
