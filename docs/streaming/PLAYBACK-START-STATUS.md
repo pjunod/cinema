@@ -134,12 +134,26 @@ Decisions (Paul away):
 Still open: fleet acceptance of the items below and the limits listed under
 items 4 and 5.
 
-## Current batch — A1/B1 discrepancy quarantine (item 5)
+## Current batch — A1/B1 local playback demand (item 6, first step)
 
 Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
-agent on local branch `item5`, not pushed. Item 5 below is built; clippy
-`-D warnings` and fmt are clean, the inventory and formal pins are green. No
-unit test has been run: the tests run once in CI. A claude-fable-5-2
+agent on local branch `item6`, stacked on `item5`, not pushed. The first
+step of item 6 below is built; clippy `-D warnings` and fmt are clean, the
+inventory and formal pins are green. No unit test has been run.
+
+Decision (Paul away): the full unification is not one safe PR. Moving local
+rolling copy and indexed-VOD copy onto the growing engine replaces the local
+serving path and needs a local owner at four Source-bound points of the
+engine. This batch builds only what leaves every serving path untouched:
+the typed local authority and a row-less demand the Analysis worker answers
+with the same engine. The cost and the remainder are under item 6.
+
+## Previous batch — A1/B1 discrepancy quarantine (item 5, #1532)
+
+Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
+agent on branch `item5`, pushed as #1532 into the effort. Item 5 below is
+built; clippy `-D warnings` and fmt are clean, the inventory and formal pins
+are green. Its unit tests run once in CI. A claude-fable-5-2
 adversarial review found three majors and six minors, all addressed in item
 5 below.
 
@@ -330,11 +344,66 @@ Known limits:
   calling the eviction owner, and the hiqlite backend of the new store
   operations (generic statements) and of the enqueue changes.
 
-### 6. Local playback observations
+### 6. Local playback observations — first step built
 
-Local rolling copy and indexed-VOD copy become the same growing engine.
-`CopyObservationAuthority` gains a typed local demand variant that never
-reuses a Source grant.
+Built: local playback asks, and the one copy engine answers in the
+background. The local serving paths are not migrated.
+
+- `CopyObservationAuthority` has a `Local(LocalCopyAuthority)` variant. Only
+  `LocalCopyAuthority::of` makes one, from a `PlaybackViewerDemand` that
+  passes `require_local_authority`; a Sharing principal is refused, so it
+  never reuses a Source grant. It holds no assignment and no Source
+  interest, and grants no read.
+- A local viewer's copy start that finds no v3 index sends a row-less
+  `CopyIndexDemand` through the copy-analysis inbox (one stat and one
+  message; the start plans from the existing index order and waits on
+  nothing). It is keyed exactly as the reader looks its own head up.
+- The worker holds the demand as a source without rows. When the source
+  domain is idle it claims the coordinator and runs the copy engine itself:
+  the first Analysis generation is given no contract to check, reads the
+  whole title and establishes the set (`CopyObservationSet::from_analysis`),
+  then attestation, seal and publication are items 1-2 unchanged. A later
+  start of the title, on any node, plans from the published index.
+- A demand that meets a quarantined head adopts its repair generation, so
+  a local play of the title now starts the rebuild item 5 left waiting for
+  a Source observation.
+- A generation whose coordination request already ended (`failed`,
+  `cancelled`, `ready`) is dropped instead of being asked about on every
+  pass. This also applies to Source sets.
+
+Cost: the first local copy start of a title without a v3 index leads to one
+background whole-file read by the copy engine and, where no full-source
+receipt exists, one whole-file hash. Both are Analysis physical phases of a
+`fragment_index` request for that file (visible and cancellable where every
+Analysis request is), admitted only while the source domain is idle and
+paused under foreground pressure. The worker logs the user and playback
+that asked.
+
+Remaining for item 6, not started:
+
+- Local rolling copy and indexed-VOD copy still run their own producers
+  (`copy_pipe_args` to the rolling segmenter, and plan-verified VOD
+  generations). Neither runs the growing engine, so local playback commits
+  no ranges and contributes no rows: a locally played title is indexed by a
+  second read, not by the read that served it.
+- The growing engine is bound to the Source worker: `CopyRangeFiles::create`
+  takes a `SourceDispatchAssignment` and names its payload directory by the
+  Source incarnation, `spawn_source_generation` is owned through
+  `SourceRenditionOwners` and the Source gate, and the range is served
+  through the Source viewer's own playlist. A local owner needs its own
+  variant at each of those four points and a local serving attachment
+  (build contract step 4: growing attachment and A1-N admission for local
+  sessions) before any local path can be moved onto it.
+- `CopyObservationSet::observe` accepts a `Local` range, but nothing
+  produces one. When the engine runs for local playback, the range's
+  `CompletedCopyRange` carries `CopyObservationAuthority::Local` and the
+  row-less demand becomes redundant for that start.
+- A demand is in memory only: a restart forgets it and the next local start
+  of the title asks again. It is dropped on non-unix builds, which have no
+  copy engine.
+- Not unit tested: the VOD start emitting the demand, and the worker's
+  build of a demanded source end to end (the unseeded first generation runs
+  in `gap_fill_tests`; the claim and phases around it are items 1-2's).
 
 ### Acceptance for the next merge
 
