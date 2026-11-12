@@ -121,7 +121,12 @@ COPY licenses/ /usr/share/doc/plurx/licenses/
 # Keep both the daemon's explicit path and shell-invoked fixture generation on
 # jellyfin-ffmpeg 8. Debian bookworm's /usr/bin/ffmpeg remains the release
 # fallback, but must never answer an M5 CI job's bare `ffmpeg` invocation.
-RUN ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
+# A media base published before 2026-11-12 carries a DV helper bundle from
+# other sources than any checkout this image will test. Nothing here builds
+# one, so the stale directory goes: an absent bundle is ordinary, a refused
+# one is not.
+RUN rm -rf /usr/lib/plurx/dv-processing \
+    && ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
     && ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe \
     && apt-get -o Acquire::Retries=3 update \
     && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \

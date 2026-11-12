@@ -85,7 +85,13 @@ class DvHelperOwnershipTests(unittest.TestCase):
         capture = capture[capture.index("pub(crate) async fn installed_helper_identity()"):]
         self.assertIn("ToolSet::capture()", capture[:capture.index("\n}\n")])
         # The bundle is installed nowhere else, and the pinned bases stay untouched.
-        self.assertEqual(source.count("/usr/lib/plurx/dv-processing ") + source.count("/usr/lib/plurx/dv-processing\n"), 2)
+        self.assertEqual(source.count("/usr/lib/plurx/dv-processing\n"), 2)
+        # The CI image inherits the same base and installs no bundle: it must
+        # not keep the base's, which matches no checkout it will test.
+        ci = instructions(stage(source, "ci"))
+        self.assertRegex(next(line for line in ci if line.startswith("RUN ")),
+                         r"^RUN rm -rf /usr/lib/plurx/dv-processing\s+&& ")
+        self.assertFalse(any("dv-processing-helpers" in line for line in ci))
         for name in ("runtime-assets", "dv-processing-dependencies"):
             self.assertEqual(len(instructions(stage(source, name))), 1, name)
 
