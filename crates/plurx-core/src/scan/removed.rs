@@ -120,6 +120,16 @@ pub struct Removal {
     pub pruned_items: u64,
 }
 
+/// One absent path that had catalogue records.
+struct Target {
+    /// As the caller sent it.
+    path: String,
+    /// Every file recorded at it (or below it, for a folder).
+    files: Vec<(i64, PathBuf)>,
+    /// The item owning the first of them.
+    item_id: i64,
+}
+
 /// Remove the catalogue files recorded at (or, for a folder, under) each
 /// absent path, and the items that leaves with no files.
 pub async fn remove_absent(
@@ -129,8 +139,7 @@ pub async fn remove_absent(
 ) -> Result<Removal, StoreError> {
     let mut removal = Removal::default();
     let mut library_files: Option<Vec<(i64, PathBuf)>> = None;
-    // (report path, file ids with their paths, owning item of the first file)
-    let mut targets: Vec<(String, Vec<(i64, PathBuf)>, i64)> = Vec::new();
+    let mut targets: Vec<Target> = Vec::new();
     for entry in absent {
         let mut files: Vec<(i64, PathBuf)> = Vec::new();
         let mut item_id = None;
@@ -168,9 +177,11 @@ pub async fn remove_absent(
             }
         }
         match item_id {
-            Some(item_id) if !files.is_empty() => {
-                targets.push((entry.path.clone(), files, item_id))
-            }
+            Some(item_id) if !files.is_empty() => targets.push(Target {
+                path: entry.path.clone(),
+                files,
+                item_id,
+            }),
             _ => removal.reports.push(PlacedReport::Unknown {
                 path: entry.path.clone(),
             }),
@@ -193,7 +204,7 @@ pub async fn remove_absent(
         Ok(fingerprint) => {
             let mut ids: Vec<i64> = targets
                 .iter()
-                .flat_map(|(_, files, _)| files.iter().map(|(id, _)| *id))
+                .flat_map(|target| target.files.iter().map(|(id, _)| *id))
                 .collect();
             ids.sort_unstable();
             ids.dedup();
@@ -227,7 +238,12 @@ pub async fn remove_absent(
         }
     }
 
-    for (path, files, item_id) in targets {
+    for Target {
+        path,
+        files,
+        item_id,
+    } in targets
+    {
         let mut kept = false;
         for (_, file) in &files {
             if store
