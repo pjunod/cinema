@@ -287,6 +287,8 @@ jobs:
           name: rust-units-plan-${{ github.run_id }}
           path: target/rust-units
       - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        # A shard that published nothing is reported by the verdict itself.
+        continue-on-error: true
         with:
           pattern: rust-units-shard-${{ github.run_id }}-*
           path: target/rust-units/shards
@@ -294,7 +296,9 @@ jobs:
       # that did run are never repeated; the job still fails afterwards.
       - name: Prove every planned test ran once and write per-crate receipts
         id: verdict
-        run: python3 -m validation.rust_units verdict --receipts target/rust-units/shards
+        run: |
+          mkdir -p target/rust-units/shards
+          python3 -m validation.rust_units verdict --receipts target/rust-units/shards
       - name: Publish the plurx-compat-jellyfin receipt
         if: always() && steps.verdict.outputs.key_plurx_compat_jellyfin != ''
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -487,10 +491,15 @@ jobs:
           rm -- "$dir/nextest.tar.gz"
           "$dir/cargo-nextest" nextest --version | grep -F "cargo-nextest $NEXTEST_VERSION"
           echo "$dir" >> "$GITHUB_PATH"
+      # The tools run from their own directory: `python3 -m` puts the working
+      # directory first on the path, and the merge-base's validation package
+      # need not contain this module.
       - name: Run the failing tests at the merge-base and classify them
         run: |
-          mapfile -t filters < <(PYTHONPATH="$RUST_UNITS_TOOLS" python3 -m validation.rust_units \
+          mapfile -t filters < <(cd "$RUST_UNITS_TOOLS" && python3 -m validation.rust_units \
             baseline-filter --failures "$RUST_UNITS_TOOLS/failures.json")
+          report="${CARGO_TARGET_DIR:-$GITHUB_WORKSPACE/target}/nextest/ci/junit.xml"
+          rm -f -- "$report"
           args=()
           for expression in "${filters[@]}"; do args+=(-E "$expression"); done
           set +e
@@ -499,9 +508,9 @@ jobs:
             --color never --run-ignored all --test-threads 2 "${args[@]}"
           echo "merge-base nextest exited $?"
           set -e
-          junit="$(find "${CARGO_TARGET_DIR:-target}/nextest/ci" -name junit.xml -print -quit 2>/dev/null || true)"
-          PYTHONPATH="$RUST_UNITS_TOOLS" python3 -m validation.rust_units classify \
-            --failures "$RUST_UNITS_TOOLS/failures.json" --junit "${junit:-/nonexistent}"
+          cd "$RUST_UNITS_TOOLS"
+          python3 -m validation.rust_units classify \
+            --failures "$RUST_UNITS_TOOLS/failures.json" --junit "$report"
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         continue-on-error: true

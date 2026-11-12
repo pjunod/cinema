@@ -186,7 +186,8 @@ class ReceiptAuthenticationTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def forge(self, receipt=None, shard_log=None, publisher_log=None, run_commit=None):
+    def forge(self, receipt=None, shard_log=None, publisher_log=None, run_commit=None,
+              workflow="rust-units.yml", shard_job="shard"):
         name = ru.receipt_name("app", self.key)
         receipt = receipt or {
             "schema": 1, "producer": "validation.rust_units", "crate": "app", "key": self.key,
@@ -204,13 +205,13 @@ class ReceiptAuthenticationTests(unittest.TestCase):
         responses = {
             "/actions/artifacts": [{"id": 7, "name": name, "run_id": 41, "expired": False,
                                     "size_in_bytes": len(buffer.getvalue())}],
-            "/actions/runs/41": {"id": 41, "commit_sha": run_commit or self.commit},
+            "/actions/runs/41": {"id": 41, "commit_sha": run_commit or self.commit, "workflow_id": workflow},
             "/actions/runs/41/jobs": [
                 {"id": 501, "name": ru.JOB_VERDICT, "status": "success"},
                 {"id": 502, "name": ru.JOB_SHARD.format(index=1), "status": "success"}],
             "/actions/artifacts/7/zip": buffer.getvalue(),
-            "/actions/jobs/501/logs": publisher_log.encode(),
-            "/actions/jobs/502/logs": shard_log.encode(),
+            "/actions/jobs/501/logs": (self.task("verdict") + publisher_log).encode(),
+            "/actions/jobs/502/logs": (self.task(shard_job) + shard_log).encode(),
         }
 
         class Forge:
@@ -224,6 +225,11 @@ class ReceiptAuthenticationTests(unittest.TestCase):
                 return json.loads(self.bytes(path, query))
 
         return Forge()
+
+    @staticmethod
+    def task(job):
+        return (f"2026-11-12T10:00:00.0Z Runner 1f (version:v13.2.0) received task 77 of job {job}, "
+                "triggered by event: workflow_dispatch\n")
 
     def adopted(self, forge):
         authenticator = ru.Authenticator(forge, current_run=99, config=self.config,
@@ -258,6 +264,12 @@ class ReceiptAuthenticationTests(unittest.TestCase):
 
     def test_a_receipt_for_a_different_run_commit_is_not_adopted(self):
         self.assertEqual(self.adopted(self.forge(run_commit="f" * 40)), set())
+
+    def test_a_run_of_another_workflow_is_not_adopted(self):
+        self.assertEqual(self.adopted(self.forge(workflow="something-else.yml")), set())
+
+    def test_evidence_from_a_job_that_is_not_the_stage_shard_is_not_adopted(self):
+        self.assertEqual(self.adopted(self.forge(shard_job="impostor")), set())
 
     def test_a_complete_listing_lets_the_whole_crate_be_skipped(self):
         listing = {"count": 2, "sha256": ru.digest_lines(sorted(self.passes))}

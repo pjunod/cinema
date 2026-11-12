@@ -65,6 +65,11 @@ JOB_BASELINE = "Rust units: merge-base check of failures"
 ARTIFACT_RECEIPT = "rust-units-{crate}-{key}"
 ARTIFACT_SHARD = "rust-units-shard-{run}-{index}"
 ARTIFACT_ARCHIVE = "rust-units-archive-{run}"
+# Runs whose jobs may carry receipts, and the job ids (as the runner names them
+# in a log's first line) that may publish or evidence one.
+RECEIPT_WORKFLOWS = ("rust-units.yml", "main-fast-lane.yml")
+TASK_LINE = re.compile(r"received task \d+ of job (?:rust_units\.)?([A-Za-z0-9_-]+), "
+                       r"triggered by event: (workflow_dispatch|workflow_call)\b")
 CRATE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -571,7 +576,7 @@ def ensure_commit(commit, repository="."):
         import base64
         auth = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         subprocess.run(["git", "-C", repository, "-c", f"http.extraheader=AUTHORIZATION: basic {auth}",
-                        "fetch", "--quiet", "--no-tags", "--depth=1", "origin", commit],
+                        "fetch", "--quiet", "--no-tags", "origin", commit],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
     return present()
 
@@ -602,6 +607,7 @@ class Authenticator:
         self._keys = {}
         self._jobs = {}
         self._logs = {}
+        self._workflows = {}
 
     def key_at(self, commit, crate):
         if commit not in self._keys:
@@ -625,11 +631,17 @@ class Authenticator:
                                                   ).decode("utf-8", "replace")
         return self._logs[job_id]
 
-    def job(self, run, name, statuses):
+    def job(self, run, name, statuses, job_id):
+        """The one job of that name, terminal, and run as the stage's own job id."""
         found = [job for job in self.jobs(run) if job.get("name") == name]
         require(len(found) == 1, f"run {run} has {len(found)} jobs named {name!r}", NotAdopted)
         require(found[0].get("status") in statuses, f"{name!r} in run {run} is {found[0].get('status')}",
                 NotAdopted)
+        head = self.log(found[0]["id"])[:4096]
+        task = TASK_LINE.search(head)
+        require(task is not None and task.group(1) == job_id and (task.group(2) == "workflow_dispatch") ==
+                (self._workflows[run] == "rust-units.yml"),
+                f"{name!r} in run {run} was not the stage's {job_id} job", NotAdopted)
         return found[0]
 
     def authenticate(self, artifact, crate, key):
@@ -640,20 +652,25 @@ class Authenticator:
         require(run != self.current_run, "the current run is not history", NotAdopted)
         meta = self.forge.get(f"/actions/runs/{run}")
         require(meta.get("id") == run, "run identity mismatch", NotAdopted)
+        require(meta.get("workflow_id") in RECEIPT_WORKFLOWS, "run is not of the stage's workflows", NotAdopted)
+        self._workflows[run] = meta["workflow_id"]
         size = artifact.get("size_in_bytes")
         require(isinstance(size, int) and 0 < size <= MAX_RECEIPT_BYTES, "artifact size out of bounds", NotAdopted)
         receipt = unzip_receipt(self.forge.bytes(f"/actions/artifacts/{artifact['id']}/zip"))
         validate_receipt(receipt, crate, key)
         require(receipt["run"] == run and receipt["commit"] == meta.get("commit_sha"),
                 "receipt run/commit disagree with the forge", NotAdopted)
-        publisher = self.job(run, receipt.get("publisher"), {"success", "failure"})
+        require(receipt.get("publisher") == JOB_VERDICT and all(
+            re.fullmatch(r"Rust units shard [1-9][0-9]?", job) for job in receipt["evidence_jobs"]),
+            "receipt names jobs that cannot publish or evidence one", NotAdopted)
+        publisher = self.job(run, JOB_VERDICT, {"success", "failure"}, "verdict")
         require(self.log(publisher["id"]).count(f"Artifact {name} has been successfully uploaded!") >= 1,
                 "the publishing job's log does not show this upload", NotAdopted)
         require(self.key_at(receipt["commit"], crate) == key,
                 "key recomputed from the receipt's commit differs", NotAdopted)
         logged = {}
         for job_name in receipt["evidence_jobs"]:
-            job = self.job(run, job_name, {"success", "failure"})
+            job = self.job(run, job_name, {"success", "failure"}, "shard")
             logged.update(logged_outcomes(self.log(job["id"])))
         passed = {test for test in receipt["passed"] if logged.get(test) == "PASS"}
         failed = {test for test in receipt["failed"] if logged.get(test) == "FAIL"}
