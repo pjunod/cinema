@@ -258,3 +258,13 @@ fn an_unreadable_recovery_memory_lets_the_trial_run_but_never_grants_after_it() 
         Ok(Admission::Proven)
     );
 }
+
+#[test]
+fn a_processed_successor_begins_at_its_verified_window_unless_the_viewer_passed_it() {
+    use super::successor_start_ms;
+    // The trial verified the window at 18 s while the viewer reached 12 s:
+    // the successor begins at the produced window, not behind it.
+    assert_eq!(successor_start_ms(12_000, 18_000), 18_000);
+    // A viewer already past the window is never sent back to it.
+    assert_eq!(successor_start_ms(21_000, 18_000), 21_000);
+}

@@ -501,6 +501,12 @@ fn projected_processed_candidate(
         .map(|entry| entry.candidate.clone())
 }
 
+/// Where a processed upgrade's successor begins: the trial's verified
+/// window, or the viewer when the viewer has already passed it.
+fn successor_start_ms(viewer_ms: i64, verified_ms: i64) -> i64 {
+    viewer_ms.max(verified_ms)
+}
+
 /// [`run_upgrade`] with its trial supplied: production passes
 /// `prepare_processed_upgrade`, and tests pass a trial of their own, so the
 /// upgrade's decisions around the trial are exercised without a renderer.
@@ -620,20 +626,20 @@ where
         recovery_epoch: route.recovery_epoch.clone(),
     };
     // The trial verifies its first window where the viewer will be when it
-    // ends: at most its own budget past where the viewer is now, so the
-    // verified window is never behind the successor's start, and the
-    // successor's producer takes it when it reaches that segment.
+    // ends: at most its own budget past where the viewer is now. The
+    // successor begins at that window (see `successor_start_ms` below), so
+    // its producer starts from media the trial already produced.
     let trial_budget_ms =
         i64::try_from(crate::transcode::PROCESSED_UPGRADE_TRIAL_BUDGET.as_millis())
             .unwrap_or(i64::MAX);
-    let mut trial_request = intent.request.clone();
-    trial_request.start_seconds = bounded_film_ms(
+    let verified_ms = bounded_film_ms(
         viewer_film_time_ms(state, intent, run)
             .await
             .saturating_add(trial_budget_ms),
         source.duration_ms,
-    ) as f64
-        / 1_000.0;
+    );
+    let mut trial_request = intent.request.clone();
+    trial_request.start_seconds = verified_ms as f64 / 1_000.0;
     let superseded = pending.cancellation_token();
     let trial = tokio::select! {
         () = superseded.cancelled() => return "cancelled",
@@ -696,13 +702,23 @@ where
             return "admission_refused";
         }
     }
-    // Where the successor begins: where the viewer is now, as an ordinary
-    // prepared successor begins at its ask's accepted position (B1). The
-    // ordinary request a dispatch falls back to begins there too, or a
+    // Where the successor begins: at the window the trial verified, which
+    // is already produced, unless the viewer has passed it. A successor
+    // begun where the viewer is now leaves its producer to render, from the
+    // viewer's position, everything before that window, while the viewer
+    // and the client's rendezvous lead and runway move away from it; unless
+    // the render runs well above realtime it does not catch up within the
+    // client's overlap bound (Avatar on the Google TV: runway_unproven after
+    // 12 s). The clients hold the incumbent until it reaches the
+    // successor's own start, so beginning ahead of the viewer skips no film.
+    // The ordinary request a dispatch falls back to begins there too, or a
     // degraded successor would restart the film at the create's start.
-    let film_time_ms = bounded_film_ms(
-        viewer_film_time_ms(state, intent, run).await,
-        source.duration_ms,
+    let film_time_ms = successor_start_ms(
+        bounded_film_ms(
+            viewer_film_time_ms(state, intent, run).await,
+            source.duration_ms,
+        ),
+        verified_ms,
     );
     if let Some(ordinary) = processed
         .candidate_context
