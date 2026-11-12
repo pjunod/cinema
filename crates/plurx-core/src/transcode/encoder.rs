@@ -3383,14 +3383,19 @@ mod tests {
 
     #[test]
     fn vaapi_device_defaults_and_honors_env() {
-        // Clean env → documented default render node.
+        // Clean env → this host's first VA-API-capable node, else renderD128.
+        let default = vaapi_render_node(
+            std::path::Path::new("/dev/dri"),
+            std::path::Path::new("/sys/class/drm"),
+        )
+        .unwrap_or_else(|| "/dev/dri/renderD128".to_owned());
         std::env::remove_var("PLURX_VAAPI_DEVICE");
-        assert_eq!(vaapi_device(), "/dev/dri/renderD128");
+        assert_eq!(vaapi_device(), default);
         // Explicit override wins; empty is ignored (falls back to default).
         std::env::set_var("PLURX_VAAPI_DEVICE", "/dev/dri/renderD129");
         assert_eq!(vaapi_device(), "/dev/dri/renderD129");
         std::env::set_var("PLURX_VAAPI_DEVICE", "");
-        assert_eq!(vaapi_device(), "/dev/dri/renderD128");
+        assert_eq!(vaapi_device(), default);
         std::env::remove_var("PLURX_VAAPI_DEVICE");
     }
 }
