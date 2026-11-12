@@ -1993,10 +1993,13 @@ impl HiqliteAuthStore {
     pub async fn validation_duplicate_instance_id_transaction(&self) -> Result<(), StoreError> {
         let results = self
             .client()
-            .txn([(
-                "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3)",
-                params!(keys::INSTANCE_ID, "duplicate", self.now()?),
-            )])
+            .txn(
+                "validation_duplicate_instance_id_transaction",
+                [(
+                    "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3)",
+                    params!(keys::INSTANCE_ID, "duplicate", self.now()?),
+                )],
+            )
             .await?;
         results
             .into_iter()

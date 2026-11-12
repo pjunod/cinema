@@ -587,6 +587,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     time_store_operation_controlled(
         metrics,
         StoreOperationClass::LocalRead,
+        "validation_control_preserves_results_without_recording_any_outcome",
         async { Ok::<_, StoreError>(17) },
         |_| true,
         false,
@@ -596,6 +597,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     let error = time_store_operation_controlled(
         metrics,
         StoreOperationClass::AuthorityRead,
+        "validation_control_preserves_results_without_recording_any_outcome",
         async { Err::<(), _>(StoreError::Database("control error".to_owned())) },
         |_| true,
         false,
@@ -606,6 +608,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     let mut cancelled = Box::pin(time_store_operation_controlled(
         metrics,
         StoreOperationClass::Write,
+        "validation_control_preserves_results_without_recording_any_outcome",
         std::future::pending::<Result<(), StoreError>>(),
         |_| true,
         false,
@@ -620,6 +623,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     time_store_operation_controlled(
         metrics,
         StoreOperationClass::LocalRead,
+        "validation_control_preserves_results_without_recording_any_outcome",
         async { Ok::<_, StoreError>(17) },
         |_| true,
         true,
@@ -629,6 +633,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     let _ = time_store_operation_controlled(
         metrics,
         StoreOperationClass::AuthorityRead,
+        "validation_control_preserves_results_without_recording_any_outcome",
         async { Err::<(), _>(StoreError::Database("measured error".to_owned())) },
         |_| true,
         true,
@@ -637,6 +642,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     let mut cancelled = Box::pin(time_store_operation_controlled(
         metrics,
         StoreOperationClass::Write,
+        "validation_control_preserves_results_without_recording_any_outcome",
         std::future::pending::<Result<(), StoreError>>(),
         |_| true,
         true,
@@ -936,7 +942,7 @@ async fn takeover_authority_attribution_starts_on_poll_and_retains_cancelled_att
         store_metrics,
         "takeover_authority_attribution_starts_on_poll_and_retains_cancelled_attempts",
         scope.metrics(&metrics),
-        || std::future::pending::<Result<(), StoreError>>(),
+        std::future::pending::<Result<(), StoreError>>,
     );
     drop(unpolled);
     assert_eq!(metrics.started.load(Ordering::Relaxed), 0);
