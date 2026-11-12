@@ -83,6 +83,20 @@ class DvReconstructionSamplingTests(unittest.TestCase):
             self.assertNotIn("pl_tex_create", created)
             self.assertIn('"reconstruction-target-unsupported: linearly sampled renderable UNORM16 RGBA"',
                           created)
+        # The 10-bit export's picture is UNORM16 too: no float texture stands
+        # in for it, and the float texture exists only for the other exports.
+        for name, target in (("fel_renderer.h", "context.output_texture"),
+                             ("base_dv_renderer.h", "base_context.output_texture")):
+            source = (TOOLS / name).read_text()
+            assigned = [m.start() for m in re.finditer(re.escape(target) + r" = ", source)]
+            self.assertEqual(len(assigned), 2, name)
+            first = source[assigned[0]:assigned[1]]
+            self.assertRegex(first, re.escape(target) + r" = EXPORT_YUV10 \? dv_yuv10_source_texture\("
+                                    r"gpu, EXPORT_WIDTH, EXPORT_HEIGHT, false\) : NULL;")
+            self.assertIn(f"require(!EXPORT_YUV10 || {target} != NULL,", first)
+            self.assertIn('"export-target-unsupported: renderable UNORM16 RGBA"', first)
+            self.assertTrue(first.rstrip().endswith("if (!EXPORT_YUV10)"), name)
+            self.assertNotIn("if (!" + target + ")", source)
 
     def test_host_copied_base_planes_are_accepted_as_p010(self):
         base = (TOOLS / "base_dv_renderer.h").read_text()

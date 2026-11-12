@@ -426,12 +426,15 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
       require(context.textures[layer][c] != NULL, "persistent native plane texture");
     }
   }
+  // The 10-bit export reads its picture from UNORM16; a device without that
+  // format is refused, never handed a float texture instead.
   context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT, false) : NULL;
-  if (!context.output_texture)
+  require(!EXPORT_YUV10 || context.output_texture != NULL,
+          "export-target-unsupported: renderable UNORM16 RGBA");
+  if (!EXPORT_YUV10)
     context.output_texture = pl_tex_create(gpu,
         pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = format,
-                      .renderable = true, .host_readable = true,
-                      .sampleable = EXPORT_YUV10));
+                      .renderable = true, .host_readable = true));
   require(context.output_texture != NULL, "persistent export float texture");
   require(!EXPORT_YUV10 || dv_yuv10_init(log, gpu, EXPORT_WIDTH, EXPORT_HEIGHT),
           "GPU yuv420p10 export planes");

@@ -99,12 +99,15 @@ static void base_gpu_init(int width, int height) {
                            (EXPORT_YUV10 ? PL_FMT_CAP_SAMPLEABLE : 0));
   require(base_context.renderer && fmt && fmt->texel_size == 16,
           "base renderer/output format");
+  // The 10-bit export reads its picture from UNORM16; a device without that
+  // format is refused, never handed a float texture instead.
   base_context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT, false) : NULL;
-  if (!base_context.output_texture)
+  require(!EXPORT_YUV10 || base_context.output_texture != NULL,
+          "export-target-unsupported: renderable UNORM16 RGBA");
+  if (!EXPORT_YUV10)
     base_context.output_texture = pl_tex_create(gpu,
         pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = fmt,
-                      .renderable = true, .host_readable = true,
-                      .sampleable = EXPORT_YUV10));
+                      .renderable = true, .host_readable = true));
   require(!EXPORT_YUV10 || dv_yuv10_init(base_context.log, gpu, EXPORT_WIDTH, EXPORT_HEIGHT),
           "GPU yuv420p10 export planes");
   base_context.rgba = malloc(EXPORT_FLOAT_COUNT * sizeof(float));
