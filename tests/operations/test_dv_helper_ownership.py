@@ -61,7 +61,7 @@ class DvHelperOwnershipTests(unittest.TestCase):
         # A context copy: no --from, so the helper sources are this checkout's.
         self.assertIn("COPY tools/dv_processing /build-inputs/dv_processing", helpers)
         build = [line for line in helpers if line.startswith("RUN ")]
-        self.assertEqual(len(build), 1)
+        self.assertEqual(len(build), 2)
         self.assertIn("sh /build-inputs/dv_processing/build-bundle.sh /opt/dv-dependencies /opt/dv-bundle", build[0])
         self.assertIn("bundle-manifest.py /opt/dv-bundle/sources /opt/dv-bundle --verify", build[0])
         runtime = instructions(stage(source, "runtime"))
@@ -88,6 +88,32 @@ class DvHelperOwnershipTests(unittest.TestCase):
         self.assertEqual(source.count("/usr/lib/plurx/dv-processing ") + source.count("/usr/lib/plurx/dv-processing\n"), 2)
         for name in ("runtime-assets", "dv-processing-dependencies"):
             self.assertEqual(len(instructions(stage(source, name))), 1, name)
+
+    def test_application_build_runs_the_active_area_c_controls(self):
+        helpers = instructions(stage(DOCKERFILE.read_text(encoding="utf-8"), "dv-processing-helpers"))
+        control = [line for line in helpers if "test_dm_active_area" in line]
+        self.assertEqual(len(control), 1)
+        run = control[0]
+        self.assertTrue(run.startswith("RUN "))
+        self.assertGreater(helpers.index(run), helpers.index(
+            next(line for line in helpers if "build-bundle.sh /opt/dv-dependencies" in line)))
+        # Compiled from this context with warnings fatal, then executed: every
+        # step is joined by &&, so a failing case fails the stage.
+        self.assertIn("-Wall -Wextra -Werror", run)
+        self.assertIn("/build-inputs/dv_processing/controls/test_dm_active_area.c", run)
+        self.assertIn("-o /build-inputs/test_dm_active_area", run)
+        self.assertTrue(run.rstrip().endswith("/build-inputs/test_dm_active_area"))
+        self.assertNotIn("||", run)
+        self.assertNotIn(";", run)
+        source = (ROOT / "tools/dv_processing/controls/test_dm_active_area.c").read_text(encoding="utf-8")
+        wrapper = (ROOT / "tools/dv_processing/controls/test_dm_active_area.py").read_text(encoding="utf-8")
+        cases = re.findall(r"(?m)^static void (test_l5_\w+)\(void\)", source)
+        self.assertGreaterEqual(len(cases), 6)
+        for case in cases:
+            # Defined, called from main, and named by the Regression-Test wrapper.
+            self.assertIn(f"  RUN({case});", source)
+            self.assertIn(case, wrapper)
+        self.assertIn("test_l5_cm29_crop_domain_excludes_adversarial_bars", cases)
 
     def test_published_media_images_never_carry_a_helper_bundle(self):
         media = MEDIA_DOCKERFILE.read_text(encoding="utf-8")

@@ -77,6 +77,15 @@ RUN sh /build-inputs/dv_processing/dependency-inputs.sh > /build-inputs/applicat
            echo 'Publish new dependencies and pin them: docs/ci/MEDIA-RUNTIME.md.' >&2; exit 1; }; } \
     && sh /build-inputs/dv_processing/build-bundle.sh /opt/dv-dependencies /opt/dv-bundle \
     && python3 /opt/dv-bundle/sources/bundle-manifest.py /opt/dv-bundle/sources /opt/dv-bundle --verify
+# The display-management active-area controls (CM v2.9 and CM v4.0 L5) are C
+# against the same headers the helpers compile. Nothing else in CI has those
+# headers, so they run here: a failing control fails the image. CPU only.
+RUN placebo_pc=$(dirname "$(find /opt/dv-dependencies/placebo/lib -name libplacebo.pc -print)") \
+    && cc -std=c11 -O2 -Wall -Wextra -Werror -I/opt/dv-dependencies/include \
+        /build-inputs/dv_processing/controls/test_dm_active_area.c \
+        $(PKG_CONFIG_PATH="$placebo_pc" pkg-config --cflags --libs libplacebo) -lm \
+        -o /build-inputs/test_dm_active_area \
+    && LD_LIBRARY_PATH=/opt/dv-bundle/lib /build-inputs/test_dm_active_area
 
 # Published media dependencies are independent of application source.
 # A base published before 2026-11-12 still carries a DV helper bundle of its
