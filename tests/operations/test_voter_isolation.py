@@ -219,6 +219,10 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
     WORKFLOWS = (".github/workflows/ci.yml", ".github/workflows/effort-ci.yml",
                  ".github/workflows/main-fast-lane.yml")
     ROUTE = "[ci-nonvoter-heavy-amd64]"
+    # Jobs whose container the workflow bounds run on the two-carrier
+    # compile pool; host-mode and publishing jobs stay on the heavy host.
+    COMPILE_ROUTE = "[ci-nonvoter-compile-amd64]"
+    COMPILE_JOBS = frozenset({"rust_compile", "cluster_daemon"})
     CAPS = {"--memory": "20g", "--memory-swap": "20g", "--cpus": "4",
             "--cpuset-cpus": "0-3", "--pids-limit": "4096"}
     EFFECTIVE = {"memory.max": "21474836480", "memory.swap.max": "0",
@@ -277,6 +281,29 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                                     env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
             return result, marker.exists()
 
+    def test_every_compile_pool_job_runs_in_an_exactly_bounded_container(self):
+        # The pool spans two hosts, so its only resource bound is the job's own
+        # container; a host-mode job on this label would escape it.
+        found = set()
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            text = path.read_text()
+            for match in re.finditer(r"(?ms)^  ([A-Za-z0-9_-]+):\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)", text):
+                name, block = match.groups()
+                header = block.split("    steps:\n", 1)[0]
+                if "ci-nonvoter-compile-amd64" not in header:
+                    continue
+                found.add((path.name, name))
+                with self.subTest(workflow=path.name, job=name):
+                    self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", header), [self.COMPILE_ROUTE])
+                    self.assertIn("    container:\n", header)
+                    options = re.findall(r"(?m)^      options: (.+)$", header)
+                    self.assertEqual(len(options), 1)
+                    argv = shlex.split(options[0])
+                    self.assertEqual(dict(zip(argv[::2], argv[1::2])), self.CAPS)
+                    self.assertEqual(len(argv), len(self.CAPS) * 2)
+                    self.verifier(block)
+        self.assertEqual({name for _, name in found}, self.COMPILE_JOBS)
+
     def test_only_dedicated_nonvoter_jobs_declare_exact_limits_and_verify_before_tools(self):
         scripts = []
         for path, name, job in self.guarded_jobs():
@@ -285,7 +312,8 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                 if name in {"package_smoke", "image", "platform"}:
                     self.assertIn("runs_on: '[\"ci-nonvoter-heavy-amd64\"]'", header)
                 else:
-                    expected_route = "[incus, ci-nonvoter-heavy-amd64]" if name in {"deep-validation", "mutation"} else self.ROUTE
+                    expected_route = ("[incus, ci-nonvoter-heavy-amd64]" if name in {"deep-validation", "mutation"}
+                                      else self.COMPILE_ROUTE if name in self.COMPILE_JOBS else self.ROUTE)
                     self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", header), [expected_route])
                     if "    container:\n" in header:
                         options = re.findall(r"(?m)^      options: (.+)$", header)
@@ -311,6 +339,17 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertTrue(started)
 
+    def test_hybrid_host_v1_hierarchy_before_the_unified_line_is_ignored(self):
+        # lab5 mounts a v1 net_cls hierarchy (VPN split tunnelling), so a job
+        # container's /proc/self/cgroup lists it ahead of the unified line.
+        for path, name, job in self.guarded_jobs():
+            script = self.verifier(job, name in {"package_smoke", "image", "platform"})
+            for membership in ("1:net_cls:/\n0::/\n", "2:net_cls,net_prio:/x\n0::/\n1:name=systemd:/\n"):
+                with self.subTest(workflow=path, job=name, membership=membership):
+                    result, started = self.run_verifier(script, membership=membership)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(started)
+
     def test_ignored_yaml_unlimited_swap_cpu_pid_and_missing_limits_stop_before_tools(self):
         variants = [{**self.EFFECTIVE, name: value} for name, value in (
             ("memory.max", "max"), ("memory.max", "17179869184"),
@@ -333,7 +372,8 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                     result, started = self.run_verifier(script, missing=missing)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertFalse(started)
-            for membership in ("1:memory:/\n", "0::relative\n", "0::/../escape\n", "0::/./escape\n"):
+            for membership in ("1:memory:/\n", "1:net_cls:/\n", "0::/\n0::/\n", "0:memory:/\n",
+                               "0::relative\n", "0::/../escape\n", "0::/./escape\n"):
                 with self.subTest(workflow=path, job=name, membership=membership):
                     result, started = self.run_verifier(script, membership=membership)
                     self.assertNotEqual(result.returncode, 0)
@@ -394,7 +434,7 @@ class ForgejoRoleRoutingTests(unittest.TestCase):
     def test_explicit_role_only_worker_does_not_gain_generic_pool_eligibility(self):
         from validation import runner_fleet as fleet
         old = {"name": "old", "os": "Linux", "arch": "X64", "labels": ["lab"]}
-        roles = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-store", "incus"]
+        roles = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"]
         new = {"name": "dedicated", "os": "Linux", "arch": "X64",
                "labels": roles, "implicit_labels": False}
         rows = dict(fleet.rostered_runners({"runners": [old, new]}))
