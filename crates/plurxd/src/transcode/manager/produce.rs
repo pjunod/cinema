@@ -1044,6 +1044,18 @@ impl TranscodeManager {
         publication_fence: Option<PublicationFence>,
         pretranscode_fence: Option<PretranscodeFence>,
     ) -> Result<PretranscodeProduceOutcome, String> {
+        // This scope retains the operation registration until the future is
+        // destroyed. File Arc clones in detached collectors remain separately
+        // owned capabilities; the completion actor closes its last original.
+        let _source_operation = match (
+            crate::background_jobs::source_budget(),
+            bound_source.as_ref(),
+        ) {
+            (Some(budget), Some(source)) => {
+                budget.enroll_preparation(Arc::clone(&source.handle))?
+            }
+            _ => None,
+        };
         if cancelled.is_cancelled() {
             return Ok(PretranscodeProduceOutcome::Yielded("ownership_lost"));
         }
@@ -2913,45 +2925,55 @@ impl TranscodeManager {
                     yield_to_offline,
                     cancelled,
                     |input_url| {
-                        spawn_ffmpeg_at_with_env(
-                            macos_executable
-                                .as_ref()
-                                .map(|executable| executable.path.as_path())
-                                .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
-                            &crate::source_input::source_args(
-                                &args,
-                                &ffmpeg_file.path,
-                                &[3],
-                                input_url,
-                            ),
-                            crate::process_control::ChildWork::background(
-                                "pre-transcode cache producer",
-                            ),
-                            encoder.label(),
-                            hash,
-                            FfmpegProgressObserver::offline(Arc::clone(&progress), generation),
-                            &self.runtime_cache,
-                            {
-                                #[cfg(unix)]
-                                let descriptors = FfmpegDescriptors::from_raw_fds(
-                                    bound_source_fd,
-                                    Some(temp.raw_fd()),
-                                    subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
-                                    true,
-                                );
-                                #[cfg(windows)]
-                                let descriptors = windows_offline_descriptors(
-                                    bound_source.as_deref(),
-                                    &part_dir,
-                                    subtitle_handle,
-                                )?;
-                                descriptors
+                        #[cfg(unix)]
+                        let descriptors = FfmpegDescriptors::from_raw_fds(
+                            bound_source_fd,
+                            Some(temp.raw_fd()),
+                            subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
+                            true,
+                        );
+                        #[cfg(windows)]
+                        let descriptors = windows_offline_descriptors(
+                            bound_source.as_deref(),
+                            &part_dir,
+                            subtitle_handle,
+                        )?;
+                        let output_url = upload.as_ref().map(|sink| sink.base_url(0));
+                        crate::producer_spawn::brokered_cache_part(
+                            input_url,
+                            output_url.as_deref(),
+                            part_opts.subtitle_burn.is_some(),
+                            descriptors,
+                            |descriptors| {
+                                spawn_ffmpeg_at_with_env(
+                                    macos_executable
+                                        .as_ref()
+                                        .map(|executable| executable.path.as_path())
+                                        .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
+                                    &crate::source_input::source_args(
+                                        &args,
+                                        &ffmpeg_file.path,
+                                        &[3],
+                                        input_url,
+                                    ),
+                                    crate::process_control::ChildWork::background(
+                                        "pre-transcode cache producer",
+                                    ),
+                                    encoder.label(),
+                                    hash,
+                                    FfmpegProgressObserver::offline(
+                                        Arc::clone(&progress),
+                                        generation,
+                                    ),
+                                    &self.runtime_cache,
+                                    descriptors,
+                                    observation.clone(),
+                                    &macos_executable
+                                        .as_ref()
+                                        .map(|executable| executable.processing_child_env())
+                                        .unwrap_or_default(),
+                                )
                             },
-                            observation.clone(),
-                            &macos_executable
-                                .as_ref()
-                                .map(|executable| executable.processing_child_env())
-                                .unwrap_or_default(),
                         )
                     },
                 )

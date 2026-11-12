@@ -6,6 +6,11 @@ deployed · served only for a title whose own measurement admits it (§7);
 on lab6 neither measured title is admitted · physical Dolby Vision display
 acceptance open · **Written:** 2026-10-25 · **Updated:** 2026-11-08 (America/New_York)
 
+**Current follow-up:** the [GPU qualification and Playback Info repair](DV-GPU-QUALIFICATION-AND-PLAYBACK-INFO.md)
+adds Intel/NVIDIA-specific measurement, receipt-based serving checks and
+current-generation deferred reasons. The measurements below are historical
+AMD evidence; they do not qualify another vendor or a changed exact recipe.
+
 Companion to [DV_PROCESSING_TOOLS.md](DV_PROCESSING_TOOLS.md) (the helpers)
 and [the authoring notes](../../tools/dv_processing/AUTHORING.md) (the P8.1
 record). This is what made the route serve, what proves the picture is the
@@ -279,10 +284,12 @@ metadata there, like the title aggregate).
   also measured on the GPU …"; its children appear under Processes as `Dolby
   Vision FEL qualification render / encode / sample`, each stoppable. No new
   job type, thread or schedule.
-- **When.** For a Profile 7 FEL title, with HDR processing and FEL re-encode
-  on, on a node whose encoder is radeonsi VA-API with its Main10 graph
-  proved and whose renderer decodes on the GPU, when the title has no
-  verdict for this renderer, recipe and encoder.
+- **When.** For a Profile 7 FEL title with FEL re-encode enabled, when its
+  actual supported hardware encoder has no current source/backend/output
+  verdict. HDR10 processing is independent and may remain off. The current
+  vendor paths and decoder/resource limits are tracked in the
+  [GPU qualification repair](DV-GPU-QUALIFICATION-AND-PLAYBACK-INFO.md);
+  the measurements below remain the historical AMD controls.
 - **Admission.** The title job's own admission is extended
   (`extend_fragment_admission`) with a background GPU bundle: the renderer's
   debit plus `CONSUMER_THREADS` (3). It is a claim on that admission, so

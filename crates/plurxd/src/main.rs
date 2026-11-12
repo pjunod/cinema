@@ -614,6 +614,7 @@ fn main() -> anyhow::Result<()> {
         result.context("launching namespace-bound probe")?;
         anyhow::bail!("probe exec unexpectedly returned");
     }
+    crate::source_custody::note_process_start();
     daemon_main()
 }
 

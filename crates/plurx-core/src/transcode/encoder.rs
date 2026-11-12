@@ -1329,23 +1329,30 @@ impl VaapiHdrPolicy {
 pub const RECONSTRUCTED_P81_RECIPE: &str =
     "p81-vbr:source-budget-preserved:checked-peak-cpb-hevc-dv-envelope:bf=0:radeonsi-compression_level=0:v2";
 
-/// The route's VA-API encode of one sample window for the per-title FEL
+/// The route's actual completed encoder for one sample window of the per-title FEL
 /// qualification: the same Main10 contract arguments and route flags as
 /// [`super::vod_completed_reconstructed_pipe_args`] with
 /// [`super::CompletedReconstructedOutputPlan::with_reconstructed_profile81`],
 /// the level of the window's own raster and cadence, and the VOD window GOP.
 /// Input and output arguments are the caller's.
 pub fn reconstructed_p81_window_encode_args(
-    policy: VaapiHdrPolicy,
+    encoder: Encoder,
+    policy: Option<VaapiHdrPolicy>,
     bitrate_kbps: u32,
     width: u32,
     height: u32,
     rate: (u32, u32),
     frames: u32,
 ) -> Option<Vec<String>> {
-    let contract = CompletedReconstructedOutputContract::resolve(Encoder::Vaapi)?;
+    let contract = CompletedReconstructedOutputContract::resolve(encoder)?;
     let mut args = contract.encode_args(bitrate_kbps, true, Some(1));
-    args.extend(policy.reconstructed_profile81_flags().map(str::to_owned));
+    if encoder == Encoder::Vaapi {
+        args.extend(
+            policy
+                .into_iter()
+                .flat_map(|policy| policy.reconstructed_profile81_flags().map(str::to_owned)),
+        );
+    }
     let envelope = super::EnhancementRateEnvelope::resolve(
         bitrate_kbps,
         super::EnhancementRateProvenance::ContainerAverageVideoUpperBound,
@@ -1356,7 +1363,7 @@ pub fn reconstructed_p81_window_encode_args(
         Default::default(),
     )
     .ok()?;
-    envelope.apply_args(&mut args, Encoder::Vaapi);
+    envelope.apply_args(&mut args, encoder);
     let gop = frames.to_string();
     args.extend(
         [

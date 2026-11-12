@@ -26,6 +26,12 @@ pub async fn mediated<T>(work: impl Future<Output = T>) -> T {
     MEDIATED.scope(true, work).await
 }
 
+/// The synchronous spawn half of an audited mediated operation. Callers must
+/// withhold all original source descriptors and paths, as for [`mediated`].
+pub fn mediated_spawn<T>(spawn: impl FnOnce() -> T) -> T {
+    MEDIATED.sync_scope(true, spawn)
+}
+
 /// Descriptor handoff always disqualifies daemon-only proof, even if a caller
 /// also rewrites argv to an HTTP source URL. Call before installing inheritance.
 pub fn unmediated_descriptor() -> io::Result<()> {

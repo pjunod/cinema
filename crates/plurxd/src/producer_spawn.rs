@@ -177,6 +177,51 @@ pub(crate) struct Spawned {
     pub(crate) stderr: tokio::process::ChildStderr,
 }
 
+/// A cache part may retain daemon-only reader lifetime proof only when both
+/// original input and output use the existing loopback brokers. The caller
+/// has already rewritten the source argv and selected the upload URL; a raw
+/// subtitle (including an embedded-subtitle filter without a subtitle FD) or
+/// any unknown descriptor keeps the conservative handoff path.
+pub(crate) fn brokered_cache_part<T>(
+    input_url: Option<&str>,
+    output_url: Option<&str>,
+    subtitle_burn: bool,
+    descriptors: Descriptors,
+    spawn: impl FnOnce(Descriptors) -> T,
+) -> T {
+    #[cfg(unix)]
+    {
+        let loopback = |raw: &str| {
+            reqwest::Url::parse(raw).ok().is_some_and(|url| {
+                url.scheme() == "http"
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url
+                        .host_str()
+                        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                        .is_some_and(|host| host.is_loopback())
+            })
+        };
+        if !subtitle_burn
+            && input_url.is_some_and(loopback)
+            && output_url.is_some_and(loopback)
+            && descriptors
+                .inherited
+                .iter()
+                .all(|(_, target)| matches!(*target, 3 | 4))
+        {
+            // Neither capability is used after its argv was brokered. In
+            // particular, do not hand the original source FD to an HTTP child.
+            return plurx_core::process::source_lifetime::mediated_spawn(|| {
+                spawn(Descriptors::default())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (input_url, output_url, subtitle_burn);
+    spawn(descriptors)
+}
+
 pub(crate) fn spawn(
     program: &Path,
     args: &[String],

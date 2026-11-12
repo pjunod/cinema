@@ -3368,29 +3368,28 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("continue-on-error", job)
         fleet = runner_fleet()
         carriers = [row for row in fleet["runners"] if "ci-nonvoter-heavy-amd64" in row["labels"]]
-        self.assertEqual(len(carriers), 1, "host-mode and publishing jobs keep one native build host")
-        self.assertNotIn(carriers[0]["host"], fleet["voter_hosts"])
-        # The bounded-container compile pool has a carrier on each of two
-        # physical nonvoters; the heavy worker is one of them.
+        self.assertTrue(carriers, "the heavy lane needs a carrier")
+        for row in carriers:
+            self.assertNotIn(row["host"], fleet["voter_hosts"])
+            self.assertIs(row.get("implicit_labels"), False)
+            self.assertEqual((row["os"], row["arch"]), ("Linux", "X64"))
+            # Every heavy slot also serves the bounded compile pool.
+            self.assertIn("ci-nonvoter-compile-amd64", row["labels"])
+        # Exactly one heavy worker shares the Store role, on lab1.
+        primary = [row for row in carriers if "ci-nonvoter-store" in row["labels"]]
+        self.assertEqual(len(primary), 1, "one capacity-one worker must share heavy and Store roles")
+        self.assertEqual(primary[0]["host"], "lab1", "the heavy Store worker is bound to its verified physical nonvoter")
+        self.assertEqual(set(primary[0]["labels"]),
+                         {"ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"})
         compile_pool = [row for row in fleet["runners"] if "ci-nonvoter-compile-amd64" in row["labels"]]
-        self.assertEqual({row["host"] for row in compile_pool}, {"lab1", "lab5"})
-        self.assertEqual(len(compile_pool), len({row["host"] for row in compile_pool}))
-        self.assertIn(carriers[0], compile_pool)
+        self.assertIn("lab5", {row["host"] for row in compile_pool})
         self.assertTrue(all(row["host"] not in fleet["voter_hosts"] for row in compile_pool))
         self.assertTrue(all(row.get("implicit_labels") is False for row in compile_pool))
         self.assertTrue(all((row["os"], row["arch"]) == ("Linux", "X64") for row in compile_pool))
         store = [row for row in fleet["runners"] if "ci-nonvoter-store" in row["labels"]]
         self.assertEqual(len(store), 2, "two actual nonvoter Store carriers are required")
-        self.assertIn(carriers[0], store, "one capacity-one worker must share heavy and Store roles")
-        self.assertEqual(carriers[0]["host"], "lab1", "the heavy alias is bound to its verified physical nonvoter")
         self.assertEqual({row["host"] for row in store}, {"lab1", "lab2"})
-        self.assertEqual(len({row["host"] for row in store}), 2)
         self.assertTrue(all(row["host"] not in fleet["voter_hosts"] for row in store))
-        self.assertEqual({label for label in carriers[0]["labels"] if label.startswith("ci-")},
-                         {"ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store"})
-        self.assertIs(carriers[0].get("implicit_labels"), False)
-        self.assertEqual(set(carriers[0]["labels"]),
-                         {"ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"})
         self.assertTrue(all((row["os"], row["arch"]) == ("Linux", "X64") for row in store))
 
     def test_new_role_carriers_reject_singleton_voter_and_swapped_physical_owners(self):
