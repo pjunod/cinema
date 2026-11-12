@@ -1,12 +1,22 @@
-//! Gap filling end to end on the real copy engine: every observation here is
-//! one real ffmpeg generation run through `copyrange::fill_copy_gap` (head
-//! census, triple-output child, observed mux, normalizer, companion verifier,
-//! producer slot and reap) against a generated HEVC fixture title.
+//! Gap filling end to end on the real copy engine. Every observation here
+//! is an Analysis-owned generation run through `copyrange::fill_copy_gap`:
+//! its head census child and its primary triple-output child, the observed
+//! mux, normalizer, companion verifier, producer slot and reap, against a
+//! generated HEVC fixture title. Three fills and the test's own contract
+//! census make seven ffmpeg children.
 //!
-//! What is not real: the physical phase is an exact, well-formed
-//! `AnalysisPhysicalPhase` value that no store admitted, and each Input is the
-//! loopback bridge over the fixture's bytes with the test byte budget. The
-//! store's phase admission and byte service have their own store tests.
+//! What is not real:
+//! - The physical phase is an exact, well-formed `AnalysisPhysicalPhase`
+//!   value that no store admitted, and each Input is the loopback bridge over
+//!   the fixture's bytes with the test byte budget. The store's phase
+//!   admission and byte service have their own store tests.
+//! - The head is not a `CompletedCopyRange`. That message carries a
+//!   `SourceDispatchAssignment` and an `AnalysisSourceInterestAuthority`,
+//!   which only plurx-core's Source session store can construct (their fields
+//!   are crate-private by design), so building one here needs a whole shared
+//!   Source session. The head is instead an Analysis generation retired
+//!   early, merged through the same `merge` every observation ends in; the
+//!   Source-authority checks of `observe` are not exercised.
 use super::*;
 use crate::copy_normalization::CopyNormalizationContract;
 use crate::copyrange::{fill_copy_gap, run_source_census, CopyGapFill, CopyGenerationOwner};
@@ -114,20 +124,33 @@ fn set_for(
     .expect("an empty set of this source")
 }
 
-/// A head range a viewer played and a separately filled gap merge into one
-/// complete set whose rows are exactly a single whole-title observation's.
+/// An Analysis generation retired early (the head) and the separately filled
+/// gap it leaves merge into one complete set whose rows are exactly a single
+/// whole-title Analysis observation's.
 #[tokio::test]
-async fn a_played_head_and_a_filled_gap_merge_into_the_whole_title_observation() {
+async fn an_analysis_filled_head_and_gap_merge_into_the_whole_title_analysis_observation() {
     plurx_core::testfixtures::require_ffmpeg();
-    tokio::time::timeout(
-        Duration::from_secs(240),
-        head_and_gap_equal_the_whole_title(),
-    )
-    .await
-    .expect("three copy generations of a twelve second fixture finish");
+    let stop = CancellationToken::new();
+    let run = head_and_gap_equal_the_whole_title(stop.clone());
+    tokio::pin!(run);
+    match tokio::time::timeout(Duration::from_secs(240), &mut run).await {
+        Ok(result) => result.expect("the copy generations"),
+        Err(_) => {
+            // The stop token is every generation's loss token: the running
+            // fill retires its child and joins its pipe tasks, Input and
+            // reap before it returns, so no ffmpeg outlives the test.
+            stop.cancel();
+            let settled = run.await;
+            panic!("the copy generations did not finish in 240 s; cancelled, they settled with {settled:?}");
+        }
+    }
 }
 
-async fn head_and_gap_equal_the_whole_title() {
+fn failed(step: &'static str) -> impl Fn(crate::copyrange::CopyGapFillError) -> String {
+    move |error| format!("{step}: {error:?}")
+}
+
+async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(), String> {
     let path = plurx_core::testfixtures::source("clean-cra");
     let bytes = Arc::new(std::fs::read(&path).expect("fixture bytes"));
     let held = Arc::new(Mutex::new(Vec::new()));
@@ -159,13 +182,12 @@ async fn head_and_gap_equal_the_whole_title() {
         source: source.clone(),
         phase_sequence: 1,
     };
-    let stop = CancellationToken::new();
 
     // The init contract every observation of this source must share, from the
     // same head census and normalization a range's first generation runs.
     let mut open = opener(&bytes, &held);
     let census = run_source_census(
-        open().await.expect("census input"),
+        open().await?,
         object_version.clone(),
         &file,
         recipe.video,
@@ -176,7 +198,7 @@ async fn head_and_gap_equal_the_whole_title() {
         &stop,
     )
     .await
-    .expect("head census");
+    .map_err(|error| format!("head census: {error}"))?;
     let timescale = census
         .raw_canonical_init
         .video()
@@ -213,7 +235,7 @@ async fn head_and_gap_equal_the_whole_title() {
         opener(&bytes, &held),
     )
     .await
-    .expect("whole-title generation");
+    .map_err(failed("whole-title generation"))?;
     assert!(whole.boundaries.begins_title && whole.boundaries.eof);
     assert!(
         whole.rows.len() >= 3,
@@ -227,8 +249,9 @@ async fn head_and_gap_equal_the_whole_title() {
     assert!(title.is_complete());
     assert_eq!(title.init_contract_sha256(), init_contract);
 
-    // A playback-style head: from the title start, retired once a later row
-    // is verified, as a viewer who stopped watching leaves it.
+    // The head: an Analysis generation from the title start, retired once a
+    // later row is verified, which leaves the rows a viewer who stopped
+    // watching would have left.
     let head = fill_copy_gap(
         fill(RangeGap {
             start: None,
@@ -237,7 +260,7 @@ async fn head_and_gap_equal_the_whole_title() {
         opener(&bytes, &held),
     )
     .await
-    .expect("head generation");
+    .map_err(failed("head generation"))?;
     assert!(head.boundaries.begins_title && !head.boundaries.eof);
     assert!(
         head.rows.len() < whole.rows.len(),
@@ -246,10 +269,9 @@ async fn head_and_gap_equal_the_whole_title() {
         whole.rows.len()
     );
     let mut set = set_for(&source, &head, timescale);
-    set.merge(observed(&head, timescale))
-        .expect("played head rows");
+    set.merge(observed(&head, timescale)).expect("head rows");
     assert!(!set.is_complete());
-    let gap = set.first_gap().expect("the unplayed tail");
+    let gap = set.first_gap().expect("the unobserved tail");
     assert_eq!(
         gap,
         RangeGap {
@@ -269,7 +291,7 @@ async fn head_and_gap_equal_the_whole_title() {
         opener(&bytes, &held),
     )
     .await
-    .expect("gap-fill generation");
+    .map_err(failed("gap-fill generation"))?;
     assert!(filled.boundaries.eof && !filled.boundaries.begins_title);
     // Whatever the seek landed on before the gap is a row the head observed,
     // and it is the same row.
@@ -310,4 +332,5 @@ async fn head_and_gap_equal_the_whole_title() {
         Err(CopyObservationError::Coverage)
     ));
     assert_eq!(set.rows.rows(), whole.rows.as_slice());
+    Ok(())
 }
