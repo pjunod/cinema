@@ -31,10 +31,15 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build(source, root):
-    source_digest = hashlib.sha256()
+def source_identity(source):
+    """The renderer-source identity plurxd compiles in and requires of a bundle."""
+    digest = hashlib.sha256()
     for name in sorted(INPUTS):
-        source_digest.update(name.encode() + b"\0" + bytes.fromhex(sha(source / name)))
+        digest.update(name.encode() + b"\0" + bytes.fromhex(sha(source / name)))
+    return digest.hexdigest()
+
+
+def build(source, root):
     abi = json.loads((root / "sources/abi.json").read_text())
     if abi.get("libplacebo") != 374 or any(abi.get(name, 0) <= 0 for name in ("avcodec", "avformat", "avutil")):
         raise ValueError("unsupported installed helper ABI")
@@ -43,7 +48,7 @@ def build(source, root):
                   for name, filename in (("renderer", "segment_decode_render"), ("muxer", "mux_rgb"), ("author", "author_p81"), ("scanner", "scan_title"))},
         "libraries": [{"path": "lib/libplacebo.so.374", "sha256": sha(root / "lib/libplacebo.so.374")}],
         "parser_sha256": sha(root / "sources/libdovi.a"),
-        "source_sha256": source_digest.hexdigest(),
+        "source_sha256": source_identity(source),
         "environment": {"LD_LIBRARY_PATH": "lib"}}
     (root / "build-identity.json").write_text(json.dumps(manifest, indent=2) + "\n")
     verify(source, root)
@@ -58,10 +63,7 @@ def verify(source, root):
     assert all(type(manifest["abi"].get(name)) is int and manifest["abi"][name] > 0
                for name in ("avcodec", "avformat", "avutil"))
     assert manifest["environment"] == {"LD_LIBRARY_PATH": "lib"}, "leave Vulkan device discovery untouched"
-    digest = hashlib.sha256()
-    for name in sorted(INPUTS):
-        digest.update(name.encode() + b"\0" + bytes.fromhex(sha(source / name)))
-    assert digest.hexdigest() == manifest["source_sha256"]
+    assert source_identity(source) == manifest["source_sha256"]
     assert sha(root / "sources/libdovi.a") == manifest["parser_sha256"]
     for artifact in [*manifest["tools"].values(), *manifest["libraries"]]:
         target = (root / artifact["path"]).resolve()
@@ -73,7 +75,13 @@ def verify(source, root):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
-    parser.add_argument("root", type=Path)
+    parser.add_argument("root", type=Path, nargs="?")
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--identity", action="store_true", help="print the source identity of SOURCE and exit")
     args = parser.parse_args()
-    (verify if args.verify else build)(args.source, args.root)
+    if args.identity:
+        print(source_identity(args.source))
+    elif args.root is None:
+        parser.error("ROOT is required unless --identity is given")
+    else:
+        (verify if args.verify else build)(args.source, args.root)

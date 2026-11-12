@@ -20,7 +20,11 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.8.0**, build `196` — Playback Info shows the server's
+> Status: **v0.8.0**, build `197` — releases builds 195–196 through the
+> internal-testing channel: no app change; the channel's release guard needs a
+> version commit after the last Android source change.
+>
+> Build `196` — Playback Info shows the server's
 > real reason a Dolby Vision enhancement was skipped or is still qualifying.
 >
 > Build `195` — the HEVC decoder envelope is the one
