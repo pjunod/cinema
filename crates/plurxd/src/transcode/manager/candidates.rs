@@ -2354,77 +2354,117 @@ mod tests {
         }
     }
 
-    /// D3t pin of the settings the create chain reads after the snapshot
-    /// (what D3b folds into `QUALITY_PLANNING_KEYS`): `vod_settings`, the
-    /// typeless-playlist and takeover switches, the media-pool switch read by
-    /// `remote_placement_ready`, and the admission pair. Derived by reading
-    /// every `get_setting`/`get_settings` caller reachable from the create
-    /// (PLAYBACK-START-D3-RECORD.md section 6). The extension's key list must
-    /// cover every one that the globs do not, so D3b widens the planning list
-    /// without a second trigger change.
+    /// The store-contract test writes `PLAYBACK_PLANNING_KEYS`; it is only a
+    /// pin of this list if the two agree. D3b widens both together.
     #[test]
-    fn every_key_the_create_chain_reads_moves_the_playback_input_generation() {
-        use plurx_core::store::keys;
-        let chain = [
-            keys::VOD_PRESENTATION,
-            keys::VOD_WORKING_SET_BYTES,
-            keys::VOD_BLOCK_BUDGET_SECS,
-            keys::VOD_MATERIALIZE_BUDGET_SECS,
-            keys::CACHE_MAX_GB,
-            keys::VOD_BLOCKED_GET_CAP,
-            keys::PLAYBACK_SDR_MASTER_CODECS,
-            keys::VOD_INDEX_CLUSTER_CACHE,
-            keys::HEVC_UNVERIFIED_COPY,
-            keys::VOD_LIVE_RECOVERY,
-            keys::VOD_OUTPUT_PREPARATION,
-            keys::VOD_ROLLING_RETENTION,
-            keys::HLS_TYPELESS_SLIDING,
-            keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
-            keys::CLUSTER_MEDIA_POOL_ENABLED,
-            keys::MAX_HW_SESSIONS,
-            keys::SW_POOL_THREADS,
-            keys::HWACCEL,
-            keys::DV_CONVERT,
-            keys::DV_HDR_PROCESSING,
-            keys::DV_FEL_REENCODE,
-            keys::DV_DISPLAY_TARGET,
-            keys::CONTENT_AWARE_ENCODING,
-            keys::HLS_READRATE,
-            keys::HLS_BURST_SECS,
-            keys::HLS_AHEAD_MAX_SECS,
-            keys::HLS_AHEAD_MAX_BYTES,
-            keys::HLS_SCRATCH_MAX_BYTES,
-            keys::PLAYBACK_CONTROL_PROTOCOL_V1,
-            keys::PLAYBACK_DISPLAY_AWARE_AUTO,
-            keys::TRANSCODE_RATE_MODE,
-            keys::TRANSCODE_QUALITY,
-            keys::AUDIO_LANG,
-            keys::SUB_LANG,
-            keys::SUB_MODE,
-            keys::SUBTITLE_WINDOW_SECS,
-        ];
-        let uncovered = chain
-            .iter()
-            .filter(|key| {
-                !plurx_core::store::playback_input_keys::playback_input_key_moves_generation(key)
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            uncovered.is_empty(),
-            "create-chain keys outside every generation trigger: {uncovered:?}"
-        );
-        // The extension carries exactly the chain's keys that the globs miss.
-        let mut outside = chain
-            .iter()
-            .copied()
-            .filter(|key| !key.starts_with("playback.") && !key.starts_with("transcode."))
-            .collect::<Vec<_>>();
-        outside.sort_unstable();
-        outside.dedup();
+    fn the_store_contract_key_list_is_the_planning_list() {
+        let mut ours = super::QUALITY_PLANNING_KEYS.to_vec();
+        let mut theirs = plurx_core::store::playback_input_keys::PLAYBACK_PLANNING_KEYS.to_vec();
+        ours.sort_unstable();
+        theirs.sort_unstable();
         assert_eq!(
-            outside,
-            plurx_core::store::playback_input_keys::PLAYBACK_INPUT_EXTRA_KEYS
+            ours, theirs,
+            "update plurx_core::store::playback_input_keys::PLAYBACK_PLANNING_KEYS with the list"
         );
+    }
+
+    /// Setting reads in the create chain that are deliberately not bound, each
+    /// with the reason. A key a create-chain file reads that is neither bound
+    /// by a generation trigger nor listed here fails
+    /// `every_setting_the_create_chain_reads_is_bound_or_excluded`.
+    const UNBOUND_CHAIN_READS: [(&str, &str); 1] = [(
+        "subtitles.cluster_sources",
+        "the cluster subtitle consumer switch (`SubtitleSourceAccess::cluster_enabled`): read by cluster consumers after the answer, not by the create plan; the stored-source switch beside it is bound",
+    )];
+
+    /// `pub const NAME: &str = "value";` lines of the `keys` module, by name.
+    fn key_values() -> std::collections::BTreeMap<String, String> {
+        let source = include_str!("../../../../plurx-core/src/store/mod.rs");
+        let start = source.find("pub mod keys {").expect("keys module");
+        source[start..]
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("pub const ")?;
+                let (name, rest) = rest.split_once(": &str = \"")?;
+                let (value, _) = rest.split_once('"')?;
+                Some((name.to_owned(), value.to_owned()))
+            })
+            .collect()
+    }
+
+    /// The text of a file up to its test module.
+    fn production_text(source: &str) -> &str {
+        ["#[cfg(test)]\nmod ", "#[cfg(test)]\n#[path"]
+            .iter()
+            .filter_map(|marker| source.find(marker))
+            .min()
+            .map_or(source, |end| &source[..end])
+    }
+
+    /// D3t source scan: every setting key the create chain's files name
+    /// (`keys::NAME`) must move the generation (a glob or the extension) or be
+    /// on `UNBOUND_CHAIN_READS` with a reason. Replaces a hand-typed list: a
+    /// key read in these files and bound nowhere fails here, which is how
+    /// `subtitles.stored_sources` (read by the burn guard on both sides of a
+    /// start) was found missing.
+    #[test]
+    fn every_setting_the_create_chain_reads_is_bound_or_excluded() {
+        let files = [
+            ("transcode/manager/create.rs", include_str!("create.rs")),
+            ("transcode/manager/describe.rs", include_str!("describe.rs")),
+            ("transcode/manager/start.rs", include_str!("start.rs")),
+            (
+                "http/hls/create.rs",
+                include_str!("../../http/hls/create.rs"),
+            ),
+            ("media_pool.rs", include_str!("../../media_pool.rs")),
+            (
+                "subtitle_source.rs",
+                include_str!("../../subtitle_source.rs"),
+            ),
+            ("vodencode.rs", include_str!("../../vodencode.rs")),
+        ];
+        let values = key_values();
+        assert!(values.len() > 100, "the keys module was not parsed");
+        let mut unbound = Vec::new();
+        let mut seen = 0;
+        for (file, source) in files {
+            let text = production_text(source);
+            let mut rest = text;
+            while let Some(at) = rest.find("keys::") {
+                rest = &rest[at + "keys::".len()..];
+                let name = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                    .collect::<String>();
+                let Some(value) = values.get(&name) else {
+                    continue;
+                };
+                seen += 1;
+                let bound =
+                    plurx_core::store::playback_input_keys::playback_input_key_moves_generation(
+                        value,
+                    );
+                let excluded = UNBOUND_CHAIN_READS.iter().any(|(key, _)| key == value);
+                if !bound && !excluded {
+                    unbound.push(format!("{file}: keys::{name} = {value}"));
+                }
+            }
+        }
+        assert!(seen > 40, "the scan found only {seen} key reads");
+        unbound.sort();
+        unbound.dedup();
+        assert!(
+            unbound.is_empty(),
+            "settings the create chain reads that move no generation: bind them in playback_input_keys.sql (a new revision) or list them in UNBOUND_CHAIN_READS with a reason: {unbound:?}"
+        );
+        for (key, reason) in UNBOUND_CHAIN_READS {
+            assert!(!reason.is_empty());
+            assert!(
+                !plurx_core::store::playback_input_keys::playback_input_key_moves_generation(key),
+                "{key} is bound; drop it from the exclusion list"
+            );
+        }
     }
 }
 

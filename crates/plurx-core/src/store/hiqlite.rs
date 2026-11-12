@@ -4190,7 +4190,7 @@ impl HiqliteAuthStore {
             ));
         }
         // authority: the committed marker closes the extension; shape alone is not admission.
-        let marker=self.client().query_consistent_map::<CountRow,_>("playback_input_keys_shape", "SELECT count(*) AS count FROM playback_input_keys_schema WHERE singleton=1 AND version=1",params!()).await?;
+        let marker=self.client().query_consistent_map::<CountRow,_>("playback_input_keys_shape", "SELECT count(*) AS count FROM playback_input_keys_schema WHERE singleton=1 AND version>=1",params!()).await?;
         Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
     }
     async fn install_playback_input_keys_schema(
@@ -4206,7 +4206,8 @@ impl HiqliteAuthStore {
             }
             None => {}
         }
-        let mut statements=vec![("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name LIKE 'playback_input_keys_%') THEN 1 ELSE json('playback input keys extension raced') END".to_owned(),params!())];
+        let raced=format!("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ({})) THEN 1 ELSE json('playback input keys extension raced') END",super::playback_input_keys::object_name_list());
+        let mut statements = vec![(raced, params!())];
         statements.extend(
             super::playback_input_keys::SCHEMA
                 .split("-- next statement\n")
@@ -5187,6 +5188,15 @@ impl HiqliteAuthStore {
                 sql.push(format!("DROP TRIGGER {trigger}"));
             }
             sql.push("DROP TABLE playback_input_generation".to_owned());
+            // The D3t planning-key triggers sit over the generation table.
+            for object in [
+                "DROP TRIGGER IF EXISTS playback_input_keys_r1_insert",
+                "DROP TRIGGER IF EXISTS playback_input_keys_r1_update",
+                "DROP TRIGGER IF EXISTS playback_input_keys_r1_delete",
+                "DROP TABLE IF EXISTS playback_input_keys_schema",
+            ] {
+                sql.push(object.to_owned());
+            }
         }
         if main < 3 {
             sql.push("DROP TRIGGER dv_queue_admission_settings_ai".to_owned());

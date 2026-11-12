@@ -18981,6 +18981,10 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
             "DROP TRIGGER IF EXISTS playback_settings_insert;
              DROP TRIGGER IF EXISTS playback_settings_update;
              DROP TRIGGER IF EXISTS playback_settings_delete;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_insert;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_update;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_delete;
+             DROP TABLE IF EXISTS playback_input_keys_schema;
              DROP TABLE IF EXISTS playback_input_generation;
              ",
         )
@@ -21589,11 +21593,11 @@ async fn playback_planning_snapshot_retains_one_source_and_settings_revision() {
 }
 
 /// D3t: the planning binding covers every planning key, on both stores. A
-/// write (insert, update, delete) to each key outside the `playback.*` and
-/// `transcode.*` globs, which the original triggers cover, moves the
-/// generation; so do the glob keys, and a job key does not. Before the
-/// extension `cache.max_gb`, `vod.output_preparation` and `vod.rolling_retention`
-/// (and the two cluster switches) moved nothing.
+/// write (insert, update, delete) to every key the planning snapshot reads and
+/// to every key of the extension moves the generation, as does a
+/// representative of each glob family; a job key does not. Before the
+/// extension `cache.max_gb`, `vod.output_preparation`, `vod.rolling_retention`,
+/// the two cluster switches and `subtitles.stored_sources` moved nothing.
 #[tokio::test]
 async fn every_planning_key_write_moves_the_playback_input_generation() {
     for_each_strandable_backend(|store, backend, raw| async move {
@@ -21630,8 +21634,14 @@ async fn every_planning_key_write_moves_the_playback_input_generation() {
                 .expect("known source")
                 .generation
         };
-        let mut bound = plurx_core::store::playback_input_keys::PLAYBACK_INPUT_EXTRA_KEYS.to_vec();
-        bound.extend(["playback.audio_lang", "transcode.hwaccel"]);
+        // Every key the planning snapshot reads, every extension key, and a
+        // representative of each glob family (a `plurxd` test pins the first
+        // list equal to `QUALITY_PLANNING_KEYS`).
+        let mut bound = plurx_core::store::playback_input_keys::PLAYBACK_PLANNING_KEYS.to_vec();
+        bound.extend(plurx_core::store::playback_input_keys::PLAYBACK_INPUT_EXTRA_KEYS);
+        bound.extend(["playback.binding_fixture", "transcode.binding_fixture"]);
+        bound.sort_unstable();
+        bound.dedup();
         for key in bound {
             let before = generation().await;
             store.put_setting(key, "one").await.expect("insert");

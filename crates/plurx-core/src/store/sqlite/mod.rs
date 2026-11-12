@@ -1343,9 +1343,6 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::analysis_coordination::SCHEMA,
     // v128: canonical fragment publication never reserves original media.
     super::subtitle_managed_schema::PUBLISH_MIGRATION,
-    // v129: planning keys outside `playback.*`/`transcode.*` move the planning
-    // generation too (D3t); additive triggers with their own marker.
-    super::playback_input_keys::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1625,6 +1622,10 @@ impl SqliteStore {
     fn init(conn: Connection) -> Result<Self, StoreError> {
         housekeeping::configure_writer(&conn)?;
         Self::migrate(&conn)?;
+        // D3t: planning keys outside `playback.*`/`transcode.*` move the
+        // planning generation too. An idempotent extension, not a migration:
+        // `user_version` stays where it is, so an older binary still opens it.
+        super::playback_input_keys::install_sqlite(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
             conn: Arc::new(Mutex::new(conn)),
