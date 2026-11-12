@@ -95,7 +95,7 @@ jobs:
           case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="$cgroup_mount$relative"
-          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=600000 100000' pids.max=4096; do
+          for limit in memory.max=21474836480 'cpu.max=600000 100000' pids.max=4096; do
             name=${limit%%=*}
             expected=${limit#*=}
             actual="$(cat "$cgroup_root/$name")"
@@ -104,6 +104,18 @@ jobs:
               exit 1
             fi
           done
+          # No swap: either the container may not swap, or the host has none.
+          # Some runner hosts' Docker leaves memory.swap.max at the memory
+          # limit despite --memory-swap; on a swapless host that is moot.
+          swap_max="$(cat "$cgroup_root/memory.swap.max")"
+          host_swap_kb="$(sed -n 's/^SwapTotal: *\([0-9][0-9]*\) kB$/\1/p' /proc/meminfo)"
+          if [ "$swap_max" != 0 ] && [ "$host_swap_kb" != 0 ]; then
+            printf '%s\n' "Unexpected effective memory.swap.max: $swap_max with ${host_swap_kb:-unknown} kB of host swap (required 0)" >&2
+            exit 1
+          fi
+          printf 'bounds ok: memory.max=%s cpu.max=%s pids.max=%s swap.max=%s host swap=%s kB cpus=%s\n' \
+            "$(cat "$cgroup_root/memory.max")" "$(cat "$cgroup_root/cpu.max")" "$(cat "$cgroup_root/pids.max")" \
+            "$swap_max" "$host_swap_kb" "$(cat "$cgroup_root/cpuset.cpus.effective" 2>/dev/null || echo unknown)"
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
