@@ -1045,6 +1045,84 @@ async fn commit_index_header_offers_the_acknowledged_position_or_unknown() {
     assert_eq!(header(&response), None);
 }
 
+#[test]
+fn the_by_method_series_are_capped_and_the_overflow_is_counted() {
+    let metrics = HttpMethodMetrics::with_cap(2);
+    metrics.record(
+        5,
+        &[
+            ("get_file", [1, 2, 0]),
+            ("claim_media_session_request", [0, 0, 3]),
+        ],
+    );
+    // `claim_media_session_request` found no room; the two series that fit
+    // keep counting, and a method over the cap is counted as dropped.
+    metrics.record(5, &[("get_file", [0, 1, 0]), ("get_user", [4, 0, 0])]);
+    let text = metrics.render();
+    let series = text
+        .lines()
+        .filter(|line| line.starts_with("plurx_http_store_operations_by_method_total{"))
+        .collect::<Vec<_>>();
+    assert_eq!(series.len(), 2, "the cap holds:\n{text}");
+    assert!(series.contains(
+        &"plurx_http_store_operations_by_method_total{route_group=\"playback\",class=\"local_read\",method=\"get_file\"} 1"
+    ));
+    assert!(series.contains(
+        &"plurx_http_store_operations_by_method_total{route_group=\"playback\",class=\"authority_read\",method=\"get_file\"} 3"
+    ));
+    assert!(
+        text.contains("plurx_http_store_operations_by_method_dropped_total 7\n"),
+        "{text}"
+    );
+    // The production cap covers every consistent-read site over every route
+    // group and class with room to spare, so it bounds only a mistake.
+    assert!(HTTP_METHOD_SERIES_CAP >= 365 * HTTP_ROUTE_GROUPS.len());
+}
+
+#[tokio::test]
+async fn a_request_feeds_the_by_method_metric_under_its_route_group() {
+    // A group of its own: the route metrics are process-wide and the sibling
+    // test counts exactly one request on `home` while this one runs.
+    let (_, state) = test_app_with_state();
+    let app = Router::new()
+        .route(
+            "/api/v1/search",
+            axum::routing::get(recorded_store_handler),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            http_store_attribution,
+        ))
+        .with_state(state);
+    let line = |class: &str| {
+        format!(
+            "plurx_http_store_operations_by_method_total{{route_group=\"search\",class=\"{class}\",method=\"validation_time_http_store_operation\"}} "
+        )
+    };
+    let value = |text: &str, class: &str| {
+        text.lines()
+            .find_map(|candidate| candidate.strip_prefix(line(class).as_str()))
+            .map_or(0, |count| count.parse::<u64>().expect("counter"))
+    };
+    let before = HTTP_ROUTE_METRICS.render();
+    assert!(before.contains("# TYPE plurx_http_store_operations_by_method_total counter"));
+    assert_eq!(
+        app.oneshot(get("/api/v1/search", None))
+            .await
+            .expect("attributed request")
+            .status(),
+        StatusCode::OK
+    );
+    let after = HTTP_ROUTE_METRICS.render();
+    for class in HTTP_STORE_CLASSES {
+        assert_eq!(
+            value(&after, class),
+            value(&before, class) + 1,
+            "class {class}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn metrics_route_attribution_renders_fixed_labels_and_scoped_store_counts() {
     let (_, state) = test_app_with_state();
