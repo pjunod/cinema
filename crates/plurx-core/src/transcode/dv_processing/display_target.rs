@@ -469,6 +469,24 @@ impl DvMasterMetadata {
         metadata.output_metadata()?;
         Ok(metadata)
     }
+    /// What a processed master may still say about its picture. The mastering
+    /// display describes the grade and survives reconstruction. The content
+    /// light levels describe the base layer's own samples: a render that adds
+    /// the enhancement layer, or applies reshaping that is not the identity,
+    /// produces other samples, which can exceed them, so they are not
+    /// re-declared. `reshape_identity` is a proof, never an assumption: a
+    /// caller that cannot show every frame's reshaping is the identity passes
+    /// `false`.
+    pub fn for_processed(self, mode: super::DvProcessingMode, reshape_identity: bool) -> Self {
+        if mode == super::DvProcessingMode::Fel || !reshape_identity {
+            Self {
+                light: None,
+                ..self
+            }
+        } else {
+            self
+        }
+    }
     /// What the re-exported picture declares. The mastering display is the
     /// source's own. Its content light levels describe the source's samples;
     /// this render writes new 10-bit codes, which can round a component up, so
@@ -1134,6 +1152,51 @@ mod tests {
         }
         assert!(DvMasterMetadata::new(p3, 0, 0, None).is_err());
         assert!(DvMasterMetadata::new([0; 8], 10_000_000, 1, None).is_err());
+    }
+
+    /// A reconstructed master is not the base layer's picture: with the
+    /// enhancement layer, or with reshaping that is not the identity, it keeps
+    /// the mastering display and drops the base layer's light levels.
+    #[test]
+    fn reconstructed_master_keeps_mastering_and_omits_base_layer_light_levels() {
+        use super::super::{DvExportPolicy, DvProcessingMode};
+        let p3 = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
+        let from_source = crate::fmp4::Hdr10OutputMetadata::from_source;
+        let stated = DvMasterMetadata::new(p3, 40_000_000, 50, Some([1187, 320])).expect("stated");
+        let mastering_only = from_source(p3, 40_000_000, 50, None).expect("mastering only");
+        for (mode, reshape_identity) in [
+            (DvProcessingMode::Fel, true),
+            (DvProcessingMode::Fel, false),
+            (DvProcessingMode::BaseRpu, false),
+        ] {
+            let processed = stated.for_processed(mode, reshape_identity);
+            assert_eq!(processed.light, None, "{mode:?} {reshape_identity}");
+            assert_eq!(
+                processed.output_metadata().expect("declared"),
+                mastering_only
+            );
+            // The export identity is the mastering-only one, whatever the
+            // base layer stated: two sources differing only there share it.
+            assert_eq!(
+                DvExportPolicy::for_master((64, 64), Some(processed)),
+                DvExportPolicy::for_master(
+                    (64, 64),
+                    Some(DvMasterMetadata::new(p3, 40_000_000, 50, None).expect("mastering")),
+                )
+            );
+        }
+        // Only an unchanged base-layer picture keeps its stated levels.
+        let unchanged = stated.for_processed(DvProcessingMode::BaseRpu, true);
+        assert_eq!(unchanged, stated);
+        assert_ne!(
+            unchanged.output_metadata().expect("declared"),
+            mastering_only
+        );
+        // The runtime has no title-wide proof of identity reshaping, so it
+        // never claims one.
+        let runtime = include_str!("../../../../plurxd/src/dv_runtime.rs");
+        assert!(runtime.contains(".for_processed(self.mode, false)"));
+        assert!(!runtime.contains(".for_processed(self.mode, true)"));
     }
 
     /// A master-grade render re-exports the picture, so its stated light

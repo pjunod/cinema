@@ -38,9 +38,9 @@ bump may break compatibility and a **patch** bump never does.
   Profile 8.1 picture start from the picture the player's mapping was
   qualified on. On the two measured frames the server master is within one
   16-bit code of the player's (it was up to 3293 codes away).
-- Master-grade HDR10-E declares the source's own mastering display and, when
-  the source states them, its content light levels. It carried no static HDR10
-  metadata at all.
+- Master-grade HDR10-E declares the source's own mastering display; it carried
+  no static HDR10 metadata at all. It does not repeat the base layer's content
+  light levels, because the reconstructed picture can exceed them.
 - A display-targeted render's MaxCLL covers the rounding of its 10-bit export
   (407 for a 400-nit target) instead of stating the target itself, which the
   decoded picture could exceed.

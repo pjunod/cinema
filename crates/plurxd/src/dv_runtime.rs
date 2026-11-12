@@ -1204,10 +1204,15 @@ impl RuntimeRecipe {
             use plurx_core::transcode::dv_processing::DvExportPolicy;
             let export_policy = display_target.map_or_else(
                 || {
+                    // Every processed master is a reconstruction: FEL adds
+                    // the enhancement layer, and base-RPU applies reshaping
+                    // this daemon cannot prove is the identity for the whole
+                    // title. The base layer's light levels are not carried.
                     DvExportPolicy::for_master(
                         raster,
                         self.source_master_metadata
-                            .filter(|_| self.destination == DvDestination::Hdr10),
+                            .filter(|_| self.destination == DvDestination::Hdr10)
+                            .map(|metadata| metadata.for_processed(self.mode, false)),
                     )
                 },
                 |target| DvExportPolicy::DisplayTargetYuv420p10V1 { raster, target },
