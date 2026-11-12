@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: plurx contributors <noreply@plurx.invalid>
+Date: Thu, 12 Nov 2026 12:00:00 +0000
+Subject: [PATCH] wayland: stop dispatching after a fatal display error
+
+wayland_dispatch_events() waits for the display with
+
+    while (wl_display_prepare_read(wl->display) != 0)
+        wl_display_dispatch_pending(wl->display);
+
+Once the connection is in a fatal error state, wl_display_dispatch_pending()
+returns -1 without ever dispatching anything and wl_display_prepare_read()
+keeps failing, so the loop never ends: the VO thread spins at 100% CPU, the
+POLLHUP handling below is never reached, and the player no longer answers
+IPC or SIGTERM. The compositor ending the connection over a protocol error
+(for example Weston refusing a zero maxFALL) or a lost connection both get
+there. A player was seen holding the GPU for 15 hours this way, with only
+wl_display_prepare_read_queue(), wl_display_dispatch_queue_pending() and
+mutex lock/unlock in the profile.
+
+Check wl_display_dispatch_pending() in that loop, wl_display_read_events()
+and the final wl_display_dispatch_pending() for failure. A failure is
+handled like the existing error on the display fd: log the error the
+display reports, stop using the display and ask the player to close.
+---
+ video/out/wayland_common.c | 26 ++++++++++++++++++++++----
+ 1 file changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/video/out/wayland_common.c b/video/out/wayland_common.c
+index 9192ac7..f751e92 100644
+--- a/video/out/wayland_common.c
++++ b/video/out/wayland_common.c
+@@ -4177,6 +4177,21 @@ static int update_window_title(struct vo_wayland_state *wl, const char *title)
+     return VO_TRUE;
+ }
+ 
++// Once the connection is in an error state (the compositor ended it over a
++// protocol error, or it was lost), wl_display_prepare_read() and the dispatch
++// and read calls fail forever. Treat that like an error on the display fd.
++static bool wayland_display_failed(struct vo_wayland_state *wl, int ret)
++{
++    if (ret >= 0)
++        return false;
++
++    int err = wl_display_get_error(wl->display);
++    MP_FATAL(wl, "Wayland display error: %s\n", mp_strerror(err ? err : errno));
++    wl->display_fd = -1;
++    mp_input_put_key(wl->vo->input_ctx, MP_KEY_CLOSE_WIN);
++    return true;
++}
++
+ static void wayland_dispatch_events(struct vo_wayland_state *wl, int nfds, int64_t timeout_ns)
+ {
+     if (wl->display_fd == -1)
+@@ -4187,14 +4202,17 @@ static void wayland_dispatch_events(struct vo_wayland_state *wl, int nfds, int64
+         {.fd = wl->wakeup_pipe[0], .events = POLLIN },
+     };
+ 
+-    while (wl_display_prepare_read(wl->display) != 0)
+-        wl_display_dispatch_pending(wl->display);
++    while (wl_display_prepare_read(wl->display) != 0) {
++        if (wayland_display_failed(wl, wl_display_dispatch_pending(wl->display)))
++            return;
++    }
+     wl_display_flush(wl->display);
+ 
+     mp_poll(fds, nfds, timeout_ns);
+ 
+     if (fds[0].revents & POLLIN) {
+-        wl_display_read_events(wl->display);
++        if (wayland_display_failed(wl, wl_display_read_events(wl->display)))
++            return;
+     } else {
+         wl_display_cancel_read(wl->display);
+     }
+@@ -4208,7 +4226,7 @@ static void wayland_dispatch_events(struct vo_wayland_state *wl, int nfds, int64
+     if (fds[1].revents & POLLIN)
+         mp_flush_wakeup_pipe(wl->wakeup_pipe[0]);
+ 
+-    wl_display_dispatch_pending(wl->display);
++    wayland_display_failed(wl, wl_display_dispatch_pending(wl->display));
+ }
+ 
+ static void xdg_activate(struct vo_wayland_state *wl)
