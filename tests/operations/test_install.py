@@ -479,6 +479,18 @@ class InstallerCase(unittest.TestCase):
         self.assertFalse([call for call in self.host.calls() if call.startswith("curl") and " -o " in call])
         self.assertIn("already in", result.stdout)
 
+    def test_intel_mac_is_refused_before_anything_changes(self):
+        # macOS releases and every bundled tool are Apple Silicon only.
+        self.host.stub("launchctl", "")
+        self.host.stub("uname", 'case "$1" in -m) echo x86_64 ;; *) echo Darwin ;; esac\n')
+        prefix = self.tmp / "homebrew"
+        result = self.host.run("--prefix", str(prefix), "--binary", str(self.host.fake_binary))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Intel Macs are not supported", result.stderr)
+        self.assertFalse(prefix.exists())
+        self.assertFalse((self.host.home / "Library/LaunchAgents/com.plurx.plurxd.plist").exists())
+        self.assertFalse([c for c in self.host.calls() if c.startswith(("launchctl", "xattr", "curl", "tar"))])
+
     def test_macos_release_archive_installs_its_own_plurxd_and_clears_quarantine(self):
         # The GitHub release's macOS archive is this script, the agent template
         # and a built plurxd side by side; `./install` alone must install that

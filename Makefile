@@ -1896,8 +1896,8 @@ hooks: ## Install the pre-commit (lint) and pre-push (paperwork) hooks, and Ripw
 ## ---- native macOS server tray ------------------------------------------
 
 .PHONY: desktop-macos-build desktop-macos-test desktop-macos-check
-# Cross-architecture slices prove compilation; unit tests execute only on the
-# runner's actual architecture. Separate scratch roots allow parallel make.
+# The tray is built for Apple Silicon only; unit tests execute on the runner's
+# own architecture. Separate scratch roots allow parallel make.
 desktop-macos-build: ## Compile the Apple Silicon macOS server tray without executing tests
 	clients/server-tray/macos/build --configuration release \
 	  --version "$(VERSION)" --arch arm64 \

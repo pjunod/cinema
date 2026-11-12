@@ -403,7 +403,9 @@ mod local {
                 }
             }
             let qualified_platform = match (std::env::consts::OS, std::env::consts::ARCH) {
-                ("macos", "aarch64") => &["macos-arm64"][..],
+                // An engine kept from an earlier universal release still runs
+                // its arm64 slice here; Intel Macs are not supported.
+                ("macos", "aarch64") => &["macos-arm64", "macos-universal"][..],
                 ("linux", "aarch64") => &["linux-aarch64", "linux-arm64"][..],
                 ("linux", "x86_64") => &["linux-x86_64", "linux-amd64"][..],
                 _ => return Err("managed_engine_platform_unqualified".into()),

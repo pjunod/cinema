@@ -1027,7 +1027,7 @@ fn native_archive_root_binds_signed_identity_and_refuses_every_symlink_path() {
         match mutation {
             0 => wrong.name = "plurxd-0.7.9-macos-arm64.tar.gz".into(),
             1 => wrong.platform = Platform::Linux,
-            2 => wrong.architecture = Architecture::Arm64,
+            2 => wrong.architecture = Architecture::Universal,
             3 => wrong.format = Format::Deb,
             4 => wrong.component = Component::Server,
             _ => wrong.package_name = "plurxd".into(),
