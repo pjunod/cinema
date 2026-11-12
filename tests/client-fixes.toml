@@ -8469,6 +8469,15 @@ source_anchor = "def invalidate_native_target(self, state):"
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_load_source_and_changed_target_policy_require_a_fresh_success(self):"
 
+# A prepared successor is never tunneled: it took the incumbent's hardware A/V sync on a Google TV.
+[[fixes]]
+id = "android.successor-untunneled"
+commits = ["1f911234375d2b9c44531d0291dd882a53a3cf6e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlurxPlayerBuilder.kt"
+source_anchor = "role == PlayerRole.Finite && television"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioFocusOwnershipTest.kt"
+test_anchor = "fun onlyTheFinitePlayerTunnelsSoASuccessorNeverTakesTheIncumbentsAvSync()"
+
 # PR #1489: the Android decoder envelope claims only what Media3's selector admits.
 [[fixes]]
 id = "android.decoder-envelope-media3-admits"

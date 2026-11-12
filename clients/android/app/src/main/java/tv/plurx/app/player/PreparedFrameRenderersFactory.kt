@@ -24,8 +24,10 @@ import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.exoplayer.video.VideoRendererEventListener
 
-/** Keep the pinned default renderer policy, including TV tunneling. The
- * tunneled hardware callback also supplies frame PTS to prepared outputs. */
+/** Keep the pinned default renderer policy, including TV tunneling for the
+ * finite player ([requestsTunneling]); a successor is untunneled. The tunneled
+ * hardware callback supplies frame PTS where tunneling is on; the normal path
+ * reports item-local PTS. */
 internal class PreparedFrameRenderersFactory(context: Context, private val continuousOutput: ContinuousOutputEvidence? = null) : DefaultRenderersFactory(context) {
     override fun getCodecAdapterFactory(): MediaCodecAdapter.Factory {
         val original = super.getCodecAdapterFactory()

@@ -33,6 +33,18 @@ internal val PLURX_MEDIA_AUDIO_ATTRIBUTES: AudioAttributes = AudioAttributes.Bui
  */
 internal fun handlesAudioFocus(role: PlayerRole): Boolean = role != PlayerRole.Successor
 
+/**
+ * Television tunneling belongs to the finite player alone. A tunneled pipeline
+ * claims the device's hardware A/V sync, and a television's audio HAL keeps
+ * one: on the Google TV Streamer, a parked tunneled successor opening its audio
+ * output invalidated the incumbent's HW_AV_SYNC stream, which froze the
+ * incumbent short of the meeting point until the overlap bound abandoned the
+ * switch. A successor therefore primes untunneled and keeps serving untunneled
+ * after its commit.
+ */
+internal fun requestsTunneling(role: PlayerRole, television: Boolean): Boolean =
+    role == PlayerRole.Finite && television
+
 /** The one player capability that focus ownership moves. */
 internal fun interface AudioFocusOwner {
     fun ownAudioFocus(owns: Boolean)
@@ -89,7 +101,7 @@ internal fun ExoPlayer.playbackSilencing() = PlaybackSilencing { volume = 0f; pl
 /**
  * One construction path for every player. In particular, Offline still has a
  * cache-only source with no account-bearing upstream, and only finite players
- * request television tunneling. Successor inherits the incumbent's setting.
+ * request television tunneling ([requestsTunneling]).
  */
 @UnstableApi
 internal class PlurxPlayerBuilder(private val context: Context, private val role: PlayerRole) {
@@ -115,10 +127,7 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
             else DefaultTrackSelector(context, ContinuousTrackSelectionFactory(continuousSources::binding))).apply {
             parameters = buildUponParameters()
                 .setPreferredAudioLanguage(audioLanguage)
-                .setTunnelingEnabled(
-                    role in setOf(PlayerRole.Finite, PlayerRole.Successor) &&
-                        isTelevision(this@PlurxPlayerBuilder.context),
-                )
+                .setTunnelingEnabled(requestsTunneling(role, isTelevision(this@PlurxPlayerBuilder.context)))
                 .apply {
                     // Controller-managed playback owns subtitle selection.
                     // Live TV, library channels and offline HLS need Media3 to
