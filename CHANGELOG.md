@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- CM v2.9 display mapping keeps its detail filter inside the L5 active picture,
+  as CM v4.0 does. Letterboxed CM v2.9 titles no longer blend the bars into the
+  first and last two picture rows; bars take the pointwise mapping. Titles
+  without L5, or with a zero or full-frame L5, render exactly as before.
 - CM4 display mapping evaluates the ST 2084 transfer functions in its point and
   final passes with precise split-float helpers and the normative black and
   white endpoints. On the measured Source16 frame no enhanced pixel is farther

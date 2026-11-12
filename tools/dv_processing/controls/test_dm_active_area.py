@@ -59,6 +59,15 @@ class ActiveAreaCControl(unittest.TestCase):
     def test_l5_crop_domain_excludes_adversarial_bars(self):
         self.run_case("test_l5_crop_domain_excludes_adversarial_bars")
 
+    def test_l5_cm29_owned_offsets_and_rectangles(self):
+        self.run_case("test_l5_cm29_owned_offsets_and_rectangles")
+
+    def test_l5_cm29_absent_and_zero_preserve_full_frame(self):
+        self.run_case("test_l5_cm29_absent_and_zero_preserve_full_frame")
+
+    def test_l5_cm29_crop_domain_excludes_adversarial_bars(self):
+        self.run_case("test_l5_cm29_crop_domain_excludes_adversarial_bars")
+
 
 if __name__ == "__main__":
     unittest.main()
