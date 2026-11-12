@@ -25,7 +25,7 @@ CONFIG = """
 version = 1
 excluded_crates = ["harness"]
 harness = ["validation/rust-unit-inputs.toml"]
-exempt = ["docs/**", "tests/**", "validation/**", "**/*.md"]
+exempt = ["manual/**", "tests/**", "validation/**", "**/*.md"]
 """
 
 
@@ -74,7 +74,7 @@ core = { path = "crates/core" }
 """)
     repo.write("Cargo.lock", "# lock v1\n")
     repo.write("validation/rust-unit-inputs.toml", CONFIG)
-    repo.write("docs/guide.md", "guide\n")
+    repo.write("manual/guide.md", "guide\n")
     repo.write("shared/fixture.json", "{}\n")
     repo.write("tests/data/leaf.json", "[1]\n")
     for name, spec in {
@@ -112,8 +112,8 @@ class SelectionTests(unittest.TestCase):
     def test_an_unrelated_crate_change_selects_only_that_crate(self):
         self.assertEqual(self.due_after({"crates/app/src/lib.rs": "pub fn app() { /* new */ }\n"}), ["app"])
 
-    def test_documentation_selects_nothing(self):
-        self.assertEqual(self.due_after({"docs/guide.md": "changed\n"}), [])
+    def test_an_exempt_tree_selects_nothing(self):
+        self.assertEqual(self.due_after({"manual/guide.md": "changed\n"}), [])
 
     def test_the_lock_file_selects_everything(self):
         self.assertEqual(self.due_after({"Cargo.lock": "# lock v2\n"}), ["app", "core", "devonly", "leaf"])
@@ -142,7 +142,7 @@ class SelectionTests(unittest.TestCase):
 
     def test_the_key_is_identical_for_identical_inputs_across_commits(self):
         first = ru.Keys(ru.Tree(self.base, self.repo.root), ru.Config.load(CONFIG)).key("app")
-        self.repo.write("docs/guide.md", "other\n")
+        self.repo.write("manual/guide.md", "other\n")
         second_commit = self.repo.commit()
         second = ru.Keys(ru.Tree(second_commit, self.repo.root), ru.Config.load(CONFIG)).key("app")
         self.assertEqual(first, second)
@@ -157,19 +157,19 @@ class SelectionTests(unittest.TestCase):
     def test_a_run_time_workspace_walk_must_be_declared(self):
         walker = ('pub fn walk() -> std::path::PathBuf {\n'
                   '    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))\n'
-                  '        .parent()\n        .unwrap()\n        .join("docs")\n}\n')
+                  '        .parent()\n        .unwrap()\n        .join("manual")\n}\n')
         self.repo.write("crates/leaf/src/walk.rs", walker)
         head = self.repo.commit()
         keys = ru.Keys(ru.Tree(head, self.repo.root), ru.Config.load(CONFIG))
         self.assertEqual(ru.dynamic_site_drift(keys), ([("leaf", "crates/leaf/src/walk.rs", "walk")], []))
         declared = CONFIG + ('\n[[dynamic]]\ncrate = "leaf"\nfile = "crates/leaf/src/walk.rs"\n'
-                             'function = "walk"\nreads = ["docs/**"]\nreason = "walks docs"\n')
+                             'function = "walk"\nreads = ["manual/**"]\nreason = "walks the manual"\n')
         self.repo.write("validation/rust-unit-inputs.toml", declared)
         self.base = self.repo.commit()
         keys = ru.Keys(ru.Tree(self.base, self.repo.root), ru.Config.load(declared))
         self.assertEqual(ru.dynamic_site_drift(keys), ([], []))
-        # Once declared, the read paths are inputs: docs now re-key the reader.
-        self.assertEqual(self.due_after({"docs/guide.md": "read by leaf\n"}), ["leaf"])
+        # Once declared, the read paths are inputs: the manual now re-key the reader.
+        self.assertEqual(self.due_after({"manual/guide.md": "read by leaf\n"}), ["leaf"])
 
 
 class ReceiptAuthenticationTests(unittest.TestCase):
