@@ -206,7 +206,7 @@ async fn committed(store: &Arc<dyn Store>, session_id: &str, owner: &str) -> Med
             owner_node_id: owner.to_owned(),
             recipe_json: "{}".to_owned(),
             response_json: "{}".to_owned(),
-            publication_ready_at_ms: 0,
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
             media_origin_ms: 0,
             now_ms: unix_ms(),
             lease_expires_at_ms: unix_ms().saturating_add(600_000),
