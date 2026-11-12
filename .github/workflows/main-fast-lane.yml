@@ -403,7 +403,7 @@ jobs:
     name: fast Rust gate
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [ci-nonvoter-heavy-amd64]
+    runs-on: [ci-nonvoter-compile-amd64]
     # The online generic runners currently carry ffmpeg 8. Ubuntu 24.04 is the
     # pinned ffmpeg 6 environment used by this lane, while the host label keeps
     # the job on the high-CPU pool.

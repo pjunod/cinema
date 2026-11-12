@@ -72,13 +72,26 @@ increasing host resident allocations.
 
 ### Dedicated nonvoter compiler capacity
 
-Heavy Rust jobs and AMD package and release builds use the repository-only
-`gha-lab1-plurx-heavy-01` worker with `ci-nonvoter-heavy-amd64`. The same
+Heavy host-mode jobs and AMD package and release builds use the
+repository-only `gha-lab1-plurx-heavy-01` worker with `ci-nonvoter-heavy-amd64`
+(it also carries the compile pool below). The same
 capacity-one worker and the existing `lab2` Store worker advertise
 `ci-nonvoter-store`; the Store fan-out has two physical nonvoter carriers.
 The older `lab1` organization registration stays under maintenance labels,
 and its three previous GitHub/Forgejo schedulers remain stopped. Preserve
 those registrations and their private rollback backups.
+
+#### Compile pool: `ci-nonvoter-compile-amd64`
+
+The three `rust_compile` gates, `check` and `cluster_daemon` request this
+pool. Their `container.options` and first-step cgroup check pin the same
+4-CPU / 20 GiB box on any carrier: lab1's heavy worker (which carries both
+labels) and the capacity-one `gha-lab5-plurx-compile-01` (lab5 is a
+nonvoter). Host-mode, package, publish and release-image jobs, and the
+disk-gated `web_layout`/`vod_web` pair, stay on lab1-only
+`ci-nonvoter-heavy-amd64`. lab5 shares 30 GiB and cores 0-3 with other runners
+and a `plurxd`; its worker adds `--oom-score-adj=500` so the kernel picks a CI
+container before `plurxd`. Watch lab5 memory and root disk.
 
 The compiler VM has 24 GiB. Its `plurx-heavy.slice` enforces a **shared**
 20 GiB resident limit, zero swap, four CPUs (0–3) and 4096 PIDs. The runner

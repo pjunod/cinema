@@ -200,8 +200,8 @@ jobs:
     name: effort Rust compile
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
-    # Use the capacity-one nonvoter compiler slot; verify its actual limits.
-    runs-on: [ci-nonvoter-heavy-amd64]
+    # Use the nonvoter compile pool; verify the container's actual limits.
+    runs-on: [ci-nonvoter-compile-amd64]
     container:
       image: ubuntu:24.04
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
