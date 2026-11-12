@@ -315,6 +315,7 @@ function theaterLibraryShell(m){
       <span class="th-cpair"><span class="lbl">Show</span>
         <select data-library-watch-filter aria-label="Show" onchange="LIB_FILTER=this.value;${m.reload}">
           ${libOpt("all","Everything",LIB_FILTER)}${libOpt("unwatched","Unwatched",LIB_FILTER)}${libOpt("inprogress","In progress",LIB_FILTER)}${libOpt("watched","Watched",LIB_FILTER)}</select></span>
+      ${libPresenceSelect(m.reload)}
       ${libraryPageSize()}
       <span class="muted" id="libcount"></span></div>`;
   return `${head}${bar}<div class="th-grid"><div id="libbody"><div class="empty">Loading…</div></div></div>`

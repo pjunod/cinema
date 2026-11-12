@@ -33,7 +33,7 @@ const ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, yea
      tmdb_id, imdb_id, season_number, episode_number, air_date, runtime_ms, \
      poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, \
      artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, \
-     book_metadata_source";
+     book_metadata_source, offloaded_at";
 
 pub(super) const IDENTITY_REPAIR_ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, year, overview, tmdb_id, imdb_id, season_number, episode_number, air_date, runtime_ms, poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, metadata_at, artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source";
 pub(super) const IDENTITY_REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
@@ -76,6 +76,7 @@ struct ItemRow {
     book_work_id: Option<String>,
     book_edition_id: Option<String>,
     book_metadata_source: Option<String>,
+    offloaded_at: Option<i64>,
 }
 
 struct ItemTitleRow {
@@ -305,6 +306,7 @@ impl From<&mut Row<'_>> for ItemRow {
             book_work_id: row.get("book_work_id"),
             book_edition_id: row.get("book_edition_id"),
             book_metadata_source: row.get("book_metadata_source"),
+            offloaded_at: row.get("offloaded_at"),
         }
     }
 }
@@ -351,6 +353,7 @@ impl TryFrom<ItemRow> for Item {
             book_work_id: row.book_work_id,
             book_edition_id: row.book_edition_id,
             book_metadata_source: row.book_metadata_source,
+            offloaded_at: row.offloaded_at,
         })
     }
 }
@@ -752,6 +755,20 @@ impl From<&mut Row<'_>> for WatchMapRow {
     }
 }
 
+struct OffloadedCountRow {
+    root: i64,
+    offloaded: i64,
+}
+
+impl From<&mut Row<'_>> for OffloadedCountRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            root: row.get("root"),
+            offloaded: row.get("offloaded"),
+        }
+    }
+}
+
 struct RollupRow {
     root: i64,
     leaves: i64,
@@ -923,8 +940,8 @@ pub(super) fn root_removal_statements(
         (
             format!(
                 "DELETE FROM items WHERE library_id = $1 AND {GUARD} \
-                 AND kind IN ('movie','episode','video','photo','book','audiobook') \
-                 AND id NOT IN (SELECT item_id FROM files) {{LEASE}}"
+                 AND {LEAF} {{LEASE}}",
+                LEAF = crate::store::offload::fileless_prunable_leaf!()
             ),
             params!(library_id),
         ),
@@ -1121,7 +1138,9 @@ impl HiqliteAuthStore {
         offset: i64,
         limit: i64,
         genre: Option<&str>,
+        presence: crate::domain::ItemPresence,
     ) -> Result<ItemPage, StoreError> {
+        let presence = presence.sql();
         let order = item_sort_order_by(sort);
         const GENRE: &str = "($2 IS NULL OR EXISTS (SELECT 1 FROM json_each(items.genres) \
              WHERE value = $2 COLLATE NOCASE))";
@@ -1130,7 +1149,8 @@ impl HiqliteAuthStore {
             .query_map::<CountRow, _>(
                 format!(
                     "SELECT COUNT(*) AS count FROM items \
-                     WHERE library_id = $1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}"
+                     WHERE library_id = $1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE} \
+                     AND {presence}"
                 ),
                 params!(library_id, genre),
             )
@@ -1142,7 +1162,7 @@ impl HiqliteAuthStore {
             .count;
         let page_sql = format!(
             "SELECT {ITEM_COLS} FROM items WHERE library_id = $1 \
-             AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE} \
+             AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE} AND {presence} \
              ORDER BY {order} LIMIT $3 OFFSET $4"
         );
         validate_sql(&page_sql)?;
@@ -1855,6 +1875,114 @@ impl MediaStore for HiqliteAuthStore {
         )
     }
 
+    async fn find_offloaded_movie(
+        &self,
+        library_id: i64,
+        tmdb_id: Option<i64>,
+        imdb_id: Option<&str>,
+    ) -> Result<Option<Item>, StoreError> {
+        one_item(
+            self.client()
+                .query_consistent_map::<ItemRow, _>(
+                    format!(
+                        "SELECT {ITEM_COLS} FROM items WHERE library_id = $1 \
+                         AND kind = 'movie' AND offloaded_at IS NOT NULL \
+                         AND (($2 IS NOT NULL AND tmdb_id = $2) OR ($3 IS NOT NULL AND imdb_id = $3)) \
+                         ORDER BY id LIMIT 1"
+                    ),
+                    params!(library_id, tmdb_id, imdb_id),
+                )
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
+    async fn find_offloaded_episode(
+        &self,
+        library_id: i64,
+        series_tmdb_id: i64,
+        season_number: i32,
+        episode_number: i32,
+    ) -> Result<Option<Item>, StoreError> {
+        one_item(
+            self.client()
+                .query_consistent_map::<ItemRow, _>(
+                    format!(
+                        "SELECT {} FROM items e \
+                         JOIN items s ON s.id = e.parent_id AND s.kind = 'season' \
+                         JOIN items sh ON sh.id = s.parent_id AND sh.kind = 'show' \
+                         WHERE e.library_id = $1 AND e.kind = 'episode' \
+                           AND e.offloaded_at IS NOT NULL \
+                           AND sh.tmdb_id = $2 AND s.season_number = $3 AND e.episode_number = $4 \
+                         ORDER BY e.id LIMIT 1",
+                        item_cols("e")
+                    ),
+                    params!(library_id, series_tmdb_id, season_number, episode_number),
+                )
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
+    async fn offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let rows = self
+            .client()
+            .query_consistent_map::<OffloadedCountRow, _>(
+                "WITH RECURSIVE tree(root, id) AS ( \
+                     SELECT id, id FROM items WHERE id IN (SELECT value FROM json_each($1)) \
+                     UNION \
+                     SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id \
+                 ) \
+                 SELECT t.root AS root, COUNT(*) AS offloaded FROM tree t \
+                 JOIN items i ON i.id = t.id \
+                 WHERE i.offloaded_at IS NOT NULL GROUP BY t.root",
+                params!(ids_json(ids)?),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.root, row.offloaded))
+            .collect())
+    }
+
+    async fn mark_items_offloaded(&self, item_ids: &[i64], at: i64) -> Result<u64, StoreError> {
+        let ids = ids_json(item_ids)?;
+        let rows = self
+            .client()
+            .execute(
+                "UPDATE items SET offloaded_at = COALESCE(offloaded_at, $2) \
+                 WHERE id IN (SELECT value FROM json_each($1)) \
+                   AND kind IN ('movie','episode','video')",
+                params!(ids, at),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(rows as u64)
+    }
+
+    async fn clear_offloaded_with_files(&self, item_ids: &[i64]) -> Result<u64, StoreError> {
+        let ids = ids_json(item_ids)?;
+        let rows = self
+            .client()
+            .execute(
+                "UPDATE items SET offloaded_at = NULL \
+                 WHERE id IN (SELECT value FROM json_each($1)) \
+                   AND offloaded_at IS NOT NULL \
+                   AND id IN (SELECT item_id FROM files)",
+                params!(ids),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(rows as u64)
+    }
+
     async fn find_movies_by_directory(
         &self,
         library_id: i64,
@@ -2224,20 +2352,22 @@ impl MediaStore for HiqliteAuthStore {
             .collect())
     }
 
-    async fn list_top_items_in_genre(
+    async fn list_top_items_filtered(
         &self,
         library_id: i64,
         sort: ItemSort,
         offset: i64,
         limit: i64,
         genre: Option<&str>,
+        presence: crate::domain::ItemPresence,
     ) -> Result<ItemPage, StoreError> {
+        let presence = presence.sql();
         let order = item_sort_order_by(sort);
         const GENRE: &str = "($2 IS NULL OR EXISTS (SELECT 1 FROM json_each(items.genres) \
              WHERE value = $2 COLLATE NOCASE))";
         let count_sql = format!(
             "SELECT COUNT(*) AS count FROM items \
-             WHERE library_id = $1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}"
+             WHERE library_id = $1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE} AND {presence}"
         );
         trace_statement("list_top_items_in_genre.count", &count_sql);
         let count = self
@@ -2251,7 +2381,7 @@ impl MediaStore for HiqliteAuthStore {
             .count;
         let page_sql = format!(
             "SELECT {ITEM_COLS} FROM items WHERE library_id = $1 \
-             AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE} \
+             AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE} AND {presence} \
              ORDER BY {order} LIMIT $3 OFFSET $4"
         );
         validate_sql(&page_sql)?;
@@ -2754,6 +2884,7 @@ impl MediaStore for HiqliteAuthStore {
                         "SELECT {i} FROM items i \
                          JOIN libraries l ON l.id = i.library_id AND l.kind != 'home' \
                          WHERE i.kind IN ('movie','show') \
+                           AND i.offloaded_at IS NULL \
                            AND ($1 = 1 OR i.metadata_at IS NULL) \
                            AND ($2 IS NULL OR i.library_id = $2) \
                            AND ($3 IS NULL OR i.id IN (SELECT value FROM json_each($3))) \
@@ -2840,6 +2971,7 @@ impl MediaStore for HiqliteAuthStore {
                                  AND grandparent.kind = 'show' \
                                  AND grandparent.metadata_at IS NOT NULL)) \
                            AND (i.artwork_attempted_at IS NULL OR i.artwork_attempted_at <= $1) \
+                           AND i.offloaded_at IS NULL \
                            AND ($2 IS NULL OR i.library_id = $2) \
                          ORDER BY i.artwork_attempted_at, i.id LIMIT $3",
                         i = item_cols("i")
@@ -3982,11 +4114,13 @@ impl MediaStore for HiqliteAuthStore {
                 params!(library_id, &gone_file_ids),
             ),
             (
-                "DELETE FROM items WHERE library_id = $1 \
+                concat!(
+                    "DELETE FROM items WHERE library_id = $1 \
                  AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1) \
-                 AND kind IN ('movie','episode','video','photo','book','audiobook') \
-                 AND id NOT IN (SELECT item_id FROM files)"
-                    .to_owned(),
+                 AND ",
+                    crate::store::offload::fileless_prunable_leaf!()
+                )
+                .to_owned(),
                 params!(library_id),
             ),
             (
@@ -4189,9 +4323,10 @@ impl MediaStore for HiqliteAuthStore {
 /// across SQLite wrappers).
 const PRUNE_EMPTY_ITEMS_SQL: [&str; 7] = [
     "DELETE FROM scan_reconcile_items WHERE library_id = $1",
-    "DELETE FROM items WHERE library_id = $1 \
-     AND kind IN ('movie','episode','video','photo','book','audiobook') \
-     AND id NOT IN (SELECT item_id FROM files)",
+    concat!(
+        "DELETE FROM items WHERE library_id = $1 AND ",
+        crate::store::offload::fileless_prunable_leaf!()
+    ),
     "DELETE FROM items WHERE library_id = $1 AND kind = 'season' \
      AND id NOT IN (SELECT parent_id FROM items \
                     WHERE kind = 'episode' AND parent_id IS NOT NULL)",
@@ -4879,6 +5014,7 @@ impl HiqliteAuthStore {
              LEFT JOIN items show ON show.id = season.parent_id \
              WHERE w.user_id = $1 AND w.watched = 0 AND w.position_ms > 0 \
                AND i.kind IN ('movie','episode','video','audiobook') \
+               AND i.offloaded_at IS NULL \
              ORDER BY w.updated_at DESC LIMIT $2",
             i = item_cols("i")
         );

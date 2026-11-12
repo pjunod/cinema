@@ -41,6 +41,7 @@ pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
 mod items;
 mod jellyfin;
+mod offload;
 pub(crate) use jellyfin::{
     standard_port_app as jellyfin_standard_port_app, StandardPort as JellyfinStandardPort,
     StandardPortStatus as JellyfinStandardPortStatus,
@@ -337,6 +338,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/classification"
         | "/api/v1/items/{id}/photo"
         | "/api/v1/items/{id}/reanalyze"
+        | "/api/v1/items/{id}/get-it-back"
+        | "/api/v1/items/{id}/offload-status"
         | "/api/v1/items/{id}/refresh-artwork"
         | "/api/v1/items/{id}/reading-state"
         | "/api/v1/items/{id}/annotations"
@@ -2016,6 +2019,8 @@ pub fn router(state: AppState) -> Router {
             post(libraries::reset_root_identity),
         )
         .route("/items/{id}/reanalyze", post(items::reanalyze))
+        .route("/items/{id}/get-it-back", post(offload::get_it_back))
+        .route("/items/{id}/offload-status", get(offload::offload_status))
         .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
         .route("/files/{id}/analysis", post(analysis::request))
         .route("/files/{id}/dv-conversion", post(dv_disk::queue_file))

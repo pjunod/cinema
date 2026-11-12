@@ -42,3 +42,67 @@ function hdrChip(f){
   if(s) return {cls, text:s, full:s};                    // HDR10+ / HDR10 / HLG are already short
   if(f.hdr) return {cls, text:hdrLabel(f.hdr), full:hdrLabel(f.hdr)};
   return null; }
+
+// ---- Offload: Curator deleted the files to free disk; the title stays ----
+// Badge for a card or a page. A container is "offloaded" only when every leaf
+// is; a partly offloaded one carries a count instead (`rollup.offloaded`).
+function offloadedBadge(it){
+  if(!it) return "";
+  if(it.offloaded) return `<span class="offbadge" title="Curator removed the files to free disk space">Offloaded</span>`;
+  const n=it.rollup&&it.rollup.offloaded;
+  return n>0?`<span class="offbadge" title="Curator removed the files of ${n} of these to free disk space">${n} offloaded</span>`:"";
+}
+// What replaces Play on an offloaded title. Only admins can ask Curator for it
+// back, so everyone else just sees where it stands. The answer and its state
+// are shown inline, in the same block as the button.
+function offloadActions(it){
+  const id=exactWireId(it);
+  const ask=ME&&ME.is_admin
+    ? `<button class="btnplay" id="offask" onclick="getItBack('${id}')">Get it back</button>` : "";
+  return `<div class="actions offactions">${ask}</div>
+    <div class="offstatus" id="offstatus" role="status" aria-live="polite">Offloaded · the files were removed to free disk space</div>`;
+}
+// A partly offloaded show or season: the same button, for the leaves that are.
+function offloadContainerActions(it){
+  const n=it&&it.rollup&&it.rollup.offloaded;
+  if(!(n>0)||!(ME&&ME.is_admin)) return "";
+  const id=exactWireId(it);
+  return `<div class="actions offactions"><button class="ghost" id="offask" onclick="getItBack('${id}')">Get ${n} back</button></div>
+    <div class="offstatus" id="offstatus" role="status" aria-live="polite"></div>`;
+}
+function offloadLine(a){
+  if(!a) return "";
+  return a.message||a.state||"";
+}
+async function getItBack(id){
+  const btn=document.getElementById("offask"), line=document.getElementById("offstatus");
+  if(btn) btn.disabled=true;
+  if(line) line.textContent="Asking Curator…";
+  try{
+    const a=await api(`/items/${id}/get-it-back`,{method:"POST",body:{}});
+    if(line) line.textContent="Get it back: "+offloadLine(a);
+    watchOffload(id);
+  }catch(e){
+    if(line) line.textContent=(e&&e.message)||"Curator could not be asked.";
+  }
+  if(btn) btn.disabled=false;
+}
+// While an offloaded title's page is open, read Curator's state for it. The
+// read is a pass-through: nothing is stored, and the loop ends with the page.
+let OFFWATCH=null;
+function watchOffload(id){
+  if(OFFWATCH&&OFFWATCH.id===id) return;
+  if(OFFWATCH) clearInterval(OFFWATCH.timer);
+  const tick=async()=>{
+    const line=document.getElementById("offstatus");
+    if(!line||!location.hash.endsWith("/item/"+id)){ if(OFFWATCH&&OFFWATCH.id===id){clearInterval(OFFWATCH.timer);OFFWATCH=null;} return; }
+    try{
+      const a=await api(`/items/${id}/offload-status`);
+      if(a.state==="on_disk") line.textContent="Curator has it; it will play as soon as it is indexed.";
+      else if(a.state==="not_found"||a.state==="not_offloaded") line.textContent="Offloaded · "+offloadLine(a);
+      else line.textContent="Offloaded · "+offloadLine(a);
+    }catch(e){ line.textContent="Offloaded · curator unreachable"; }
+  };
+  OFFWATCH={id,timer:setInterval(tick,5000)};
+  tick();
+}

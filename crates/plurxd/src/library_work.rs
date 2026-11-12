@@ -598,9 +598,16 @@ impl JobManager {
                         removed.push(path.clone());
                     }
                 }
+                let mut offloaded: Vec<String> = Vec::new();
+                for path in sidecars.iter().flat_map(|row| &row.offloaded_paths) {
+                    if !offloaded.contains(path) {
+                        offloaded.push(path.clone());
+                    }
+                }
                 let targeted = Targeted {
                     expected: &expected,
                     removed: &removed,
+                    offloaded: &offloaded,
                     probe_only,
                 };
                 let result = match self.run_targeted(&group, &targeted, publisher).await {
@@ -615,6 +622,10 @@ impl JobManager {
                                         .iter()
                                         .any(|expected| expected.path == file.path())
                                         || row.removed_paths.iter().any(|path| path == file.path())
+                                        || row
+                                            .offloaded_paths
+                                            .iter()
+                                            .any(|path| path == file.path())
                                 })
                                 .cloned()
                                 .collect();
@@ -744,6 +755,9 @@ pub(super) struct Targeted<'a> {
     pub expected: &'a [ExpectedFile],
     /// Removed paths (contract amendment `removed_paths`).
     pub removed: &'a [String],
+    /// Offloaded paths (contract amendment `offload`): removed paths whose
+    /// items stay.
+    pub offloaded: &'a [String],
     /// Record exactly the expected files and walk nothing else.
     pub probe_only: bool,
 }
@@ -755,6 +769,10 @@ pub(super) enum RemovedEntry {
     Outside(String),
     Present(String, plurx_core::store::scan_request_v2::PresentReason),
     Absent(plurx_core::scan::removed::AbsentPath),
+    /// An offloaded path under a library root that lists nothing on its
+    /// parent's filesystem: nothing on this node tells it from an unmounted
+    /// share, so nothing was removed (`retained`, `root_empty`).
+    EmptyRoot(String),
 }
 
 /// Probe each removed path from its library root down, never following a
@@ -766,6 +784,7 @@ pub(super) async fn probe_removed_paths(
     library: &plurx_core::domain::Library,
     target: &std::path::Path,
     removed: &[String],
+    offload: bool,
 ) -> Result<Vec<RemovedEntry>, TargetError> {
     use plurx_core::scan::{containment, removed as probe};
     if removed.is_empty() {
@@ -793,8 +812,16 @@ pub(super) async fn probe_removed_paths(
                 error: failure.error,
             };
             if !listable.contains(&root) {
-                probe::root_listable(&root).map_err(unreadable)?;
-                listable.push(root.clone());
+                match probe::root_listable(&root) {
+                    Ok(()) => listable.push(root.clone()),
+                    // An offload that empties a root is lasting, not a share
+                    // that will come back.
+                    Err(failure) if offload && failure.empty_root => {
+                        entries.push(RemovedEntry::EmptyRoot(raw));
+                        continue;
+                    }
+                    Err(failure) => return Err(unreadable(failure)),
+                }
             }
             entries.push(
                 match probe::probe_removed(&root, path).map_err(unreadable)? {
@@ -804,6 +831,7 @@ pub(super) async fn probe_removed_paths(
                             path: raw,
                             spellings,
                             root: root.clone(),
+                            offload,
                         })
                     }
                 },
@@ -851,6 +879,16 @@ pub(super) async fn remove_paths(
                 reason: "outside the requested path or library".into(),
             },
             RemovedEntry::Present(path, reason) => PlacedReport::Present { path, reason },
+            RemovedEntry::EmptyRoot(path) => PlacedReport::Retained {
+                path,
+                item_id: 0,
+                code: plurx_core::store::scan_request_v2::RetainedCode::RootEmpty,
+                retryable: false,
+                reason: "the offload emptied this library root, which this node cannot tell from \
+                         an unmounted share, so nothing was removed; a full scan or the next \
+                         placement settles it"
+                    .to_owned(),
+            },
             RemovedEntry::Absent(absent) => removal
                 .next()
                 .unwrap_or(PlacedReport::Unknown { path: absent.path }),
@@ -2069,6 +2107,7 @@ mod tests {
                         request_key: String::new(),
                         expected_files,
                         removed_paths: Vec::new(),
+                        offloaded_paths: Vec::new(),
                         probe_only: false,
                     },
                 )

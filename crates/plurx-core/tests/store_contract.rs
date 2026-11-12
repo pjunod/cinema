@@ -43,6 +43,8 @@ mod library_schedule;
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
 mod remote;
+#[path = "store_contract/offload.rs"]
+mod offload;
 #[path = "store_contract/scan_request_v2.rs"]
 mod scan_request_v2;
 #[cfg(feature = "hiqlite-contract-tests")]

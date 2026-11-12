@@ -578,6 +578,7 @@ paths = [
   "crates/plurx-core/src/store/schema_lineage.rs",
   "crates/plurx-core/tests/schema_lineage_upgrade.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
+  "crates/plurx-core/src/store/offload.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
   # K-05 section 3.9: poisoned-connection recovery and the boot integrity
   # check that refuses a corrupt database before migration touches it.
@@ -1005,7 +1006,7 @@ paths = [
   "crates/plurxd/src/state/backfill_tests.rs",
   "crates/plurx-core/src/store/sqlite/library.rs",
   "crates/plurx-core/src/store/sqlite/media.rs",
-  "crates/plurxd/src/http/{browse,comingsoon,images,images_worker,items,libraries,photos,scan}.rs",
+  "crates/plurxd/src/http/{browse,comingsoon,images,images_worker,items,libraries,offload,photos,scan}.rs",
   "docs/FEATURES.md",
   "docs/REQUIREMENTS.md",
 ]

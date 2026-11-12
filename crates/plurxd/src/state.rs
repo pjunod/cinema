@@ -5728,7 +5728,11 @@ impl JobManager {
         } else {
             req.path.clone()
         };
-        let removed = library_work::probe_removed_paths(&library, &scope, targeted.removed).await?;
+        let mut removed =
+            library_work::probe_removed_paths(&library, &scope, targeted.removed, false).await?;
+        removed.extend(
+            library_work::probe_removed_paths(&library, &scope, targeted.offloaded, true).await?,
+        );
         // Files the caller says it just placed are probed whatever their
         // size and whole-second mtime say (contract v2 §5.1).
         let force_probe = library_work::canonical_expected(expected, &library, &scope).await;
@@ -5748,6 +5752,16 @@ impl JobManager {
                     .probe_only
                     .then(|| canonical.iter().cloned().collect()),
                 force_probe: canonical,
+                offload_hint: requests
+                    .iter()
+                    .find_map(|request| request.ids.as_ref())
+                    .map(|ids| scan::OffloadHint {
+                        // An episode request's own `ids` are the episode's;
+                        // the show's id travels in `series_tmdb`.
+                        tmdb: (!ids.episodeish).then_some(ids.tmdb).flatten(),
+                        imdb: (!ids.episodeish).then(|| ids.imdb.clone()).flatten(),
+                        series_tmdb: ids.series_tmdb,
+                    }),
             },
         )
         .await?;

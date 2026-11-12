@@ -1837,14 +1837,17 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "DELETE FROM items WHERE library_id = $1
+                concat!(
+                    "DELETE FROM items WHERE library_id = $1
                  AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1)
-                 AND kind IN ('movie','episode','video','photo','book','audiobook')
-                 AND id NOT IN (SELECT item_id FROM files)
+                 AND ",
+                    crate::store::offload::fileless_prunable_leaf!(),
+                    "
                  AND EXISTS (SELECT 1 FROM job_leases WHERE resource = $2
                    AND owner_node_id = $3 AND fence = $4 AND revision = $5
                    AND expires_at_ms = $6)"
-                    .to_owned(),
+                )
+                .to_owned(),
                 reconcile_lease_params(library_id, lease)?,
             ),
             (

@@ -2048,7 +2048,10 @@ async fn library_pages_read_top_level_items_from_the_title_index() {
         ItemSort::Resolution,
         ItemSort::Recorded,
     ] {
-        let (count, page) = super::library_page_statements(crate::store::item_sort_order_by(sort));
+        let (count, page) = super::library_page_statements(
+            crate::store::item_sort_order_by(sort),
+            crate::domain::ItemPresence::Everything,
+        );
         for genre in [Value::Null, Value::Text("Drama".into())] {
             let count_plan = plan_of(
                 &store,

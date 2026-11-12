@@ -181,6 +181,12 @@ pub struct ItemDto {
     /// label a "mark watched / unwatched" control from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rollup: Option<RollupDto>,
+    /// Curator offloaded this title: its files were deleted to free disk, the
+    /// item and its watch history stay. Not playable; an admin can Get it
+    /// back. For a show or season, true only when every leaf is offloaded
+    /// (`rollup.offloaded` counts a partial offload). Absent when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub offloaded: bool,
 }
 
 /// The `media` block: what a list row can say about an item's files without
@@ -236,6 +242,9 @@ impl From<MediaFacts> for MediaDto {
 pub struct RollupDto {
     pub leaves: i64,
     pub watched: i64,
+    /// Offloaded leaves among `leaves`. Absent when none.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub offloaded: i64,
 }
 
 impl From<WatchRollup> for RollupDto {
@@ -243,6 +252,7 @@ impl From<WatchRollup> for RollupDto {
         RollupDto {
             leaves: r.leaves,
             watched: r.watched,
+            offloaded: 0,
         }
     }
 }
@@ -273,6 +283,7 @@ impl From<Item> for ItemDto {
             book_work_id: item.book_work_id,
             book_edition_id: item.book_edition_id,
             book_metadata_source: item.book_metadata_source,
+            offloaded: item.offloaded_at.is_some(),
             tmdb_id: item.tmdb_id,
             imdb_id: item.imdb_id,
             poster: image_url(&item.poster_path, item.updated_at),
@@ -329,6 +340,21 @@ impl ItemDto {
 
     pub fn with_rollup(mut self, rollup: Option<WatchRollup>) -> Self {
         self.rollup = rollup.map(Into::into);
+        self
+    }
+
+    /// Fold in how many of a container's leaves are offloaded: the rollup
+    /// carries the count, and the container itself reads as offloaded only
+    /// when every leaf is.
+    pub fn with_offloaded_leaves(mut self, count: Option<i64>) -> Self {
+        if let (Some(count), Some(rollup)) =
+            (count.filter(|count| *count > 0), self.rollup.as_mut())
+        {
+            rollup.offloaded = count;
+            if rollup.leaves > 0 && count >= rollup.leaves {
+                self.offloaded = true;
+            }
+        }
         self
     }
 }

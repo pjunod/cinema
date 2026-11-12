@@ -869,7 +869,7 @@ async fn v6_rebuild_preserves_everything() {
     // coordination with the v3 copy index; v128 the managed v6 view; v129
     // retention that keeps a charged source custody's owner job.
     assert_eq!(
-        version, 129,
+        version, 130,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );

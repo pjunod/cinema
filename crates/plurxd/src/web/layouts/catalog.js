@@ -522,6 +522,7 @@ function catalogLibraryShell(m){
       <span class="lbl" style="margin-left:8px">Show</span>
       <select data-library-watch-filter aria-label="Show" onchange="LIB_FILTER=this.value;${m.reload}">
         ${libOpt("all","Everything",LIB_FILTER)}${libOpt("unwatched","Unwatched",LIB_FILTER)}${libOpt("inprogress","In progress",LIB_FILTER)}${libOpt("watched","Watched",LIB_FILTER)}</select>
+      ${libPresenceSelect(m.reload)}
       ${libraryPageSize()}
     </div>
     <span class="muted" id="libcount"></span></div>`;

@@ -50,6 +50,10 @@ pub enum RemovedProbe {
 pub struct RemovedUnreadable {
     pub root: PathBuf,
     pub error: String,
+    /// The root listed nothing and is not a mount point of its own: an
+    /// unmounted share looks exactly like this, and so does a root whose last
+    /// file just went. Only [`root_listable`] sets it.
+    pub empty_root: bool,
 }
 
 fn absent(error: &std::io::Error) -> bool {
@@ -83,17 +87,21 @@ pub fn root_listable(root: &Path) -> Result<(), RemovedUnreadable> {
     let unreadable = |error: String| RemovedUnreadable {
         root: root.to_path_buf(),
         error,
+        empty_root: false,
     };
     let mut entries = std::fs::read_dir(root).map_err(|error| unreadable(error.to_string()))?;
     match entries.next() {
         Some(Ok(_)) => Ok(()),
         Some(Err(error)) => Err(unreadable(error.to_string())),
         None if is_mount_point(root) => Ok(()),
-        None => Err(unreadable(
-            "the library root is empty and is not a mount point of its own, which is how an \
-             unmounted share looks; nothing is removed while it is"
-                .to_owned(),
-        )),
+        None => Err(RemovedUnreadable {
+            empty_root: true,
+            ..unreadable(
+                "the library root is empty and is not a mount point of its own, which is how an \
+                 unmounted share looks; nothing is removed while it is"
+                    .to_owned(),
+            )
+        }),
     }
 }
 
@@ -124,10 +132,12 @@ pub fn probe_removed(root: &Path, path: &Path) -> Result<RemovedProbe, RemovedUn
     let unreadable = |error: std::io::Error| RemovedUnreadable {
         root: root.clone(),
         error: error.to_string(),
+        empty_root: false,
     };
     let below = path.strip_prefix(&root).map_err(|_| RemovedUnreadable {
         root: root.clone(),
         error: format!("`{}` is not under this root", path.display()),
+        empty_root: false,
     })?;
     let mut existing = root.clone();
     let components: Vec<_> = below.components().collect();
@@ -161,6 +171,7 @@ pub fn probe_removed(root: &Path, path: &Path) -> Result<RemovedProbe, RemovedUn
                                  a nested mount may be away, so nothing under it is removed",
                                 existing.display()
                             ),
+                            empty_root: false,
                         });
                     }
                 }
@@ -191,6 +202,10 @@ pub struct AbsentPath {
     /// The configured library root it lies under, for the second look just
     /// before removal.
     pub root: PathBuf,
+    /// An offloaded path (contract amendment `offload`): its file records go
+    /// like a removed path's, but the item stays, marked offloaded once it is
+    /// left with no files.
+    pub offload: bool,
 }
 
 /// What forgetting the absent paths did.
@@ -200,12 +215,15 @@ pub struct Removal {
     pub reports: Vec<PlacedReport>,
     pub deleted_files: u64,
     pub pruned_items: u64,
+    /// Items left with no files and marked offloaded.
+    pub offloaded_items: u64,
 }
 
 /// One absent path that had catalogue records.
 struct Target {
     /// As the caller sent it.
     path: String,
+    offload: bool,
     root: PathBuf,
     /// Every file recorded at it (or below it, for a folder).
     files: Vec<(i64, PathBuf)>,
@@ -268,6 +286,7 @@ pub async fn remove_absent(
         match item_ids.first().copied() {
             Some(item_id) if !files.is_empty() => targets.push(Target {
                 path: entry.path.clone(),
+                offload: entry.offload,
                 root: entry.root.clone(),
                 files,
                 item_id,
@@ -352,6 +371,29 @@ pub async fn remove_absent(
                 .collect();
             ids.sort_unstable();
             ids.dedup();
+            // An offload keeps its items, but the prune inside the removal
+            // deletes a file-less leaf unless it is already marked, so mark
+            // first every item this call leaves with no files, and take the
+            // mark back off any that still has one afterwards (a refused or
+            // partial removal, or a copy elsewhere).
+            let mut marks: Vec<i64> = Vec::new();
+            for target in targets.iter().filter(|target| target.offload) {
+                for item_id in &target.item_ids {
+                    if marks.contains(item_id) {
+                        continue;
+                    }
+                    let remaining = store.files_for_item(*item_id).await?;
+                    if remaining
+                        .iter()
+                        .all(|file| ids.binary_search(&file.id).is_ok())
+                    {
+                        marks.push(*item_id);
+                    }
+                }
+            }
+            if !marks.is_empty() {
+                store.mark_items_offloaded(&marks, now_seconds()).await?;
+            }
             for batch in ids.chunks(MAX_RECONCILE_FILE_IDS) {
                 // The fourth argument is the most files this call may delete,
                 // not a ratio of the library: the caller named these files, so
@@ -397,6 +439,9 @@ pub async fn remove_absent(
                     }
                 }
             }
+            if !marks.is_empty() {
+                store.clear_offloaded_with_files(&marks).await?;
+            }
         }
     }
 
@@ -423,6 +468,26 @@ pub async fn remove_absent(
             });
             removal.reports.push(retained(&target, code, reason));
         } else {
+            if target.offload {
+                let mut offloaded_items = 0_u64;
+                for id in &target.item_ids {
+                    if store
+                        .get_item(*id)
+                        .await?
+                        .is_some_and(|item| item.offloaded_at.is_some())
+                    {
+                        offloaded_items += 1;
+                    }
+                }
+                removal.offloaded_items += offloaded_items;
+                removal.reports.push(PlacedReport::Offloaded {
+                    path: target.path,
+                    item_id: target.item_id,
+                    item_ids: target.item_ids,
+                    offloaded_items,
+                });
+                continue;
+            }
             let mut item_removed = true;
             for id in &target.item_ids {
                 item_removed &= store.get_item(*id).await?.is_none();
@@ -437,6 +502,14 @@ pub async fn remove_absent(
     }
     sort_in_request_order(&mut removal.reports, absent);
     Ok(removal)
+}
+
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 /// In the order the caller named them.

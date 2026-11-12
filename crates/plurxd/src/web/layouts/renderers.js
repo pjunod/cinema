@@ -223,6 +223,15 @@ window.addEventListener("resize",()=>document.querySelectorAll(".railbox").forEa
 // something happened, everything else about what it is called. An explicit
 // pick from the dropdown wins from then on.
 let LIB_SORT="", LIB_FILTER="all";
+// Which titles a library lists: what is on disk (default), what Curator
+// offloaded, or both. Remembered per browser; storage may be unavailable.
+let LIB_PRESENCE="disk";
+try{ const saved=localStorage.getItem("plurx.libPresence"); if(saved==="disk"||saved==="offloaded"||saved==="everything") LIB_PRESENCE=saved; }catch(e){}
+function setLibPresence(v){ LIB_PRESENCE=v; try{ localStorage.setItem("plurx.libPresence",v); }catch(e){} }
+function libPresenceSelect(reload){
+  return `<select data-library-presence aria-label="Files" onchange="setLibPresence(this.value);${reload}">
+    ${libOpt("disk","On disk",LIB_PRESENCE)}${libOpt("offloaded","Offloaded",LIB_PRESENCE)}${libOpt("everything","Everything",LIB_PRESENCE)}</select>`;
+}
 // How many posters a page of a library shows. "all" is a real choice, not the
 // default: 300 cards is a slow first paint on a TV browser and an easy scroll
 // on a desktop, and only the person looking at it knows which they are.

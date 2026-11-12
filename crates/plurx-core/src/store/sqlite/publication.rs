@@ -1414,9 +1414,10 @@ fn reconcile_library(
     }
     let mut pruned_items = 0_u64;
     pruned_items += conn.execute(
-        "DELETE FROM items WHERE library_id = ?1
-         AND kind IN ('movie','episode','video','photo','book','audiobook')
-         AND id NOT IN (SELECT item_id FROM files)",
+        concat!(
+            "DELETE FROM items WHERE library_id = ?1 AND ",
+            crate::store::offload::fileless_prunable_leaf!()
+        ),
         params![library_id],
     )? as u64;
     pruned_items += conn.execute(

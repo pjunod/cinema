@@ -206,6 +206,7 @@ scope AS (
  FROM items i JOIN libraries library ON library.id=i.library_id
  WHERE EXISTS(SELECT 1 FROM scope) AND library.kind IN ('movies','shows')
  AND i.kind IN ('movie','show','season','episode')
+ AND i.offloaded_at IS NULL
  AND (CASE json_extract($1,'$.mode')
    WHEN 'resume' THEN i.kind IN ('movie','episode') AND EXISTS(SELECT 1 FROM watch_state w WHERE w.user_id=(SELECT user_id FROM scope) AND w.item_id=i.id AND w.watched=0 AND w.position_ms>0)
    WHEN 'next_up' THEN i.id IN (SELECT id FROM next_up)

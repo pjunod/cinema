@@ -22582,7 +22582,7 @@ async fn a_removed_path_whose_folder_is_gone_is_not_path_unreadable_and_an_unmou
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         body["features"],
-        json!(["removed_paths", "probe_only"]),
+        json!(["removed_paths", "probe_only", "offload"]),
         "{body}"
     );
 
@@ -22985,4 +22985,277 @@ async fn probe_paths_never_follow_a_symlink_and_refuse_a_path_beside_them() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "probe_paths_with_path");
+}
+
+// ---- Offload: Curator deleted the files, the title stays ----
+
+/// A fake Curator webhook answering every call with `answer`, recording the
+/// request bodies and the key it saw.
+async fn fake_curator(
+    answer: Value,
+) -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+) {
+    use axum::routing::post as axpost;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    let router = axum::Router::new().route(
+        "/api/v1/webhooks/plurx",
+        axpost(
+            move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+                let sink = sink.clone();
+                let answer = answer.clone();
+                async move {
+                    let key = headers
+                        .get("x-api-key")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_owned();
+                    sink.lock().expect("lock").push((key, body));
+                    axum::Json(answer)
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    (base, seen)
+}
+
+async fn pair_curator(app: &Router, admin: &str, url: &str) {
+    let (status, _) = call(
+        app,
+        put(
+            "/api/v1/settings",
+            Some(admin),
+            json!({ "monarr_url": url, "monarr_api_key": "curator-key" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// Two indexed movies, Dune offloaded through a probe-only scan: the report
+/// says `offloaded`, the item survives flagged, the library hides it by
+/// default, and `presence` brings it back.
+#[tokio::test]
+async fn an_offloaded_title_stays_flagged_listed_on_request_and_searchable() {
+    let (app, state) = test_app_with_state();
+    let _worker = scan_worker(&state);
+    let admin = setup_admin(&app).await;
+    let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let root = dir.path().canonicalize().expect("canonical").join("movies");
+    let dune = media(&root, "Dune (1984)", "Dune.1984.mkv");
+    let _heat = media(&root, "Heat (1995)", "Heat.1995.mkv");
+    indexed_movies(&app, &state, &admin, &root).await;
+    let dune_item = state
+        .store
+        .get_file_by_path(&dune.to_string_lossy())
+        .await
+        .expect("lookup")
+        .expect("indexed")
+        .item_id;
+    std::fs::remove_file(&dune).expect("unlink");
+
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({
+                "path": root,
+                "request_key": "op/51/d0/1",
+                "wait_ms": 15_000,
+                "offloaded_paths": [dune],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let files = body["files"].as_array().expect("files");
+    assert_eq!(files.len(), 1, "{body}");
+    assert_eq!(files[0]["state"], "offloaded", "{body}");
+    assert_eq!(files[0]["item_id"], dune_item, "{body}");
+
+    let item = state
+        .store
+        .get_item(dune_item)
+        .await
+        .expect("get")
+        .expect("kept");
+    assert!(item.offloaded_at.is_some(), "the last file left: marked");
+
+    let (_, detail) = call(
+        &app,
+        get(&format!("/api/v1/items/{dune_item}"), Some(&admin)),
+    )
+    .await;
+    assert_eq!(detail["item"]["offloaded"], true, "{detail}");
+
+    let titles = |body: &Value| -> Vec<String> {
+        body["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|i| i["title"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    let library = state.store.list_libraries().await.expect("libs")[0].id;
+    let list = |query: &'static str| {
+        let uri = format!("/api/v1/libraries/{library}/items{query}");
+        let app = app.clone();
+        let admin = admin.clone();
+        async move { call(&app, get(&uri, Some(&admin))).await }
+    };
+    let (_, on_disk) = list("").await;
+    assert_eq!(titles(&on_disk).len(), 1, "default hides it: {on_disk}");
+    let (_, offloaded) = list("?presence=offloaded").await;
+    assert_eq!(titles(&offloaded).len(), 1, "{offloaded}");
+    assert_eq!(offloaded["items"][0]["offloaded"], true, "{offloaded}");
+    let (_, everything) = list("?presence=everything").await;
+    assert_eq!(titles(&everything).len(), 2, "{everything}");
+    let (status, _) = list("?presence=sideways").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (_, search) = call(&app, get("/api/v1/search?q=Dune", Some(&admin))).await;
+    assert!(
+        search.to_string().contains("\"offloaded\":true"),
+        "search includes offloaded titles, flagged: {search}"
+    );
+
+    // Replay of the same request reports the same answer and changes nothing.
+    let (_, again) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({ "path": root, "request_key": "op/51/d0/1", "wait_ms": 15_000, "offloaded_paths": [dune] }),
+        ),
+    )
+    .await;
+    assert_eq!(again["files"], body["files"], "{again}");
+}
+
+/// Get it back: an admin's press reaches Curator with the ids and the key;
+/// the answer is read through; an old Curator, an unreachable one, a title
+/// that is not offloaded, a title without ids and a non-admin each get their
+/// own plain answer.
+#[tokio::test]
+async fn get_it_back_asks_curator_and_says_what_it_answered() {
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    state
+        .store
+        .apply_metadata(
+            seed.movie,
+            &plurx_core::domain::MetadataPatch {
+                tmdb_id: Some(603),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("tmdb");
+    let uri = format!("/api/v1/items/{}/get-it-back", seed.movie);
+
+    let (status, body) = call(&app, post(&uri, Some(&admin), json!({}))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "not_offloaded", "{body}");
+
+    state
+        .store
+        .mark_items_offloaded(&[seed.movie], 1_700_000_000)
+        .await
+        .expect("mark");
+
+    let (status, body) = call(&app, post(&uri, Some(&admin), json!({}))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "curator_not_configured", "{body}");
+
+    let (base, seen) =
+        fake_curator(json!({"matched": true, "mediaItemId": 9, "state": "searching"})).await;
+    pair_curator(&app, &admin, &base).await;
+    let (status, body) = call(&app, post(&uri, Some(&admin), json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "searching", "{body}");
+    assert_eq!(body["matched"], true, "{body}");
+    {
+        let seen = seen.lock().expect("lock");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "curator-key");
+        assert_eq!(seen[0].1["event"], "reacquire");
+        assert_eq!(seen[0].1["kind"], "movie");
+        assert_eq!(seen[0].1["tmdb"], 603);
+    }
+    let status_uri = format!("/api/v1/items/{}/offload-status", seed.movie);
+    let (status, body) = call(&app, get(&status_uri, Some(&admin))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(seen.lock().expect("lock")[1].1["event"], "reacquire_status");
+
+    let (busy, _) = fake_curator(json!({"matched": true, "state": "offloading"})).await;
+    pair_curator(&app, &admin, &busy).await;
+    let (_, body) = call(&app, post(&uri, Some(&admin), json!({}))).await;
+    assert_eq!(
+        body["message"], "Curator is still offloading this; try again shortly.",
+        "{body}"
+    );
+    let (still, _) = fake_curator(
+        json!({"matched": true, "state": "offloaded", "message": "Not started: no indexer"}),
+    )
+    .await;
+    pair_curator(&app, &admin, &still).await;
+    let (_, body) = call(&app, post(&uri, Some(&admin), json!({}))).await;
+    assert_eq!(body["message"], "Not started: no indexer", "{body}");
+    let (odd, _) = fake_curator(json!({"matched": true, "state": "future_state"})).await;
+    pair_curator(&app, &admin, &odd).await;
+    let (status, body) = call(&app, post(&uri, Some(&admin), json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["message"], "Curator answered future_state.", "{body}");
+
+    // A Curator that predates the feature answers without a state.
+    let (old, _) = fake_curator(json!({"ok": true})).await;
+    pair_curator(&app, &admin, &old).await;
+    let (status, body) = call(&app, post(&uri, Some(&admin), json!({}))).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["code"], "curator_too_old", "{body}");
+
+    pair_curator(&app, &admin, "http://127.0.0.1:1").await;
+    let (status, body) = call(&app, post(&uri, Some(&admin), json!({}))).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["code"], "curator_unreachable", "{body}");
+
+    // No ids: Curator cannot be asked.
+    state
+        .store
+        .mark_items_offloaded(&[seed.movie], 1_700_000_000)
+        .await
+        .expect("mark");
+    call(
+        &app,
+        post(
+            "/api/v1/users",
+            Some(&admin),
+            json!({"username":"viewer","password":"longenough"}),
+        ),
+    )
+    .await;
+    let (_, login) = call(
+        &app,
+        post(
+            "/api/v1/auth/login",
+            None,
+            json!({"username":"viewer","password":"longenough"}),
+        ),
+    )
+    .await;
+    let viewer = login["token"].as_str().expect("token");
+    let (status, _) = call(&app, post(&uri, Some(viewer), json!({}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "Get it back is for admins");
 }

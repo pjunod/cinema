@@ -2449,6 +2449,7 @@ async fn a_probe_only_targeted_scan_records_exactly_the_named_files() {
         &TargetedOptions {
             force_probe: [dune.clone()].into_iter().collect(),
             only: Some(vec![dune.clone(), outside]),
+            offload_hint: None,
         },
     )
     .await
@@ -2527,6 +2528,7 @@ async fn removed_paths_forget_their_records_and_the_items_left_without_files() {
                 path: path.display().to_string(),
                 spellings,
                 root: root.clone(),
+                offload: false,
             }),
             other => panic!("{path:?} is absent, not {other:?}"),
         }
@@ -2584,6 +2586,7 @@ async fn removed_paths_forget_their_records_and_the_items_left_without_files() {
             path: alien.display().to_string(),
             spellings: vec![alien.clone()],
             root: other.path().to_path_buf(),
+            offload: false,
         }],
         false,
     )
@@ -2616,8 +2619,16 @@ async fn absent_path(root: &Path, path: &Path) -> removed::AbsentPath {
             path: path.display().to_string(),
             spellings,
             root: root.to_path_buf(),
+            offload: false,
         },
         other => panic!("{path:?} is absent, not {other:?}"),
+    }
+}
+
+async fn offloaded_path(root: &Path, path: &Path) -> removed::AbsentPath {
+    removed::AbsentPath {
+        offload: true,
+        ..absent_path(root, path).await
     }
 }
 
@@ -2807,4 +2818,240 @@ async fn a_gone_request_path_is_scoped_to_its_nearest_existing_ancestor() {
         "a file where a folder should be is where the climb stops"
     );
     assert_eq!(containment::nearest_existing(&libs, &root), root);
+}
+
+/// Contract amendment `offload`: the file records go and the item stays; the
+/// item is marked offloaded only when it is left with no files (so a second
+/// copy elsewhere keeps it on disk); a folder offloads every item under it;
+/// the same request again is `unknown`; and neither a later full scan nor a
+/// prune deletes the offloaded item.
+#[tokio::test]
+async fn an_offload_keeps_the_item_and_marks_it_only_when_no_files_remain() {
+    use crate::store::scan_request_v2::PlacedReport;
+    let (store, lib, dir) = removal_fixture(&[
+        "Dune (1984)/Dune (1984).mkv",
+        "Dune (1984)/Dune (1984) [2160p].mkv",
+        "Ran (1985)/Ran (1985).mkv",
+        "Heat (1995)/Heat (1995).mkv",
+    ])
+    .await;
+    let root = dir.path().to_path_buf();
+    let dune_hd = root.join("Dune (1984)").join("Dune (1984).mkv");
+    let dune_4k = root.join("Dune (1984)").join("Dune (1984) [2160p].mkv");
+    let dune_item = store
+        .get_file_by_path(&dune_hd.to_string_lossy())
+        .await
+        .expect("lookup")
+        .expect("Dune file")
+        .item_id;
+    let publisher = PublicationStore::unfenced(&store);
+
+    // One of two copies: the item keeps a file, so it is not offloaded.
+    std::fs::remove_file(&dune_hd).expect("rm hd");
+    let first = removed::remove_absent(
+        &publisher,
+        &lib,
+        &[offloaded_path(&root, &dune_hd).await],
+        false,
+    )
+    .await
+    .expect("offload one copy");
+    assert!(
+        matches!(&first.reports[..], [PlacedReport::Offloaded { item_id, offloaded_items: 0, .. }] if *item_id == dune_item),
+        "{:?}",
+        first.reports
+    );
+    assert_eq!(first.offloaded_items, 0);
+    let item = store.get_item(dune_item).await.expect("get").expect("kept");
+    assert_eq!(item.offloaded_at, None, "a copy remains on disk");
+    assert_eq!(
+        store.files_for_item(dune_item).await.expect("files").len(),
+        1
+    );
+
+    // The last copy, and a whole folder: both stay as offloaded items.
+    std::fs::remove_file(&dune_4k).expect("rm 4k");
+    std::fs::remove_dir_all(root.join("Ran (1985)")).expect("rm Ran");
+    let ran_folder = root.join("Ran (1985)");
+    let ran_item = store
+        .library_file_paths_under(lib.id, &ran_folder)
+        .await
+        .expect("ran files")
+        .first()
+        .map(|(id, _)| *id)
+        .expect("Ran file id");
+    let ran_item = store
+        .get_file(ran_item)
+        .await
+        .expect("file")
+        .expect("row")
+        .item_id;
+    let second = removed::remove_absent(
+        &publisher,
+        &lib,
+        &[
+            offloaded_path(&root, &dune_4k).await,
+            offloaded_path(&root, &ran_folder).await,
+        ],
+        false,
+    )
+    .await
+    .expect("offload the rest");
+    assert_eq!(second.offloaded_items, 2, "{:?}", second.reports);
+    assert_eq!(
+        second.pruned_items, 0,
+        "nothing pruned: {:?}",
+        second.reports
+    );
+    for id in [dune_item, ran_item] {
+        let item = store.get_item(id).await.expect("get").expect("item kept");
+        assert!(item.offloaded_at.is_some(), "{id} is offloaded");
+        assert!(store.files_for_item(id).await.expect("files").is_empty());
+    }
+
+    // The same request again: nothing is catalogued there any more.
+    let replay = removed::remove_absent(
+        &publisher,
+        &lib,
+        &[offloaded_path(&root, &dune_4k).await],
+        false,
+    )
+    .await
+    .expect("replay");
+    assert!(
+        matches!(&replay.reports[..], [PlacedReport::Unknown { .. }]),
+        "{:?}",
+        replay.reports
+    );
+
+    // A later full scan reconciles against the disk and must not prune them.
+    scan_library(&store, &lib).await.expect("full scan");
+    for id in [dune_item, ran_item] {
+        assert!(
+            store.get_item(id).await.expect("get").is_some(),
+            "{id} survived the full scan's prune"
+        );
+    }
+    assert_eq!(store.prune_empty_items(lib.id).await.expect("prune"), 0);
+}
+
+/// Whatever attaches a file to an offloaded item ends the offload: the store
+/// clears the mark, so no attach path can forget to.
+#[tokio::test]
+async fn a_file_attaching_clears_the_offload() {
+    let (store, lib, dir) =
+        removal_fixture(&["Dune (1984)/Dune (1984).mkv", "Heat (1995)/Heat (1995).mkv"]).await;
+    let root = dir.path().to_path_buf();
+    let dune = root.join("Dune (1984)").join("Dune (1984).mkv");
+    let item = store
+        .get_file_by_path(&dune.to_string_lossy())
+        .await
+        .expect("lookup")
+        .expect("file")
+        .item_id;
+    std::fs::remove_file(&dune).expect("rm");
+    removed::remove_absent(
+        &PublicationStore::unfenced(&store),
+        &lib,
+        &[offloaded_path(&root, &dune).await],
+        false,
+    )
+    .await
+    .expect("offload");
+    assert!(store
+        .get_item(item)
+        .await
+        .expect("get")
+        .expect("kept")
+        .offloaded_at
+        .is_some());
+    store
+        .upsert_file(item, &dune.to_string_lossy(), 1, 1, &ProbeResult::default())
+        .await
+        .expect("a file comes back");
+    assert_eq!(
+        store
+            .get_item(item)
+            .await
+            .expect("get")
+            .expect("kept")
+            .offloaded_at,
+        None
+    );
+}
+
+/// Files that come back after Get it back land on the offloaded item named by
+/// the request's ids, not on whatever the release name parses to: a title the
+/// library spells `Tár` and the release spells `Tar` must not become a second
+/// item with no watch history.
+#[tokio::test]
+async fn returning_files_are_placed_on_the_offloaded_item_by_ids() {
+    use crate::domain::MetadataPatch;
+    let (store, lib, dir) =
+        removal_fixture(&["Tar (2022)/Tar (2022).mkv", "Heat (1995)/Heat (1995).mkv"]).await;
+    let root = dir.path().to_path_buf();
+    let original = root.join("Tar (2022)").join("Tar (2022).mkv");
+    let item = store
+        .get_file_by_path(&original.to_string_lossy())
+        .await
+        .expect("lookup")
+        .expect("file")
+        .item_id;
+    store
+        .apply_metadata(
+            item,
+            &MetadataPatch {
+                title: Some("T\u{e1}r".into()),
+                tmdb_id: Some(817758),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("enriched");
+    std::fs::remove_dir_all(root.join("Tar (2022)")).expect("rm");
+    removed::remove_absent(
+        &PublicationStore::unfenced(&store),
+        &lib,
+        &[offloaded_path(&root, &root.join("Tar (2022)")).await],
+        false,
+    )
+    .await
+    .expect("offload");
+    let before = store
+        .list_top_items(lib.id, ItemSort::Title, 0, 50)
+        .await
+        .expect("list")
+        .total;
+
+    let returned = write_fake_video(
+        dir.path(),
+        "Tar.2022.1080p.WEB-DL/Tar.2022.1080p.WEB-DL.mkv",
+    )
+    .await;
+    let hinted = |hint: Option<OffloadHint>| TargetedOptions {
+        force_probe: [returned.clone()].into_iter().collect(),
+        only: Some(vec![returned.clone()]),
+        offload_hint: hint,
+    };
+    let (placed, _) = scan_path_targeted(
+        &PublicationStore::unfenced(&store),
+        &lib,
+        &root,
+        &hinted(Some(OffloadHint {
+            tmdb: Some(817758),
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect("scan with ids");
+    assert_eq!(placed.items[0].item_id, item, "{:?}", placed.items);
+    let item = store.get_item(item).await.expect("get").expect("item");
+    assert_eq!(item.offloaded_at, None, "the file cleared the offload");
+    assert_eq!(item.title, "T\u{e1}r");
+    let after = store
+        .list_top_items(lib.id, ItemSort::Title, 0, 50)
+        .await
+        .expect("list")
+        .total;
+    assert_eq!(after, before, "no duplicate item appeared");
 }
