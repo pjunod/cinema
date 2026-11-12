@@ -110,7 +110,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 18] = [
+    let inputs: [(&str, &[u8]); 19] = [
         (
             "author_p81.c",
             include_bytes!("../../../tools/dv_processing/author_p81.c"),
@@ -150,6 +150,10 @@ fn renderer_source_identity() -> String {
         (
             "movie_source_io.h",
             include_bytes!("../../../tools/dv_processing/movie_source_io.h"),
+        ),
+        (
+            "mux_rgb.c",
+            include_bytes!("../../../tools/dv_processing/mux_rgb.c"),
         ),
         (
             "nlq_clipping.h",

@@ -15,6 +15,7 @@ INPUTS = (
     'fel_renderer.h',
     'hevc-rasl-frame-thread.patch',
     'movie_source_io.h',
+    'mux_rgb.c',
     'nlq_clipping.h',
     'nut_timing.h',
     'rgb48.h',

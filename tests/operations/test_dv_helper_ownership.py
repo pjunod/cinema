@@ -111,6 +111,29 @@ class DvHelperOwnershipTests(unittest.TestCase):
                           + bytes.fromhex(PACKAGING["sha"](ROOT / "tools/dv_processing" / name)))
         self.assertEqual(bundle.hexdigest(), expected.hexdigest())
 
+    def test_every_source_compiled_into_the_bundle_is_in_its_identity(self):
+        source = ROOT / "tools/dv_processing"
+        recipe = (source / "build.sh").read_text(encoding="utf-8")
+        pending = re.findall(r'"\$source_dir/([A-Za-z0-9_]+\.c)"', recipe)
+        # One compile and one existence test name author_p81.c; the rest once.
+        self.assertEqual(sorted(set(pending)),
+                         ["author_p81.c", "mux_rgb.c", "scan_title.c", "segment_decode_render.c"])
+        self.assertEqual(recipe.count('-o "$output_dir/'), 4)
+        compiled = set()
+        while pending:
+            name = pending.pop()
+            if name in compiled:
+                continue
+            compiled.add(name)
+            for include in re.findall(r'(?m)^[ \t]*#[ \t]*include[ \t]+"([^"]+)"',
+                                      (source / name).read_text(encoding="utf-8")):
+                self.assertTrue((source / include).is_file(), f"{name} includes {include}")
+                pending.append(include)
+        # The decoder patch is compiled into the published FFmpeg, and is the
+        # one identity input that is not a helper source.
+        self.assertEqual(set(PACKAGING["INPUTS"]), compiled | {"hevc-rasl-frame-thread.patch"})
+        self.assertEqual({name for name, _ in daemon_identity_inputs()}, set(PACKAGING["INPUTS"]))
+
     def test_dependency_pin_records_this_trees_dependency_inputs(self):
         source = DOCKERFILE.read_text(encoding="utf-8")
         recorded = media_runtime.DV_INPUTS_ARG.findall(source)
