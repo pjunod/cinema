@@ -128,7 +128,7 @@ static inline void dv_dm_pack_cm29(dv_dm_frame *f, const dm_cm29_state *s) {
   dv_dm_put(f->u[3], s->tr.sg, f->weight, s->tg.floor_pq, s->tg.prim == DM_BT709);
   dv_dm_rows(f->u + 4, s->rgb2lms);
   dv_dm_rows(f->u + 7, s->lms2rgb);
-  dv_dm_put(f->u[10], s->grid_origin, s->native_black, s->native_span, s->xtop);
+  dv_dm_put(f->u[10], s->grid_origin, s->native_black, s->native_span, 0);
   dv_dm_put(f->u[19], s->decode_black, s->decode_span, 0, 0);
   dv_dm_rows(f->u + 11, s->to_t);
   dv_dm_rows(f->u + 14, s->from_t);
@@ -211,10 +211,15 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
     dv_dm_pack_cm4(f, &s);
     return NULL;
   }
-  // CM v2.9: the L2 trim authored for this target's peak (12-bit PQ match); otherwise each decoded
-  // trim field interpolated linearly in target PQ between the bracketing L2 targets, with neutral
-  // trims at PQ 0 and at the mastering display (title peak). No usable L2, or a target at or above
-  // the mastering peak (even with an L2 authored for it): neutral trim with the default MS weight.
+  // CM v2.9, as cm_offline 5.6.4 selects the trim (black-box grid, L2 at 100/600/1000/2000 nits
+  // singly and in pairs against 100/600/1000/2000-nit targets and 1000/2000/4000-nit masters):
+  // the L2 authored for this target's peak (12-bit PQ match) whatever the mastering peak;
+  // otherwise each decoded trim field interpolated linearly in target PQ between the nearest L2
+  // target below and the nearest above (an L2 at or above the mastering peak brackets too). A
+  // missing lower side is a neutral trim at the mastering display's minimum, a missing upper side
+  // a neutral trim at its peak; with no L2 above, a target at or above the mastering peak maps
+  // untrimmed, as does an RPU without L2.
+  const double smin_nits = d->level6 ? d->level6->min_display_mastering_luminance / 10000.0 : 0.005;
   dm_cm29_trim tr = {0, 0, 0, 0, 0, 0}; unsigned want = (unsigned)floor(tmax * 4095 + 0.5); int found = 0;
   {
     dm_cm29_trim lo_t = tr, hi_t = tr, ex_t = tr; double lo = -1, hi = 2; bool exact = false;
@@ -231,14 +236,12 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
       if (q < tmax && q > lo) { lo = q; lo_t = t; }
       if (q > tmax && q < hi) { hi = q; hi_t = t; }
     }
-    // an L2 target between this display and the mastering peak; without one (and without a lower
-    // target) every trim has faded out and the mapping is the untrimmed one
-    bool upper = hi <= 1 && hi < smast, lower = lo >= 0;
-    if (exact && tmax < smast) { found = 2; tr = ex_t; }
-    else if (!exact && tmax < smast && (lower || upper)) {
-      if (!upper) { hi = smast; memset(&hi_t, 0, sizeof(hi_t)); }   // neutral at the mastering peak
-      if (!lower) { lo = 0; memset(&lo_t, 0, sizeof(lo_t)); }       // neutral at PQ 0
-      double w = (hi - tmax) / (hi - lo);                  // weight of the lower trim
+    bool upper = hi <= 1, lower = lo >= 0;
+    if (exact) { found = 2; tr = ex_t; }
+    else if (upper || (lower && tmax < smast)) {
+      if (!upper) { hi = smast; memset(&hi_t, 0, sizeof(hi_t)); }                     // neutral at the mastering peak
+      if (!lower) { lo = dm_pq_nits(smin_nits); memset(&lo_t, 0, sizeof(lo_t)); }     // neutral at the mastering minimum
+      double w = hi > lo ? (hi - tmax) / (hi - lo) : 0;    // weight of the lower trim
       w = dm_mind(dm_maxd(w, 0), 1);
       tr.lift = w * lo_t.lift + (1 - w) * hi_t.lift; tr.gain = w * lo_t.gain + (1 - w) * hi_t.gain;
       tr.gamma = w * lo_t.gamma + (1 - w) * hi_t.gamma; tr.cw = w * lo_t.cw + (1 - w) * hi_t.cw;
@@ -248,8 +251,7 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
   }
   dm_cm29_target tg = {nits, floor_nits, tprim, 0.0};
   dm_cm29_state s;
-  if (!dm_cm29_prepare(&s, L1, d->level6 ? d->level6->min_display_mastering_luminance / 10000.0 : 0.005,
-                       smast_nits, &tg, &tr)) return "degenerate CM2.9 shot";
+  if (!dm_cm29_prepare(&s, L1, smin_nits, smast_nits, &tg, &tr)) return "degenerate CM2.9 shot";
   f->weight = tr.ms;
   f->trim_targets = found ? (int)d->level2.len : 0; f->trim = found == 2 ? "l2-exact" : (found ? "l2-interpolated" : "l1-only");
   f->c29 = s;
@@ -299,13 +301,12 @@ static inline bool dv_dm_cpu_render(const dv_dm_frame *f, const float *in, int w
   for (size_t i = 0; ok && i < n; i++) {
     double rgb[3] = {in[4 * i], in[4 * i + 1], in[4 * i + 2]};
     if (f->algo == 4) { double ic[3]; dm_rgbpq_to_ictcp(rgb, ic); a[i] = ic[0]; dm_cm4_pixel(&f->c4, rgb, o3 + 3 * i); b[i] = o3[3 * i]; }
-    else { dm_cm29_pixel_pre(&f->c29, rgb, &px[i]); a[i] = dm_cm29_detail_in(&f->c29, &px[i], 0); b[i] = px[i].Ib; c[i] = px[i].Io; }
+    else { dm_cm29_pixel_pre(&f->c29, rgb, &px[i]); a[i] = px[i].I; b[i] = px[i].Ib; c[i] = px[i].Io; }
   }
   if (ok && f->weight > -1) {
     ok = dm_detail(a, b, w, h, f->weight, e);
     if (ok) memcpy(b, e, n * sizeof(double));
     if (ok && f->algo == 29 && f->c29.tr.cw != 0) {
-      for (size_t i = 0; i < n; i++) a[i] = dm_cm29_detail_in(&f->c29, &px[i], 1);
       ok = dm_detail(a, c, w, h, f->weight, e); if (ok) memcpy(c, e, n * sizeof(double)); }
     else if (ok && f->algo == 29) memcpy(c, b, n * sizeof(double));
   }
@@ -420,15 +421,15 @@ enum { DV_DM_LATTICE_X = 66 };
   " return o; }\n"
 
 #define DV_DM_GLSL_CM29_SPATIAL \
-  "float c29curve(float x){ float xn=pow(max(x,0.0),u[0].w); float v=pow(max((u[0].x+u[0].y*xn)/(1.0+u[0].z*xn),0.0),1.0/3.0); return clamp(v,u[1].x,u[1].y); }\n" \
+  "// Curve and trim are not clamped to the target range; c29finish holds the finished intensity to it.\n" \
+  "float c29curve(float x){ float xn=pow(max(x,0.0),u[0].w); return pow(max((u[0].x+u[0].y*xn)/(1.0+u[0].z*xn),0.0),1.0/3.0); }\n" \
   "float c29sop(float y){ if(u[17].x<0.5) return y; float L=u[2].x,g=u[2].y,G=u[2].z;\n" \
-  " return clamp(pow(max((1.0+g/2.0)*((1.0-L/2.0)*y+L/2.0),0.0),2.0/(2.0+G)),u[1].x,u[1].y); }\n" \
+  " return pow(max((1.0+g/2.0)*((1.0-L/2.0)*y+L/2.0),0.0),2.0/(2.0+G)); }\n" \
   "vec3 ipt(vec3 rgb){ vec3 lms=max(mrow(u[4],u[5],u[6],pq_eotf3(rgb)),vec3(0.0)); return pq_oetf3(lms)*IPT_T; }\n" \
   "vec2 c29point(vec3 p, out float I){ I=p.x; float C=length(p.yz); float Ib=c29sop(c29curve(I));\n" \
   " float Io=u[17].y>0.5 ? c29sop(c29curve(I+0.5*u[2].w*C)) : Ib; return vec2(Ib,Io); }\n" \
-  "// Source intensity as the detail stage reads it (x: base plane, y: chroma-weighted plane): held where\n" \
-  "// that plane's tone-curve argument reaches the top clip (u[10].w), so clipped highlights gain no detail.\n" \
-  "vec2 c29din(vec3 p){ return min(vec2(p.x),vec2(u[10].w,u[10].w-0.5*u[2].w*length(p.yz))); }\n" \
+  "// Source intensity as the detail stage reads it, for both planes (x: base, y: chroma-weighted).\n" \
+  "vec2 c29din(vec3 p){ return vec2(p.x); }\n" \
   "vec3 c29vertex(vec3 q){\n" \
   " if(q.x<=u[10].x) return vec3(0.0);\n" \
   " vec3 lmsp=clamp(q*IPTI_T,0.0,1.0);\n" \
@@ -443,7 +444,7 @@ enum { DV_DM_LATTICE_X = 66 };
   "  return texelFetch(lat,ivec2(int(idx.x)+int(DV_DM_LATTICE_X)*int(idx.y+R),int(idx.z+R)),0).rgb;\n" \
   " return c29vertex(origin+idx*step); }\n" \
   "vec3 c29finish(sampler2D lat, vec3 p, float Ib, float Io){\n" \
-  " Ib=max(Ib,0.0); Io=max(Io,0.0); float Ii=max(p.x,1e-6);\n" \
+  " Ib=clamp(Ib,0.0,u[1].y); Io=clamp(Io,0.0,u[1].y); float Ii=max(p.x,1e-6);\n" \
   " float sc=clamp((Ib/Ii)*(2.0+Ii)/(2.0+Ib),0.5,2.0)*(1.0+0.5*u[3].x);\n" \
   " vec3 q=vec3(Io,p.y*sc,p.z*sc), origin=vec3(u[10].x,0.0,0.0);\n" \
   " vec3 step=vec3(u[1].y/64.0,u[1].y/32.0,u[1].y/32.0);\n" \

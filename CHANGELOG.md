@@ -15,11 +15,22 @@ bump may break compatibility and a **patch** bump never does.
   owner's custody could not be released once it was gone. The job is kept
   until the custody is released, then expires as usual (SQLite v129; a
   shape-verified hiqlite extension).
-- CM v2.9 display mapping restores no detail where the tone curve sits on its
-  top clip, as the licensed reference does. Pixels brighter than the shot's
-  clip point kept a detail term the reference drops (up to 33 dE ITP on
-  synthetic specks above the clip); frames with no pixel above the clip
-  render exactly as before.
+- CM v2.9 display mapping holds the picture to the display's range only once,
+  after the L2 trim and the detail pass, as the licensed reference does. The
+  tone curve was clamped to the target range before the trim, so pixels
+  brighter than the shot's L1 maximum lost their gradation under a darkening
+  trim (flat up to 2,280 16-bit codes below the reference), pixels darker than
+  the shot's L1 minimum were lifted to the display black the reference maps
+  under, and detail above the clip came out wrong (up to 33 dE ITP on
+  synthetic specks). Pixels inside the shot's own L1 range map as before.
+- CM v2.9 picks its L2 trim the way the licensed reference does when the RPU
+  has none for the display's peak: it interpolates between the nearest L2
+  targets below and above, including one at or above the mastering peak
+  (which was ignored, leaving such titles untrimmed below it), fades a trim
+  with nothing below it towards the mastering display's minimum instead of
+  absolute black, and applies an L2 authored for the mastering peak or above.
+  A title with no L2, or a display at or above the mastering peak with no L2
+  above it, still maps untrimmed.
 - The server image builds its Dolby Vision helper bundle from the same source
   tree as the server it ships with. The bundle had been taken from a separately
   published image, so helper changes never reached an image, and a server built
