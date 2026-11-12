@@ -345,6 +345,15 @@ fn channels(stream: &AudioStream) -> u8 {
         .unwrap_or(2)
 }
 
+/// Whether the copy pipe can carry this audio codec unchanged in fMP4: the
+/// rolling route's own table. A recipe built without a playback decision
+/// (a recovered copy-index demand) encodes anything this refuses, as
+/// playback's default does, rather than ask the muxer for a copy it cannot
+/// write.
+pub fn copy_pipe_admits_audio(codec: &str) -> bool {
+    route_admits_copy(AudioRoute::RollingHls, codec)
+}
+
 fn route_admits_copy(route: AudioRoute, codec: &str) -> bool {
     let codec = codec.to_ascii_lowercase();
     match route {

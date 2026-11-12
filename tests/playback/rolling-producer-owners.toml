@@ -5791,6 +5791,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # tasks, Input and reap are joined by `fill_copy_gap` itself) and then fails
 # the test. It settles nothing itself. The v3 consumer and its peer route add no timer: hydration reuses
 # the peer transport's per-request deadline, as the v2 read does.
+# Discrepancy quarantine (item 5) adds no task, timer or process: a reader's
+# defect is a message in the existing copy-analysis inbox, handled inline by
+# the pass that folds it; the stranded-coordinator retirement runs once at
+# the head of a process's first pass; the v3 eviction owner is called by the
+# playback-cache budget.
+# Local playback demand (item 6, first step) adds no task, timer or process: a
+# local start's demand is one more message in the copy-analysis inbox, and the
+# build it leads to is the existing source unit and its Analysis phases.
 # 2202 -> 2205 with E1c (route view): `raw_route_before` bounds its view read
 # and its quorum read (alternative arms) by the lookup's existing request
 # deadline, one `timeout_at` more than the single Store read had (+1); two
@@ -5798,6 +5806,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # lease cases (+2). No new task, timer or producer: the cache has no clock.
 # 2205 -> 2203 with the E1c review: the two wall-clock pacing sleeps in
 # route_view_tests.rs are gone; those cases run on a paused clock.
+# Merged main into E1c: 2202 base, +0 main, +1 E1c.
 # Merged main into E1c: 2202 base, +0 main, +1 E1c.
 expected_occurrences = 2203
 

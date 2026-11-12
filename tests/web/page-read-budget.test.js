@@ -1398,6 +1398,7 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
      ${shippedSource("analysisNodeCell")}
      ${shippedSource("analysisNodeDetail")}
      ${shippedSource("analysisRowKey")}
+     ${shippedSource("analysisLocalPlayback")}
      ${shippedSource("analysisDisposition")}
      ${shippedSource("analysisErrors")}
      ${shippedSource("analysisAttemptHistory")}
@@ -1619,6 +1620,7 @@ test("Analysis repaint restores row-link and disclosure focus with stable keys",
      ${shippedSource("analysisNodeCell")}
      ${shippedSource("analysisNodeDetail")}
      ${shippedSource("analysisRowKey")}
+     ${shippedSource("analysisLocalPlayback")}
      ${shippedSource("analysisDisposition")}
      ${shippedSource("analysisErrors")}
      ${shippedSource("analysisAttemptHistory")}
@@ -2077,6 +2079,7 @@ test("A failed row lists the code every charged attempt ended with", () => {
      ${shippedSource("analysisNodeCell")}
      ${shippedSource("analysisNodeDetail")}
      ${shippedSource("analysisRowKey")}
+     ${shippedSource("analysisLocalPlayback")}
      ${shippedSource("analysisDisposition")}
      ${shippedSource("analysisErrors")}
      ${shippedSource("analysisAttemptHistory")}

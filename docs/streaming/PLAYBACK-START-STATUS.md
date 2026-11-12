@@ -98,8 +98,7 @@ must refuse a v3 blob whose promotion lacks `indexed_hdr10_metadata`, which
 item 5 then quarantines and rebuilds.
 
 Coordination request rows of sources never observed again after a restart
-stay `queued` (one per file, as before this batch); retiring them belongs
-with item 5.
+stayed `queued` (one per file); item 5 retires them.
 
 ## Effort batch — A1/B1 v3 consumer and peer hydration (#1525, merged into the effort)
 
@@ -133,8 +132,48 @@ Decisions (Paul away):
 - No eviction owner was added for the v3 root: evicting a publisher's only
   copy turns a healthy head into a rebuild, which is item 5's to route.
 
-Still open: fleet acceptance of all three items below, item 5's quarantine of
-a refused or contradicted head, and the limits listed under item 4.
+Still open: fleet acceptance of the items below and the limits listed under
+items 4 and 5.
+
+## Current batch — A1/B1 local playback demand (item 6, first step)
+
+Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
+agent on local branch `item6`, stacked on `item5`, not pushed. The first
+step of item 6 below is built; clippy `-D warnings` and fmt are clean, the
+inventory and formal pins are green. No unit test has been run. A
+claude-fable-5-2 adversarial review found four majors and six minors, all
+addressed below except the persisted trigger value, which the schema
+forbids without a migration (item 6, Attribution).
+
+Decision (Paul away): the full unification is not one safe PR. Moving local
+rolling copy and indexed-VOD copy onto the growing engine replaces the local
+serving path and needs a local owner at four Source-bound points of the
+engine. This batch builds only what leaves every serving path untouched:
+the typed local authority and a row-less demand the Analysis worker answers
+with the same engine. The cost and the remainder are under item 6.
+
+## Previous batch — A1/B1 discrepancy quarantine (item 5, #1532)
+
+Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
+agent on branch `item5`, pushed as #1532 into the effort. Item 5 below is
+built; clippy `-D warnings` and fmt are clean, the inventory and formal pins
+are green. Its unit tests run once in CI. A claude-fable-5-2
+adversarial review found three majors and six minors, all addressed in item
+5 below.
+
+Decisions (Paul away), each stated under item 5:
+
+- A quarantined pointer is not readable. The plan said the old pointer stays
+  readable until the successor publishes; the store has never done that, and
+  a contradicted index must not keep serving.
+- A quarantine on a doubt (no holder, a contradicting observation) does not
+  ban its blob. A set that still holds contradicting rows cannot reseal the
+  quarantined bytes, so an identical reseal means the observation was the
+  faulty side and the index was good. A sealed-init mismatch does ban its
+  blob: a reseal repeats the seal's own promotion, so identical bytes
+  disprove nothing about the init a generation served.
+- A coordinator retired as stranded does not use up its generation, or a
+  restart would lock every half-observed source out for the 30-day prune.
 
 ## After the first A1/B1 merge — remaining build order
 
@@ -230,12 +269,9 @@ Known limits, for the items that follow:
 - `copy_index_v3_heads` has no `(catalog_namespace, file_id)` index, so the
   per-file listing scans. It belongs in the next schema version; this batch
   adds no migration and reaches the listing only behind the receipt check.
-- The v3 root has no eviction owner. Its blobs are charged to the playback
-  cache budget but nothing registered evicts them (the v2 root has
-  `FragmentCacheOwner`), so no eviction path forgets a v3 location today. An
-  owner added later must forget this node's row when it removes a blob.
-- A healthy head none of whose holders can supply the bytes falls back to the
-  next index, as a miss does. Item 5 routes it to rebuild.
+- A healthy head whose listed holders cannot be reached falls back to the
+  next index, as a miss does. Only a head with no holder at all is rebuilt
+  (item 5).
 - A rendition planned from v3 is keyed by the contract key, for Source
   renditions as well. A session re-prepared after a v3 publication therefore
   gets a new rendition and re-cuts its segments once. The retained-manifest
@@ -245,18 +281,193 @@ Known limits, for the items that follow:
   Binding a resurrected session to its original plan needs the plan's digest
   on the durable route and is not built.
 
-### 5. Discrepancy quarantine
+### 5. Discrepancy quarantine — built
 
-A consumer that finds a healthy head's bytes contradict a fresh observation
-calls `quarantine_copy_index_v3_head`. The deterministic successor
-generation re-enters items 1–2. The old pointer stays readable until the
-successor publishes.
+Only the Analysis worker quarantines, through
+`quarantine_copy_index_v3_head` under a coordination claim on the head's
+deterministic repair generation (`copy_index_v3_rebuild_generation`).
 
-### 6. Local playback observations
+- Contradiction. Before a healthy head is called done, `publish_source`
+  compares the set's fresh rows with the head's decoded variant from this
+  node's own v3 root (`reconcile_with_head`): every observed row must be in
+  the published table unchanged. Only when this node's engine digest is the
+  variant's producer engine; two ffmpeg builds may cut the same bytes
+  differently. A blob that is absent, unreadable or refused proves nothing.
+  A contradicted head is quarantined with `copy_observation_contradiction`
+  whether or not a viewer holds the source. Cost: one local blob read, hash
+  and decode per completed range of a title that already has a healthy
+  head.
+- Adoption. The set then seals for the repair generation, so items 1–2
+  rebuild it. A set that meets a quarantined head adopts its desire only
+  when that is exactly the repair generation of the blob and epoch the head
+  still records. Playback rows keep arriving under their own generation and
+  still fold in.
+- Reader defects. The VOD reader cannot claim. It hands the worker a typed
+  `CopyIndexDefect` (head epoch and blob) through a new variant of the
+  existing copy-analysis inbox; the pass that folds the inbox handles it.
+  - `copy_index_hdr10_unindexed`: the worker re-checks its own verified copy.
+  - `copy_index_no_holder`: this node has no copy and no other holder is
+    listed, or every listed one answered the route's positive 404. A node
+    the replicated removal fence ejected is not listed at all; an
+    unreachable member still counts. The worker re-reads the list first.
+  - `copy_index_sealed_init_mismatch`: only when this node's engine digest
+    is the variant's producer engine. Another engine's init says nothing
+    about the variant, so the generation's own refusal is all that happens.
+    The blob is banned and the producer engine does not rebuild it (it
+    would seal the same bytes): the head stays quarantined and readers
+    keep the v2 or node-local index, which still plays. A node with
+    another engine may rebuild it.
+  A refusal with no computed contract to compare (the promotion failed)
+  fails the generation and reports nothing. The claim the worker borrowed
+  is ended as a stranded coordinator, uncharged; the origin's next
+  observation of the source enqueues its own request. Defects share the
+  two-slot inbox with committed ranges: a full inbox drops the report and
+  the next start that meets the head makes it again.
+- Eviction. `CopyIndexCacheOwner` registers the v3 root with the playback
+  cache budget as `FragmentCacheOwner` does for v2. Evicting a blob drops
+  this node's holder rows for those bytes under every contract. It refuses
+  the blob of a readable head this node is the last member holding, so
+  cache pressure cannot turn a healthy head into a rebuild loop. Coldness
+  is the file's access time, as for v2; neither owner touches it.
+- Stranded coordinators. The first copy-analysis pass of a process retires
+  this node's queued coordination requests created before the process made
+  its registry (`cancelled`, `coordination_stranded`), in one store
+  statement. A request whose role still names a physical custody is left
+  for the claimant that must settle it. The request that replaces a retired
+  one inherits its attempt count, so a restart never resets the attempt
+  limit.
 
-Local rolling copy and indexed-VOD copy become the same growing engine.
-`CopyObservationAuthority` gains a typed local demand variant that never
-reuses a Source grant.
+Known limits:
+
+- A quarantined head is unreadable everywhere until the origin next
+  observes the source: only the origin rebuilds, and only from observations
+  it holds in memory. Until then readers use their next index, as before.
+- A last-holder blob is never evicted, so the v3 root's floor is one blob
+  per head this node alone holds.
+- `forget_copy_index_v3_blob_holder` and `copy_index_v3_last_blob_holder`
+  read their tables by blob, which no index covers. Only eviction calls
+  them.
+- A sealed-init refusal names its head through a per-process map of the
+  last variant planned for each rendition key; a restart forgets it.
+- Not unit tested: `publish_source` end to end (its `PendingSource` needs a
+  Source authority only plurx-core's session store builds), the budget
+  calling the eviction owner, and the hiqlite backend of the new store
+  operations (generic statements) and of the enqueue changes.
+
+### 6. Local playback observations — first step built
+
+Built: local playback asks, and the one copy engine answers in the
+background. The local serving paths are not migrated.
+
+- `CopyObservationAuthority` has a `Local(LocalCopyAuthority)` variant. Only
+  `LocalCopyAuthority::of` makes one, from a `PlaybackViewerDemand` that
+  passes `require_local_authority`; a Sharing principal is refused, so it
+  never reuses a Source grant. It holds no assignment and no Source
+  interest, and grants no read.
+- A local viewer's copy start that finds no v3 index sends a row-less
+  `CopyIndexDemand` through the copy-analysis inbox, whether or not a
+  legacy or v2 index serves that start: v3 is the index every node shares,
+  and playing a title is what migrates it. The start plans from the
+  existing index order and waits on nothing. The demand names the source
+  the lookup itself derived (no second stat), the authority is checked
+  first, a changed fragment-index engine asks for nothing, and a source
+  already asked for is refused before the inbox until its work settles.
+- The worker holds the demand as a source without rows, and never before
+  one retry interval has passed, so its first attempt is a later dispatch
+  wake and cannot run against the start that raised it. A demand makes
+  room only among other demands; it never evicts a set that holds rows.
+- When the source domain is idle the worker claims the coordinator and runs
+  the copy engine itself: the first Analysis generation is given no
+  contract to check, reads the whole title and establishes the set
+  (`CopyObservationSet::from_analysis`), then attestation, seal and
+  publication are items 1-2 unchanged. The set keeps the source as
+  playback observes it, so later playback ranges still fold in. No fill
+  runs on an engine that changed under the process.
+- A demand that meets a quarantined head adopts its repair generation, so
+  a local play of the title starts the rebuild item 5 left waiting for a
+  Source observation. The one exception is a sealed-init mismatch on this
+  node's own engine, which is not rebuilt.
+- A generation whose coordination request already ended (`failed`,
+  `cancelled`, `ready`) is dropped, logged at debug, instead of being asked
+  about on every pass. A request retired as `coordination_stranded` is
+  never counted as ended. This also applies to Source sets.
+
+Attribution. The request a demand creates has the id
+`local-play.u<user>.<playback>.<suffix>` (the playback is left out when it
+does not fit 64 bytes or cannot sit in a URL path). `analysis_requests.
+trigger` is constrained by the schema to `admin`, `background` and
+`playback`, and `playback` means a waiting viewer to the claim and turn
+logic, so a fourth value needs a table-rebuild migration on both backends
+that this batch does not make; the stored trigger stays `background`. The
+id shows wherever requests are listed: `GET /api/v1/analysis/jobs` and
+`/api/v1/analysis/jobs/{id}` (`request_id`/`job_id`), and the Analysis page,
+whose row details show it as Request and whose Trigger reads "Local
+playback" for it, in the row and in Copy details. The row's Cancel button
+stops the build. The worker also logs the user and playback at info.
+
+Cost: one extra whole-file read per title and copy identity. The first
+local copy start of a file under a given copy-video identity (plain copy,
+Dolby Vision preserved, Dolby Vision converted are distinct identities)
+without a v3 index leads to one background read of the whole file by the
+copy engine, on top of the legacy node-local index pass's own read, and
+where no full-source receipt exists one whole-file hash. Both are Analysis
+physical phases, admitted only while the source domain is idle and paused
+under foreground pressure.
+
+The rest of item 6 has a build plan any agent can work:
+[LOCAL-COPY-ENGINE-BUILD.md](LOCAL-COPY-ENGINE-BUILD.md), ten ordered
+steps with an Execution log. Its step 1, durable demand, is built on
+`item6b` (not pushed), with its review fixes:
+
+- A demand makes its coordination request once, on its first attempt,
+  before the source is idle. A demand dropped unbuilt retires it.
+- A restarted worker takes up the `local-play.` requests its predecessor
+  left, queued or still claimed by that dead process, and keeps them out of
+  the stranded retirement. It opens no file: the request's recorded object
+  version is carried and the unit's source fence refuses a changed object.
+  A store error fails the step, which the next pass makes again.
+- A recovered demand's audio is playback's default (the first track copied
+  when the copy pipe carries its codec, encoded otherwise) until a fresh
+  local demand brings its own recipe. A user who no longer exists is not
+  named.
+- Found, not fixed here: a coordination request newer than a legacy
+  `fragment_index` request of the same file and target stops that legacy
+  publication from advancing the v2 head (the "no newer request" guard of
+  `background_job_publish_fragment_command`). Source coordination rows
+  have done so since item 2. The fix redefines that trigger and is one
+  schema version on both backends; it is plan step 2.
+
+Remaining for item 6, not started (plan steps 2-10):
+
+- Local rolling copy and indexed-VOD copy still run their own producers
+  (`copy_pipe_args` to the rolling segmenter, and plan-verified VOD
+  generations). Neither runs the growing engine, so local playback commits
+  no ranges and contributes no rows: a locally played title is indexed by a
+  second read, not by the read that served it.
+- The growing engine is bound to the Source worker: `CopyRangeFiles::create`
+  takes a `SourceDispatchAssignment` and names its payload directory by the
+  Source incarnation, `spawn_source_generation` is owned through
+  `SourceRenditionOwners` and the Source gate, and the range is served
+  through the Source viewer's own playlist. A local owner needs its own
+  variant at each of those four points and a local serving attachment
+  (build contract step 4: growing attachment and A1-N admission for local
+  sessions) before any local path can be moved onto it.
+- `CopyObservationSet::observe` accepts a `Local` range, but nothing
+  produces one. When the engine runs for local playback, the range's
+  `CompletedCopyRange` carries `CopyObservationAuthority::Local` and the
+  row-less demand becomes redundant for that start.
+- A demand that has not yet made its first attempt (one retry interval
+  after the start) is in memory only; a restart inside that window forgets
+  it and the next local start asks again. Demands are dropped on non-unix
+  builds, which have no copy engine.
+- The persisted trigger is not `local_playback` (see Attribution). Doing
+  that is one migration: rebuild `analysis_requests` with the wider CHECK
+  on SQLite and hiqlite, and add the value to both `valid_request`s.
+- Not unit tested: the VOD start emitting the demand, the Analysis page's
+  label, the ceiling case of a stranded request, a demand refused because
+  every held source has rows, and the worker's build of a demanded source
+  end to end (the unseeded first generation runs in `gap_fill_tests`; the
+  claim and phases around it are items 1-2's).
 
 ### Acceptance for the next merge
 

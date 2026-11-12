@@ -48,7 +48,7 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     ),
     (
         "http/hls/link_receipts.rs",
-        "processed_candidate_admissible",
+        "processed_candidate_link_evidence",
         1,
         true,
     ),
@@ -117,7 +117,7 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "http/hls/link_receipts.rs",
-        "processed_candidate_admissible",
+        "processed_candidate_link_evidence",
         "http/hls/processed_upgrade.rs",
         "admit_processed_candidate",
     ),

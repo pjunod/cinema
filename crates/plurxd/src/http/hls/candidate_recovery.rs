@@ -409,7 +409,20 @@ pub(crate) async fn auto_catalog(
         .collect()
 }
 
-pub(crate) async fn processed_candidate_admissible(
+/// What this playback's recovery memory says about one processed recipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessedRecoveryEvidence {
+    /// No recovery memory refuses the recipe for the bound incumbent.
+    Admissible,
+    /// The recipe is in the incumbent's rejected set, or the incumbent the
+    /// upgrade was planned against is no longer the playback's incumbent.
+    Rejected,
+    /// The incumbent or its memory could not be read before the deadline.
+    /// Not a verdict about the recipe.
+    Unavailable,
+}
+
+pub(crate) async fn processed_candidate_recovery_evidence(
     state: &AppState,
     network: Option<&NetworkIdentity>,
     file: &MediaFile,
@@ -417,13 +430,14 @@ pub(crate) async fn processed_candidate_admissible(
     candidate: &QualityCandidate,
     predecessor: Option<&MediaSessionRoute>,
     deadline: tokio::time::Instant,
-) -> bool {
+) -> ProcessedRecoveryEvidence {
     let Some(predecessor) = predecessor.filter(|route| route.state == "active") else {
-        return true;
+        return ProcessedRecoveryEvidence::Admissible;
     };
     let Some(network) = network else {
-        return false;
+        return ProcessedRecoveryEvidence::Rejected;
     };
+    // Err(()) is an unreadable incumbent or memory; Ok(false) is a verdict.
     let read = async {
         let bound = incumbent(
             state,
@@ -436,7 +450,7 @@ pub(crate) async fn processed_candidate_admissible(
         .await
         .ok_or(())?;
         if bound.route.incarnation_id != predecessor.incarnation_id {
-            return Err(());
+            return Ok(false);
         }
         let memory = state
             .store
@@ -460,7 +474,11 @@ pub(crate) async fn processed_candidate_admissible(
                 && !memory.rejected_recipes.contains(&candidate.recipe_digest),
         )
     };
-    matches!(tokio::time::timeout_at(deadline, read).await, Ok(Ok(true)))
+    match tokio::time::timeout_at(deadline, read).await {
+        Ok(Ok(true)) => ProcessedRecoveryEvidence::Admissible,
+        Ok(Ok(false)) => ProcessedRecoveryEvidence::Rejected,
+        Ok(Err(())) | Err(_) => ProcessedRecoveryEvidence::Unavailable,
+    }
 }
 
 /// A Decision has no playback identity in its public intent. Only its exact

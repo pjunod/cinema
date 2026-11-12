@@ -563,6 +563,15 @@ pub(crate) fn source_budget() -> Option<Arc<SourceReadBudget>> {
     SOURCE_BUDGET.try_with(Arc::clone).ok()
 }
 
+impl super::JobFence {
+    /// Whether this claim registered physical source custody. A job whose
+    /// resources name no `source_io` key (a contract v2 targeted probe) has
+    /// none, and the source service grants bytes only to a custody owner.
+    pub(crate) fn holds_source_custody(&self) -> bool {
+        self.0.source_custody.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

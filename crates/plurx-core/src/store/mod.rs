@@ -22,6 +22,7 @@ pub use copy_index_v3::{
     copy_index_v3_publish_payload, copy_index_v3_rebuild_generation, copy_index_v3_source_key,
     CopyIndexSourceAttestation, CopyIndexV3Artifact, CopyIndexV3Head, CopyIndexV3HeadState,
     CopyIndexV3Location, CopyIndexV3Quarantine, CopyIndexV3Variant,
+    COPY_INDEX_V3_CONTRADICTION_CODE, COPY_INDEX_V3_NO_HOLDER_CODE, COPY_INDEX_V3_SEALED_INIT_CODE,
 };
 pub mod sharing;
 pub use sharing::SharingStore;
@@ -281,6 +282,7 @@ pub mod background_jobs_transcription;
 pub mod classification_schedule;
 #[cfg(test)]
 mod copy_index_v3_tests;
+mod custody_retention;
 pub mod dv_title_jobs;
 mod dv_title_jobs_schema;
 mod library_annotations_schema;

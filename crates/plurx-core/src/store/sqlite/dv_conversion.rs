@@ -1604,7 +1604,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 84] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 85] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1765,6 +1765,9 @@ mod tests {
             // v124 claim reservation trigger, then managed v5 before the rest.
             "CREATE TABLE IF NOT EXISTS analysis_coordination_schema",
             "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=6))",
+            // v129: the shared queue helper drops every background_* object,
+            // the replaced triggers and their marker among them.
+            "CREATE TABLE IF NOT EXISTS background_custody_retention_schema",
         ];
 
         assert!(

@@ -18,6 +18,7 @@ pub mod decoder_inventory;
 mod dolby;
 pub mod dv_fel_qualification;
 pub mod dv_processing;
+pub mod dv_refit;
 pub mod dvconvert;
 mod encoder;
 mod enhancement_rate;

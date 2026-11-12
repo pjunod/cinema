@@ -537,6 +537,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("analysis_coordination_shape", STARTUP),
     ("bootstrap_with_clock", STARTUP),
     ("bridge_private_lineage_inner", STARTUP),
+    ("custody_retention_schema_version", STARTUP),
     ("dispatch_turns_installed", STARTUP),
     ("committed_schema_version_unchecked", STARTUP),
     ("custody_migration_settled", STARTUP),

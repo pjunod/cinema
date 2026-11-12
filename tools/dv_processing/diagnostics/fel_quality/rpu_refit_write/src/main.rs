@@ -3,13 +3,15 @@
 //!
 //! PLAN.json: {"frames": [{"src": "<P7 RPU NAL>", "out": "<P8.1 RPU NAL>"}, ...],
 //!             "luma": {"pivot_deltas": [u16; 9], "coef": [[c0, c1, c2]; 8]},
-//!             "chroma": [{"constant": f, "coef": [[f; 7]; 3]}; 2]}
+//!             "chroma": [{"constant": f, "coef": [[f; 7]; 3]}; 2],
+//!             "l1": [min_pq, max_pq, avg_pq]}   (optional, diagnostics only: overrides every frame's L1)
 //! Coefficients are in the composer's normalised domain (BL code / 2^bl_bit_depth in,
 //! 1.0 = 2^vdr_bit_depth out). Each source RPU is converted to 8.1 (dovi_tool mode 2) and its
 //! mapping replaced; everything else (L1/L2 etc.) is kept. Prints, per frame, the curves as
 //! parsed back from the written bytes so the caller can check the round trip.
 use anyhow::{ensure, Context, Result};
 use dolby_vision::rpu::dovi_rpu::DoviRpu;
+use dolby_vision::rpu::extension_metadata::blocks::{ExtMetadataBlock, ExtMetadataBlockLevel1};
 use dolby_vision::rpu::rpu_data_mapping::{DoviMMRCurve, DoviMappingMethod, DoviPolynomialCurve};
 use serde_json::{json, Value};
 use std::fs;
@@ -39,6 +41,21 @@ fn main() -> Result<()> {
     let plan: Value = serde_json::from_str(&fs::read_to_string(std::env::args().nth(1).context("PLAN.json")?)?)?;
     let deltas: Vec<u16> = plan["luma"]["pivot_deltas"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u16).collect();
     ensure!(deltas.len() >= 2 && deltas.len() <= 9);
+    // Optional diagnostic L1 override, validated once: three PQ codes in 0..=4095.
+    let l1 = match plan.get("l1") {
+        None => None,
+        Some(v) => {
+            let vals = v.as_array().context("l1 must be [min_pq, max_pq, avg_pq]")?;
+            ensure!(vals.len() == 3, "l1 must have exactly three values");
+            let mut pq = [0u16; 3];
+            for (slot, x) in pq.iter_mut().zip(vals) {
+                let n = x.as_u64().context("l1 values must be integers")?;
+                ensure!(n <= 4095, "l1 value {n} outside 0..=4095");
+                *slot = n as u16;
+            }
+            Some(ExtMetadataBlockLevel1 { min_pq: pq[0], max_pq: pq[1], avg_pq: pq[2] })
+        }
+    };
     let mut readback = Vec::new();
     for fr in plan["frames"].as_array().unwrap() {
         let src = fs::read(fr["src"].as_str().unwrap())?;
@@ -95,6 +112,10 @@ fn main() -> Result<()> {
             m.mmr_coef_int.push(oi);
             m.mmr_coef.push(of);
             cc.mmr = Some(m);
+        }
+        if let Some(l1) = &l1 {
+            let dm = rpu.vdr_dm_data.as_mut().context("no DM data")?;
+            dm.replace_metadata_block(ExtMetadataBlock::Level1(l1.clone()))?;
         }
         rpu.modified = true;
         let out = rpu.write_hevc_unspec62_nalu()?;
