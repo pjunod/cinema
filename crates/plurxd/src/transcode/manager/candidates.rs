@@ -2326,6 +2326,106 @@ mod tests {
         );
         assert_eq!(super::candidate_heights(Some(4320)).last(), Some(&2160));
     }
+
+    /// D3t census: a key in the planning list that no generation trigger
+    /// covers would let a settings change leave a binding standing. The
+    /// original triggers cover `playback.*`/`transcode.*`; the D3t extension
+    /// covers `PLAYBACK_INPUT_EXTRA_KEYS`. A key added to the list without
+    /// either fails here.
+    #[test]
+    fn every_planning_key_moves_the_playback_input_generation() {
+        let uncovered = super::QUALITY_PLANNING_KEYS
+            .iter()
+            .filter(|key| {
+                !plurx_core::store::playback_input_keys::playback_input_key_moves_generation(key)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            uncovered.is_empty(),
+            "planning keys outside every generation trigger: {uncovered:?}"
+        );
+        // The three keys that were outside the triggers before D3t.
+        for key in [
+            "cache.max_gb",
+            "vod.output_preparation",
+            "vod.rolling_retention",
+        ] {
+            assert!(super::QUALITY_PLANNING_KEYS.contains(&key), "{key}");
+        }
+    }
+
+    /// D3t pin of the settings the create chain reads after the snapshot
+    /// (what D3b folds into `QUALITY_PLANNING_KEYS`): `vod_settings`, the
+    /// typeless-playlist and takeover switches, the media-pool switch read by
+    /// `remote_placement_ready`, and the admission pair. Derived by reading
+    /// every `get_setting`/`get_settings` caller reachable from the create
+    /// (PLAYBACK-START-D3-RECORD.md section 6). The extension's key list must
+    /// cover every one that the globs do not, so D3b widens the planning list
+    /// without a second trigger change.
+    #[test]
+    fn every_key_the_create_chain_reads_moves_the_playback_input_generation() {
+        use plurx_core::store::keys;
+        let chain = [
+            keys::VOD_PRESENTATION,
+            keys::VOD_WORKING_SET_BYTES,
+            keys::VOD_BLOCK_BUDGET_SECS,
+            keys::VOD_MATERIALIZE_BUDGET_SECS,
+            keys::CACHE_MAX_GB,
+            keys::VOD_BLOCKED_GET_CAP,
+            keys::PLAYBACK_SDR_MASTER_CODECS,
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::HEVC_UNVERIFIED_COPY,
+            keys::VOD_LIVE_RECOVERY,
+            keys::VOD_OUTPUT_PREPARATION,
+            keys::VOD_ROLLING_RETENTION,
+            keys::HLS_TYPELESS_SLIDING,
+            keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            keys::CLUSTER_MEDIA_POOL_ENABLED,
+            keys::MAX_HW_SESSIONS,
+            keys::SW_POOL_THREADS,
+            keys::HWACCEL,
+            keys::DV_CONVERT,
+            keys::DV_HDR_PROCESSING,
+            keys::DV_FEL_REENCODE,
+            keys::DV_DISPLAY_TARGET,
+            keys::CONTENT_AWARE_ENCODING,
+            keys::HLS_READRATE,
+            keys::HLS_BURST_SECS,
+            keys::HLS_AHEAD_MAX_SECS,
+            keys::HLS_AHEAD_MAX_BYTES,
+            keys::HLS_SCRATCH_MAX_BYTES,
+            keys::PLAYBACK_CONTROL_PROTOCOL_V1,
+            keys::PLAYBACK_DISPLAY_AWARE_AUTO,
+            keys::TRANSCODE_RATE_MODE,
+            keys::TRANSCODE_QUALITY,
+            keys::AUDIO_LANG,
+            keys::SUB_LANG,
+            keys::SUB_MODE,
+            keys::SUBTITLE_WINDOW_SECS,
+        ];
+        let uncovered = chain
+            .iter()
+            .filter(|key| {
+                !plurx_core::store::playback_input_keys::playback_input_key_moves_generation(key)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            uncovered.is_empty(),
+            "create-chain keys outside every generation trigger: {uncovered:?}"
+        );
+        // The extension carries exactly the chain's keys that the globs miss.
+        let mut outside = chain
+            .iter()
+            .copied()
+            .filter(|key| !key.starts_with("playback.") && !key.starts_with("transcode."))
+            .collect::<Vec<_>>();
+        outside.sort_unstable();
+        outside.dedup();
+        assert_eq!(
+            outside,
+            plurx_core::store::playback_input_keys::PLAYBACK_INPUT_EXTRA_KEYS
+        );
+    }
 }
 
 #[cfg(test)]

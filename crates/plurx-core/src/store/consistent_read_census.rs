@@ -48,7 +48,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // The contract v2 scan request sidecar does the same: two more.
     // Analysis coordination checks its table marker, canonical objects and
     // protocol singleton before admitting adjunct work: three more.
-    ("hiqlite.rs", 67),
+    // The planning-key extension (D3t) checks its object shape and marker: two more.
+    ("hiqlite.rs", 69),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.

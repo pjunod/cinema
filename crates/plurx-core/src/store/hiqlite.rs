@@ -2165,6 +2165,7 @@ impl HiqliteAuthStore {
         store.install_invitation_schema(None).await?;
         store.install_source_arbitration_schema(None).await?;
         store.install_analysis_coordination_schema(None).await?;
+        store.install_playback_input_keys_schema(None).await?;
         store.install_subtitle_managed_schema(None).await?;
         store.install_subtitle_translation_schema(None).await?;
         store.install_subtitle_text_translation_schema(None).await?;
@@ -2366,6 +2367,7 @@ impl HiqliteAuthStore {
                     self.install_invitation_schema(admission).await?;
                     self.install_source_arbitration_schema(admission).await?;
                     self.install_analysis_coordination_schema(admission).await?;
+                    self.install_playback_input_keys_schema(admission).await?;
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
                     self.install_subtitle_text_translation_schema(admission)
@@ -4159,6 +4161,66 @@ impl HiqliteAuthStore {
         attempt?;
         Err(StoreError::Migration(
             "foreground source arbitration extension did not settle".into(),
+        ))
+    }
+
+    /// D3t extension: the planning-key triggers and their marker. `None` when
+    /// none of the objects exist, `Some(true)` when all match exactly and the
+    /// marker is committed; a partial or mutated shape is refused.
+    async fn playback_input_keys_shape(&self) -> Result<Option<bool>, StoreError> {
+        let expected = super::playback_input_keys::schema_objects()?;
+        let names = expected
+            .iter()
+            .map(|(name, _)| format!("'{}'", name.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        // authority: the planning-key triggers must match the committed extension exactly before the shape is trusted.
+        let installed=self.client().query_consistent_map::<RemoteShapeRow,_>("playback_input_keys_shape", format!("SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names}) ORDER BY name"),params!()).await?;
+        if installed.is_empty() {
+            return Ok(None);
+        }
+        if installed.len() != expected.len()
+            || installed
+                .iter()
+                .zip(&expected)
+                .any(|(row, (name, sql))| row.name != *name || row.sql != *sql)
+        {
+            return Err(StoreError::Migration(
+                "playback input keys extension has incompatible shape".into(),
+            ));
+        }
+        // authority: the committed marker closes the extension; shape alone is not admission.
+        let marker=self.client().query_consistent_map::<CountRow,_>("playback_input_keys_shape", "SELECT count(*) AS count FROM playback_input_keys_schema WHERE singleton=1 AND version=1",params!()).await?;
+        Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
+    }
+    async fn install_playback_input_keys_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        match self.playback_input_keys_shape().await? {
+            Some(true) => return Ok(()),
+            Some(false) => {
+                return Err(StoreError::Migration(
+                    "playback input keys marker missing".into(),
+                ))
+            }
+            None => {}
+        }
+        let mut statements=vec![("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name LIKE 'playback_input_keys_%') THEN 1 ELSE json('playback input keys extension raced') END".to_owned(),params!())];
+        statements.extend(
+            super::playback_input_keys::SCHEMA
+                .split("-- next statement\n")
+                .filter(|sql| !sql.trim().is_empty())
+                .map(|sql| (sql.to_owned(), params!())),
+        );
+        admit_schema_migration(admission)?;
+        let attempt = self.schema_migration_transaction(statements).await;
+        if self.playback_input_keys_shape().await? == Some(true) {
+            return Ok(());
+        }
+        attempt?;
+        Err(StoreError::Migration(
+            "playback input keys extension did not settle".into(),
         ))
     }
 

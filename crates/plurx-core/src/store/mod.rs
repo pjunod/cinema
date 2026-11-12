@@ -17,6 +17,7 @@
 
 pub mod analysis_coordination;
 mod copy_index_v3;
+pub mod playback_input_keys;
 pub use copy_index_v3::{
     copy_index_v3_publish_payload, copy_index_v3_rebuild_generation, copy_index_v3_source_key,
     CopyIndexSourceAttestation, CopyIndexV3Artifact, CopyIndexV3Head, CopyIndexV3HeadState,

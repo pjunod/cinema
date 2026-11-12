@@ -1343,6 +1343,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::analysis_coordination::SCHEMA,
     // v128: canonical fragment publication never reserves original media.
     super::subtitle_managed_schema::PUBLISH_MIGRATION,
+    // v129: planning keys outside `playback.*`/`transcode.*` move the planning
+    // generation too (D3t); additive triggers with their own marker.
+    super::playback_input_keys::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
