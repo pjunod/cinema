@@ -1162,11 +1162,57 @@ pub fn hevc_level_for(width: u32, height: u32, fps_num: u32, fps_den: u32) -> Op
         .map(|(level, _, _)| *level)
 }
 
+/// The VA-API render node: `PLURX_VAAPI_DEVICE`, else the first render node
+/// whose kernel driver has a VA-API driver behind it.
+///
+/// A hybrid laptop (Intel or AMD integrated graphics beside an NVIDIA GPU)
+/// often numbers the NVIDIA node first. NVIDIA's kernel driver has no VA-API
+/// implementation here, so taking `renderD128` there failed every VA-API
+/// probe and left the Dolby Vision renderer decoding in software beside an
+/// idle integrated decoder. Without sysfs (or with no matching node) the
+/// historical `renderD128` default is kept.
 pub fn vaapi_device() -> String {
-    std::env::var("PLURX_VAAPI_DEVICE")
+    if let Some(device) = std::env::var("PLURX_VAAPI_DEVICE")
         .ok()
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/dev/dri/renderD128".to_owned())
+    {
+        return device;
+    }
+    static DEFAULT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DEFAULT
+        .get_or_init(|| {
+            vaapi_render_node(
+                std::path::Path::new("/dev/dri"),
+                std::path::Path::new("/sys/class/drm"),
+            )
+            .unwrap_or_else(|| "/dev/dri/renderD128".to_owned())
+        })
+        .clone()
+}
+
+/// Kernel DRM drivers with a VA-API user-space driver (iHD/i965, radeonsi).
+const VAAPI_KERNEL_DRIVERS: [&str; 4] = ["i915", "xe", "amdgpu", "radeon"];
+
+/// The lowest-numbered `renderD*` under `dev` whose `sys` driver link names a
+/// VA-API-capable kernel driver.
+fn vaapi_render_node(dev: &std::path::Path, sys: &std::path::Path) -> Option<String> {
+    let mut nodes: Vec<(u32, String)> = std::fs::read_dir(dev)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let minor = name.strip_prefix("renderD")?.parse().ok()?;
+            Some((minor, name))
+        })
+        .collect();
+    nodes.sort_unstable();
+    nodes.into_iter().find_map(|(_, name)| {
+        let driver = std::fs::read_link(sys.join(&name).join("device/driver")).ok()?;
+        let driver = driver.file_name()?.to_str()?;
+        VAAPI_KERNEL_DRIVERS
+            .contains(&driver)
+            .then(|| dev.join(&name).to_string_lossy().into_owned())
+    })
 }
 
 /// Which families accept the forced-IDR flag, as measured at startup.
@@ -2313,6 +2359,32 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn vaapi_default_skips_a_render_node_without_a_vaapi_driver() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let (dev, sys) = (root.path().join("dev"), root.path().join("sys"));
+        let link = |node: &str, driver: &str| {
+            let drivers = root.path().join("drivers").join(driver);
+            std::fs::create_dir_all(&drivers).expect("driver");
+            std::fs::create_dir_all(sys.join(node).join("device")).expect("node");
+            std::os::unix::fs::symlink(&drivers, sys.join(node).join("device/driver"))
+                .expect("driver link");
+            std::fs::write(dev.join(node), b"").expect("device node");
+        };
+        std::fs::create_dir_all(&dev).expect("dev");
+        std::fs::write(dev.join("card0"), b"").expect("card");
+        link("renderD128", "nvidia");
+        assert_eq!(super::vaapi_render_node(&dev, &sys), None);
+        link("renderD129", "i915");
+        link("renderD130", "amdgpu");
+        assert_eq!(
+            super::vaapi_render_node(&dev, &sys),
+            Some(dev.join("renderD129").to_string_lossy().into_owned()),
+            "the lowest VA-API-capable node wins; NVIDIA's node is skipped"
+        );
+    }
+
     #[test]
     fn inventory_keeps_actual_pci_identity_and_never_binds_implicit_defaults() {
         let temporary = tempfile::tempdir().expect("PCI fixture");
