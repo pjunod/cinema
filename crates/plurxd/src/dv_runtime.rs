@@ -326,7 +326,7 @@ impl ToolSet {
             if manifest.schema != 1
                 || manifest.source_sha256 != renderer_source_identity()
                 || manifest.graph != "dv-native-master-or-closed-form-dm-v1"
-                || manifest.abi.get("libplacebo") != Some(&374)
+                || manifest.abi.get("libplacebo") != Some(&387)
                 || !["avcodec", "avformat", "avutil"]
                     .iter()
                     .all(|key| manifest.abi.get(*key).is_some_and(|major| *major > 0))
@@ -3300,13 +3300,13 @@ mod bundle_capture_tests {
         ] {
             std::fs::write(root.join("bin").join(name), name).expect("stub helper");
         }
-        std::fs::write(root.join("lib/libplacebo.so.374"), b"fixture placebo")
+        std::fs::write(root.join("lib/libplacebo.so.387"), b"fixture placebo")
             .expect("write stub placebo library");
         std::fs::write(root.join("sources/libdovi.a"), b"fixture parser")
             .expect("write stub parser library");
         std::fs::write(
             root.join("sources/abi.json"),
-            br#"{"libplacebo":374,"avcodec":62,"avformat":62,"avutil":60}"#,
+            br#"{"libplacebo":387,"avcodec":62,"avformat":62,"avutil":60}"#,
         )
         .expect("write fixture ABI");
         let source = fixture.path().join("source");

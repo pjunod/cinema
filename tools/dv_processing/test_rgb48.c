@@ -57,48 +57,48 @@ static void check_nonfinite(void) {
       assert(!dv_pack_rgba_rgb48(input, 1, output, sizeof(output)));
     }
 }
-static void check_native_plane(void) {
-  uint16_t codes[1032];
-  float actual[1032], expected[1032];
+// The shared software plane contract: code << 6 in UNORM16 (bits 16/10/6).
+// Every bilinear quarter tap between two stored codes, scaled by the
+// renderer's 65535/64 code scale, is the exact quarter code, so the rounded
+// enhancement-layer code never depends on storage normalization.
+static void check_shifted_plane(void) {
+  uint16_t codes[1032], actual[1032];
   for (size_t i = 0; i < 1032; i++) codes[i] = i % 1024;
-  // Unaligned loads/stores, vector body and scalar tail use the same division.
   for (size_t count = 0; count < 1031; count++) {
-    for (size_t i = 0; i < count; i++) expected[i] = codes[i + 1] / 1023.0f;
-    assert(dv_unpack_10bit_plane(codes + 1, count, actual + 1));
-    assert(memcmp(expected, actual + 1, count * sizeof(float)) == 0);
+    memset(actual, 0xee, sizeof(actual));
+    assert(dv_shift_10bit_plane(codes + 1, count, actual + 1));
+    for (size_t i = 0; i < count; i++) assert(actual[i + 1] == codes[i + 1] * 64);
+    assert(actual[0] == 0xeeee && actual[count + 1] == 0xeeee);
   }
   for (size_t lane = 0; lane < 17; lane++) {
     uint16_t old = codes[lane];
     codes[lane] = 1024;
-    assert(!dv_unpack_10bit_plane(codes, 17, actual));
+    assert(!dv_shift_10bit_plane(codes, 17, actual));
     codes[lane] = 65535;
-    assert(!dv_unpack_10bit_plane(codes, 17, actual));
+    assert(!dv_shift_10bit_plane(codes, 17, actual));
     codes[lane] = old;
   }
-}
-static void check_rounding_bits(void) {
-  const int modes[] = {FE_UPWARD, FE_TONEAREST, FE_DOWNWARD, FE_UPWARD,
-                       FE_TOWARDZERO, FE_TONEAREST};
-  const uint16_t codes[9] = {1, 1, 1, 1, 1, 1, 1, 1, 1};
-  float actual[9];
-  for (size_t mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++) {
-    assert(fesetround(modes[mode]) == 0);
-    assert(dv_unpack_10bit_plane(codes, 9, actual));
-    uint32_t expected = modes[mode] == FE_UPWARD ? 0x3a802009U : 0x3a802008U;
-    for (size_t lane = 0; lane < 9; lane++) {
-      uint32_t bits;
-      memcpy(&bits, &actual[lane], sizeof(bits));
-      assert(bits == expected);
-    }
-  }
+  assert(dv_shift_10bit_plane(codes, 1024, actual));
+  for (unsigned a = 0; a < 1024; a++)
+    for (unsigned step = 1; step <= 3 && a + step < 1024; step++)
+      for (unsigned n = 1; n < 4; n++) {
+        // Bilinear weights at 2x are quarters; the tap is an integer over 4.
+        unsigned tap4 = (4 - n) * actual[a] + n * actual[a + step];
+        assert(tap4 % 64 == 0);
+        float sampled = (float)((double)tap4 / (4 * 65535.0));
+        float code = sampled * (65535.0f / 64.0f);
+        assert(fabsf(code - (a + n * step / 4.0f)) < 1e-3f);
+      }
+  // The old storage (code/65535, bits 16/10/0) cannot hold such a tap: the
+  // quarter tap between adjacent codes is not a multiple of the texel step.
+  assert(((4 - 1) * 512u + 1 * 513u) % 4 != 0);
 }
 int main(void) {
   const int modes[]={FE_TONEAREST,FE_DOWNWARD,FE_UPWARD,FE_TOWARDZERO};
   unsigned long checked=0;
-  check_rounding_bits();
+  check_shifted_plane();
   for (unsigned mode=0;mode<4;mode++) {
     assert(fesetround(modes[mode])==0);
-    check_native_plane();
     check(-0.0f);check(0.0f);check(-1.0f);check(1.0f);check(2.0f);checked+=5;
     check_bulk(-0.0f);check_bulk(0);check_bulk(-1);check_bulk(1);check_bulk(2);
     check_nonfinite();

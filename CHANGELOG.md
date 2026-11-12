@@ -10,6 +10,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- The server's Dolby Vision helper reconstructs the same master as the native
+  player. It sampled every plane nearest-neighbour on an older libplacebo; it
+  now builds the player's release (7.387) and samples bilinearly from the same
+  10-bit plane storage, so HDR10-E, display-targeted output and the FEL to
+  Profile 8.1 picture start from the picture the player's mapping was
+  qualified on. On the two measured frames the server master is within one
+  16-bit code of the player's (it was up to 3293 codes away).
 - Master-grade HDR10-E declares the source's own mastering display and, when
   the source states them, its content light levels. It carried no static HDR10
   metadata at all.

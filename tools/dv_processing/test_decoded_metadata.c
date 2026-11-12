@@ -71,7 +71,8 @@ static void public_piecewise_fel_mapping(void) {
     const AVDOVIReshapingCurve *curve = &m->curves[comp];
     assert(out.dovi.comp[comp].num_pivots == curve->num_pivots);
     for (int i = 0; i < curve->num_pivots; i++)
-      close_enough(out.dovi.comp[comp].pivots[i], curve->pivots[i] / 1023.0);
+      // libplacebo normalizes BL pivots by 2^bl_bit_depth.
+      close_enough(out.dovi.comp[comp].pivots[i], curve->pivots[i] / 1024.0);
     for (int i = 0; i < curve->num_pivots - 1; i++) {
       assert((int)out.dovi.comp[comp].method[i] == (int)curve->mapping_idc[i]);
       if (curve->mapping_idc[i] == AV_DOVI_MAPPING_POLYNOMIAL) {
@@ -87,18 +88,22 @@ static void public_piecewise_fel_mapping(void) {
                          curve->mmr_coef[i][order][k] / 8388608.0);
       }
     }
-    close_enough(out.dovi.nlq[comp].offset, 512.0 / 1023);
-    close_enough(out.dovi.nlq[comp].deadzone_slope, 1023.0 * 2048 / 8388608);
-    close_enough(out.dovi.nlq[comp].deadzone_threshold, -1024.0 / 8388608);
-    // Exact neutral code contributes zero; endpoints obey the original bound.
+    // libplacebo's units: offset in EL codes; slope, threshold and limit
+    // over 2^coef_log2_denom. The renderer rounds the resampled EL code.
+    close_enough(out.dovi.nlq[comp].offset, 512.0);
+    close_enough(out.dovi.nlq[comp].deadzone_slope, 2048.0 / 8388608);
+    close_enough(out.dovi.nlq[comp].deadzone_threshold, 0.0);
+    assert(isfinite(out.dovi.nlq[comp].hdr_in_max) && out.dovi.nlq[comp].hdr_in_max > 0);
+    // Exact neutral code contributes zero; endpoints obey the original bound
+    // and never reach the signalled limit.
     for (int code = 0; code <= 1023; code++) {
       double delta = code - 512;
       double expected = delta == 0 ? 0 : copysign((fabs(delta) - .5) * 2048 / 8388608, delta);
-      double normalized = code / 1023.0 - out.dovi.nlq[comp].offset;
-      double actual = code == 512 ? 0 : copysign(fabs(normalized) *
-          out.dovi.nlq[comp].deadzone_slope + out.dovi.nlq[comp].deadzone_threshold, delta);
+      double rr = round(code - out.dovi.nlq[comp].offset);
+      double actual = rr == 0 ? 0 : copysign((fabs(rr) - .5) *
+          out.dovi.nlq[comp].deadzone_slope + out.dovi.nlq[comp].deadzone_threshold, rr);
       close_enough(actual, expected);
-      assert(fabs(actual) < .125);
+      assert(fabs(actual) < .125 && fabs(actual) < out.dovi.nlq[comp].hdr_in_max);
     }
   }
   unsigned samples = 0;
@@ -123,8 +128,8 @@ static void public_piecewise_fel_mapping(void) {
   AVDOVIDataMapping *change = av_dovi_get_mapping(data);
   change->curves[1].pivots[0] = 16;change->curves[1].pivots[1] = 1000;
   assert(dv_map_metadata(data, size, 7, true, &out));
-  close_enough(out.dovi.comp[1].pivots[0], 16.0/1023);
-  close_enough(out.dovi.comp[1].pivots[1], 1000.0/1023);
+  close_enough(out.dovi.comp[1].pivots[0], 16.0/1024);
+  close_enough(out.dovi.comp[1].pivots[1], 1000.0/1024);
   av_free(data);
   printf("public piecewise FEL mapping: %u scalar samples; no GPU qualification\n", samples);
 }
