@@ -1991,11 +1991,32 @@
   "conclusion": "macOS applies a non-identity 8.1 luma polynomial and chroma MMR in the display path, close to libplacebo semantics (A matches B, not C); not bit-exact."
  },
  "device_check_android": {
-  "device": "Lenovo TB322FC (Qualcomm Adreno 830; display reports Dolby Vision); Google Photos player; decoder c2.dolby.decoder.hevc (Dolby Vision Mobile_3.1.0, GPU processing IMPL_TARGET_OTT_OPENGL, RGB output); adb screencap 2.5 s into playback",
-  "rpu_parsed": "yes: the decoder logs profile 8.1; its only parseRPU failure is at pts 0 (codec config buffer), the same for the production author's 8.1 output",
-  "dm_metadata_applied": "yes: the same frames with L1 max/avg overridden to 4095/3600 drop the picture mean from (76.5, 61.3, 56.5) to (48.0, 37.4, 33.9) 8-bit RGB",
-  "mapping_applied": "no: luma x0.5 is pixel-identical to the identity RPU (max difference 0); flat-patch A (F+ RPU) is pixel-identical to C (identity RPU) on all 48 patches in two repeats while B (pre-mapped pixels) differs on several patches by up to 10 8-bit levels; a +0.15 Cr constant shows no visible tint (that capture landed on a different frame, so it was judged by eye, not by pixel)",
-  "conclusion": "This Dolby mobile decoder ignores the 8.1 composer mapping (luma polynomial and chroma MMR) and applies the DM metadata, so F+ shows exactly what F shows on it: no gain, no harm.",
+  "device": "Lenovo TB322FC, Google Photos, c2.dolby.decoder.hevc (Dolby Vision Mobile_3.1.0, GPU processing IMPL_TARGET_OTT_OPENGL, RGB output); adb screencap 2.5 s into playback",
+  "rpu_parsed": "yes: the decoder logs profile 8.1; its one parseRPU failure (\"VesDmx Failed for pts : 0\") also appears for the production author's 8.1 output",
+  "dm_metadata_applied": "L1 is applied: max/avg 4095/3600 drops the picture mean from (76.5, 61.3, 56.5) to (48.0, 37.4, 33.9) 8-bit RGB; max 2081 changes it by at most 3 levels",
+  "mapping_applied": "no: luma x0.5 screenshot byte-identical to the identity RPU's; flat-patch A (F+ curves; patches vary Cb/Cr by up to +-72 codes) byte-identical to C (identity RPU) in two repeats, while B (pre-mapped pixels) differs from A on 30 of 48 patches by up to 10 levels; a +0.15 Cr constant shows no visible tint (different frame captured, judged by eye)",
+  "scope": "one device, one app, one decoder build, 8.1 RPUs converted from P7 by the production dolby_vision crate; L1 sensitivity rules out pre-composer capture; a deliberate 8.1 composer bypass is not distinguished from silent rejection of non-identity curves",
+  "conclusion": "For this client F+ shows exactly what F shows: no gain, no harm.",
+  "evidence": {
+   "private_root": "$FEL_ROI_ROOT/rpu-refit/android (screenshots), patch/run-m5400 and honour/ (clips)",
+   "clip_sha256_prefix": {
+    "A.mp4": "af5893917c3d29cd",
+    "B.mp4": "7e8338273618f99b",
+    "C.mp4": "2428d977c3b50106",
+    "ident.mp4": "3cc1294a04d96415",
+    "half.mp4": "74e868952f29463e",
+    "l1hi.mp4": "aee8044f86ef3086",
+    "l1lo.mp4": "7b9c7e2242f928d7",
+    "crshift.mp4": "ab8c56cb596aa9da"
+   },
+   "screenshot_sha256_prefix": {
+    "A-1,A-2,C-1,C-2": "b86b019129a34bba",
+    "B-1,B-2": "e2a59f1b2151057e",
+    "ident,half": "2e21e9eb4963354e",
+    "l1hi": "7d37e70d98ae8e24",
+    "l1lo": "df9bcd93ed0e7757"
+   }
+  },
   "not_observed": "Google TV Streamer (video plane black to screencap; HDR10-only monitor); the Pixels have no Dolby Vision display support."
  }
 }

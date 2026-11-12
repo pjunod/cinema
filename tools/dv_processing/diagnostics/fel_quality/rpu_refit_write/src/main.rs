@@ -41,6 +41,21 @@ fn main() -> Result<()> {
     let plan: Value = serde_json::from_str(&fs::read_to_string(std::env::args().nth(1).context("PLAN.json")?)?)?;
     let deltas: Vec<u16> = plan["luma"]["pivot_deltas"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u16).collect();
     ensure!(deltas.len() >= 2 && deltas.len() <= 9);
+    // Optional diagnostic L1 override, validated once: three PQ codes in 0..=4095.
+    let l1 = match plan.get("l1") {
+        None => None,
+        Some(v) => {
+            let vals = v.as_array().context("l1 must be [min_pq, max_pq, avg_pq]")?;
+            ensure!(vals.len() == 3, "l1 must have exactly three values");
+            let mut pq = [0u16; 3];
+            for (slot, x) in pq.iter_mut().zip(vals) {
+                let n = x.as_u64().context("l1 values must be integers")?;
+                ensure!(n <= 4095, "l1 value {n} outside 0..=4095");
+                *slot = n as u16;
+            }
+            Some(ExtMetadataBlockLevel1 { min_pq: pq[0], max_pq: pq[1], avg_pq: pq[2] })
+        }
+    };
     let mut readback = Vec::new();
     for fr in plan["frames"].as_array().unwrap() {
         let src = fs::read(fr["src"].as_str().unwrap())?;
@@ -98,10 +113,9 @@ fn main() -> Result<()> {
             m.mmr_coef.push(of);
             cc.mmr = Some(m);
         }
-        if let Some(l1) = plan.get("l1").and_then(|v| v.as_array()) {
-            let pq = |i: usize| l1[i].as_u64().expect("l1 value") as u16;
+        if let Some(l1) = &l1 {
             let dm = rpu.vdr_dm_data.as_mut().context("no DM data")?;
-            dm.replace_metadata_block(ExtMetadataBlock::Level1(ExtMetadataBlockLevel1 { min_pq: pq(0), max_pq: pq(1), avg_pq: pq(2) }))?;
+            dm.replace_metadata_block(ExtMetadataBlock::Level1(l1.clone()))?;
         }
         rpu.modified = true;
         let out = rpu.write_hevc_unspec62_nalu()?;
