@@ -11,7 +11,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |
 | [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 build contract. | open |
 | [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 contract; build record: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md). | open |
-| [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) | D3 create-collapse contract. | open |
+| [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) | D3 contract; records: [PLAYBACK-START-D3-RECORD.md](PLAYBACK-START-D3-RECORD.md). | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Effort plan: rulings, lanes, status. | open |
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |
@@ -87,7 +87,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md](ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md) | Why immersive AC-4 and delayed AC-3 broke live starts, what the fixes preserve, and why the 103.1 capture cannot initialize its decoder. | open |
 | [ATSC 3.0 live audio repair status](ATSC3-AUDIO-STARTUP-STATUS.html) | Implementation, single adversarial review, final fast lane, merge and outstanding live acceptance. | open |
 | [LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md](LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md) | Why idle tuners reported busy: subtitle backfill blocked admission; pool policy and refusal classification fixes. | built |
-| [LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](LIVE-TV-DIRECT-PLAY-AND-SURROUND.md) | 2026-09-24: why every ATSC 1.0 channel was encoded in stereo; copy-first audio track selection, the sink-derived AAC channel claim, Android hardware MPEG-2, and an aspect-ratio report the server could not reproduce. | built |
+| [LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](LIVE-TV-DIRECT-PLAY-AND-SURROUND.md) | 2026-09-24: why every ATSC 1.0 channel was encoded in stereo; copy-first audio selection, the sink-derived AAC claim, Android hardware MPEG-2, an unreproducible aspect-ratio report. | built |
 | [RESUME-ROLLING-PUBLICATION-RCA.md](RESUME-ROLLING-PUBLICATION-RCA.md) | Why resume failed across clients: rolling-engine fallback, unopened web MediaSource and progress update erasing position after failed startup. | open |
 | [PLAYBACK-STARTUP-LATENCY-M2-20261002.json](PLAYBACK-STARTUP-LATENCY-M2-20261002.json) | Candidate floor rejection arithmetic and bounded generated hls.js startup sweep; continuity/native qualification state. | open |
 | [PLAYBACK-STARTUP-LATENCY-M0-20261002.md](PLAYBACK-STARTUP-LATENCY-M0-20261002.md) | Native Safari preparation/publication incident and review-reported index backlog, with evidence limits. | done |
@@ -109,7 +109,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [Seek scratch reservations receipt](../evidence/seek-scratch-reservations-receipt-2026-09-20.md) | Exact base and compiler, the accounting/release/mechanism proofs, which regression covers which acceptance row, what already failed before the change, and what is still owed. | open |
 | [FFmpeg HLS write boundary receipt](../evidence/ffmpeg-hls-write-boundary-receipt-2026-09-24.md) | The last whole-ceiling reservation removed: FFmpeg's HLS muxer uploads through a loopback endpoint that grants every piece before it lands, the legacy copy hole, the inverted grant wait, and the proofs. | open |
 | [FFMPEG-SCRATCH-SINK-IMPLEMENTATION.md](FFMPEG-SCRATCH-SINK-IMPLEMENTATION.md) | Historical design proposal for the owned FFmpeg write boundary; use the receipt above for the implemented mechanism and proof. | done |
-| [MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md](MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md) | Why one valid MKV was denied immutable VOD, why its rolling fallback violated AVFoundation's playlist-update deadline, and the packet-duration plus sliding-HLS repair contracts. | open |
+| [MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md](MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md) | Why one valid MKV was denied immutable VOD, why its rolling fallback missed AVFoundation's update deadline, and the packet-duration and sliding-HLS repairs. | open |
 | [MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md](MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md) | The build contract for the reviewed MKV-duration and sliding-HLS repair: startup admission, packet evidence, publication scheduling, object grace, and acceptance. | open |
 | [MKV-DURATION-AND-SLIDING-HLS-STATUS.md](MKV-DURATION-AND-SLIDING-HLS-STATUS.md) | Live package, compiler, review, qualification, and production-authorization ledger for the MKV-duration and sliding-HLS repair. | open |
 | [APPLE-TV-FORWARD-SKIPS-STATUS.md](APPLE-TV-FORWARD-SKIPS-STATUS.md) | Live implementation, review, focused-proof, fast-lane and merge ledger for cumulative rolling-publication pacing and Apple TV position continuity. | open |
