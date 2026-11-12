@@ -1,0 +1,141 @@
+# Inputs of the PR-time Rust unit stage (validation/rust_units.py).
+#
+# A crate's content key hashes every input its tests can observe. Two keys are
+# equal only when those inputs are byte-identical, and that equality is the
+# whole of the reuse rule: a crate is *selected* when its key at the PR head
+# differs from its key at the merge-base, and a selected crate's test is
+# *skipped* when an authenticated receipt already records it passing under the
+# head key. docs/ci/RUST-UNIT-FANOUT.md explains both.
+#
+# The input set of crate C is:
+#   1. every tracked file outside `crates/` that no `exempt` glob matches
+#      (anything not explicitly exempted is an input of every crate);
+#   2. every `harness` file, exempt or not;
+#   3. the directory of C and of every workspace crate in C's dependency
+#      closure (C's normal, build and dev dependencies, then their normal and
+#      build dependencies), plus external path dependencies;
+#   4. every tracked path a closure crate names in a string literal through
+#      `../` (include_str!, include!, concat!(env!("CARGO_MANIFEST_DIR"), ..),
+#      Path::join("../../x")), found by scanning its Rust sources;
+#   5. the `reads` of every `[[dynamic]]` site in a closure crate.
+#
+# So an exemption is a claim that no Rust test reads that path. A wrong claim
+# can only be made safe by the scanner (item 4) or a declaration (item 5); keep
+# the list to trees that are demonstrably documentation, clients, CI
+# configuration or non-Rust test suites.
+version = 1
+
+# `make unit` runs `cargo test --workspace --exclude plurx-cluster-check`.
+# The separate-process cluster harness has its own lanes in ci.yml.
+excluded_crates = ["plurx-cluster-check"]
+
+# The files that decide how the stage builds and runs tests, including the CI
+# image digest (in the workflow). A change here re-keys every crate.
+harness = [
+    ".config/nextest.toml",
+    ".github/workflows/rust-units.yml",
+    ".github/actions/ffmpeg/**",
+    ".github/actions/rust-native-deps/**",
+    "validation/rust_units.py",
+    "validation/rust-unit-inputs.toml",
+]
+
+exempt = [
+    "**/*.md",
+    ".github/**",
+    ".ignore",
+    "Dockerfile*",
+    "LICENSE*",
+    "Makefile",
+    "NOTICE*",
+    "benchmarks/**",
+    "brand/**",
+    "clients/**",
+    "deny.toml",
+    "deploy/**",
+    "docs/**",
+    "fuzz/**",
+    "plurx.example.toml",
+    "scripts/**",
+    "swarm/**",
+    "tests/**",
+    "tools/**",
+    "validation/**",
+    "verification/**",
+]
+
+# Tests that locate the workspace at run time (`CARGO_MANIFEST_DIR` followed
+# by `.parent()`, `.ancestors()` or `.pop()`) can read anything, so the
+# scanner cannot see what they read. Each such site is declared here with the
+# paths it reads; tests/validation/test_rust_units.py fails when a site is
+# added, moved to another function or removed without updating this list.
+[[dynamic]]
+crate = "plurx-core"
+file = "crates/plurx-core/src/process/census.rs"
+function = "daemon_production_sources"
+reads = [
+    "crates/plurx-core/src/**",
+    "crates/plurxd/src/**",
+    "crates/plurx-pgs/src/**",
+    "crates/plurx-compat-plex/src/**",
+]
+reason = "The process-launch census walks the src trees of DAEMON_CRATES."
+
+[[dynamic]]
+crate = "plurx-core"
+file = "crates/plurx-core/src/process/census.rs"
+function = "clippy_refuses_every_spawning_method_outside_tests"
+reads = ["clippy.toml"]
+reason = "Reads the workspace clippy.toml (an input of every crate already)."
+
+[[dynamic]]
+crate = "plurx-core"
+file = "crates/plurx-core/src/process/mod.rs"
+function = "output_job_owned_call_sites_are_the_audited_set"
+reads = ["crates/plurxd/src/**"]
+reason = "Audits the plurxd call sites of the output helper."
+
+[[dynamic]]
+crate = "plurx-core"
+file = "crates/plurx-core/src/scan/probe.rs"
+function = "store_probe_writes_stay_in_the_application_namespace"
+reads = []
+reason = "Walks its own src/store; the `.pop()` is its work queue, not a path."
+
+[[dynamic]]
+crate = "plurx-core"
+file = "crates/plurx-core/src/testfixtures.rs"
+function = "fixture_dir"
+reads = []
+reason = "Generated fixtures under target/fixtures; nothing tracked is read."
+
+[[dynamic]]
+crate = "plurx-core"
+file = "crates/plurx-core/src/transcode/tests.rs"
+function = "shipped_ffmpeg_deinterlace_fixture_matrix"
+reads = ["tests/playback/**"]
+reason = "Runs tests/playback/interlace-fixtures.sh (not exempt, so already an input)."
+
+[[dynamic]]
+crate = "plurxd"
+file = "crates/plurxd/src/store_result.rs"
+function = "production_store_results_never_use_bare_let_underscore"
+reads = ["crates/plurx-core/src/store/**"]
+reason = "Derives Store method names from the plurx-core Store traits."
+
+[[dynamic]]
+crate = "plurxd"
+file = "crates/plurxd/src/transcode/tests/seam_census.rs"
+function = "seam_census_of_the_workspace"
+reads = ["crates/*/src/**"]
+reason = "The seam census parses every crate's production sources."
+
+# `make unit` also runs these ignored tests, serially, through
+# `make vodencode-restart-check`. The stage runs them with
+# `--run-ignored only --test-threads 1` whenever their crate is due.
+[[serial_ignored]]
+crate = "plurxd"
+tests = [
+    "vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid",
+    "vodserve::tests::encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing",
+]
