@@ -164,9 +164,93 @@ struct HttpRouteCell {
     buckets: [AtomicU64; HTTP_ROUTE_BUCKETS.len()],
 }
 
+/// The most `(route_group, class, method)` series
+/// `plurx_http_store_operations_by_method_total` ever holds. The method label
+/// is a `&'static str` chosen at a Store call site, so the set is bounded by
+/// the source: at most one label per consistent-read site (365 at the census)
+/// and write site, over nine route groups and three classes. In practice a
+/// method is reached from two or three groups. This cap is the guarantee
+/// behind that arithmetic: past it a new series is not created and the
+/// operation is counted in `plurx_http_store_operations_by_method_dropped_total`
+/// instead, so a mistake can never grow the exposition without bound.
+const HTTP_METHOD_SERIES_CAP: usize = 4096;
+
+/// Replicated Store operations by the Store method that issued them, per
+/// route group and class. Fed once per request from the request's own
+/// [`plurx_core::store::HttpStoreOperationCounts::method_snapshot`].
+struct HttpMethodMetrics {
+    cap: usize,
+    series: std::sync::Mutex<std::collections::BTreeMap<(usize, usize, &'static str), u64>>,
+    dropped: AtomicU64,
+}
+
+impl HttpMethodMetrics {
+    fn with_cap(cap: usize) -> Self {
+        Self {
+            cap,
+            series: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    /// `methods` is `(method, [local, authority, write])`, the layout
+    /// `HttpStoreOperationCounts::snapshot` uses; `HTTP_STORE_CLASSES` is in
+    /// the same order.
+    fn record(&self, group: usize, methods: &[(&'static str, [u64; 3])]) {
+        let mut series = self
+            .series
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (method, counts) in methods {
+            for (class, count) in counts.iter().copied().enumerate() {
+                if count == 0 {
+                    continue;
+                }
+                let key = (group, class, *method);
+                if series.len() >= self.cap && !series.contains_key(&key) {
+                    HttpRouteMetrics::saturating_add(&self.dropped, count);
+                    continue;
+                }
+                let cell = series.entry(key).or_insert(0);
+                *cell = cell.saturating_add(count);
+            }
+        }
+    }
+
+    fn render(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::from(
+            "# HELP plurx_http_store_operations_by_method_total Replicated Store operations by the Store method that issued them, attributed to matched HTTP route group. Series exist only for methods that have run; their count is capped.\n\
+             # TYPE plurx_http_store_operations_by_method_total counter\n",
+        );
+        for ((group, class, method), count) in self
+            .series
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
+            let _ = writeln!(
+                out,
+                "plurx_http_store_operations_by_method_total{{route_group=\"{}\",class=\"{}\",method=\"{method}\"}} {count}",
+                HTTP_ROUTE_GROUPS[*group], HTTP_STORE_CLASSES[*class],
+            );
+        }
+        let _ = write!(
+            out,
+            "# HELP plurx_http_store_operations_by_method_dropped_total Store operations not attributed by method because the series cap was reached.\n\
+             # TYPE plurx_http_store_operations_by_method_dropped_total counter\n\
+             plurx_http_store_operations_by_method_dropped_total {}\n",
+            self.dropped.load(Ordering::Relaxed),
+        );
+        out
+    }
+}
+
 struct HttpRouteMetrics {
     store_reads: [AtomicU64; 9 * 3 * HTTP_NODE_ROLES.len()],
     routes: [HttpRouteCell; 9 * HTTP_NODE_ROLES.len()],
+    by_method: HttpMethodMetrics,
 }
 
 impl Default for HttpRouteMetrics {
@@ -174,6 +258,7 @@ impl Default for HttpRouteMetrics {
         Self {
             store_reads: std::array::from_fn(|_| AtomicU64::new(0)),
             routes: std::array::from_fn(|_| HttpRouteCell::default()),
+            by_method: HttpMethodMetrics::with_cap(HTTP_METHOD_SERIES_CAP),
         }
     }
 }
@@ -259,6 +344,7 @@ impl HttpRouteMetrics {
                 );
             }
         }
+        out.push_str(&self.by_method.render());
         out
     }
 }
@@ -699,6 +785,9 @@ async fn http_store_attribution(
     )
     .await;
     HTTP_ROUTE_METRICS.record(group, role, counts.snapshot(), started_at.elapsed());
+    HTTP_ROUTE_METRICS
+        .by_method
+        .record(group, &counts.method_snapshot());
     // K-04 M2: offer the acknowledged watch-write position so a client can
     // echo it as `X-Plurx-Read-After` to whichever node serves its next read,
     // or say that a watch write's position is unknown so it drops its echo.

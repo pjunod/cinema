@@ -127,8 +127,8 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 | A2 | — | 3 | unclaimed | HW/SW transcode TTFF → |
 | A3 | — | 3 | unclaimed | — |
 | B1 | — | 3 | unclaimed (design with A1) | artifacts matched across a deploy → |
-| D3 | — | 3 | unclaimed | create elapsed p99 → |
-| E1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | E1a, E1b on main; E1c on `claude/ps-e1c` ([record](PLAYBACK-START-E1-RECORD.md) §3) | 5.7 playback quorum reads/request → |
+| D3 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht; D3a claude-sonnet-5-5 | 3 | [contract](PLAYBACK-START-D3-BUILD.md) rev 2, review applied; D3a lands with E1c ([record](PLAYBACK-START-D3-RECORD.md)); D3t–D3e open | create elapsed p99 → |
+| E1 | claude-opus-5-5, 01BCWL9xwmpSjitHqZMTRAht | 3 | E1a, E1b on main; E1c lands with D3a ([record](PLAYBACK-START-E1-RECORD.md) §3) | 5.7 playback quorum reads/request → |
 | F1 | — | 3 | unclaimed | retries per attempt; overshoot → |
 
 ## 7. Reviews applied

@@ -157,6 +157,7 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
         let mut rows = self
             .client()
             .query_consistent_map::<SetRow, _>(
+                "timeline_annotation_set",
                 "SELECT generation_id, version, annotations_json
                    FROM timeline_annotation_sets
                   WHERE file_id = $1 AND source_size = $2
@@ -184,6 +185,7 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
         let manual = self
             .client()
             .query_consistent_map::<ManualRow, _>(
+                "timeline_annotation_set",
                 "SELECT kind, start_ticks, end_ticks, timescale, start_ms, end_ms,
                         revision, generation_id
                    FROM timeline_manual_overrides
@@ -344,6 +346,7 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
         let row = self
             .client()
             .execute_returning_map::<_, RevisionRow>(
+                "set_manual_timeline_annotation",
                 sql,
                 params!(
                     file_id,

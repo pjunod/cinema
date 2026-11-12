@@ -881,6 +881,7 @@ paths = [
   "crates/plurx-core/src/store/hiqlite/tests.rs",
   "crates/plurx-core/src/store/hiqlite_media/query_helper_tests.rs",
   "crates/plurx-core/src/store/hiqlite_media/tests.rs",
+  "crates/plurx-core/src/store/http_operation_method_tests.rs",
   "crates/plurx-core/src/store/item_sort_order_tests.rs",
   "crates/plurx-core/src/store/producer_recovery_schema_tests.rs",
   "crates/plurx-core/src/store/queue_verdict_tests.rs",

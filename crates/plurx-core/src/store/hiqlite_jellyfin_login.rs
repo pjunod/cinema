@@ -27,6 +27,7 @@ impl JellyfinLoginStore for HiqliteAuthStore {
             .client()
             // authority: play and manual-edit origin must use current native token membership, never client-claimed device context.
             .query_consistent_map::<SwitchRow, _>(
+                "jellyfin_login_scope",
                 super::jellyfin_login::LOGIN_SCOPE,
                 params!(token_hash),
             )
@@ -44,7 +45,11 @@ impl JellyfinLoginStore for HiqliteAuthStore {
         let row = self
             .client()
             // authority: login admission observes enabled choice and generation from one committed snapshot.
-            .query_consistent_map::<SwitchRow, _>(super::jellyfin_login::SWITCH_STATE, params!())
+            .query_consistent_map::<SwitchRow, _>(
+                "jellyfin_compatibility_state",
+                super::jellyfin_login::SWITCH_STATE,
+                params!(),
+            )
             .await?
             .into_iter()
             .next()
@@ -58,16 +63,19 @@ impl JellyfinLoginStore for HiqliteAuthStore {
         let now = super::jellyfin_login::switch_save_time();
         let results = self
             .client()
-            .txn([
-                (
-                    super::jellyfin_login::SAVE_GENERATION,
-                    params!(generation, now),
-                ),
-                (
-                    super::jellyfin_login::SAVE_SWITCH,
-                    params!(if enabled { "1" } else { "0" }, now),
-                ),
-            ])
+            .txn(
+                "set_jellyfin_compatibility",
+                [
+                    (
+                        super::jellyfin_login::SAVE_GENERATION,
+                        params!(generation, now),
+                    ),
+                    (
+                        super::jellyfin_login::SAVE_SWITCH,
+                        params!(if enabled { "1" } else { "0" }, now),
+                    ),
+                ],
+            )
             .await?;
         for result in results {
             result.map_err(super::hiqlite::database_error)?;

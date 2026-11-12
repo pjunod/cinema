@@ -228,6 +228,7 @@ async fn request_ledger_full(
     let count = store
         .client()
         .query_consistent_map::<CountRow, _>(
+            "request_ledger_full",
             "SELECT COUNT(*) AS count FROM library_channel_requests WHERE user_id = $1",
             params!(user_id),
         )
@@ -372,6 +373,7 @@ async fn query_channel(
     let rows = store
         .client()
         .query_consistent_map::<ChannelRow, _>(
+            "query_channel",
             channel_query("c.id = $2"),
             params!(actor_user_id, channel_id),
         )
@@ -398,7 +400,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
     ) -> Result<Option<crate::channel_subjects::SubjectJob>, StoreError> {
         let rows = self
             .client()
-            .query_consistent_map::<SubjectRow, _>(query.sql(), params!())
+            .query_consistent_map::<SubjectRow, _>("subject_job", query.sql(), params!())
             .await
             .map_err(database_error)?;
         rows.into_iter()
@@ -426,7 +428,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, StoreError>>()?;
         let results = self
             .client()
-            .txn(statements)
+            .txn("subject_write", statements)
             .await
             .map_err(database_error)?;
         let counts = results
@@ -445,7 +447,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         let sql = crate::channel_subjects::decision_query(owner, subject, profile, ids);
         let rows = self
             .client()
-            .query_consistent_map::<SubjectPayload, _>(sql, params!())
+            .query_consistent_map::<SubjectPayload, _>("subject_decisions", sql, params!())
             .await
             .map_err(database_error)?;
         rows.into_iter()
@@ -474,6 +476,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         };
         self.client()
             .query_consistent_map::<ChannelRow, _>(
+                "list_library_channels",
                 format!("{} ORDER BY c.id LIMIT $3", channel_query(scope)),
                 params!(
                     actor_user_id,
@@ -509,6 +512,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         let replays = self
             .client()
             .query_consistent_map::<RequestRow, _>(
+                "create_library_channel",
                 "SELECT channel_id, operation_hash, result_revision \
                  FROM library_channel_requests WHERE user_id = $1 AND request_id = $2 \
                  AND expires_at_ms > $3",
@@ -537,7 +541,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .map_err(|error| StoreError::Database(error.to_string()))?;
         let results = self
             .client()
-            .txn([
+            .txn("create_library_channel", [
                 (
                     "INSERT INTO library_channels \
                      (id, owner_user_id, name, description, visibility, enabled, \
@@ -615,6 +619,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         let replays = self
             .client()
             .query_consistent_map::<RequestRow, _>(
+                "update_library_channel",
                 "SELECT channel_id, operation_hash, result_revision FROM library_channel_requests \
                  WHERE user_id = $1 AND request_id = $2 AND expires_at_ms > $3",
                 params!(
@@ -695,7 +700,10 @@ impl LibraryChannelStore for HiqliteAuthStore {
                 ));
             }
         }
-        let results = self.client().txn(statements).await?;
+        let results = self
+            .client()
+            .txn("update_library_channel", statements)
+            .await?;
         let counts = results
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -716,6 +724,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         let replays = self
             .client()
             .query_consistent_map::<RequestRow, _>(
+                "delete_library_channel",
                 "SELECT channel_id, operation_hash, result_revision \
                  FROM library_channel_requests WHERE user_id = $1 AND request_id = $2 \
                  AND expires_at_ms > $3",
@@ -750,42 +759,45 @@ impl LibraryChannelStore for HiqliteAuthStore {
         }
         let results = self
             .client()
-            .txn([
-                (
-                    "INSERT INTO library_channel_requests \
+            .txn(
+                "delete_library_channel",
+                [
+                    (
+                        "INSERT INTO library_channel_requests \
                  (user_id, request_id, operation_hash, channel_id, result_revision, \
                   created_at_ms, expires_at_ms) \
                  SELECT $1, $2, $3, $4, 0, $5, $6 \
                  WHERE EXISTS(SELECT 1 FROM library_channels WHERE id = $4 \
                    AND definition_revision = $7 AND (owner_user_id = $1 OR $8)) \
                    AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $1) < $9",
-                    params!(
-                        deletion.actor_user_id,
-                        deletion.request_id.as_str(),
-                        deletion.request_hash.as_str(),
-                        deletion.channel_id.as_str(),
-                        deletion.now_ms,
-                        deletion.now_ms + 86_400_000,
-                        deletion.expected_revision,
-                        deletion.actor_is_admin,
-                        CHANNEL_REQUESTS_PER_USER_MAX
+                        params!(
+                            deletion.actor_user_id,
+                            deletion.request_id.as_str(),
+                            deletion.request_hash.as_str(),
+                            deletion.channel_id.as_str(),
+                            deletion.now_ms,
+                            deletion.now_ms + 86_400_000,
+                            deletion.expected_revision,
+                            deletion.actor_is_admin,
+                            CHANNEL_REQUESTS_PER_USER_MAX
+                        ),
                     ),
-                ),
-                (
-                    "DELETE FROM library_channels WHERE id = $1 AND definition_revision = $2 \
+                    (
+                        "DELETE FROM library_channels WHERE id = $1 AND definition_revision = $2 \
                  AND (owner_user_id = $3 OR $4) \
                  AND EXISTS(SELECT 1 FROM library_channel_requests \
                    WHERE user_id = $3 AND request_id = $5 AND operation_hash = $6)",
-                    params!(
-                        deletion.channel_id.as_str(),
-                        deletion.expected_revision,
-                        deletion.actor_user_id,
-                        deletion.actor_is_admin,
-                        deletion.request_id.as_str(),
-                        deletion.request_hash.as_str()
+                        params!(
+                            deletion.channel_id.as_str(),
+                            deletion.expected_revision,
+                            deletion.actor_user_id,
+                            deletion.actor_is_admin,
+                            deletion.request_id.as_str(),
+                            deletion.request_hash.as_str()
+                        ),
                     ),
-                ),
-            ])
+                ],
+            )
             .await?;
         let counts = results
             .into_iter()
@@ -838,7 +850,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
     ) -> Result<Vec<ChannelCandidate>, StoreError> {
         let rows = self
             .client()
-            .query_consistent_map::<CatalogRow, _>(
+            .query_consistent_map::<CatalogRow, _>("library_channel_catalog_snapshot", 
                 "SELECT i.id AS item_id, f.id AS file_id, f.size AS file_size, \
                     f.mtime AS file_mtime, f.duration_ms AS duration_ms, \
                     i.library_id, i.kind, i.title, \
@@ -917,6 +929,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
     ) -> Result<Vec<LibraryChannel>, StoreError> {
         self.client()
             .query_consistent_map::<ChannelRow, _>(
+                "list_library_channel_refresh_candidates",
                 format!(
                     "SELECT {CHANNEL_COLS}, 0 AS favourite FROM library_channels c \
                      WHERE c.id > $1 AND (c.build_state = 'queued' OR (c.enabled = 1 \
@@ -986,7 +999,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         &self,
         claim: &LibraryChannelBuildClaim,
     ) -> Result<ChannelBuildMutation, StoreError> {
-        let results = self.client().txn([
+        let results = self.client().txn("claim_library_channel_build", [
             ("INSERT INTO library_channel_generations \
              (id, channel_id, definition_revision, algorithm_version, content_digest, state, \
               build_claim_id, build_claim_expires_ms, created_at_ms) \
@@ -1075,7 +1088,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .collect::<Vec<_>>();
         let counts = self
             .client()
-            .txn(statements)
+            .txn("stage_library_channel_entries", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1094,6 +1107,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         let staged = self
             .client()
             .query_consistent_map::<EntryRow, _>(
+                "publish_library_channel_generation",
                 "SELECT ordinal, item_id, file_id, file_size, file_mtime, duration_ms, \
              cumulative_start_ms, show_id FROM library_channel_entries WHERE generation_id = $1 \
              ORDER BY ordinal",
@@ -1160,7 +1174,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         };
         let results = self
             .client()
-            .txn([
+            .txn("publish_library_channel_generation", [
                 (
                     "UPDATE library_channels SET active_generation_id = pending_generation_id, \
                      active_epoch_ms = pending_epoch_ms, pending_generation_id = NULL, \
@@ -1290,7 +1304,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         if !visible(&channel, actor_user_id, actor_is_admin) {
             return Ok(None);
         }
-        let rows = self.client().query_consistent_map::<GenerationRow, _>(
+        let rows = self.client().query_consistent_map::<GenerationRow, _>("read_library_channel_generation", 
             "SELECT id, channel_id, definition_revision, algorithm_version, content_digest, state, \
              entry_count, loop_duration_ms, build_claim_id, build_claim_expires_ms, created_at_ms \
              FROM library_channel_generations WHERE id = $1 AND channel_id = $2",
@@ -1302,6 +1316,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         let entries = self
             .client()
             .query_consistent_map::<EntryRow, _>(
+                "read_library_channel_generation",
                 "SELECT ordinal, item_id, file_id, file_size, file_mtime, duration_ms, \
              cumulative_start_ms, show_id FROM library_channel_entries \
              WHERE generation_id = $1 ORDER BY ordinal",

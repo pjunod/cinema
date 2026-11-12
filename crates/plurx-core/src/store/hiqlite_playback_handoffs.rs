@@ -99,6 +99,7 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
             .client()
             // authority: the web app polls this to tell a redeemed code from an unopened player; a stale replica would report a redemption late.
             .query_consistent_map::<HandoffRow, _>(
+                "playback_handoff_for_minter",
                 ph::STATUS_SQL,
                 params!(id, user_id, source_token_hash),
             )
@@ -134,6 +135,7 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
             .client()
             // authority: the redemption verdict must observe the transaction just committed, never a replica that predates it.
             .query_consistent_map::<HandoffRow, _>(
+                "redeem_playback_handoff",
                 ph::OUTCOME_SQL,
                 params!(r.token_hash.clone(), r.code_hash.clone()),
             )
@@ -153,7 +155,11 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
         Ok(self
             .client()
             // authority: a handoff token is revoked with its minting token; a stale replica would keep serving it.
-            .query_consistent_map::<ScopeRow, _>(ph::TOKEN_SCOPE_SQL, params!(token_hash, now))
+            .query_consistent_map::<ScopeRow, _>(
+                "playback_handoff_token_scope",
+                ph::TOKEN_SCOPE_SQL,
+                params!(token_hash, now),
+            )
             .await?
             .into_iter()
             .next()
@@ -222,6 +228,7 @@ impl HiqliteAuthStore {
             .client()
             // authority: a handoff token is revoked with its minting token; a stale replica would keep accepting it.
             .query_consistent_map::<HandoffUserRow, _>(
+                "authenticate_playback_handoff",
                 ph::AUTHENTICATE_SQL,
                 params!(token_hash, now),
             )
