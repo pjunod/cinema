@@ -138,8 +138,9 @@ items 4 and 5.
 
 Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
 agent on local branch `step3`, stacked on `item6b`, not pushed.
-[Plan step 3](LOCAL-COPY-ENGINE-BUILD.md) is built; clippy `-D warnings` and
-fmt are clean, the inventory and formal pins are green. No unit test has
+[Plan step 3](LOCAL-COPY-ENGINE-BUILD.md) is built, with the fixes from its
+adversarial review (2 majors, 9 minors). Clippy `-D warnings` and fmt are
+clean, the inventory and formal pins are green. No unit test has
 been run: the ride's tests are written and wait for the fast lane.
 
 The cluster fragment-index build job's pass now also observes the whole v3
@@ -152,11 +153,19 @@ every title the ride does not.
 
 - Added to the pass: one `framecrc` packet-clock output on descriptor 7,
   after the index outputs. No source read, no global option, nothing inside
-  the argv the cluster cache key hashes.
+  the argv the cluster cache key hashes. The child runs the copy recipe's
+  bitstream filters a second time for that output and checksums every
+  packet.
+- The ride consumes the lead reader's own parsed fragments, by move, in
+  place: no observer task, no byte copy, no second parse or Dolby Vision
+  conversion. One thing is done again, the engine's per-row NAL-header
+  walk for HDR10 SEI; the plan says why.
 - Not ridden, by design: the non-cluster local pass (it holds no claim to
-  name), sibling identities of a shared read, transport streams, and any
-  title whose format start is not a whole number of video ticks or whose
-  first packet is not the stream's first picture.
+  name), sibling identities of a shared read, any container but Matroska
+  and ISO base media, a source that already has a healthy current head, a
+  source whose last riding pass failed, and any title whose format start
+  is not a whole number of video ticks or whose first packet is not the
+  stream's first picture.
 - Decision (Paul away), a correction to the plan: the engine's clock needs
   the global `-copyts`, which the pass cannot take. It would shift the
   subtitle tracks the same pass stores, and it disables FFmpeg's
@@ -164,10 +173,24 @@ every title the ride does not.
   recovers the source origin from the pass's probe (format start, checked
   against the video stream's first presentation time) and abandons on any
   disagreement. The plan's Step 3 "Clock" paragraph records this.
-- Decision (Paul away): a pass's rows only ever add an index. They never
-  quarantine a healthy head and never displace rows already held.
+- Decision (Paul away): a pass's rows only ever add an index. A set that
+  holds nothing but a pass's rows never quarantines a healthy head, and a
+  pass never displaces rows already held or evicts a demand or a viewer's
+  set. A viewer's own contradicting range still quarantines.
+- An abandoned ride is counted
+  (`plurx_copy_index_ride_total{outcome="abandoned"}`), logged at warn
+  with its reason, shown on the pass's Analysis row and remembered, so
+  that source's next pass does not ride.
 - A second read remains for a non-HEVC pass: one whole-file hash phase,
   because only HEVC passes record a full-source receipt.
+
+Open, post-deploy acceptance: the ride has only run against 12-second
+generated fixtures in tests that have not been executed. On the fleet, a
+UHD HDR10 remux and a Dolby Vision title (profile 7 and 8, preserved and
+converted) must each ride to `observed` with no abandonment, seal the blob
+a standalone fill seals, and leave the pass's wall time and the node's
+memory within noise. Record titles, counters and any abandonment reason
+here.
 
 ## Previous batch — A1/B1 local playback demand (item 6, first step)
 
