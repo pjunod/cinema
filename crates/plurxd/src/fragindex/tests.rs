@@ -536,7 +536,7 @@ async fn hevc_incomplete_stderr_cannot_publish_a_proofless_index() {
             std::task::Poll::Ready(Err(std::io::Error::other("failed stderr")))
         }
     }
-    let (_, _, trace) = read_stderr_tail(FailedRead, None, true).await;
+    let (_, _, trace) = read_stderr_tail(FailedRead, None, true, None).await;
     assert!(trace.is_none());
     let mut outcome = IndexOutcome::Built(Box::new(FragmentIndex::new(
         90_000,

@@ -87,6 +87,20 @@ impl CopyNormalizationContract {
         })
     }
 
+    /// The canonical half alone, for an observer that reads only the
+    /// video-only output: the same init check and the same per-fragment
+    /// normalization [`Self::begin`] gives the canonical pipe of a pair.
+    pub(crate) fn begin_canonical(
+        &self,
+        canonical_init: Init,
+    ) -> Result<CanonicalNormalizer, CopyNormalizationError> {
+        Ok(CanonicalNormalizer {
+            canonical: self.pipe(canonical_init)?,
+            raw_parameters: self.raw_parameters.clone(),
+            failed: false,
+        })
+    }
+
     fn pipe(&self, raw_init: Init) -> Result<PipeNormalizer, CopyNormalizationError> {
         let mut served_init = raw_init.clone();
         normalize_init(&mut served_init, &self.promotion)?;
@@ -167,20 +181,57 @@ impl CopyNormalizers {
         result
     }
 }
+/// [`CopyNormalizers`] without the AV companion. Errors latch, as a pair's do.
+pub(crate) struct CanonicalNormalizer {
+    canonical: PipeNormalizer,
+    raw_parameters: PromotionInputs,
+    failed: bool,
+}
+impl CanonicalNormalizer {
+    pub(crate) fn canonical_init(&self) -> &Init {
+        &self.canonical.served_init
+    }
+    /// Admit one fragment its reader has already converted, where this
+    /// identity converts: the parameter-set check a pair's normalization
+    /// makes, without the conversion. Conversion rewrites RPU NAL units
+    /// only, so the parameter sets checked are the ones the muxer wrote.
+    pub(crate) fn admit(&mut self, canonical: &Fragment) -> Result<(), CopyNormalizationError> {
+        if self.failed {
+            return Err(CopyNormalizationError::Failed);
+        }
+        let result =
+            check_parameter_sets(&self.canonical.raw_init, canonical, &self.raw_parameters);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+}
 fn normalize_fragment(
     pipe: &mut PipeNormalizer,
     fragment: &mut Fragment,
     expected: &PromotionInputs,
 ) -> Result<(), CopyNormalizationError> {
-    let mut observed = PromotionInputs::from_fragment(fragment, &pipe.raw_init);
-    observed.hdr10_sei.clear();
-    if !expected.matches_later_parameter_sets(&observed) {
-        return Err(CopyNormalizationError::ParameterSetsChanged);
-    }
+    check_parameter_sets(&pipe.raw_init, fragment, expected)?;
     if let Some(converter) = &mut pipe.converter {
         converter
             .convert(fragment)
             .map_err(|error| CopyNormalizationError::Conversion(error.to_string()))?;
+    }
+    Ok(())
+}
+
+/// A later fragment may omit the head's parameter sets; it may not carry
+/// different ones.
+fn check_parameter_sets(
+    raw_init: &Init,
+    fragment: &Fragment,
+    expected: &PromotionInputs,
+) -> Result<(), CopyNormalizationError> {
+    let mut observed = PromotionInputs::from_fragment(fragment, raw_init);
+    observed.hdr10_sei.clear();
+    if !expected.matches_later_parameter_sets(&observed) {
+        return Err(CopyNormalizationError::ParameterSetsChanged);
     }
     Ok(())
 }

@@ -365,6 +365,35 @@ test("a live index row names the PGS tracks its pass is also keeping", () => {
   assert.doesNotMatch(older, /PGS/, "a peer that predates the fields says nothing either");
 });
 
+// Local copy engine step 3: an index pass that is also observing the title's
+// copy index from the same read says so on its live row, with its row count.
+test("a live index row says its pass is also observing the copy index", () => {
+  const live = new Function(
+    "return (function(){" +
+      ["esc", "fmtBytes", "fmtDur", "nodeLabel", "analysisNodeCell", "analysisSharedRead", "analysisRideAlong", "analysisLiveProgress"]
+        .map(shippedSource)
+        .join("\n") +
+      "\nreturn analysisLiveProgress;})()",
+  )();
+  const base = {
+    file_id: 5208, item_id: 7, title: "Bad Boys", component: "fragment_index",
+    stage: "fragment_index", bytes_read: 1000, total_bytes: 2000,
+    media_ms_examined: 1000, total_media_ms: 2000, fragments_indexed: 12,
+    elapsed_ms: 1000, throughput_bps: 1000, node_id: OWNER,
+  };
+  const riding = live({ progress: [{ ...base, copy_index_riding: true, copy_index_rows: 12 }] }, {});
+  assert.match(riding, /Also observing this title's copy index from the same read · 12 rows/);
+  const starting = live({ progress: [{ ...base, copy_index_riding: true }] }, {});
+  assert.match(starting, /copy index from the same read · 0 rows/, "a ride with no rows yet still shows");
+  const both = live({ progress: [{ ...base, pgs_tracks: 1, pgs_bytes_written: 10, copy_index_riding: true, copy_index_rows: 1 }] }, {});
+  assert.match(both, /Also keeping 1 PGS track ·[\s\S]*copy index from the same read · 1 row</, "both rides show, tracks first");
+  const abandoned = live({ progress: [{ ...base, copy_index_riding: true, copy_index_rows: 7, copy_index_abandoned: true }] }, {});
+  assert.match(abandoned, /Copy index observation abandoned for this pass; its index is unaffected/);
+  assert.doesNotMatch(abandoned, /from the same read/, "an abandoned ride no longer reads as observing");
+  const plain = live({ progress: [base] }, {});
+  assert.doesNotMatch(plain, /[Cc]opy index/, "a pass that is not riding, or an older peer, says nothing");
+});
+
 test("a subtitle_source progress row names text and PGS tracks and bytes read", () => {
   const live = new Function(
     "return (function(){" +

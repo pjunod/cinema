@@ -224,10 +224,23 @@ fn one_clock(bytes: &[u8]) -> Result<SourcePacketObservation, String> {
         .finish()
         .map_err(|_| "copy_head_clock_truncated".to_owned())?;
     let packet = packet.ok_or("copy_head_clock_missing")?;
+    head_origin(&packet)?;
+    Ok(packet)
+}
+
+/// The whole-title clock origin the first selected video packet establishes:
+/// packet zero, a sync sample with a duration, at its own decode time. The
+/// head census and the content-analysis pass's copy ride-along both take the
+/// origin of a title from here.
+pub(crate) fn head_origin(packet: &SourcePacketObservation) -> Result<SourceTimestamp, String> {
     if packet.sequence != 0 || packet.flags & 1 == 0 || packet.duration == 0 {
         return Err("copy_head_not_sync".into());
     }
-    Ok(packet)
+    Ok(SourceTimestamp {
+        dts: packet.dts,
+        time_base_num: packet.time_base_num,
+        time_base_den: packet.time_base_den,
+    })
 }
 
 /// A Source start is bounded by its viewer's startup deadline. An Analysis
@@ -347,11 +360,7 @@ pub(crate) async fn run_source_census(
     }
     Ok(CopyClockCensus {
         source_object_version: object,
-        first_dts: SourceTimestamp {
-            dts: packet.dts,
-            time_base_num: packet.time_base_num,
-            time_base_den: packet.time_base_den,
-        },
+        first_dts: head_origin(&packet)?,
         first_pts: packet.pts,
         format_start: format.finish(),
         raw_canonical_init,

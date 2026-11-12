@@ -27,6 +27,8 @@ mod clock_offset;
 mod copy_analysis;
 mod copy_index_v3;
 mod copy_normalization;
+#[cfg(unix)]
+mod copy_ride_along;
 mod copyrange;
 mod copyseg;
 mod decode_facts;

@@ -20,9 +20,9 @@ use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
-pub(super) const MAX_HELD: usize = 96 * 1024 * 1024;
+pub(crate) const MAX_HELD: usize = 96 * 1024 * 1024;
 const MAX_FRAGMENTS: usize = 8;
-const MAX_PACKETS: usize = 131072;
+pub(crate) const MAX_PACKETS: usize = 131072;
 
 pub(crate) struct ObservedCopySegment {
     pub(crate) segment: VerifiedCopySegment,
@@ -352,14 +352,7 @@ impl ObservedCopyMux {
         let canonical = Arc::new(normalizers.canonical_init().clone());
         let av = Arc::new(normalizers.av_init().clone());
         let scale = canonical.video().ok_or("copy_video_missing")?.timescale;
-        let policy = fmp4::CutPolicy::new(
-            plurx_core::transcode::COPY_SEGMENT_SECONDS,
-            plurx_core::transcode::COPY_FIRST_SEGMENT_SECONDS,
-            plurx_core::transcode::COPY_SEGMENT_MAX_BYTES,
-            plurx_core::transcode::COPY_SEGMENT_MAX_SECS,
-            scale,
-        )
-        .with_strict_max_seconds(16, scale);
+        let policy = copy_cut_policy(scale);
         self.kernel = Some(
             VerifiedCopyKernel::new(
                 (*canonical).clone(),
@@ -414,46 +407,13 @@ impl ObservedCopyMux {
             }
             let mut inspection = None;
             if self.inspect_hevc {
-                let mut slices = 0u64;
-                let mut configuration = None;
-                for (offset, packet) in self.inspected.iter().take(packets).enumerate() {
-                    if packet.sequence != first_sequence + offset as u64 || packet.slices == 0 {
-                        return Err("copy_inspection_sequence".into());
-                    }
-                    if configuration
-                        .as_ref()
-                        .is_some_and(|digest| digest != &packet.configuration_sha256)
-                    {
-                        return Err("copy_init_contract_changed".into());
-                    }
-                    configuration = Some(packet.configuration_sha256.clone());
-                    slices = slices
-                        .checked_add(packet.slices)
-                        .ok_or("copy_inspection_overflow")?;
-                }
-                // Every sample of the canonical fragment, as the legacy index
-                // pass scans it. Legacy scans after Dolby Vision conversion;
-                // conversion rewrites only RPU NAL units (type 62), never the
-                // prefix SEI that carries 137/144, so before is the same scan.
-                // An unreadable SEI is a fact about the row, not a reason to
-                // end this viewer's copy: only the seal refuses it.
-                let mut hdr10 = fmp4::Hdr10IndexMetadata::default();
-                let hdr10_conflict = hdr10
-                    .observe_fragment(canonical, normalizers.canonical_init())
-                    .is_err();
-                if hdr10_conflict {
-                    hdr10 = fmp4::Hdr10IndexMetadata::default();
-                }
-                inspection = Some(CopyRowInspection {
-                    dts: clock.canonical_dts,
-                    duration: clock.duration,
-                    packets: packets as u64,
-                    slices,
-                    configuration_sha256: configuration.ok_or("copy_inspection_missing")?,
-                    hdr10_mastering: hdr10.mastering().map(hex::encode),
-                    hdr10_light: hdr10.light(),
-                    hdr10_conflict,
-                });
+                inspection = Some(inspect_canonical_row(
+                    canonical,
+                    normalizers.canonical_init(),
+                    clock,
+                    first_sequence,
+                    self.inspected.iter().take(packets),
+                )?);
             }
             let (mut canonical, clock) = self.canonical.pop_front().ok_or("copy_pair_missing")?;
             let mut av = self.av.pop_front().ok_or("copy_pair_missing")?;
@@ -581,6 +541,75 @@ impl ObservedCopyMux {
         }
         Ok((events, self.inspection))
     }
+}
+
+/// The cut policy every copy range plans its segments under, and the longest
+/// video span one of them may hold.
+pub(crate) const COPY_TARGET_SECONDS: u32 = 16;
+pub(crate) fn copy_cut_policy(timescale: u32) -> fmp4::CutPolicy {
+    fmp4::CutPolicy::new(
+        plurx_core::transcode::COPY_SEGMENT_SECONDS,
+        plurx_core::transcode::COPY_FIRST_SEGMENT_SECONDS,
+        plurx_core::transcode::COPY_SEGMENT_MAX_BYTES,
+        plurx_core::transcode::COPY_SEGMENT_MAX_SECS,
+        timescale,
+    )
+    .with_strict_max_seconds(COPY_TARGET_SECONDS, timescale)
+}
+
+/// One canonical row's inspection: its own packets' slice counts and one
+/// configuration digest from the header trace, and its own HDR10 SEI facts.
+/// `inspected` is exactly the row's packets, in order, the first of them
+/// `first_sequence`; `canonical` is the row's fragment before conversion.
+/// Playback ranges, Analysis fills and the content-analysis pass's copy
+/// ride-along all inspect a row here.
+pub(crate) fn inspect_canonical_row<'a>(
+    canonical: &Fragment,
+    canonical_init: &Init,
+    clock: &SourceFragmentClock,
+    first_sequence: u64,
+    inspected: impl Iterator<Item = &'a PacketInspection>,
+) -> Result<CopyRowInspection, String> {
+    let mut packets = 0u64;
+    let mut slices = 0u64;
+    let mut configuration = None;
+    for (offset, packet) in inspected.enumerate() {
+        if packet.sequence != first_sequence + offset as u64 || packet.slices == 0 {
+            return Err("copy_inspection_sequence".into());
+        }
+        if configuration
+            .as_ref()
+            .is_some_and(|digest| digest != &packet.configuration_sha256)
+        {
+            return Err("copy_init_contract_changed".into());
+        }
+        configuration = Some(packet.configuration_sha256.clone());
+        slices = slices
+            .checked_add(packet.slices)
+            .ok_or("copy_inspection_overflow")?;
+        packets += 1;
+    }
+    // Every sample of the canonical fragment, as the legacy index
+    // pass scans it. Legacy scans after Dolby Vision conversion;
+    // conversion rewrites only RPU NAL units (type 62), never the
+    // prefix SEI that carries 137/144, so before is the same scan.
+    // An unreadable SEI is a fact about the row, not a reason to
+    // end this viewer's copy: only the seal refuses it.
+    let mut hdr10 = fmp4::Hdr10IndexMetadata::default();
+    let hdr10_conflict = hdr10.observe_fragment(canonical, canonical_init).is_err();
+    if hdr10_conflict {
+        hdr10 = fmp4::Hdr10IndexMetadata::default();
+    }
+    Ok(CopyRowInspection {
+        dts: clock.canonical_dts,
+        duration: clock.duration,
+        packets,
+        slices,
+        configuration_sha256: configuration.ok_or("copy_inspection_missing")?,
+        hdr10_mastering: hdr10.mastering().map(hex::encode),
+        hdr10_light: hdr10.light(),
+        hdr10_conflict,
+    })
 }
 
 fn normalization_error(error: CopyNormalizationError) -> String {

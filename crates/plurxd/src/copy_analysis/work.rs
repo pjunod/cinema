@@ -1,7 +1,9 @@
 //! The Analysis consumer of committed copy-range observations.
 //!
 //! Playback and Source copies send [`CompletedCopyRange`] notifications after
-//! their durable commit. This worker coalesces them per exact source. Under the
+//! their durable commit, and the content-analysis pass sends the whole-title
+//! rows it observed on its own read. This worker coalesces them per exact
+//! source. Under the
 //! existing Analysis lease it first fills what playback left unobserved, one
 //! Analysis-owned copy generation per admitted physical phase, and once the
 //! rows cover the whole title it runs the remaining metadata-owned steps: one
@@ -10,7 +12,7 @@
 //! serving or a Source grant; every physical read is a phase's exact custody.
 use super::{
     physical, CompletedCopyRange, CopyAnalysisMessage, CopyIndexDefect, CopyIndexDefectKind,
-    CopyIndexDemand, CopyObservationAuthority, CopyObservationSet,
+    CopyIndexDemand, CopyObservationAuthority, CopyObservationSet, PassCopyObservation,
 };
 use plurx_core::store::analysis_coordination::{
     AnalysisCoordinationClaim, AnalysisCoordinationSource,
@@ -88,6 +90,11 @@ pub(crate) struct PendingSource {
     /// Whether this demand came back from a previous process and still has
     /// the recipe rebuilt for it rather than a playback's own.
     recovered: bool,
+    /// Whether every row of this set came from a content-analysis pass.
+    /// Such a set may publish where no healthy head stands; it never
+    /// quarantines one. A viewer's range folding in clears it, and a pass
+    /// folding into rows a viewer or a fill left never sets it.
+    ridden: bool,
     observed: Instant,
     /// Not before this instant: a busy source domain or a contended claim
     /// waits for the next dispatch wake after it, never a private timer.
@@ -117,6 +124,16 @@ impl PendingSource {
     }
     fn is_complete(&self) -> bool {
         self.set().is_some_and(CopyObservationSet::is_complete)
+    }
+    /// The rows held, and whether a content-analysis pass's are among them.
+    #[cfg(test)]
+    pub(super) fn held_rows(&self) -> (Vec<plurx_core::segplan::IndexRow>, bool) {
+        (
+            self.set()
+                .map(|set| set.rows.rows().to_vec())
+                .unwrap_or_default(),
+            self.ridden,
+        )
     }
     /// Fold the rows of one Analysis generation. The first rows of a source
     /// that was only asked for establish its set.
@@ -173,6 +190,7 @@ impl PendingSources {
         match message {
             CopyAnalysisMessage::Range(range) => self.observe(*range),
             CopyAnalysisMessage::Demand(demand) => self.demand(*demand, retry),
+            CopyAnalysisMessage::Pass(observation) => self.observe_pass(*observation),
             CopyAnalysisMessage::Defect(defect) => {
                 if self.defects.len() < MAX_PENDING_DEFECTS
                     || self.defects.contains_key(&defect.source_key)
@@ -258,6 +276,7 @@ impl PendingSources {
                 // A request taken up from a previous process already exists.
                 persist_tried: demand.durable_request.is_some(),
                 recovered: demand.durable_request.is_some(),
+                ridden: false,
                 request_id: demand.durable_request,
                 held: Held::Demand {
                     catalog_namespace: demand.catalog_namespace,
@@ -290,6 +309,26 @@ impl PendingSources {
                 }
             }
         }
+    }
+
+    /// Room for one more set of a pass's rows. At the bound only another
+    /// such set is forgotten, the least recently observed; never a demand
+    /// and never rows a viewer or a fill left. False when there is none.
+    fn make_room_for_pass(&mut self) -> bool {
+        if self.sources.len() + self.working.len() < MAX_PENDING_SOURCES {
+            return true;
+        }
+        let Some(oldest) = self
+            .sources
+            .iter()
+            .filter(|(_, pending)| pending.ridden && !pending.demanded)
+            .min_by_key(|(_, pending)| pending.observed)
+            .map(|(key, _)| key.clone())
+        else {
+            return false;
+        };
+        self.sources.remove(&oldest);
+        true
     }
 
     /// [`Self::settle`] for a source a test worked itself.
@@ -345,6 +384,23 @@ impl PendingSources {
                     CopyObservationSet::new(&message).map(|set| *held = Held::Rows(Box::new(set)))
                 }
             };
+            let folded = match folded {
+                // A viewer's own range outranks rows a pass rode in with:
+                // the pass's rows are dropped and the range starts this
+                // source's set again, so it is the range that is judged
+                // against the head.
+                Err(error) if pending.ridden => {
+                    tracing::warn!(
+                        file_id = message.source.file_id,
+                        range_id = %message.range_id,
+                        ?error,
+                        "a playback range disagrees with a content-analysis pass's copy rows; keeping the range"
+                    );
+                    CopyObservationSet::new(&message)
+                        .map(|set| pending.held = Held::Rows(Box::new(set)))
+                }
+                folded => folded,
+            };
             if let Err(error) = folded {
                 tracing::warn!(
                     file_id = message.source.file_id,
@@ -356,6 +412,8 @@ impl PendingSources {
                     self.dropped.extend(dropped_request(&discarded));
                 }
             } else {
+                // Not a pass's rows alone any more.
+                pending.ridden = false;
                 pending.observed = Instant::now();
                 pending.interest = interest;
                 pending.recipe = message.recipe;
@@ -377,6 +435,7 @@ impl PendingSources {
                         persist_tried: false,
                         request_id: None,
                         recovered: false,
+                        ridden: false,
                         observed: Instant::now(),
                         retry_after: None,
                     },
@@ -388,6 +447,91 @@ impl PendingSources {
                 ?error,
                 "copy observation refused"
             ),
+        }
+    }
+
+    /// Fold the whole-title rows a content-analysis pass observed. They can
+    /// only add: rows that disagree with what is held, or that no set of
+    /// this source accepts, are dropped and what is held stands. A source a
+    /// unit is working now is already on its way to the same index.
+    pub(crate) fn observe_pass(&mut self, observation: PassCopyObservation) {
+        let Ok(key) = plurx_core::store::copy_index_v3_source_key(
+            &observation.catalog_namespace,
+            &observation.source,
+        ) else {
+            return;
+        };
+        if self.working.contains_key(&key) {
+            return;
+        }
+        let refused = |error: super::CopyObservationError| {
+            tracing::warn!(
+                file_id = observation.source.file_id,
+                job_id = observation.custody.job_id(),
+                ?error,
+                "the content-analysis pass's copy rows were not accepted; what is held stands"
+            );
+        };
+        if let Some(pending) = self.sources.get_mut(&key) {
+            // Whether the set is then the pass's rows and nothing else.
+            let folded = match &mut pending.held {
+                Held::Rows(set) => set.observe_pass(&observation).map(|()| false),
+                // The first rows of a source so far only asked for.
+                held @ Held::Demand { .. } => {
+                    CopyObservationSet::from_pass(&observation).map(|set| {
+                        *held = Held::Rows(Box::new(set));
+                        true
+                    })
+                }
+            };
+            match folded {
+                Ok(only_pass_rows) => {
+                    if only_pass_rows {
+                        pending.ridden = true;
+                    }
+                    pending.observed = Instant::now();
+                    // Whole now: nothing is left to wait for.
+                    pending.retry_after = None;
+                }
+                Err(error) => refused(error),
+            }
+            return;
+        }
+        match CopyObservationSet::from_pass(&observation) {
+            Ok(set) => {
+                if !self.make_room_for_pass() {
+                    tracing::info!(
+                        file_id = observation.source.file_id,
+                        job_id = observation.custody.job_id(),
+                        "every held copy source is a viewer's or a demand's; the content-analysis pass's rows are dropped"
+                    );
+                    return;
+                }
+                tracing::info!(
+                    file_id = observation.source.file_id,
+                    job_id = observation.custody.job_id(),
+                    rows = set.observed_rows(),
+                    "the content-analysis pass observed this source's whole copy index"
+                );
+                self.sources.insert(
+                    key,
+                    PendingSource {
+                        file: observation.file,
+                        held: Held::Rows(Box::new(set)),
+                        recipe: observation.recipe,
+                        interest: None,
+                        asked_by: None,
+                        demanded: false,
+                        persist_tried: false,
+                        request_id: None,
+                        recovered: false,
+                        ridden: true,
+                        observed: Instant::now(),
+                        retry_after: None,
+                    },
+                );
+            }
+            Err(error) => refused(error),
         }
     }
 
@@ -782,23 +926,14 @@ async fn rebuild_demand(
         Ok(source) => source,
         Err(_) => return Ok(None),
     };
-    // Playback's default audio: the first track copied when the copy pipe
-    // can carry its codec, encoded when it cannot. Never a bare copy the
-    // muxer may refuse. A playback that asks again brings its own choice.
-    let transcode_audio = file
-        .audio_streams
-        .first()
-        .is_some_and(|audio| !plurx_core::playback::audio::copy_pipe_admits_audio(&audio.codec));
+    // Playback's default audio. A playback that asks again brings its own
+    // choice.
+    let recipe = super::CopyRecipe::playback_default(&file, video);
     Ok(Some(CopyIndexDemand {
         file: Arc::new(file),
         catalog_namespace: namespace.to_owned(),
         source,
-        recipe: super::CopyRecipe {
-            video,
-            audio_index: None,
-            transcode_audio,
-            audio_delivery: None,
-        },
+        recipe,
         authority: CopyObservationAuthority::Local(authority),
         durable_request: Some(row.request_id),
     }))
@@ -835,6 +970,15 @@ pub(super) async fn publish_source(
         Ok(HeadDecision::Discard(reason)) => return Attempt::Discard(reason.into()),
         Err(error) => return Attempt::Retry(error),
     };
+    // A content-analysis pass's rows only ever add an index where none
+    // stands. When they are all a set holds, a disagreement with a healthy
+    // head is reported and the head kept: a quarantine is for a viewer's own
+    // range to ask for, and a set that holds one is not `ridden`.
+    if pending.ridden && contradicted.is_some() {
+        return Attempt::Discard(
+            "content-analysis copy rows disagree with the published index; the head stands".into(),
+        );
+    }
     let source = pending.source().clone();
     // An incomplete set needs a physical phase, which the store admits only
     // while the source domain is idle. While a viewer holds it, a read-only
