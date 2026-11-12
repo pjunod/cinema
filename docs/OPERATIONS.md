@@ -2829,7 +2829,7 @@ here), `view` and `store` (a quorum read);
 `plurx_media_session_route_lock_seconds{site}` is the map-lock wait per site;
 `plurx_media_session_route_prune_entries` is the entries an eviction scan
 walks (only when full); `plurx_media_session_route_cache_entries` is the size
-against 4,096. Control and final-status reads bypass the cache.
+against 4,096 (no expiry, so it sits near the cap). Control and final-status reads bypass the cache.
 
 The playback-start E1a baseline ([PLAYBACK-START-E1-BUILD.md](streaming/PLAYBACK-START-E1-BUILD.md)
 §7, §9) adds, all loaded from atomics at scrape time:
