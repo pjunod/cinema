@@ -1034,6 +1034,9 @@ pub(crate) struct StreamingSegmentRequest {
     pub(crate) export_raster: Option<(u32, u32)>,
     /// Explicit producer policy only; this layer never reads client caps.
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    /// The source's static HDR10 metadata a master-grade HDR10 window carries.
+    /// The helper never sees it; it is authored onto the encoded window.
+    pub(crate) master_metadata: Option<plurx_core::transcode::dv_processing::DvMasterMetadata>,
 }
 
 #[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
@@ -1453,6 +1456,7 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
         return spawn_streaming(StreamingSegmentRequest {
             export_raster: None,
             display_target: None,
+            master_metadata: None,
             mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
             // The probe passes no decode device: the renderer decodes in software.
             decode: RendererDecode::Software,

@@ -10,6 +10,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Master-grade HDR10-E declares the source's own mastering display and, when
+  the source states them, its content light levels. It carried no static HDR10
+  metadata at all.
+- A display-targeted render's MaxCLL covers the rounding of its 10-bit export
+  (407 for a 400-nit target) instead of stating the target itself, which the
+  decoded picture could exceed.
 - CM4 display mapping evaluates the ST 2084 transfer functions in its point and
   final passes with precise split-float helpers and the normative black and
   white endpoints. On the measured Source16 frame no enhanced pixel is farther

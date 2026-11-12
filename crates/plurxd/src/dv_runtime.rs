@@ -447,6 +447,7 @@ pub(crate) struct PrivateWindow {
     pub(crate) evidence: crate::dv_segment::SegmentEvidence,
     registration: crate::prodrun::ProducerRegistration,
     display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    master_metadata: Option<plurx_core::transcode::dv_processing::DvMasterMetadata>,
 }
 
 #[cfg(target_os = "linux")]
@@ -522,7 +523,18 @@ impl PrivateWindow {
                     )
                     .map_err(|error| error.to_string())?
                 }
-                None => self.encoded,
+                // A master-grade window re-declares the source's own static
+                // metadata; a source that states none stays undeclared.
+                None => match self.master_metadata {
+                    Some(metadata) => plurx_core::transcode::dv_processing::dv_author_hdr10_window(
+                        &self.encoded,
+                        metadata
+                            .output_metadata()
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?,
+                    None => self.encoded,
+                },
             },
             DvDestination::Profile81 => dv_author_profile81_window_with_envelope(
                 &self.encoded,
@@ -738,6 +750,10 @@ pub(crate) struct RuntimeRecipe {
         Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String>,
     /// Independent SDR floor parse; invalid/absent HDR coordinates are irrelevant.
     pub(crate) source_mastering_minimum: Result<Option<u32>, String>,
+    /// The selected held stream's own static HDR10 declarations, which a
+    /// master-grade HDR10 render carries; `None` when it states none.
+    pub(crate) source_master_metadata:
+        Option<plurx_core::transcode::dv_processing::DvMasterMetadata>,
     /// Lazy, source/probe/absolute-stream-bound metadata. Master and SDR paths
     /// with a title floor never invoke this separate frame projection.
     pub(crate) source_frame_probe: Option<Arc<crate::decode_facts::SourceFrameProbe>>,
@@ -1163,10 +1179,16 @@ impl RuntimeRecipe {
             // Both destinations leave the GPU as 10-bit YCbCr at the output
             // raster: the encoder only uploads it, it never converts colour.
             use plurx_core::transcode::dv_processing::DvExportPolicy;
-            let export_policy = display_target
-                .map_or(DvExportPolicy::PqBilinearYuv420p10V1 { raster }, |target| {
-                    DvExportPolicy::DisplayTargetYuv420p10V1 { raster, target }
-                });
+            let export_policy = display_target.map_or_else(
+                || {
+                    DvExportPolicy::for_master(
+                        raster,
+                        self.source_master_metadata
+                            .filter(|_| self.destination == DvDestination::Hdr10),
+                    )
+                },
+                |target| DvExportPolicy::DisplayTargetYuv420p10V1 { raster, target },
+            );
             let export_raster = export_policy
                 .raster(self.native_bl)
                 .map_err(|e| e.to_string())?;
@@ -1195,6 +1217,7 @@ impl RuntimeRecipe {
                 decode: self.decode,
                 export_raster: Some(export_raster),
                 display_target: export_policy.display_target(),
+                master_metadata: export_policy.master_metadata(),
                 request: crate::dv_segment::SegmentRequest {
                     source_input: Some(source_input),
                     renderer: self.tools.renderer.clone(),
@@ -1451,6 +1474,7 @@ async fn run_private_window(
     request.request.cancel = cancel.clone();
     let deadline = request.renderer_deadline;
     let display_target = request.display_target;
+    let master_metadata = request.master_metadata;
     let mut producer = crate::dv_segment::spawn_streaming(request).await?;
     let source_settlement = producer.take_source_settlement();
     let result = async {
@@ -1481,6 +1505,7 @@ async fn run_private_window(
                 evidence,
                 registration,
                 display_target,
+                master_metadata,
             })),
             WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
         }
