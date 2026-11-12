@@ -633,6 +633,16 @@ never edited. Refused attempts are kept under each root's `logs/`.
 
 ### Validation limits
 
+Review of PR #1518 (2026-11-12), not fixed by code:
+- Encoder overrides (`x265-params +=`) and the qualifier's expected values
+  are passed by the caller, not read from the protocol; each recipe records
+  them, and the qualifier verifies them against the coded stream.
+- The rung's crossover by log-rate interpolation was not computed; the
+  table gives the measured points.
+- Some protocol `author` fields carry a session id; they are hash-bound by
+  the recipes, so they are left as written.
+
+
 Audit notes from the adversarial review (2026-11-11):
 - **Protocol timestamps.** The `written_utc` fields inside the four
   2026-11-11 protocols were typed by hand and run 5–10 minutes later than
