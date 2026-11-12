@@ -861,8 +861,8 @@ internal fun preparedReplacementRequirements(
                 "holds. On the Google TV Streamer that invalidated the " +
                 "incumbent's audio and stalled it before the switch."
         } else {
-            "The successor primes and serves untunneled, so it never takes " +
-                "the incumbent's hardware A/V sync."
+            "By construction: a successor primes and serves untunneled, so " +
+                "it never takes the incumbent's hardware A/V sync."
         },
     ),
     PreparedReplacementRequirement(
