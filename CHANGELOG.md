@@ -10,6 +10,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A Dolby Vision title played over a share with its Dolby Vision layers
+  removed now uses the same copy index as local playback of it. Shared
+  playback ignored whether the server's FFmpeg can strip Dolby Vision, so on
+  a server that can, the two kept separate indexes of one file and neither
+  found the other's. Indexes shared playback built for such titles are
+  rebuilt on their next shared play.
 - Job retention no longer deletes a settled job whose source custody is still
   charged. That job is the custody's only exact source binding, and a dead
   owner's custody could not be released once it was gone. The job is kept

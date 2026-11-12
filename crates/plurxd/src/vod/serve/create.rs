@@ -662,11 +662,6 @@ impl VodServe {
                 "the file has no probed duration, so no immutable plan can be built",
             ));
         };
-        let phase_started = Instant::now();
-        let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
-        tracing::debug!(target: "plurxd::vodserve", file_id = file.id,
-            phase = "pipeline_capability", elapsed_ms = phase_started.elapsed().as_millis(),
-            "rendition preparation phase completed");
         // An encoded rendition never carries the source's parameter sets, so
         // only a copy waits on the census.
         let probe_json = if prepared.encoding.is_none() {
@@ -675,13 +670,17 @@ impl VodServe {
             self.shared.store.get_file_probe_json(file.id).await
         }
         .map_err(|error| format!("reading the file probe: {error}"))?;
-        let video = copy_video_pipeline(
+        let phase_started = Instant::now();
+        let video = node_copy_video_pipeline(
             file,
             probe_json.as_deref(),
-            have_dovi,
             preserve_dolby_vision,
             convert_dolby_vision,
-        );
+        )
+        .await;
+        tracing::debug!(target: "plurxd::vodserve", file_id = file.id,
+            phase = "pipeline_capability", elapsed_ms = phase_started.elapsed().as_millis(),
+            "rendition preparation phase completed");
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
@@ -2655,13 +2654,6 @@ impl VodServe {
                 "the file has no probed duration, so no immutable plan can be built",
             ));
         };
-        // Source SDR preparation already owns its actual engine capture. A
-        // generic capability probe here would create an unowned child.
-        let have_dovi = if source_binding.is_some() {
-            false
-        } else {
-            crate::ffmpeg::has_dovi_rpu().await
-        };
         // An encoded rendition never carries the source's parameter sets, so
         // only a copy waits on the census.
         let probe_json = if prepared.encoding.is_some() && source_binding.is_some() {
@@ -2674,13 +2666,17 @@ impl VodServe {
             self.shared.store.get_file_probe_json(file.id).await
         }
         .map_err(|error| format!("reading the file probe: {error}"))?;
-        let video = copy_video_pipeline(
+        // A Source rendition derives its copy pipeline exactly as a local
+        // one does, so the copy index a Source range or a local playback of
+        // this file published is the one found below. The capability it asks
+        // was measured at boot; no child is started here.
+        let video = node_copy_video_pipeline(
             file,
             probe_json.as_deref(),
-            have_dovi,
             preserve_dolby_vision,
             convert_dolby_vision,
-        );
+        )
+        .await;
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),

@@ -1568,6 +1568,7 @@ use marker_dispatch::*;
 // split: begin vod-generation
 #[path = "vod/generation.rs"]
 mod generation;
+pub(crate) use generation::node_copy_video_pipeline;
 use generation::*;
 #[path = "vod/stream_format.rs"]
 mod stream_format;

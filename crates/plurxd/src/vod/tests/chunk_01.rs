@@ -185,6 +185,81 @@ fn a_converting_session_gets_a_converting_pipeline_and_its_own_identity() {
     assert_eq!(fingerprints.len(), 3, "{fingerprints:?}");
 }
 
+/// One file and recipe have one copy identity on a node, whoever plays it.
+///
+/// Whether the node's FFmpeg can strip Dolby Vision reaches the bitstream
+/// filter of a stripped Dolby Vision copy, and through it the argv
+/// fingerprint and the source key of the title's copy index. Shared (Source)
+/// playback used to answer "no" whatever the node could do while local
+/// playback asked the node, so on a node with the filter one file had two
+/// keys and neither path found the index the other published. Both now
+/// derive through `node_copy_video_pipeline`.
+#[tokio::test]
+async fn a_stripped_dolby_vision_copy_has_one_source_key_whoever_plays_it() {
+    let mut file = fixture_file();
+    file.id = 7;
+    file.hdr = Some("dolby_vision".into());
+    file.dolby_vision.profile = Some(8);
+    file.dolby_vision.level = Some(6);
+    file.dolby_vision.bl_compat_id = Some(1);
+    let source_key = |video: CopyVideoOptions| {
+        let identity = crate::fragindex::identity_for(&file, video).argv_fingerprint;
+        let source = crate::copy_analysis::source_for_copy(
+            "catalogue",
+            &file,
+            &identity,
+            "object-version",
+            "origin-node",
+        )
+        .expect("a copy source");
+        plurx_core::store::copy_index_v3_source_key("catalogue", &source).expect("a source key")
+    };
+
+    // The answer is not cosmetic for a stripped copy: it is two identities.
+    let with_filter = copy_video_pipeline(&file, None, true, false, false);
+    let without_filter = copy_video_pipeline(&file, None, false, false, false);
+    assert_ne!(source_key(with_filter), source_key(without_filter));
+    // A preserved or converted copy runs no strip, so it never had two.
+    for (preserve, convert) in [(true, false), (true, true)] {
+        assert_eq!(
+            source_key(copy_video_pipeline(&file, None, true, preserve, convert)),
+            source_key(copy_video_pipeline(&file, None, false, preserve, convert)),
+        );
+    }
+
+    // The one derivation is the explicit one with this node's measured
+    // answer, for every recipe.
+    let measured = crate::ffmpeg::has_dovi_rpu().await;
+    for (preserve, convert) in [(false, false), (true, false), (true, true)] {
+        let node = node_copy_video_pipeline(&file, None, preserve, convert).await;
+        assert_eq!(
+            node,
+            copy_video_pipeline(&file, None, measured, preserve, convert)
+        );
+        assert_eq!(
+            source_key(node),
+            source_key(copy_video_pipeline(
+                &file, None, measured, preserve, convert
+            )),
+        );
+    }
+
+    // The growing Source range, and a rendition whether local or Source,
+    // ask that derivation and assemble no copy options of their own.
+    for (path, source) in [
+        (
+            "transcode/source_actor/growing.rs",
+            include_str!("../../transcode/source_actor/growing.rs"),
+        ),
+        ("vod/serve/create.rs", include_str!("../serve/create.rs")),
+    ] {
+        assert!(source.contains("node_copy_video_pipeline("), "{path}");
+        assert!(!source.contains("CopyVideoOptions::from_probe("), "{path}");
+        assert!(!source.contains("= copy_video_pipeline("), "{path}");
+        assert!(!source.contains("has_dovi_rpu()"), "{path}");
+    }
+}
+
 /// A shared artifact for the selected converting recipe is sufficient to
 /// open copy VOD even when this node has no legacy file-keyed index.  This
 /// reaches the same hydrate path used for a blob fetched from a peer; the

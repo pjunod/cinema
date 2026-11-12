@@ -1057,6 +1057,32 @@ pub(super) fn copy_video_pipeline(
         .with_dolby_vision_conversion(convert_dolby_vision)
 }
 
+/// The video pipeline of every copy this node cuts of `file` for playback,
+/// local or shared: [`copy_video_pipeline`] with this node's own measured
+/// answer to whether its FFmpeg can strip Dolby Vision.
+///
+/// That answer reaches the bitstream filter of a Dolby Vision copy served
+/// stripped, and through it the argv fingerprint, the fragment-index identity
+/// and the source key of the title's copy index. A local rendition, a Source
+/// rendition and the growing Source range all ask here, so one file and
+/// recipe have one identity on a node, and an index one of them published is
+/// the index the others find. The capability is measured once, at boot, so
+/// asking it starts no child on a start.
+pub(crate) async fn node_copy_video_pipeline(
+    file: &MediaFile,
+    probe_json: Option<&str>,
+    preserve_dolby_vision: bool,
+    convert_dolby_vision: bool,
+) -> CopyVideoOptions {
+    copy_video_pipeline(
+        file,
+        probe_json,
+        crate::ffmpeg::has_dovi_rpu().await,
+        preserve_dolby_vision,
+        convert_dolby_vision,
+    )
+}
+
 /// How to ask where a repositioned copy generation's demuxer landed.
 ///
 /// The producer's own output cannot say: `-avoid_negative_ts make_zero`

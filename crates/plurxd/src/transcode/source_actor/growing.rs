@@ -384,7 +384,6 @@ impl TranscodeManager {
             run_source_census, spawn_source_generation, CopyGenerationOwner, CopyRangeFiles,
             CopyRangeOwner, ObservedCopyMux,
         };
-        use plurx_core::transcode::CopyVideoOptions;
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
@@ -416,13 +415,15 @@ impl TranscodeManager {
         {
             tracks.set_presentation_probe(probe.as_deref());
         }
-        let video = CopyVideoOptions::from_probe(
+        // The one derivation local playback and a Source rendition use, so
+        // this range's rows are keyed as theirs are.
+        let video = crate::vodserve::node_copy_video_pipeline(
             prepared.file(),
             probe.as_deref(),
-            false,
             preserve_dolby_vision,
+            convert_dolby_vision,
         )
-        .with_dolby_vision_conversion(convert_dolby_vision);
+        .await;
         let permit = self.admit_source_copy(deadline).await?;
         let owners = Arc::new(SourceRenditionOwners::default());
         let source_owner = owners
