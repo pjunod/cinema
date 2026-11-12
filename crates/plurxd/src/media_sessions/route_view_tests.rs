@@ -344,7 +344,7 @@ async fn a_replica_behind_a_local_release_never_revives_the_pre_release_row() {
 
     // W: the release, committed through this node, published as it returns.
     let released = store
-        .end_media_session(&session, "client", unix_ms())
+        .end_media_session(&session, "deleted", unix_ms())
         .await
         .expect("end")
         .expect("ended row");

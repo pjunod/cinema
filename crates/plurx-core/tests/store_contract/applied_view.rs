@@ -1047,7 +1047,7 @@ async fn applied_route_view_moves_with_a_release_applied_here() {
     assert!(view.same_image(&stamp));
 
     node.store
-        .end_media_session(SESSION, "client", 2_000)
+        .end_media_session(SESSION, "deleted", 2_000)
         .await
         .expect("release")
         .expect("the release ends the row");
@@ -1073,7 +1073,7 @@ async fn applied_route_view_moves_with_a_release_applied_here() {
 
     let stamp = read.stamp.expect("stamped");
     node.store
-        .end_media_session(OTHER, "client", 2_000)
+        .end_media_session(OTHER, "deleted", 2_000)
         .await
         .expect("release the other session")
         .expect("ended");
@@ -1198,7 +1198,7 @@ impl From<&mut hiqlite::Row<'_>> for RouteState {
 async fn applied_route_view_never_meets_the_floor_of_a_release_its_replica_holds_back() {
     const SESSION: &str = "00000000-0000-4000-8000-0000000e1c41";
     const RELEASE: &str = "UPDATE media_sessions SET state = 'ended', \
-                           terminal_reason = 'client' \
+                           terminal_reason = 'deleted' \
                            WHERE session_id = '00000000-0000-4000-8000-0000000e1c41'";
     let _case = HIQLITE_CASE.lock().await;
     let node = LaggingLearner::start().await;
