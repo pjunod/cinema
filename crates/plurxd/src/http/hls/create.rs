@@ -2116,8 +2116,8 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     .is_some_and(|value| value.trim() == "1")
             } else {
                 state
-                    .store
-                    .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+                    .applied
+                    .setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
                     .await?
                     .is_some_and(|value| value.trim() == "1")
             };
@@ -3470,12 +3470,15 @@ async fn create_with_purpose_inner(
             &user.password_hash,
         ));
     }
-    let network_prior =
-        super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
-            .await
-            .map_err(|error| {
-                ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
-            })?;
+    let network_prior = super::super::network::stored_prior(
+        state.store.as_ref(),
+        &state.applied,
+        identity.as_ref(),
+    )
+    .await
+    .map_err(|error| {
+        ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
+    })?;
     crate::media_pool::mark_create_phase("settings");
     let resolved = resolve_plan_with_continuous(
         PlanInputs {

@@ -211,8 +211,8 @@ pub(crate) fn advisory_deadline() -> tokio::time::Instant {
 /// either way (D6).
 pub(crate) async fn network_priors_enabled(state: &AppState) -> bool {
     state
-        .store
-        .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+        .applied
+        .setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
         .await
         .ok()
         .flatten()
@@ -1266,8 +1266,8 @@ pub(crate) async fn processed_candidate_admissible(
     };
     let read = async {
         let enabled = state
-            .store
-            .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+            .applied
+            .setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
             .await
             .map_err(|_| ())?
             .is_some_and(|value| value.trim() == "1");

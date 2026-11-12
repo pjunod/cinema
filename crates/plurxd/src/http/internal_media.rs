@@ -223,7 +223,7 @@ async fn serve_subtitle_source(
     format: crate::subtitle_source::RepresentationFormat,
     peer_id: String,
 ) -> Result<Response, StatusCode> {
-    if !subtitle_cluster_source_enabled(state.store.as_ref()).await {
+    if !subtitle_cluster_source_enabled(&state.applied).await {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let read_permit = std::sync::Arc::clone(&SUBTITLE_SOURCE_READS)
@@ -273,9 +273,9 @@ async fn serve_subtitle_source(
     Ok(response)
 }
 
-async fn subtitle_cluster_source_enabled(store: &dyn plurx_core::store::Store) -> bool {
-    store
-        .get_setting(plurx_core::store::keys::SUBTITLE_CLUSTER_SOURCES)
+async fn subtitle_cluster_source_enabled(applied: &plurx_core::store::AppliedView) -> bool {
+    applied
+        .setting(plurx_core::store::keys::SUBTITLE_CLUSTER_SOURCES)
         .await
         .ok()
         .is_some_and(|value| plurx_core::store::stored_switch(value.as_deref(), false))
