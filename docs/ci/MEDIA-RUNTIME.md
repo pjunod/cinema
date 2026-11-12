@@ -5,10 +5,8 @@ reach main) and [RUNNER-DISK.md](RUNNER-DISK.md) (builder storage limits).
 
 **Status:** built; the runtime pin is the `runtime-assets` base in
 `Dockerfile`. The DV helper bundle moved back to the application build on
-2026-11-11; its dependency image **is not published yet**, so the
-`dv-processing-dependencies` pin is the all-zero placeholder and
-`tests/operations/test_dv_helper_ownership.py` fails on it by design until the
-[publication below](#publish-a-dependency-update-explicitly) is pinned.
+2026-11-11; its dependency image is the `dv-processing-dependencies` pin
+beside it, published and pinned on 2026-11-12.
 
 ## Application builds consume the committed digest
 
@@ -167,19 +165,28 @@ contracts passed; paperwork passed all 15 checks. This evidence covers base
 publication and consumption, without asserting a full daemon rebuild, hardware
 playback qualification or audited amd64 release readiness.
 
-## Helper bundle returned to the application build — 2026-11-11
+## Helper bundle returned to the application build — 2026-11-12
 
-The pinned runtime `sha256:17b3bf9f…` carries a bundle whose
-`source_sha256` is `cfb13f96…`; the tree at `c0a234817` hashes to `0ae1fc25…`.
-On a lab host, with a capped builder, the `dv-processing-dependencies` target
-built for amd64 (910 MB compressed) and the application `runtime` target built
-against it and the pinned public runtime, with placeholder daemon binaries. The
-helper stage compiled and verified the bundle in three seconds; all four
-helpers loaded and reported usage; the image's `build-identity.json` named
-`0ae1fc25…`, equal to the daemon's identity computed from the same tree (in
-Python, by the daemon's algorithm), and each installed tool hashed to its
-manifest entry. With one byte appended to the decoder patch the helper stage
-refused the dependency image and printed the differing input.
+The runtime pinned on 2026-11-09 carried a bundle whose `source_sha256` was
+`cfb13f96…` while main's daemon expected `0ae1fc25…`. The dependency image is
+pinned to index digest
+`sha256:9130f0ce818833dea3361c93b50eaa4d25ceef3f0275593a2ab57877a389a050`,
+published natively for amd64 and arm64 by the maintenance workflow, which also
+built the application recipe against both candidates on each platform.
+`pin-dv-dependencies` read the input record out of both platform images and
+found this tree's identity in each.
 
-Not yet done: publication of the dependency image, an arm64 build, a run of the
-changed maintenance workflow, and a daemon started against the new bundle.
+On a lab host, with a capped builder, the helper stage built against that
+published image: its inputs matched the tree, the bundle compiled against
+libplacebo 7.387 and the six active-area C controls passed. The `runtime`
+target, given a daemon built from the same tree, installed the bundle, loaded
+all four helpers and had `plurxd dv-helper-identity` accept it as the service
+account. With one line appended to `dv_dm.h` after the daemon was built, the
+image build stopped at that step with "unsupported DV build identity"; with
+one byte appended to the decoder patch, the helper stage refused the
+dependency image and printed the differing input. The bundle's `scan_title`
+hashes the same as the one in the pinned runtime, so the title-scanner key
+does not move.
+
+Not yet done: the daemon check on an arm64 image (the workflow's qualification
+uses placeholder daemon binaries), and playback served against the new bundle.

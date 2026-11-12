@@ -55,7 +55,7 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
 # FFmpeg, libplacebo and libdovi built from pinned sources, with the compiler
 # and headers the helpers need. `scripts/media-runtime pin-dv-dependencies`
 # writes this digest and the dependency input identity below together.
-FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:0000000000000000000000000000000000000000000000000000000000000000 AS dv-processing-dependencies
+FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:9130f0ce818833dea3361c93b50eaa4d25ceef3f0275593a2ab57877a389a050 AS dv-processing-dependencies
 
 # These stages sit before runtime-assets so release packaging keeps them
 # (validation/release_dockerfile.py); they see no daemon source.
