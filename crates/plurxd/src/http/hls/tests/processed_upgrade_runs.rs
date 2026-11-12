@@ -54,7 +54,8 @@ async fn upgrade_after_playing_to(
 /// The trial verifies its window at the viewer, never at the create's start
 /// (the old code handed it the create's request unchanged, so a successor
 /// began fifteen to thirty seconds behind a viewer of a fresh start and the
-/// client's alignment refused it), and the staging position is the viewer's.
+/// client's alignment refused it), and the successor is staged at that
+/// window, never behind the viewer.
 #[tokio::test]
 async fn the_upgrade_positions_its_trial_and_stage_at_the_viewer_not_the_start() {
     let dir = crate::test_tempdir().expect("state dir");
@@ -83,10 +84,13 @@ async fn the_upgrade_positions_its_trial_and_stage_at_the_viewer_not_the_start()
         "the trial's window starts at the viewer (600 s) plus at most its budget, not at \
          the create's start: {asked} s"
     );
-    let staged_at = super::processed_upgrade::viewer_film_time_ms(&fixture.state, &intent, &run).await;
+    let viewer = super::processed_upgrade::viewer_film_time_ms(&fixture.state, &intent, &run).await;
+    let staged_at =
+        super::processed_upgrade::successor_start_ms(viewer, (asked * 1_000.0).round() as i64);
     assert!(
-        (600_000..630_000).contains(&staged_at),
-        "the successor is staged where the viewer is: {staged_at} ms"
+        (600_000..640_000).contains(&staged_at) && staged_at >= viewer,
+        "the successor is staged at the verified window, never behind the viewer \
+         and never back at the create's start: {staged_at} ms (viewer {viewer} ms)"
     );
 }
 

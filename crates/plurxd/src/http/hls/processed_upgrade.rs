@@ -501,10 +501,21 @@ fn projected_processed_candidate(
         .map(|entry| entry.candidate.clone())
 }
 
-/// Where a processed upgrade's successor begins: the trial's verified
-/// window, or the viewer when the viewer has already passed it.
-fn successor_start_ms(viewer_ms: i64, verified_ms: i64) -> i64 {
-    viewer_ms.max(verified_ms)
+/// How far ahead of the viewer a processed upgrade's successor may begin.
+/// The incumbent keeps playing until it reaches the successor's start, and
+/// both pipelines run meanwhile: the Apple client plans its rendezvous within
+/// its overlap's commit lead (`PreparedCommitRendezvous.planLoaded`, at most
+/// 8 s and less as priming spends the overlap), and Android within its 12 s
+/// overlap bound. Four seconds at staging leaves both room after priming.
+const SUCCESSOR_MAX_HEAD_START_MS: i64 = 4_000;
+
+/// Where a processed upgrade's successor begins: the trial's verified window,
+/// already produced, but never more than [`SUCCESSOR_MAX_HEAD_START_MS`]
+/// ahead of the viewer, and never behind the viewer.
+pub(in crate::http) fn successor_start_ms(viewer_ms: i64, verified_ms: i64) -> i64 {
+    verified_ms
+        .min(viewer_ms.saturating_add(SUCCESSOR_MAX_HEAD_START_MS))
+        .max(viewer_ms)
 }
 
 /// [`run_upgrade`] with its trial supplied: production passes
@@ -703,7 +714,8 @@ where
         }
     }
     // Where the successor begins: at the window the trial verified, which
-    // is already produced, unless the viewer has passed it. A successor
+    // is already produced, within the head start the clients' rendezvous
+    // can absorb, and never behind the viewer. A successor
     // begun where the viewer is now leaves its producer to render, from the
     // viewer's position, everything before that window, while the viewer
     // and the client's rendezvous lead and runway move away from it; unless
