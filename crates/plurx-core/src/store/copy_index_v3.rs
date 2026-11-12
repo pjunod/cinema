@@ -48,10 +48,37 @@ pub fn copy_index_v3_source_key(
 }
 
 /// The quarantine code of a healthy head whose bytes no node holds any more.
-/// It says the bytes were lost, never that they were wrong, so it is the one
-/// ledger entry that does not ban its blob: the rebuild of an unchanged source
-/// seals the same bytes again and must be able to publish them.
+/// It says the bytes were lost, never that they were wrong: the rebuild of an
+/// unchanged source seals the same bytes again and must be able to publish
+/// them.
 pub const COPY_INDEX_V3_NO_HOLDER_CODE: &str = "copy_index_no_holder";
+
+/// The quarantine code of a healthy head that fresh observations of its
+/// source contradicted. The rebuild seals from a set that still holds those
+/// rows, so it cannot produce the quarantined bytes while they stand; when a
+/// later rebuild does seal identical bytes, the contradicting observation
+/// was the faulty side and the index was good all along.
+pub const COPY_INDEX_V3_CONTRADICTION_CODE: &str = "copy_observation_contradiction";
+
+/// The quarantine code of a healthy head whose sealed init its own producer
+/// engine did not reproduce. One generation's init is one observation, like
+/// a contradicting row: an identical reseal says the index was right.
+pub const COPY_INDEX_V3_SEALED_INIT_CODE: &str = "copy_index_sealed_init_mismatch";
+
+/// The codes that record a doubt about a head without proving its bytes
+/// wrong. A blob quarantined under one of them may be published again; any
+/// other code bans the blob it quarantined for this source.
+const NON_BANNING_CODES: [&str; 3] = [
+    COPY_INDEX_V3_NO_HOLDER_CODE,
+    COPY_INDEX_V3_CONTRADICTION_CODE,
+    COPY_INDEX_V3_SEALED_INIT_CODE,
+];
+
+/// Holders a consumer may count or ask: not a node the replicated removal
+/// fence has ejected from the cluster. `alias` is the location's table alias.
+fn holder_is_member(alias: &str) -> String {
+    format!("NOT EXISTS(SELECT 1 FROM settings WHERE key='internal.cluster_job_owner_removed.'||{alias}.node_id)")
+}
 
 /// All viewers observing the same bad head converge on one repair generation.
 pub fn copy_index_v3_rebuild_generation(
@@ -793,6 +820,11 @@ pub(super) async fn publish<T: super::background_jobs::QueueSql>(
 }
 
 fn publication_sql() -> String {
+    let non_banning = NON_BANNING_CODES
+        .iter()
+        .map(|code| format!("'{code}'"))
+        .collect::<Vec<_>>()
+        .join(",");
     let metadata = super::analysis_coordination::metadata_owned_condition();
     let source_head = head_source_condition();
     format!(
@@ -825,7 +857,7 @@ WITH input AS (SELECT json($1) AS body), snapshot AS (
       AND head.published_generation=json_extract(body,'$.source.requested_generation'))
    OR (head.state IN ('pending','quarantined') AND head.head_epoch<9223372036854775807
     AND NOT EXISTS(SELECT 1 FROM copy_index_v3_quarantines bad WHERE bad.source_key=head.source_key
-     AND bad.bad_blob_sha256=json_extract(body,'$.artifact.blob_sha256') AND bad.code<>'{COPY_INDEX_V3_NO_HOLDER_CODE}'))) THEN 1 ELSE 0 END AS head_matches,
+     AND bad.bad_blob_sha256=json_extract(body,'$.artifact.blob_sha256') AND bad.code NOT IN ({non_banning})))) THEN 1 ELSE 0 END AS head_matches,
  CASE WHEN EXISTS(SELECT 1 FROM copy_index_source_attestations receipt
    WHERE receipt.origin_node_id=json_extract(body,'$.source.origin_node_id') AND receipt.file_id=json_extract(body,'$.source.file_id')
     AND receipt.object_version=json_extract(body,'$.source.object_version') AND receipt.source_size=json_extract(body,'$.source.source_size')
@@ -988,13 +1020,14 @@ pub(super) async fn healthy_heads_for_file<T: super::background_jobs::QueueSql>(
 
 /// Advisory holder list for one variant. A listed node is asked for the exact
 /// bytes and its answer is verified by digest; the row itself proves nothing.
+/// A node the cluster has removed is not a holder: its row is not listed.
 pub(super) async fn list_locations<T: super::background_jobs::QueueSql>(
     store: &T,
     contract_key: &str,
     blob_sha256: &str,
 ) -> Result<Vec<CopyIndexV3Location>, StoreError> {
     let body = super::background_jobs::encode(&variant_body(contract_key, blob_sha256)?)?;
-    let rows = store.queue_sql(format!("SELECT json_object('contract_key',location.contract_key,'blob_sha256',location.blob_sha256,'node_id',location.node_id,'bytes',location.bytes,'verified_at_ms',location.verified_at_ms,'last_seen_at_ms',location.last_seen_at_ms) AS result_json FROM copy_index_v3_locations location WHERE location.contract_key=json_extract($1,'$.contract_key') AND location.blob_sha256=json_extract($1,'$.blob_sha256') ORDER BY location.last_seen_at_ms DESC,location.node_id LIMIT {MAX_VARIANT_LOCATIONS}"), body, false, false).await?;
+    let rows = store.queue_sql(format!("SELECT json_object('contract_key',location.contract_key,'blob_sha256',location.blob_sha256,'node_id',location.node_id,'bytes',location.bytes,'verified_at_ms',location.verified_at_ms,'last_seen_at_ms',location.last_seen_at_ms) AS result_json FROM copy_index_v3_locations location WHERE location.contract_key=json_extract($1,'$.contract_key') AND location.blob_sha256=json_extract($1,'$.blob_sha256') AND {} ORDER BY location.last_seen_at_ms DESC,location.node_id LIMIT {MAX_VARIANT_LOCATIONS}", holder_is_member("location")), body, false, false).await?;
     rows.iter()
         .map(|row| {
             let location: CopyIndexV3Location = super::background_jobs::decode(row)?;
@@ -1058,4 +1091,23 @@ pub(super) async fn forget_blob_holder<T: super::background_jobs::QueueSql>(
     )?;
     let rows = store.queue_sql("DELETE FROM copy_index_v3_locations WHERE blob_sha256=json_extract($1,'$.blob_sha256') AND node_id=json_extract($1,'$.node_id') RETURNING 'true' AS result_json".into(), body, true, true).await?;
     Ok(rows.len() as u64)
+}
+
+/// Whether `node_id` is the last listed holder of a readable head's variant
+/// with these bytes: it is listed for one, and no other member is. Evicting
+/// that node's copy would leave a healthy head nobody can serve. Reads the
+/// heads by blob, which no index covers; only cache eviction asks.
+pub(super) async fn last_blob_holder<T: super::background_jobs::QueueSql>(
+    store: &T,
+    blob_sha256: &str,
+    node_id: &str,
+) -> Result<bool, StoreError> {
+    if !digest(blob_sha256) || !identifier(node_id) {
+        return Err(invalid());
+    }
+    let body = super::background_jobs::encode(
+        &serde_json::json!({"blob_sha256":blob_sha256,"node_id":node_id}),
+    )?;
+    let rows = store.queue_sql(format!("SELECT 'true' AS result_json FROM copy_index_v3_heads head WHERE head.blob_sha256=json_extract($1,'$.blob_sha256') AND {HEAD_READABLE} AND EXISTS(SELECT 1 FROM copy_index_v3_locations own WHERE own.contract_key=head.contract_key AND own.blob_sha256=head.blob_sha256 AND own.node_id=json_extract($1,'$.node_id')) AND NOT EXISTS(SELECT 1 FROM copy_index_v3_locations other WHERE other.contract_key=head.contract_key AND other.blob_sha256=head.blob_sha256 AND other.node_id<>json_extract($1,'$.node_id') AND {}) LIMIT 1", holder_is_member("other")), body, false, true).await?;
+    Ok(!rows.is_empty())
 }

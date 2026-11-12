@@ -2337,6 +2337,20 @@ pub trait BackgroundJobStore: Send + Sync {
         created_before_ms: i64,
         now_ms: i64,
     ) -> Result<u64, StoreError>;
+    /// Whether `node_id` is the last listed holder of a readable head's
+    /// variant with these bytes.
+    async fn copy_index_v3_last_blob_holder(
+        &self,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<bool, StoreError>;
+    /// End a coordination claim borrowed only for a metadata write, as a
+    /// stranded coordinator: cancelled, uncharged, its generation left free.
+    async fn retire_analysis_coordination_claim(
+        &self,
+        claim: &super::analysis_coordination::AnalysisCoordinationClaim,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     async fn ensure_copy_index_v3_head(
         &self,
         catalog_namespace: &str,
@@ -3161,6 +3175,20 @@ impl<T: QueueSql> BackgroundJobStore for T {
     ) -> Result<u64, StoreError> {
         super::analysis_coordination::retire_stranded(self, node_id, created_before_ms, now_ms)
             .await
+    }
+    async fn copy_index_v3_last_blob_holder(
+        &self,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<bool, StoreError> {
+        super::copy_index_v3::last_blob_holder(self, blob_sha256, node_id).await
+    }
+    async fn retire_analysis_coordination_claim(
+        &self,
+        claim: &super::analysis_coordination::AnalysisCoordinationClaim,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::analysis_coordination::retire_claim(self, claim, now_ms).await
     }
     async fn ensure_copy_index_v3_head(
         &self,
