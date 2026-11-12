@@ -581,10 +581,11 @@ where
     // Admission before the GPU (review 3 S6): when this node has already
     // described the processed recipe for this query, the evidence kept under
     // its digest and bitrate decides now, and a refused recipe costs no
-    // trial. Without a description there is no evidence about the recipe yet
-    // (recovery and link memory are kept under its digest, which only exists
-    // once it has been rendered), and the check after the trial is the
-    // admission.
+    // trial. A read that misses its deadline is not a refusal: the trial runs
+    // unproven and the check after it is the admission. Without a description
+    // there is no evidence about the recipe yet (recovery and link memory are
+    // kept under its digest, which only exists once it has been rendered), and
+    // the check after the trial is the admission.
     let projected = projected_processed_candidate(state, intent, &source);
     let mut proven_before = true;
     if let Some(projected) = projected.as_ref() {
@@ -678,13 +679,7 @@ where
     } = trial;
     // The recipe the trial actually froze is admitted unless it is exactly
     // the one admitted before the trial: same digest, same bitrate.
-    let admitted_before = proven_before
-        && projected.as_ref().is_some_and(|projected| {
-            projected.recipe_digest == candidate.recipe_digest
-                && projected.average_bps == candidate.average_bps
-                && projected.peak_bps == candidate.peak_bps
-        });
-    if !admitted_before {
+    if post_trial_admission_needed(proven_before, projected.as_ref(), &candidate) {
         if let Err(reason) = admit_processed_candidate(
             state,
             intent,
@@ -815,6 +810,42 @@ pub(in crate::http) fn link_admission(
     }
 }
 
+/// How one recovery-memory read bears on a processed recipe at one stage.
+pub(in crate::http) fn recovery_admission(
+    evidence: super::candidate_recovery::ProcessedRecoveryEvidence,
+    stage: AdmissionStage,
+) -> Result<Admission, String> {
+    use super::candidate_recovery::ProcessedRecoveryEvidence as Evidence;
+    match (evidence, stage) {
+        (Evidence::Admissible, _) => Ok(Admission::Proven),
+        (Evidence::Rejected, _) => {
+            Err("this playback's recovery evidence rejects the processed recipe".into())
+        }
+        (Evidence::Unavailable, AdmissionStage::BeforeTrial) => Ok(Admission::Unproven),
+        (Evidence::Unavailable, AdmissionStage::AfterTrial) => Err(
+            "this playback's recovery evidence for the processed recipe could not be read before its deadline"
+                .into(),
+        ),
+    }
+}
+
+/// Whether the recipe a trial froze still needs the admission after the
+/// trial. Only a recipe exactly the one admitted on evidence before the trial
+/// (same digest, same bitrate) is spared it; an unproven pre-trial admission
+/// never is.
+pub(in crate::http) fn post_trial_admission_needed(
+    proven_before: bool,
+    projected: Option<&plurx_core::playback::candidate::QualityCandidate>,
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+) -> bool {
+    !(proven_before
+        && projected.is_some_and(|projected| {
+            projected.recipe_digest == candidate.recipe_digest
+                && projected.average_bps == candidate.average_bps
+                && projected.peak_bps == candidate.peak_bps
+        }))
+}
+
 /// The admission the in-create qualification applied to a processed
 /// candidate, against the session it now upgrades: this playback's recovery
 /// evidence, and for Auto the link evidence for its bitrate.
@@ -837,8 +868,10 @@ async fn admit_processed_candidate(
     // Recovery memory is keyed by the viewer's network identity. Without one
     // there is no memory to consult, and the in-create qualification of a
     // fresh start did not consult one either.
-    let recovered = network.is_none()
-        || super::candidate_recovery::processed_candidate_admissible(
+    let recovery = if network.is_none() {
+        super::candidate_recovery::ProcessedRecoveryEvidence::Admissible
+    } else {
+        super::candidate_recovery::processed_candidate_recovery_evidence(
             state,
             network,
             source,
@@ -847,18 +880,20 @@ async fn admit_processed_candidate(
             Some(route),
             advisory,
         )
-        .await;
-    if !recovered {
-        return Err("this playback's recovery evidence rejects the processed recipe".into());
-    }
+        .await
+    };
+    let recovered = recovery_admission(recovery, stage)?;
     if !intent.auto_policy {
-        return Ok(Admission::Proven);
+        return Ok(recovered);
     }
     let evidence = super::link_receipts::processed_candidate_link_evidence(
         state, network, source, candidate, advisory,
     )
     .await;
-    let admission = link_admission(evidence, stage)?;
+    let admission = match (recovered, link_admission(evidence, stage)?) {
+        (Admission::Proven, Admission::Proven) => Admission::Proven,
+        _ => Admission::Unproven,
+    };
     let mut admitted = vec![candidate.clone()];
     admitted = super::link_receipts::link_starved_catalog(
         intent.network_prior.as_ref(),

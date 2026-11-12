@@ -1264,7 +1264,9 @@ pub(crate) enum ProcessedLinkEvidence {
     Unavailable,
 }
 
-/// The tri-state read behind [`processed_candidate_admissible`].
+/// One processed recipe's link memory on this network. Callers decide what an
+/// `Unavailable` read means at their stage; after a qualification it must never
+/// become a grant (the reserved post-qualification read is the last word).
 pub(crate) async fn processed_candidate_link_evidence(
     state: &AppState,
     network: Option<&NetworkIdentity>,
@@ -1300,20 +1302,6 @@ pub(crate) async fn processed_candidate_link_evidence(
         Ok(Ok(false)) => ProcessedLinkEvidence::Negative,
         Ok(Err(())) | Err(_) => ProcessedLinkEvidence::Unavailable,
     }
-}
-
-/// A new processed recipe cannot turn a timed-out negative read into a grant.
-/// This is the caller's reserved post-qualification stage, not a renewed
-/// ordinary advisory allowance.
-pub(crate) async fn processed_candidate_admissible(
-    state: &AppState,
-    network: Option<&NetworkIdentity>,
-    file: &MediaFile,
-    candidate: &plurx_core::playback::candidate::QualityCandidate,
-    deadline: tokio::time::Instant,
-) -> bool {
-    processed_candidate_link_evidence(state, network, file, candidate, deadline).await
-        == ProcessedLinkEvidence::Admissible
 }
 
 /// Public advisory projection from the exact existing local resolver. Remote
@@ -3721,7 +3709,7 @@ mod tests {
         // reserved post-qualification read must still reject this exact
         // recipe, and an exhausted reserved allowance must never grant it.
         assert!(
-            !processed_candidate_admissible(
+            processed_candidate_link_evidence(
                 &state,
                 Some(&network),
                 &file,
@@ -3729,9 +3717,10 @@ mod tests {
                 tokio::time::Instant::now() + Duration::from_millis(500),
             )
             .await
+                != ProcessedLinkEvidence::Admissible
         );
         assert!(
-            !processed_candidate_admissible(
+            processed_candidate_link_evidence(
                 &state,
                 Some(&network),
                 &file,
@@ -3739,6 +3728,7 @@ mod tests {
                 tokio::time::Instant::now() - Duration::from_secs(2),
             )
             .await
+                != ProcessedLinkEvidence::Admissible
         );
 
         // The tri-state read names why: an active exact negative is a
