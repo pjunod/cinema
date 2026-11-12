@@ -26,6 +26,11 @@ ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}
 # has no `.git` to read the commit time from.
 ARG SOURCE_DATE_EPOCH
 ARG TARGETARCH
+# Compile parallelism. Unset, cargo uses every CPU the build can see, which is
+# what `make docker-up` on a node wants. A host that has to bound the compile
+# passes `--build-arg CARGO_BUILD_JOBS=N` (ARG values reach RUN as environment).
+# CI does not build this stage; its compiles are bounded in the workflows.
+ARG CARGO_BUILD_JOBS
 WORKDIR /src
 COPY . .
 # The target dirs below are cache mounts that outlive any one checkout, and
@@ -41,10 +46,10 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
     find crates vendor -type f -exec touch {} + \
     && ! cargo tree --locked -p plurxd -e features \
         | grep -q 'cluster-read-cost-validation' \
-    && CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/src/target-plurxd cargo build --locked --release -p plurxd \
+    && CARGO_TARGET_DIR=/src/target-plurxd cargo build --locked --release -p plurxd \
     && cp target-plurxd/release/plurxd /plurxd \
     && cp target-plurxd/release/plurxd.dwp /plurxd.dwp \
-    && CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/src/target-cluster-check cargo build --locked --release -p plurx-cluster-check \
+    && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --locked --release -p plurx-cluster-check \
     && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check \
     && cp target-cluster-check/release/plurx-cluster-check.dwp /plurx-cluster-check.dwp
 
