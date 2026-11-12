@@ -1,5 +1,7 @@
 //! Metadata contributions from an already committed copy range. No input here
 //! grants physical source I/O, a complete-source proof, or media publication.
+//! Rows the playback ranges left unobserved are produced by an Analysis-owned
+//! generation of the same copy engine, inside its own exact physical phase.
 
 mod physical;
 mod work;
@@ -14,7 +16,9 @@ use plurx_core::{
         IndexRow,
     },
     sharing_source_sessions::SourceDispatchAssignment,
-    store::analysis_coordination::{AnalysisCoordinationSource, AnalysisSourceInterestAuthority},
+    store::analysis_coordination::{
+        AnalysisCoordinationSource, AnalysisPhysicalPhase, AnalysisSourceInterestAuthority,
+    },
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -27,6 +31,22 @@ pub(crate) struct CopyRowInspection {
     pub(crate) packets: u64,
     pub(crate) slices: u64,
     pub(crate) configuration_sha256: String,
+    /// This row's own HDR10 SEI facts, from every sample of its canonical
+    /// fragment (hex mastering-display payload, content-light maxima).
+    pub(crate) hdr10_mastering: Option<String>,
+    pub(crate) hdr10_light: Option<[u16; 2]>,
+}
+impl CopyRowInspection {
+    fn hdr10(&self) -> Result<plurx_core::fmp4::Hdr10IndexMetadata, CopyObservationError> {
+        let mastering = self
+            .hdr10_mastering
+            .as_deref()
+            .map(hex::decode)
+            .transpose()
+            .map_err(|_| CopyObservationError::Inspection)?;
+        plurx_core::fmp4::Hdr10IndexMetadata::from_parts(mastering, self.hdr10_light)
+            .map_err(|_| CopyObservationError::Inspection)
+    }
 }
 
 /// Rows, references and checkpoint are committed together by the range owner.
@@ -43,6 +63,83 @@ pub(crate) struct CopyRangeCheckpoint {
     pub(crate) inspection: Option<RangeInspection>,
     pub(crate) row_inspections: Arc<[CopyRowInspection]>,
     pub(crate) promotion: PromotionInputs,
+}
+
+/// The one copy recipe of a range: its canonical video options and the audio
+/// half of the AV companion the kernel verified those rows against. Playback
+/// and an Analysis gap fill both build their child's arguments from it.
+#[derive(Clone)]
+pub(crate) struct CopyRecipe {
+    pub(crate) video: plurx_core::transcode::CopyVideoOptions,
+    pub(crate) audio_index: Option<i64>,
+    pub(crate) transcode_audio: bool,
+    pub(crate) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+}
+impl CopyRecipe {
+    /// Triple-output arguments: AV on stdout, canonical MP4 on descriptor 6
+    /// and the packet clock on descriptor 7.
+    pub(crate) fn args(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        start_seconds: f64,
+    ) -> Result<Vec<String>, &'static str> {
+        plurx_core::transcode::copy_pipe_args_with_index_and_packet_clock(
+            file,
+            start_seconds,
+            self.audio_index,
+            self.transcode_audio,
+            plurx_core::transcode::Pacing::unpaced(),
+            self.video,
+            self.audio_delivery.as_ref(),
+            "pipe:6",
+            "pipe:7",
+        )
+    }
+    /// The planner reserves conservative audio headroom; actual AV bytes and
+    /// repaired presentation span are still checked by the kernel.
+    pub(crate) fn tracks(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+    ) -> plurx_core::segplan::TrackDurations {
+        let audio_bits_per_second = self
+            .audio_delivery
+            .as_ref()
+            .and_then(|audio| audio.bitrate_kbps())
+            .map(|rate| rate.saturating_mul(1000))
+            .unwrap_or(if self.transcode_audio { 256000 } else { 640000 });
+        plurx_core::segplan::TrackDurations {
+            video_ms: file.duration_ms.unwrap_or(0),
+            audio_ms: file.duration_ms.unwrap_or(0),
+            audio_bits_per_second,
+        }
+    }
+}
+
+/// Rows one Analysis-owned generation observed. They were never served, so
+/// they carry no manifest, range identity or rendered milestone; the exact
+/// physical phase that read them is their authority.
+pub(crate) struct AnalysisCopyRows {
+    pub(crate) init: Arc<Init>,
+    pub(crate) source_origin: SourceTimestamp,
+    pub(crate) canonical_title_start: u64,
+    pub(crate) rows: Vec<IndexRow>,
+    pub(crate) boundaries: RangeBoundaries,
+    pub(crate) inspection: Option<RangeInspection>,
+    pub(crate) row_inspections: Vec<CopyRowInspection>,
+    pub(crate) promotion: PromotionInputs,
+}
+
+/// One batch of observed rows, whichever owner produced it.
+struct ObservedRows<'a> {
+    init: &'a Init,
+    timescale: u32,
+    source_origin: SourceTimestamp,
+    canonical_title_start: u64,
+    rows: &'a [IndexRow],
+    boundaries: RangeBoundaries,
+    inspection: Option<&'a RangeInspection>,
+    row_inspections: &'a [CopyRowInspection],
+    promotion: &'a PromotionInputs,
 }
 
 /// The authority an observation arrived under. Only Shared Source ranges
@@ -64,6 +161,7 @@ pub(crate) struct CompletedCopyRange {
     pub(crate) range_epoch: u64,
     pub(crate) init: Arc<Init>,
     pub(crate) checkpoint: Arc<CopyRangeCheckpoint>,
+    pub(crate) recipe: CopyRecipe,
 }
 
 pub(crate) type CopyAnalysisInbox = tokio::sync::mpsc::Sender<CompletedCopyRange>;
@@ -183,6 +281,19 @@ impl CopyObservationSet {
     pub(crate) fn is_complete(&self) -> bool {
         self.rows.is_complete()
     }
+    /// The earliest span no generation has observed yet.
+    pub(crate) fn first_gap(&self) -> Option<plurx_core::segplan::ranges::RangeGap> {
+        self.rows.first_gap()
+    }
+    pub(crate) fn timescale(&self) -> u32 {
+        self.rows.timescale()
+    }
+    pub(crate) fn canonical_title_start(&self) -> u64 {
+        self.canonical_title_start
+    }
+    pub(crate) fn observed_rows(&self) -> usize {
+        self.rows.rows().len()
+    }
     pub(crate) fn new(message: &CompletedCopyRange) -> Result<Self, CopyObservationError> {
         use plurx_core::segplan::ranges::{RangeBinding, SparseIndexRows};
         let init_contract_sha256 = plurx_core::fmp4::copy_video_init_contract_sha256(&message.init)
@@ -243,11 +354,6 @@ impl CopyObservationSet {
         }
         if message.source != self.source
             || message.catalog_namespace != self.catalog_namespace
-            || checkpoint.source_origin != self.source_origin
-            || checkpoint.canonical_title_start != self.canonical_title_start
-            || checkpoint.timescale != self.rows.timescale()
-            || checkpoint.promotion != self.promotion
-            || checkpoint.promotion.hevc_configuration.is_some()
             || !checkpoint.first_frame_rendered
             || message.range_epoch == 0
             || !valid_copy_digest(&checkpoint.manifest_sha256)
@@ -255,13 +361,64 @@ impl CopyObservationSet {
         {
             return Err(CopyObservationError::Binding);
         }
-        let init_contract = plurx_core::fmp4::copy_video_init_contract_sha256(&message.init)
+        self.merge(ObservedRows {
+            init: &message.init,
+            timescale: checkpoint.timescale,
+            source_origin: checkpoint.source_origin,
+            canonical_title_start: checkpoint.canonical_title_start,
+            rows: &checkpoint.rows,
+            boundaries: checkpoint.boundaries,
+            inspection: checkpoint.inspection.as_ref(),
+            row_inspections: &checkpoint.row_inspections,
+            promotion: &checkpoint.promotion,
+        })
+    }
+
+    /// Rows from an Analysis-owned generation. The phase must be this exact
+    /// source's, held by its origin node. They pass the same init, inspection
+    /// and overlap-equality checks as a playback range's rows.
+    pub(crate) fn observe_analysis(
+        &mut self,
+        phase: &AnalysisPhysicalPhase,
+        observed: &AnalysisCopyRows,
+    ) -> Result<(), CopyObservationError> {
+        if phase.source != self.source || phase.claim.node_id != self.source.origin_node_id {
+            return Err(CopyObservationError::Binding);
+        }
+        let timescale = observed
+            .init
+            .video()
+            .ok_or(CopyObservationError::Init)?
+            .timescale;
+        self.merge(ObservedRows {
+            init: &observed.init,
+            timescale,
+            source_origin: observed.source_origin,
+            canonical_title_start: observed.canonical_title_start,
+            rows: &observed.rows,
+            boundaries: observed.boundaries,
+            inspection: observed.inspection.as_ref(),
+            row_inspections: &observed.row_inspections,
+            promotion: &observed.promotion,
+        })
+    }
+
+    fn merge(&mut self, observed: ObservedRows<'_>) -> Result<(), CopyObservationError> {
+        if observed.source_origin != self.source_origin
+            || observed.canonical_title_start != self.canonical_title_start
+            || observed.timescale != self.rows.timescale()
+            || observed.promotion != &self.promotion
+            || observed.promotion.hevc_configuration.is_some()
+        {
+            return Err(CopyObservationError::Binding);
+        }
+        let init_contract = plurx_core::fmp4::copy_video_init_contract_sha256(observed.init)
             .map_err(|_| CopyObservationError::Init)?;
         if init_contract != self.init_contract_sha256 {
             return Err(CopyObservationError::Init);
         }
         if self.hevc {
-            if checkpoint.row_inspections.len() != checkpoint.rows.len() {
+            if observed.row_inspections.len() != observed.rows.len() {
                 return Err(CopyObservationError::Inspection);
             }
             let graph = self
@@ -269,30 +426,27 @@ impl CopyObservationSet {
                 .values()
                 .next()
                 .map(|inspection| inspection.configuration_sha256.as_str());
-            for (row, inspection) in checkpoint
-                .rows
-                .iter()
-                .zip(checkpoint.row_inspections.iter())
-            {
+            for (row, inspection) in observed.rows.iter().zip(observed.row_inspections.iter()) {
                 if inspection.dts != row.dts
                     || inspection.duration != row.duration
                     || inspection.packets == 0
                     || inspection.slices < inspection.packets
                     || !valid_copy_digest(&inspection.configuration_sha256)
+                    || inspection.hdr10().is_err()
                     || graph.is_some_and(|digest| digest != inspection.configuration_sha256)
                     || self
                         .inspections
                         .get(&row.dts)
                         .is_some_and(|old| old != inspection)
-                    || checkpoint.row_inspections.first().is_some_and(|first| {
+                    || observed.row_inspections.first().is_some_and(|first| {
                         first.configuration_sha256 != inspection.configuration_sha256
                     })
                 {
                     return Err(CopyObservationError::Inspection);
                 }
             }
-            if let Some(range) = &checkpoint.inspection {
-                let (packets, slices) = checkpoint
+            if let Some(range) = observed.inspection {
+                let (packets, slices) = observed
                     .row_inspections
                     .iter()
                     .try_fold((0u64, 0u64), |(p, s), row| {
@@ -301,24 +455,24 @@ impl CopyObservationSet {
                     .ok_or(CopyObservationError::Overflow)?;
                 if range.packets != packets
                     || range.slices != slices
-                    || checkpoint
+                    || observed
                         .row_inspections
                         .first()
                         .is_none_or(|row| row.configuration_sha256 != range.configuration_sha256)
                 {
                     return Err(CopyObservationError::Inspection);
                 }
-            } else if checkpoint.boundaries.eof {
+            } else if observed.boundaries.eof {
                 return Err(CopyObservationError::Inspection);
             }
-        } else if !checkpoint.row_inspections.is_empty() || checkpoint.inspection.is_some() {
+        } else if !observed.row_inspections.is_empty() || observed.inspection.is_some() {
             return Err(CopyObservationError::Inspection);
         }
         let binding = self.rows.binding().clone();
         self.rows
-            .insert(&binding, &checkpoint.rows, checkpoint.boundaries)
+            .insert(&binding, observed.rows, observed.boundaries)
             .map_err(|_| CopyObservationError::Coverage)?;
-        for inspection in checkpoint.row_inspections.iter() {
+        for inspection in observed.row_inspections.iter() {
             self.inspections
                 .entry(inspection.dts)
                 .or_insert_with(|| inspection.clone());
@@ -353,6 +507,10 @@ impl CopyObservationSet {
             identity,
         );
         index.promotion = self.promotion.clone();
+        // The whole-title HDR10 maximum the legacy index pass computes, from
+        // every row's own facts. Overlapping observations agreed row by row,
+        // and the fold is order-free, so this equals one sequential scan.
+        let mut hdr10 = plurx_core::fmp4::Hdr10IndexMetadata::default();
         if self.hevc {
             let mut slices = 0u64;
             for row in self.rows.rows() {
@@ -366,6 +524,9 @@ impl CopyObservationSet {
                 slices = slices
                     .checked_add(inspection.slices)
                     .ok_or(CopyObservationError::Overflow)?;
+                hdr10
+                    .merge(&inspection.hdr10()?)
+                    .map_err(|_| CopyObservationError::Inspection)?;
             }
             index.promotion.hevc_configuration = Some(plurx_core::hevc_configuration::Proof {
                 revision: plurx_core::hevc_configuration::REVISION,
@@ -377,6 +538,8 @@ impl CopyObservationSet {
                 refusal: None,
             });
         }
+        index.promotion.hdr10_sei = hdr10.promotion_nals();
+        index.promotion.indexed_hdr10_metadata = true;
         index.parameter_sets_constant = true;
         Ok(index)
     }

@@ -431,12 +431,20 @@ impl ObservedCopyMux {
                         .checked_add(packet.slices)
                         .ok_or("copy_inspection_overflow")?;
                 }
+                // Every sample of the canonical fragment, before normalization
+                // touches it: the same scan the legacy index pass makes.
+                let mut hdr10 = fmp4::Hdr10IndexMetadata::default();
+                hdr10
+                    .observe_fragment(canonical, normalizers.canonical_init())
+                    .map_err(|_| "copy_hdr10_metadata_changed")?;
                 inspection = Some(CopyRowInspection {
                     dts: clock.canonical_dts,
                     duration: clock.duration,
                     packets: packets as u64,
                     slices,
                     configuration_sha256: configuration.ok_or("copy_inspection_missing")?,
+                    hdr10_mastering: hdr10.mastering().map(hex::encode),
+                    hdr10_light: hdr10.light(),
                 });
             }
             let (mut canonical, clock) = self.canonical.pop_front().ok_or("copy_pair_missing")?;
