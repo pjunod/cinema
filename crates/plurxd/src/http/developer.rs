@@ -1186,6 +1186,15 @@ pub(crate) fn applied_view(
             ),
         )
     };
+    // The last fallback is one cell for both views; say outright when the
+    // route view cannot open at all.
+    let reads_evidence = if observation.route_view_open == Some(false) {
+        format!(
+            "{reads_evidence} Routes: this replica's session table is still in the legacy layout (no Source installation yet), so every route read is a quorum read (reason legacy_layout)."
+        )
+    } else {
+        reads_evidence
+    };
     DeveloperEnableItem {
         id: "applied_view",
         title: "Applied view",
@@ -4065,6 +4074,14 @@ mod tests {
             evidence.contains("settings: 0 view, 2 quorum; routes: 3 view, 1 quorum"),
             "{evidence}"
         );
+        assert!(!evidence.contains("legacy layout"), "{evidence}");
+        observation.route_view_open = Some(false);
+        let (_, evidence) = status(&super::applied_view(&observation), "applied_view_reads");
+        assert!(
+            evidence.contains("still in the legacy layout"),
+            "{evidence}"
+        );
+        observation.route_view_open = None;
 
         observation.mode = "replicated";
         observation.proof_present = false;

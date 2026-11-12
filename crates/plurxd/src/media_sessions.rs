@@ -991,6 +991,17 @@ pub(crate) async fn read_media_session_route_view(
     Ok(answer)
 }
 
+/// The route cache's Authority read for an `Observed` fact past its lease,
+/// counted by site as an authority read. Only `raw_route_before` calls it.
+pub(crate) async fn read_media_session_route_quorum(
+    applied: &dyn RouteView,
+    site: RouteReadSite,
+    session_id: &str,
+) -> Result<Option<MediaSessionRoute>, StoreError> {
+    ROUTE_READS[site.index()][0].fetch_add(1, Ordering::Relaxed);
+    applied.quorum_route(session_id).await
+}
+
 /// What the route cache asks of this node's applied view (E1 §4.4). The
 /// production implementation is [`AppliedView`]; unit tests drive the cache
 /// through a replica double.
@@ -1015,6 +1026,17 @@ pub(crate) trait RouteView: Send + Sync + 'static {
     fn hold_floor(&self, fact: RouteFact);
     /// Count one cache re-read a stale stamp caused.
     fn note_reload(&self);
+    /// Whether [`Self::route`] can answer from this node's replica at all
+    /// (a replica, a registered route slot, the installed principal session
+    /// layout). An `Observed` fact is retired only into a view that can
+    /// answer; otherwise it lives out its lease, as the cache before E1c did.
+    fn answers_routes(&self) -> bool;
+    /// The Authority read (a quorum read on a replicated node) that replaces
+    /// an `Observed` fact whose lease ended unretired.
+    fn quorum_route<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>>;
 }
 
 /// [`RouteView::route`]'s answer.
@@ -1099,11 +1121,22 @@ impl RouteView for AppliedView {
     fn note_reload(&self) {
         AppliedView::note_reload(self, plurx_core::store::AppliedTable::MediaSessions);
     }
+
+    fn answers_routes(&self) -> bool {
+        AppliedView::answers_routes(self)
+    }
+
+    fn quorum_route<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>> {
+        Box::pin(AppliedView::authority_route(self, session_id))
+    }
 }
 
 fn route_reads_prometheus() -> String {
     let mut out = String::from(
-        "# HELP plurx_media_session_route_reads_total Session-keyed media-session route reads by the site that made them and what answered: authority is a Store read (a quorum read on a replicated node), view a node-local applied-view read.\n\
+        "# HELP plurx_media_session_route_reads_total Session-keyed media-session route reads by the site that made them and what answered: authority is a Store read (a quorum read on a replicated node), view a node-local applied-view read (on SQLite, where the store is the only copy, a store read).\n\
          # TYPE plurx_media_session_route_reads_total counter\n",
     );
     for site in RouteReadSite::ALL {
@@ -1278,7 +1311,7 @@ impl RouteCacheMetrics {
 
     pub(crate) fn prometheus(&self) -> String {
         let mut out = String::from(
-            "# HELP plurx_media_session_route_lookups_total Media-session route lookups through the route cache (HLS media GETs, the first status resolution, session DELETEs) by how they were answered: cache_hit and single_flight_hit a cached view answer whose stamp is still current (before and after waiting on the lookup's single-flight shard), observed a fact this process holds directly (a row it committed or a quorum read) that the replica is not yet proven to contain, view a node-local applied-view read, store a Store (quorum) read. Cached view answers are invalidated by what the replica applies, not by a clock. Control and final-status reads bypass the cache and are not counted here.\n\
+            "# HELP plurx_media_session_route_lookups_total Media-session route lookups through the route cache (HLS media GETs, the first status resolution, session DELETEs) by how they were answered: cache_hit and single_flight_hit a cached view answer whose stamp is still current (before and after waiting on the lookup's single-flight shard), observed a fact this process holds directly (a row it committed or a quorum read) that the replica is not yet proven to contain, view a node-local applied-view read (on SQLite the view is the store itself), store a Store (quorum) read. Cached view answers are invalidated by what the replica applies, not by a clock. Control and final-status reads bypass the cache and are not counted here.\n\
              # TYPE plurx_media_session_route_lookups_total counter\n",
         );
         for (index, result) in ROUTE_LOOKUP_RESULTS.iter().enumerate() {
@@ -1331,7 +1364,7 @@ impl RouteCacheMetrics {
             "plurx_media_session_route_prune_entries_bucket{{le=\"+Inf\"}} {cumulative}\n\
              plurx_media_session_route_prune_entries_sum {}\n\
              plurx_media_session_route_prune_entries_count {cumulative}\n\
-             # HELP plurx_media_session_route_cache_entries Entries in the route cache after its last change; the cache holds at most {MAX_ROUTE_CACHE_ENTRIES}.\n\
+             # HELP plurx_media_session_route_cache_entries Entries in the route cache after its last change; the cache holds at most {MAX_ROUTE_CACHE_ENTRIES}. Entries carry no clock, so in steady state it sits near that ceiling, ended and absent sessions included, until evicted.\n\
              # TYPE plurx_media_session_route_cache_entries gauge\n\
              plurx_media_session_route_cache_entries {}\n",
             self.prune_sum.load(Ordering::Relaxed),
@@ -3035,11 +3068,11 @@ impl MediaSessionCoordinator {
             CachedLookup::Quorum => {
                 let route = tokio::time::timeout_at(
                     deadline,
-                    read_media_session_route(&*self.store, site, session_id),
+                    read_media_session_route_quorum(&*self.applied, site, session_id),
                 )
                 .await
                 .map_err(|_| lookup_timeout())??;
-                (route, Some(self.observed_now()), RouteLookup::Store)
+                (route, self.observed_now(), RouteLookup::Store)
             }
             CachedLookup::View | CachedLookup::Hit(..) => {
                 let answer = tokio::time::timeout_at(
@@ -3049,17 +3082,19 @@ impl MediaSessionCoordinator {
                 .await
                 .map_err(|_| lookup_timeout())??;
                 match (answer.source, answer.stamp) {
-                    (ViewSource::View, Some(stamp)) => (
-                        answer.route,
-                        Some(RouteOrigin::View(stamp)),
-                        RouteLookup::View,
-                    ),
+                    (ViewSource::View, Some(stamp)) => {
+                        (answer.route, RouteOrigin::View(stamp), RouteLookup::View)
+                    }
                     // SQLite: the store is the only copy and hands out no
-                    // stamp, so there is nothing to keep the answer against.
-                    (ViewSource::View, None) => (answer.route, None, RouteLookup::View),
+                    // stamp. Its answer is held for one lease, as the cache
+                    // before E1c held it, so a standalone server's segment
+                    // GETs stay map hits.
+                    (ViewSource::View, None) => {
+                        (answer.route, self.observed_now(), RouteLookup::View)
+                    }
                     // A quorum read is a fact this process now holds.
                     (ViewSource::Authority, _) => {
-                        (answer.route, Some(self.observed_now()), RouteLookup::Store)
+                        (answer.route, self.observed_now(), RouteLookup::Store)
                     }
                 }
             }
@@ -3085,8 +3120,8 @@ impl MediaSessionCoordinator {
     }
 
     /// Authoritative, admission-bounded route read for a control mutation.
-    /// Unlike media GET routing this deliberately bypasses the positive cache:
-    /// an owner epoch may advance during its one-second TTL. The same query
+    /// Unlike media GET routing this deliberately bypasses the route cache:
+    /// an owner epoch may advance before this replica applies it. The same query
     /// shards still prevent random capability probes from creating unbounded
     /// concurrent consensus reads.
     pub(crate) async fn control_route(
@@ -3492,16 +3527,16 @@ impl MediaSessionCoordinator {
                 StampCheck::Closed(_) => {}
             },
             RouteOrigin::Observed { fact, at } => {
-                if !self.applied.floor_met(fact) {
+                // Retired only into a view that can answer: in the legacy
+                // layout, or with no slot, the fact lives out its lease.
+                if !(self.applied.answers_routes() && self.applied.floor_met(fact)) {
                     if now.saturating_duration_since(at) < OBSERVED_ROUTE_LEASE {
                         return CachedLookup::Hit(cached.route.clone(), RouteLookup::Observed);
                     }
-                    if !exclusive {
-                        return CachedLookup::Quorum;
-                    }
-                    // Replaced by the quorum read this lookup now makes.
-                    routes.remove(session_id);
-                    self.route_cache_metrics.cache_entries(routes.len());
+                    // Past its lease: one quorum read replaces it, and only
+                    // when that read lands. Until then the entry stays, so an
+                    // error, a timeout or a cancelled request never leaves a
+                    // lagging replica to answer this row.
                     return CachedLookup::Quorum;
                 }
                 if !exclusive {
@@ -3513,6 +3548,38 @@ impl MediaSessionCoordinator {
         routes.remove(session_id);
         self.route_cache_metrics.cache_entries(routes.len());
         CachedLookup::View
+    }
+
+    /// A quorum verdict taken after a cached lookup replaces a cached view
+    /// answer for the same session with the verdict as an `Observed` fact
+    /// (§4.4: a quorum read is a fact this process holds). A replica that
+    /// trails the verdict is then not relayed to again on every request, and
+    /// a confirmed absence is not confirmed again within the fact's lease. It
+    /// never displaces an `Observed` entry, and does nothing without an entry.
+    pub(crate) async fn adopt_authoritative_route(
+        &self,
+        session_id: &str,
+        route: Option<MediaSessionRoute>,
+    ) {
+        let origin = self.observed_now();
+        let mut routes = self.lock_routes(RouteLockSite::Insert).await;
+        if routes
+            .get(session_id)
+            .is_some_and(|cached| matches!(cached.origin, RouteOrigin::View(_)))
+        {
+            self.insert_cached_route(&mut routes, session_id, route, origin);
+        }
+    }
+
+    /// Whether the cache holds `session_id` as a fact (an `Observed` entry:
+    /// a publication of this process or a quorum read within its lease)
+    /// rather than as a view answer, so a non-active answer from it needs no
+    /// confirming quorum read.
+    pub(crate) async fn cached_route_is_a_fact(&self, session_id: &str) -> bool {
+        self.lock_routes(RouteLockSite::Lookup)
+            .await
+            .get(session_id)
+            .is_some_and(|cached| matches!(cached.origin, RouteOrigin::Observed { .. }))
     }
 
     /// The entry the cache holds for `session_id`, as it is, without
@@ -3544,13 +3611,16 @@ impl MediaSessionCoordinator {
     /// produced a newer authoritative cache entry while the read was in
     /// flight. This closes the miss-before-activation race without making
     /// activation wait behind a potentially slow consensus lookup. An
-    /// unretired `Observed` entry is never replaced by a view answer; an
-    /// answer with no origin (SQLite's unstamped view) is returned uncached.
+    /// unretired `Observed` entry is replaced only by another fact (the
+    /// quorum read that renews it), never by a view answer. On a generation
+    /// mismatch the read lost a race with a publication and answers what the
+    /// cache now holds — `None` when that publication's entry is gone, the
+    /// fail-closed answer for a read that may predate a release.
     async fn cache_queried_route_result(
         &self,
         session_id: &str,
         route: Option<MediaSessionRoute>,
-        origin: Option<RouteOrigin>,
+        origin: RouteOrigin,
         observed_generation: u64,
     ) -> Option<MediaSessionRoute> {
         let mut routes = self.lock_routes(RouteLockSite::QueriedInsert).await;
@@ -3563,13 +3633,12 @@ impl MediaSessionCoordinator {
                 .and_then(|cached| cached.route.clone());
         }
         if let Some(cached) = routes.get(session_id) {
-            if matches!(cached.origin, RouteOrigin::Observed { .. }) {
+            if matches!(cached.origin, RouteOrigin::Observed { .. })
+                && !matches!(origin, RouteOrigin::Observed { .. })
+            {
                 return cached.route.clone();
             }
         }
-        let Some(origin) = origin else {
-            return route;
-        };
         if let Some(route) = &route {
             crate::telemetry::diagnostics(Arc::clone(&self.store)).route(route);
         }
@@ -3577,11 +3646,15 @@ impl MediaSessionCoordinator {
         route
     }
 
-    /// Insert one entry. A full cache first evicts by one scan: the first
-    /// `View` entry whose table moved, else the lowest insert sequence. An
-    /// `Observed` entry evicted before its floor is met closes the route view
-    /// until the replica contains its fact (`hold_floor`), so dropping it can
-    /// never let a lagging replica answer that row.
+    /// Insert one entry. A full cache first evicts by one scan, in this
+    /// order: the first `View` entry whose table moved; else the oldest entry
+    /// that can go without a floor — a `View` entry, or an `Observed` fact the
+    /// replica holds (or one no view could revive: legacy layout, SQLite);
+    /// and only when every entry is an unretired `Observed` fact, the oldest
+    /// of those, which closes the route view until the replica contains it
+    /// (`hold_floor`). So a spray of new ids evicts view answers, never the
+    /// release this node just published, and dropping a fact never lets a
+    /// lagging replica answer its row.
     fn insert_cached_route(
         &self,
         routes: &mut HashMap<String, CachedRoute>,
@@ -3590,33 +3663,48 @@ impl MediaSessionCoordinator {
         origin: RouteOrigin,
     ) {
         if routes.len() >= MAX_ROUTE_CACHE_ENTRIES && !routes.contains_key(session_id) {
+            let answers = self.applied.answers_routes();
             let mut walked = 0_usize;
             let mut stale = None;
-            let mut oldest: Option<(&String, u64)> = None;
+            let mut oldest_free: Option<(&String, u64)> = None;
+            let mut oldest_fact: Option<(&String, u64, RouteFact)> = None;
             for (key, cached) in routes.iter() {
                 walked += 1;
-                if let RouteOrigin::View(stamp) = cached.origin {
-                    if !self.applied.same_image(stamp) {
-                        stale = Some(key);
-                        break;
+                let free = match cached.origin {
+                    RouteOrigin::View(stamp) => {
+                        if !self.applied.same_image(stamp) {
+                            stale = Some(key);
+                            break;
+                        }
+                        true
                     }
-                }
-                if oldest.is_none_or(|(_, sequence)| cached.sequence < sequence) {
-                    oldest = Some((key, cached.sequence));
+                    RouteOrigin::Observed { fact, .. } => {
+                        if !answers || self.applied.floor_met(fact) {
+                            true
+                        } else {
+                            if oldest_fact.is_none_or(|(_, sequence, _)| cached.sequence < sequence)
+                            {
+                                oldest_fact = Some((key, cached.sequence, fact));
+                            }
+                            false
+                        }
+                    }
+                };
+                if free && oldest_free.is_none_or(|(_, sequence)| cached.sequence < sequence) {
+                    oldest_free = Some((key, cached.sequence));
                 }
             }
             self.route_cache_metrics.pruned(walked);
-            let victim = stale.or(oldest.map(|(key, _)| key)).cloned();
-            if let Some(victim) = victim {
-                if let Some(CachedRoute {
-                    origin: RouteOrigin::Observed { fact, .. },
-                    ..
-                }) = routes.remove(&victim)
-                {
-                    if !self.applied.floor_met(fact) {
-                        self.applied.hold_floor(fact);
-                    }
+            let victim = match (stale.or(oldest_free.map(|(key, _)| key)), oldest_fact) {
+                (Some(key), _) => Some(key.clone()),
+                (None, Some((key, _, fact))) => {
+                    self.applied.hold_floor(fact);
+                    Some(key.clone())
                 }
+                (None, None) => None,
+            };
+            if let Some(victim) = victim {
+                routes.remove(&victim);
             }
         }
         let sequence = self
@@ -7447,7 +7535,7 @@ mod cleanup_tests;
 
 /// E1c: the route cache over the applied view, through a replica double.
 #[cfg(test)]
-mod route_view_tests;
+pub(crate) mod route_view_tests;
 
 /// K-03: the takeover loop's switch reads, on a virtual clock.
 #[cfg(test)]

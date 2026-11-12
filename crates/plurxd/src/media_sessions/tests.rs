@@ -3639,7 +3639,7 @@ async fn route_misses_are_single_flight_and_activation_supersedes_them() {
             .cache_queried_route_result(
                 session_id,
                 None,
-                Some(coordinator.observed_now()),
+                coordinator.observed_now(),
                 stale_miss_generation,
             )
             .await
@@ -3673,7 +3673,7 @@ async fn route_misses_are_single_flight_and_activation_supersedes_them() {
             .cache_queried_route_result(
                 session_id,
                 Some(stale_active),
-                Some(coordinator.observed_now()),
+                coordinator.observed_now(),
                 stale_active_generation,
             )
             .await

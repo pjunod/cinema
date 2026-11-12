@@ -48,16 +48,23 @@ async fn status_local_answer(
     {
         active @ (DurableRouteResolution::ActiveLocal(_)
         | DurableRouteResolution::ActiveRemote(_)) => active,
-        _ => state
-            .media_sessions
-            .status_media_route_resolution_before(
-                crate::media_sessions::RouteReadSite::StatusFirst,
-                session,
-                &state.node_id,
-                request_deadline,
-            )
-            .await
-            .map_err(|_| response_publication_timeout())?,
+        _ => {
+            let confirmed = state
+                .media_sessions
+                .status_media_route_resolution_before(
+                    crate::media_sessions::RouteReadSite::StatusFirst,
+                    session,
+                    &state.node_id,
+                    request_deadline,
+                )
+                .await
+                .map_err(|_| response_publication_timeout())?;
+            state
+                .media_sessions
+                .adopt_authoritative_route(session, super::relay::durable_route(&confirmed))
+                .await;
+            confirmed
+        }
     };
     let mut route = match resolution {
         DurableRouteResolution::Absent => return Err(ApiError::NotFound("hls session")),

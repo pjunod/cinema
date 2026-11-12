@@ -111,9 +111,12 @@ const STORE_READS: &[(&str, &str, &str, usize)] = &[
         "site",
         1,
     ),
-    // The cached lookup's quorum read for an `Observed` fact past its lease.
-    ("media_sessions.rs", "raw_route_before", "site", 1),
 ];
+
+/// Every quorum read the route cache makes through the view handle to
+/// replace an `Observed` fact past its lease.
+const QUORUM_READS: &[(&str, &str, &str, usize)] =
+    &[("media_sessions.rs", "raw_route_before", "site", 1)];
 
 /// Every read through the applied view: `(file, function, site, count)`.
 const VIEW_READS: &[(&str, &str, &str, usize)] = &[
@@ -256,11 +259,15 @@ fn every_route_read_is_pinned_by_function_and_site() {
     let sources = production_sources();
     let store = calls(&sources, "read_media_session_route");
     let view = calls(&sources, "read_media_session_route_view");
+    let quorum = calls(&sources, "read_media_session_route_quorum");
     assert!(
-        store == pinned(STORE_READS) && view == pinned(VIEW_READS),
-        "the route inventory moved (contract §6.1); found:\nSTORE_READS\n{}VIEW_READS\n{}",
+        store == pinned(STORE_READS)
+            && view == pinned(VIEW_READS)
+            && quorum == pinned(QUORUM_READS),
+        "the route inventory moved (contract §6.1); found:\nSTORE_READS\n{}VIEW_READS\n{}QUORUM_READS\n{}",
         render(&store),
-        render(&view)
+        render(&view),
+        render(&quorum)
     );
 }
 
@@ -282,18 +289,39 @@ fn every_caller_of_the_cached_route_lookups_is_pinned() {
 }
 
 /// The Store method is called from the one counted reader, and the view's
-/// route from the one counted view reader, so no read escapes the pins above.
+/// route and quorum methods from the counted view readers, in any spelling —
+/// method call or path-qualified — so no read escapes the pins above.
 #[test]
 fn the_store_and_view_route_methods_are_called_from_one_place_each() {
     let mut found = BTreeMap::new();
     for (path, text) in production_sources() {
-        for (dot, name, receiver) in method_calls(&text, &["media_session_route", "route"]) {
+        for (dot, name, receiver) in method_calls(
+            &text,
+            &[
+                "media_session_route",
+                "route",
+                "quorum_route",
+                "authority_route",
+            ],
+        ) {
             if name == "route" && receiver != "applied" {
                 continue;
             }
             *found
                 .entry((path.clone(), enclosing(&text, dot), name.to_owned()))
                 .or_default() += 1;
+        }
+        for qualified in [
+            "AppliedView::route(",
+            "RouteView::route(",
+            "AppliedView::authority_route(",
+            "RouteView::quorum_route(",
+        ] {
+            for (at, _) in text.match_indices(qualified) {
+                *found
+                    .entry((path.clone(), enclosing(&text, at), qualified.to_owned()))
+                    .or_default() += 1;
+            }
         }
     }
     let expected = pinned(&[
@@ -309,10 +337,190 @@ fn the_store_and_view_route_methods_are_called_from_one_place_each() {
             "route",
             1,
         ),
+        (
+            "media_sessions.rs",
+            "read_media_session_route_quorum",
+            "quorum_route",
+            1,
+        ),
+        // `impl RouteView for AppliedView`: the trait methods forward.
+        ("media_sessions.rs", "route", "AppliedView::route(", 1),
+        (
+            "media_sessions.rs",
+            "quorum_route",
+            "AppliedView::authority_route(",
+            1,
+        ),
     ]);
     assert!(
         found == expected,
         "a route read bypasses the counted readers; found:\n{}",
+        render(&found)
+    );
+}
+
+/// Every route-cache and applied-view entry point is called from a pinned
+/// function (review S2): a fence that reached the cache or the view through
+/// a private helper would add a caller here. `self.applied`, `self.routes`
+/// and `dyn RouteView` are counted where they appear in `media_sessions.rs`,
+/// and every `dyn RouteView` handle is named `applied`.
+#[test]
+fn every_route_cache_entry_point_has_a_pinned_caller() {
+    const ENTRY_POINTS: &[&str] = &[
+        "raw_route_before",
+        "route_resolution_at",
+        "media_route_resolution_at",
+        "cached_route",
+        "lock_routes",
+        "cached_route_is_a_fact",
+        "adopt_authoritative_route",
+    ];
+    let mut found = BTreeMap::new();
+    for (path, text) in production_sources() {
+        for (dot, name, _) in method_calls(&text, ENTRY_POINTS) {
+            *found
+                .entry((path.clone(), enclosing(&text, dot), name.to_owned()))
+                .or_default() += 1;
+        }
+        if path != "media_sessions.rs" {
+            assert!(
+                !text.contains("dyn RouteView"),
+                "{path} holds a RouteView handle"
+            );
+            continue;
+        }
+        let bytes = text.as_bytes();
+        for handle in ["self.applied", "self.routes", "dyn RouteView"] {
+            for (at, _) in text.match_indices(handle) {
+                if bytes
+                    .get(at + handle.len())
+                    .is_some_and(|byte| is_ident(*byte))
+                {
+                    continue;
+                }
+                *found
+                    .entry((path.clone(), enclosing(&text, at), handle.to_owned()))
+                    .or_default() += 1;
+            }
+        }
+        for line in text.lines().filter(|line| line.contains("dyn RouteView")) {
+            let binding = line.split(':').next().unwrap_or_default().trim();
+            assert_eq!(
+                binding, "applied",
+                "a RouteView handle not named applied: {line}"
+            );
+        }
+    }
+    let expected = pinned(&[
+        (
+            "http/hls/relay.rs",
+            "relay_if_remote",
+            "adopt_authoritative_route",
+            2,
+        ),
+        (
+            "http/hls/relay.rs",
+            "relay_if_remote",
+            "cached_route_is_a_fact",
+            1,
+        ),
+        (
+            "http/hls/status.rs",
+            "status_local_answer",
+            "adopt_authoritative_route",
+            1,
+        ),
+        (
+            "media_sessions.rs",
+            "adopt_authoritative_route",
+            "lock_routes",
+            1,
+        ),
+        (
+            "media_sessions.rs",
+            "cache_queried_route_result",
+            "lock_routes",
+            1,
+        ),
+        (
+            "media_sessions.rs",
+            "cache_route_if_generation",
+            "lock_routes",
+            1,
+        ),
+        ("media_sessions.rs", "cache_route_result", "lock_routes", 1),
+        ("media_sessions.rs", "cached_route", "lock_routes", 1),
+        ("media_sessions.rs", "cached_route", "self.applied", 4),
+        (
+            "media_sessions.rs",
+            "cached_route_is_a_fact",
+            "lock_routes",
+            1,
+        ),
+        (
+            "media_sessions.rs",
+            "insert_cached_route",
+            "self.applied",
+            4,
+        ),
+        ("media_sessions.rs", "lock_routes", "self.routes", 1),
+        (
+            "media_sessions.rs",
+            "media_route_resolution_at",
+            "route_resolution_at",
+            1,
+        ),
+        (
+            "media_sessions.rs",
+            "media_route_resolution_before",
+            "media_route_resolution_at",
+            1,
+        ),
+        ("media_sessions.rs", "observed_now", "self.applied", 1),
+        ("media_sessions.rs", "raw_route_before", "cached_route", 2),
+        ("media_sessions.rs", "raw_route_before", "self.applied", 2),
+        (
+            "media_sessions.rs",
+            "read_media_session_route_quorum",
+            "dyn RouteView",
+            1,
+        ),
+        (
+            "media_sessions.rs",
+            "read_media_session_route_view",
+            "dyn RouteView",
+            1,
+        ),
+        (
+            "media_sessions.rs",
+            "route_resolution_at",
+            "raw_route_before",
+            1,
+        ),
+        (
+            "media_sessions.rs",
+            "route_resolution_before",
+            "route_resolution_at",
+            1,
+        ),
+        (
+            "media_sessions.rs",
+            "status_view_media_route_resolution_before",
+            "media_route_resolution_at",
+            1,
+        ),
+        // The coordinator's field (counted under the function before it).
+        (
+            "media_sessions.rs",
+            "valid_resource_name",
+            "dyn RouteView",
+            1,
+        ),
+        ("media_sessions.rs", "with_applied_view", "dyn RouteView", 1),
+    ]);
+    assert!(
+        found == expected,
+        "a route-cache entry point gained or lost a caller; found:\n{}",
         render(&found)
     );
 }
@@ -346,6 +554,6 @@ fn status_reads_the_view_first_and_keeps_its_quorum_bracket() {
     }
     // Only an active view answer skips the confirming quorum read.
     assert!(status.contains(
-        "active@(DurableRouteResolution::ActiveLocal(_)|DurableRouteResolution::ActiveRemote(_))=>active,_=>state"
+        "active@(DurableRouteResolution::ActiveLocal(_)|DurableRouteResolution::ActiveRemote(_))=>active,_=>{letconfirmed=state"
     ));
 }
