@@ -385,6 +385,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
                 SourceClaimOutcome::Retired(_) => "Retired".to_owned(),
                 SourceClaimOutcome::Conflict => "Conflict".to_owned(),
                 SourceClaimOutcome::Unavailable => "Unavailable".to_owned(),
+                SourceClaimOutcome::RetargetUnassigned => "RetargetUnassigned".to_owned(),
                 SourceClaimOutcome::Capacity(capacity) => format!("Capacity({capacity:?})"),
             };
             panic!(

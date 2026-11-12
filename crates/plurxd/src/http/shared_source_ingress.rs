@@ -105,12 +105,22 @@ fn input(path: &str, bytes: &[u8]) -> Result<SourceStartInput, ApiError> {
         _ => Err(invalid()),
     }
 }
-fn fingerprint(input: &SourceStartInput) -> String {
+pub(super) fn fingerprint_recipe(recipe: &[u8], range: bool) -> String {
     use sha2::Digest;
     let mut hash = sha2::Sha256::new();
-    hash.update(b"plurx.sharing-source-invocation.v2\0");
-    hash.update(&input.canonical_recipe);
+    hash.update(if range {
+        b"plurx.sharing-source-invocation.bounded-range.v1\0".as_slice()
+    } else {
+        b"plurx.sharing-source-invocation.v2\0".as_slice()
+    });
+    hash.update(recipe);
     format!("{:x}", hash.finalize())
+}
+pub(super) fn fingerprint(input: &SourceStartInput) -> String {
+    fingerprint_recipe(
+        &input.canonical_recipe,
+        receiver_presentation::range_bound(input),
+    )
 }
 pub(super) fn actual_assignment(entry: &SourceStartEntry) -> Option<SourceDispatchAssignment> {
     let stage = entry
@@ -232,6 +242,79 @@ pub(super) async fn assigned(
         }
     }
 }
+/// Select the immutable invocation recipe before route fingerprint matching.
+/// This reads existing authority only; it never creates another start/claim.
+pub(super) async fn receiver_effective_body(
+    state: &crate::state::AppState,
+    headers: &SourceHeaders,
+    path: &str,
+    bytes: &[u8],
+) -> Result<Vec<u8>, ApiError> {
+    let input = input(path, bytes)?;
+    let hash = source_credential_hash(headers)?;
+    let viewer = viewer_hash(headers)?;
+    // A retained local owner already holds the exact invocation recipe and
+    // checks the receiver itself, so it needs no durable route read.
+    if let Ok(entry) = state
+        .transcode
+        .source_http_starts
+        .cleanup_entry(&hash, &viewer, &input)
+    {
+        let unassigned = matches!(
+            *entry.result.lock().expect("Source HTTP outcome"),
+            Some(Err(super::SourceStartFailure::RetargetUnassigned))
+        );
+        if !unassigned {
+            let selected = entry.identity.recipe.clone();
+            return receiver_presentation::operation_body(path, bytes, &selected);
+        }
+    }
+    let current = current_reference(state, headers, &input.reference).await;
+    // Header interpretation follows the existing exact current grant check.
+    let ready = current.is_ok() && receiver_presentation::authenticated_receiver_ready(headers);
+    let route = state
+        .store
+        .lookup_source_ingress_route(
+            &hash,
+            &viewer,
+            &input.request_id.to_string(),
+            input.reference.server_id,
+            input.reference.catalogue_epoch,
+            input.reference.library_id.as_str(),
+            input.reference.item_id.as_str(),
+            input.reference.file_id.as_str(),
+            input.reference.revision.as_str(),
+        )
+        .await
+        .map_err(|_| unavailable())?;
+    let cleanup = path.ends_with("/end")
+        || (path.ends_with("/status")
+            && (current.is_err() || route.as_ref().is_some_and(|route| route.sealed)));
+    let selected = if let Some(recipe) = state
+        .transcode
+        .source_http_starts
+        .forwarding
+        .pinned_recipe(&hash, &viewer, &input)?
+    {
+        recipe
+    } else if let Some(route) = route {
+        receiver_presentation::select_persisted_recipe(
+            &input.canonical_recipe,
+            &route.request_fingerprint,
+            cleanup,
+        )?
+    } else {
+        if !cleanup {
+            current?;
+        }
+        receiver_presentation::normalize_wire(&input.canonical_recipe, ready)?
+    };
+    if !cleanup && receiver_presentation::internal_range(&selected)? && !ready {
+        return Err(receiver_presentation::unavailable());
+    }
+    receiver_presentation::operation_body(path, bytes, &selected)
+}
+
 pub(super) async fn resolve_forward_route(
     state: &crate::state::AppState,
     headers: &SourceHeaders,
@@ -243,13 +326,21 @@ pub(super) async fn resolve_forward_route(
     let input = input(path, bytes)?;
     let hash = source_credential_hash(headers)?;
     let viewer = viewer_hash(headers)?;
-    if state
+    if let Ok(entry) = state
         .transcode
         .source_http_starts
         .cleanup_entry(&hash, &viewer, &input)
-        .is_ok()
     {
-        return Ok(ForwardRoute::Local);
+        let unassigned_retarget = matches!(
+            *entry.result.lock().expect("Source HTTP outcome"),
+            Some(Err(SourceStartFailure::RetargetUnassigned))
+        );
+        // An affirmative no-claim result confers no ownership and leaves no
+        // cleanup obligation here: every later operation, End included,
+        // follows the durable route to the owner that did claim.
+        if !unassigned_retarget {
+            return Ok(ForwardRoute::Local);
+        }
     }
     let target = &input.reference;
     if let Some(route) = state
@@ -268,7 +359,13 @@ pub(super) async fn resolve_forward_route(
         .await
         .map_err(|_| unavailable())?
     {
-        if route.request_fingerprint != fingerprint(&input) {
+        let cleanup_legacy = path.ends_with("/end")
+            || (path.ends_with("/status")
+                && (route.sealed || current_reference(state, headers, target).await.is_err()));
+        if route.request_fingerprint != fingerprint(&input)
+            && !(cleanup_legacy
+                && route.request_fingerprint == fingerprint_recipe(&input.canonical_recipe, false))
+        {
             return Err(SourceStartFailure::Conflict.response());
         }
         if route.owner_node_id == state.node_id {
@@ -409,6 +506,7 @@ pub(super) async fn prepare_forward_start(
     wire: &FreshAuthority,
     bytes: &[u8],
     deadline: Instant,
+    receiver_range: bool,
 ) -> Result<ForwardAuthority, ApiError> {
     if wire.candidate_node_id != state.node_id
         || wire
@@ -429,8 +527,12 @@ pub(super) async fn prepare_forward_start(
         wire.credential_hash.clone(),
         wire.principal.clone(),
         deadline,
-    );
+    )
+    .with_receiver_range(receiver_range);
     let (hash, grant) = current_reference(state, &headers, &input.reference).await?;
+    if receiver_presentation::range_bound(&input) && !receiver_range {
+        return Err(receiver_presentation::unavailable());
+    }
     let viewer = viewer_hash(&headers)?;
     let (entry, new) = state
         .transcode
@@ -472,14 +574,20 @@ pub(super) async fn validate_retained_forward(
 ) -> Result<(), ApiError> {
     let (entry, value) = retained(state, wire)?;
     let input = input(path, bytes)?;
-    if input.reference != entry.identity.reference
-        || input.request_id != entry.identity.request_id
-        || fingerprint(&input) != value.binding().request_fingerprint()
+    if input.reference != entry.identity.reference || input.request_id != entry.identity.request_id
     {
         return Err(invalid());
     }
     if path.ends_with("/end") || (path.ends_with("/status") && wire.cleanup_only) {
+        if receiver_presentation::public_recipe_hash(&input.canonical_recipe)?
+            != entry.identity.public_recipe_hash
+        {
+            return Err(invalid());
+        }
         return Ok(());
+    }
+    if fingerprint(&input) != value.binding().request_fingerprint() {
+        return Err(invalid());
     }
     if wire.cleanup_only {
         return Err(unavailable());
@@ -1026,6 +1134,29 @@ pub(super) async fn source_forward_locality(
         })?;
     #[cfg(test)]
     eprintln!("Source locate actual owner member floor accepted");
+    if !state
+        .store
+        .source_copy_coordination_capable(&state.node_id)
+        .await
+        .map_err(|_| unavailable())?
+    {
+        return Ok(None);
+    }
+    if let Some(owner) = state
+        .store
+        .source_copy_designated_owner(
+            wire.reference.server_id,
+            wire.reference.catalogue_epoch,
+            &wire.reference.file_id,
+            &wire.reference.revision,
+        )
+        .await
+        .map_err(|_| unavailable())?
+    {
+        if owner != state.node_id {
+            return Ok(None);
+        }
+    }
     if !state.serving.accepting_new_media().await {
         #[cfg(test)]
         eprintln!("Source locate actual owner not serving media");

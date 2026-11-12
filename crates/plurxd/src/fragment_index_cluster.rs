@@ -906,11 +906,34 @@ pub(crate) async fn attest_analysis_copy_source_persistent(
     attest_source_mode(node_id, file, memo, progress, true, Some(&persistence)).await
 }
 
+/// The v3 canonical index uses complete-byte attestation for every codec.
+/// Reuse the existing resumable full-v1 regime; this is not a sampled digest.
+pub(crate) async fn attest_coordination_source_full_persistent(
+    node_id: &str,
+    file: &MediaFile,
+    progress: &(dyn Fn(u64) + Sync),
+    checkpoint_root: Option<&Path>,
+    store: &dyn Store,
+    request: &plurx_core::store::AnalysisRequest,
+) -> Result<AttestedSource, String> {
+    let persistence = match checkpoint_root {
+        Some(root) => Some(
+            source_digest::CheckpointStorage::open(
+                root,
+                source_digest::CheckpointOwner::Analysis { store, request },
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    attest_source_mode(node_id, file, None, progress, true, persistence.as_ref()).await
+}
+
 fn is_hevc(file: &MediaFile) -> bool {
     matches!(file.video_codec.as_deref(), Some("hevc" | "h265"))
 }
 
-const FULL_COPY_PREFIX: &str = "hevc-full-v1:";
+pub(crate) const FULL_COPY_PREFIX: &str = "hevc-full-v1:";
 
 pub(crate) fn local_object_version(version: &str) -> &str {
     version.strip_prefix(FULL_COPY_PREFIX).unwrap_or(version)

@@ -21,6 +21,7 @@ final class SharedPlayerController: ObservableObject {
         case remoteControl(SharedControlIntent, () -> Bool, (CinemaRemoteOutcome) -> Void)
         case change(SharedDirectedChange)
         case restartDirect(session: String)
+        case reopenRange(positionMs: Int)
         case caption(SharedCaptionAsset, Int)
     }
     let player = AVPlayer()
@@ -42,6 +43,9 @@ final class SharedPlayerController: ObservableObject {
     func seedCaptionPlaybackForTesting(plan: SharedPlaybackPlan, playback: SharedStartedPlayback,
                                        client: SharedDecisionClient, item: AVPlayerItem) throws {
         self.plan=plan;self.playback = .hls(playback);self.client=client
+        timeline = SharedPlaybackTimeline(vod: playback.start.response.vod,
+            mediaOriginMs: playback.start.response.mediaOriginMs,
+            startSeconds: playback.start.response.startSeconds, requestedStartMs: Int(plan.subject.resumeMs))
         var capabilities=Caps.controlCapabilities();capabilities.dualPlayerPreparation=false
         channel=try SharedControlChannel(playback:playback,clientInstanceId:clientInstanceId,capabilities:capabilities)
         player.replaceCurrentItem(with:item)
@@ -69,6 +73,8 @@ final class SharedPlayerController: ObservableObject {
     private var timeObserver: Any?
     private var ticks = 0
     private var lastPositionMs = 0
+    private var timeline = SharedPlaybackTimeline(vod: true, mediaOriginMs: 0, startSeconds: 0, requestedStartMs: 0)
+    private var preparedTimeline = SharedPlaybackTimeline(vod: false, mediaOriginMs: 0, startSeconds: 0, requestedStartMs: 0)
     private var historyFrameObserved = false
     private var historyOutput: AVPlayerItemVideoOutput?
     private var authorizationObserver: UUID?
@@ -254,6 +260,7 @@ final class SharedPlayerController: ObservableObject {
         case .remoteControl(let intent, let permit, let complete): complete(await performControl(intent, permit: permit))
         case .change(let change): await performChange(change)
         case .restartDirect(let session): await restartDirect(session)
+        case .reopenRange(let position): await reopen(at: position, change: nil, play: playing)
         case .caption(let asset, let intent): await performCaptionSelection(asset, intent: intent)
         }
     }
@@ -321,13 +328,21 @@ final class SharedPlayerController: ObservableObject {
         observe(item)
         player.replaceCurrentItem(with: item)
         self.plan = plan; playback = media; channel = nextChannel
+        if case .hls(let started) = media {
+            let response = started.start.response
+            timeline = SharedPlaybackTimeline(vod: response.vod, mediaOriginMs: response.mediaOriginMs,
+                startSeconds: response.startSeconds, requestedStartMs: Int(plan.subject.resumeMs))
+        } else {
+            timeline = SharedPlaybackTimeline(vod: true, mediaOriginMs: 0, startSeconds: 0, requestedStartMs: 0)
+        }
         configureCaptions(plan,client:client)
         statusSummary = nil; sessionEnded = false; notice = nil
         if let predecessor { unreleased.append(predecessor) }
         let resume = plan.subject.resumeMs
         lastPositionMs = Int(resume)
-        if resume > 0 {
-            await player.seek(to: CMTime(seconds: Double(resume) / 1000, preferredTimescale: 1000),
+        let attachMs = timeline.itemPositionMs(filmPositionMs: Int(resume))
+        if attachMs > 0 {
+            await player.seek(to: CMTime(seconds: Double(attachMs) / 1000, preferredTimescale: 1000),
                               toleranceBefore: .zero, toleranceAfter: .zero)
         }
         await applySubtitle(plan, item: item, permit: permit)
@@ -488,8 +503,21 @@ final class SharedPlayerController: ObservableObject {
         case .pause: player.pause(); playing = false; lastPositionMs = currentPositionMs()
         case .seek(let ms):
             captions.mediaChanged(seekTo: max(0,ms))
-            await player.seek(to: CMTime(seconds: Double(max(0, ms)) / 1000, preferredTimescale: 1000),
-                              toleranceBefore: .zero, toleranceAfter: .zero)
+            let ranges = player.currentItem?.seekableTimeRanges.compactMap { value -> ClosedRange<Int>? in
+                let range = value.timeRangeValue
+                let start = range.start.seconds * 1000, end = CMTimeRangeGetEnd(range).seconds * 1000
+                guard start.isFinite, end.isFinite, start >= 0, end >= start else { return nil }
+                return Int(start)...Int(end)
+            } ?? []
+            switch PlayerController.seekRoute(targetMs: max(0, ms), baseMs: timeline.mediaOriginMs,
+                usesDirectTimeline: playback?.isDirect == true, isVOD: timeline.wholeTitle,
+                isChangingStream: false, seekableRangesMs: ranges) {
+            case .native(let itemMs):
+                await player.seek(to: CMTime(seconds: Double(itemMs) / 1000, preferredTimescale: 1000),
+                                  toleranceBefore: .zero, toleranceAfter: .zero)
+            case .reopen:
+                await reopen(at: max(0, ms), change: nil, play: playing)
+            }
             lastPositionMs = currentPositionMs()
         }
     }
@@ -542,9 +570,10 @@ final class SharedPlayerController: ObservableObject {
         if let item = player.currentItem {
             for value in item.loadedTimeRanges {
                 let range = value.timeRangeValue
-                let start = range.start.seconds * 1000, end = range.end.seconds * 1000
+                let start = Double(timeline.mediaOriginMs) + range.start.seconds * 1000
+                let end = Double(timeline.mediaOriginMs) + CMTimeRangeGetEnd(range).seconds * 1000
                 guard start.isFinite, end.isFinite, start <= Double(position), end >= Double(position) else { continue }
-                from = Int(start.rounded(.down)); through = max(position, Int(end.rounded(.down)))
+                from = max(0, Int(start.rounded(.down))); through = max(position, Int(end.rounded(.down)))
             }
         }
         return SharedRendererSample(positionMs: position, bufferedFromMs: from, bufferedThroughMs: through,
@@ -554,11 +583,16 @@ final class SharedPlayerController: ObservableObject {
     private func observe(_ item: AVPlayerItem) {
         for observer in itemObservers { NotificationCenter.default.removeObserver(observer) }
         itemObservers = [
-            NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+            NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self, weak item] _ in
                 Task { @MainActor in
-                    guard let self, !self.closing else { return }
-                    await self.stop(watched: true)
-                    self.onNaturalEnd?()
+                    guard let self, let item, !self.closing, self.player.currentItem === item else { return }
+                    let duration = self.playback.flatMap { self.durationMs($0) }.map(Int.init)
+                    if self.timeline.reachedTitleEnd(filmPositionMs: self.currentPositionMs(), durationMs: duration) {
+                        await self.stop(watched: true)
+                        self.onNaturalEnd?()
+                    } else {
+                        await self.run(.reopenRange(positionMs: self.currentPositionMs()))
+                    }
                 }
             },
             NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self, weak item] _ in
@@ -610,7 +644,7 @@ final class SharedPlayerController: ObservableObject {
     private func positionMs() -> Int64? {
         let value = player.currentTime().seconds * 1000
         guard value.isFinite, value >= 0, value <= 9_007_199_254_740_991 else { return nil }
-        return Int64(value.rounded(.down))
+        return Int64(timeline.filmPositionMs(itemPositionMs: Int(value.rounded(.down))))
     }
 
     private func durationMs(_ media: SharedStartedMedia) -> Int64? {
@@ -819,7 +853,7 @@ extension SharedPlayerController {
                     // Issued once, and only once the item can honour it.
                     preparedSeekPending = false
                     let remaining = min(PreparedReplacementBounds.alignmentMs, coordinator.readinessRemainingMs() ?? 0)
-                    guard await alignPrepared(item, to: preparedFilmPositionMs, boundMs: remaining) else {
+                    guard await alignPrepared(item, to: preparedTimeline.itemPositionMs(filmPositionMs: preparedFilmPositionMs), boundMs: remaining) else {
                         if preemptRequested || closing || Task.isCancelled {
                             coordinator.abandonWithoutFallback(.aborted)
                         } else {
@@ -880,6 +914,9 @@ extension SharedPlayerController {
                                                    capabilities: capabilities)
         else { failure = "This Shared change could not continue."; return }
         plan = adoption.plan; playback = .hls(adoption.playback); channel = next
+        let response = adoption.playback.start.response
+        timeline = SharedPlaybackTimeline(vod: response.vod, mediaOriginMs: response.mediaOriginMs,
+            startSeconds: response.startSeconds, requestedStartMs: currentPositionMs())
         if let client { configureCaptions(adoption.plan,client:client) }
         // The prepared commit already proved its successor frame.
         historyFrameObserved = true; historyOutput = nil
@@ -893,7 +930,7 @@ extension SharedPlayerController {
             let range = value.timeRangeValue
             let start = range.start.seconds, end = CMTimeRangeGetEnd(range).seconds
             guard start.isFinite, end.isFinite, start <= playhead + 0.5, end > playhead else { continue }
-            return Int((end * 1_000).rounded(.down))
+            return preparedTimeline.filmPositionMs(itemPositionMs: Int((end * 1_000).rounded(.down)))
         }
         return nil
     }
@@ -941,7 +978,7 @@ extension SharedPlayerController {
             if itemTime.isValid, itemTime.seconds.isFinite, output.hasNewPixelBuffer(forItemTime: itemTime),
                output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &displayTime) != nil,
                displayTime.isValid, displayTime.seconds.isFinite,
-               PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: max(0, displayTime.seconds * 1_000), boundaryMs: boundaryMs, frameDurationSeconds: frameDurationSeconds) {
+               PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: Double(timeline.mediaOriginMs) + max(0, displayTime.seconds * 1_000), boundaryMs: boundaryMs, frameDurationSeconds: frameDurationSeconds) {
                 return Int(Date().timeIntervalSince1970 * 1_000)
             }
             try? await Task.sleep(nanoseconds: UInt64(PreparedReplacementBounds.pollMs) * 1_000_000)
@@ -967,10 +1004,11 @@ extension SharedPlayerController: PreparedSuccessorHost {
         successor.isMuted = true; successor.volume = 0
         successor.appliesMediaSelectionCriteriaAutomatically = false
         preparedPlayer = successor; preparedItem = item; preparedOutput = output
-        let origin = PlayerController.sessionMediaOriginMs(vod: true, mediaOriginMs: action.mediaOriginMs,
-                                                           startSeconds: nil, requestedStartMs: filmPositionMs)
-        preparedFilmPositionMs = max(0, filmPositionMs - origin)
-        preparedSeekPending = preparedFilmPositionMs > 0
+        let response = adoption.playback.start.response
+        preparedTimeline = SharedPlaybackTimeline(vod: response.vod, mediaOriginMs: action.mediaOriginMs,
+            startSeconds: response.startSeconds, requestedStartMs: filmPositionMs)
+        preparedFilmPositionMs = max(0, filmPositionMs)
+        preparedSeekPending = preparedTimeline.itemPositionMs(filmPositionMs: filmPositionMs) > 0
         return true
     }
 
@@ -999,7 +1037,7 @@ extension SharedPlayerController: PreparedSuccessorHost {
         guard rate.isFinite, rate > 0,
               let leadWallMs = PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: .max) else { return .refused }
         let rendezvous = PreparedCommitRendezvous.plan(stagedFilmPositionMs: preparedFilmPositionMs,
-                                                       incumbentFilmPositionMs: currentPositionMs(), mediaOriginMs: 0,
+                                                       incumbentFilmPositionMs: currentPositionMs(), mediaOriginMs: preparedTimeline.mediaOriginMs,
                                                        leadMs: Int(min(16, rate) * Double(leadWallMs)))
         guard let cadence = await preparedDecodedFrameDuration(of: item, boundMs: PreparedReplacementBounds.alignmentMs,
                 targetItemSeconds: Double(rendezvous.itemPositionMs) / 1000),
@@ -1045,6 +1083,7 @@ extension SharedPlayerController: PreparedSuccessorHost {
         preparedPlayer = nil; preparedItem = nil; preparedOutput = nil
         observe(item)
         player.replaceCurrentItem(with: item)
+        timeline = preparedTimeline
         preparedSwapped = true
         await applySubtitle(adoption.plan, item: item)
         player.play()

@@ -9,10 +9,11 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 |---|---|---|
 | [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |
+| [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 build contract. | open |
 | [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 contract; build record: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md). | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
-| [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Playback-start effort: rulings, lanes, reviews, lane status. | open |
-| [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions; current state is in the plan. | live |
+| [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Effort plan: rulings, lanes, status. | open |
+| [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |
 | [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
 | [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, implementation, retained evidence and merge prerequisites. | built |
 | [SHARED-SUBTITLE-CUSTODY-AND-START-503.md](SHARED-SUBTITLE-CUSTODY-AND-START-503.md) | S5 Source-owned caption windows, custody initialization race and follow-up qualification. | done |
@@ -78,7 +79,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [INTERLACE-IN-THE-MEDIA-CONTRACT.md](INTERLACE-IN-THE-MEDIA-CONTRACT.md) | Field order contract, deinterlace/frame policy, Live TV field-rate bitrate fix and fixture acceptance. | open |
 | [AUDIO-RESOLVED-INDEPENDENTLY.md](AUDIO-RESOLVED-INDEPENDENTLY.md) | 2026-09-20 plan: audio negotiated apart from video, so a resolution change or burn no longer downmixes compatible multichannel audio; carried through recipe identity, manifests and handoffs. | open |
 | [AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md](AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md) | Shipped Jellyfin 8.1.3 per-side synthetic downmix measurements, clipping and AAC limiter margin; no real-content, listening, device or output enablement claim. | open |
-| [AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md](AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md) | Real-content stereo downmix measurement (nine film windows): the incumbent fold clipped and AC-3/E-AC-3 applied stored levels; the float matrix plus −4 dBFS limiter that ships, and its encoded-VOD join proof. | open |
+| [AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md](AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md) | Stereo downmix on real content: the incumbent fold clipped and AC-3/E-AC-3 applied stored levels; the shipped float matrix with a −4 dBFS limiter, and its encoded-VOD join proof. | open |
 | [VOD-BFRAMES-TIMELINE-DESIGN.md](VOD-BFRAMES-TIMELINE-DESIGN.md) | Strict presentation-grid implementation and optional signed-offset software B-frames; no-reorder default, per-family/client qualification and remaining evidence. | open |
 | [DECODE-FACTS-GATE-AND-FALLBACK.md](DECODE-FACTS-GATE-AND-FALLBACK.md) | Implementation plan from the 2026-09-20 architecture review: instrumenting the decode-fact gate, amortising immutable-image validation without losing tamper checks, and classifying fallback reasons. | open |
 | [TRANSCODE-DECOMPOSITION-PLAN.md](TRANSCODE-DECOMPOSITION-PLAN.md) | Built extraction and all three removal consumers; delegated lifecycle/seam decisions and retained evidence. Optional registry evaluation is deferred; S-05 physical acceptance remains open. | built |

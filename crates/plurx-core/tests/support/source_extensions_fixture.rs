@@ -5,7 +5,7 @@ pub(crate) const MANAGED_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_
 
 pub(crate) fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
     assert!(
-        matches!(version, 1..=5),
+        matches!(version, 1..=6),
         "only published managed fixture versions are recognized"
     );
     let expected = rusqlite::Connection::open_in_memory().expect("closed managed metadata witness");
@@ -34,12 +34,19 @@ pub(crate) fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
             ))
             .expect("published managed v4 objects");
     }
-    if version == 5 {
+    if version >= 5 {
         expected
             .execute_batch(include_str!(
                 "../../src/store/subtitle_managed_resources_v5.sql"
             ))
             .expect("published managed v5 objects");
+    }
+    if version == 6 {
+        expected
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_managed_resources_v6.sql"
+            ))
+            .expect("published managed v6 objects");
     }
     expected
 }
@@ -355,22 +362,216 @@ fn source_extension_rewind_plan(
     statements.join("\n")
 }
 
+/// The v127 adjunct exactly as published: metadata-only index coordination
+/// and the v3 copy index, spelled as the migration spells them.
+const COORDINATION_FIXTURE_SCHEMA: &str = concat!(
+    include_str!("../../src/store/analysis_coordination.sql"),
+    "\n-- next statement\n",
+    include_str!("../../src/store/copy_index_v3.sql"),
+);
+
+/// v127 replaces this v124 trigger rather than adding it.
+const REPLACED_RESERVATION_TRIGGER: &str = "analysis_source_reserve_on_claim";
+
+fn coordination_tail_witness() -> Vec<(String, String, String)> {
+    let witness = rusqlite::Connection::open_in_memory().expect("published coordination witness");
+    witness
+        .execute_batch(
+            "CREATE TABLE analysis_requests(request_id TEXT PRIMARY KEY,state TEXT,fence INTEGER);
+             CREATE TABLE analysis_source_reservations(request_id TEXT);
+             CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);",
+        )
+        .expect("published coordination dependencies");
+    witness
+        .execute_batch(COORDINATION_FIXTURE_SCHEMA)
+        .expect("published v127 coordination extension");
+    let mut inventory = witness
+        .prepare(
+            "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL
+              AND name NOT IN ('analysis_requests','analysis_source_reservations','background_job_commands')
+              ORDER BY type,name",
+        )
+        .expect("coordination witness inventory");
+    inventory
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("coordination witness objects")
+        .collect::<Result<_, _>>()
+        .expect("complete coordination witness")
+}
+
+/// The v124 definition v127 replaced, from its own published migration.
+fn published_v124_reservation_trigger() -> &'static str {
+    let mut statements = include_str!("../../src/store/background_jobs_viewer_analysis.sql")
+        .split("-- next statement")
+        .filter(|statement| {
+            statement.contains(&format!(
+                "CREATE TRIGGER IF NOT EXISTS {REPLACED_RESERVATION_TRIGGER}\n"
+            ))
+        });
+    let statement = statements
+        .next()
+        .expect("published v124 reservation trigger");
+    assert!(
+        statements.next().is_none(),
+        "one published v124 reservation trigger"
+    );
+    statement
+}
+
+/// Plan the rewind of an owned, empty v127/v128 tail to published v126.
+/// Coordination roles, interests, designations and every v3 copy index row
+/// refuse; the v124 claim reservation trigger and the managed v5 view return.
+fn coordination_tail_rewind_plan(connection: &rusqlite::Connection) -> Option<String> {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture coordination ordinal");
+    if version <= 126 {
+        return None;
+    }
+    assert!(
+        matches!(version, 127 | 128),
+        "only published coordination tails may be rewound"
+    );
+    let expected = coordination_tail_witness();
+    let names = expected
+        .iter()
+        .map(|(_, name, _)| format!("'{}'", name.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let installed: Vec<(String, String, String)> = connection
+        .prepare(&format!(
+            "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL
+              AND (name IN ({names}) OR tbl_name IN ({names})) ORDER BY type,name"
+        ))
+        .expect("coordination fixture inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("coordination fixture objects")
+        .collect::<Result<_, _>>()
+        .expect("complete coordination fixture objects");
+    assert_eq!(
+        installed, expected,
+        "exact published coordination tail required"
+    );
+    let counts = expected
+        .iter()
+        .filter(|(kind, _, _)| kind == "table")
+        .map(|(_, name, _)| {
+            let count: i64 = connection
+                .query_row(
+                    &format!(r#"SELECT count(*) FROM "{}""#, name.replace('"', r#""""#)),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("coordination tail accepted data inventory");
+            (name.clone(), count)
+        })
+        .collect::<Vec<_>>();
+    let expected_counts = expected
+        .iter()
+        .filter(|(kind, _, _)| kind == "table")
+        .map(|(_, name, _)| {
+            (
+                name.clone(),
+                i64::from(name == "analysis_coordination_schema"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        counts, expected_counts,
+        "coordination roles, designations or copy index rows must not be discarded"
+    );
+    let marker: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM analysis_coordination_schema WHERE singleton=1 AND version=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("coordination tail exact marker");
+    assert_eq!(
+        marker, 1,
+        "coordination tail requires its exact singleton marker"
+    );
+    let managed_version = if version == 128 { 6 } else { 5 };
+    assert_eq!(
+        managed_fixture_rows(connection),
+        managed_fixture_rows(&managed_fixture_connection(managed_version)),
+        "coordination tail requires its exact published managed generation"
+    );
+    let managed_marker: (i64, i64) = connection
+        .query_row(
+            "SELECT count(*),count(*) FILTER (WHERE singleton=1 AND version=?1) FROM subtitle_managed_schema",
+            [managed_version],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("coordination tail managed marker");
+    assert_eq!(
+        managed_marker,
+        (1, 1),
+        "managed generation marker must match the coordination ordinal"
+    );
+    let mut statements = Vec::new();
+    for kind in ["trigger", "table"] {
+        for (_, name, _) in expected
+            .iter()
+            .filter(|(object_kind, _, _)| object_kind == kind)
+        {
+            statements.push(format!(
+                "DROP {} \"{}\";",
+                kind.to_ascii_uppercase(),
+                name.replace('"', "\"\"")
+            ));
+        }
+    }
+    statements.push(published_v124_reservation_trigger().to_owned());
+    if managed_version == 6 {
+        statements
+            .push(include_str!("../../src/store/subtitle_managed_resources_v5.sql").to_owned());
+    }
+    statements.push("PRAGMA user_version=126;".to_owned());
+    Some(statements.join("\n"))
+}
+
+/// Run `body` inside one savepoint: a refusal anywhere in it leaves the
+/// fixture exactly as it was, even inside an outer fixture transaction.
+pub(crate) fn within_fixture_savepoint(connection: &rusqlite::Connection, body: impl FnOnce()) {
+    connection
+        .execute_batch("SAVEPOINT coordination_fixture;")
+        .expect("open fixture savepoint");
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(()) => connection
+            .execute_batch("RELEASE coordination_fixture;")
+            .expect("release fixture savepoint"),
+        Err(refusal) => {
+            connection
+                .execute_batch("ROLLBACK TO coordination_fixture; RELEASE coordination_fixture;")
+                .expect("roll back refused fixture rewind");
+            std::panic::resume_unwind(refusal);
+        }
+    }
+}
+
+/// Rewind an owned, empty v127/v128 coordination tail to published v126;
+/// a fixture already at or below v126 is left alone. The caller owns
+/// atomicity (see [`within_fixture_savepoint`]).
+pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
+    if let Some(plan) = coordination_tail_rewind_plan(connection) {
+        connection
+            .execute_batch(&plan)
+            .expect("published coordination tail rewind");
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn validated_empty_source_tail_removal(connection: &rusqlite::Connection) -> String {
     source_extension_rewind_plan(connection, false)
 }
 
 pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Connection) {
-    let statements = source_extension_rewind_plan(connection, true);
-    let sql = format!(
-        "SAVEPOINT source_extension_fixture; {statements} RELEASE source_extension_fixture;"
-    );
-    if let Err(error) = connection.execute_batch(&sql) {
-        connection
-            .execute_batch(
-                "ROLLBACK TO source_extension_fixture; RELEASE source_extension_fixture;",
-            )
-            .expect("rollback failed source fixture rewind");
-        panic!("atomic source fixture rewind: {error}");
-    }
+    within_fixture_savepoint(connection, || {
+        rewind_empty_coordination_tail_to_v126(connection);
+        let statements = source_extension_rewind_plan(connection, true);
+        if let Err(error) = connection.execute_batch(&statements) {
+            panic!("atomic source fixture rewind: {error}");
+        }
+    });
 }

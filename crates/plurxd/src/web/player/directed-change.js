@@ -1190,7 +1190,7 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
 // came to drop the burned subtitle, and `vod` would have gone the same way.
 //
 // `wantSec` is where the viewer expects to be in film time. Every HLS response
-// is now the whole immutable title, so the media element seeks there directly.
+// maps through this response's source origin onto the item's local clock.
 // The returned absolute position is also what the stall watchdog is armed with.
 function attachSession(v, t, info, wantSec){
   clearEffectiveProcessing(t);
@@ -1209,7 +1209,8 @@ function attachSession(v, t, info, wantSec){
     t.meta={...(t.meta||{}),fileContext:t.fileContext};
   }
   t.streamId=null;
-  t.vod=!!info.vod;
+  t.vod=!!info.vod&&t.offset===0;
+  t.rangePresentation=!t.vod;
   if(Array.isArray(info.ladder)&&info.ladder.length) t.ladder=info.ladder;
   t.qualityCandidates=Array.isArray(info.quality_candidates)?info.quality_candidates:null;
   t.measuredCandidateOutputs=Array.isArray(info.measured_candidate_outputs)?info.measured_candidate_outputs:null;
@@ -1242,12 +1243,15 @@ function attachSession(v, t, info, wantSec){
   // MEDIA-BADGES-PLAN.md requires the chip and the panel row to agree.
   t.continuousQualityBootstrap=info.continuous_quality||null;
   t.probeUrl=info.playlist_url;
-  const into = t.vod ? Math.max(0, wantSec||0) : 0;
+  const into = Math.max(0,(Number(wantSec)||0)-(t.offset||0));
   t.controlPositionHintSec=(t.offset||0)+into;
   attachHls(v, info.playlist_url, into);
   startPlaybackControl(v,t,info.control||null);
   t.effectiveProcessing=effectiveHdrProcessing(info.effective_processing,
     t.controlReporter?.bootstrap?.generation,info.delivered_dynamic_range);
+  // A new session has no skipped upgrade yet. Without this, the first control
+  // exchange saw undefined -> null as a change and repainted the panel.
+  t.processingSkip=null;
   if(t===PLAYER) renderPlayerInfo();
   markPlaybackControlSeekExecuted(t,wantSec||0);
   return into + (t.offset||0);

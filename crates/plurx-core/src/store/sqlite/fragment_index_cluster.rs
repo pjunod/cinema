@@ -942,6 +942,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                             AND component <> 'subtitle_source' AND attempts < ?2
                             AND state = 'queued' AND not_before_ms <= ?3
                             AND (?5 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?5)
+                            AND pipeline_version NOT LIKE 'coordination-contract:%'
                             AND {capacity} AND {viewer} AND {exclusion}
                           ORDER BY {order} LIMIT 1"
                     ),
@@ -968,6 +969,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                   WHERE request_id = ?4 AND fence = ?5
                     AND state = 'queued' AND not_before_ms <= ?3
                     AND (?6 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?6)
+                            AND pipeline_version NOT LIKE 'coordination-contract:%'
                     AND {capacity} AND {viewer}"),
                 params![
                     node_id,

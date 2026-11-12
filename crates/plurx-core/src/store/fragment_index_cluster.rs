@@ -2938,6 +2938,410 @@ pub fn decode_cluster_fragment_index_blob(
     Ok(index)
 }
 
+/// Version of the canonical index-planning observations, not an engine version.
+/// Bump when timing, selected-track, conversion, init or row semantics change.
+pub const FRAGMENT_INDEX_CONTRACT: u32 = 1;
+const V3_BLOB_MAGIC: &[u8; 8] = b"PLRXIDX3";
+const V3_BLOB_FORMAT_VERSION: u16 = 3;
+const V3_ROW_BYTES: usize = 28;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FragmentIndexOutputIdentity {
+    pub contract_version: u32,
+    /// Digest of planning observations; this is not a media-sample digest.
+    pub keyframe_table_sha256: String,
+}
+
+/// Execution provenance never participates in the v3 artifact key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FragmentIndexEngineProvenance {
+    pub engine_sha256: String,
+    pub pipeline_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FragmentIndexProvenance {
+    LegacyV2 {
+        pipeline_sha256: String,
+    },
+    OutputV3 {
+        identity: FragmentIndexOutputIdentity,
+        engine: FragmentIndexEngineProvenance,
+    },
+}
+
+/// New consumers must inspect provenance and explicitly bind the current
+/// attested source before bridging into a file-keyed local index store.
+/// V2 retains its historical neutral pipeline fingerprint; V3 has no legacy
+/// argv fingerprint and leaves that field empty, never filled with a contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedFragmentIndex {
+    pub index: FragmentIndex,
+    pub provenance: FragmentIndexProvenance,
+}
+
+/// A dual reader must supply the identity expected for each permitted format.
+/// Omitting one rejects that format; a v2 pipeline never grants v3 adoption.
+pub struct FragmentIndexBlobExpectations<'a> {
+    pub source_sha256: &'a str,
+    pub legacy_pipeline_sha256: Option<&'a str>,
+    pub output_identity: Option<&'a FragmentIndexOutputIdentity>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V3BlobHeader {
+    segplan_version: u32,
+    timescale: u32,
+    init_sha256: String,
+    init_contract_sha256: String,
+    promotion: PromotionInputs,
+    parameter_sets_constant: bool,
+    source_sha256: String,
+    output_identity: FragmentIndexOutputIdentity,
+    engine: FragmentIndexEngineProvenance,
+    rows: usize,
+}
+
+fn v3_error(message: &str) -> StoreError {
+    StoreError::Task(format!("v3 fragment-index {message}"))
+}
+
+fn v3_portable_promotion(
+    index: &FragmentIndex,
+    source_sha256: &str,
+) -> Result<PromotionInputs, StoreError> {
+    let mut promotion = index.promotion.clone();
+    if let Some(proof) = promotion.hevc_configuration.as_mut() {
+        // Exactly the v2 writer's content-binding rule: no inferred proof and
+        // no case-insensitive substitute for the supplied attestation.
+        if proof.source_sha256.as_deref() != Some(source_sha256) {
+            return Err(v3_error("HEVC proof lacks full source attestation"));
+        }
+        proof.source_object_version.clear();
+        proof.source_node_id.clear();
+        proof.source_sha256 = Some(source_sha256.to_ascii_lowercase());
+    }
+    Ok(promotion)
+}
+
+// Stable typed encoding of promotion's complete serialized shape, including
+// DolbyVisionRecord's private retained raw bytes. Object keys are explicitly
+// sorted; no serde_json map iteration order or JSON whitespace is hashed.
+// Every node has a type tag, integer width, and length-delimited children.
+fn hash_v3_promotion_value(
+    digest: &mut Sha256,
+    value: &serde_json::Value,
+) -> Result<(), StoreError> {
+    use serde_json::Value;
+    match value {
+        Value::Null => digest.update([0]),
+        Value::Bool(value) => digest.update([1, u8::from(*value)]),
+        Value::Number(value) => {
+            if let Some(value) = value.as_u64() {
+                digest.update([2]);
+                digest.update(value.to_be_bytes());
+            } else if let Some(value) = value.as_i64() {
+                digest.update([3]);
+                digest.update(value.to_be_bytes());
+            } else {
+                return Err(v3_error("promotion contains a non-integer number"));
+            }
+        }
+        Value::String(value) => {
+            digest.update([4]);
+            update_field(digest, value.as_bytes());
+        }
+        Value::Array(values) => {
+            digest.update([5]);
+            digest.update((values.len() as u64).to_be_bytes());
+            for value in values {
+                hash_v3_promotion_value(digest, value)?;
+            }
+        }
+        Value::Object(values) => {
+            digest.update([6]);
+            digest.update((values.len() as u64).to_be_bytes());
+            let mut fields: Vec<_> = values.iter().collect();
+            fields.sort_unstable_by_key(|(left, _)| *left);
+            for (key, value) in fields {
+                update_field(digest, key.as_bytes());
+                hash_v3_promotion_value(digest, value)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Canonical planning identity of a complete index. All row fields are hashed
+/// in order with full-width duration, timescale, semantic init and portable promotion.
+/// Worker-local SourceIdentity and engine provenance are deliberately absent.
+/// The caller supplies the freshly observed `copy_video_init_contract_sha256`;
+/// raw init bytes remain provenance and do not identify the output contract.
+/// This measures planning equivalence, not cryptographic sample equivalence.
+pub fn cluster_fragment_index_output_identity(
+    index: &FragmentIndex,
+    source_sha256: &str,
+    init_contract_sha256: &str,
+) -> Result<FragmentIndexOutputIdentity, StoreError> {
+    if index.version != SEGPLAN_VERSION
+        || index.timescale == 0
+        || index.rows.is_empty()
+        || !is_sha256(&index.init_sha256)
+        || !is_sha256(source_sha256)
+        || !is_sha256(init_contract_sha256)
+    {
+        return Err(v3_error("has invalid planning observations"));
+    }
+    let promotion = v3_portable_promotion(index, source_sha256)?;
+    let mut digest = Sha256::new();
+    digest.update(b"plurx/fragment-index/planning-table/v3\0");
+    digest.update(FRAGMENT_INDEX_CONTRACT.to_be_bytes());
+    digest.update(index.version.to_be_bytes());
+    digest.update(index.timescale.to_be_bytes());
+    update_field(
+        &mut digest,
+        init_contract_sha256.to_ascii_lowercase().as_bytes(),
+    );
+    digest.update([u8::from(index.parameter_sets_constant)]);
+    let value = serde_json::to_value(&promotion)
+        .map_err(|error| StoreError::Task(format!("encoding v3 promotion: {error}")))?;
+    hash_v3_promotion_value(&mut digest, &value)?;
+    digest.update((index.rows.len() as u64).to_be_bytes());
+    for row in &index.rows {
+        digest.update(row.dts.to_be_bytes());
+        digest.update(row.duration.to_be_bytes());
+        digest.update(row.bytes.to_be_bytes());
+        digest.update(row.video_bytes.to_be_bytes());
+        digest.update([class_code(row.class)]);
+    }
+    Ok(FragmentIndexOutputIdentity {
+        contract_version: FRAGMENT_INDEX_CONTRACT,
+        keyframe_table_sha256: hex::encode(digest.finalize()),
+    })
+}
+
+/// A v3 key needs origin catalog identity and full source attestation. Opaque
+/// per-node object versions, size/mtime and engine provenance are not keys.
+/// The caller must establish complete source attestation before publication.
+pub fn cluster_fragment_index_v3_key(
+    catalog_namespace: &str,
+    file_id: i64,
+    source_sha256: &str,
+    output: &FragmentIndexOutputIdentity,
+) -> Option<String> {
+    if catalog_namespace.trim().is_empty()
+        || catalog_namespace.len() > 256
+        || file_id <= 0
+        || !is_sha256(source_sha256)
+        || output.contract_version == 0
+        || !is_sha256(&output.keyframe_table_sha256)
+    {
+        return None;
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"plurx/fragment-index/cache-key/v3\0");
+    digest.update(V3_BLOB_FORMAT_VERSION.to_be_bytes());
+    update_field(&mut digest, catalog_namespace.as_bytes());
+    digest.update(file_id.to_be_bytes());
+    update_field(&mut digest, source_sha256.to_ascii_lowercase().as_bytes());
+    digest.update(output.contract_version.to_be_bytes());
+    update_field(
+        &mut digest,
+        output.keyframe_table_sha256.to_ascii_lowercase().as_bytes(),
+    );
+    Some(hex::encode(digest.finalize()))
+}
+
+/// Additive writer: legacy v2 functions and bytes retain their exact meaning.
+pub fn encode_cluster_fragment_index_blob_v3(
+    index: &FragmentIndex,
+    source_sha256: &str,
+    init_contract_sha256: &str,
+    engine: &FragmentIndexEngineProvenance,
+) -> Result<Vec<u8>, StoreError> {
+    if !is_sha256(&engine.engine_sha256) || !is_sha256(&engine.pipeline_sha256) {
+        return Err(v3_error("has invalid engine provenance"));
+    }
+    let output_identity =
+        cluster_fragment_index_output_identity(index, source_sha256, init_contract_sha256)?;
+    let header = V3BlobHeader {
+        segplan_version: index.version,
+        timescale: index.timescale,
+        init_sha256: index.init_sha256.to_ascii_lowercase(),
+        init_contract_sha256: init_contract_sha256.to_ascii_lowercase(),
+        promotion: v3_portable_promotion(index, source_sha256)?,
+        parameter_sets_constant: index.parameter_sets_constant,
+        source_sha256: source_sha256.to_ascii_lowercase(),
+        output_identity,
+        engine: FragmentIndexEngineProvenance {
+            engine_sha256: engine.engine_sha256.to_ascii_lowercase(),
+            pipeline_sha256: engine.pipeline_sha256.to_ascii_lowercase(),
+        },
+        rows: index.rows.len(),
+    };
+    let header = serde_json::to_vec(&header)
+        .map_err(|error| StoreError::Task(format!("encoding v3 index header: {error}")))?;
+    let capacity = index
+        .rows
+        .len()
+        .checked_mul(V3_ROW_BYTES)
+        .and_then(|bytes| bytes.checked_add(header.len()))
+        .and_then(|bytes| bytes.checked_add(14))
+        .filter(|bytes| *bytes <= MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES)
+        .ok_or_else(|| v3_error("blob exceeds hard limit"))?;
+    let mut blob = Vec::with_capacity(capacity);
+    blob.extend_from_slice(V3_BLOB_MAGIC);
+    blob.extend_from_slice(&V3_BLOB_FORMAT_VERSION.to_be_bytes());
+    blob.extend_from_slice(
+        &u32::try_from(header.len())
+            .map_err(|_| v3_error("header is too large"))?
+            .to_be_bytes(),
+    );
+    blob.extend_from_slice(&header);
+    for row in &index.rows {
+        blob.extend_from_slice(&row.dts.to_le_bytes());
+        blob.extend_from_slice(&row.duration.to_le_bytes());
+        blob.extend_from_slice(&row.bytes.to_le_bytes());
+        blob.extend_from_slice(&row.video_bytes.to_le_bytes());
+        blob.push(class_code(row.class));
+        blob.extend_from_slice(&[0, 0, 0]);
+    }
+    Ok(blob)
+}
+
+/// Decode only v3, requiring independently expected source/output identities.
+/// Engine provenance is returned, never required to equal the local engine.
+pub fn decode_cluster_fragment_index_blob_v3(
+    blob: &[u8],
+    expected_source_sha256: &str,
+    expected_output: &FragmentIndexOutputIdentity,
+) -> Result<DecodedFragmentIndex, StoreError> {
+    if blob.len() < 14 || blob.len() > MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES {
+        return Err(v3_error("has invalid blob size"));
+    }
+    if &blob[..8] != V3_BLOB_MAGIC
+        || u16::from_be_bytes(blob[8..10].try_into().expect("two bytes")) != V3_BLOB_FORMAT_VERSION
+    {
+        return Err(v3_error("has unsupported magic/version"));
+    }
+    let header_len = u32::from_be_bytes(blob[10..14].try_into().expect("four bytes")) as usize;
+    let rows_offset = 14_usize
+        .checked_add(header_len)
+        .filter(|offset| *offset <= blob.len())
+        .ok_or_else(|| v3_error("has truncated header"))?;
+    let header: V3BlobHeader = serde_json::from_slice(&blob[14..rows_offset])
+        .map_err(|error| StoreError::Task(format!("decoding v3 index header: {error}")))?;
+    // In particular, reject unrecognized nested promotion fields instead of
+    // deserializing them away under an unchanged planning contract version.
+    let canonical_header = serde_json::to_vec(&header)
+        .map_err(|error| StoreError::Task(format!("validating v3 index header: {error}")))?;
+    if canonical_header != blob[14..rows_offset] {
+        return Err(v3_error(
+            "header is noncanonical or contains unknown fields",
+        ));
+    }
+    if header.segplan_version != SEGPLAN_VERSION
+        || header.timescale == 0
+        || header.rows == 0
+        || !is_sha256(&header.init_sha256)
+        || !is_sha256(&header.init_contract_sha256)
+        || !is_sha256(expected_source_sha256)
+        || !is_sha256(&header.source_sha256)
+        || !header
+            .source_sha256
+            .eq_ignore_ascii_case(expected_source_sha256)
+        || header.output_identity.contract_version != FRAGMENT_INDEX_CONTRACT
+        || header.output_identity.contract_version != expected_output.contract_version
+        || !is_sha256(&header.output_identity.keyframe_table_sha256)
+        || !header
+            .output_identity
+            .keyframe_table_sha256
+            .eq_ignore_ascii_case(&expected_output.keyframe_table_sha256)
+        || !is_sha256(&header.engine.engine_sha256)
+        || !is_sha256(&header.engine.pipeline_sha256)
+    {
+        return Err(v3_error("identity mismatch"));
+    }
+    if let Some(proof) = &header.promotion.hevc_configuration {
+        if !proof.source_object_version.is_empty()
+            || !proof.source_node_id.is_empty()
+            || proof.source_sha256.as_deref() != Some(header.source_sha256.as_str())
+        {
+            return Err(v3_error("contains unbound or worker-local HEVC proof"));
+        }
+    }
+    let packed = &blob[rows_offset..];
+    if header.rows.checked_mul(V3_ROW_BYTES) != Some(packed.len()) {
+        return Err(v3_error("row count mismatch"));
+    }
+    let mut rows = Vec::with_capacity(header.rows);
+    for chunk in packed.chunks_exact(V3_ROW_BYTES) {
+        let class = class_from_code(chunk[24]).ok_or_else(|| v3_error("has invalid cut class"))?;
+        if chunk[25..28] != [0, 0, 0] {
+            return Err(v3_error("has nonzero reserved row bytes"));
+        }
+        rows.push(IndexRow {
+            dts: u64::from_le_bytes(chunk[0..8].try_into().expect("eight bytes")),
+            duration: u64::from_le_bytes(chunk[8..16].try_into().expect("eight bytes")),
+            bytes: u32::from_le_bytes(chunk[16..20].try_into().expect("four bytes")),
+            video_bytes: u32::from_le_bytes(chunk[20..24].try_into().expect("four bytes")),
+            class,
+        });
+    }
+    let mut index = FragmentIndex::new(
+        header.timescale,
+        rows,
+        header.init_sha256,
+        SourceIdentity::new(0, 0, ""),
+    );
+    index.promotion = header.promotion;
+    index.parameter_sets_constant = header.parameter_sets_constant;
+    let observed = cluster_fragment_index_output_identity(
+        &index,
+        &header.source_sha256,
+        &header.init_contract_sha256,
+    )?;
+    if observed != header.output_identity {
+        return Err(v3_error("planning-table digest mismatch"));
+    }
+    Ok(DecodedFragmentIndex {
+        index,
+        provenance: FragmentIndexProvenance::OutputV3 {
+            identity: header.output_identity,
+            engine: header.engine,
+        },
+    })
+}
+
+/// Explicit dual reader. The historical v2 decoder still rejects v3 blobs.
+pub fn decode_cluster_fragment_index_blob_with_provenance(
+    blob: &[u8],
+    expected: &FragmentIndexBlobExpectations<'_>,
+) -> Result<DecodedFragmentIndex, StoreError> {
+    match blob.get(..8) {
+        Some(magic) if magic == BLOB_MAGIC => {
+            let pipeline = expected
+                .legacy_pipeline_sha256
+                .ok_or_else(|| v3_error("v2 provenance expectation missing"))?;
+            let index = decode_cluster_fragment_index_blob(blob, expected.source_sha256, pipeline)?;
+            let provenance = FragmentIndexProvenance::LegacyV2 {
+                pipeline_sha256: index.source.argv_fingerprint.clone(),
+            };
+            Ok(DecodedFragmentIndex { index, provenance })
+        }
+        Some(magic) if magic == V3_BLOB_MAGIC => {
+            let output = expected
+                .output_identity
+                .ok_or_else(|| v3_error("output identity expectation missing"))?;
+            decode_cluster_fragment_index_blob_v3(blob, expected.source_sha256, output)
+        }
+        _ => Err(v3_error("has unsupported blob magic")),
+    }
+}
+
 pub fn cluster_fragment_index_blob_sha256(blob: &[u8]) -> String {
     hex::encode(Sha256::digest(blob))
 }
@@ -3257,5 +3661,356 @@ mod tests {
             encode_cluster_fragment_index_blob(&first, &source, &pipeline).expect("first"),
             encode_cluster_fragment_index_blob(&second, &source, &pipeline).expect("second")
         );
+    }
+
+    fn codec_index() -> FragmentIndex {
+        FragmentIndex::new(
+            90_000,
+            vec![IndexRow {
+                dts: 12,
+                duration: 3_003,
+                bytes: 45,
+                video_bytes: 31,
+                class: CutClass::CleanIdr,
+            }],
+            digest('c'),
+            SourceIdentity::new(123, 456, "argv"),
+        )
+    }
+
+    fn codec_engine() -> FragmentIndexEngineProvenance {
+        FragmentIndexEngineProvenance {
+            engine_sha256: digest('d'),
+            pipeline_sha256: digest('b'),
+        }
+    }
+
+    #[test]
+    fn v2_blob_remains_byte_compatible_with_legacy_fixture() {
+        let blob = encode_cluster_fragment_index_blob(&codec_index(), &digest('a'), &digest('b'))
+            .expect("legacy encode");
+        // Fixed PLRXIDX2/segplan-3 fixture, independently packed with a
+        // 24-byte row and the original ordered header. V3 never rewrites it.
+        assert_eq!(
+            cluster_fragment_index_blob_sha256(&blob),
+            "50696f0867150955850aabaa4d1cd1305d84a3d571ce8d9da9f0c051f93d9d6c"
+        );
+        let decoded = decode_cluster_fragment_index_blob_with_provenance(
+            &blob,
+            &FragmentIndexBlobExpectations {
+                source_sha256: &digest('a'),
+                legacy_pipeline_sha256: Some(&digest('b')),
+                output_identity: None,
+            },
+        )
+        .expect("explicit legacy reader");
+        assert_eq!(decoded.index.source, SourceIdentity::new(0, 0, digest('b')));
+        assert_eq!(
+            decoded.provenance,
+            FragmentIndexProvenance::LegacyV2 {
+                pipeline_sha256: digest('b'),
+            }
+        );
+    }
+
+    #[test]
+    fn v3_round_trips_full_width_rows_without_legacy_identity_aliasing() {
+        let source = digest('a');
+        let mut index = codec_index();
+        index.rows[0].duration = u64::from(u32::MAX) + 123;
+        let output = cluster_fragment_index_output_identity(&index, &source, &digest('9'))
+            .expect("identity");
+        let engine = codec_engine();
+        let blob = encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &engine)
+            .expect("v3 encode");
+        let decoded = decode_cluster_fragment_index_blob_with_provenance(
+            &blob,
+            &FragmentIndexBlobExpectations {
+                source_sha256: &source,
+                legacy_pipeline_sha256: Some(&engine.pipeline_sha256),
+                output_identity: Some(&output),
+            },
+        )
+        .expect("dual reader");
+        assert_eq!(decoded.index.rows, index.rows);
+        assert_eq!(decoded.index.source, SourceIdentity::new(0, 0, ""));
+        assert_eq!(
+            decoded.provenance,
+            FragmentIndexProvenance::OutputV3 {
+                identity: output,
+                engine: engine.clone(),
+            }
+        );
+        assert!(
+            decode_cluster_fragment_index_blob(&blob, &source, &engine.pipeline_sha256).is_err()
+        );
+        assert!(
+            decode_cluster_fragment_index_blob_with_provenance(
+                &blob,
+                &FragmentIndexBlobExpectations {
+                    source_sha256: &source,
+                    legacy_pipeline_sha256: Some(&engine.pipeline_sha256),
+                    output_identity: None,
+                },
+            )
+            .is_err(),
+            "legacy pipeline identity cannot authorize v3 adoption"
+        );
+        let legacy = encode_cluster_fragment_index_blob(&index, &source, &engine.pipeline_sha256)
+            .expect("legacy encoding retains legacy semantics");
+        assert_eq!(
+            decode_cluster_fragment_index_blob(&legacy, &source, &engine.pipeline_sha256)
+                .expect("legacy decoding")
+                .rows[0]
+                .duration,
+            u64::from(u32::MAX),
+        );
+    }
+
+    #[test]
+    fn v3_planning_identity_covers_every_row_field_and_init_contract() {
+        let source = digest('a');
+        let index = codec_index();
+        let baseline = cluster_fragment_index_output_identity(&index, &source, &digest('9'))
+            .expect("baseline");
+        let mut changed: Vec<FragmentIndex> = vec![index.clone(); 12];
+        changed[0].rows[0].dts += 1;
+        changed[1].rows[0].duration += 1;
+        changed[2].rows[0].bytes += 1;
+        changed[3].rows[0].video_bytes += 1;
+        changed[4].rows[0].class = CutClass::CleanCra;
+        changed[5].timescale += 1;
+        changed[6].init_sha256 = digest('e');
+        changed[7].parameter_sets_constant = false;
+        changed[8].promotion.parameter_sets = vec![vec![32, 1]];
+        changed[9].promotion.dvh1_parameter_sets_malformed = true;
+        changed[10].promotion.indexed_hdr10_metadata = true;
+        changed[11].promotion.dolby_vision = Some(
+            crate::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("DV record"),
+        );
+        for (field, index) in changed.iter().enumerate() {
+            let output = cluster_fragment_index_output_identity(index, &source, &digest('9'))
+                .expect("changed");
+            if field == 6 {
+                assert_eq!(
+                    output, baseline,
+                    "raw muxer init changes are provenance only"
+                );
+            } else {
+                assert_ne!(output, baseline, "planning field {field} must participate");
+            }
+        }
+        assert_ne!(
+            cluster_fragment_index_output_identity(&index, &source, &digest('8'))
+                .expect("semantic change"),
+            baseline,
+            "semantic decoder/timing init changes must rekey"
+        );
+        assert!(
+            cluster_fragment_index_output_identity(&index, &source, "missing semantic digest")
+                .is_err()
+        );
+        let mut reordered = index.clone();
+        reordered.rows.push(IndexRow {
+            dts: 99,
+            ..index.rows[0].clone()
+        });
+        let ordered = cluster_fragment_index_output_identity(&reordered, &source, &digest('9'))
+            .expect("ordered");
+        reordered.rows.reverse();
+        assert_ne!(
+            cluster_fragment_index_output_identity(&reordered, &source, &digest('9'))
+                .expect("reordered"),
+            ordered
+        );
+        let mut local = index;
+        local.source = SourceIdentity::new(999, 888, "another-worker");
+        assert_eq!(
+            cluster_fragment_index_output_identity(&local, &source, &digest('9')).expect("local"),
+            baseline
+        );
+    }
+
+    #[test]
+    fn v3_raw_init_changes_preserve_semantic_identity_and_raw_provenance() {
+        let source = digest('a');
+        let semantic = digest('9');
+        let mut index = codec_index();
+        let identity =
+            cluster_fragment_index_output_identity(&index, &source, &semantic).expect("identity");
+        let original =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &semantic, &codec_engine())
+                .expect("original");
+        index.init_sha256 = digest('e');
+        let changed =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &semantic, &codec_engine())
+                .expect("changed raw init");
+        assert_ne!(
+            cluster_fragment_index_blob_sha256(&original),
+            cluster_fragment_index_blob_sha256(&changed)
+        );
+        let decoded = decode_cluster_fragment_index_blob_v3(&changed, &source, &identity)
+            .expect("same semantic output");
+        assert_eq!(decoded.index.init_sha256, index.init_sha256);
+        assert_eq!(
+            cluster_fragment_index_output_identity(&decoded.index, &source, &semantic)
+                .expect("decoded identity"),
+            identity
+        );
+    }
+
+    #[test]
+    fn v3_key_is_engine_independent_and_contract_source_catalog_bound() {
+        let index = codec_index();
+        let source = digest('a');
+        let output = cluster_fragment_index_output_identity(&index, &source, &digest('9'))
+            .expect("identity");
+        let key = cluster_fragment_index_v3_key("catalog-one", 1, &source, &output).expect("key");
+        let first =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &codec_engine())
+                .expect("first");
+        let mut other_engine = codec_engine();
+        other_engine.engine_sha256 = digest('f');
+        other_engine.pipeline_sha256 = digest('e');
+        let second =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &other_engine)
+                .expect("second");
+        assert_ne!(first, second, "provenance remains in immutable blob bytes");
+        let decoded = decode_cluster_fragment_index_blob_v3(&second, &source, &output)
+            .expect("another engine can satisfy the same planning contract");
+        assert!(
+            matches!(decoded.provenance, FragmentIndexProvenance::OutputV3 { engine, .. } if engine == other_engine)
+        );
+        assert_eq!(
+            cluster_fragment_index_v3_key("catalog-one", 1, &source.to_ascii_uppercase(), &output),
+            Some(key.clone())
+        );
+        assert_ne!(
+            cluster_fragment_index_v3_key("catalog-two", 1, &source, &output),
+            Some(key.clone())
+        );
+        assert_ne!(
+            cluster_fragment_index_v3_key("catalog-one", 2, &source, &output),
+            Some(key.clone())
+        );
+        assert_ne!(
+            cluster_fragment_index_v3_key("catalog-one", 1, &digest('e'), &output),
+            Some(key.clone())
+        );
+        let mut successor = output.clone();
+        successor.contract_version += 1;
+        assert_ne!(
+            cluster_fragment_index_v3_key("catalog-one", 1, &source, &successor),
+            Some(key)
+        );
+        assert!(decode_cluster_fragment_index_blob_v3(&first, &source, &successor).is_err());
+        assert!(cluster_fragment_index_v3_key("", 1, &source, &output).is_none());
+    }
+
+    #[test]
+    fn v3_rejects_corrupt_rows_padding_unknown_fields_and_wrong_identities() {
+        let index = codec_index();
+        let source = digest('a');
+        let output = cluster_fragment_index_output_identity(&index, &source, &digest('9'))
+            .expect("identity");
+        let blob =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &codec_engine())
+                .expect("blob");
+        let row = blob.len() - V3_ROW_BYTES;
+        for offset in [0, 8, 16, 20, 24, 25] {
+            let mut corrupt = blob.clone();
+            corrupt[row + offset] ^= 1;
+            assert!(
+                decode_cluster_fragment_index_blob_v3(&corrupt, &source, &output).is_err(),
+                "row corruption at {offset}"
+            );
+        }
+        assert!(
+            decode_cluster_fragment_index_blob_v3(&blob[..blob.len() - 1], &source, &output)
+                .is_err()
+        );
+        assert!(decode_cluster_fragment_index_blob_v3(&blob, &digest('f'), &output).is_err());
+        let mut wrong_table = output.clone();
+        wrong_table.keyframe_table_sha256 = digest('f');
+        assert!(decode_cluster_fragment_index_blob_v3(&blob, &source, &wrong_table).is_err());
+        let header_len = u32::from_be_bytes(blob[10..14].try_into().expect("length")) as usize;
+        let mut header: serde_json::Value =
+            serde_json::from_slice(&blob[14..14 + header_len]).expect("header");
+        for semantic in [None, Some("invalid".to_owned()), Some(digest('8'))] {
+            let mut changed = header.clone();
+            if let Some(semantic) = semantic {
+                changed["init_contract_sha256"] = serde_json::json!(semantic);
+            } else {
+                changed
+                    .as_object_mut()
+                    .expect("object")
+                    .remove("init_contract_sha256");
+            }
+            let encoded = serde_json::to_vec(&changed).expect("changed header");
+            let mut corrupt = blob[..10].to_vec();
+            corrupt.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+            corrupt.extend_from_slice(&encoded);
+            corrupt.extend_from_slice(&blob[14 + header_len..]);
+            assert!(
+                decode_cluster_fragment_index_blob_v3(&corrupt, &source, &output).is_err(),
+                "missing, invalid or changed semantic init cannot inherit expected identity"
+            );
+        }
+        header["promotion"]["unknown_future_rule"] = serde_json::json!(true);
+        let header = serde_json::to_vec(&header).expect("modified header");
+        let mut unknown = blob[..10].to_vec();
+        unknown.extend_from_slice(&(header.len() as u32).to_be_bytes());
+        unknown.extend_from_slice(&header);
+        unknown.extend_from_slice(&blob[14 + header_len..]);
+        assert!(decode_cluster_fragment_index_blob_v3(&unknown, &source, &output).is_err());
+    }
+
+    #[test]
+    fn v3_portable_hevc_proof_never_adopts_local_custody() {
+        let mut index = codec_index();
+        let source = digest('a');
+        index.promotion.hevc_configuration = Some(crate::hevc_configuration::Proof {
+            revision: crate::hevc_configuration::REVISION,
+            source_node_id: "one".into(),
+            source_object_version: "held-one".into(),
+            source_sha256: Some(source.clone()),
+            stream_index: 0,
+            slices: 24,
+            refusal: None,
+        });
+        let output = cluster_fragment_index_output_identity(&index, &source, &digest('9'))
+            .expect("identity");
+        let first =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &codec_engine())
+                .expect("first");
+        let proof = index.promotion.hevc_configuration.as_mut().expect("proof");
+        proof.source_node_id = "two".into();
+        proof.source_object_version = "held-two".into();
+        assert_eq!(
+            first,
+            encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &codec_engine())
+                .expect("portable")
+        );
+        let decoded =
+            decode_cluster_fragment_index_blob_v3(&first, &source, &output).expect("decoded");
+        assert!(!decoded
+            .index
+            .promotion
+            .hevc_configuration
+            .expect("proof")
+            .permits_on_node("held-two", "two"));
+        index
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("proof")
+            .source_sha256 = None;
+        assert!(encode_cluster_fragment_index_blob_v3(
+            &index,
+            &source,
+            &digest('9'),
+            &codec_engine()
+        )
+        .is_err());
     }
 }

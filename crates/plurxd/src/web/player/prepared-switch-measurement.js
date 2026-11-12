@@ -200,6 +200,8 @@ function rollbackPreparedReplacement(p,state,successor){
   p.sessionId=predecessor.sessionId;
   p.probeUrl=predecessor.probeUrl;
   p.offset=predecessor.offset;
+  p.vod=predecessor.vod;
+  p.rangePresentation=predecessor.rangePresentation;
   p.method=predecessor.method;
   p.copyHls=predecessor.copyHls;
   p.autoHeight=predecessor.autoHeight;

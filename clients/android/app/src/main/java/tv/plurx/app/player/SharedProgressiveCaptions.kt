@@ -122,6 +122,7 @@ internal fun verifiedSharedCaptionSegment(bytes: ByteArray, ref: CaptionSegmentR
 internal class SharedProgressiveCaptions(
     api: () -> PlurxApi, private val scope: CoroutineScope,
     private val currentBinding: () -> SharedCaptionReadBinding?, private val player: () -> ExoPlayer,
+    private val mediaOriginMs: () -> Long = { 0L },
 ) {
     var assets: List<SharedCaptionAsset> by mutableStateOf(emptyList()); private set
     var selected: SharedCaptionAsset? by mutableStateOf(null); private set
@@ -185,7 +186,7 @@ internal class SharedProgressiveCaptions(
             while (current(g, read)) {
                 var waitMs = 5_000L
                 try {
-                    val at = player().currentPosition.coerceIn(0, asset.duration_ms)
+                    val at = successorFilmPositionMs(mediaOriginMs(), player().currentPosition).coerceIn(0, asset.duration_ms)
                     val value = reader.window(read, asset, at, cache)
                     if (!current(g, read)) return@launch
                     require(revision == null || captionCounter(value.manifest.manifest_revision) >= captionCounter(revision!!))
@@ -210,12 +211,12 @@ internal class SharedProgressiveCaptions(
         if (seeked) { selected?.let(::select); return }
         boundary?.cancel(); boundary = null
         if (selected == null || binding?.ordinarySubtitleSelected != false) { text = ""; return }
-        val at = player().currentPosition - offsetMs
+        val at = successorFilmPositionMs(mediaOriginMs(), player().currentPosition) - offsetMs
         text = window.textAt(at)
         val next = window.nextBoundary(at) ?: return
         val owner = player(); val g = generation
         boundary = owner.createMessage { _, _ -> if (g == generation && owner === player()) reconcile() }
-            .setLooper(owner.applicationLooper).setPosition(next + offsetMs).setDeleteAfterDelivery(true).send()
+            .setLooper(owner.applicationLooper).setPosition(successorAttachPositionMs(mediaOriginMs(), next + offsetMs)).setDeleteAfterDelivery(true).send()
     }
     fun setOffset(value: Long) { offsetMs = value.coerceIn(-15_000, 15_000); reconcile() }
     private fun clear() { boundary?.cancel(); boundary = null; cache = emptyMap(); window.clear(); text = "" }

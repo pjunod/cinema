@@ -297,7 +297,7 @@ internal fun capsDocument(
         }.let(::compactVideoEntries),
         audio = audio,
         containers = DIRECT_PLAY_CONTAINERS.split(','),
-        transports = listOf("progressive", "hls"),
+        transports = listOf("progressive", "hls", "hls-bounded-range-v1"),
         hls_hevc_sample_entries = hlsHevcSampleEntries,
         display = DisplayCaps(
             hdr = displayIsHdr(hdrTypes),

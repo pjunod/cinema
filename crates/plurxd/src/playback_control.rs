@@ -41,6 +41,7 @@ pub(crate) const VOD_LEASE_TIMEOUT_MS: u32 = 300_000;
 /// retained delivery evidence, not a playback or owner lease.
 pub(crate) const TERMINAL_ACK_REPLAY_TTL_MS: i64 = 60_000;
 
+pub(crate) const MAX_MEDIA_ORIGIN_MILLIS: i64 = 9_007_199_254_740_991;
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
 const MAX_OBSERVED_DOWNLOAD_BPS: u64 = 10_000_000_000_000;
 const MAX_ERROR_DETAIL_BYTES: usize = 512;
@@ -908,10 +909,9 @@ impl ActionAcknowledgement {
         if self.first_frame_unix_ms.is_some_and(|value| value <= 0) {
             return Err("acknowledgement.first_frame_unix_ms");
         }
-        if self
-            .committed_media_origin_ms
-            .is_some_and(|value| !(0..=MAX_MEDIA_MILLIS).contains(&value))
-        {
+        if self.committed_media_origin_ms.is_some_and(|value| {
+            !(-MAX_MEDIA_ORIGIN_MILLIS..=MAX_MEDIA_ORIGIN_MILLIS).contains(&value)
+        }) {
             return Err("acknowledgement.committed_media_origin_ms");
         }
         match self.state {
@@ -2143,7 +2143,7 @@ pub(crate) fn prepared_payload_is_valid(
         value.len() <= MAX_ACTION_ID_LEN && uuid::Uuid::parse_str(value).is_ok()
     }) && uuid::Uuid::parse_str(session_id).is_ok()
         && is_node_relative_playlist(playlist_url, session_id)
-        && (0..=MAX_MEDIA_MILLIS).contains(&media_origin_ms)
+        && (-MAX_MEDIA_ORIGIN_MILLIS..=MAX_MEDIA_ORIGIN_MILLIS).contains(&media_origin_ms)
         && effective_selection.is_valid()
 }
 
@@ -9434,6 +9434,42 @@ struct StartupPositionObservation {
     accepted_sequence: u64,
     position_ms: i64,
     timeline_sequence: u64,
+}
+
+/// Reuse the existing pure D1 presentation observation without exposing a
+/// session authority or creating another startup timer. Rendering alone is
+/// insufficient: accepted same-timeline progress must cross the D1 threshold.
+pub(crate) struct PresentedFrameMilestone(RollingStartupState);
+impl Default for PresentedFrameMilestone {
+    fn default() -> Self {
+        Self(RollingStartupState::new())
+    }
+}
+impl PresentedFrameMilestone {
+    pub(crate) fn activate_at(&mut self, now: Instant) {
+        self.0.activate_at(now);
+    }
+    pub(crate) fn observe_control(
+        &mut self,
+        now: Instant,
+        generation: &str,
+        owner_epoch: u64,
+        producer_attempt: u64,
+        accepted_sequence: u64,
+        demand: &PlaybackDemandSnapshot,
+    ) {
+        self.0.observe_control(
+            now,
+            generation,
+            owner_epoch,
+            producer_attempt,
+            accepted_sequence,
+            demand,
+        );
+    }
+    pub(crate) fn presented(&self) -> bool {
+        matches!(self.0, RollingStartupState::Presented)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

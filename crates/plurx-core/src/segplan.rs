@@ -37,6 +37,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::fmp4::{CutClass, CutPolicy, CutReason, PromotionInputs};
 
+/// Sparse canonical observations and exact source-clock normalization.
+pub mod companion;
+pub mod copy_cursor;
+pub mod observed_range;
+pub mod packet_clock;
+pub mod ranges;
+pub mod verified_copy;
+
 /// Bumped when a stored index or plan stops being readable by this binary.
 /// A persisted row from a newer version is discarded and rebuilt rather than
 /// misinterpreted — an index is always cheaper to rebuild than to get wrong.
@@ -607,11 +615,25 @@ impl IndexRow {
         let track = fragment
             .track(video.id)
             .ok_or("a fragment carried no video track")?;
+        // A row is an exact planning observation. Saturation would make
+        // distinct fragments indistinguishable and publish a false byte budget.
+        let bytes = u32::try_from(fragment.len())
+            .map_err(|_| "fragment wire bytes exceed the index row limit")?;
+        let video_bytes = track
+            .samples()
+            .try_fold(0u32, |total, sample| total.checked_add(sample.size))
+            .ok_or("video payload bytes exceed the index row limit")?;
+        let duration = track
+            .samples()
+            .try_fold(0u64, |total, sample| {
+                total.checked_add(u64::from(sample.duration))
+            })
+            .ok_or("video duration exceeds the index row limit")?;
         Ok(Self {
             dts: track.base_decode_time,
-            duration: fragment.video_duration(init),
-            bytes: u32::try_from(fragment.len()).unwrap_or(u32::MAX),
-            video_bytes: u32::try_from(track.byte_len()).unwrap_or(u32::MAX),
+            duration,
+            bytes,
+            video_bytes,
             class: crate::fmp4::classify(fragment, init),
         })
     }
@@ -906,57 +928,21 @@ pub fn plan_copy(
     tracks: &TrackDurations,
 ) -> SegmentPlan {
     let timescale = index.timescale.max(1);
-    let mut entries: Vec<PlanEntry> = Vec::new();
-    let mut pending_ticks: u64 = 0;
-    let mut pending_bytes: u64 = 0;
-    let mut pending_fragments: u32 = 0;
-    let mut pending_start: Option<u64> = None;
-
+    let mut cursor = copy_cursor::CopyPlanCursor::new(timescale, *policy, *tracks);
+    let mut entries = Vec::new();
     for row in &index.rows {
-        // Decide in front of the arriving fragment, exactly as
-        // `Segmenter::push` does: the fragment being examined becomes the
-        // FIRST of the next segment, never the last of this one.
-        let with_headroom = pending_bytes.saturating_add(tracks.headroom(pending_ticks, timescale));
-        let reason = policy.cut_before(
-            pending_ticks,
-            usize::try_from(with_headroom).unwrap_or(usize::MAX),
-            row.class,
-            entries.is_empty(),
-        );
-        if let Some(reason) = reason {
-            entries.push(PlanEntry {
-                index: entries.len() as u32,
-                kind: PlanEntryKind::Video,
-                start_ticks: pending_start.unwrap_or(0),
-                duration_ticks: pending_ticks,
-                est_bytes: with_headroom,
-                cut: reason.into(),
-                fragments: pending_fragments,
-            });
-            pending_ticks = 0;
-            pending_bytes = 0;
-            pending_fragments = 0;
-            pending_start = None;
+        if let Some(entry) = cursor
+            .push(row)
+            .expect("validated fragment index exceeds segment plan representation")
+        {
+            entries.push(entry);
         }
-        if pending_start.is_none() {
-            pending_start = Some(row.dts);
-        }
-        pending_ticks += row.duration;
-        pending_bytes += u64::from(row.bytes);
-        pending_fragments += 1;
     }
-
-    if pending_fragments > 0 {
-        let with_headroom = pending_bytes.saturating_add(tracks.headroom(pending_ticks, timescale));
-        entries.push(PlanEntry {
-            index: entries.len() as u32,
-            kind: PlanEntryKind::Video,
-            start_ticks: pending_start.unwrap_or(0),
-            duration_ticks: pending_ticks,
-            est_bytes: with_headroom,
-            cut: PlanCut::EndOfStream,
-            fragments: pending_fragments,
-        });
+    if let Some(entry) = cursor
+        .finish()
+        .expect("validated fragment index exceeds segment plan representation")
+    {
+        entries.push(entry);
     }
 
     append_audio_tail(&mut entries, tracks, policy, timescale);
@@ -1309,6 +1295,59 @@ pub fn discards_to(index: &FragmentIndex, landed_row: usize, entry: &PlanEntry) 
 mod tests {
     use super::{FragmentIndexOutcome, IndexOutcomeState, IndexRefusal, SourceIdentity};
     use crate::content_analysis::{IndexFailureCode, INDEX_FAILURE_POLICY_REVISION};
+
+    /// Oversized sample declarations must not become a seemingly exact
+    /// u32::MAX observation. No multi-gigabyte allocation is needed to exercise
+    /// the declaration boundary handed to the shared row extractor.
+    #[test]
+    fn canonical_row_rejects_payload_overflow_instead_of_saturating() {
+        use crate::fmp4::{FragmentReader, Unit};
+        let mut reader = FragmentReader::new();
+        reader.push(&crate::testfixtures::pipe("h264"));
+        let Some(Unit::Init(init)) = reader.next_unit().expect("fixture measurement") else {
+            panic!("fixture init");
+        };
+        let Some(Unit::Fragment(mut fragment)) = reader.next_unit().expect("fixture measurement")
+        else {
+            panic!("fixture fragment");
+        };
+        assert!(super::IndexRow::from_fragment(&fragment, &init).is_ok());
+        let video_id = init.video().expect("fixture measurement").id;
+        let track = fragment
+            .tracks
+            .iter_mut()
+            .find(|t| t.track_id == video_id)
+            .expect("fixture measurement");
+        let run = track
+            .runs
+            .iter_mut()
+            .find(|r| !r.samples.is_empty())
+            .expect("fixture measurement");
+        let mut sample = run.samples[0];
+        sample.size = u32::MAX;
+        run.samples = vec![sample];
+        let only_run = run.clone();
+        track.runs = vec![only_run];
+        // The representable boundary remains exact (even if the payload is
+        // malformed, classification is a separate concern).
+        assert_eq!(
+            super::IndexRow::from_fragment(&fragment, &init)
+                .expect("fixture measurement")
+                .video_bytes,
+            u32::MAX
+        );
+        let track = fragment
+            .tracks
+            .iter_mut()
+            .find(|t| t.track_id == video_id)
+            .expect("fixture measurement");
+        sample.size = 1;
+        track.runs[0].samples.push(sample);
+        assert_eq!(
+            super::IndexRow::from_fragment(&fragment, &init),
+            Err("video payload bytes exceed the index row limit")
+        );
+    }
 
     fn outcome(
         typed_retryable: Option<bool>,

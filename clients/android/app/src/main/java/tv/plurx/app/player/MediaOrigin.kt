@@ -14,7 +14,7 @@ internal const val MEDIA_ORIGIN_HEADER = "X-Plurx-Media-Origin-Ms"
 /** Resolve an HLS item's local-time-zero point onto the source timeline. */
 internal fun sessionMediaOriginMs(hls: HlsStart): Long = when {
     hls.vod -> 0L
-    hls.media_origin_ms != null -> hls.media_origin_ms.coerceAtLeast(0L)
+    hls.media_origin_ms != null -> hls.media_origin_ms
     hls.start_seconds.isFinite() ->
         (hls.start_seconds * 1_000.0).roundToLong().coerceAtLeast(0L)
     else -> 0L
@@ -39,8 +39,9 @@ internal fun sessionPlaybackTimeline(
     isVod: Boolean,
     requestedStartMs: Long,
 ): SessionPlaybackTimeline = SessionPlaybackTimeline(
-    baseMs = mediaOriginMs.coerceAtLeast(0L),
-    attachPositionMs = if (isVod) requestedStartMs.coerceAtLeast(0L) else 0L,
+    baseMs = mediaOriginMs,
+    attachPositionMs = if (isVod) requestedStartMs.coerceAtLeast(0L)
+        else successorAttachPositionMs(mediaOriginMs, requestedStartMs),
 )
 
 /** Map a freshly-created HLS session onto ExoPlayer's local timeline. */
@@ -64,7 +65,11 @@ internal fun sessionPlaybackTimeline(
 internal fun successorAttachPositionMs(
     mediaOriginMs: Long,
     filmPositionMs: Long,
-): Long = (filmPositionMs - mediaOriginMs.coerceAtLeast(0L)).coerceAtLeast(0L)
+): Long {
+    val film = filmPositionMs.coerceAtLeast(0L)
+    return if (mediaOriginMs < 0 && film > Long.MAX_VALUE + mediaOriginMs) Long.MAX_VALUE
+        else (film - mediaOriginMs).coerceAtLeast(0L)
+}
 
 /**
  * The successor's contiguous runway, back in film time.
@@ -75,7 +80,11 @@ internal fun successorAttachPositionMs(
 internal fun successorFilmPositionMs(
     mediaOriginMs: Long,
     playerPositionMs: Long,
-): Long = mediaOriginMs.coerceAtLeast(0L) + playerPositionMs.coerceAtLeast(0L)
+): Long {
+    val local = playerPositionMs.coerceAtLeast(0L)
+    return if (mediaOriginMs > 0 && local > Long.MAX_VALUE - mediaOriginMs) Long.MAX_VALUE
+        else (mediaOriginMs + local).coerceAtLeast(0L)
+}
 
 /** Resolve the player's local clock through the active delivery regime. */
 internal fun realMediaPositionMs(
@@ -90,7 +99,7 @@ internal fun realMediaPositionMs(
     return when {
         directTransport || sessionIsVod -> local
         progressiveTransport -> progressiveOriginMs.coerceAtLeast(0L) + local
-        else -> sessionBaseMs.coerceAtLeast(0L) + local
+        else -> successorFilmPositionMs(sessionBaseMs, local)
     }
 }
 
@@ -116,7 +125,7 @@ internal fun playerLocalPositionMs(
     return when {
         directTransport || sessionIsVod -> film
         progressiveTransport -> (film - progressiveOriginMs.coerceAtLeast(0L)).coerceAtLeast(0L)
-        else -> (film - sessionBaseMs.coerceAtLeast(0L)).coerceAtLeast(0L)
+        else -> successorAttachPositionMs(sessionBaseMs, film)
     }
 }
 
@@ -336,3 +345,25 @@ internal class ProgressiveMediaOrigin : TransferListener {
     /** Test seam: the window, drivable without Media3's types or a clock. */
     internal fun throughputWindowForTest(): ThroughputWindow = throughput
 }
+
+/**
+ * A whole-title attachment ending is the title's end, whatever the container
+ * header claims. A bounded range ends the title only once it reaches the
+ * title clock's duration; ENDLIST alone is insufficient.
+ */
+internal fun sharedTitleEnded(isVod: Boolean, filmPositionMs: Long, titleDurationMs: Long?): Boolean =
+    isVod || titleDurationMs?.takeIf { it > 0 }?.let { filmPositionMs >= it - 1_000L } == true
+
+/** Current player-local seek window expressed on the title clock. */
+internal fun sharedSeekableFilmRange(originMs: Long, itemDurationMs: Long?, seekable: Boolean): LongRange? =
+    itemDurationMs?.takeIf { seekable && it > 0 && (originMs <= 0 || it <= Long.MAX_VALUE - originMs) }
+        ?.let { duration ->
+            val from = originMs.coerceAtLeast(0L)
+            successorFilmPositionMs(originMs, duration).takeIf { it > from }?.let { from..it }
+        }
+
+
+/** Shared descriptors may complete a range without becoming whole-title VOD. */
+internal fun sharedFilmLocalVod(start: HlsStart): Boolean = start.vod && (start.media_origin_ms ?: 0L) == 0L
+internal fun sharedMediaOriginMs(start: HlsStart): Long =
+    sessionMediaOriginMs(start.copy(vod = sharedFilmLocalVod(start)))

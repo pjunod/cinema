@@ -11,6 +11,8 @@ pub(crate) const PREPARED_MIGRATION: &str = include_str!("subtitle_managed_resou
 pub(crate) const PREPARED_MIGRATION_VERSION: i64 = 123;
 pub(crate) const TARGETED_MIGRATION: &str = include_str!("subtitle_managed_resources_v5.sql");
 pub(crate) const TARGETED_MIGRATION_VERSION: i64 = 126;
+pub(crate) const PUBLISH_MIGRATION: &str = include_str!("subtitle_managed_resources_v6.sql");
+pub(crate) const PUBLISH_MIGRATION_VERSION: i64 = 128;
 pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources') ORDER BY name";
 
 // The first statement of bootstrap's atomic legacy-probe/managed installation.
@@ -41,7 +43,7 @@ fn rows(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>, StoreError
         .map_err(StoreError::from)
 }
 pub(crate) fn verify_sqlite(conn: &rusqlite::Connection) -> Result<(), StoreError> {
-    verify_version(conn, 5)
+    verify_version(conn, 6)
 }
 fn verify_version(conn: &rusqlite::Connection, expected: i64) -> Result<(), StoreError> {
     if version(&rows(conn)?)? != Some(expected) {
@@ -60,6 +62,31 @@ fn verify_version(conn: &rusqlite::Connection, expected: i64) -> Result<(), Stor
         ));
     }
     Ok(())
+}
+
+pub(crate) fn verify_publish_predecessor(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    verify_version(conn, 5)
+}
+#[cfg(feature = "hiqlite-store")]
+pub(crate) const PUBLISH_GUARD: &str = "SELECT CASE WHEN EXISTS(SELECT 1 FROM subtitle_managed_schema WHERE singleton=1 AND version=5) AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='background_job_required_resources' AND sql=$1) THEN 1 ELSE json('fragment publisher resource predecessor changed') END";
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn publish_statements() -> Vec<String> {
+    PUBLISH_MIGRATION
+        .split("-- next statement")
+        .map(str::trim)
+        .filter(|sql| !sql.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn publish_predecessor_view() -> String {
+    SHAPES
+        .6
+        .iter()
+        .find(|(name, _)| name == "background_job_required_resources")
+        .expect("v5 resource view")
+        .1
+        .clone()
 }
 
 pub(crate) fn verify_prepared_predecessor(conn: &rusqlite::Connection) -> Result<(), StoreError> {
@@ -205,7 +232,8 @@ fn normalize(sql: &str) -> String {
 // SQLite normalizes IF NOT EXISTS and terminal semicolons when storing DDL.
 // Measure that normalization instead of inventing a second SQL parser.
 type SchemaShape = Vec<(String, String)>;
-static SHAPES: LazyLock<(
+/// Historical view, v1 managed, bootstrap view, then managed v2 through v6.
+type SchemaShapes = (
     SchemaShape,
     SchemaShape,
     SchemaShape,
@@ -213,7 +241,9 @@ static SHAPES: LazyLock<(
     SchemaShape,
     SchemaShape,
     SchemaShape,
-)> = LazyLock::new(|| {
+    SchemaShape,
+);
+static SHAPES: LazyLock<SchemaShapes> = LazyLock::new(|| {
     let conn = rusqlite::Connection::open_in_memory().expect("closed schema fixture");
     conn.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);").expect("closed stubs");
     let resources = super::background_jobs_resources::SCHEMA
@@ -249,6 +279,9 @@ static SHAPES: LazyLock<(
     let v4 = rows(&conn).expect("managed v4 rows");
     conn.execute_batch(TARGETED_MIGRATION)
         .expect("targeted probe migration");
+    let v5 = rows(&conn).expect("managed v5 rows");
+    conn.execute_batch(PUBLISH_MIGRATION)
+        .expect("publisher resource migration");
     (
         before,
         managed,
@@ -256,7 +289,8 @@ static SHAPES: LazyLock<(
         v2,
         v3,
         v4,
-        rows(&conn).expect("managed v5 rows"),
+        v5,
+        rows(&conn).expect("managed v6 rows"),
     )
 });
 // Bootstrap also recognizes the exact pre-probe view it just installed. This
@@ -294,6 +328,8 @@ pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreEr
         Ok(Some(4))
     } else if canonical(shape) == canonical(&SHAPES.6) {
         Ok(Some(5))
+    } else if canonical(shape) == canonical(&SHAPES.7) {
+        Ok(Some(6))
     } else {
         Err(StoreError::Migration(
             "managed subtitle schema is partial or incompatible".into(),
@@ -833,7 +869,7 @@ mod tests {
         conn.execute("INSERT INTO background_job_reservations(resource_key,slot,job_id,fence,expires_at_ms) VALUES('source_io',0,'targeted',1,90000)", []).expect("old owned reservation");
         let before: String = conn.query_row("SELECT json_group_array(json_array(resource_key,slot,job_id,fence,expires_at_ms)) FROM background_job_reservations", [], |row|row.get(0)).expect("snapshot prior physical reservations");
         SqliteStore::apply_next_migration_for_test(&conn).expect("v126 targeted classification");
-        verify_sqlite(&conn).expect("canonical v5");
+        verify_version(&conn, 5).expect("canonical v5");
         assert_eq!(
             keys("targeted"),
             ["provider:anilist", "provider:tmdb"],
@@ -859,22 +895,22 @@ mod tests {
     }
 
     #[test]
-    fn a_v126_store_reopens_without_touching_the_managed_view_or_marker() {
+    fn a_current_store_reopens_without_touching_the_managed_view_or_marker() {
         let directory = tempfile::tempdir().expect("store directory");
         let path = directory.path().join("store.db");
-        drop(SqliteStore::open(&path).expect("fresh v126 store"));
+        drop(SqliteStore::open(&path).expect("fresh current store"));
         let snapshot = || {
             let conn = rusqlite::Connection::open(&path).expect("reopen for snapshot");
-            verify_sqlite(&conn).expect("canonical v5");
+            verify_sqlite(&conn).expect("canonical v6");
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("ordinal");
             (rows(&conn).expect("managed shape"), version)
         };
         let before = snapshot();
-        assert_eq!(before.1, TARGETED_MIGRATION_VERSION);
+        assert_eq!(before.1, PUBLISH_MIGRATION_VERSION);
         drop(SqliteStore::open(&path).expect("restart"));
-        assert_eq!(snapshot(), before, "a restart is a no-op at v126/v5");
+        assert_eq!(snapshot(), before, "a restart is a no-op at v128/v6");
     }
 
     #[test]
@@ -910,6 +946,98 @@ mod tests {
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .expect("read unchanged migration ordinal"),
             122
+        );
+    }
+
+    #[test]
+    fn publisher_v6_claims_no_source_slot_and_old_kind_cannot_take_its_job() {
+        let conn = rusqlite::Connection::open_in_memory().expect("SQLite");
+        SqliteStore::apply_migrations_for_test(&conn, 127).expect("deployed v5 resources");
+        // One ordinary reader fills the background source slot; the second
+        // slot is reserved for live demand, so no further reader is admitted.
+        queued(
+            &conn,
+            "busy",
+            "metadata_refresh",
+            r#"{"kind":"metadata_refresh"}"#,
+        );
+        assert!(claim_raw(&conn, "busy", "metadata_refresh"));
+        queued(
+            &conn,
+            "publisher",
+            "fragment_index_publish",
+            r#"{"kind":"fragment_index_publish"}"#,
+        );
+        queued(
+            &conn,
+            "reader",
+            "future_source_reader",
+            r#"{"kind":"future_source_reader"}"#,
+        );
+        let source_count = |id: &str| {
+            conn.query_row(
+            "SELECT count(*) FROM background_job_required_resources WHERE job_id=?1 AND resource_key LIKE 'source_io%'",
+            [id], |row| row.get::<_,i64>(0),
+        ).expect("source resource classification")
+        };
+        assert_eq!(
+            source_count("publisher"),
+            1,
+            "old view charges unknown kinds"
+        );
+        let before: String = conn.query_row("SELECT json_group_array(json_array(resource_key,slot,job_id,fence,expires_at_ms)) FROM background_job_reservations", [], |row|row.get(0)).expect("existing owned slots");
+        SqliteStore::apply_next_migration_for_test(&conn).expect("v128 publisher classification");
+        verify_sqlite(&conn).expect("exact v6 layout and marker");
+        assert!(
+            verify_version(&conn, 5).is_err(),
+            "old binary exact-layout check refuses v6"
+        );
+        assert!(
+            verify_publish_predecessor(&conn).is_err(),
+            "stale installer cannot replace v6"
+        );
+        assert_eq!(source_count("publisher"), 0);
+        assert_eq!(
+            source_count("reader"),
+            1,
+            "unknown future readers remain charged"
+        );
+        assert!(
+            !claim_raw(&conn, "publisher", "fragment_index_build"),
+            "old worker's kind cannot claim publisher even when engine is unchanged"
+        );
+        assert!(
+            claim_raw(&conn, "publisher", "fragment_index_publish"),
+            "metadata publisher claims while source slots are occupied"
+        );
+        assert!(
+            !claim_raw(&conn, "reader", "future_source_reader"),
+            "source reader remains blocked"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM background_job_reservations WHERE job_id='publisher'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .expect("publisher reservations"),
+            0
+        );
+        assert_eq!(before, conn.query_row("SELECT json_group_array(json_array(resource_key,slot,job_id,fence,expires_at_ms)) FROM background_job_reservations", [], |row|row.get::<_,String>(0)).expect("retained physical reservations"));
+    }
+
+    #[test]
+    fn publisher_v6_migration_refuses_drifted_v5_without_advancing_schema() {
+        let conn = rusqlite::Connection::open_in_memory().expect("SQLite");
+        SqliteStore::apply_migrations_for_test(&conn, 127).expect("deployed v5");
+        conn.execute_batch("DROP VIEW background_job_required_resources; CREATE VIEW background_job_required_resources AS SELECT id AS job_id,'source_io' AS resource_key FROM background_jobs").expect("drifted resource view");
+        let before = rows(&conn).expect("drift snapshot");
+        assert!(SqliteStore::apply_next_migration_for_test(&conn).is_err());
+        assert_eq!(rows(&conn).expect("refused migration leaves shape"), before);
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("unchanged ordinal"),
+            127
         );
     }
 }
