@@ -10,6 +10,6 @@ export LC_ALL
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 inputs=${PLURX_DV_BUILD_INPUTS:-"$source_dir/../dv_quality/backends"}
 cd "$source_dir"
-sha256sum build-dependencies.sh build-requirements.txt *.patch
+sha256sum build-dependencies.sh build-requirements.txt fetch_renderer_sources.py *.patch
 cd "$inputs"
-sha256sum libplacebo/fetch_sources.py parsed-rpu/fetch_parser.py parsed-rpu/resolved-Cargo.lock
+sha256sum parsed-rpu/fetch_parser.py parsed-rpu/resolved-Cargo.lock

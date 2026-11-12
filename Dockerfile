@@ -60,9 +60,8 @@ FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:0000000000000000000000000000000000
 # These stages sit before runtime-assets so release packaging keeps them
 # (validation/release_dockerfile.py); they see no daemon source.
 FROM dv-processing-dependencies AS dv-processing-helpers
-ARG PLURX_DV_DEPENDENCY_INPUTS="sha256:5c653ebd688f63ef028ffbdbff84b2ba852461d6519b6edfeb90768bbc403f9e"
+ARG PLURX_DV_DEPENDENCY_INPUTS="sha256:9c76fad57add425e5f0311165f8378dba071e8a79df361a8f6016a2f3476c102"
 COPY tools/dv_quality/backends/parsed-rpu/fetch_parser.py tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock /build-inputs/parsed-rpu/
-COPY tools/dv_quality/backends/libplacebo/fetch_sources.py /build-inputs/libplacebo/
 COPY tools/dv_processing /build-inputs/dv_processing
 COPY LICENSE NOTICE /build-inputs/project-notices/
 ENV PLURX_DV_PROJECT_NOTICES=/build-inputs/project-notices

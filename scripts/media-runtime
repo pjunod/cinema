@@ -29,9 +29,8 @@ DV_PIN = re.compile(
 DV_INPUTS_ARG = re.compile(r'(?m)^ARG PLURX_DV_DEPENDENCY_INPUTS="(sha256:[0-9a-f]{64})"$')
 UNPUBLISHED = "sha256:" + "0" * 64
 DV_DEPENDENCY_INPUTS = (
-    ("tools/dv_processing", ("build-dependencies.sh", "build-requirements.txt", "*.patch")),
-    ("tools/dv_quality/backends", ("libplacebo/fetch_sources.py", "parsed-rpu/fetch_parser.py",
-                                   "parsed-rpu/resolved-Cargo.lock")),
+    ("tools/dv_processing", ("build-dependencies.sh", "build-requirements.txt", "fetch_renderer_sources.py", "*.patch")),
+    ("tools/dv_quality/backends", ("parsed-rpu/fetch_parser.py", "parsed-rpu/resolved-Cargo.lock")),
 )
 IMAGE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}"

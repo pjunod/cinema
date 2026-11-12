@@ -17,10 +17,10 @@ Linux with a C11 compiler, pkg-config and the following dependency installations
 | Dependency | Source used by the controls | Required configuration |
 |---|---|---|
 | FFmpeg | `bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa` | Static avcodec/avformat/avutil; HEVC decoder/parser; dovi_split, hevc_mp4toannexb and extract_extradata BSFs; Matroska/HEVC/MOV demuxers; Matroska/NUT/MP4 muxers; file protocol. No network, automatic dependency discovery, programs, avfilter or hardware decoder. |
-| libplacebo | `0d043c7f6f79cd3687c023454bdacbe615e4d96f`, API 374 | Vulkan, glslang, dovi and xxhash enabled; libdovi integration, OpenGL, D3D11, demos and tests disabled. |
+| libplacebo | release `v7.387.0`, API 387 — the release the native player's reconstruction builds ([upstream.lock](../../clients/linux-player/packaging/upstream.lock)) | Vulkan, glslang, dovi and xxhash enabled; libdovi integration, OpenGL, D3D11, demos and tests disabled. |
 | libdovi | dovi_tool `83e1fdad6dcd5995556235946e7c5c0f9010d5a1` | Static `dolby_vision` C API with the corresponding reviewed `libdovi/rpu_parser.h`. |
 
-The existing [renderer source fetcher](../../tools/dv_quality/backends/libplacebo/fetch_sources.py),
+The [renderer source fetcher](../../tools/dv_processing/fetch_renderer_sources.py),
 [FFmpeg source lock](../../tools/dv_quality/backends/decoded-layers/source-lock.json)
 and [parser source lock](../../tools/dv_quality/backends/parsed-rpu/source-lock.json)
 record archive identities. The parser lock also identifies the C header source.
@@ -71,7 +71,7 @@ docker build --platform linux/arm64 --target dv-processing-helpers .
 docker build --platform linux/amd64 --target dv-processing-helpers .
 ```
 
-**How to read it:** the manifest check must report schema 1, libplacebo API 374
+**How to read it:** the manifest check must report schema 1, libplacebo API 387
 and positive FFmpeg ABI majors. The build first refuses a dependency image
 that was built from other inputs than this tree. The `runtime` stage then
 installs the bundle at `/usr/lib/plurx/dv-processing` and requires every helper
@@ -185,11 +185,17 @@ HDR10 graphs describe conditional methods and per-frame receipts list only
 methods actually signalled. Synthetic scalar predicates and P8.1 authoring stay
 narrow; no helper JSON claim supplies missing source authority.
 
-The pinned [public mapper](https://github.com/haasn/libplacebo/blob/0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/include/libplacebo/utils/libav_internal.h)
-and [public shader](https://github.com/haasn/libplacebo/blob/0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/shaders/colorspace.c)
+The pinned [public mapper](https://code.videolan.org/videolan/libplacebo/-/blob/v7.387.0/src/include/libplacebo/utils/libav_internal.h)
+and [public shader](https://code.videolan.org/videolan/libplacebo/-/blob/v7.387.0/src/shaders/colorspace.c)
 normalize and reshape BL, add the paired EL's LINEAR_DZ residual, then apply
-color transforms. NLQ offset uses code/1023, slope uses 1023*S/2^23 and threshold
-uses (T−S/2)/2^23, with exact neutral code contributing zero. The existing
+color transforms. Every BL and EL plane is sampled bilinearly at its own siting
+(EL luma co-sited horizontally, centred vertically), from UNORM16 storage holding
+each 10-bit code as code << 6. The resampled EL code is rounded to an integer
+before dequantization: NLQ offset is in EL codes, slope is S/2^23 and threshold
+T/2^23, the residual is sign(rr)·((|rr|−½)·slope+threshold) bounded by
+`vdr_in_max`, and the exact neutral code contributes zero. This is the native
+player's reconstruction, release for release and parameter for parameter;
+[the sampling record](DM-PRECISION-STATUS.md#reconstruction-sampling--one-master-for-the-server-and-the-player) has the pixel proof. The existing
 [`vdr_in_max` admission](../../tools/dv_processing/nlq_clipping.h) must still
 prove clipping cannot bind for any ten-bit EL code, including its rounding
 reserve. The measured 512/2048/0/1048576 parameter family satisfies that same
@@ -317,7 +323,10 @@ Validation retained for this change:
   1/64 reference-pixel bias corrected it. All 80 sampled 4K points, including
   40 tie points, then agreed within one RGB code at the unchanged bound.
 - A separate spatial chroma control compared all 49,152 pixels within one code.
-  This defines the chosen point-sampling policy, not normative Dolby interpolation.
+  This defined the earlier point-sampling policy, not normative Dolby interpolation.
+  It was replaced on 2026-11-12 by the native player's bilinear contract
+  ([the sampling record](DM-PRECISION-STATUS.md#reconstruction-sampling--one-master-for-the-server-and-the-player)); the two bullets above
+  describe the retired renderer.
 - Actual streaming controls passed raw/pipe byte equality, reordered encode
   with exact source PTS, closed-consumer refusal and one real 4K encoded picture.
 - Review added checked NUT clock scaling, including the complete interval end;

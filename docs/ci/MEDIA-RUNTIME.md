@@ -47,8 +47,9 @@ not have: DV processing disabled, with "unsupported DV build identity".
 The dependency image records the files it was built from
 (`/opt/dv-dependencies/build-inputs.sha256`, printed by
 `tools/dv_processing/dependency-inputs.sh`): the dependency recipe, the decoder
-patch, the Python build requirements and the three source-pin files under
-`tools/dv_quality/backends`. `Dockerfile` records the same identity beside the
+patch, the Python build requirements, the renderer source fetcher (libplacebo
+7.387 and its Vulkan headers) and the two parser pin files under
+`tools/dv_quality/backends/parsed-rpu`. `Dockerfile` records the same identity beside the
 pin. A change to any of them fails
 `tests/operations/test_dv_helper_ownership.py` in the fast lane and fails the
 image build, until new dependencies are published and pinned. The helper

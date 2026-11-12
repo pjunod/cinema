@@ -237,9 +237,8 @@ RELEASE_BUILD_PATHS = (
     "scripts/media-runtime",
     ".github/workflows/media-runtime.yml",
     # The image compiles the DV helper bundle from these application sources
-    # against the pinned dependency image, whose inputs are the last three.
+    # against the pinned dependency image, whose inputs include the last two.
     "tools/dv_processing/**",
-    "tools/dv_quality/backends/libplacebo/fetch_sources.py",
     "tools/dv_quality/backends/parsed-rpu/fetch_parser.py",
     "tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock",
     "rust-toolchain.toml",
@@ -266,9 +265,8 @@ CONTAINER_PATHS = (
     "scripts/media-runtime",
     ".github/workflows/media-runtime.yml",
     # The image compiles the DV helper bundle from these application sources
-    # against the pinned dependency image, whose inputs are the last three.
+    # against the pinned dependency image, whose inputs include the last two.
     "tools/dv_processing/**",
-    "tools/dv_quality/backends/libplacebo/fetch_sources.py",
     "tools/dv_quality/backends/parsed-rpu/fetch_parser.py",
     "tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock",
     "deploy/**",

@@ -21,6 +21,19 @@ bump may break compatibility and a **patch** bump never does.
   reason an enhancement was skipped. Source custody left behind by a job whose
   owner died before its join can now be released from a host source-open
   census instead of holding the shared storage fence indefinitely (#1491).
+- The server's Dolby Vision helper reconstructs the same master as the native
+  player. It sampled every plane nearest-neighbour on an older libplacebo; it
+  now builds the player's release (7.387) and samples bilinearly from the same
+  10-bit plane storage, so HDR10-E, display-targeted output and the FEL to
+  Profile 8.1 picture start from the picture the player's mapping was
+  qualified on. On the two measured frames the server master is within one
+  16-bit code of the player's (it was up to 3293 codes away).
+- Master-grade HDR10-E declares the source's own mastering display and, when
+  the source states them, its content light levels. It carried no static HDR10
+  metadata at all.
+- A display-targeted render's MaxCLL covers the rounding of its 10-bit export
+  (407 for a 400-nit target) instead of stating the target itself, which the
+  decoded picture could exceed.
 - CM4 display mapping evaluates the ST 2084 transfer functions in its point and
   final passes with precise split-float helpers and the normative black and
   white endpoints. On the measured Source16 frame no enhanced pixel is farther
