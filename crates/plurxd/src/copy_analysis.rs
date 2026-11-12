@@ -168,11 +168,15 @@ pub(crate) enum CopyObservationAuthority {
     Local(LocalCopyAuthority),
 }
 
-/// A local user's own playback of this node's file. Only
-/// [`LocalCopyAuthority::of`] makes one, and it refuses a Sharing principal,
-/// so shared playback can never present itself as local demand. It is
-/// attribution and admission to the worker's inbox, nothing more: it grants
-/// no source read, which every Analysis phase still takes from the store.
+/// A local user's own playback of this node's file. [`LocalCopyAuthority::of`]
+/// makes one from a viewer and refuses a Sharing principal, so shared
+/// playback can never present itself as local demand. The two other
+/// constructors only carry one across a restart: `of_durable_request` gives
+/// back what a request this worker wrote records, and `unattributed` stands
+/// for an asker that no longer exists. It is attribution and admission to
+/// the worker's inbox, nothing more: it grants no source read, which every
+/// Analysis phase still takes from the store, so an authority read back from
+/// a row confers nothing a row could not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalCopyAuthority {
     user_id: i64,
@@ -197,6 +201,40 @@ impl LocalCopyAuthority {
     pub(crate) fn playback_id(&self) -> &str {
         &self.playback_id
     }
+    /// Local demand with nobody to name: the user a durable request records
+    /// has since been removed. The build is the title's, not the user's.
+    pub(crate) fn unattributed() -> Self {
+        Self {
+            user_id: 0,
+            playback_id: String::new(),
+        }
+    }
+    /// Whether this names a user.
+    pub(crate) fn is_attributed(&self) -> bool {
+        self.user_id > 0
+    }
+    /// The authority a durable request recorded. A request under
+    /// [`LOCAL_PLAYBACK_REQUEST_PREFIX`] is written only by this worker for
+    /// a demand `of` admitted, so a restarted worker that finds one takes
+    /// the build up again under the same attribution. The playback is empty
+    /// when the id had no room for it; an id that names no user is
+    /// unattributed.
+    pub(crate) fn of_durable_request(request_id: &str) -> Option<Self> {
+        let rest = request_id.strip_prefix(LOCAL_PLAYBACK_REQUEST_PREFIX)?;
+        let Some(rest) = rest.strip_prefix('u') else {
+            return Some(Self::unattributed());
+        };
+        let (user, rest) = rest.split_once('.')?;
+        let user_id = user.parse::<i64>().ok().filter(|user_id| *user_id > 0)?;
+        let playback_id = rest
+            .rsplit_once('.')
+            .map(|(playback, _)| playback.to_owned())
+            .unwrap_or_default();
+        Some(Self {
+            user_id,
+            playback_id,
+        })
+    }
     /// The id of the Analysis request this demand creates, which is how the
     /// build is attributed wherever requests are listed: it names the local
     /// user and, when it fits the 64-byte bound and is plain enough to sit
@@ -205,6 +243,11 @@ impl LocalCopyAuthority {
     /// lives in the one free-form field every listing already shows.
     pub(crate) fn request_id(&self) -> String {
         let unique = uuid::Uuid::new_v4().simple().to_string();
+        // Still recognisably a local demand's request, naming nobody.
+        let anonymous = format!("{LOCAL_PLAYBACK_REQUEST_PREFIX}{unique}");
+        if !self.is_attributed() {
+            return anonymous;
+        }
         let plain = !self.playback_id.is_empty()
             && self
                 .playback_id
@@ -223,7 +266,7 @@ impl LocalCopyAuthority {
         if short.len() <= 64 {
             short
         } else {
-            unique
+            anonymous
         }
     }
 }
@@ -242,6 +285,9 @@ pub(crate) struct CopyIndexDemand {
     /// The copy recipe of the playback that asked; the fill repeats it.
     pub(crate) recipe: CopyRecipe,
     pub(crate) authority: CopyObservationAuthority,
+    /// The coordination request a previous process made for this demand,
+    /// when a restarted worker took it up. None for a demand a start raised.
+    pub(crate) durable_request: Option<String>,
 }
 impl CopyIndexDemand {
     /// A local viewer's demand for the index of the file it is playing on
@@ -259,6 +305,7 @@ impl CopyIndexDemand {
             source,
             recipe,
             authority: CopyObservationAuthority::Local(LocalCopyAuthority::of(viewer)?),
+            durable_request: None,
         })
     }
 }

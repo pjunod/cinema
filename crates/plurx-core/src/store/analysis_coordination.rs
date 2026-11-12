@@ -362,16 +362,66 @@ pub(super) async fn retire_stranded<T: QueueSql>(
     node_id: &str,
     created_before_ms: i64,
     now_ms: i64,
+    keep: &[String],
 ) -> Result<u64, StoreError> {
-    if !identifier(node_id) || created_before_ms < 0 || now_ms < 0 {
+    if !identifier(node_id)
+        || created_before_ms < 0
+        || now_ms < 0
+        || keep.len() > MAX_LISTED_COORDINATIONS
+    {
         return Err(invalid());
     }
     let body = encode(
-        &serde_json::json!({"node_id":node_id,"created_before_ms":created_before_ms,"now_ms":now_ms,"code":STRANDED_CODE,"pipeline":format!("{PIPELINE_PREFIX}%")}),
+        &serde_json::json!({"node_id":node_id,"created_before_ms":created_before_ms,"now_ms":now_ms,"code":STRANDED_CODE,"pipeline":format!("{PIPELINE_PREFIX}%"),"keep":keep}),
     )?;
-    let rows = store.queue_sql("UPDATE analysis_requests SET state='cancelled',fence=fence+1,cancel_requested=1,last_error_code=json_extract($1,'$.code'),updated_at_ms=json_extract($1,'$.now_ms') WHERE state='queued' AND component='fragment_index' AND pipeline_version LIKE json_extract($1,'$.pipeline') AND target_node_id=json_extract($1,'$.node_id') AND created_at_ms<json_extract($1,'$.created_before_ms') AND NOT EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE role.request_id=analysis_requests.request_id AND role.active_custody_id IS NOT NULL) RETURNING 'true' AS result_json".into(), body, true, true).await?;
+    let rows = store.queue_sql("UPDATE analysis_requests SET state='cancelled',fence=fence+1,cancel_requested=1,last_error_code=json_extract($1,'$.code'),updated_at_ms=json_extract($1,'$.now_ms') WHERE state='queued' AND component='fragment_index' AND pipeline_version LIKE json_extract($1,'$.pipeline') AND target_node_id=json_extract($1,'$.node_id') AND created_at_ms<json_extract($1,'$.created_before_ms') AND request_id NOT IN (SELECT value FROM json_each($1,'$.keep')) AND NOT EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE role.request_id=analysis_requests.request_id AND role.active_custody_id IS NOT NULL) RETURNING 'true' AS result_json".into(), body, true, true).await?;
     Ok(rows.len() as u64)
 }
+
+/// The coordination requests a previous process of `node_id` left, created
+/// before `created_before_ms` under ids beginning with `id_prefix`, with
+/// the exact source and phase state of each: the queued ones targeted at the
+/// node, and the running ones it owns (its predecessor is dead, so nothing
+/// holds those claims). A restarted worker reads them before it retires
+/// what was left, to take up again the ones it can still work.
+pub(super) async fn predecessor_with_prefix<T: QueueSql>(
+    store: &T,
+    node_id: &str,
+    created_before_ms: i64,
+    id_prefix: &str,
+) -> Result<Vec<AnalysisCoordination>, StoreError> {
+    if !identifier(node_id) || created_before_ms < 0 || id_prefix.is_empty() || id_prefix.len() > 64
+    {
+        return Err(invalid());
+    }
+    let body = encode(
+        &serde_json::json!({"node_id":node_id,"created_before_ms":created_before_ms,"prefix":id_prefix,"pipeline":format!("{PIPELINE_PREFIX}%")}),
+    )?;
+    let rows = store.queue_sql(format!("{OBSERVATION} WHERE request_id IN (SELECT request.request_id FROM analysis_requests request WHERE request.component='fragment_index' AND request.pipeline_version LIKE json_extract($1,'$.pipeline') AND request.created_at_ms<json_extract($1,'$.created_before_ms') AND substr(request.request_id,1,length(json_extract($1,'$.prefix')))=json_extract($1,'$.prefix') AND ((request.state='queued' AND request.target_node_id=json_extract($1,'$.node_id')) OR (request.state='running' AND request.owner_node_id=json_extract($1,'$.node_id')))) ORDER BY request_id LIMIT {MAX_LISTED_COORDINATIONS}"), body, false, true).await?;
+    rows.iter().map(|row| decode(row)).collect()
+}
+
+/// Retire one queued coordination request by id, as a stranded coordinator:
+/// the worker that made it for a demand has dropped the demand. A request
+/// that is not queued (claimed, published, already ended) is left as it is.
+pub(super) async fn retire_queued<T: QueueSql>(
+    store: &T,
+    request_id: &str,
+    now_ms: i64,
+) -> Result<bool, StoreError> {
+    if !super::fragment_index_cluster::analysis_request_id_is_valid(request_id) || now_ms < 0 {
+        return Err(invalid());
+    }
+    let body = encode(
+        &serde_json::json!({"request_id":request_id,"now_ms":now_ms,"code":STRANDED_CODE,"pipeline":format!("{PIPELINE_PREFIX}%")}),
+    )?;
+    let rows = store.queue_sql("UPDATE analysis_requests SET state='cancelled',fence=fence+1,cancel_requested=1,last_error_code=json_extract($1,'$.code'),updated_at_ms=json_extract($1,'$.now_ms') WHERE request_id=json_extract($1,'$.request_id') AND state='queued' AND component='fragment_index' AND pipeline_version LIKE json_extract($1,'$.pipeline') AND NOT EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE role.request_id=analysis_requests.request_id AND role.active_custody_id IS NOT NULL) RETURNING 'true' AS result_json".into(), body, true, true).await?;
+    Ok(!rows.is_empty())
+}
+
+/// Queued coordinations one listing returns. A worker holds at most this
+/// many sources; the rest are retired and asked for again when played.
+const MAX_LISTED_COORDINATIONS: usize = 64;
 
 /// End a coordinator this claim borrowed only to write metadata (a reader's
 /// quarantine), as `cancelled` with [`STRANDED_CODE`] and without charging
