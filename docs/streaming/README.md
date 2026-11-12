@@ -17,15 +17,16 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
 | [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, implementation, retained evidence and merge prerequisites. | built |
 | [SHARED-SUBTITLE-CUSTODY-AND-START-503.md](SHARED-SUBTITLE-CUSTODY-AND-START-503.md) | S5 Source-owned caption windows, custody initialization race and follow-up qualification. | done |
-| [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold publication and Resume fault repair: review and merge ledger. | open |
-| [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs; review and acceptance. | open |
+| [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold publication and Resume fault repair ledger. | open |
+| [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
 | [FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL quality findings. | open |
+| [FEL-RPU-REFIT-BUILD.md](FEL-RPU-REFIT-BUILD.md) | F+ curves: build plan. | open |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Shared playback cache: reservations, eviction and protected readers. | built |
 | [WEB-PREPARED-SEEK-INCIDENT.md](WEB-PREPARED-SEEK-INCIDENT.md) | October 20 ROG seek failure: subtitle cancellation, Auto repair and qualification. | open |
-| [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Close/Resume HDR downgrade, lost DV cancellation, Safari intent corruption and lifecycle ownership. | open |
+| [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Close/Resume HDR downgrade, lost DV cancellation, Safari intent, lifecycle. | open |
 | [TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md) | Why TCL Auto rejects capability counts; catalog read-budget failure and one-catalog-per-create fix. | open |
-| [TCL-CATALOG-REPAIR-STATUS.md](TCL-CATALOG-REPAIR-STATUS.md) | Implementation decisions, commit milestones, compile and review evidence, and remaining physical TCL acceptance. | open |
+| [TCL-CATALOG-REPAIR-STATUS.md](TCL-CATALOG-REPAIR-STATUS.md) | Decisions, milestones, review evidence, remaining TCL acceptance. | open |
 | [COLD-PLAYBACK-AC3-RETEST-RCA.md](COLD-PLAYBACK-AC3-RETEST-RCA.md) | AC3 retest, Resume and startup repair; Fable client-binding and shared-classifier dispositions. | open |
 | [COLD-PLAYBACK-SOURCE-SHARING.md](COLD-PLAYBACK-SOURCE-SHARING.md) | Source-sharing evidence and bounded M1 handoff. | open |
 | [COLD-PLAYBACK-STARTUP-ASTRA-REVIEW.md](COLD-PLAYBACK-STARTUP-ASTRA-REVIEW.md) | Historical Astra startup RCA review and dispositions. | done |

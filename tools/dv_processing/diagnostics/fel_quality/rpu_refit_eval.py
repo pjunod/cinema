@@ -38,6 +38,7 @@ ap.add_argument('--output', required=True, type=Path)
 ap.add_argument('--rpu-list', type=Path, help='with --write-plan: the ordered source RPU list (path/sha256 entries)')
 ap.add_argument('--write-plan', type=Path, help='write the rpu_refit_write plan for Fp_poly (normative domain) and exit after fitting')
 ap.add_argument('--rpu-out-dir', type=Path, help='with --write-plan: where the 8.1 RPUs go')
+ap.add_argument('--dump-fit-stats', type=Path, help='write the window fit statistics and the Fp_safe result (fit and composer domains) as a test vector for the production port, then exit')
 ap.add_argument('--readback', type=Path, help="rpu_refit_write's output: adds arm Fp_rpu (amendment_2)")
 a = ap.parse_args()
 assert not a.output.exists()
@@ -214,6 +215,14 @@ print(json.dumps({'fitted': True, 'samples': int(win.ycnt.sum())}), flush=True)
 # Composer domain (amendment_2): x = code / 1024 in, s * 4096 out; the fit used code/1023 in, value/4095 out.
 K, RS = 4095 / 4096, 1024 / 1023
 DEG = [0] + [g * p for p in (1, 2, 3) for g in (1, 1, 1, 2, 2, 2, 3)]
+if a.dump_fit_stats:
+    pf = fits['Fp_safe'][0]
+    norm = {'luma': [[K * c[0], K * c[1] * RS, K * c[2] * RS * RS] for c in pf['poly'].tolist()],
+            'chroma': [[K * pf['mmr'][i, ch] * RS ** DEG[i] for i in range(22)] for ch in range(2)]}
+    a.dump_fit_stats.write_text(json.dumps({'ysum': win.ysum.tolist(), 'ycnt': win.ycnt.tolist(), 'xtx': win.xtx.tolist(), 'xty': win.xty.tolist(),
+                                            'fp_safe': {'poly': pf['poly'].tolist(), 'mmr': pf['mmr'].tolist()}, 'composer_domain': norm,
+                                            'diagnostics': fit_diag['Fp_safe']}) + '\n')
+    print(json.dumps({'dumped': str(a.dump_fit_stats)})); sys.exit(0)
 if a.write_plan:
     pf = fits['Fp_safe'][0]  # amendment_3: only the safe fit is written
     assert all(abs(v) < 63 for v in pf['poly'].ravel()) and all(abs(v) < 63 for v in pf['mmr'].ravel()), 'coefficient outside the writable range'
