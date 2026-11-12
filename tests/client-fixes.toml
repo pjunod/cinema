@@ -8487,6 +8487,15 @@ source_anchor = "role == PlayerRole.Finite && television"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioFocusOwnershipTest.kt"
 test_anchor = "fun onlyTheFinitePlayerTunnelsSoASuccessorNeverTakesTheIncumbentsAvSync()"
 
+# PR #1551: the rendezvous never precedes a prepared successor's own start (a processed upgrade stages ahead of the viewer).
+[[fixes]]
+id = "android.rendezvous-floor-at-successor-origin"
+commits = ["e4cc25697a13d35b9d3d161262c75859b78155a0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "val target = maxOf(incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead, floorFilmMs)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/RendezvousModelTest.kt"
+test_anchor = "fun aSuccessorStagedAheadIsMetAtItsOwnStart()"
+
 # PR #1489: the Android decoder envelope claims only what Media3's selector admits.
 [[fixes]]
 id = "android.decoder-envelope-media3-admits"
