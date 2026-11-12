@@ -36,7 +36,7 @@ pub(in crate::http) fn ordinary_request(playback_id: &str) -> crate::transcode::
 }
 
 /// A waiting upgrade for a fresh session of a fresh playback, by `user_id`.
-fn waiting(user_id: i64) -> (String, String, String) {
+pub(super) fn waiting(user_id: i64) -> (String, String, String) {
     let playback = uuid::Uuid::new_v4().to_string();
     let session = uuid::Uuid::new_v4().to_string();
     let incarnation = uuid::Uuid::new_v4().to_string();
@@ -149,4 +149,28 @@ fn a_release_cancels_the_upgrades_playback_claim() {
     let (_intent, run) = take_on_first_frame(52, &session).expect("first frame");
     cancel_for_session(&session);
     assert!(begin_processed_upgrade(&playback, run.cancelled()).is_none());
+}
+
+#[test]
+fn a_skipped_upgrade_explains_only_its_own_generation_until_release_or_replacement() {
+    let (playback, session, generation) = waiting(51);
+    let (_, run) = take_on_first_frame(51, &session).expect("first frame");
+    run.skipped("the title is being measured");
+    drop(run);
+    assert_eq!(
+        processing_skip(&session, &generation)
+            .expect("current explanation")
+            .reason,
+        "the title is being measured"
+    );
+    assert!(processing_skip(&session, "other-generation").is_none());
+    cancel_for_playback(&playback, Some("replacement-generation"));
+    assert!(processing_skip(&session, &generation).is_none());
+
+    let (_, session, generation) = waiting(52);
+    let (_, run) = take_on_first_frame(52, &session).expect("first frame");
+    cancel_for_session(&session);
+    run.skipped("a cancelled run must not republish a reason");
+    drop(run);
+    assert!(processing_skip(&session, &generation).is_none());
 }

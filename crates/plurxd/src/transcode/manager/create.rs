@@ -1564,15 +1564,35 @@ impl TranscodeManager {
             .await
     }
 
-    /// Whether this node can serve and measure the reconstructed 8.1 with the
-    /// route's qualified recipe: radeonsi VA-API with its Main10 graph proved.
-    /// The recipe and the per-title verdicts are measured on that encoder only.
+    /// Whether this node has a hardware completed-output encoder that can
+    /// measure its own reconstructed recipe. This permits a trial, not serving:
+    /// every actual encoder/driver/device still needs its own quality verdict.
     #[cfg(target_os = "linux")]
     pub(crate) fn fel_qualification_capable(&self) -> bool {
-        self.caps.vaapi
-            && self.hdr10_passthrough_vaapi
-            && self.caps.vaapi_hdr_policy
-                == Some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq)
+        self.caps.nvenc || (self.caps.vaapi && self.hdr10_passthrough_vaapi)
+    }
+
+    /// Use the same hardware family as completed_window_encoder. A QSV
+    /// preference uses the independently proved VA-API completed-picture path.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn fel_qualification_encoder(&self) -> Result<Encoder, String> {
+        let preferred = self.encoder().await;
+        match preferred {
+            Encoder::Nvenc if self.caps.nvenc => Ok(Encoder::Nvenc),
+            Encoder::Qsv | Encoder::Vaapi if self.caps.vaapi && self.hdr10_passthrough_vaapi => {
+                Ok(Encoder::Vaapi)
+            }
+            _ => Err(format!(
+                "the selected {preferred:?} encoder has no proved hardware reconstruction path"
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fel_qualification_vaapi_policy(
+        &self,
+    ) -> Option<plurx_core::transcode::VaapiHdrPolicy> {
+        self.caps.vaapi_hdr_policy
     }
 
     /// The title's FEL qualification verdict for this renderer and recipe:
@@ -1580,6 +1600,7 @@ impl TranscodeManager {
     /// play keeps the plain conversion. A missing verdict asks for the title
     /// to be measured.
     #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
     async fn reconstruction_qualified(
         &self,
         planning: &plurx_core::store::PlaybackPlanningSnapshot,
@@ -1587,6 +1608,8 @@ impl TranscodeManager {
         plan: &plurx_core::transcode::ResolvedTranscode,
         grid: plurx_core::transcode::VodFrameGrid,
         encoder: Encoder,
+        source_object_version: &str,
+        required: Option<&PendingFelQualification>,
     ) -> Result<(), String> {
         Self::require_fel_qualification_backend(encoder)?;
         if !self.fel_qualification_capable() {
@@ -1596,7 +1619,9 @@ impl TranscodeManager {
             .await?
             .ok_or("the processing helper is unavailable on this node")?;
         use plurx_core::transcode::dv_fel_qualification as q;
-        let backend_identity = self.fel_identity(&tools.backend_digest()).await?;
+        let backend_identity = self
+            .fel_identity_for_encoder(&tools.backend_digest(), encoder)
+            .await?;
         let request = q::FelRecipeRequest::new(
             backend_identity,
             planning.file.size,
@@ -1611,6 +1636,19 @@ impl TranscodeManager {
                 (grid.numerator, grid.denominator),
             ),
         );
+        if required.is_some_and(|required| {
+            !required.matches(
+                planning.file.id,
+                planning.generation,
+                source_object_version,
+                &request,
+            )
+        }) {
+            return Err(
+                "the reconstruction source, settings or exact recipe changed after qualification"
+                    .into(),
+            );
+        }
         match Self::fel_gate(
             true,
             q::verdict_state(
@@ -1623,6 +1661,12 @@ impl TranscodeManager {
             FelGate::Serve => Ok(()),
             FelGate::Decline(reason) => Err(reason),
             FelGate::Measure => {
+                if required.is_some() {
+                    return Err(
+                        "the exact completed reconstruction qualification is no longer available"
+                            .into(),
+                    );
+                }
                 if !self
                     .store
                     .request_dv_fel_variant(planning.file.id, &request)
@@ -1631,8 +1675,35 @@ impl TranscodeManager {
                 {
                     return Err("the enhancement recipe qualification request is full or its source changed".into());
                 }
-                Err(Self::fel_being_measured().into())
+                Err(pending_fel_qualification_error(PendingFelQualification {
+                    file_id: planning.file.id,
+                    settings_generation: planning.generation,
+                    source_object_version: source_object_version.to_owned(),
+                    request,
+                }))
             }
+        }
+    }
+
+    /// Recheck the actual helper/encoder identity before a pending receipt is
+    /// consumed. A receipt for an old deployment never arms a new measurement.
+    pub(crate) async fn pending_fel_backend_current(
+        &self,
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+        wait: &PendingFelQualification,
+    ) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(Some(tools)) = crate::vodencode::dv_runtime::ToolSet::capture().await else {
+                return false;
+            };
+            self.fel_identity(&tools.backend_digest())
+                .await
+                .is_ok_and(|identity| identity == wait.request.backend_identity)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
         }
     }
 
@@ -1640,10 +1711,10 @@ impl TranscodeManager {
     /// overridden and another backend cannot consume a VA-API receipt.
     #[cfg(target_os = "linux")]
     pub(crate) fn require_fel_qualification_backend(encoder: Encoder) -> Result<(), String> {
-        if encoder == Encoder::Vaapi {
+        if matches!(encoder, Encoder::Vaapi | Encoder::Nvenc) {
             Ok(())
         } else {
-            Err(format!("the selected {encoder:?} reconstruction recipe has no matching FEL quality measurement (current measurements use radeonsi VA-API)"))
+            Err(format!("the selected {encoder:?} reconstruction recipe has no supported hardware quality-measurement path"))
         }
     }
 
@@ -1672,17 +1743,67 @@ impl TranscodeManager {
         }
     }
 
-    /// The encoder a FEL verdict is measured on: the FFmpeg executable's
-    /// digest, the VA driver's description from the startup probe (vendor,
-    /// driver version, GPU) and the render device with its PCI identity.
     #[cfg(target_os = "linux")]
-    pub(crate) async fn fel_encoder_identity(&self) -> Result<String, String> {
+    async fn fel_encoder_identity_for(&self, encoder: Encoder) -> Result<String, String> {
+        use tokio::io::AsyncReadExt;
+        let ffmpeg = crate::ffmpeg::EncodedExecutable::capture().await?;
+        if encoder == Encoder::Nvenc {
+            // NVENC currently uses the driver's default GPU. Do not let a
+            // receipt cross devices on a machine where that choice is ambiguous.
+            let devices: Vec<_> = self
+                .caps
+                .graphics_devices
+                .iter()
+                .filter(|device| device.vendor_id == "0x10de")
+                .collect();
+            if devices.len() != 1 {
+                return Err("NVIDIA FEL qualification requires one identified NVIDIA GPU; the default encoder device is ambiguous on a multi-GPU node".into());
+            }
+            async fn read_identity(path: &std::path::Path) -> Result<String, String> {
+                let file = tokio::fs::File::open(path)
+                    .await
+                    .map_err(|e| format!("NVIDIA qualification identity unavailable: {e}"))?;
+                let mut bytes = Vec::new();
+                file.take(16385)
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if bytes.len() > 16384 {
+                    return Err("NVIDIA qualification identity exceeds its bound".into());
+                }
+                String::from_utf8(bytes).map_err(|e| e.to_string())
+            }
+            let device = devices[0];
+            let renderer_device = plurx_core::transcode::vaapi_device();
+            let renderer_binding = self
+                .caps
+                .graphics_devices
+                .iter()
+                .find(|device| device.render_node.as_deref() == Some(renderer_device.as_str()))
+                .map(|device| format!("{} {}:{}", device.id, device.vendor_id, device.device_id));
+            let driver = read_identity(std::path::Path::new("/proc/driver/nvidia/version")).await?;
+            let information = read_identity(
+                &std::path::Path::new("/proc/driver/nvidia/gpus")
+                    .join(&device.id)
+                    .join("information"),
+            )
+            .await?;
+            if !information
+                .lines()
+                .any(|line| line.starts_with("GPU UUID:") && line.contains("GPU-"))
+            {
+                return Err("NVIDIA qualification requires the physical GPU UUID".into());
+            }
+            return Ok(plurx_core::transcode::dv_fel_qualification::encoder_identity(
+                &ffmpeg.digest, &format!("Nvenc:{driver}:renderer-vaapi-driver={:?}:renderer-device={renderer_device}:{renderer_binding:?}", self.caps.vaapi_driver),
+                &format!("{} {}:{} {information} CUDA_VISIBLE_DEVICES={:?} NVIDIA_VISIBLE_DEVICES={:?}", device.id, device.vendor_id, device.device_id,
+                    std::env::var_os("CUDA_VISIBLE_DEVICES"), std::env::var_os("NVIDIA_VISIBLE_DEVICES"))));
+        }
         let driver = self
             .caps
             .vaapi_driver
             .as_deref()
             .ok_or("this node's VA driver was not identified by its startup probe")?;
-        let ffmpeg = crate::ffmpeg::EncodedExecutable::capture().await?;
         let path = plurx_core::transcode::vaapi_device();
         let device = self
             .caps
@@ -1707,13 +1828,39 @@ impl TranscodeManager {
         )
     }
 
-    /// The full key of this node's FEL verdicts: renderer, recipe, encoder.
+    /// The full key of this node's actual completed encoder. The AMD recipe
+    /// retains its existing identity; Intel and NVIDIA cannot consume it.
     #[cfg(target_os = "linux")]
     pub(crate) async fn fel_identity(&self, scanner: &str) -> Result<String, String> {
+        self.fel_identity_for_encoder(scanner, self.fel_qualification_encoder().await?)
+            .await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn fel_identity_for_encoder(
+        &self,
+        scanner: &str,
+        encoder: Encoder,
+    ) -> Result<String, String> {
+        Self::require_fel_qualification_backend(encoder)?;
+        let recipe = if encoder == Encoder::Vaapi
+            && self.caps.vaapi_hdr_policy
+                == Some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq)
+        {
+            plurx_core::transcode::RECONSTRUCTED_P81_RECIPE.to_owned()
+        } else {
+            format!(
+                "{}:actual-encoder={encoder:?}:vaapi-policy={:?}",
+                plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
+                (encoder == Encoder::Vaapi)
+                    .then_some(self.caps.vaapi_hdr_policy)
+                    .flatten()
+            )
+        };
         Ok(plurx_core::transcode::dv_fel_qualification::identity(
             scanner,
-            plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
-            &self.fel_encoder_identity().await?,
+            &recipe,
+            &self.fel_encoder_identity_for(encoder).await?,
         ))
     }
 
@@ -1739,14 +1886,12 @@ impl TranscodeManager {
 
     #[cfg(target_os = "linux")]
     pub(crate) const fn fel_recipe_unqualified() -> &'static str {
-        "no reconstruction recipe is qualified for this server's encoder \
-         (the route is measured on radeonsi VA-API only)"
+        "this server has no proved VA-API or NVIDIA completed-picture encoder for FEL qualification"
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) const fn fel_being_measured() -> &'static str {
-        "whether this title's enhancement layer adds more than re-encoding loses \
-         is being measured on this server's GPU"
+        "waiting for this title and reconstruction recipe's quality measurement (queued or running)"
     }
 
     /// Rebind the title's scan demand so the title job runs again and
@@ -1809,13 +1954,9 @@ impl TranscodeManager {
         ),
         String,
     > {
-        if decode != crate::dv_segment::RendererDecode::Gpu {
-            return Err(
-                "this node has not proved a VA-API HEVC Main10 decode; the qualification \
-                 measures the GPU-decoded route only"
-                    .into(),
-            );
-        }
+        // NVIDIA can encode the composed picture while the helper decodes
+        // in software. Charge that exact graph's decoder workers instead of
+        // claiming an unproved NVDEC route or borrowing a GPU-decoded receipt.
         let resources = crate::admission::TranscodeResourceEstimate {
             hardware_slot: true,
             cpu_threads: crate::dv_segment::streaming_helper_cpu_threads(
@@ -2207,6 +2348,7 @@ impl TranscodeManager {
                 .candidate_context
                 .as_mut()
                 .ok_or("processed trial context missing")?;
+            context.required_fel_qualification = original.required_fel_qualification.clone();
             context.display_target = display_target;
             context.display_target_note = display_target_note.clone();
             context.retained_output = None;
@@ -2257,6 +2399,10 @@ impl TranscodeManager {
                                     .as_ref()
                                     .ok_or("reused FEL root lost its runtime recipe")?
                                     .encoder,
+                                &root.encoding.source_object_version,
+                                request.candidate_context.as_ref().and_then(|context| {
+                                    context.required_fel_qualification.as_ref()
+                                }),
                             )
                             .await?;
                         }
@@ -3463,7 +3609,8 @@ impl TranscodeManager {
                     if destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
                         self.reconstruction_qualified(&planning,
                             enhancement_envelope.ok_or("FEL recipe lost its frozen envelope")?,
-                            &processed_plan,grid,processed_encoder).await?;
+                            &processed_plan,grid,processed_encoder,&source_object_version,
+                            req.candidate_context.as_ref().and_then(|context| context.required_fel_qualification.as_ref())).await?;
                     }
                     if source_frame_probe.as_ref().is_some_and(|probe| probe.absolute_stream() != retained.0.decode().input_video_stream()) {
                         return Err("source frame metadata selected stream differs from the held decoder plan".into());
@@ -3578,9 +3725,14 @@ impl TranscodeManager {
                     // is the qualification's answer, reported with the
                     // ordinary start, not an ordinary recipe nobody asked for.
                     Err(reason) if processed_trial => {
+                        if pending_fel_qualification(&reason).is_some() { return Err(reason); }
                         return Err(format!("processed window refused: {reason}"));
                     }
                     Err(reason) => {
+                        // Process-private continuation data is consumed only
+                        // by a deferred trial. Legacy/direct preparations keep
+                        // the explanatory sentence, never its source/recipe token.
+                        let reason = ordinary_processing_decline(reason);
                         retained.3 = plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
                             plurx_core::transcode::dv_processing::DvFallbackReason::BackendFailure);
                         tracing::warn!(target: "plurxd::transcode", %reason,
@@ -6579,10 +6731,61 @@ mod display_target_policy_tests {
 #[cfg(all(test, target_os = "linux"))]
 mod exact_fel_backend_tests {
     use super::*;
+    #[tokio::test]
+    async fn intel_and_nvidia_qualification_resolve_the_same_saved_completed_encoder() {
+        use plurx_core::store::{SqliteStore, Store};
+        let root = crate::test_tempdir().expect("qualification selection scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let caps = EncoderCaps {
+            qsv: true,
+            vaapi: true,
+            nvenc: true,
+            ..Default::default()
+        };
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            root.path().to_owned(),
+            caps,
+            Pipeline::Cpu,
+        )
+        .with_hdr10_passthrough_vaapi(true);
+        assert!(
+            manager.fel_qualification_capable(),
+            "AMD policy is not an eligibility gate"
+        );
+        for (preference, expected) in [
+            ("qsv", Encoder::Vaapi),
+            ("vaapi", Encoder::Vaapi),
+            ("nvenc", Encoder::Nvenc),
+        ] {
+            store
+                .put_setting(keys::HWACCEL, preference)
+                .await
+                .expect("saved preference");
+            assert_eq!(
+                manager
+                    .fel_qualification_encoder()
+                    .await
+                    .expect("hardware path"),
+                expected
+            );
+        }
+        store
+            .put_setting(keys::HWACCEL, "software")
+            .await
+            .expect("explicit software");
+        assert!(
+            manager.fel_qualification_encoder().await.is_err(),
+            "qualification cannot override the viewer's encoder preference"
+        );
+    }
+
     #[test]
     fn actual_fel_backend_cannot_consume_another_encoders_quality_receipt() {
-        assert!(TranscodeManager::require_fel_qualification_backend(Encoder::Vaapi).is_ok());
-        for encoder in [Encoder::Software, Encoder::Nvenc, Encoder::Qsv] {
+        for encoder in [Encoder::Vaapi, Encoder::Nvenc] {
+            assert!(TranscodeManager::require_fel_qualification_backend(encoder).is_ok());
+        }
+        for encoder in [Encoder::Software, Encoder::Qsv] {
             let reason = TranscodeManager::require_fel_qualification_backend(encoder)
                 .expect_err("unmeasured backend");
             assert!(reason.contains(&format!("{encoder:?}")));

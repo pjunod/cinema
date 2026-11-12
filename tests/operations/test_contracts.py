@@ -1894,7 +1894,7 @@ assert.equal(context.ACT_TIMER, null);
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
         self.assertIn("timeout-minutes: 60", fast_rust)
-        compiler_pool = "runs-on: [ci-nonvoter-heavy-amd64]"
+        compiler_pool = "runs-on: [ci-nonvoter-compile-amd64]"
         for compiler_job in (
             metadata_jobs["rust_compile"],
             workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
@@ -2622,7 +2622,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(workflow_step_scalar(
             full_compile_steps["Compile every Rust target without executing tests"], "run"
         ), "make effort-rust-check")
-        self.assertRegex(full_jobs["check"], r"(?m)^    timeout-minutes: 120$")
+        self.assertRegex(full_jobs["check"], r"(?m)^    timeout-minutes: 180$")
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
         # Main must also finish the cold full-unit fallback when prior receipts
         # cannot authenticate; effort retains its separate finite budget.
@@ -3352,7 +3352,7 @@ assert.equal(context.ACT_TIMER, null);
             header,
         )
         self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"\n      RUST_TEST_THREADS: "2"\n', header)
-        self.assertRegex(header, r"(?m)^    timeout-minutes: 120$")
+        self.assertRegex(header, r"(?m)^    timeout-minutes: 180$")
         self.assertIn(
             FLEET_REGISTRY_EXPR + "/noirr/plurx-ci@sha256:"
             "3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855",
@@ -3368,32 +3368,43 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("continue-on-error", job)
         fleet = runner_fleet()
         carriers = [row for row in fleet["runners"] if "ci-nonvoter-heavy-amd64" in row["labels"]]
-        self.assertEqual(len(carriers), 1, "the complete suite has one native build slot")
-        self.assertNotIn(carriers[0]["host"], fleet["voter_hosts"])
+        self.assertTrue(carriers, "the heavy lane needs a carrier")
+        for row in carriers:
+            self.assertNotIn(row["host"], fleet["voter_hosts"])
+            self.assertIs(row.get("implicit_labels"), False)
+            self.assertEqual((row["os"], row["arch"]), ("Linux", "X64"))
+            # Every heavy slot also serves the bounded compile pool.
+            self.assertIn("ci-nonvoter-compile-amd64", row["labels"])
+        # Exactly one heavy worker shares the Store role, on lab1.
+        primary = [row for row in carriers if "ci-nonvoter-store" in row["labels"]]
+        self.assertEqual(len(primary), 1, "one capacity-one worker must share heavy and Store roles")
+        self.assertEqual(primary[0]["host"], "lab1", "the heavy Store worker is bound to its verified physical nonvoter")
+        self.assertEqual(set(primary[0]["labels"]),
+                         {"ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"})
+        compile_pool = [row for row in fleet["runners"] if "ci-nonvoter-compile-amd64" in row["labels"]]
+        self.assertIn("lab5", {row["host"] for row in compile_pool})
+        self.assertTrue(all(row["host"] not in fleet["voter_hosts"] for row in compile_pool))
+        self.assertTrue(all(row.get("implicit_labels") is False for row in compile_pool))
+        self.assertTrue(all((row["os"], row["arch"]) == ("Linux", "X64") for row in compile_pool))
         store = [row for row in fleet["runners"] if "ci-nonvoter-store" in row["labels"]]
         self.assertEqual(len(store), 2, "two actual nonvoter Store carriers are required")
-        self.assertIn(carriers[0], store, "one capacity-one worker must share heavy and Store roles")
-        self.assertEqual(carriers[0]["host"], "lab1", "the heavy alias is bound to its verified physical nonvoter")
         self.assertEqual({row["host"] for row in store}, {"lab1", "lab2"})
-        self.assertEqual(len({row["host"] for row in store}), 2)
         self.assertTrue(all(row["host"] not in fleet["voter_hosts"] for row in store))
-        self.assertEqual({label for label in carriers[0]["labels"] if label.startswith("ci-")},
-                         {"ci-nonvoter-heavy-amd64", "ci-nonvoter-store"})
-        self.assertIs(carriers[0].get("implicit_labels"), False)
-        self.assertEqual(set(carriers[0]["labels"]), {"ci-nonvoter-heavy-amd64", "ci-nonvoter-store", "incus"})
         self.assertTrue(all((row["os"], row["arch"]) == ("Linux", "X64") for row in store))
 
     def test_new_role_carriers_reject_singleton_voter_and_swapped_physical_owners(self):
         # Unit fixtures exercise the new aliases' affirmative host boundary;
         # they are not enrollment evidence for an actually registered worker.
         heavy = {"name": "fixture-heavy", "host": "lab1", "os": "Linux", "arch": "X64",
-                 "labels": ["ci-nonvoter-heavy-amd64", "ci-nonvoter-store", "incus"],
+                 "labels": ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"],
                  "implicit_labels": False}
+        compile_carrier = {"name": "fixture-compile", "host": "lab5", "os": "Linux", "arch": "X64",
+                           "labels": ["ci-nonvoter-compile-amd64"], "implicit_labels": False}
         store = {"name": "fixture-store", "host": "lab2", "os": "Linux", "arch": "X64",
                  "labels": ["ci-nonvoter-store"]}
         protected = ["media1", "lab3", "lab4", "lab6"]
         def check_carriers(first, second):
-            fixture = {"voter_hosts": protected, "runners": [first, second]}
+            fixture = {"voter_hosts": protected, "runners": [first, second, compile_carrier]}
             with mock.patch(__name__ + ".runner_fleet", return_value=fixture):
                 self.test_full_unit_suite_has_dedicated_bounded_resident_capacity()
         check_carriers(heavy, store)
@@ -3430,7 +3441,7 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_full_runtime_job_allowances_preserve_the_existing_suites(self):
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
-        for name, minutes in (("preflight", 30), ("check", 120), ("cluster_store_legacy", 120), ("cluster_wal", 60)):
+        for name, minutes in (("preflight", 30), ("check", 180), ("cluster_store_legacy", 120), ("cluster_wal", 60)):
             with self.subTest(job=name):
                 self.assertRegex(jobs[name], rf"(?m)^    timeout-minutes: {minutes}$")
                 # The serial Store suite is not a compiler lane; the full unit
@@ -4690,8 +4701,8 @@ assert.equal(context.ACT_TIMER, null);
                     expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
                     # The pinned image retains shipped FFmpeg 8; placement is
-                    # the same bounded nonvoter daemon compiler slot.
-                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
+                    # the bounded nonvoter compile pool.
+                    expected = "    runs-on: [ci-nonvoter-compile-amd64]"
                 elif path == ".github/workflows/ci.yml" and name in {
                     "web_layout", "vod_web"
                 }:
@@ -4738,7 +4749,7 @@ assert.equal(context.ACT_TIMER, null);
                     }
                     and name == "rust_compile"
                 ):
-                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
+                    expected = "    runs-on: [ci-nonvoter-compile-amd64]"
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
                     "android_device",
@@ -4810,7 +4821,7 @@ assert.equal(context.ACT_TIMER, null);
         }
         for workflow in ("ci", "effort-ci", "main-fast-lane"):
             job = workflow_job_blocks(f".github/workflows/{workflow}.yml")["rust_compile"]
-            self.assertEqual(self_hosted_label_sets(job), [("ci-nonvoter-heavy-amd64",)])
+            self.assertEqual(self_hosted_label_sets(job), [("ci-nonvoter-compile-amd64",)])
             bootstrap = workflow_step_blocks(job)["Install Rust gate prerequisites"]
             selector = re.search(r'(?ms)^          case "\$\(dpkg --print-architecture\)" in.*?^          esac$', bootstrap)
             self.assertIsNotNone(selector)

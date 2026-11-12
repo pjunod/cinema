@@ -1951,6 +1951,7 @@ impl TranscodeManager {
 
     pub(crate) fn candidate_context(candidate: &QualityCandidate) -> CandidateExecutionContext {
         CandidateExecutionContext {
+            required_fel_qualification: None,
             catalog_query: None,
             display_target: None,
             display_target_note: None,

@@ -7978,7 +7978,7 @@ test_anchor = "testEnhancementPillsFollowTheRangeBadgeOnlyForActiveEnhancements"
 id = "apple.prepared-successor-keeps-enhancement"
 commits = ["8a5672b3159e9f912d1826c23951d071124365c7"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "playbackEnhancement = action.enhancement"
+source_anchor = "adoptPlaybackEnhancement(action.enhancement)"
 test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
 test_anchor = "testCommitAdoptsTheSuccessorsEnhancementInsteadOfClearingIt"
 
@@ -8477,3 +8477,29 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/Caps.kt"
 source_anchor = "selector.isVideoSizeAndRateSupportedV21(width, height, rate)"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
 test_anchor = "fun decoderEnvelopeAsksMedia3AtEveryRectangleAndRate()"
+
+# PR #1491: Playback Info shows the owner's generation-scoped skip reason.
+[[fixes]]
+id = "apple.dv-enhancement-skip-reason"
+commits = ["481ac9de236fe3c93596973b34500f50cd831573"]
+source = "clients/apple/Sources/Models.swift"
+source_anchor = "struct ProcessingSkip: Codable, Equatable {"
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "func testSkippedUpgradeExplainsOnlyCurrentInactiveEnhancements()"
+
+[[fixes]]
+id = "android.dv-enhancement-skip-reason"
+commits = []
+supplements = "apple.dv-enhancement-skip-reason"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "data class ProcessingSkip(val generation: String, val reason: String) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun aSkippedUpgradeExplainsOnlyCurrentInactiveEnhancements()"
+
+[[fixes]]
+id = "apple.one-published-enhancement-surface"
+commits = ["520e4615718c7976f9bf2f4a63ecee6fb96baa63"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "@Published private(set) var playbackEnhancement: PlaybackEnhancement?"
+test = "tests/operations/test_playback_surface_fence.py"
+test_anchor = "def test_the_player_controllers_published_surface_inventory_is_pinned(self):"

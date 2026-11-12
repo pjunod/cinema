@@ -51,6 +51,13 @@ candidate without an ordinary fallback can be refused instead of downgraded.
 | Rolling recovery | No processed graph exists here | Retained ordinary fallback in the same incarnation, or refusal for an explicit processed candidate |
 | Progressive/direct request | Does not execute the processed HLS graph. The decision service routes eligible HDR10 enhancement through HLS; a stale progressive request re-decides its available producer | Producer-compatible ordinary delivery |
 
+Optional processed enhancement is prepared after the ordinary session's first
+frame and staged as a verified successor, so measurement or rendering does
+not hold first playback. Unsupported, pending or refused processing retains
+the ordinary stream. Playback Info reports the current generation's deferred
+reason; see the [GPU qualification repair](DV-GPU-QUALIFICATION-AND-PLAYBACK-INFO.md)
+for vendor-bound Intel/AMD VA-API and NVIDIA NVENC measurement and evidence.
+
 The switches are independent: HDR processing and FEL re-encode default off;
 P7 copy conversion defaults on. There is no separate DV Auto/Forced enum.
 The quality menu's Auto/Original/rung choice and these switches are distinct

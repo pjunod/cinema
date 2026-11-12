@@ -25,8 +25,18 @@ PRE_NONVOTER_JOB = '8672bfc684e8900df352a108a13fe12946ca6bde0f451b8895482379f307
 # Checkout, pinned image/toolchain, Cargo flags, job/test threads and timeout
 # remain exact. Historical admission names each reviewed recipe explicitly;
 # current admission accepts only the new recipe, never arbitrary resource edits.
-CURRENT_JOB = '6bccb65add53e801408f5ff9143022c9ddf7dc68854cf2ff3eabb5a6f4214a49'
-HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, CURRENT_JOB)
+NONVOTER_JOB = '6bccb65add53e801408f5ff9143022c9ddf7dc68854cf2ff3eabb5a6f4214a49'
+# Reviewed verifier parsing only: the first step finds the single unified
+# (cgroup v2) line of /proc/self/cgroup instead of requiring it to be first,
+# so a hybrid host's unrelated v1 hierarchy (lab5's net_cls) no longer fails
+# it. The five checked limits, their values and every refusal are unchanged.
+CGROUP_PARSE_JOB = 'c337a99f0dd97cbb824ce3207cf11abb81f2bab1768db7ddf6214ccfdc81051b'
+# Reviewed timeout only: 120 -> 180 minutes (2026-11-11). On the four-CPU
+# nonvoter the full suite needs ~175 minutes (run 7243 timed out at 4,870 of
+# ~7,850 cases with none failed). Checkout, image, toolchain, Cargo flags,
+# job/test threads and every resource limit are unchanged.
+CURRENT_JOB = '5ed443546bfbd4d4cfea28aeccd3add213f3dcc61a1be65f99a4a65822478668'
+HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, NONVOTER_JOB, CGROUP_PARSE_JOB, CURRENT_JOB)
 ROOT_SOURCES = {'tests/operations/test_source_custody_recovery.py', 'scripts/source-custody-recovery'}
 PROTECTED = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'Makefile'}
 NATIVE_ACTIONS = ('.cargo/', '.github/actions/rust-native-deps/', '.github/actions/ffmpeg/',
