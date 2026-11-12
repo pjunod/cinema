@@ -48,6 +48,37 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
     && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check \
     && cp target-cluster-check/release/plurx-cluster-check.dwp /plurx-cluster-check.dwp
 
+# The DV helper bundle is application source: plurxd compiles the identity of
+# tools/dv_processing into itself and refuses a bundle built from any other
+# sources, so the bundle is compiled here, from this build context, and never
+# taken from a published image. Only its expensive dependencies are published:
+# FFmpeg, libplacebo and libdovi built from pinned sources, with the compiler
+# and headers the helpers need. `scripts/media-runtime pin-dv-dependencies`
+# writes this digest and the dependency input identity below together.
+FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:0000000000000000000000000000000000000000000000000000000000000000 AS dv-processing-dependencies
+
+# These stages sit before runtime-assets so release packaging keeps them
+# (validation/release_dockerfile.py); they see no daemon source.
+FROM dv-processing-dependencies AS dv-processing-helpers
+ARG PLURX_DV_DEPENDENCY_INPUTS="sha256:5c653ebd688f63ef028ffbdbff84b2ba852461d6519b6edfeb90768bbc403f9e"
+COPY tools/dv_quality/backends/parsed-rpu/fetch_parser.py tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock /build-inputs/parsed-rpu/
+COPY tools/dv_quality/backends/libplacebo/fetch_sources.py /build-inputs/libplacebo/
+COPY tools/dv_processing /build-inputs/dv_processing
+COPY LICENSE NOTICE /build-inputs/project-notices/
+ENV PLURX_DV_PROJECT_NOTICES=/build-inputs/project-notices
+# The published prefix records the files it was built from. Refuse it when
+# this tree's decoder patch, source pins or dependency recipe differ: the
+# answer is a new dependency publication, never a bundle that claims sources
+# its libraries were not built from.
+RUN sh /build-inputs/dv_processing/dependency-inputs.sh > /build-inputs/application-inputs.sha256 \
+    && { cmp /build-inputs/application-inputs.sha256 /opt/dv-dependencies/build-inputs.sha256 \
+      && test "sha256:$(sha256sum < /opt/dv-dependencies/build-inputs.sha256 | cut -d' ' -f1)" = "$PLURX_DV_DEPENDENCY_INPUTS" \
+      || { echo 'FATAL: the pinned DV build dependencies were built from other inputs than this tree.' >&2; \
+           diff /opt/dv-dependencies/build-inputs.sha256 /build-inputs/application-inputs.sha256 >&2; \
+           echo 'Publish new dependencies and pin them: docs/ci/MEDIA-RUNTIME.md.' >&2; exit 1; }; } \
+    && sh /build-inputs/dv_processing/build-bundle.sh /opt/dv-dependencies /opt/dv-bundle \
+    && python3 /opt/dv-bundle/sources/bundle-manifest.py /opt/dv-bundle/sources /opt/dv-bundle --verify
+
 # Published media dependencies are independent of application source.
 FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:17b3bf9f0d3ed5dd167540a3c805e30a7624fbd93dad250e9e866799ecb22cae AS runtime-assets
 
@@ -128,6 +159,20 @@ COPY --from=build /plurxd.dwp /usr/local/bin/plurxd.dwp
 # that produced the on-disk state without installing Rust on the host.
 COPY --from=build /plurx-cluster-check /usr/local/bin/plurx-cluster-check
 COPY --from=build /plurx-cluster-check.dwp /usr/local/bin/plurx-cluster-check.dwp
+# The DV helper bundle built above from this context's tools/dv_processing.
+# This stage owns the directory outright: a media base that still carries a
+# bundle of its own contributes no file to it. Each helper must then load
+# against this image's own libraries and report its usage; that check writes
+# nothing, so it adds no bytes to the image.
+RUN rm -rf /usr/lib/plurx/dv-processing
+COPY --from=dv-processing-helpers /opt/dv-bundle /usr/lib/plurx/dv-processing
+RUN test -n "$(find /usr/share/vulkan/icd.d -name '*.json' -print -quit)" \
+    && for helper in segment_decode_render mux_rgb author_p81 scan_title; do \
+      status=0; message=$(LD_LIBRARY_PATH=/usr/lib/plurx/dv-processing/lib \
+        /usr/lib/plurx/dv-processing/bin/$helper 2>&1 >/dev/null) || status=$?; \
+      { test "$status" -eq 1 && printf '%s\n' "$message" | grep -q 'usage:'; } \
+        || { echo "FATAL: DV helper $helper does not load in this runtime: $message" >&2; exit 1; }; \
+    done
 
 # NVIDIA Container Toolkit must also mount the video encode/decode libraries.
 # This default covers direct Docker users; GPU device access is still runtime

@@ -20,6 +20,19 @@ PIN = re.compile(
     r"(sha256:[0-9a-f]{64})( AS runtime-assets)$"
 )
 DIGEST_ARG = re.compile(r'(?m)^ARG PLURX_MEDIA_RUNTIME_DIGEST="(sha256:[0-9a-f]{64})"$')
+# The DV helper build dependencies are a second published image in the same
+# repository. Its pin travels with the identity of the files it was built from.
+DV_PIN = re.compile(
+    r"(?m)^(FROM \$\{PLURX_MEDIA_RUNTIME_REPOSITORY\}@)"
+    r"(sha256:[0-9a-f]{64})( AS dv-processing-dependencies)$"
+)
+DV_INPUTS_ARG = re.compile(r'(?m)^ARG PLURX_DV_DEPENDENCY_INPUTS="(sha256:[0-9a-f]{64})"$')
+UNPUBLISHED = "sha256:" + "0" * 64
+DV_DEPENDENCY_INPUTS = (
+    ("tools/dv_processing", ("build-dependencies.sh", "build-requirements.txt", "*.patch")),
+    ("tools/dv_quality/backends", ("libplacebo/fetch_sources.py", "parsed-rpu/fetch_parser.py",
+                                   "parsed-rpu/resolved-Cargo.lock")),
+)
 IMAGE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}"
 )
@@ -87,16 +100,40 @@ def verify_public_image(digest: str) -> None:
                          + PUBLIC_REPOSITORY + "@" + digest) from error
 
 
-def pin_image(image: str, dockerfile: Path, *, insecure: bool = False) -> None:
+def dv_dependency_inputs(root: Path = ROOT) -> str:
+    """Identity of the files that define the published DV build dependencies.
+
+    Byte for byte the list tools/dv_processing/dependency-inputs.sh prints, so
+    the value pinned in source equals what the dependency image recorded when
+    it was built from the same files.
+    """
+    lines = []
+    for directory, patterns in DV_DEPENDENCY_INPUTS:
+        for pattern in patterns:
+            matches = sorted((root / directory).glob(pattern), key=lambda path: path.name.encode())
+            if not matches:
+                raise ValueError(f"DV dependency input {directory}/{pattern} is missing")
+            for path in matches:
+                name = path.relative_to(root / directory).as_posix()
+                lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {name}\n")
+    return "sha256:" + hashlib.sha256("".join(lines).encode()).hexdigest()
+
+
+def pin_image(image: str, dockerfile: Path, *, insecure: bool = False,
+              dv_dependencies: bool = False) -> None:
     """Require a published multi-platform image before changing application source."""
     if not IMAGE.fullmatch(image):
         raise ValueError("image must be REGISTRY/REPOSITORY@sha256:<64 lowercase hex>")
     source = dockerfile.read_text()
-    if len(PIN.findall(source)) != 1:
-        raise ValueError("Dockerfile must contain exactly one immutable media runtime pin")
-    defaults = DIGEST_ARG.findall(source)
-    if len(defaults) != 1 or defaults[0] != PIN.findall(source)[0][1]:
-        raise ValueError("runtime digest identity default must match the committed media base")
+    if dv_dependencies:
+        if len(DV_PIN.findall(source)) != 1 or len(DV_INPUTS_ARG.findall(source)) != 1:
+            raise ValueError("Dockerfile must contain exactly one DV build dependency pin and input identity")
+    else:
+        if len(PIN.findall(source)) != 1:
+            raise ValueError("Dockerfile must contain exactly one immutable media runtime pin")
+        defaults = DIGEST_ARG.findall(source)
+        if len(defaults) != 1 or defaults[0] != PIN.findall(source)[0][1]:
+            raise ValueError("runtime digest identity default must match the committed media base")
     inspect = ["docker", "manifest", "inspect"]
     if insecure:
         inspect.append("--insecure")
@@ -109,8 +146,15 @@ def pin_image(image: str, dockerfile: Path, *, insecure: bool = False) -> None:
         raise ValueError("media image index must contain both linux/amd64 and linux/arm64")
     digest = image.rsplit("@", 1)[1]
     verify_public_image(digest)
-    updated = PIN.sub(lambda match: match[1] + digest + match[3], source)
-    updated = DIGEST_ARG.sub(f'ARG PLURX_MEDIA_RUNTIME_DIGEST="{digest}"', updated)
+    if dv_dependencies:
+        # The image must have been built from this tree's dependency inputs;
+        # the application build compares the recorded list with the image's.
+        updated = DV_PIN.sub(lambda match: match[1] + digest + match[3], source)
+        updated = DV_INPUTS_ARG.sub(
+            f'ARG PLURX_DV_DEPENDENCY_INPUTS="{dv_dependency_inputs(dockerfile.resolve().parent)}"', updated)
+    else:
+        updated = PIN.sub(lambda match: match[1] + digest + match[3], source)
+        updated = DIGEST_ARG.sub(f'ARG PLURX_MEDIA_RUNTIME_DIGEST="{digest}"', updated)
     # Keep the mirror repository configurable while making the selected bytes immutable.
     temporary: str | None = None
     try:
@@ -124,7 +168,7 @@ def pin_image(image: str, dockerfile: Path, *, insecure: bool = False) -> None:
     finally:
         if temporary:
             Path(temporary).unlink(missing_ok=True)
-    print(f"Pinned media runtime: {digest}")
+    print(f"Pinned {'DV build dependencies' if dv_dependencies else 'media runtime'}: {digest}")
 
 
 def main() -> int:
@@ -137,11 +181,18 @@ def main() -> int:
     pin.add_argument("image")
     pin.add_argument("--insecure", action="store_true", help="allow the configured private HTTP registry")
     pin.add_argument("--dockerfile", type=Path, default=ROOT / "Dockerfile")
+    pin_dv = commands.add_parser(
+        "pin-dv-dependencies",
+        help="verify a published DV build dependency index and update its digest and input identity")
+    pin_dv.add_argument("image")
+    pin_dv.add_argument("--insecure", action="store_true", help="allow the configured private HTTP registry")
+    pin_dv.add_argument("--dockerfile", type=Path, default=ROOT / "Dockerfile")
     build = commands.add_parser("build", help="explicitly build and push media dependencies")
     build.add_argument("--image", required=True)
     build.add_argument("--metadata", type=Path, required=True)
     build.add_argument("--platforms", default="linux/amd64,linux/arm64")
-    build.add_argument("--target", choices=("media-runtime", "runtime-assets-dolby-amd64"), default="media-runtime")
+    build.add_argument("--target", choices=("media-runtime", "runtime-assets-dolby-amd64", "dv-processing-dependencies"),
+                       default="media-runtime")
     build.add_argument("--package", type=Path)
     args = parser.parse_args()
     try:
@@ -156,6 +207,8 @@ def main() -> int:
             print(reference.replace("${PLURX_MEDIA_RUNTIME_REPOSITORY}", args.repository))
         elif args.command == "pin":
             pin_image(args.image, args.dockerfile, insecure=args.insecure)
+        elif args.command == "pin-dv-dependencies":
+            pin_image(args.image, args.dockerfile, insecure=args.insecure, dv_dependencies=True)
         else:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9_.-]+", args.image):
                 raise ValueError("build image must be a tagged REGISTRY/REPOSITORY reference")

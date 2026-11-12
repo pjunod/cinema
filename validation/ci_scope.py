@@ -236,6 +236,12 @@ RELEASE_BUILD_PATHS = (
     "Dockerfile.media-runtime",
     "scripts/media-runtime",
     ".github/workflows/media-runtime.yml",
+    # The image compiles the DV helper bundle from these application sources
+    # against the pinned dependency image, whose inputs are the last three.
+    "tools/dv_processing/**",
+    "tools/dv_quality/backends/libplacebo/fetch_sources.py",
+    "tools/dv_quality/backends/parsed-rpu/fetch_parser.py",
+    "tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock",
     "rust-toolchain.toml",
     # Copied into the runtime-assets stage that package-smoke builds.
     "scripts/build-static-ffprobe",
@@ -259,6 +265,12 @@ CONTAINER_PATHS = (
     "Dockerfile.media-runtime",
     "scripts/media-runtime",
     ".github/workflows/media-runtime.yml",
+    # The image compiles the DV helper bundle from these application sources
+    # against the pinned dependency image, whose inputs are the last three.
+    "tools/dv_processing/**",
+    "tools/dv_quality/backends/libplacebo/fetch_sources.py",
+    "tools/dv_quality/backends/parsed-rpu/fetch_parser.py",
+    "tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock",
     "deploy/**",
     "plurx.example.toml",
     "rust-toolchain.toml",

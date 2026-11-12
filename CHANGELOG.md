@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- The server image builds its Dolby Vision helper bundle from the same source
+  tree as the server it ships with. The bundle had been taken from a separately
+  published image, so helper changes never reached an image, and a server built
+  after them would have refused the older bundle and turned DV processing off.
 - CM4 display mapping evaluates the ST 2084 transfer functions in its point and
   final passes with precise split-float helpers and the normative black and
   white endpoints. On the measured Source16 frame no enhanced pixel is farther

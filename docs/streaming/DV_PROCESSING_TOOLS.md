@@ -52,8 +52,13 @@ rounding are part of the processing contract.
 
 ## Build the installed Linux bundle
 
-The [Dockerfile](../../Dockerfile) keeps `dv-processing-dependencies` separate from helper source
-and daemon builds. It uses the source pins above, Rust 1.97.1, Debian snapshot
+The helper bundle is application source: the [Dockerfile](../../Dockerfile)
+compiles it from the build context in its `dv-processing-helpers` stage, so
+the bundle always matches the daemon built beside it. Its dependencies are a
+published, digest-pinned image built by `dv-processing-dependencies` in
+`Dockerfile.media-runtime`; [MEDIA-RUNTIME.md](../ci/MEDIA-RUNTIME.md) says who
+owns what and how a dependency change is published. That image uses the source
+pins above, Rust 1.97.1, Debian snapshot
 `20260928T000000Z`, and hash-pinned Python build tools. The
 [`build-dependencies.sh`](../../tools/dv_processing/build-dependencies.sh) and
 [`build-bundle.sh`](../../tools/dv_processing/build-bundle.sh) scripts also run
@@ -61,17 +66,18 @@ on Linux with those dependencies installed. Build jobs are bounded to 1–4,
 with a default of 2.
 
 ```bash
-# Check only the helper bundle on either shipped Linux architecture.
-docker build --platform linux/arm64 --target dv-processing-helper-check .
-docker build --platform linux/amd64 --target dv-processing-helper-check .
+# Compile and verify only the helper bundle on either shipped Linux architecture.
+docker build --platform linux/arm64 --target dv-processing-helpers .
+docker build --platform linux/amd64 --target dv-processing-helpers .
 ```
 
 **How to read it:** the manifest check must report schema 1, libplacebo API 374
-and positive FFmpeg ABI majors. Every helper must load and exit with its
-usage status, and Mesa provider definitions must be installed. This headless
-check runs no GPU rendering, media encode or daemon
-suite. The normal `runtime-assets` stage installs the same bundle at
-`/usr/lib/plurx/dv-processing`. Jellyfin FFmpeg 8 remains the production encoder.
+and positive FFmpeg ABI majors. The build first refuses a dependency image
+that was built from other inputs than this tree. The `runtime` stage then
+installs the bundle at `/usr/lib/plurx/dv-processing` and requires every helper
+to load there and exit with its usage status, with Mesa provider definitions
+installed. Neither step runs GPU rendering, media encode or the daemon
+suite. Jellyfin FFmpeg 8 remains the production encoder.
 
 The bundle has a private libplacebo directory and an exact source, tool,
 parser and library hash manifest. Only renderer subprocesses receive its

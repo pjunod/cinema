@@ -184,8 +184,86 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertIn("shipping-system-elf-sha256.txt", workflow)
         self.assertIn("sha256sum -c", workflow)
         self.assertIn("Audited-amd64: %s", workflow)
-        # Both the standalone exporter and final builder use the maintenance recipe.
-        self.assertEqual(workflow.count("file: Dockerfile.media-runtime"), 2)
+        # The standalone exporter, the final builder and the DV build
+        # dependencies all use the maintenance recipe.
+        self.assertEqual(workflow.count("file: Dockerfile.media-runtime"), 3)
+
+    def test_maintenance_workflow_publishes_dependencies_and_qualifies_the_application_bundle(self):
+        workflow = (ROOT / ".github/workflows/media-runtime.yml").read_text()
+        self.assertIn("target: dv-processing-dependencies", workflow)
+        # The helper bundle is never built by the maintenance recipe: the
+        # application Dockerfile builds it against both candidates.
+        qualify = workflow.split("- name: Qualify the application helper bundle against both candidates", 1)[1]
+        qualify = qualify.split("\n      - name:", 1)[0]
+        self.assertIn("file: Dockerfile\n", qualify)
+        self.assertIn("target: runtime\n", qualify)
+        self.assertIn("dv-processing-dependencies=docker-image://${{ env.RUNTIME_IMAGE }}@${{ steps.dv-dependencies.outputs.digest }}", qualify)
+        self.assertIn("runtime-assets=docker-image://${{ env.RUNTIME_IMAGE }}@${{ steps.runtime.outputs.digest }}", qualify)
+        self.assertIn("build=./media-qualification-build", qualify)
+        self.assertIn("outputs: type=cacheonly", qualify)
+        self.assertLess(workflow.index("Qualify the application helper bundle"),
+                        workflow.index("media-digests/${{ matrix.arch }}.dv-dependencies.digest"))
+        self.assertIn('docker manifest push --insecure --purge "$dv_tag"', workflow)
+        self.assertIn("DV-Build-Dependencies: %s@%s", workflow)
+        self.assertIn("scripts/media-runtime pin-dv-dependencies ghcr.io/pjunod/cinema-media-runtime@%s", workflow)
+
+    def test_dv_dependency_pin_updates_only_its_digest_and_input_identity(self):
+        inputs = "sha256:" + "3" * 64
+        source = SOURCE + (
+            f"FROM ${{PLURX_MEDIA_RUNTIME_REPOSITORY}}@{OLD} AS dv-processing-dependencies\n"
+            f'ARG PLURX_DV_DEPENDENCY_INPUTS="{inputs}"\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            dockerfile = Path(directory) / "Dockerfile"
+            dockerfile.write_text(source)
+            image = "registry.example:5000/noirr/plurx-media-runtime@" + NEW
+            with (
+                patch.object(media_runtime, "run", return_value=index("amd64", "arm64")),
+                patch.object(media_runtime, "verify_public_image") as public,
+                patch.object(media_runtime, "dv_dependency_inputs", return_value="sha256:" + "4" * 64) as tree,
+            ):
+                media_runtime.pin_image(image, dockerfile, dv_dependencies=True)
+            public.assert_called_once_with(NEW)
+            tree.assert_called_once_with(dockerfile.resolve().parent)
+            self.assertEqual(dockerfile.read_text(), SOURCE + (
+                f"FROM ${{PLURX_MEDIA_RUNTIME_REPOSITORY}}@{NEW} AS dv-processing-dependencies\n"
+                f'ARG PLURX_DV_DEPENDENCY_INPUTS="sha256:{"4" * 64}"\n'
+            ))
+            # The runtime pin leaves the dependency pin alone, and the reverse.
+            dockerfile.write_text(source)
+            with patch.object(media_runtime, "run", return_value=index("amd64", "arm64")), patch.object(media_runtime, "verify_public_image"):
+                media_runtime.pin_image(image, dockerfile)
+            self.assertEqual(dockerfile.read_text(), source.replace(OLD, NEW, 1).replace(
+                f'DIGEST="{OLD}"', f'DIGEST="{NEW}"'))
+
+    def test_dv_dependency_pin_refuses_a_source_without_exactly_one_pin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dockerfile = Path(directory) / "Dockerfile"
+            dockerfile.write_text(SOURCE)
+            with patch.object(media_runtime, "run") as run:
+                with self.assertRaisesRegex(ValueError, "exactly one DV build dependency pin"):
+                    media_runtime.pin_image("registry.example/noirr/plurx-media-runtime@" + NEW,
+                                            dockerfile, dv_dependencies=True)
+                run.assert_not_called()
+            self.assertEqual(dockerfile.read_text(), SOURCE)
+
+    def test_dv_dependency_input_identity_changes_with_any_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for folder, patterns in media_runtime.DV_DEPENDENCY_INPUTS:
+                for pattern in patterns:
+                    path = root / folder / pattern.replace("*", "decoder")
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(pattern)
+            before = media_runtime.dv_dependency_inputs(root)
+            (root / "tools/dv_processing/second.patch").write_text("another patch")
+            added = media_runtime.dv_dependency_inputs(root)
+            self.assertNotEqual(before, added)
+            (root / "tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock").write_text("moved pin")
+            self.assertNotEqual(added, media_runtime.dv_dependency_inputs(root))
+            (root / "tools/dv_processing/build-requirements.txt").unlink()
+            with self.assertRaisesRegex(ValueError, "is missing"):
+                media_runtime.dv_dependency_inputs(root)
 
 
 if __name__ == "__main__":
