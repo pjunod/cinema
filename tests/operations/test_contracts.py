@@ -1531,6 +1531,22 @@ assert.equal(context.ACT_TIMER, null);
             with self.subTest(runtime_asset_assertion=assertion):
                 self.assertIn(assertion, runtime_assets_stage)
 
+    def test_local_docker_build_compiles_in_parallel_unless_the_builder_bounds_it(self):
+        # `make docker-up` builds this stage on a node. A hard-coded
+        # CARGO_BUILD_JOBS=1 (2026-11-09) made every node build ~3x slower;
+        # CI never builds this stage, so the bound only cost local builds.
+        dockerfile = read("Dockerfile")
+        build_stage = dockerfile.split(" AS build\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertNotRegex(build_stage, r"CARGO_BUILD_JOBS=\S")
+        self.assertNotRegex(build_stage, r"(?m)^ENV .*CARGO_BUILD_JOBS")
+        # A host that must bound the compile can still pass a build arg, and
+        # an ARG with no default leaves cargo's own default (every CPU).
+        self.assertRegex(build_stage, r"(?m)^ARG CARGO_BUILD_JOBS$")
+        self.assertLess(
+            build_stage.index("ARG CARGO_BUILD_JOBS"),
+            build_stage.index("cargo build --locked --release -p plurxd"),
+        )
+
     def test_docker_build_keeps_cluster_validation_features_out_of_plurxd(self):
         dockerfile = read("Dockerfile")
         ci = read(".github/workflows/ci.yml")
