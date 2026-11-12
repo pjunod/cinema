@@ -1301,6 +1301,9 @@ async fn run_generation(
             }
             Ok((consumed, muxer)) => {
                 if let Err(outcome) = establish_or_verify(&rendition, &muxer).await {
+                    if matches!(outcome, Outcome::Failed(Failure::SealedInit(_))) {
+                        report_sealed_init(&shared, &rendition.recipe);
+                    }
                     return (Some(outcome), None);
                 }
                 Box::new(std::io::Cursor::new(consumed).chain(stdout))
@@ -1405,6 +1408,22 @@ pub(super) fn sealed_init_refusal(
         Err(error) => Some(format!(
             "this engine's init cannot be promoted with the sealed inputs: {error}"
         )),
+    }
+}
+
+/// Tell the Analysis worker which head a refused sealed init was planned
+/// from. This path cannot claim; the worker decides whether the variant or
+/// only this node's engine is at fault, and quarantines only the former.
+fn report_sealed_init(shared: &Shared, recipe: &Recipe) {
+    let Some(registry) = shared.copy_analysis.get() else {
+        return;
+    };
+    let defect = recipe
+        .cluster_cache_key
+        .as_deref()
+        .and_then(crate::copy_index_v3::sealed_init_defect);
+    if let Some(defect) = defect {
+        registry.notify_defect(defect);
     }
 }
 

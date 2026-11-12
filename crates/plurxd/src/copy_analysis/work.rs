@@ -8,17 +8,20 @@
 //! fenced full-source attestation phase, seal, local blob installation, and the
 //! guarded v3 publication through a publisher job. No step here grants media
 //! serving or a Source grant; every physical read is a phase's exact custody.
-use super::{physical, CompletedCopyRange, CopyObservationSet};
+use super::{
+    physical, CompletedCopyRange, CopyAnalysisMessage, CopyIndexDefect, CopyIndexDefectKind,
+    CopyObservationSet,
+};
 use plurx_core::store::analysis_coordination::{
     AnalysisCoordinationClaim, AnalysisCoordinationSource,
 };
 use plurx_core::store::background_jobs::{
     ClaimJob, EnqueueJob, EnqueueOutcome, JobKind, JobPublishOutcome, JobRequest,
-    PublishCopyIndexV3,
+    PublishCopyIndexV3, QuarantineCopyIndexV3Head,
 };
 use plurx_core::store::{
-    AnalysisRequest, CopyIndexV3Artifact, CopyIndexV3HeadState, FragmentIndexEngineProvenance,
-    NewAnalysisRequest, Store,
+    AnalysisRequest, CopyIndexV3Artifact, CopyIndexV3HeadState, CopyIndexV3Variant,
+    FragmentIndexEngineProvenance, NewAnalysisRequest, Store,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -36,6 +39,14 @@ const MAX_PENDING_SOURCES: usize = 64;
 /// commit of the same range supersedes its earlier one; past this many ranges
 /// the oldest is dropped, and its durable manifest remains the record.
 const MAX_DEFERRED_RANGES: usize = 8;
+
+/// Reader-found defects held between passes, one per head. A defect past this
+/// is dropped; the next start that meets its head reports it again.
+const MAX_PENDING_DEFECTS: usize = 64;
+
+/// The quarantine code of a head whose published variant fresh observations
+/// of the same source contradict.
+const CONTRADICTION_CODE: &str = "copy_observation_contradiction";
 
 pub(crate) struct PendingSource {
     file: Arc<plurx_core::domain::MediaFile>,
@@ -56,9 +67,36 @@ pub(crate) struct PendingSources {
     sources: HashMap<String, PendingSource>,
     /// Sources a unit is working now, with the ranges committed meanwhile.
     working: HashMap<String, Vec<CompletedCopyRange>>,
+    /// Defects readers reported since the last pass, by source key.
+    defects: HashMap<String, CopyIndexDefect>,
 }
 
 impl PendingSources {
+    /// Fold one inbox message: a committed range into its source's set, a
+    /// reader's defect into the next pass's quarantine work.
+    pub(crate) fn fold(&mut self, message: CopyAnalysisMessage) {
+        match message {
+            CopyAnalysisMessage::Range(range) => self.observe(*range),
+            CopyAnalysisMessage::Defect(defect) => {
+                if self.defects.len() < MAX_PENDING_DEFECTS
+                    || self.defects.contains_key(&defect.source_key)
+                {
+                    self.defects.insert(defect.source_key.clone(), defect);
+                }
+            }
+        }
+    }
+
+    fn take_defects(&mut self) -> Vec<CopyIndexDefect> {
+        let mut defects = self
+            .defects
+            .drain()
+            .map(|(_, defect)| defect)
+            .collect::<Vec<_>>();
+        defects.sort_by(|a, b| a.source_key.cmp(&b.source_key));
+        defects
+    }
+
     /// Fold one committed range into its source's set. A contradiction between
     /// two observations of the same source discards both: neither can seal.
     pub(crate) fn observe(&mut self, message: CompletedCopyRange) {
@@ -187,7 +225,8 @@ pub(crate) struct CopyAnalysisContext {
 
 #[derive(Debug)]
 enum Attempt {
-    /// Published now, or a healthy head already serves this generation.
+    /// Published now, or a healthy head already serves this source and the
+    /// observations agree with it.
     Done,
     /// Another owner or a legacy request holds this source; try on a later wake.
     Busy,
@@ -206,13 +245,38 @@ pub(crate) async fn work_copy_observations(
     registry: &super::CopyAnalysisRegistry,
     context: Arc<CopyAnalysisContext>,
 ) {
+    // Before this process joins or creates any coordination request: what
+    // its predecessor left queued has no worker. Once per process.
+    registry
+        .retire_stranded_once(|created_before_ms| {
+            let context = Arc::clone(&context);
+            async move {
+                let retired = context
+                    .store
+                    .retire_stranded_analysis_coordination(
+                        &context.node_id,
+                        created_before_ms,
+                        crate::state::clock_ms(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if retired > 0 {
+                    tracing::info!(
+                        retired,
+                        "retired copy coordination requests a previous process left queued"
+                    );
+                }
+                Ok(())
+            }
+        })
+        .await;
     let pending = registry.pending();
-    let units = {
+    let (units, defects) = {
         let mut sources = pending.lock().await;
         for message in registry.take_pending() {
-            sources.observe(message);
+            sources.fold(message);
         }
-        sources.start_ready(Instant::now())
+        (sources.start_ready(Instant::now()), sources.take_defects())
     };
     let retry = Duration::from_millis(context.retry_ms.max(1_000) as u64);
     for (key, mut source) in units {
@@ -249,6 +313,31 @@ pub(crate) async fn work_copy_observations(
             }
         });
     }
+    // Reader-reported defects are a few store writes each. This pass does
+    // them itself, after its sources have their units, so nothing detached
+    // outlives it.
+    for defect in defects {
+        match quarantine_defect(&context, &defect).await {
+            Ok(true) => tracing::warn!(
+                source_key = defect.source_key,
+                blob_sha256 = defect.blob_sha256,
+                head_epoch = defect.head_epoch,
+                code = defect.kind.code(),
+                "copy index v3 head quarantined on a reader's defect"
+            ),
+            Ok(false) => tracing::debug!(
+                source_key = defect.source_key,
+                code = defect.kind.code(),
+                "copy index v3 defect did not quarantine its head"
+            ),
+            Err(error) => tracing::warn!(
+                source_key = defect.source_key,
+                code = defect.kind.code(),
+                %error,
+                "copy index v3 defect was not handled; the next start reports it again"
+            ),
+        }
+    }
 }
 
 async fn publish_source(
@@ -256,30 +345,24 @@ async fn publish_source(
     key: &str,
     pending: &mut PendingSource,
 ) -> Attempt {
-    let source = pending.set.source().clone();
-    if source.origin_node_id != context.node_id {
+    if pending.set.source().origin_node_id != context.node_id {
         // Only the origin node holds the exact object and may read it.
         return Attempt::Discard("observation is not for this origin".into());
     }
-    match context.store.copy_index_v3_head(key).await {
-        Ok(Some(head))
-            if head.state == CopyIndexV3HeadState::Healthy
-                && head.published_generation.as_deref() == Some(&source.requested_generation) =>
-        {
-            return Attempt::Done;
-        }
-        // A quarantine moved this source to its repair generation; these
-        // observations belong to the old one. Known before any read.
-        Ok(Some(head)) if head.desired_generation != source.requested_generation => {
-            return Attempt::Discard("head desires another generation".into());
-        }
-        Ok(_) => {}
-        Err(error) => return Attempt::Retry(error.to_string()),
-    }
+    // The exact head epoch and blob these observations contradict, if any.
+    let contradicted = match reconcile_with_head(context, key, &mut pending.set).await {
+        Ok(HeadDecision::Proceed { contradicted }) => contradicted,
+        Ok(HeadDecision::Done) => return Attempt::Done,
+        Ok(HeadDecision::Discard(reason)) => return Attempt::Discard(reason.into()),
+        Err(error) => return Attempt::Retry(error),
+    };
+    let source = pending.set.source().clone();
     // An incomplete set needs a physical phase, which the store admits only
     // while the source domain is idle. While a viewer holds it, a read-only
-    // look answers without enqueueing, claiming or charging anything.
-    if !pending.set.is_complete() {
+    // look answers without enqueueing, claiming or charging anything. A
+    // contradicted head is quarantined whoever is watching: the viewer whose
+    // range found it is the one being served the wrong index.
+    if contradicted.is_none() && !pending.set.is_complete() {
         match context
             .store
             .foreground_source_pressure(source.file_id, crate::state::clock_ms())
@@ -290,7 +373,7 @@ async fn publish_source(
             Err(error) => return Attempt::Retry(error.to_string()),
         }
     }
-    let request = match coordination_request(context, &pending.file, &source).await {
+    let request = match coordination_request(context, &source).await {
         Ok(Some(request)) => request,
         Ok(None) => return Attempt::Busy,
         Err(reason) => return Attempt::Retry(reason),
@@ -332,8 +415,29 @@ async fn publish_source(
     let stop = CancellationToken::new();
     let lost = CancellationToken::new();
     let heartbeat = heartbeat(context, &claimed, stop.clone(), lost.clone());
-    let outcome = match fill_gaps(context, pending, &source, &claim, &claimed, &lost).await {
-        Ok(()) => publish_claimed(context, key, pending, &source, &claim, &claimed, &lost).await,
+    let quarantined = match &contradicted {
+        Some((epoch, blob)) => {
+            let namespace = pending.set.catalog_namespace().to_owned();
+            quarantine_head(
+                context,
+                namespace,
+                &source,
+                &claim,
+                *epoch,
+                blob,
+                CONTRADICTION_CODE,
+            )
+            .await
+        }
+        None => Ok(()),
+    };
+    let outcome = match quarantined {
+        Ok(()) => match fill_gaps(context, pending, &source, &claim, &claimed, &lost).await {
+            Ok(()) => {
+                publish_claimed(context, key, pending, &source, &claim, &claimed, &lost).await
+            }
+            Err(attempt) => Err(attempt),
+        },
         Err(attempt) => Err(attempt),
     };
     // Retire the heartbeat before the outcome write, as the legacy worker does.
@@ -366,6 +470,263 @@ async fn publish_source(
             }
             attempt
         }
+    }
+}
+
+/// What the head of a source means for a set of its observations.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum HeadDecision {
+    /// A healthy head serves this source and the observations agree with it.
+    Done,
+    /// The head desires a generation no quarantine of it explains.
+    Discard(&'static str),
+    /// Fill, seal and publish. `contradicted` names the healthy head epoch
+    /// and blob the observations disagree with, which must be quarantined
+    /// first; the set has then already adopted its repair generation.
+    Proceed { contradicted: Option<(i64, String)> },
+}
+
+/// Read the head by its key and settle which generation `set` seals for. A
+/// healthy head is checked against the fresh observations before it is
+/// called done. A quarantined head's desire is adopted only when it is
+/// exactly the repair generation of the blob and epoch the head still
+/// records, which is what every quarantine of it computes.
+pub(super) async fn reconcile_with_head(
+    context: &CopyAnalysisContext,
+    key: &str,
+    set: &mut CopyObservationSet,
+) -> Result<HeadDecision, String> {
+    let Some(variant) = context
+        .store
+        .copy_index_v3_variant(key, &context.node_id)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(HeadDecision::Proceed { contradicted: None });
+    };
+    let head = &variant.head;
+    // The repair generation of the variant this head points at.
+    let successor = head.blob_sha256.as_deref().and_then(|blob| {
+        plurx_core::store::copy_index_v3_rebuild_generation(key, blob, head.head_epoch).ok()
+    });
+    if variant.readable().is_some() {
+        // A healthy head serves this source whichever generation built it.
+        let Some(reason) = contradiction_with_head(context, set, &variant).await else {
+            return Ok(HeadDecision::Done);
+        };
+        let (Some(successor), Some(blob)) = (successor, head.blob_sha256.clone()) else {
+            return Ok(HeadDecision::Discard("contradicted head names no variant"));
+        };
+        tracing::warn!(
+            file_id = head.file_id,
+            blob_sha256 = blob,
+            head_epoch = head.head_epoch,
+            %reason,
+            "copy observations contradict the published copy index v3"
+        );
+        set.adopt_generation(&successor);
+        return Ok(HeadDecision::Proceed {
+            contradicted: Some((head.head_epoch, blob)),
+        });
+    }
+    if head.state == CopyIndexV3HeadState::Quarantined
+        && successor.as_deref() == Some(head.desired_generation.as_str())
+    {
+        set.adopt_generation(&head.desired_generation);
+    } else if head.desired_generation != set.source().requested_generation {
+        return Ok(HeadDecision::Discard("head desires another generation"));
+    }
+    Ok(HeadDecision::Proceed { contradicted: None })
+}
+
+/// What the fresh observations of `set` contradict in the variant a healthy
+/// head points at, if anything. The blob is read and decoded only here, from
+/// this node's own v3 root: the origin installed it when it published. A
+/// blob that is absent, unreadable or refused proves nothing about the head.
+async fn contradiction_with_head(
+    context: &CopyAnalysisContext,
+    set: &CopyObservationSet,
+    variant: &CopyIndexV3Variant,
+) -> Option<String> {
+    let artifact = variant.readable()?;
+    let path = v3_blob_path(&v3_root(&context.cache_dir), &artifact.blob_sha256)?;
+    let blob = {
+        let _pin = crate::playback_cache::pin(&path).ok()?;
+        tokio::fs::read(&path).await.ok()?
+    };
+    let index = crate::copy_index_v3::decode_verified(&blob, artifact).ok()?;
+    set.contradiction(&index)
+}
+
+/// Quarantine the exact healthy head `claim` owns the repair generation of.
+/// The store moves it only at this epoch and blob; a head that has moved
+/// since is read again by the next pass.
+async fn quarantine_head(
+    context: &CopyAnalysisContext,
+    catalog_namespace: String,
+    source: &AnalysisCoordinationSource,
+    claim: &AnalysisCoordinationClaim,
+    expected_epoch: i64,
+    bad_blob_sha256: &str,
+    code: &str,
+) -> Result<(), Attempt> {
+    match context
+        .store
+        .quarantine_copy_index_v3_head(QuarantineCopyIndexV3Head {
+            catalog_namespace,
+            source: source.clone(),
+            claim: claim.clone(),
+            expected_epoch,
+            bad_blob_sha256: bad_blob_sha256.to_owned(),
+            code: code.to_owned(),
+            now_ms: crate::state::clock_ms(),
+        })
+        .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Attempt::Busy),
+        Err(error) => Err(Attempt::Retry(error.to_string())),
+    }
+}
+
+/// Act on one defect a reader reported: re-read the head, check what this
+/// worker can check itself, and quarantine it under a claim on its repair
+/// generation. `Ok(false)` means the head was left as it is. The request is
+/// handed back queued, so the origin's next observation of the source finds
+/// it and rebuilds; nothing here reads the source.
+pub(super) async fn quarantine_defect(
+    context: &CopyAnalysisContext,
+    defect: &CopyIndexDefect,
+) -> Result<bool, String> {
+    let store = &context.store;
+    let Some(variant) = store
+        .copy_index_v3_variant(&defect.source_key, &context.node_id)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    let head = &variant.head;
+    let Some(artifact) = variant.readable().filter(|artifact| {
+        head.head_epoch == defect.head_epoch && artifact.blob_sha256 == defect.blob_sha256
+    }) else {
+        // Already quarantined, republished or gone: the report is stale.
+        return Ok(false);
+    };
+    match defect.kind {
+        CopyIndexDefectKind::UnindexedHdr10 => {
+            // A fact of the bytes themselves, checked again on this node's
+            // verified copy rather than taken from the report.
+            let Some(path) = v3_blob_path(&v3_root(&context.cache_dir), &artifact.blob_sha256)
+            else {
+                return Ok(false);
+            };
+            let blob = {
+                let _pin = crate::playback_cache::pin(&path).map_err(|error| error.to_string())?;
+                tokio::fs::read(&path).await
+            };
+            if !blob.is_ok_and(|blob| crate::copy_index_v3::lacks_indexed_hdr10(&blob, artifact)) {
+                return Ok(false);
+            }
+        }
+        CopyIndexDefectKind::NoHolder => {
+            // A holder that appeared since the report keeps the head.
+            let holders = store
+                .copy_index_v3_locations(&artifact.contract_key, &artifact.blob_sha256)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !holders.is_empty() {
+                return Ok(false);
+            }
+        }
+        CopyIndexDefectKind::SealedInit => {
+            // A generation here promoted another init than the seal
+            // published. The served init is this engine's muxer init plus
+            // the index's promotion, so the two can differ for two reasons:
+            // the variant is wrong, or this node's ffmpeg is not the one
+            // that built it and simply writes its init differently. Only the
+            // first is a defect of the head. When this engine is exactly the
+            // variant's producer engine the second reason is excluded: the
+            // same engine sealed a contract it does not itself produce for
+            // this source, on any node. With any other engine nothing is
+            // known about the variant, and quarantining it would take a
+            // good index away from every node whose engine does match; the
+            // generation's refusal already keeps this process off it.
+            if crate::ffmpeg::fragment_index_engine_digest().await
+                != artifact.producer_engine_sha256
+            {
+                return Ok(false);
+            }
+        }
+    }
+    let successor = plurx_core::store::copy_index_v3_rebuild_generation(
+        &head.source_key,
+        &artifact.blob_sha256,
+        head.head_epoch,
+    )
+    .map_err(|error| error.to_string())?;
+    let source = AnalysisCoordinationSource {
+        file_id: head.file_id,
+        source_size: head.source_size,
+        source_mtime: head.source_mtime,
+        origin_node_id: head.origin_node_id.clone(),
+        object_version: head.object_version.clone(),
+        video_identity: head.raw_video_identity.clone(),
+        contract_version: head.contract_version,
+        requested_generation: successor,
+    };
+    let Some(request) = coordination_request(context, &source).await? else {
+        return Ok(false);
+    };
+    let now = crate::state::clock_ms();
+    let Some(claim) = store
+        .claim_analysis_coordination(
+            &request.request_id,
+            source.clone(),
+            &context.node_id,
+            request.fence,
+            now,
+            now.saturating_add(context.lease_ms),
+        )
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    let quarantined = quarantine_head(
+        context,
+        head.catalog_namespace.clone(),
+        &source,
+        &claim,
+        head.head_epoch,
+        &artifact.blob_sha256,
+        defect.kind.code(),
+    )
+    .await;
+    // Hand the claim back whatever happened, uncharged: the rebuild is the
+    // origin's, from its own observations, under this same request.
+    let mut claimed = request;
+    claimed.state = "running".into();
+    claimed.owner_node_id = claim.node_id.clone();
+    claimed.fence = claim.fence;
+    let now = crate::state::clock_ms();
+    if let Err(error) = store
+        .retry_analysis_request(
+            &claimed,
+            "copy_index_quarantine_settled",
+            now,
+            now.saturating_add(1),
+            false,
+        )
+        .await
+    {
+        tracing::warn!(%error, "the quarantine claim was not handed back; its lease ends it");
+    }
+    match quarantined {
+        Ok(()) => Ok(true),
+        Err(Attempt::Busy) => Ok(false),
+        Err(Attempt::Retry(reason) | Attempt::Discard(reason)) => Err(reason),
+        Err(Attempt::Done) => Ok(false),
     }
 }
 
@@ -489,7 +850,6 @@ async fn fill_gaps(
 /// legacy request for the same file/node keeps its claim; this returns None.
 async fn coordination_request(
     context: &CopyAnalysisContext,
-    file: &plurx_core::domain::MediaFile,
     source: &AnalysisCoordinationSource,
 ) -> Result<Option<AnalysisRequest>, String> {
     let now = crate::state::clock_ms();
@@ -497,9 +857,9 @@ async fn coordination_request(
         .store
         .enqueue_analysis_request(&NewAnalysisRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
-            file_id: file.id,
-            source_size: file.size,
-            source_mtime: file.mtime,
+            file_id: source.file_id,
+            source_size: source.source_size,
+            source_mtime: source.source_mtime,
             component: "fragment_index".into(),
             pipeline_version: source.pipeline_marker(),
             video_identity: source.video_marker(),
@@ -833,6 +1193,108 @@ pub(crate) fn v3_blob_path(root: &Path, blob_sha256: &str) -> Option<PathBuf> {
                 .join(format!("{blob_sha256}.idx3"))
         },
     )
+}
+
+/// The blob digest a v3 root file name carries, if it is a variant.
+fn v3_blob_digest(name: &str) -> Option<&str> {
+    name.strip_suffix(".idx3").filter(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+/// Let the playback-cache budget evict this node's v3 blobs, as it evicts
+/// its v2 ones. A blob is this node's disposable copy of bytes the catalogue
+/// names by digest; evicting it retires this node's holder rows, and a head
+/// left with no holder is rebuilt when its next reader finds it so.
+pub(crate) fn register_playback_cache(
+    budget: &Arc<crate::playback_cache::PlaybackCacheBudget>,
+    runtime_root: &Path,
+    store: Arc<dyn Store>,
+    node: String,
+) {
+    budget.register(Arc::new(CopyIndexCacheOwner {
+        root: v3_root(runtime_root),
+        store,
+        node,
+    }));
+}
+
+pub(super) struct CopyIndexCacheOwner {
+    pub(super) root: PathBuf,
+    pub(super) store: Arc<dyn Store>,
+    pub(super) node: String,
+}
+
+#[async_trait::async_trait]
+impl crate::playback_cache::CacheOwner for CopyIndexCacheOwner {
+    async fn candidates(&self) -> std::io::Result<Vec<crate::playback_cache::CacheCandidate>> {
+        let mut prefixes = match tokio::fs::read_dir(&self.root).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut candidates = Vec::new();
+        while let Some(prefix) = prefixes.next_entry().await? {
+            if !tokio::fs::symlink_metadata(prefix.path()).await?.is_dir() {
+                continue;
+            }
+            let mut files = tokio::fs::read_dir(prefix.path()).await?;
+            while let Some(file) = files.next_entry().await? {
+                let metadata = tokio::fs::symlink_metadata(file.path()).await?;
+                if !metadata.is_file() {
+                    continue;
+                }
+                let name = file.file_name();
+                let name = name.to_string_lossy();
+                // A staging file an interrupted install left behind.
+                let stale_temporary = name.ends_with(".tmp")
+                    && metadata.modified()?.elapsed().unwrap_or_default()
+                        >= Duration::from_secs(60 * 60);
+                if v3_blob_digest(&name).is_none() && !stale_temporary {
+                    continue;
+                }
+                candidates.push(crate::playback_cache::CacheCandidate {
+                    path: file.path(),
+                    last_used: metadata.accessed().or_else(|_| metadata.modified())?,
+                });
+            }
+        }
+        Ok(candidates)
+    }
+
+    async fn evict(
+        &self,
+        candidate: &crate::playback_cache::CacheCandidate,
+    ) -> std::io::Result<bool> {
+        if candidate.path.parent().and_then(Path::parent) != Some(self.root.as_path()) {
+            return Ok(false);
+        }
+        let Some(name) = candidate.path.file_name().and_then(|name| name.to_str()) else {
+            return Ok(false);
+        };
+        let blob = v3_blob_digest(name);
+        if blob.is_none() && !name.ends_with(".tmp") {
+            return Ok(false);
+        }
+        match tokio::fs::remove_file(&candidate.path).await {
+            Ok(()) => {
+                if let Some(blob) = blob {
+                    // The variant stays valid on its other holders; only
+                    // this node's rows for the bytes it no longer has go.
+                    self.store
+                        .forget_copy_index_v3_blob_holder(blob, &self.node)
+                        .await
+                        .map_err(std::io::Error::other)?;
+                }
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// Install under the node's disk budget with the same staged-write and rename

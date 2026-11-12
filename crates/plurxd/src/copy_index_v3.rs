@@ -9,7 +9,9 @@
 //! size and SHA-256 before they are installed, recorded as a location or
 //! decoded. Nothing here reads the source, queues work or grants serving
 //! authority; without a usable head the caller keeps its existing index
-//! order.
+//! order. A healthy head this reader finds defective (sealed without the
+//! HDR10 fold, held by no node) is reported to the Analysis worker, which
+//! alone can quarantine it; the reader still just moves to its next index.
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
@@ -24,6 +26,7 @@ use plurx_core::store::{
 };
 use plurx_core::transcode::CopyVideoOptions;
 
+use crate::copy_analysis::{CopyAnalysisRegistry, CopyIndexDefect, CopyIndexDefectKind};
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
 pub(crate) const PEER_PATH_PREFIX: &str = "/internal/media/copy-index-v3/";
@@ -70,6 +73,41 @@ pub(crate) fn refuse_on_this_engine(rendition_cache_key: &str) {
     unserved.insert(rendition_cache_key.to_owned());
 }
 
+/// The head variant each rendition key was last planned from, so a generation
+/// that refuses the sealed init can name the exact head it was planned from.
+static PLANNED_VARIANTS: Mutex<Option<HashMap<String, CopyIndexDefect>>> = Mutex::new(None);
+
+fn remember_planned(rendition_cache_key: &str, variant: &CopyIndexV3Variant, blob_sha256: &str) {
+    let mut planned = PLANNED_VARIANTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let planned = planned.get_or_insert_with(HashMap::new);
+    if planned.len() >= MAX_UNSERVED_CONTRACTS {
+        // Forgetting only costs a sealed-init refusal its report.
+        planned.clear();
+    }
+    planned.insert(
+        rendition_cache_key.to_owned(),
+        CopyIndexDefect {
+            source_key: variant.head.source_key.clone(),
+            head_epoch: variant.head.head_epoch,
+            blob_sha256: blob_sha256.to_owned(),
+            kind: CopyIndexDefectKind::SealedInit,
+        },
+    );
+}
+
+/// The sealed-init defect of the head `rendition_cache_key` was last planned
+/// from. Whether it is a defect of the variant or only of this node's engine
+/// is the Analysis worker's to decide.
+pub(crate) fn sealed_init_defect(rendition_cache_key: &str) -> Option<CopyIndexDefect> {
+    PLANNED_VARIANTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|planned| planned.get(rendition_cache_key).cloned())
+}
+
 fn refused_on_this_engine(rendition_cache_key: &str) -> bool {
     UNSERVED_CONTRACTS
         .lock()
@@ -106,11 +144,15 @@ struct Consumer<'a> {
     file: &'a MediaFile,
     identity: SourceIdentity,
     object_version: String,
+    /// Where a defective healthy head is reported. None reports nothing.
+    defects: Option<&'a CopyAnalysisRegistry>,
 }
 
 /// Resolve the v3 index for one copy of `file` on this node, or `None` when no
 /// usable head, holder or valid blob exists. `namespace` is the cluster's
-/// catalogue identity, as the publisher keyed it.
+/// catalogue identity, as the publisher keyed it. `defects` is the Analysis
+/// worker's inbox for a healthy head found defective.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve(
     store: &dyn Store,
     membership: Option<&MembershipManager>,
@@ -119,6 +161,7 @@ pub(crate) async fn resolve(
     runtime_cache: &Path,
     file: &MediaFile,
     video: CopyVideoOptions,
+    defects: Option<&CopyAnalysisRegistry>,
 ) -> Result<Option<ResolvedCopyIndex>, String> {
     // This node's current object: a stat checked against the scanner's facts.
     let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
@@ -142,6 +185,7 @@ pub(crate) async fn resolve(
         file,
         identity,
         object_version,
+        defects,
     };
     // This node's own head, by primary key.
     let own_variant = store
@@ -198,9 +242,28 @@ pub(crate) async fn resolve(
 }
 
 impl Consumer<'_> {
+    /// Report a defect of the healthy head `variant` to the Analysis worker.
+    fn report(&self, variant: &CopyIndexV3Variant, blob_sha256: &str, kind: CopyIndexDefectKind) {
+        let Some(defects) = self.defects else { return };
+        let sent = defects.notify_defect(CopyIndexDefect {
+            source_key: variant.head.source_key.clone(),
+            head_epoch: variant.head.head_epoch,
+            blob_sha256: blob_sha256.to_owned(),
+            kind,
+        });
+        tracing::debug!(
+            file_id = self.file.id,
+            blob_sha256,
+            code = kind.code(),
+            sent,
+            "copy index v3 defect reported"
+        );
+    }
+
     /// Plan from one head's variant, or `None` when it is unreadable, its
-    /// bytes are unavailable, or it is refused. A refusal repairs nothing:
-    /// the caller moves to its next index and the head stays as published.
+    /// bytes are unavailable, or it is refused. A refusal repairs nothing
+    /// here: the caller moves to its next index, and a defect of the head
+    /// itself is reported for the Analysis worker to quarantine.
     async fn plan_from(
         &self,
         variant: &CopyIndexV3Variant,
@@ -216,7 +279,7 @@ impl Consumer<'_> {
         if refused_on_this_engine(&rendition_cache_key) {
             return Ok(None);
         }
-        let Some(blob) = load_blob(
+        let blob = match load_blob(
             self.store,
             self.membership,
             self.node_id,
@@ -225,12 +288,28 @@ impl Consumer<'_> {
             artifact,
         )
         .await?
-        else {
-            return Ok(None);
+        {
+            Loaded::Blob(blob) => blob,
+            Loaded::Unavailable => return Ok(None),
+            Loaded::NoHolder => {
+                self.report(
+                    variant,
+                    &artifact.blob_sha256,
+                    CopyIndexDefectKind::NoHolder,
+                );
+                return Ok(None);
+            }
         };
         let mut index = match decode_verified(&blob, artifact) {
             Ok(index) => index,
             Err(reason) => {
+                if reason == UNINDEXED_HDR10 {
+                    self.report(
+                        variant,
+                        &artifact.blob_sha256,
+                        CopyIndexDefectKind::UnindexedHdr10,
+                    );
+                }
                 tracing::warn!(
                     file_id = self.file.id,
                     contract_key = artifact.contract_key,
@@ -256,6 +335,7 @@ impl Consumer<'_> {
                 return Ok(None);
             }
         }
+        remember_planned(&rendition_cache_key, variant, &artifact.blob_sha256);
         Ok(Some(ResolvedCopyIndex {
             index,
             object_version: self.object_version.clone(),
@@ -294,6 +374,15 @@ fn blob_matches(blob: &[u8], artifact: &CopyIndexV3Artifact) -> bool {
         && plurx_core::store::cluster_fragment_index_blob_sha256(blob) == artifact.blob_sha256
 }
 
+/// Why a verified blob sealed before the whole-title HDR10 fold is refused.
+const UNINDEXED_HDR10: &str = "sealed without whole-title HDR10 metadata";
+
+/// Whether `blob` is the row's exact bytes and is refused only for lacking
+/// the whole-title HDR10 fold.
+pub(crate) fn lacks_indexed_hdr10(blob: &[u8], artifact: &CopyIndexV3Artifact) -> bool {
+    decode_verified(blob, artifact).is_err_and(|reason| reason == UNINDEXED_HDR10)
+}
+
 /// Decode the variant against its artifact row. The blob must be the exact
 /// catalogued bytes, carry the row's source and output identity, promise the
 /// whole-title HDR10 metadata a legacy index promises, and its planning table
@@ -319,7 +408,7 @@ pub(crate) fn decode_verified(
     if !index.promotion.indexed_hdr10_metadata {
         // Sealed before the whole-title HDR10 fold: its promotion would serve
         // a different init than the legacy index of the same title.
-        return Err("sealed without whole-title HDR10 metadata".into());
+        return Err(UNINDEXED_HDR10.into());
     }
     // The served init is `promote_from(muxer init, index.promotion)`, and the
     // seal published the contract of exactly that promotion. The planning
@@ -438,6 +527,17 @@ async fn forget_own_location(
     );
 }
 
+/// What became of one variant's bytes.
+enum Loaded {
+    Blob(Vec<u8>),
+    /// Not obtained now; a holder may still have them.
+    Unavailable,
+    /// This node has no copy and no other node is a holder: none is listed,
+    /// or every listed one answered that it holds nothing. An unreachable
+    /// or unanswering holder is never counted as absent.
+    NoHolder,
+}
+
 /// The variant's exact bytes: this node's verified blob, or one hydrated from
 /// a listed holder. A hydrating node installs under the publisher's staged
 /// write and disk budget and then records itself as a verified location.
@@ -448,7 +548,7 @@ async fn load_blob(
     root: &Path,
     variant: &CopyIndexV3Variant,
     artifact: &CopyIndexV3Artifact,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Loaded, String> {
     let path = crate::copy_analysis::v3_blob_path(root, &artifact.blob_sha256)
         .ok_or("invalid v3 blob digest")?;
     let source_key = variant.head.source_key.as_str();
@@ -466,7 +566,7 @@ async fn load_blob(
             if !variant.held {
                 record_location(store, node_id, source_key, artifact).await;
             }
-            return Ok(Some(blob));
+            return Ok(Loaded::Blob(blob));
         }
         LocalBlob::Missing => {
             if variant.held {
@@ -485,7 +585,7 @@ async fn load_blob(
                 %error,
                 "local copy index v3 blob is unreadable; leaving it in place"
             );
-            return Ok(None);
+            return Ok(Loaded::Unavailable);
         }
         LocalBlob::Corrupt(reason) => {
             tracing::warn!(
@@ -505,16 +605,23 @@ async fn load_blob(
             }
         }
     }
-    let Some(membership) = membership else {
-        return Ok(None);
-    };
+    // This node's own row, if any, is gone or was never there: its bytes are
+    // not here. Whether anyone else holds them is what remains.
     let locations = store
         .copy_index_v3_locations(&artifact.contract_key, &artifact.blob_sha256)
         .await
-        .map_err(|error| format!("listing copy index holders: {error}"))?;
-    if !locations.iter().any(|location| location.node_id != node_id) {
-        return Ok(None);
+        .map_err(|error| format!("listing copy index holders: {error}"))?
+        .into_iter()
+        .filter(|location| location.node_id != node_id)
+        .collect::<Vec<_>>();
+    if locations.is_empty() {
+        return Ok(Loaded::NoHolder);
     }
+    let Some(membership) = membership else {
+        return Ok(Loaded::Unavailable);
+    };
+    // Holders that did not themselves say they hold nothing.
+    let mut possible = locations.len();
     let peers = membership
         .media_peers()
         .await
@@ -560,6 +667,7 @@ async fn load_blob(
                     )
                     .await,
             );
+            possible -= 1;
             continue;
         }
         if !response.status.is_success() || !blob_matches(&response.body, artifact) {
@@ -582,9 +690,13 @@ async fn load_blob(
             holder = location.node_id,
             "copy index v3 hydrated from a peer"
         );
-        return Ok(Some(response.body));
+        return Ok(Loaded::Blob(response.body));
     }
-    Ok(None)
+    Ok(if possible == 0 {
+        Loaded::NoHolder
+    } else {
+        Loaded::Unavailable
+    })
 }
 
 #[cfg(test)]

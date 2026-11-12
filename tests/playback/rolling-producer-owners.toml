@@ -5751,6 +5751,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # tasks, Input and reap are joined by `fill_copy_gap` itself) and then fails
 # the test. It settles nothing itself. The v3 consumer and its peer route add no timer: hydration reuses
 # the peer transport's per-request deadline, as the v2 read does.
+# Discrepancy quarantine (item 5) adds no task, timer or process: a reader's
+# defect is a message in the existing copy-analysis inbox, handled inline by
+# the pass that folds it; the stranded-coordinator retirement runs once at
+# the head of a process's first pass; the v3 eviction owner is called by the
+# playback-cache budget.
 expected_occurrences = 2202
 
 

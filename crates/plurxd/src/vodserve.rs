@@ -1215,6 +1215,10 @@ struct Shared {
     /// The cluster's catalogue identity (`instance.id`), read once: it never
     /// changes, and v3 copy-index source keys are derived from it per start.
     catalog_namespace: tokio::sync::OnceCell<String>,
+    /// The Analysis worker's inbox, attached once the job manager exists. A
+    /// defective healthy v3 head is reported there; this serving path never
+    /// claims or quarantines anything itself.
+    copy_analysis: std::sync::OnceLock<Arc<crate::copy_analysis::CopyAnalysisRegistry>>,
     sessions: Mutex<HashMap<String, Session>>,
     /// Bounded by in-flight VOD request admission and cleaned by exact RAII.
     /// This closes lease loss against a slow resurrection before attachment.

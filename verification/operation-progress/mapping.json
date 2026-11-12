@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "5278a91e3262fcf7592e0355e981b8ec6d48cf260f3c1c0fc9b3bc0ab949f9fe"
+        "sha256": "f1d28b49b3ab6759bcece53740b92d1cbda695febcc3c1b69bb2858c47c1c9ab"
       },
       {
         "table": "31 authority implementation",
@@ -249,19 +249,19 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "49cd172b14e25672e0590f6dc1ee82f1b79be9ba1024d34a223ece1324c29b1b"
+        "sha256": "6fca497a045451153b9232eeac6ad404e8fe5eb15b875263c460e9762c0c02c3"
       },
       {
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "d3d1543b48b0119bf68db6a95546183fa880e2f69dddc04ff3a3ee0541bd099c"
+        "sha256": "8580cff3938519b06b957211f4a4099a43b91ffdbbc7a783eb65ca9b63ec67eb"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "d3d1543b48b0119bf68db6a95546183fa880e2f69dddc04ff3a3ee0541bd099c"
+        "sha256": "8580cff3938519b06b957211f4a4099a43b91ffdbbc7a783eb65ca9b63ec67eb"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
