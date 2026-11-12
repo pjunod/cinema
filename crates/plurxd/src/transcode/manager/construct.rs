@@ -1470,6 +1470,14 @@ impl TranscodeManager {
         self.admit_source_work(1).await
     }
 
+    /// An F+ curve fit decodes and composes both layers of a whole title on
+    /// the CPU with frame threads, so it holds the software budget the way
+    /// the fragment index pass does, on the same one heavy lane.
+    pub(crate) async fn admit_dv_refit(&self) -> Option<FragmentAdmission> {
+        self.admit_source_work(self.software_budget().await.max(1))
+            .await
+    }
+
     /// The node-local fragment index pass's queued turn on the heavy lane.
     /// It waits in the lane's FIFO queue behind the holder (a Dolby Vision
     /// title scan) and any earlier waiter (a speech pass), and is still

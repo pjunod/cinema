@@ -362,7 +362,9 @@ pub async fn retry(
     }
     if !matches!(
         payload,
-        JobPayload::TranscodePrepare { .. } | JobPayload::ArtifactHydrate { .. }
+        JobPayload::TranscodePrepare { .. }
+            | JobPayload::ArtifactHydrate { .. }
+            | JobPayload::DvRefit { .. }
     ) {
         return Err(ApiError::Conflict(
             "this job requires its domain retry action".into(),

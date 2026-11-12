@@ -61,6 +61,7 @@ fn kind_slot(kind: JobKind) -> usize {
         JobKind::SubtitleTextModelOperation => 19,
         JobKind::SubtitleTextTranslateArtifact => 20,
         JobKind::FragmentIndexPublish => 21,
+        JobKind::DvRefit => 22,
     }
 }
 

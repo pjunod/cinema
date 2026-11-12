@@ -284,6 +284,12 @@ fn payload_source(payload: &JobPayload) -> Option<(i64, i64, i64)> {
             source_size,
             source_mtime,
             ..
+        }
+        | JobPayload::DvRefit {
+            file_id,
+            source_size,
+            source_mtime,
+            ..
         } => Some((*file_id, *source_size, *source_mtime)),
         _ => None,
     }

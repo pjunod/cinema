@@ -330,6 +330,13 @@ impl ToolSet {
     pub(crate) fn title_scanner_digest(&self) -> String {
         hash(format!("plurx-dv-title-scanner-v1\0{}", self.scanner_sha256).as_bytes())
     }
+    /// What an F+ curve fit depends on: the helper that decodes and composes
+    /// both layers, with the libraries it loads, its parser and its sources.
+    /// The fit method itself is named separately (`dv_refit::FIT_VERSION`).
+    #[cfg(unix)]
+    pub(crate) fn refit_helper_digest(&self) -> String {
+        hash(format!("plurx-dv-refit-helper-v1\0{}", self.backend_digest()).as_bytes())
+    }
     /// Configuration is captured by the worker, never supplied by a playback
     /// request. Absence preserves ordinary output and the saved preference.
     pub(crate) async fn capture() -> Result<Option<Arc<Self>>, String> {

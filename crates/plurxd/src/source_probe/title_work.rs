@@ -230,66 +230,85 @@ impl TitleTask {
     /// Scheduler checks only locally readable, compatible, live ordinary work.
     /// Durable SQL excludes stale coordinators and other resource blockers.
     pub(super) async fn should_yield(&mut self, state: &AppState) -> Result<bool, StoreError> {
-        if !state
-            .jobs
-            .execution_authority()
-            .may_execute_job(JobKind::MediaProbe)
-            .await
-        {
-            return Ok(false);
-        }
-        let now = now_ms();
-        let page = state
-            .store
-            .job_candidates(CandidateQuery {
-                node_id: state.node_id.clone(),
-                kinds: vec![JobKind::MediaProbe],
-                after: self.probe_after.clone(),
-                now_ms: now,
-                limit: 128,
-            })
-            .await?;
-        // Keep the keyset walk across scheduler ticks. A fixed first page can
-        // hide runnable probes behind locally unreadable or stale candidates.
-        self.probe_after = page.next;
-        for job in page.jobs {
-            let Ok(JobPayload::MediaProbe {
-                file_id,
-                source_size,
-                source_mtime,
-                probe_digest,
-                ..
-            }) = job.supported_payload()
-            else {
-                continue;
-            };
-            if probe_digest != self.probe_pipeline {
-                continue;
-            }
-            let Some(file) = state.store.get_file(file_id).await? else {
-                continue;
-            };
-            if (file.size, file.mtime) != (source_size, source_mtime)
-                || snapshot(&file.path).await != Some((source_size, source_mtime))
-                || tokio::fs::File::open(&file.path).await.is_err()
-            {
-                continue;
-            }
-            if state
-                .store
-                .probe_can_preempt_title(&job.id, &self.job_id, &state.node_id, now)
-                .await?
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        probe_preempts(
+            state,
+            &self.job_id,
+            &self.probe_pipeline,
+            &mut self.probe_after,
+        )
+        .await
     }
     pub(super) async fn stop(mut self) -> bool {
         self.cancel.cancel();
         // Never drop the child future to release the lane: reap, settle, finish.
         self.work.as_mut().await
     }
+}
+
+/// Whether a runnable ordinary probe outranks the running title-lane job
+/// `job_id` (a title scan or an F+ fit). Scheduler checks only locally
+/// readable, compatible, live ordinary work; durable SQL excludes stale
+/// coordinators and other resource blockers.
+pub(super) async fn probe_preempts(
+    state: &AppState,
+    job_id: &str,
+    probe_pipeline: &str,
+    probe_after: &mut Option<CandidateCursor>,
+) -> Result<bool, StoreError> {
+    if !state
+        .jobs
+        .execution_authority()
+        .may_execute_job(JobKind::MediaProbe)
+        .await
+    {
+        return Ok(false);
+    }
+    let now = now_ms();
+    let page = state
+        .store
+        .job_candidates(CandidateQuery {
+            node_id: state.node_id.clone(),
+            kinds: vec![JobKind::MediaProbe],
+            after: probe_after.clone(),
+            now_ms: now,
+            limit: 128,
+        })
+        .await?;
+    // Keep the keyset walk across scheduler ticks. A fixed first page can
+    // hide runnable probes behind locally unreadable or stale candidates.
+    *probe_after = page.next;
+    for job in page.jobs {
+        let Ok(JobPayload::MediaProbe {
+            file_id,
+            source_size,
+            source_mtime,
+            probe_digest,
+            ..
+        }) = job.supported_payload()
+        else {
+            continue;
+        };
+        if probe_digest != probe_pipeline {
+            continue;
+        }
+        let Some(file) = state.store.get_file(file_id).await? else {
+            continue;
+        };
+        if (file.size, file.mtime) != (source_size, source_mtime)
+            || snapshot(&file.path).await != Some((source_size, source_mtime))
+            || tokio::fs::File::open(&file.path).await.is_err()
+        {
+            continue;
+        }
+        if state
+            .store
+            .probe_can_preempt_title(&job.id, job_id, &state.node_id, now)
+            .await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A renderer, recipe or encoder change leaves every FEL verdict measured

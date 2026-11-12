@@ -1,8 +1,12 @@
 //! Admitted leaf workers never mutate catalogue identity or scan completion.
 #[cfg(target_os = "linux")]
+mod dv_refit;
+#[cfg(target_os = "linux")]
 mod dv_title;
 #[cfg(target_os = "linux")]
 pub(crate) mod fel_qualification;
+#[cfg(target_os = "linux")]
+mod refit_work;
 #[cfg(target_os = "linux")]
 mod title_work;
 
@@ -51,10 +55,20 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let mut title: Option<title_work::TitleTask> = None;
     #[cfg(target_os = "linux")]
     let mut title_after = 0;
+    // The F+ fit shares the title lane: it starts only when no title scan
+    // does, and either one yields to ordinary probes.
+    #[cfg(target_os = "linux")]
+    let mut refit: Option<refit_work::RefitTask> = None;
+    #[cfg(target_os = "linux")]
+    let mut refit_after = 0;
     loop {
         if shutdown.is_cancelled() {
             #[cfg(target_os = "linux")]
             if let Some(work) = title.take() {
+                work.stop().await;
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(work) = refit.take() {
                 work.stop().await;
             }
             return;
@@ -77,7 +91,21 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             }
         }
         #[cfg(target_os = "linux")]
-        let ordinary_idle = title.is_none();
+        if let Some(work) = refit.as_mut() {
+            match work.should_yield(&state).await {
+                Ok(true) => {
+                    if let Some(work) = refit.take() {
+                        work.stop().await;
+                    }
+                    cursor = None;
+                    yielded = true;
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error,"F+ priority observation unavailable"),
+            }
+        }
+        #[cfg(target_os = "linux")]
+        let ordinary_idle = title.is_none() && refit.is_none();
         #[cfg(not(target_os = "linux"))]
         let ordinary_idle = true;
         let published = if ordinary_idle {
@@ -93,11 +121,22 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             false
         };
         #[cfg(target_os = "linux")]
-        if title.is_none() && cursor.is_none() && !yielded && !published && !shutdown.is_cancelled()
+        if title.is_none()
+            && refit.is_none()
+            && cursor.is_none()
+            && !yielded
+            && !published
+            && !shutdown.is_cancelled()
         {
             match title_work::TitleTask::start(&state, &boot, &mut title_after).await {
                 Ok(work) => title = work,
                 Err(error) => tracing::warn!(%error,"title demand unavailable"),
+            }
+            if title.is_none() {
+                match refit_work::RefitTask::start(&state, &boot, &mut refit_after).await {
+                    Ok(work) => refit = work,
+                    Err(error) => tracing::warn!(%error, "F+ demand unavailable"),
+                }
             }
         }
         #[cfg(target_os = "linux")]
@@ -108,9 +147,16 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                     None => std::future::pending().await,
                 }
             };
+            let refit_poll = async {
+                match refit.as_mut() {
+                    Some(work) => work.work.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 () = shutdown.cancelled() => {},
                 _ = title_poll => { title = None; },
+                _ = refit_poll => { refit = None; },
                 () = tokio::time::sleep(idle.after_completion(published)) => {},
             }
         }

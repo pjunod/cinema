@@ -1673,6 +1673,109 @@ impl JobFence {
         Ok(published)
     }
 
+    /// Stage the title's scenes in bounded pages, then publish the title,
+    /// each under the attempt's then-current token. The claim lock is taken
+    /// per page, not across the title, so the heartbeat renews the lease
+    /// between pages of a long title. `false` when the attempt lost the title.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn publish_dv_refit(
+        &self,
+        title: plurx_core::store::dv_refit_jobs::RefitTitle,
+        scenes: Vec<plurx_core::store::dv_refit_jobs::StagedScene>,
+    ) -> Result<bool, StoreError> {
+        use plurx_core::store::dv_refit_jobs::{
+            PublishRefitJob, StageRefitScenes, MAX_STAGE_BYTES,
+        };
+        let mut pages: Vec<Vec<_>> = Vec::new();
+        let mut bytes = 0;
+        for scene in scenes {
+            if pages.is_empty() || bytes + scene.bytes() > MAX_STAGE_BYTES {
+                pages.push(Vec::new());
+                bytes = 0;
+            }
+            bytes += scene.bytes();
+            pages.last_mut().expect("page").push(scene);
+        }
+        let mut first_index = 0;
+        for page in pages {
+            let state = self.0.state.lock().await;
+            if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                metrics::event(self.0.kind, Event::FencedPublication);
+                return Ok(false);
+            }
+            let Some(token) = state.token.clone() else {
+                metrics::event(self.0.kind, Event::FencedPublication);
+                return Ok(false);
+            };
+            let count = page.len() as i64;
+            let mut request = StageRefitScenes {
+                token,
+                file_id: title.file_id,
+                first_index,
+                scenes: page,
+                now_ms: unix_ms()?,
+            };
+            // A page is idempotent (its rows are keyed by claim and index), so
+            // a lost acknowledgement is answered by staging it again.
+            let staged = match self.0.store.stage_dv_refit_scenes(request.clone()).await {
+                Ok(staged) => staged,
+                Err(error) => {
+                    if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                        return Err(error);
+                    }
+                    request.now_ms = unix_ms()?;
+                    self.0.store.stage_dv_refit_scenes(request).await?
+                }
+            };
+            drop(state);
+            if !staged {
+                metrics::event(self.0.kind, Event::FencedPublication);
+                return Ok(false);
+            }
+            first_index += count;
+        }
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        };
+        let mut request = PublishRefitJob {
+            token,
+            title,
+            now_ms: unix_ms()?,
+        };
+        let result = match self.0.store.publish_dv_refit_job(request.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_dv_refit_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
     pub(crate) async fn publish_probe(
         &self,
         output: plurx_core::store::background_jobs_probe::ProbeOutput,
