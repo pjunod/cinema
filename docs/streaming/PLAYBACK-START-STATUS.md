@@ -138,17 +138,22 @@ items 4 and 5.
 
 Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
 agent on local branch `step5`, stacked on #1548, not pushed.
-[Plan step 5](LOCAL-COPY-ENGINE-BUILD.md) is built. Clippy `-D warnings` and
-fmt are clean, the inventory and formal pins are green. No unit test has
-been run: the step's tests are written and wait for the fast lane.
+[Plan step 5](LOCAL-COPY-ENGINE-BUILD.md) is built, with the fixes from its
+review (8 findings). Clippy `-D warnings` and fmt are clean, the inventory
+and formal pins are green. No unit test has been run: the step's tests are
+written and wait for the fast lane.
 
 `LocalCopyRange` is the range half of a local VOD session. Nothing starts
 one yet and nothing is served from one; step 6 attaches a session to it.
 
-- Its Inputs open under one foreground source request keyed by the local
-  playback, with the keys a rolling local session registers. The census
-  and the primary generation are sequential, so the session has at most
-  one custody row: the read is charged once.
+- It registers one foreground custody keyed by the local playback, with
+  the keys a rolling local session registers. The census reads through an
+  Input lent that custody and the primary's Input takes it over: one row,
+  written once, as a rolling start's.
+- Decision (review): it presses exactly as a rolling session does. The
+  rolling source observation is now one function that maintenance and the
+  range's read bank both call; a paused or buffering viewer still
+  reporting lifts pressure while held. The Source range keeps its rule.
 - Decision (Paul away): a local range takes no copy admission. No local
   copy holds an encoder-pool permit today, and taking one could queue or
   refuse a local copy start that never queues. The optional permit step 4
@@ -156,16 +161,18 @@ one yet and nothing is served from one; step 6 attaches a session to it.
 - It has no lease, loop or timer. The session's accepted control
   exchanges, maintenance and retirement drive it (`observe_control`,
   `refresh`, `settle`); settlement joins the child, the pipe tasks and the
-  Input before it removes the payload and manifests.
+  Input before it removes the payload, manifests and session directory.
+  Dropped unsettled it retires; a panicking run task ends it.
 - Boot clears `copy-ranges/observations` and `copy-ranges/local-observations`
   where it clears the transcode scratch that holds the payloads.
 - Decision (Paul away): the calls from `vod/session.rs` into the range are
   left to step 6. A session cannot hold a range before it can attach one.
 - Fixed on Paul's call: a killed Source range's manifests under
   `copy-ranges/observations` used to stay forever; boot now reaps them.
-- The trace comparison is written, not run. It replays a rolling
-  session's custody calls rather than running one, and sets the range's
-  bank by hand; the plan lists what that leaves unmeasured.
+- The trace comparison is written, not run. Both sides' observations come
+  from the shared function; the rolling flow's holds are replayed and the
+  range's committed media is set by hand (the fixture is shorter than the
+  low watermark); the plan lists what that leaves unmeasured.
 
 ## Previous batch — a local owner for the copy engine (item 6, plan step 4, #1548)
 

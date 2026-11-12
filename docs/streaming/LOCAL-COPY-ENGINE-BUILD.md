@@ -377,18 +377,22 @@ the attachment in step 6.
 
 - **Owner surfaces:** a new `copyrange/local.rs` (`LocalCopyRange`, the
   local range's actor), `copyrange/pipes.rs`, `copyrange/production.rs`
-  and `copyrange/storage.rs` (test hooks only), `main.rs` (boot reaping),
-  `transcode/rolling/flow.rs` (the watermarks' visibility).
-  `source_input.rs` and `source_custody.rs` needed no change: the range
-  opens through `open_foreground_held` as the Source range does.
-- **P3, Input admission:** `LocalCopyRange::start` opens every Input under
-  one foreground source request keyed by the local playback
+  (the read bank's rolling rule, the run task's end guard),
+  `copyrange/storage.rs` (two fields visible to the range's tests),
+  `source_input.rs` (Inputs under a custody their owner registered),
+  `main.rs` (boot reaping), `transcode/rolling/flow.rs` (the rolling
+  source observation, one function) and `transcode/manager/maintenance.rs`
+  (calls it). `source_custody.rs` needed no change.
+- **P3, Input admission:** `LocalCopyRange::start` registers one foreground
+  custody under a request keyed by the local playback
   (`local_range_source_request`): the session is the request's lifetime
   and the policy is `Rolling`, the keys a rolling local session registers.
-  The head census and the primary generation run one after the other and
-  each Input registers its own custody, so the store holds at most one
-  `foreground_source_owners` row for the session: the read is charged
-  once.
+  The head census reads through an Input lent that custody
+  (`open_foreground_lent`: closing it joins its reads and neither marks nor
+  releases the custody); once the census has joined it, the primary's
+  Input takes the custody over (`open_foreground_with_custody`) and
+  releases it when it closes. One row, written once, from start to end,
+  as a rolling start's: the read is charged once.
 - **Decision, copy admission: a local range takes none.** A local copy
   holds no encoder-pool permit today, as a rolling session (`sw_permit` is
   empty for a copy) or as a plan-verified VOD rendition, so taking one
@@ -403,12 +407,25 @@ the attachment in step 6.
   while its production is and its held object is unchanged
   (`is_live`, `physical_fence`). The session's retirement calls `settle`,
   which stops the range, joins the child, every pipe task and the Input
-  (releasing the custody), and then removes the payload and manifests. A
-  start that fails after its files were made removes them itself.
-- **P7, control:** `observe_control` takes the session's newly accepted
-  `PlaybackDemandSnapshot` (position, seek target, rate, render state) and
-  `refresh` is for the session's existing maintenance. Both drive the read
-  bank the Source range uses, under `rolling_source_watermarks`.
+  (releasing the custody), then removes the payload, the manifests and the
+  empty `local-copy-ranges/<session>/`; a removal failure beside a failed
+  range is logged. A range dropped unsettled is retired by its `Drop`: the
+  run task reaps the child and closes the Input, and only its files are
+  left, for boot. A run task that unwinds stores `copy_range_panicked`
+  through its end guard, so `settle` is bounded by the task's end. A start
+  stopped once its generation ran returns the range retired, as the Source
+  range does; a start that fails after its files were made removes them,
+  and a start future dropped there removes them on the runtime.
+- **P7, control:** `observe_control(demand, startup_protected)` takes the
+  session's newly accepted `PlaybackDemandSnapshot` and its lease's
+  startup protection; `refresh(startup_protected)` is for its existing
+  maintenance. Both drive the engine's read bank under the rolling rule,
+  `rolling_source_observation`, the function `maintenance.rs` now calls:
+  watermarks from the demand's rate, lead from its estimated position,
+  fresh while the demand is at most 5 s old and the startup unprotected.
+- **Decision, pressure: a local range presses exactly as a rolling session
+  does.** A paused or buffering viewer still reporting lifts pressure while
+  held. The Source range keeps its own rule (fresh only while rendering).
 - **P8, reaping:** a range dies with its process. Its payload is in the
   transcode scratch every boot already clears, which is the recovery that
   reaps a rolling session's directory. Its manifests are under the data
@@ -420,33 +437,34 @@ the attachment in step 6.
   and costs no boot. This fixes the Source leak found while building the
   step: before it, a killed Source range's manifests stayed forever.
 - **Acceptance, as measured:** the trace test below. For every existing
-  serving path the answer is by construction: no function a rolling
-  session, a VOD rendition, the Source range or an Analysis fill runs is
-  changed, except `spawn_source_generation`, whose Source and Analysis
-  arms are as they were, and one function's visibility.
+  serving path the answer is by construction: `spawn_source_generation`'s
+  Source and Analysis arms are as they were; rolling maintenance calls the
+  same arithmetic moved into one function; the Source read bank keeps its
+  rule; an owned Input opens and closes as before.
 - **Tests (written, in `copyrange/local_tests.rs`):**
-  - The trace: against a real store and catalogue file, a rolling local
-    session's custody (its real request and `SourceInput::open`, then its
-    `rolling` and `refill` calls replayed in `maintenance.rs`'s order) and
-    a local range's (its real request and `open_foreground_held`, then
-    the engine's read bank driven through `observe_control` and
-    `refresh`) give the same custody rows and the same
-    `foreground_source_pressure` at six points of one playback: opened,
-    banked below the high watermark, held above it, a seek ahead, held
-    with a viewer that is not rendering, closed. One row keyed by the
-    session throughout; pressure lifts only while held with a fresh
-    viewer.
-  - A whole local range on the real engine through its real foreground
-    Inputs: it starts, takes the rendered report, a control exchange and
-    a maintenance refresh, and settles to no custody row, no pressure, no
-    payload and no manifest.
-  - Boot reaping removes local manifests and leaves Source ones.
-- **Not covered by a test:** the custody row while a real generation is
-  reading (the fixture title ends before it could be sampled without a
-  race; the trace test's bank is set by hand); a running rolling session
-  (its side of the trace is replayed); a background Analysis phase
-  pausing and resuming, which is the store's answer to the pressure the
-  trace records; a kill followed by a real boot.
+  - The trace: on a real store and fixture, a rolling session's custody
+    (its request and `SourceInput::open`, then `rolling`/`refill` in
+    `maintenance.rs`'s order, each observation from
+    `rolling_source_observation`) and a local range's (`start`'s own
+    census and custody, the primary Input taking it over, the read bank
+    through `observe_control`/`refresh`) give the same rows and pressure
+    at eight points: opened, below high, held above high, a seek ahead,
+    held with a buffering, a paused and a startup-protected viewer,
+    closed. Committed media is set by hand: the 12 s fixture is shorter
+    than the 48 s low watermark.
+  - Census then primary on the real engine, reads held: one row with one
+    owner id and attempt from census to settlement.
+  - A held range dropped unsettled releases its custody; its files stay.
+  - A run task that panics ends its range as `copy_range_panicked`.
+  - A whole range on the real engine settles to no row, no pressure, no
+    payload, no manifest and no session directory.
+  - Boot reaping removes both owners' manifests; a live range's stay.
+- **Not covered by a test:** a stop between the production's start and the
+  range's return, and a start future dropped with its files made (neither
+  can be reached without a race); a generation reading a bank deeper than
+  the fixture; a running rolling session (its flow's holds are replayed);
+  an Analysis phase pausing on the recorded pressure; a kill and a real
+  boot.
 - **Left for step 6, with the attachment:** the calls from
   `vod/session.rs` (`observe_control` where a control exchange is
   accepted, `refresh` from maintenance, `settle` from the session's
@@ -557,4 +575,4 @@ session id or URL. **Tests** says whether the step's tests have been run.
 | 2026-11-12 | 1 Durable demand | claude-fable-5-2 | https://claude.ai/code/session_01BCWL9ypnQEiQUyRaZtMhh3 | `item6b` | Built, with its review fixes; clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
 | 2026-11-12 | 3 Copy index rides the content-analysis pass | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step3` (local, on `item6b`) | Built, with its review fixes (2 majors, 9 minors): the ride consumes the lead reader's parsed fragments in place, `ridden` is pass-only, custody is bound to file and object. Clippy `-D warnings` and fmt clean, inventory and pins green. Post-deploy UHD/DV qualification open | Written, not yet run: the fast lane is their one run |
 | 2026-11-12 | 4 A local owner at P1, P2 and P5 | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step4` (local, on `step3`) | Built, with its review fixes (2 majors, 8 minors): `CopyRangeOwner` and `CopyGenerationOwner::Local`, constructed only by tests and only from a live named playback; one copy pipeline derivation (capability and probe evidence) for the Source range, Source and local renditions and the planning hint, which re-keys stripped Dolby Vision Source copies on nodes with the strip filter. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
-| 2026-11-12 | 5 Local input admission, liveness, control and reaping | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step5` (local, on #1548) | Built: `LocalCopyRange` opens its Inputs under the local playback's own foreground request, takes no copy admission, has no lease or timer, and is reaped at boot; nothing starts one yet. The session's calls into it are left to step 6. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
+| 2026-11-12 | 5 Local input admission, liveness, control and reaping | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step5` (local, on #1548) | Built, with its review fixes (8 findings): `LocalCopyRange` reads under one custody carried from census to primary, presses by the rolling rule (`rolling_source_observation`, shared with maintenance), takes no copy admission, has no lease or timer, retires on drop, survives a panicking run task, and is reaped at boot; nothing starts one yet. The session's calls into it are left to step 6. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
