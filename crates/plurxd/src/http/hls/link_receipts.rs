@@ -1251,18 +1251,31 @@ pub(crate) async fn filter_catalog(
         .collect()
 }
 
-/// A new processed recipe cannot turn a timed-out negative read into a grant.
-/// This is the caller's reserved post-qualification stage, not a renewed
-/// ordinary advisory allowance.
-pub(crate) async fn processed_candidate_admissible(
+/// What this network's link memory says about one processed recipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessedLinkEvidence {
+    /// No negative is held for the recipe on this network, or there is no
+    /// network identity or link memory to consult.
+    Admissible,
+    /// An exact negative for this recipe on this network is still active.
+    Negative,
+    /// The memory could not be read before the deadline, or the source could
+    /// not be fenced. Not a verdict about the recipe.
+    Unavailable,
+}
+
+/// One processed recipe's link memory on this network. Callers decide what an
+/// `Unavailable` read means at their stage; after a qualification it must never
+/// become a grant (the reserved post-qualification read is the last word).
+pub(crate) async fn processed_candidate_link_evidence(
     state: &AppState,
     network: Option<&NetworkIdentity>,
     file: &MediaFile,
     candidate: &plurx_core::playback::candidate::QualityCandidate,
     deadline: tokio::time::Instant,
-) -> bool {
+) -> ProcessedLinkEvidence {
     let Some(network) = network else {
-        return true;
+        return ProcessedLinkEvidence::Admissible;
     };
     let read = async {
         let enabled = state
@@ -1284,7 +1297,11 @@ pub(crate) async fn processed_candidate_admissible(
             .map_err(|_| ())?;
         Ok(!prior.is_some_and(|prior| prior.negative_active(crate::media_sessions::unix_ms())))
     };
-    matches!(tokio::time::timeout_at(deadline, read).await, Ok(Ok(true)))
+    match tokio::time::timeout_at(deadline, read).await {
+        Ok(Ok(true)) => ProcessedLinkEvidence::Admissible,
+        Ok(Ok(false)) => ProcessedLinkEvidence::Negative,
+        Ok(Err(())) | Err(_) => ProcessedLinkEvidence::Unavailable,
+    }
 }
 
 /// Public advisory projection from the exact existing local resolver. Remote
@@ -3692,7 +3709,7 @@ mod tests {
         // reserved post-qualification read must still reject this exact
         // recipe, and an exhausted reserved allowance must never grant it.
         assert!(
-            !processed_candidate_admissible(
+            processed_candidate_link_evidence(
                 &state,
                 Some(&network),
                 &file,
@@ -3700,9 +3717,10 @@ mod tests {
                 tokio::time::Instant::now() + Duration::from_millis(500),
             )
             .await
+                != ProcessedLinkEvidence::Admissible
         );
         assert!(
-            !processed_candidate_admissible(
+            processed_candidate_link_evidence(
                 &state,
                 Some(&network),
                 &file,
@@ -3710,6 +3728,48 @@ mod tests {
                 tokio::time::Instant::now() - Duration::from_secs(2),
             )
             .await
+                != ProcessedLinkEvidence::Admissible
+        );
+
+        // The tri-state read names why: an active exact negative is a
+        // verdict, an expired deadline is not, and a recipe with no negative
+        // is admissible. The boolean wrapper above stays fail-closed.
+        assert_eq!(
+            processed_candidate_link_evidence(
+                &state,
+                Some(&network),
+                &file,
+                &negative,
+                tokio::time::Instant::now() + Duration::from_millis(500),
+            )
+            .await,
+            ProcessedLinkEvidence::Negative
+        );
+        assert_eq!(
+            processed_candidate_link_evidence(
+                &state,
+                Some(&network),
+                &file,
+                &negative,
+                tokio::time::Instant::now() - Duration::from_secs(2),
+            )
+            .await,
+            ProcessedLinkEvidence::Unavailable
+        );
+        let clean = catalog
+            .iter()
+            .find(|row| !same_recipe(row))
+            .expect("a candidate without a negative");
+        assert_eq!(
+            processed_candidate_link_evidence(
+                &state,
+                Some(&network),
+                &file,
+                clean,
+                tokio::time::Instant::now() + Duration::from_millis(500),
+            )
+            .await,
+            ProcessedLinkEvidence::Admissible
         );
 
         // No requester identity is Unknown, never a refusal.
