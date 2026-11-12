@@ -1537,7 +1537,7 @@ assert.equal(context.ACT_TIMER, null);
         # CI never builds this stage, so the bound only cost local builds.
         dockerfile = read("Dockerfile")
         build_stage = dockerfile.split(" AS build\n", 1)[1].split("\nFROM ", 1)[0]
-        self.assertNotRegex(build_stage, r"CARGO_BUILD_JOBS=\S")
+        self.assertNotRegex(build_stage, r"(?m)^(?!\s*#).*CARGO_BUILD_JOBS=\S")
         self.assertNotRegex(build_stage, r"(?m)^ENV .*CARGO_BUILD_JOBS")
         # A host that must bound the compile can still pass a build arg, and
         # an ARG with no default leaves cargo's own default (every CPU).
