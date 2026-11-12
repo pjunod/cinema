@@ -1933,13 +1933,19 @@ apple-tv-navigation-test: ## Run native remote journeys and retain source-bound 
 
 .PHONY: apple-build
 apple-build: ## Compile iOS and tvOS without running simulator tests
+# A generic simulator destination builds every simulator architecture, and
+# the Intel slice is only for Intel Macs, which no runner or developer uses:
+# build the Apple Silicon slice alone. Code under an Intel-only `#if arch(...)`
+# is therefore no longer compiled here.
 	cd clients/apple && xcodegen generate
 	cd clients/apple && xcodebuild -project plurx.xcodeproj -scheme plurx-iOS \
 	  -destination "generic/platform=iOS Simulator" \
+	  ARCHS=arm64 \
 	  -derivedDataPath "$(APPLE_DERIVED_DATA)" \
 	  CODE_SIGNING_ALLOWED=NO build
 	cd clients/apple && xcodebuild -project plurx.xcodeproj -scheme plurx-tvOS \
 	  -destination "generic/platform=tvOS Simulator" \
+	  ARCHS=arm64 \
 	  -derivedDataPath "$(APPLE_DERIVED_DATA)" \
 	  CODE_SIGNING_ALLOWED=NO build
 

@@ -1343,6 +1343,13 @@ impl AppState {
             Arc::clone(&store),
             node_id.clone(),
         );
+        crate::copy_analysis::register_playback_cache(
+            &playback_cache,
+            &runtime_cache,
+            Arc::clone(&store),
+            node_id.clone(),
+        );
+        transcode.attach_copy_analysis(Arc::clone(&jobs.copy_analysis));
         crate::http::chapter_thumbs::register_playback_cache(&playback_cache, &runtime_cache);
         crate::subtitle_source::register_playback_cache(
             &playback_cache,

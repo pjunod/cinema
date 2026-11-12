@@ -18,8 +18,9 @@ HDR and queued-analysis custody repairs from #1475–#1478.
 
 S5's Source-owned caption windows and the fixture Start503 landed in
 [#1490](SHARED-SUBTITLE-CUSTODY-AND-START-503.md). S1–S3, S8 and S9 remain A1 work. Native Apple/Android startup headers
-require a client release. RX-ring operations, deployment and physical
-playback acceptance remain separate.
+require a client release. RX-ring sizing is built in the host baseline
+(2026-11-12) and awaits the owner's apply; deployment and physical playback
+acceptance remain separate.
 
 ## Fixture correction
 

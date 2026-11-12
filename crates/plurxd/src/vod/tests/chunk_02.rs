@@ -1689,12 +1689,16 @@
         let refusal = sealed_init_refusal(&recipe, Some(&index), &muxer)
             .expect("an init nobody sealed is refused");
         assert!(
-            refusal.contains(&sealed) && refusal.contains(&other),
-            "{refusal}"
+            matches!(&refusal, SealedInitRefusal::Mismatch(reason)
+                if reason.contains(&sealed) && reason.contains(&other)),
+            "a computed contract that differs is the reportable mismatch: {refusal:?}"
         );
         assert!(
-            sealed_init_refusal(&recipe, None, &muxer).is_some(),
-            "a sealed contract without its index cannot be checked, so it is refused"
+            matches!(
+                sealed_init_refusal(&recipe, None, &muxer),
+                Some(SealedInitRefusal::Unverifiable(_))
+            ),
+            "a sealed contract without its index is refused, and says nothing about the variant"
         );
 
         // Legacy and v2 recipes carry no sealed contract.

@@ -30,7 +30,9 @@ pub(crate) struct CopyGapFill<'a> {
     /// The exact phase whose active custody every Input here reads under.
     pub(crate) phase: &'a AnalysisPhysicalPhase,
     /// What the rows already observed for this source were produced under.
-    pub(crate) init_contract_sha256: &'a str,
+    /// None when nothing has been observed: this generation's own head then
+    /// establishes the contract instead of being checked against one.
+    pub(crate) init_contract_sha256: Option<&'a str>,
     pub(crate) canonical_title_start: u64,
     pub(crate) timescale: u32,
     pub(crate) gap: RangeGap,
@@ -183,7 +185,10 @@ where
         )
         .map_err(|error| Failed(error.to_string()))?,
     );
-    if contract.init_contract_sha256() != fill.init_contract_sha256 {
+    if fill
+        .init_contract_sha256
+        .is_some_and(|held| held != contract.init_contract_sha256())
+    {
         return Err(Contradicted("copy_init_contract_changed".into()));
     }
     let wanted_ms = fill_start_ms(

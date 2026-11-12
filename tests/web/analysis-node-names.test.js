@@ -51,6 +51,7 @@ const BORROWED = [
   "analysisRows",
   "analysisCounts",
   "analysisRowKey",
+  "analysisLocalPlayback",
   "analysisDisposition",
   "analysisErrors",
   "analysisAttemptHistory",
