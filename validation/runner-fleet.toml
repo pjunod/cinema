@@ -89,6 +89,17 @@ arch = "X64"
 implicit_labels = false
 labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"]
 
+# A second heavy instance in the same VM and `plurx-heavy.slice`, registered
+# 2026-11-11 (Forgejo id 62) when six PRs queued behind one heavy slot. Same
+# per-service bounds as -01; no Store label (one Store slot per host).
+[[runners]]
+name = "gha-lab1-plurx-heavy-02"
+host = "lab1"
+os = "Linux"
+arch = "X64"
+implicit_labels = false
+labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "incus"]
+
 # --- lab2: Incus guest host, non-voter --------------------------------------
 # A `ci-store` slot, and the entry to read before adding or removing one.
 #
@@ -132,6 +143,19 @@ host = "lab2"
 os = "Linux"
 arch = "X64"
 labels = ["lab", "incus", "ubuntu-24.04", "android-kvm"]
+
+# Heavy instance in the gha-lab2-android-02 guest, registered 2026-11-11
+# (Forgejo id 63). Its service carries the verified 4-CPU / 20 GiB / 4096-PID
+# bounds, but the guest has ~10 GiB: fit for the Rust gates and controller
+# proofs, not the full unit suite. No `incus` label, so the nightly
+# deep-validation lanes stay on lab1.
+[[runners]]
+name = "gha-lab2-plurx-heavy-01"
+host = "lab2"
+os = "Linux"
+arch = "X64"
+implicit_labels = false
+labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64"]
 
 # --- lab5 (`asus` in the ansible inventory): baremetal, non-voter ---------
 # lab5 is not a plurx voter (it is absent from `voter_hosts`; this header
