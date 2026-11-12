@@ -10,6 +10,34 @@ impl VodServe {
         let _ = self.shared.copy_analysis.set(registry);
     }
 
+    /// Record what the boot probe found of this node's FFmpeg. The transcode
+    /// manager calls this with its own answer whenever it sets that answer
+    /// or replaces this server.
+    pub(crate) fn set_dv_strippable(&self, dv_strippable: bool) {
+        self.shared.dv_strippable.store(dv_strippable, Relaxed);
+    }
+
+    /// The copy pipeline of a rendition of `file` on this node, local or
+    /// Source, derived by the one derivation with this server's capability.
+    pub(crate) async fn rendition_copy_pipeline(
+        &self,
+        file: &MediaFile,
+        evidence: CopyProbeEvidence,
+        preserve_dolby_vision: bool,
+        convert_dolby_vision: bool,
+    ) -> Result<NodeCopyPipeline, String> {
+        node_copy_video_pipeline(
+            self.shared.store.as_ref(),
+            file,
+            evidence,
+            self.shared.dv_strippable.load(Relaxed),
+            preserve_dolby_vision,
+            convert_dolby_vision,
+        )
+        .await
+        .map_err(|error| format!("reading the file probe: {error}"))
+    }
+
     pub(crate) fn set_source_identity(&self, identity: crate::source_custody::SourceIdentity) {
         *self.shared.source_identity.lock().expect("source identity") = Some(identity);
     }
@@ -465,6 +493,7 @@ impl VodServe {
                 cluster_node_id,
                 cluster_index_root,
                 cluster_membership,
+                dv_strippable: AtomicBool::new(false),
                 catalog_namespace: tokio::sync::OnceCell::new(),
                 copy_analysis: std::sync::OnceLock::new(),
                 sessions: Mutex::new(HashMap::new()),
