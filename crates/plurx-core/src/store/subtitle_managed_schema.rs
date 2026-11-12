@@ -232,7 +232,8 @@ fn normalize(sql: &str) -> String {
 // SQLite normalizes IF NOT EXISTS and terminal semicolons when storing DDL.
 // Measure that normalization instead of inventing a second SQL parser.
 type SchemaShape = Vec<(String, String)>;
-static SHAPES: LazyLock<(
+/// Historical view, v1 managed, bootstrap view, then managed v2 through v6.
+type SchemaShapes = (
     SchemaShape,
     SchemaShape,
     SchemaShape,
@@ -241,7 +242,8 @@ static SHAPES: LazyLock<(
     SchemaShape,
     SchemaShape,
     SchemaShape,
-)> = LazyLock::new(|| {
+);
+static SHAPES: LazyLock<SchemaShapes> = LazyLock::new(|| {
     let conn = rusqlite::Connection::open_in_memory().expect("closed schema fixture");
     conn.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);").expect("closed stubs");
     let resources = super::background_jobs_resources::SCHEMA
