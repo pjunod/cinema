@@ -2819,28 +2819,32 @@ their codec/HDR fallback ladders. Counters and latency are exported as
 `plurx_media_session_takeovers_total{method,outcome}` and
 `plurx_media_session_takeover_seconds{method}`.
 
-The media-session route cache that authorizes segment GETs reads through the
-applied view and has no clock (E1c, [PLAYBACK-START-E1-BUILD.md](streaming/PLAYBACK-START-E1-BUILD.md)
-§4.4). Four families measure it (plan [PLEX-FACADE-PAGING](server/PLEX-FACADE-PAGING.md) §3.5):
-`plurx_media_session_route_lookups_total{result}` splits lookups (HLS media
-GETs, first status reads, DELETEs) into `cache_hit`, `single_flight_hit`,
-`observed` (a fact this node committed or read by quorum, not yet applied
-here), `view` and `store` (a quorum read);
-`plurx_media_session_route_lock_seconds{site}` is the map-lock wait per site;
-`plurx_media_session_route_prune_entries` is the entries an eviction scan
-walks (only when full); `plurx_media_session_route_cache_entries` is the size
-against 4,096 (no expiry, so it sits near the cap). Control and final-status reads bypass the cache.
+The one-second media-session route cache that authorizes segment GETs is
+measured, not tuned, by four families (plan
+[PLEX-FACADE-PAGING](server/PLEX-FACADE-PAGING.md) §3.5):
+`plurx_media_session_route_lookups_total{result}` splits the cache's lookups
+(HLS media and status GETs and session DELETEs; direct plays never reach it)
+into
+`cache_hit`, `single_flight_hit` (answered by the cache after waiting on
+another lookup's Store read for the same session) and `store`;
+`plurx_media_session_route_lock_seconds{site}` is the wait for the cache's map
+lock at each of its four call sites; `plurx_media_session_route_prune_entries`
+is how many entries each expired-entry sweep walks; and
+`plurx_media_session_route_cache_entries` is the cache's size against its
+4,096 ceiling. Control mutations and final-status reads bypass the cache and
+are not in the lookup counts. None of these changes the cache; the plan's §6.4
+says how to read them.
 
 The playback-start E1a baseline ([PLAYBACK-START-E1-BUILD.md](streaming/PLAYBACK-START-E1-BUILD.md)
 §7, §9) adds, all loaded from atomics at scrape time:
 `plurx_media_session_route_reads_total{site,source}` counts every
 session-keyed route read by the decision it serves (`routing`, `status_first`,
 `status_bracket`, `status_reclassify`, `control`, `verdict`, `receipt_fence`,
-`receipt_candidate`, `observer`); `source` is `view` when the view answered.
+`receipt_candidate`, `observer`); `source` is `authority` until E1c.
 `plurx_applied_view_reads_total{view,source,reason}` and
 `plurx_applied_view_reloads_total{view}` count applied-view reads and stamp
 reloads (`view="settings"` since E1b, whose settings memo reloads at most once
-per settings change a reader saw; `view="route"`: stale route-cache stamps);
+per settings change a reader saw; `view="route"` stays 0 until E1c);
 `plurx_applied_view_table_changes_total{view}` is how often this replica
 applied a change to `settings` or `media_sessions`, the most a per-table memo
 would reload. `plurx_applied_view_proof{mode}`,
@@ -5895,20 +5899,6 @@ session, a title or a path. Nothing here names content.
 | `plurx_http_body_seconds{route_group}` | **Body delivery** time, from the handler's response to the body's last frame or its drop. A different scale from the line above — seconds to hours rather than milliseconds — which is why it is a separate family rather than more buckets. It is per **response body**, so a direct play answered as ten range requests is ten observations, not one viewing. |
 | `plurx_http_bodies_total{route_group,outcome="complete\|aborted"}` | How bodies ended. `complete` is a body that handed the connection everything it promised: it reached its end, or — for a response with a `Content-Length`, which is every direct play range and HLS segment — it yielded the declared number of bytes (hyper stops polling a fixed-length body once those are written, so "reached its end" alone would miss every one of them). `aborted` is a body let go of short of that, or one that ended in an error. `complete` means handed to the connection, not acknowledged by the client. A HEAD, 204 or 304 response promises no body and counts `complete`. **`aborted` is not an error rate**: on a media route a consumer that leaves mid-body — a seek, a player that drops a segment it no longer needs — is ordinary. But a body delivered in full is `complete` whatever its framing, so `aborted` counts real departures only. Read it against `complete` on the *same* route group, and read a change in the ratio rather than its level. |
 | `plurx_panics_total{subsystem}` | Panics the process hook saw, by a fixed allowlist of module names with `other` for everything else, including dependencies. Any movement at all is worth the daemon log: the matching line is at ERROR on target `plurxd::panic` with the panic's location and a redacted message. The counter reports a panic; it does not repair whatever the panicking task left behind. |
-
-Store operations per request are counted by `plurx_http_store_reads_total{route_group,class,role}`
-and, split by the Store method that issued each, by
-`plurx_http_store_operations_by_method_total{route_group,class,method}`
-(`method` is a Store method name chosen in source, never SQL or a request value;
-at most 4096 series, with `plurx_http_store_operations_by_method_dropped_total`
-counting what the cap refused: any movement means a reading is incomplete). The
-split sums to the totals apart from the per-request `other` fold. **From the D3a
-landing the owner-start scope adds a remote owner's own start operations to
-`route_group="cluster"`**; before it a spawned start counted nothing, so a
-`cluster` before/after pair that straddles that deploy, or the 2026-11-07
-`cluster` figure, is not comparable. Take baselines on a D3a-or-later build. A
-`session_layout` method line is the session-layout marker reads a store pays
-only while its cached layout is not the permanent v82 one.
 
 Every 5xx also writes one `WARN` line on target `plurxd::http` carrying the
 route group, the status, the latency, the redacted target and the request id.

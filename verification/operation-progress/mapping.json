@@ -117,31 +117,31 @@
         "table": "19 atomic publication transaction",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "anchor": "pub(super) async fn atomic_publication(",
-        "sha256": "eb80f1f2bbc7333058c8cf3b8cd71c2b5da9a828e6bd65228566d4d85f55a60a"
+        "sha256": "6d746994b4ea5f2e76fac50817eb5c1e018f2e20289d96ea21c2fa73a1773c1e"
       },
       {
         "table": "20 fenced insert collision loop",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "anchor": "for attempt in 0..4 {",
-        "sha256": "eb80f1f2bbc7333058c8cf3b8cd71c2b5da9a828e6bd65228566d4d85f55a60a"
+        "sha256": "6d746994b4ea5f2e76fac50817eb5c1e018f2e20289d96ea21c2fa73a1773c1e"
       },
       {
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "51bb61f0939987877e591d8ca26b712dda46f983e4e0d30d6302fefd24d68be5"
+        "sha256": "70da67b7ba2679ba8bc2aef8752463467ed5d3460ae675604bf4b1d939406004"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "51bb61f0939987877e591d8ca26b712dda46f983e4e0d30d6302fefd24d68be5"
+        "sha256": "70da67b7ba2679ba8bc2aef8752463467ed5d3460ae675604bf4b1d939406004"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "51bb61f0939987877e591d8ca26b712dda46f983e4e0d30d6302fefd24d68be5"
+        "sha256": "70da67b7ba2679ba8bc2aef8752463467ed5d3460ae675604bf4b1d939406004"
       },
       {
         "table": "24 vendor transaction rate limit",
