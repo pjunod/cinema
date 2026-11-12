@@ -155,14 +155,80 @@ struct ObservedRows<'a> {
     promotion: &'a PromotionInputs,
 }
 
-/// The authority an observation arrived under. Only Shared Source ranges
-/// produce observations today; local playback will add its own typed demand
-/// variant, and a Source observation can never mint a Local principal.
+/// The authority an observation or a demand arrived under. A Source
+/// observation carries its grant-scoped assignment; a local one carries only
+/// the fact that a local user's own playback asked. Neither can be made from
+/// the other: no Source observation mints a Local authority, and a Local
+/// authority holds no grant, assignment or Source interest.
 pub(crate) enum CopyObservationAuthority {
     Source {
-        assignment: SourceDispatchAssignment,
+        assignment: Box<SourceDispatchAssignment>,
         authority: AnalysisSourceInterestAuthority,
     },
+    Local(LocalCopyAuthority),
+}
+
+/// A local user's own playback of this node's file. Only
+/// [`LocalCopyAuthority::of`] makes one, and it refuses a Sharing principal,
+/// so shared playback can never present itself as local demand. It is
+/// attribution and admission to the worker's inbox, nothing more: it grants
+/// no source read, which every Analysis phase still takes from the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalCopyAuthority {
+    user_id: i64,
+    playback_id: String,
+}
+impl LocalCopyAuthority {
+    pub(crate) fn of(viewer: &crate::state::PlaybackViewerDemand) -> Result<Self, &'static str> {
+        viewer.require_local_authority()?;
+        match &viewer.principal {
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id } => Ok(Self {
+                user_id: *user_id,
+                playback_id: viewer.playback_id.clone(),
+            }),
+            plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. } => {
+                Err("sharing playback demand requires typed source authority")
+            }
+        }
+    }
+    pub(crate) fn user_id(&self) -> i64 {
+        self.user_id
+    }
+    pub(crate) fn playback_id(&self) -> &str {
+        &self.playback_id
+    }
+}
+
+/// A demand for the copy index of one exact source that carries no rows: the
+/// playback that raised it is served by another path and observed nothing.
+/// The Analysis worker builds the index with its own generations of the copy
+/// engine once the source domain is idle, exactly as it fills a gap.
+pub(crate) struct CopyIndexDemand {
+    pub(crate) file: Arc<plurx_core::domain::MediaFile>,
+    pub(crate) catalog_namespace: String,
+    pub(crate) source: AnalysisCoordinationSource,
+    /// The copy recipe of the playback that asked; the fill repeats it.
+    pub(crate) recipe: CopyRecipe,
+    pub(crate) authority: CopyObservationAuthority,
+}
+impl CopyIndexDemand {
+    /// A local viewer's demand for the index of the file it is playing on
+    /// this node. Refused for anything but a local user's own playback.
+    pub(crate) fn local(
+        viewer: &crate::state::PlaybackViewerDemand,
+        file: Arc<plurx_core::domain::MediaFile>,
+        catalog_namespace: String,
+        source: AnalysisCoordinationSource,
+        recipe: CopyRecipe,
+    ) -> Result<Self, &'static str> {
+        Ok(Self {
+            file,
+            catalog_namespace,
+            source,
+            recipe,
+            authority: CopyObservationAuthority::Local(LocalCopyAuthority::of(viewer)?),
+        })
+    }
 }
 
 pub(crate) struct CompletedCopyRange {
@@ -214,6 +280,7 @@ pub(crate) struct CopyIndexDefect {
 /// Everything the Analysis worker's inbox carries.
 pub(crate) enum CopyAnalysisMessage {
     Range(Box<CompletedCopyRange>),
+    Demand(Box<CopyIndexDemand>),
     Defect(CopyIndexDefect),
 }
 
@@ -251,6 +318,11 @@ impl CopyAnalysisRegistry {
     /// checkpoint's message on its own next lease or production event.
     pub(crate) fn notify(&self, message: CompletedCopyRange) -> bool {
         self.send(CopyAnalysisMessage::Range(Box::new(message)))
+    }
+    /// Hand the worker a row-less demand for one source's index. A full
+    /// inbox refuses, and the next start of the same title asks again.
+    pub(crate) fn notify_demand(&self, demand: CopyIndexDemand) -> bool {
+        self.send(CopyAnalysisMessage::Demand(Box::new(demand)))
     }
     /// Hand the worker one defect a reader found. A full inbox refuses, and
     /// the next start that meets the same head reports it again.
@@ -500,9 +572,15 @@ impl CopyObservationSet {
         {
             return Err(CopyObservationError::Binding);
         }
-        let CopyObservationAuthority::Source { assignment, .. } = &message.authority;
-        if assignment.owner_node_id() != self.source.origin_node_id {
-            return Err(CopyObservationError::Binding);
+        match &message.authority {
+            CopyObservationAuthority::Source { assignment, .. } => {
+                if assignment.owner_node_id() != self.source.origin_node_id {
+                    return Err(CopyObservationError::Binding);
+                }
+            }
+            // A local range has no assignment to bind; its source, checked
+            // below, names this node as the origin of the object it read.
+            CopyObservationAuthority::Local(_) => {}
         }
         if message.source != self.observed_source
             || message.catalog_namespace != self.catalog_namespace
@@ -524,6 +602,34 @@ impl CopyObservationSet {
             row_inspections: &checkpoint.row_inspections,
             promotion: &checkpoint.promotion,
         })
+    }
+
+    /// The set of a source nothing has observed yet, from the first rows an
+    /// Analysis-owned generation read of it: they establish the init
+    /// contract, clock origin and promotion every later observation must
+    /// share.
+    pub(crate) fn from_analysis(
+        catalog_namespace: &str,
+        source: &AnalysisCoordinationSource,
+        phase: &AnalysisPhysicalPhase,
+        observed: &AnalysisCopyRows,
+    ) -> Result<Self, CopyObservationError> {
+        let timescale = observed
+            .init
+            .video()
+            .ok_or(CopyObservationError::Init)?
+            .timescale;
+        let mut value = Self::empty(
+            catalog_namespace,
+            source,
+            &observed.init,
+            timescale,
+            observed.source_origin,
+            observed.canonical_title_start,
+            &observed.promotion,
+        )?;
+        value.observe_analysis(phase, observed)?;
+        Ok(value)
     }
 
     /// Rows from an Analysis-owned generation. The phase must be this exact

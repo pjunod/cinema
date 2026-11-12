@@ -16,7 +16,15 @@
 //!   Analysis generation; no source is read and nothing is rebuilt.
 //! - The playback-cache budget never calls the eviction owner; its two
 //!   callbacks are called as the budget would.
-use super::work::{quarantine_defect, reconcile_with_head, CopyIndexCacheOwner, HeadDecision};
+//! - A local demand is folded, handed to its unit and taken as far as the
+//!   head decision and the coordination request. The build it then starts is
+//!   a physical phase of the real copy engine, whose unseeded first
+//!   generation runs in `gap_fill_tests`; the two are not run joined, and no
+//!   VOD start emits the demand here.
+use super::work::{
+    coordination_request, publish_source, quarantine_defect, reconcile_demand, reconcile_with_head,
+    Attempt, Coordination, CopyIndexCacheOwner, HeadDecision, PendingSources,
+};
 use super::*;
 use crate::playback_cache::{CacheCandidate, CacheOwner};
 use plurx_core::fmp4::{CutClass, FragmentReader, Unit};
@@ -680,4 +688,252 @@ async fn evicting_a_v3_blob_forgets_this_nodes_holder_rows_for_it() {
         !owner.evict(&candidates[0]).await.expect("already gone"),
         "an evicted blob is not evicted twice"
     );
+}
+
+fn local_viewer(user_id: i64) -> crate::state::PlaybackViewerDemand {
+    crate::state::PlaybackViewerDemand {
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+        playback_id: "playback-1".into(),
+    }
+}
+
+/// The catalogue row of the fixture's file. Its path is never opened here.
+fn media_file() -> plurx_core::domain::MediaFile {
+    plurx_core::domain::MediaFile {
+        downloaded_subtitles: Vec::new(),
+        id: 100,
+        item_id: 10,
+        path: PathBuf::from("/films/film.mkv"),
+        size: 4096,
+        mtime: 77,
+        duration_ms: Some(12_000),
+        container: Some("mkv".into()),
+        video_codec: Some("hevc".into()),
+        video_codec_tag: None,
+        field_order: None,
+        video_profile: Some("Main".into()),
+        width: Some(640),
+        height: Some(360),
+        bit_depth: Some(8),
+        hdr: None,
+        hdr_format: None,
+        max_cll: None,
+        max_fall: None,
+        mastering_max_luminance: None,
+        luminance_source: None,
+        bitrate: Some(1_000_000),
+        audio_streams: Vec::new(),
+        subtitle_streams: Vec::new(),
+        scanned_at: 1,
+        audio_offset_ms: 0,
+        probed: true,
+        dolby_vision: Default::default(),
+    }
+}
+
+/// A local viewer's row-less demand for the fixture's source, with
+/// `origin` as the node that holds the object.
+fn local_demand(origin: &str) -> CopyAnalysisMessage {
+    let mut source = source();
+    source.origin_node_id = origin.into();
+    let demand = CopyIndexDemand::local(
+        &local_viewer(7),
+        Arc::new(media_file()),
+        NAMESPACE.into(),
+        source,
+        CopyRecipe {
+            video: plurx_core::transcode::CopyVideoOptions::new(false, false),
+            audio_index: None,
+            transcode_audio: false,
+            audio_delivery: None,
+        },
+    )
+    .expect("a local user's own playback");
+    CopyAnalysisMessage::Demand(Box::new(demand))
+}
+
+/// The local authority exists only for a local user's own playback: a
+/// Sharing principal, whatever its grant, cannot be turned into one, so a
+/// local demand never reuses a Source grant. Pure.
+#[test]
+fn a_local_copy_authority_is_never_made_from_a_sharing_principal() {
+    let local = LocalCopyAuthority::of(&local_viewer(7)).expect("local playback");
+    assert_eq!((local.user_id(), local.playback_id()), (7, "playback-1"));
+    assert!(LocalCopyAuthority::of(&local_viewer(0)).is_err(), "no user");
+
+    let shared = crate::state::PlaybackViewerDemand {
+        principal: plurx_core::playback_principal::PlaybackPrincipal::sharing(
+            uuid::Uuid::new_v4(),
+            &hex64('b'),
+        )
+        .expect("sharing principal"),
+        playback_id: "playback-1".into(),
+    };
+    assert!(LocalCopyAuthority::of(&shared).is_err());
+    assert!(
+        CopyIndexDemand::local(
+            &shared,
+            Arc::new(media_file()),
+            NAMESPACE.into(),
+            source(),
+            CopyRecipe {
+                video: plurx_core::transcode::CopyVideoOptions::new(false, false),
+                audio_index: None,
+                transcode_audio: false,
+                audio_delivery: None,
+            },
+        )
+        .is_err(),
+        "shared playback cannot ask as a local viewer"
+    );
+}
+
+/// A row-less local demand is held as its own source, once, and handed to a
+/// unit like any incomplete set. With a healthy head the unit is done
+/// without a claim; a demand for an object another node holds is dropped.
+/// Covers the worker up to the head decision; no phase is begun.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_local_demand_is_held_once_and_is_done_when_its_head_is_healthy() {
+    let fixture = store_fixture().await;
+    let init = muxer_init();
+    let (artifact, _) = variant(&sealed(&init, rows(4, 4_500), 12, true), &hex64('e'));
+    fixture.publish(&artifact);
+
+    let mut pending = PendingSources::default();
+    pending.fold(local_demand(NODE));
+    pending.fold(local_demand(NODE));
+    let mut units = pending.start_ready(std::time::Instant::now());
+    assert_eq!(units.len(), 1, "one source, however often it is asked for");
+    pending.fold(local_demand(NODE));
+    assert!(
+        pending.start_ready(std::time::Instant::now()).is_empty(),
+        "a source being worked is not held a second time"
+    );
+    let (key, mut source) = units.pop().expect("the unit");
+    assert_eq!(key, fixture.key);
+    assert!(matches!(
+        publish_source(&fixture.context, &key, &mut source).await,
+        Attempt::Done
+    ));
+    assert_eq!(
+        fixture
+            .sql()
+            .query_row("SELECT count(*) FROM analysis_requests", [], |row| row
+                .get::<_, i64>(0))
+            .expect("requests"),
+        0,
+        "a healthy head costs a demand one read and no request"
+    );
+
+    let mut elsewhere = PendingSources::default();
+    elsewhere.fold(local_demand("node-two"));
+    let (key, mut source) = elsewhere
+        .start_ready(std::time::Instant::now())
+        .pop()
+        .expect("the unit");
+    assert!(matches!(
+        publish_source(&fixture.context, &key, &mut source).await,
+        Attempt::Discard(_)
+    ));
+}
+
+/// The head decision of a demand, which holds no rows: nothing to build on a
+/// healthy head, the repair generation of a quarantined one adopted on the
+/// same condition as for a set, any other desire refused.
+#[tokio::test]
+async fn a_demand_adopts_a_quarantined_heads_repair_generation() {
+    let fixture = store_fixture().await;
+    let init = muxer_init();
+    let (artifact, _) = variant(&sealed(&init, rows(4, 4_500), 12, true), &hex64('e'));
+    let successor =
+        copy_index_v3_rebuild_generation(&fixture.key, &artifact.blob_sha256, 1).expect("repair");
+
+    let mut asked = source();
+    assert_eq!(
+        reconcile_demand(&fixture.context, &fixture.key, &mut asked).await,
+        Ok(HeadDecision::Proceed { contradicted: None }),
+        "no head: the demand builds one"
+    );
+    fixture.publish(&artifact);
+    assert_eq!(
+        reconcile_demand(&fixture.context, &fixture.key, &mut asked).await,
+        Ok(HeadDecision::Done)
+    );
+    assert_eq!(asked.requested_generation, hex64('c'));
+
+    fixture
+        .sql()
+        .execute(
+            "UPDATE copy_index_v3_heads SET state='quarantined',desired_generation=?1 WHERE source_key=?2",
+            rusqlite::params![successor, fixture.key],
+        )
+        .expect("quarantined head");
+    assert_eq!(
+        reconcile_demand(&fixture.context, &fixture.key, &mut asked).await,
+        Ok(HeadDecision::Proceed { contradicted: None })
+    );
+    assert_eq!(asked.requested_generation, successor);
+
+    fixture
+        .sql()
+        .execute(
+            "UPDATE copy_index_v3_heads SET desired_generation=?1 WHERE source_key=?2",
+            rusqlite::params![hex64('8'), fixture.key],
+        )
+        .expect("foreign desire");
+    let mut refused = source();
+    assert_eq!(
+        reconcile_demand(&fixture.context, &fixture.key, &mut refused).await,
+        Ok(HeadDecision::Discard("head desires another generation"))
+    );
+}
+
+/// A generation whose coordination request reached a terminal state is
+/// reported as ended, so its source is dropped rather than asked about on
+/// every pass; a queued one is this worker's and a claimed one is busy.
+#[tokio::test]
+async fn an_ended_generation_is_told_apart_from_a_busy_one() {
+    let fixture = store_fixture().await;
+    let source = source();
+    let Coordination::Queued(request) = coordination_request(&fixture.context, &source)
+        .await
+        .expect("coordination")
+    else {
+        panic!("a fresh generation is queued");
+    };
+    let now = crate::state::clock_ms();
+    fixture
+        .context
+        .store
+        .claim_analysis_coordination(
+            &request.request_id,
+            source.clone(),
+            NODE,
+            request.fence,
+            now,
+            now + 600_000,
+        )
+        .await
+        .expect("claim")
+        .expect("metadata claim");
+    assert!(matches!(
+        coordination_request(&fixture.context, &source)
+            .await
+            .expect("coordination"),
+        Coordination::Busy
+    ));
+    fixture
+        .sql()
+        .execute(
+            "UPDATE analysis_requests SET state='failed',owner_node_id=NULL,lease_expires_ms=NULL WHERE request_id=?1",
+            [&request.request_id],
+        )
+        .expect("the attempt limit ended it");
+    assert!(matches!(
+        coordination_request(&fixture.context, &source)
+            .await
+            .expect("coordination"),
+        Coordination::Ended
+    ));
 }

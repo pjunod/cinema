@@ -253,7 +253,8 @@ impl Fixture {
             .into_iter()
             .filter_map(|message| match message {
                 crate::copy_analysis::CopyAnalysisMessage::Defect(defect) => Some(defect),
-                crate::copy_analysis::CopyAnalysisMessage::Range(_) => None,
+                crate::copy_analysis::CopyAnalysisMessage::Range(_)
+                | crate::copy_analysis::CopyAnalysisMessage::Demand(_) => None,
             })
             .collect()
     }

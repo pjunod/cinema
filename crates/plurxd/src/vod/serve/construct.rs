@@ -635,6 +635,66 @@ impl VodServe {
         }
     }
 
+    /// Ask the Analysis worker for the v3 copy index of the file a local
+    /// viewer is starting, when planning found none. The start itself is
+    /// served by the existing index order and waits on nothing here: this
+    /// is one stat and one inbox message. The worker builds the index with
+    /// its own generations of the copy engine once the source is idle, and
+    /// a later start of the title plans from it. A Sharing principal has no
+    /// local authority and asks for nothing.
+    pub(super) async fn demand_copy_index(
+        &self,
+        file: &MediaFile,
+        recipe: crate::copy_analysis::CopyRecipe,
+        viewer: &crate::state::PlaybackViewerDemand,
+    ) {
+        let (Some(registry), Some(node_id)) = (
+            self.shared.copy_analysis.get(),
+            self.shared.cluster_node_id.as_deref(),
+        ) else {
+            return;
+        };
+        let demand =
+            async {
+                let namespace =
+                    self.shared
+                        .catalog_namespace
+                        .get_or_try_init(|| async {
+                            self.shared.store.instance_id().await.map_err(|error| {
+                                format!("reading the catalogue namespace: {error}")
+                            })
+                        })
+                        .await?;
+                let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
+                let identity = crate::fragindex::identity_for(file, recipe.video);
+                let source = crate::copy_analysis::source_for_copy(
+                    namespace,
+                    file,
+                    &identity.argv_fingerprint,
+                    &object_version,
+                    node_id,
+                )
+                .map_err(|error| format!("deriving the copy source: {error}"))?;
+                crate::copy_analysis::CopyIndexDemand::local(
+                    viewer,
+                    Arc::new(file.clone()),
+                    namespace.clone(),
+                    source,
+                    recipe,
+                )
+                .map_err(str::to_owned)
+            }
+            .await;
+        match demand {
+            Ok(demand) => {
+                registry.notify_demand(demand);
+            }
+            Err(reason) => {
+                tracing::debug!(target: "plurxd::vodserve", file_id = file.id, %reason, "no copy index demand");
+            }
+        }
+    }
+
     pub(super) async fn try_cluster_fragment_index(
         &self,
         file: &MediaFile,

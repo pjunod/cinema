@@ -694,6 +694,18 @@ impl VodServe {
         } else {
             None
         };
+        // A local viewer's copy start without a v3 index asks the Analysis
+        // worker to build one. This start is unchanged: it plans from the
+        // index order below and waits on nothing the demand sets off.
+        if let (None, None, Some(viewer)) = (&copy_index, &prepared.encoding, viewer) {
+            let recipe = crate::copy_analysis::CopyRecipe {
+                video,
+                audio_index: req.audio_index,
+                transcode_audio: aac,
+                audio_delivery: req.audio_delivery.clone(),
+            };
+            self.demand_copy_index(file, recipe, viewer).await;
+        }
         let copy_index_init_contract = copy_index
             .as_ref()
             .map(|found| found.init_contract_sha256.clone());
