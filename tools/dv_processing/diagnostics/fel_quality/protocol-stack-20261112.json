@@ -11,4 +11,8 @@
  "rate_rule":"as protocol-aq-psy-20261112.json, on all three fixtures",
  "readouts":"as protocol-aq-psy-20261112.json on the Michael fixtures; additivity (observed / sum of single-arm deltas); beekeeper1800 iso-rate pooled and per-frame whole-picture mean vs F and vs Z6, shadow wins; grain_ratio.py report",
  "accept":"common bar on both Michael fixtures, and on beekeeper1800: pooled mean below F in all four models, frames 0 and 24 below F, shadow-p99 frames beating F >= landed Z6",
- "not_claimed":["perceptual grain judgement","HRD/CPB conformance","playback, packaging or live change"]}
+ "not_claimed":["perceptual grain judgement","HRD/CPB conformance","playback, packaging or live change"],
+ "amendment_1":"Before any stack output (2026-11-12): Zfn1 of protocol-map-family-20261112.json passed its accept rule on both Michael fixtures (pooled mean vs Z6 -0.035/-0.052 in all four models, shadow wins held), so Zfn1 is the map in every recipe, on the v8 harness with each fixture's canonical BL planes.",
+ "harness_modes":{"NP1":{"mode":"lumazfs","threshold_nits":1.0,"qp_offset":-6},"NP2":{"mode":"lumazfs","threshold_nits":1.0,"qp_offset":-6},"P1":{"mode":"lumazfs","threshold_nits":1.0,"qp_offset":-6},"Zfn1":{"mode":"lumazfs","threshold_nits":1.0,"qp_offset":-6}},
+ "controls_amended":["Zfn1 alone landed on beekeeper1800, beside base and Z6"]}
+
