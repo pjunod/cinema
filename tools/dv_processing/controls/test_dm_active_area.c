@@ -358,8 +358,6 @@ static void test_cm29_detail_hold_chroma_weight(void) {
     dv_dm_frame nohold=f; nohold.c29.xtop=1e9;
     assert(dv_dm_cpu_render(&f,in,W,H,out) && dv_dm_cpu_render(&nohold,in,W,H,unheld));
     double dmax=0; for(int ch=0;ch<3;ch++) dmax=fmax(dmax,fabs(out[4*c+ch]-unheld[4*c+ch]));
-    printf("raw %u chroma speck: held %.7f %.7f %.7f, unheld %.7f %.7f %.7f\n",cw[k].raw,
-           out[4*c],out[4*c+1],out[4*c+2],unheld[4*c],unheld[4*c+1],unheld[4*c+2]);
     if(dmax<2e-3){ fprintf(stderr,"raw %u: hold moves the chroma speck by only %.2e\n",cw[k].raw,dmax); abort(); }
     for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-cw[k].gold[ch])>1e-6) {
       fprintf(stderr,"raw %u chroma speck: ch %d %.7f, pinned %.7f\n",cw[k].raw,ch,out[4*c+ch],cw[k].gold[ch]); abort(); }

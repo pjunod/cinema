@@ -71,6 +71,12 @@ class ActiveAreaCControl(unittest.TestCase):
     def test_cm29_detail_holds_at_the_top_clip(self):
         self.run_case("test_cm29_detail_holds_at_the_top_clip")
 
+    def test_cm29_top_clip_state(self):
+        self.run_case("test_cm29_top_clip_state")
+
+    def test_cm29_detail_hold_chroma_weight(self):
+        self.run_case("test_cm29_detail_hold_chroma_weight")
+
 
 if __name__ == "__main__":
     unittest.main()
