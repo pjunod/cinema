@@ -2358,6 +2358,14 @@ pub trait BackgroundJobStore: Send + Sync {
         head_epoch: i64,
         blob_sha256: &str,
     ) -> Result<Option<String>, StoreError>;
+    /// This node's queued coordination requests a previous process created
+    /// under ids beginning with `id_prefix`, with the source each coordinates.
+    async fn queued_analysis_coordination_with_prefix(
+        &self,
+        node_id: &str,
+        created_before_ms: i64,
+        id_prefix: &str,
+    ) -> Result<Vec<super::analysis_coordination::AnalysisCoordination>, StoreError>;
     async fn ensure_copy_index_v3_head(
         &self,
         catalog_namespace: &str,
@@ -3204,6 +3212,20 @@ impl<T: QueueSql> BackgroundJobStore for T {
         blob_sha256: &str,
     ) -> Result<Option<String>, StoreError> {
         super::copy_index_v3::quarantine_code(self, source_key, head_epoch, blob_sha256).await
+    }
+    async fn queued_analysis_coordination_with_prefix(
+        &self,
+        node_id: &str,
+        created_before_ms: i64,
+        id_prefix: &str,
+    ) -> Result<Vec<super::analysis_coordination::AnalysisCoordination>, StoreError> {
+        super::analysis_coordination::queued_with_prefix(
+            self,
+            node_id,
+            created_before_ms,
+            id_prefix,
+        )
+        .await
     }
     async fn ensure_copy_index_v3_head(
         &self,

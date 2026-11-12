@@ -811,11 +811,23 @@ async fn a_quarantined_variant_is_unreadable_and_gains_no_new_holder() {
 /// A queued coordination request for another generation of the fixture's
 /// source, established through the real coordinator and never claimed.
 async fn queued(store: &SqliteStore, generation: char, target: &str, created: i64) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    queued_as(store, &id, generation, target, created).await
+}
+
+/// [`queued`] under a chosen request id.
+async fn queued_as(
+    store: &SqliteStore,
+    id: &str,
+    generation: char,
+    target: &str,
+    created: i64,
+) -> String {
     let mut source = source();
     source.requested_generation = generation.to_string().repeat(64);
     let request = store
         .enqueue_analysis_request(&NewAnalysisRequest {
-            request_id: uuid::Uuid::new_v4().to_string(),
+            request_id: id.to_owned(),
             file_id: 100,
             source_size: 4096,
             source_mtime: 77,
@@ -1155,4 +1167,68 @@ async fn the_last_member_holding_a_readable_heads_bytes_is_known_and_removed_nod
         vec![NODE],
         "a removed node is not offered as a holder"
     );
+}
+
+/// Covers the SQLite backend of the durable-demand listing: only this
+/// node's queued coordination requests created before the boot mark under
+/// the given id prefix are returned, each with the exact source its role
+/// coordinates. A claimed request, another node's, a later one and one
+/// under another id are not.
+#[tokio::test]
+async fn a_restarted_worker_lists_the_queued_coordinations_of_one_id_prefix() {
+    let fixture = fixture(true).await;
+    let boot = NOW + 200;
+    let asked = queued_as(
+        &fixture.store,
+        "local-play.u7.playback-1.ab12",
+        'd',
+        NODE,
+        NOW + 100,
+    )
+    .await;
+    queued(&fixture.store, 'e', NODE, NOW + 100).await;
+    queued_as(
+        &fixture.store,
+        "local-play.u7.playback-2.cd34",
+        'f',
+        "other-node",
+        NOW + 100,
+    )
+    .await;
+    queued_as(
+        &fixture.store,
+        "local-play.u7.playback-3.ef56",
+        '9',
+        NODE,
+        NOW + 300,
+    )
+    .await;
+    let listed = fixture
+        .store
+        .queued_analysis_coordination_with_prefix(NODE, boot, "local-play.")
+        .await
+        .expect("listing");
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].request_id, asked);
+    let mut expected = source();
+    expected.requested_generation = "d".repeat(64);
+    assert_eq!(listed[0].source, expected);
+
+    // Retired with the rest, it is no longer listed.
+    fixture
+        .store
+        .retire_stranded_analysis_coordination(NODE, boot, NOW + 400)
+        .await
+        .expect("retire");
+    assert!(fixture
+        .store
+        .queued_analysis_coordination_with_prefix(NODE, boot, "local-play.")
+        .await
+        .expect("listing")
+        .is_empty());
+    assert!(fixture
+        .store
+        .queued_analysis_coordination_with_prefix(NODE, boot, "")
+        .await
+        .is_err());
 }

@@ -373,6 +373,32 @@ pub(super) async fn retire_stranded<T: QueueSql>(
     Ok(rows.len() as u64)
 }
 
+/// The queued coordination requests targeted at `node_id`, created before
+/// `created_before_ms`, whose id begins with `id_prefix`, with the exact
+/// source each coordinates. A restarted worker reads them before it retires
+/// what its predecessor left, to take up again the ones it can still work.
+/// A request whose role names a physical custody is not listed.
+pub(super) async fn queued_with_prefix<T: QueueSql>(
+    store: &T,
+    node_id: &str,
+    created_before_ms: i64,
+    id_prefix: &str,
+) -> Result<Vec<AnalysisCoordination>, StoreError> {
+    if !identifier(node_id) || created_before_ms < 0 || id_prefix.is_empty() || id_prefix.len() > 64
+    {
+        return Err(invalid());
+    }
+    let body = encode(
+        &serde_json::json!({"node_id":node_id,"created_before_ms":created_before_ms,"prefix":id_prefix,"pipeline":format!("{PIPELINE_PREFIX}%")}),
+    )?;
+    let rows = store.queue_sql(format!("{OBSERVATION} WHERE active_custody_id IS NULL AND request_id IN (SELECT request.request_id FROM analysis_requests request WHERE request.state='queued' AND request.component='fragment_index' AND request.pipeline_version LIKE json_extract($1,'$.pipeline') AND request.target_node_id=json_extract($1,'$.node_id') AND request.created_at_ms<json_extract($1,'$.created_before_ms') AND substr(request.request_id,1,length(json_extract($1,'$.prefix')))=json_extract($1,'$.prefix')) ORDER BY request_id LIMIT {MAX_LISTED_COORDINATIONS}"), body, false, true).await?;
+    rows.iter().map(|row| decode(row)).collect()
+}
+
+/// Queued coordinations one listing returns. A worker holds at most this
+/// many sources; the rest are retired and asked for again when played.
+const MAX_LISTED_COORDINATIONS: usize = 64;
+
 /// End a coordinator this claim borrowed only to write metadata (a reader's
 /// quarantine), as `cancelled` with [`STRANDED_CODE`] and without charging
 /// the attempt. The claimant holds no observations and will not rebuild; the
