@@ -269,7 +269,7 @@ int main(int argc, char **argv) {
             }
             free(sel);
         }
-        int flat = 0;
+        int flat = 0, zeroed = 0;
         double negsum = 0;
         if (m_ref) {
             size_t nb = (size_t)bw * bh;
@@ -336,7 +336,7 @@ int main(int argc, char **argv) {
                         off[b] = qpoff * t;
                     }
             }
-            int unsel = 0, zeroed = 0;
+            int unsel = 0;
             for (size_t b = 0; b < nb; b++) {
                 if (cls[b] == 1) selected++, negsum += fabs(off[b]), zeroed += lround(off[b] * 1e6) == 0;
                 if (cls[b] == 0) unsel++;
