@@ -118,6 +118,31 @@ def dv_dependency_inputs(root: Path = ROOT) -> str:
     return "sha256:" + hashlib.sha256("".join(lines).encode()).hexdigest()
 
 
+DV_DEPENDENCY_RECORD = "/opt/dv-dependencies/build-inputs.sha256"
+
+
+def image_dependency_inputs(image: str, platform: tuple[str, str]) -> str:
+    """Identity of the dependency inputs one platform image recorded when built.
+
+    The record is copied out of a created, never started container, so the
+    other architecture needs no emulation.
+    """
+    container = run(["docker", "create", "--platform", "/".join(platform), image, "true"],
+                    capture=True).strip()
+    if not re.fullmatch(r"[0-9a-f]{12,64}", container):
+        raise ValueError("docker create returned no container id")
+    try:
+        with tempfile.TemporaryDirectory(prefix="dv-dependency-record-") as directory:
+            record = Path(directory) / "build-inputs.sha256"
+            run(["docker", "cp", f"{container}:{DV_DEPENDENCY_RECORD}", str(record)])
+            if record.is_symlink() or not record.is_file() or record.stat().st_size > 64 * 1024:
+                raise ValueError("DV dependency image carries no bounded input record")
+            return "sha256:" + hashlib.sha256(record.read_bytes()).hexdigest()
+    finally:
+        subprocess.run(["docker", "rm", "--force", container], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def pin_image(image: str, dockerfile: Path, *, insecure: bool = False,
               dv_dependencies: bool = False) -> None:
     """Require a published multi-platform image before changing application source."""
@@ -146,11 +171,18 @@ def pin_image(image: str, dockerfile: Path, *, insecure: bool = False,
     digest = image.rsplit("@", 1)[1]
     verify_public_image(digest)
     if dv_dependencies:
-        # The image must have been built from this tree's dependency inputs;
-        # the application build compares the recorded list with the image's.
+        # Each platform image must have been built from this tree's dependency
+        # inputs. Read what the image itself recorded: a pin that only
+        # restated the tree would turn every later build red instead.
+        inputs = dv_dependency_inputs(dockerfile.resolve().parent)
+        for platform in sorted(REQUIRED_PLATFORMS):
+            recorded = image_dependency_inputs(image, platform)
+            if recorded != inputs:
+                raise ValueError(
+                    f"{'/'.join(platform)} DV dependency image was built from other inputs "
+                    f"({recorded}) than this tree ({inputs}); publish from this revision")
         updated = DV_PIN.sub(lambda match: match[1] + digest + match[3], source)
-        updated = DV_INPUTS_ARG.sub(
-            f'ARG PLURX_DV_DEPENDENCY_INPUTS="{dv_dependency_inputs(dockerfile.resolve().parent)}"', updated)
+        updated = DV_INPUTS_ARG.sub(f'ARG PLURX_DV_DEPENDENCY_INPUTS="{inputs}"', updated)
     else:
         updated = PIN.sub(lambda match: match[1] + digest + match[3], source)
         updated = DIGEST_ARG.sub(f'ARG PLURX_MEDIA_RUNTIME_DIGEST="{digest}"', updated)
