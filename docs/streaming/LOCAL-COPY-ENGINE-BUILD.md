@@ -1,6 +1,7 @@
 # Local copy on the one engine — build plan for the rest of item 6
 
-**Status:** open — step 1 built on `item6b`, steps 2–10 not started ·
+**Status:** open — step 1 built on `item6b`, step 3 built on `step3`,
+steps 2 and 4–10 not started ·
 **Executes:** item 6 of [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md)
 under the [A1/B1 build contract](PLAYBACK-START-A1-B1-BUILD.md) ·
 **Written:** 2026-11-12 against `item6` @ `92c0e28`
@@ -144,58 +145,109 @@ A demand survives a restart.
   (`make unit-core`); the mixed-version case; enqueue accepts the value and
   refuses a fifth; the head guard with a newer coordination row.
 
-### Step 3 — The copy index rides the content-analysis pass
+### Step 3 — The copy index rides the content-analysis pass (built)
 
 Paul's standing rule: every analysis job rides along with the analyze
 pass, reading the same unfiltered input, and also runs standalone. The
 standalone form exists (item 6 step 1). This step is the ride-along.
 
-- **Owner surfaces:** `fragindex.rs` (`index_pass`, `shared_index_argv`,
-  `build_riding_shared`), a new `copy_ride_along.rs` beside
-  `subtitle_ride_along.rs`, `copy_analysis.rs` and `copy_analysis/work.rs`
-  (a third observation source), `copyrange/observed.rs` and `census.rs`
-  for the shared row and inspection extraction.
-- **Authority, with no second claim service:** the pass already runs under
-  its own claimed `fragment_index` request, custody and `SourceReadBudget`;
-  those stay the only authority for its read. The ride-along does not
-  claim the coordinator. It hands the worker one whole-title observation
-  that names the pass's live claim and custody (a typed value only the
-  pass can build from the claim it holds). The worker, which is the one
-  coordinator, then takes the metadata-only coordination claim itself
-  (it reserves no reader) and seals and publishes. The set accepts the
-  observation on the same checks as an Analysis fill, with the pass's
-  custody in place of a coordination phase.
+- **Owner surfaces:** `fragindex.rs` (`build_attested_pass`,
+  `build_with_args_owned`, `IndexPass::riding_args`), a new
+  `copy_ride_along.rs` beside `subtitle_ride_along.rs`, `copy_analysis.rs`
+  and `copy_analysis/work.rs` (a third observation source),
+  `copyrange/observed.rs` (`inspect_canonical_row`, `copy_cut_policy`) and
+  `census.rs` (`head_origin`) for the shared row and inspection
+  extraction, `copy_normalization.rs` (`begin_canonical`),
+  `state.rs::settle_copy_ride`.
+- **Authority, with no second claim service:** the pass runs under its own
+  claimed `fragment_index` build job, the source custody that claim holds
+  and its `SourceReadBudget`; those stay the only authority for its read.
+  The ride-along does not claim the coordinator. It hands the worker one
+  whole-title observation that names the pass's claim and custody:
+  `IndexPassCustody`, whose only constructor reads a `JobFence` that is
+  live when asked, of kind `FragmentIndexBuild`, with custody owned by
+  that exact claim. The worker, which is the one coordinator, then takes
+  the metadata-only coordination claim itself (it reserves no reader) and
+  seals and publishes. The set accepts the observation on the same checks
+  as an Analysis fill (`CopyObservationSet::observe_pass`), with the
+  pass's custody in place of a coordination phase, and only as a whole
+  title.
+- **Which passes ride:** the cluster build job's pass
+  (`run_cluster_fragment_index_job`), for its lead identity. The
+  non-cluster local pass holds no claim or custody to name and does not
+  ride. Sibling identities of a shared read are not ridden. A transport
+  stream does not ride (see Clock). Each of those is still built by the
+  standalone form.
 - **Rows, and why a video-only observation is enough:** an `IndexRow` is
   defined on the video-only canonical pipe, which is what the pass emits on
   `pipe:1`. The engine checks an AV companion only because it also serves
   AV; the index does not contain it. Equality with the engine's rows comes
-  from one derivation, not from trust: the pass's canonical output goes
-  through the engine's own `CopyNormalizationContract::from_head` and row
-  and inspection extraction, and the acceptance below compares blobs. A
-  divergence that slipped through is still caught at use: every generation
-  is verified against the index, and item 5 quarantines a contradicted head.
-- **Clock:** the ride-along appends the packet clock output after `pipe:1`,
-  never inside `copy_index_pipe_args*` (the rule `subtitle_ride_along`
-  keeps, so no cluster cache key changes). Its reader always drains to end
-  of file. If the consumer falls behind a bounded buffer, or the clock is
-  unusable, the ride-along is abandoned and the reader keeps discarding, so
-  ffmpeg never blocks on that descriptor.
+  from one derivation, not from trust: the lead output's bytes are teed to
+  the engine's own `ObservedRangeAssembler`, the first fragment establishes
+  `CopyNormalizationContract::from_head`, and each fragment is inspected by
+  `inspect_canonical_row`, normalized, and measured by
+  `CopyCompanionVerifier` with the canonical stream standing as its own
+  companion. A row or a segment of rows longer than the engine's 16 s
+  target is refused as the engine's kernel refuses it. A divergence that
+  slipped through is still caught at use: every generation is verified
+  against the index, and item 5 quarantines a contradicted head.
+- **Clock:** the ride-along appends the engine's packet clock block
+  (`transcode::copy_packet_clock_output_args`) after the index outputs, on
+  descriptor 7, never inside `copy_index_pipe_args*` (the rule
+  `subtitle_ride_along` keeps, so no cluster cache key changes). It does
+  **not** add the engine's global `-copyts`. That option would move the
+  timestamps of every other output of the pass; the stored subtitle tracks
+  are written without it and their cue times depend on that
+  (`subtitles.rs`, "`-copyts` and no `-start_at_zero`"). Without it
+  FFmpeg's input clock sits the format start time before the source's.
+  Rows are differences from the first packet, so they are unaffected. The
+  source origin is recovered from the pass's own probe of the held
+  descriptor: the format start, only when it is a whole number of stream
+  ticks, and checked against the video stream's probed first presentation
+  time. Anything else abandons the ride. A transport stream never rides:
+  without `-copyts` FFmpeg corrects its discontinuities and the engine does
+  not. The clock reader always drains to end of file. If the observer falls
+  behind a 32 MiB backlog, or the clock is unusable, the ride-along is
+  abandoned and the reader keeps discarding, so ffmpeg never blocks on that
+  descriptor.
+- **A ride only adds:** rows that disagree with rows already held are
+  dropped and the held set stands. A set that holds a pass's rows never
+  quarantines a healthy head; a disagreement is logged and the source
+  discarded. A viewer's own range still quarantines.
 - **Attestation:** not a second read where the pass records its own
   full-source receipt, which `physical::cached_full_source` already accepts
-  (`LegacyFull`). Where the pass ran without one, one hash phase remains;
-  that is a second read and the step's PR must say for which passes.
-- **Product:** the ride-along's stage bytes are reported with the pass's
-  progress, as the subtitle ride-along's are, and cancelling the Analysis
-  job stops both.
+  (`LegacyFull`). That is every HEVC pass (`attest_copy_source_persistent`
+  hashes the whole file under `hevc-full-v1:`). A pass of any other codec
+  records only a sampled receipt, so one whole-file hash phase remains for
+  it; that is a second read of the file, not of the video.
+- **Product:** the Analysis page's live row says the pass is also observing
+  the copy index, with its row count (`copy_index_riding`,
+  `copy_index_rows` on the progress row), beside the subtitle ride-along's
+  line. Cancelling the Analysis job stops both: the ride has no child and no
+  timer of its own.
+- **Cost added to the pass:** no source read. One more `framecrc` output
+  (a text line per video packet) on a pipe; one in-memory copy of the
+  canonical stream through the observer, which for a converting Dolby
+  Vision identity repeats that conversion; at most 32 MiB of backlog and
+  one held fragment.
 - **Acceptance:** a title the pass indexes gets a v3 head from that read;
   its blob equals the one `fill_copy_gap` seals for the same file and
   recipe; the node-local index and its cluster cache key are byte-identical
   with and without the ride-along; a failed ride-along, and a
-  descriptor-7 reader stalled for longer than the pass runs, cost the
+  descriptor-7 consumer stalled for longer than the pass runs, cost the
   index nothing and do not lengthen the pass.
-- **Tests:** row and blob equality against `gap_fill_tests`' whole-title
-  fill on the HEVC and H.264 fixtures; argv digest unchanged; a ride-along
-  failure leaves `IndexOutcome::Built`; a stalled clock consumer.
+- **Tests (written):** row, inspection, origin, init and blob equality
+  against a whole-title fill on the HEVC and H.264 fixtures
+  (`copy_analysis/gap_fill_tests.rs`); the index equal with and without
+  the ride, the hashed argv unchanged, a ride-along failure leaving
+  `IndexOutcome::Built`, a stalled consumer
+  (`fragindex/copy_ride_tests.rs`); the origin recovery, backlog bound and
+  tee (`copy_ride_along/tests.rs`); the worker's fold and the
+  no-quarantine rule (`copy_analysis/quarantine_tests.rs`); the Analysis
+  row (`tests/web/analysis-node-names.test.js`).
+- **Not covered by a test:** `settle_copy_ride` handing the observation
+  over under a real claim, and the publication that follows, run only on a
+  cluster.
 
 ### Step 4 — A local owner at P1, P2 and P5 (no behaviour change)
 
@@ -351,3 +403,4 @@ session id or URL. **Tests** says whether the step's tests have been run.
 | Date | Step | Model | Session | Branch / PR | Outcome / evidence | Tests |
 |---|---|---|---|---|---|---|
 | 2026-11-12 | 1 Durable demand | claude-fable-5-2 | https://claude.ai/code/session_01BCWL9ypnQEiQUyRaZtMhh3 | `item6b` | Built, with its review fixes; clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
+| 2026-11-12 | 3 Copy index rides the content-analysis pass | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step3` (local, on `item6b`) | Built: the cluster build job's pass hands the Analysis worker its lead identity's whole-title rows under `IndexPassCustody`; no `-copyts`, origin recovered from the pass's probe. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |

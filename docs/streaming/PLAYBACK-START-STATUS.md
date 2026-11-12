@@ -134,7 +134,42 @@ Decisions (Paul away):
 Still open: fleet acceptance of the items below and the limits listed under
 items 4 and 5.
 
-## Current batch — A1/B1 local playback demand (item 6, first step)
+## Current batch — the copy index rides the content-analysis pass (item 6, plan step 3)
+
+Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
+agent on local branch `step3`, stacked on `item6b`, not pushed.
+[Plan step 3](LOCAL-COPY-ENGINE-BUILD.md) is built; clippy `-D warnings` and
+fmt are clean, the inventory and formal pins are green. No unit test has
+been run: the ride's tests are written and wait for the fast lane.
+
+The cluster fragment-index build job's pass now also observes the whole v3
+copy index of its lead identity from the read it already makes, and hands it
+to the Analysis worker under the claim and source custody the pass holds.
+The worker takes the coordination claim itself, seals and publishes. A
+title indexed this way needs no second pass over its video. The standalone
+form (a demand filled by `fill_copy_gap`) is unchanged and still builds
+every title the ride does not.
+
+- Added to the pass: one `framecrc` packet-clock output on descriptor 7,
+  after the index outputs. No source read, no global option, nothing inside
+  the argv the cluster cache key hashes.
+- Not ridden, by design: the non-cluster local pass (it holds no claim to
+  name), sibling identities of a shared read, transport streams, and any
+  title whose format start is not a whole number of video ticks or whose
+  first packet is not the stream's first picture.
+- Decision (Paul away), a correction to the plan: the engine's clock needs
+  the global `-copyts`, which the pass cannot take. It would shift the
+  subtitle tracks the same pass stores, and it disables FFmpeg's
+  discontinuity correction for the pass's own index. The ride instead
+  recovers the source origin from the pass's probe (format start, checked
+  against the video stream's first presentation time) and abandons on any
+  disagreement. The plan's Step 3 "Clock" paragraph records this.
+- Decision (Paul away): a pass's rows only ever add an index. They never
+  quarantine a healthy head and never displace rows already held.
+- A second read remains for a non-HEVC pass: one whole-file hash phase,
+  because only HEVC passes record a full-source receipt.
+
+## Previous batch — A1/B1 local playback demand (item 6, first step)
 
 Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
 agent on local branch `item6`, stacked on `item5`, not pushed. The first
@@ -436,7 +471,9 @@ steps with an Execution log. Its step 1, durable demand, is built on
   have done so since item 2. The fix redefines that trigger and is one
   schema version on both backends; it is plan step 2.
 
-Remaining for item 6, not started (plan steps 2-10):
+Plan step 3 is built on `step3`: see the current batch above.
+
+Remaining for item 6, not started (plan step 2 and steps 4-10):
 
 - Local rolling copy and indexed-VOD copy still run their own producers
   (`copy_pipe_args` to the rolling segmenter, and plan-verified VOD
