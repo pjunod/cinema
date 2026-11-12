@@ -61,17 +61,19 @@ pub const COPY_INDEX_V3_NO_HOLDER_CODE: &str = "copy_index_no_holder";
 pub const COPY_INDEX_V3_CONTRADICTION_CODE: &str = "copy_observation_contradiction";
 
 /// The quarantine code of a healthy head whose sealed init its own producer
-/// engine did not reproduce. One generation's init is one observation, like
-/// a contradicting row: an identical reseal says the index was right.
+/// engine did not reproduce when serving. It bans the blob. A reseal runs
+/// the seal's own promotion again and arrives at the same contract, so
+/// identical bytes disprove nothing about the init a generation served; a
+/// row contradiction is different, because there the reseal reads the rows
+/// again.
 pub const COPY_INDEX_V3_SEALED_INIT_CODE: &str = "copy_index_sealed_init_mismatch";
 
 /// The codes that record a doubt about a head without proving its bytes
 /// wrong. A blob quarantined under one of them may be published again; any
 /// other code bans the blob it quarantined for this source.
-const NON_BANNING_CODES: [&str; 3] = [
+const NON_BANNING_CODES: [&str; 2] = [
     COPY_INDEX_V3_NO_HOLDER_CODE,
     COPY_INDEX_V3_CONTRADICTION_CODE,
-    COPY_INDEX_V3_SEALED_INIT_CODE,
 ];
 
 /// Holders a consumer may count or ask: not a node the replicated removal
@@ -1110,4 +1112,25 @@ pub(super) async fn last_blob_holder<T: super::background_jobs::QueueSql>(
     )?;
     let rows = store.queue_sql(format!("SELECT 'true' AS result_json FROM copy_index_v3_heads head WHERE head.blob_sha256=json_extract($1,'$.blob_sha256') AND {HEAD_READABLE} AND EXISTS(SELECT 1 FROM copy_index_v3_locations own WHERE own.contract_key=head.contract_key AND own.blob_sha256=head.blob_sha256 AND own.node_id=json_extract($1,'$.node_id')) AND NOT EXISTS(SELECT 1 FROM copy_index_v3_locations other WHERE other.contract_key=head.contract_key AND other.blob_sha256=head.blob_sha256 AND other.node_id<>json_extract($1,'$.node_id') AND {}) LIMIT 1", holder_is_member("other")), body, false, true).await?;
     Ok(!rows.is_empty())
+}
+
+/// The code a head was quarantined with at exactly this epoch and blob, if
+/// it was. A worker reads it to tell a doubt, whose rebuild may publish the
+/// same bytes, from a ban.
+pub(super) async fn quarantine_code<T: super::background_jobs::QueueSql>(
+    store: &T,
+    source_key: &str,
+    head_epoch: i64,
+    blob_sha256: &str,
+) -> Result<Option<String>, StoreError> {
+    if !digest(source_key) || !digest(blob_sha256) || head_epoch < 0 {
+        return Err(invalid());
+    }
+    let body = super::background_jobs::encode(
+        &serde_json::json!({"source_key":source_key,"head_epoch":head_epoch,"blob_sha256":blob_sha256}),
+    )?;
+    let rows = store.queue_sql("SELECT json_quote(code) AS result_json FROM copy_index_v3_quarantines WHERE source_key=json_extract($1,'$.source_key') AND head_epoch=json_extract($1,'$.head_epoch') AND bad_blob_sha256=json_extract($1,'$.blob_sha256')".into(), body, false, true).await?;
+    rows.first()
+        .map(|row| super::background_jobs::decode(row))
+        .transpose()
 }
