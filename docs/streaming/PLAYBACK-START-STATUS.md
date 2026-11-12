@@ -60,7 +60,7 @@ and Paul had it merged. Three plurx-core unit tests are red on main from
 before this batch (two `placeholder_census` tests and the source82 layout
 test).
 
-## Current batch — A1/B1 gap filling (#1520, draft)
+## Effort batch — A1/B1 gap filling (#1520, merged into the effort)
 
 Owner: Claude (claude-opus-5-5), same session. The gap-fill draft was written
 by a claude-fable-5-2 agent and finished by Opus. Items 1–3 below are built on
@@ -100,7 +100,7 @@ Coordination request rows of sources never observed again after a restart
 stay `queued` (one per file, as before this batch); retiring them belongs
 with item 5.
 
-## Current batch — A1/B1 v3 consumer and peer hydration (item 4)
+## Effort batch — A1/B1 v3 consumer and peer hydration (#1525, merged into the effort)
 
 Owner: Claude (claude-opus-5-5), same session. The item-4 code and its review
 fixes were written by a claude-fable-5-2 agent on local branch `item4`. Item 4
@@ -258,6 +258,11 @@ Local rolling copy and indexed-VOD copy become the same growing engine.
 reuses a Source grant.
 
 ### Acceptance for the next merge
+
+Items 1–4 reached the effort branch through #1520 (`f503c7c6a`) and #1525
+(`4a0da349e`), with main merged in at `22d2a981b`. The effort → main PR's
+fast lane is the one test run. The fleet checks below need Paul's deploy and
+are recorded after it.
 
 - A partially played shared title publishes after background filling, with
   no playback interruption on any node.
