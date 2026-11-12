@@ -138,7 +138,7 @@ class Fit:
         return {'lut': lut, 'poly': poly, 'mmr': mmr}
 
     def solve_safe(self):
-        """amendment_3: monotone luma target continued by identity slope, count+floor weighted pieces; ridge MMR toward identity."""
+        """amendments 3-4: monotone luma target continued by identity slope, count+floor weighted C0-joined pieces; ridge MMR toward identity."""
         cnt = self.ycnt; pop = np.flatnonzero(cnt > 0); m = self.ysum[pop] / cnt[pop]
         # Pool-adjacent-violators: count-weighted non-decreasing fit of the conditional mean over populated codes.
         blocks = []
@@ -151,12 +151,15 @@ class Fit:
         lo, hi = pop[0], pop[-1]
         target[:lo] = 4 * codes[:lo] + (iso[0] - 4 * lo); target[hi + 1:] = 4 * codes[hi + 1:] + (iso[-1] - 4 * hi)
         target = np.clip(target, 0, 4095)
-        floor = 0.01 * cnt[pop].mean(); poly = []
-        for p_ in range(8):
-            xsel = codes[128 * p_:128 * (p_ + 1)]; wts = cnt[xsel] + floor
-            xn = xsel / 1023; A = np.stack([np.ones_like(xn), xn, xn * xn], -1) * np.sqrt(wts)[:, None]
-            poly.append(np.linalg.lstsq(A, target[xsel] / 4095 * np.sqrt(wts), rcond=None)[0])
-        poly = np.array(poly)
+        # amendment_4: the 8 pieces are fitted jointly, joined (C0) half a code before each pivot, by equality-constrained weighted LS.
+        floor = 0.01 * cnt[pop].mean(); wts = cnt + floor; xn = codes / 1023
+        G = np.zeros((1024, 24)); G[codes, 3 * (codes // 128)] = 1; G[codes, 3 * (codes // 128) + 1] = xn; G[codes, 3 * (codes // 128) + 2] = xn * xn
+        E = np.zeros((7, 24))
+        for k in range(1, 8):
+            xb = (128 * k - 0.5) / 1023; E[k - 1, 3 * k:3 * k + 3] = [-1, -xb, -xb * xb]; E[k - 1, 3 * k - 3:3 * k] = [1, xb, xb * xb]
+        H = G.T @ (G * wts[:, None]); kkt = np.block([[H, E.T], [E, np.zeros((7, 7))]])
+        rhs = np.concatenate([G.T @ (wts * target / 4095), np.zeros(7)])
+        poly = np.linalg.solve(kkt, rhs)[:24].reshape(8, 3)
         ident = np.zeros((22, 2)); ident[2, 0] = ident[3, 1] = 4 * 1023 / 4095  # Cb <- u, Cr <- v
         lam = 1e-5 * cnt.sum()
         mmr = np.linalg.solve(self.xtx + lam * np.eye(22), self.xty + lam * ident)
@@ -173,7 +176,8 @@ def diagnostics(fit):
     co = mmr_basis(grid) @ fit['mmr'] * 4095
     return {'luma_max_abs_minus_identity_codes12': float(np.abs(yl - 4 * codes).max()),
             'luma_monotone': bool(np.all(np.diff(yl) >= -1e-6)),
-            'luma_max_jump_at_pivots_codes12': float(max(abs(yl[128 * k] - yl[128 * k - 1]) for k in range(1, 8))),
+            # step at each pivot beyond what the neighbouring steps predict (0 for a continuous curve)
+            'luma_max_excess_step_at_pivots_codes12': float(max(abs((yl[128 * k] - yl[128 * k - 1]) - 0.5 * ((yl[128 * k - 1] - yl[128 * k - 2]) + (yl[128 * k + 1] - yl[128 * k]))) for k in range(1, 8))),
             'chroma_max_abs_minus_identity_codes12_on_grid': float(np.abs(co - 4 * grid[:, 1:]).max()),
             'max_abs_coefficient': float(max(np.abs(fit['poly']).max(), np.abs(fit['mmr']).max()))}
 

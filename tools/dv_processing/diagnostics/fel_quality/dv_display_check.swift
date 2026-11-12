@@ -1,6 +1,7 @@
-// dv_display_check.swift FILE.mp4 -- macOS only; build with: swiftc -O -o dv_display_check dv_display_check.swift
+// dv_display_check.swift FILE.mp4 [OUT.raw] -- macOS only; build with: swiftc -O -o dv_display_check dv_display_check.swift
 // render an AVPlayerLayer offscreen with CARenderer into an rgba16Float Metal texture (EDR on),
 // and print the mean linear R, G, B of a central region, to see whether the display-path DV processing applies the RPU mapping.
+// With OUT.raw, also write the whole texture (960x540 rgba16Float) for dv_patch_check.py score.
 import AVFoundation
 import Metal
 import QuartzCore
@@ -34,4 +35,5 @@ var g = 0.0, b = 0.0
 for y in stride(from: H / 4, to: 3 * H / 4, by: 2) {
     for x in stride(from: W / 4, to: 3 * W / 4, by: 2) { g += Double(px[(y * W + x) * 4 + 1]); b += Double(px[(y * W + x) * 4 + 2]) }
 }
+if CommandLine.arguments.count > 2 { px.withUnsafeBytes { try! Data($0).write(to: URL(fileURLWithPath: CommandLine.arguments[2])) } }
 print("layer-render t=\(String(format: "%.2f", player.currentTime().seconds)) R-mean=\(s / Double(n)) G-mean=\(g / Double(n)) B-mean=\(b / Double(n)) nonzero=\(nz)/\(n)")
