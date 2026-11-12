@@ -287,17 +287,21 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
         let error = result.expect_err(reason);
         assert!(error.contains(reason), "expected {reason:?}, got {error:?}");
     };
-    let with = |namespace: u64, init: bool, preexisting: u32, foreign: u32| {
+    let with_slice = |namespace: u64, init: bool, preexisting: u32, slice: u32, foreign: u32| {
         let mut proof = dead.proof(0);
         for pass in &mut proof.passes {
             pass.owner_teardown = Some(Teardown {
                 pid_namespace: namespace,
                 daemon_is_namespace_init: init,
                 preexisting,
+                preexisting_in_daemon_slice: slice,
                 foreign_storage_holders: foreign,
             });
         }
         proof
+    };
+    let with = |namespace: u64, init: bool, preexisting: u32, foreign: u32| {
+        with_slice(namespace, init, preexisting, 0, foreign)
     };
     // Without the job, the exact source binding is gone: a census alone refuses.
     refused(
@@ -330,6 +334,12 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
     );
     refused(
         dead.apply_in(&with(NAMESPACE, true, 0, 1), started, Some(NAMESPACE))
+            .await,
+        "census job unavailable",
+    );
+    // An earlier daemon container still alive in the deployment slice refuses.
+    refused(
+        dead.apply_in(&with_slice(NAMESPACE, true, 0, 1, 0), started, Some(NAMESPACE))
             .await,
         "census job unavailable",
     );

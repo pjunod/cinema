@@ -199,14 +199,20 @@ def teardown(daemon, devices, lease_expires_ms):
     """The dead owner's process tree, seen from the host.
 
     Processes in the live daemon's PID namespace must all be younger than the
-    owner's death. Processes outside it must hold nothing on the counted
+    owner's death. So must every process in the daemon's parent cgroup (its
+    deployment slice), where a still-running earlier daemon container would be.
+    Processes outside the namespace must hold nothing on the counted
     superblocks: no descriptor, cwd, root, executable or mapping.
     """
     namespace = os.stat(f"/proc/{daemon}/ns/pid").st_ino
+    def cgroup(pid):
+        return Path(f"/proc/{pid}/cgroup").read_text().splitlines()[-1].split(":", 2)[2]
+    slice_ = os.path.dirname(cgroup(daemon))
+    require(slice_ not in ("", "/"), "the daemon's cgroup has no deployment parent")
     btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
                  if line.startswith("btime "))
     hz = os.sysconf("SC_CLK_TCK")
-    preexisting = foreign = 0
+    preexisting = foreign = sibling = 0
     for entry in os.listdir("/proc"):
         if not entry.isdigit() or int(entry) == os.getpid():
             continue
@@ -216,6 +222,8 @@ def teardown(daemon, devices, lease_expires_ms):
             if inside:
                 preexisting += started_ms(entry, btime, hz) <= lease_expires_ms
                 continue
+            if cgroup(entry).startswith(slice_ + "/"):
+                sibling += started_ms(entry, btime, hz) <= lease_expires_ms
             names = [f"{base}/fd/{fd}" for fd in os.listdir(f"{base}/fd")]
             maps = Path(f"{base}/maps").read_text()
         except OSError:
@@ -231,7 +239,8 @@ def teardown(daemon, devices, lease_expires_ms):
                 major, minor = (int(part, 16) for part in fields[3].split(":"))
                 foreign += os.makedev(major, minor) in devices
     return {"pid_namespace": namespace, "daemon_is_namespace_init": True,
-            "preexisting": preexisting, "foreign_storage_holders": foreign}
+            "preexisting": preexisting, "preexisting_in_daemon_slice": sibling,
+            "foreign_storage_holders": foreign}
 
 
 def census(source: Path, anchor: Path, daemon=None, lease_expires_ms=None):
@@ -317,6 +326,7 @@ def main():
     quiet = all(sb["readers"] == 0 and sb["writers"] == 0 for p in proof["passes"] for sb in p["superblocks"]) \
         and all(p[k] == 0 for p in proof["passes"] for k in ("anchor_locks", "silly_renames", "path_references"))
     torn_down = all(p["owner_teardown"]["preexisting"] == 0
+                    and p["owner_teardown"]["preexisting_in_daemon_slice"] == 0
                     and p["owner_teardown"]["foreign_storage_holders"] == 0 for p in proof["passes"])
     print(json.dumps({"quiescent": quiet, "owner_teardown": torn_down, "proof": proof}, indent=1))
     require(quiet, "source is not quiescent; nothing published")

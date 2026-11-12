@@ -112,8 +112,11 @@ struct Pass {
 /// namespace started after the owner's lease ended, so none of them is the
 /// owner or a survivor of it. When the owner's own namespace init exited, the
 /// kernel killed every process in that namespace. A survivor could therefore
-/// only live in another namespace, and none outside the daemon's has any file,
-/// working directory, root, executable or mapping on a counted superblock.
+/// only live in another namespace whose init is still running: an earlier
+/// daemon container would still sit in the daemon's deployment slice, where
+/// nothing older than the owner's death may remain. No process outside the
+/// daemon's namespace has any file, working directory, root, executable or
+/// mapping on a counted superblock.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 struct Teardown {
@@ -124,6 +127,10 @@ struct Teardown {
     /// Processes in that namespace that started at or before the owner's
     /// lease expiry.
     preexisting: u32,
+    /// Processes outside that namespace but in the daemon's parent cgroup
+    /// (its deployment slice, where an earlier daemon container would still
+    /// be) that started at or before the owner's lease expiry.
+    preexisting_in_daemon_slice: u32,
     /// Open descriptors, cwd, root, exe or mappings on any counted superblock
     /// held by processes outside that namespace (the helper excluded).
     foreign_storage_holders: u32,
@@ -179,6 +186,7 @@ impl Proof {
                 teardown.pid_namespace == namespace
                     && teardown.daemon_is_namespace_init
                     && teardown.preexisting == 0
+                    && teardown.preexisting_in_daemon_slice == 0
                     && teardown.foreign_storage_holders == 0
             })
         })
