@@ -15,6 +15,8 @@
 //! The engine test runs a whole local range, census and primary generation,
 //! through its real foreground Inputs, and holds its settlement to leaving
 //! nothing behind: no custody row, no pressure, no payload, no manifest.
+//!
+//! The reaping test kills ranges of both owners and boots.
 use super::*;
 use plurx_core::store::background_jobs_resources::ForegroundSourceOwner;
 use std::time::Duration;
@@ -374,33 +376,125 @@ async fn a_local_range_charges_the_source_as_a_rolling_local_session_does() {
     assert_eq!(pressure, [true, true, false, true, true, false]);
 }
 
-/// Boot removes every local range manifest a previous process left and
-/// nothing else: Source manifests are a sibling it does not open.
-#[test]
-fn boot_reaps_local_range_manifests_and_nothing_else() {
+/// A killed process leaves its ranges' files behind: nothing retired them.
+/// The next boot removes them all, payloads with the scratch and manifests
+/// with [`reap_range_manifests`], for the shared owner and the local one. A
+/// range made after that boot is live, and its files are kept: nothing but
+/// its own retirement removes them.
+#[tokio::test]
+async fn boot_removes_a_killed_ranges_files_and_a_live_ranges_are_kept() {
+    let work = crate::test_tempdir().expect("transcode scratch");
     let data = crate::test_tempdir().expect("data directory");
-    reap_local_range_manifests(data.path()).expect("nothing to reap is not an error");
-    let copy_ranges = data.path().join("copy-ranges");
-    let local = copy_ranges.join("local-observations");
-    let source = copy_ranges.join("observations");
-    for manifests in [&local, &source] {
-        let range = manifests.join(uuid::Uuid::new_v4().to_string());
-        std::fs::create_dir_all(&range).expect("a range's manifests");
-        std::fs::write(range.join("checkpoint-1-1.json"), b"{}").expect("a manifest");
-        std::fs::write(range.join("current.json"), b"{}").expect("the pointer");
+    let observations = data.path().join("copy-ranges").join("observations");
+    reap_range_manifests(data.path()).expect("nothing to reap is not an error");
+    let local_range = |session: &'static str| {
+        let (work, observations) = (work.path().to_owned(), observations.clone());
+        async move {
+            CopyRangeFiles::create(
+                &work,
+                &observations,
+                NAMESPACE.into(),
+                plurx_core::store::analysis_coordination::AnalysisCoordinationSource {
+                    file_id: 7,
+                    source_size: 4096,
+                    source_mtime: 77,
+                    origin_node_id: NODE.into(),
+                    object_version: "object-version".into(),
+                    video_identity: "ab".repeat(32),
+                    contract_version: plurx_core::store::FRAGMENT_INDEX_CONTRACT,
+                    requested_generation: "normal".into(),
+                },
+                CopyRangeOwner::Local {
+                    session: session.into(),
+                    viewer: LocalPlaybackOwner::of(&crate::state::PlaybackViewerDemand {
+                        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id: 7,
+                        },
+                        playback_id: "playback-1".into(),
+                    })
+                    .expect("a local user's own named playback"),
+                },
+                uuid::Uuid::new_v4(),
+                1,
+                plurx_core::segplan::ranges::SourceTimestamp {
+                    dts: 0,
+                    time_base_num: 1,
+                    time_base_den: 90000,
+                },
+                0,
+                "c".repeat(64),
+                plurx_core::fmp4::PromotionInputs::default(),
+            )
+            .await
+            .expect("a range's files")
+        }
+    };
+    let populate = |payload: &Path, manifests: &Path| {
+        std::fs::write(payload.join("init.mp4"), b"init").expect("a payload file");
+        std::fs::write(manifests.join("checkpoint-1-1.json"), b"{}").expect("a manifest");
+        std::fs::write(manifests.join("current.json"), b"{}").expect("the pointer");
+    };
+
+    // The previous process: a local range through the real storage, and a
+    // shared range laid out as the Source owner lays it out (only a Source
+    // session makes that owner). Both die unretired.
+    let killed_local = local_range("killed-session").await;
+    let (killed_local_payload, killed_local_manifests) = (
+        killed_local.payload_path.clone(),
+        data.path()
+            .join("copy-ranges")
+            .join("local-observations")
+            .join(killed_local.payload_path.file_name().expect("a range")),
+    );
+    populate(&killed_local_payload, &killed_local_manifests);
+    drop(killed_local);
+    let range = uuid::Uuid::new_v4().to_string();
+    let killed_source_payload = work
+        .path()
+        .join("source-copy-ranges")
+        .join(uuid::Uuid::new_v4().to_string())
+        .join(&range);
+    let killed_source_manifests = observations.join(&range);
+    for directory in [&killed_source_payload, &killed_source_manifests] {
+        std::fs::create_dir_all(directory).expect("a Source range's directory");
     }
-    reap_local_range_manifests(data.path()).expect("the reap");
-    assert!(local.is_dir());
-    assert_eq!(
-        std::fs::read_dir(&local).expect("local manifests").count(),
-        0
-    );
-    assert_eq!(
-        std::fs::read_dir(&source)
-            .expect("Source manifests")
-            .count(),
-        1
-    );
+    populate(&killed_source_payload, &killed_source_manifests);
+
+    // The next boot: the scratch clear, then the manifest reap beside it.
+    plurx_core::fs_secure::clear_scratch_blocking(work.path()).expect("the scratch clear");
+    reap_range_manifests(data.path()).expect("the reap");
+    for gone in [
+        &killed_local_payload,
+        &killed_local_manifests,
+        &killed_source_payload,
+        &killed_source_manifests,
+    ] {
+        assert!(!gone.exists(), "{}", gone.display());
+    }
+    for owner in ["observations", "local-observations"] {
+        assert_eq!(
+            std::fs::read_dir(data.path().join("copy-ranges").join(owner))
+                .expect("the manifest directory itself stays")
+                .count(),
+            0,
+            "{owner}"
+        );
+    }
+
+    // This process's range is live: its files are where it put them.
+    let mut live = local_range("live-session").await;
+    let live_manifests = data
+        .path()
+        .join("copy-ranges")
+        .join("local-observations")
+        .join(live.payload_path.file_name().expect("a range"));
+    populate(&live.payload_path, &live_manifests);
+    assert!(live.payload_path.join("init.mp4").is_file());
+    assert!(live_manifests.join("current.json").is_file());
+    // Only its own retirement removes them.
+    live.retire_payload().await.expect("retirement");
+    assert!(!live.payload_path.exists());
+    assert!(!live_manifests.exists());
 }
 
 /// A whole local range on the real engine, through its real foreground

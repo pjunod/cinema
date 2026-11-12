@@ -157,12 +157,12 @@ one yet and nothing is served from one; step 6 attaches a session to it.
   exchanges, maintenance and retirement drive it (`observe_control`,
   `refresh`, `settle`); settlement joins the child, the pipe tasks and the
   Input before it removes the payload and manifests.
-- Boot clears `copy-ranges/local-observations` where it clears the
-  transcode scratch that holds the payloads.
+- Boot clears `copy-ranges/observations` and `copy-ranges/local-observations`
+  where it clears the transcode scratch that holds the payloads.
 - Decision (Paul away): the calls from `vod/session.rs` into the range are
   left to step 6. A session cannot hold a range before it can attach one.
-- Found, not fixed: a Source range's manifests under
-  `copy-ranges/observations` are never reaped after a kill.
+- Fixed on Paul's call: a killed Source range's manifests under
+  `copy-ranges/observations` used to stay forever; boot now reaps them.
 - The trace comparison is written, not run. It replays a rolling
   session's custody calls rather than running one, and sets the range's
   bank by hand; the plan lists what that leaves unmeasured.

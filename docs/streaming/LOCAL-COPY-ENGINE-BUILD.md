@@ -67,7 +67,7 @@ answered P1, P2 and P5; their rows say what was Source-only before it.
 | P5 | Recipe and probe derivation | `growing.rs` (`CopyVideoOptions::from_probe(file, probe, false, preserve)`) against `vod/generation.rs::copy_video_pipeline` (`has_dovi_rpu()`) | The two paths pass a different `have_dovi_bsf`. Verified: for a Dolby Vision HEVC file copied with DV stripped, that flag changes the bitstream filter argv and therefore `identity_for`, so on a node whose ffmpeg has the DV filter one file gets two source keys, one per path |
 | P6 | Range liveness and the owner loop | `growing.rs`, the loop after `complete_source_media_session_publication` | The Source lease heartbeat renews the gate, refreshes the read bank and ends the range on expiry or revocation |
 | P7 | Seek and control state | `CopyRangeProduction::observe_demand`, `rolling_source_watermarks` | Demand snapshots and watermarks come from the Source viewer's control state |
-| P8 | Crash-orphan reaping | Source session recovery over `source-copy-ranges/<incarnation>` | A range a dead process left is reaped through its Source incarnation |
+| P8 | Crash-orphan reaping | Boot: the transcode scratch clear (payloads) and `reap_range_manifests` (manifests, both owners) | No range is resumed, so every range a dead process left is reaped at the next boot |
 | P9 | Rendered milestone | `checkpoint.first_frame_rendered`, set from the Source route's accepted rendered report | No observation is sent before it |
 
 ## 3. Steps
@@ -412,14 +412,13 @@ the attachment in step 6.
 - **P8, reaping:** a range dies with its process. Its payload is in the
   transcode scratch every boot already clears, which is the recovery that
   reaps a rolling session's directory. Its manifests are under the data
-  directory, so `reap_local_range_manifests` clears
-  `copy-ranges/local-observations` at the same point of boot, under the
-  same daemon lock. A failed reap is logged and costs no boot.
-- **Found, not fixed:** nothing reaps a *Source* range's manifests
-  (`copy-ranges/observations/<range>`) after a kill; only orderly
-  retirement removes them. §2's P8 row says Source session recovery does.
-  They are unread files; the Source owner should reap them in its own
-  change.
+  directory, so `reap_range_manifests` clears `copy-ranges/observations`
+  (Source) and `copy-ranges/local-observations` (local) at the same point of
+  boot, under the same daemon lock. Nothing constructs a range but
+  `CopyRangeFiles::create` and nothing reads a manifest back, so no range is
+  resumed and every manifest at boot is an orphan. A failed reap is logged
+  and costs no boot. This fixes the Source leak found while building the
+  step: before it, a killed Source range's manifests stayed forever.
 - **Acceptance, as measured:** the trace test below. For every existing
   serving path the answer is by construction: no function a rolling
   session, a VOD rendition, the Source range or an Analysis fill runs is

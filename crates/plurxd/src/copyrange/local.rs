@@ -343,24 +343,41 @@ impl LocalCopyRange {
     }
 }
 
-/// Remove what local ranges of a previous process left under the data
-/// directory. A range lives and dies with its process: its payload is in
-/// the transcode scratch, which every boot clears, and nothing reads a
-/// checkpoint manifest back, so after a restart every local manifest
-/// directory is an orphan of a session that is gone. Called once at boot,
-/// beside that scratch clear and under the same daemon lock. Source
-/// manifests are a sibling directory and are not touched.
-pub(crate) fn reap_local_range_manifests(data_dir: &Path) -> std::io::Result<()> {
-    let manifests = data_dir.join("copy-ranges").join("local-observations");
-    match std::fs::symlink_metadata(&manifests) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-        // Never follow a link someone put where the directory belongs.
-        Ok(metadata) if !metadata.is_dir() => Err(std::io::Error::other(
-            "local copy range manifests are not a directory",
-        )),
-        Ok(_) => plurx_core::fs_secure::clear_scratch_blocking(&manifests),
+/// The manifest directories of copy ranges under the data directory: the
+/// shared (Source) owner's and the local owner's.
+const RANGE_MANIFESTS: [&str; 2] = ["observations", "local-observations"];
+
+/// Remove the checkpoint manifests copy ranges of a previous process left
+/// under the data directory, for both owners.
+///
+/// A range lives and dies with its process. Nothing constructs one but
+/// `CopyRangeFiles::create`, nothing reads a checkpoint manifest back, and
+/// its payload is in the transcode scratch every boot clears, so no range
+/// is ever resumed: after a restart every manifest directory is an orphan
+/// of a range that is gone. Orderly retirement removes a range's own; a
+/// killed process removes nothing, and this is what does. Called once at
+/// boot, beside that scratch clear and under the same daemon lock, before
+/// anything can create a range, so a live range's manifests are never here
+/// to be taken. Both directories are attempted; the first failure is
+/// returned.
+pub(crate) fn reap_range_manifests(data_dir: &Path) -> std::io::Result<()> {
+    let mut outcome = Ok(());
+    for owner in RANGE_MANIFESTS {
+        let manifests = data_dir.join("copy-ranges").join(owner);
+        let reaped = match std::fs::symlink_metadata(&manifests) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+            // Never follow a link someone put where the directory belongs.
+            Ok(metadata) if !metadata.is_dir() => Err(std::io::Error::other(
+                "copy range manifests are not a directory",
+            )),
+            Ok(_) => plurx_core::fs_secure::clear_scratch_blocking(&manifests),
+        };
+        if outcome.is_ok() {
+            outcome = reaped;
+        }
     }
+    outcome
 }
 
 #[cfg(test)]

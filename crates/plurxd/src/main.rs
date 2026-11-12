@@ -3140,15 +3140,16 @@ fn create_dirs_for_storage_with_protected(
                 )
             })?;
     }
-    // A local copy range's payload was in the scratch cleared above. Its
-    // checkpoint manifests are under the data directory and are orphans of
-    // the same dead sessions, so they go at the same point, under the same
-    // daemon lock. A failure leaves unread files behind and costs no boot.
+    // A copy range's payload, shared or local, was in the scratch cleared
+    // above. Its checkpoint manifests are under the data directory and are
+    // orphans of the same dead ranges: no range is resumed and nothing reads
+    // a manifest back. They go at the same point, under the same daemon
+    // lock. A failure leaves unread files behind and costs no boot.
     #[cfg(unix)]
-    if let Err(error) = crate::copyrange::reap_local_range_manifests(&normalized.data_dir) {
+    if let Err(error) = crate::copyrange::reap_range_manifests(&normalized.data_dir) {
         tracing::warn!(
             %error,
-            "manifests of a previous process's local copy ranges were not removed"
+            "manifests of a previous process's copy ranges were not removed"
         );
     }
     let dirs = crate::state::Dirs {

@@ -33,7 +33,7 @@ pub(crate) use fill::{fill_copy_gap, CopyGapFill, CopyGapFillError};
 #[cfg(unix)]
 mod local;
 #[cfg(unix)]
-pub(crate) use local::reap_local_range_manifests;
+pub(crate) use local::reap_range_manifests;
 #[cfg(unix)]
 mod production;
 #[cfg(unix)]
