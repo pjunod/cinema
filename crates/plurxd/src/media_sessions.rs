@@ -3735,6 +3735,7 @@ fn validated_control_relay_response(
     let status = StatusCode::from_u16(response.status.as_u16())
         .map_err(|_| PeerTransportError::InvalidResponse)?;
     let mut processing_header = None;
+    let mut skip_header = None;
     let body = if status.is_success() {
         let parsed =
             serde_json::from_slice::<crate::playback_control::ControlResponseV1>(&response.body)
@@ -3752,6 +3753,16 @@ fn validated_control_relay_response(
                 )
             })
             .and_then(|report| serde_json::to_string(&report).ok());
+        skip_header = response
+            .processing_skip_header
+            .as_ref()
+            .and_then(|header| {
+                crate::http::hls::processed_upgrade::ProcessingSkip::from_owner_wire(
+                    header.as_bytes(),
+                    &request.generation,
+                )
+            })
+            .and_then(|report| report.owner_header());
         serde_json::to_vec(&parsed).map_err(|_| PeerTransportError::InvalidResponse)?
     } else {
         let parsed =
@@ -3767,6 +3778,9 @@ fn validated_control_relay_response(
         .header(header::CACHE_CONTROL, "no-store");
     if let Some(report) = processing_header {
         builder = builder.header("x-plurx-dv-processing", report);
+    }
+    if let Some(report) = skip_header {
+        builder = builder.header("x-plurx-processing-skip", report);
     }
     builder
         .body(Body::from(body))
