@@ -6,6 +6,12 @@
 //! registered tables are the ones the daemon registers. The serving proof is
 //! the deterministic validation proof the catalogue contracts use; the mark,
 //! the replica and the Authority path are real.
+//!
+//! E1b adds the settings memo and the writer-raised settings floor: a save
+//! through this store closes the view with no `note_fact` from the caller.
+//! Its lagging-replica case needs a replica that is really behind an
+//! acknowledged save, so it runs an in-process learner (local client, real
+//! mark, held apply) beside two child voters.
 use super::*;
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::cluster::migration::status::PassiveRaftMetrics;
@@ -166,7 +172,7 @@ async fn applied_view_matches_authority_and_falls_back_exactly_once() {
     );
     assert!(
         counts.non_consistent_query_calls >= 8,
-        "the view read the replica"
+        "with no memo loaded, each keyed read reads its keys from the replica"
     );
     assert_eq!(digests.len(), 1);
 
@@ -423,4 +429,502 @@ async fn applied_view_stamp_goes_stale_the_moment_a_held_entry_applies() {
     let read = view.settings(&["e1.held"]).await.expect("view read");
     assert_eq!(read.source, ViewSource::View);
     assert_eq!(read.values.get("e1.held").map(String::as_str), Some("v2"));
+}
+
+/// The saving node's floor (E1b, §4.3), on the embedded singleton: a save
+/// through this store closes the settings view by itself — no caller notes
+/// the fact — until a watermark confirmation that started after it has been
+/// applied here, and every settings writer arms it. A singleton has always
+/// applied what it acknowledged, so this proves the source, not that a stale
+/// value is refused: `applied_view_follower_save_never_reads_its_stale_replica`
+/// proves that on a learner whose apply is held.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn applied_view_settings_save_closes_the_view_until_a_later_confirmation() {
+    let node = EmbeddedSingleton::start().await;
+    node.store
+        .put_setting("e1b.saved", "before")
+        .await
+        .expect("seed");
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(
+        view.settings(&["e1b.saved"])
+            .await
+            .expect("view read")
+            .source,
+        ViewSource::View
+    );
+
+    // The save: no `note_fact` here — the store raises the floor itself.
+    node.store
+        .put_setting("e1b.saved", "after")
+        .await
+        .expect("save");
+    node.store.validation_reset_operation_counts();
+    let read = view.settings(&["e1b.saved"]).await.expect("read back");
+    assert_eq!(
+        read.values.get("e1b.saved").map(String::as_str),
+        Some("after")
+    );
+    assert_eq!(
+        read.source,
+        ViewSource::Authority,
+        "the saving node reads its own save from Authority while the floor is unmet"
+    );
+    assert_eq!(view.observation().last_fallback, Some(ViewFallback::Floor));
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        1
+    );
+
+    // The next confirmation this replica has applied reopens the view.
+    metrics.validation_confirm_now(node.applied_index());
+    let read = view.settings(&["e1b.saved"]).await.expect("view read");
+    assert_eq!(read.source, ViewSource::View);
+    assert_eq!(
+        read.values.get("e1b.saved").map(String::as_str),
+        Some("after")
+    );
+
+    // Every settings writer arms it, not only `put_setting`.
+    node.store
+        .put_settings(&[("e1b.saved", "batch"), ("e1b.other", "o")])
+        .await
+        .expect("batch save");
+    assert_eq!(
+        view.settings(&["e1b.saved"])
+            .await
+            .expect("read back")
+            .source,
+        ViewSource::Authority
+    );
+    assert_eq!(
+        node.store
+            .get_or_init_setting("e1b.seeded", "s")
+            .await
+            .expect("seed"),
+        "s"
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(
+        view.settings(&["e1b.saved"])
+            .await
+            .expect("view read")
+            .source,
+        ViewSource::View
+    );
+    node.store
+        .get_or_init_setting("e1b.seeded", "ignored")
+        .await
+        .expect("seed again");
+    assert_eq!(
+        view.settings(&["e1b.seeded"])
+            .await
+            .expect("read back")
+            .source,
+        ViewSource::Authority,
+        "a conditional settings write closes the view whether or not it changed a row"
+    );
+}
+
+/// The settings memo (E1b, §4.3). A snapshot loads the whole table in one
+/// local read; keyed reads and snapshots answer from it while its stamp
+/// holds, and another table's writes leave it alone. After a settings write
+/// a keyed read reads its keys locally and does not reload the table (job
+/// cursors share it); only a snapshot reloads, one at a time — a snapshot
+/// that finds a reload in flight answers from Authority instead of waiting.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn applied_view_settings_memo_reloads_only_for_a_snapshot_and_never_queues() {
+    let node = EmbeddedSingleton::start().await;
+    node.store
+        .put_settings(&[("e1b.a", "1"), ("e1b.b", "2")])
+        .await
+        .expect("seed");
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    metrics.validation_confirm_now(node.applied_index());
+
+    node.store.validation_reset_operation_counts();
+    let snapshot = view.settings_snapshot().await.expect("view snapshot");
+    assert_eq!(snapshot.source, ViewSource::View);
+    for _ in 0..16 {
+        assert_eq!(
+            view.setting("e1b.a").await.expect("view read").as_deref(),
+            Some("1")
+        );
+    }
+    let counts = node.store.validation_operation_counts();
+    assert_eq!(
+        counts.non_consistent_query_calls, 1,
+        "one snapshot and sixteen keyed reads, one local statement"
+    );
+    assert_eq!(counts.consistent_query_calls, 0);
+    assert_eq!(
+        *snapshot.values,
+        node.store
+            .settings_snapshot()
+            .await
+            .expect("Authority snapshot"),
+        "the memo is the whole table, as Authority reads it"
+    );
+    assert_eq!(reloads_of(&view), 1);
+
+    node.store
+        .create_library(&NewLibrary {
+            name: "E1b unrelated write".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from("/e1b/unrelated")],
+            anime: false,
+        })
+        .await
+        .expect("unrelated write");
+    metrics.validation_confirm_now(node.applied_index());
+    node.store.validation_reset_operation_counts();
+    assert_eq!(
+        view.setting("e1b.b").await.expect("view read").as_deref(),
+        Some("2")
+    );
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .non_consistent_query_calls,
+        0,
+        "another table's write keeps the memo"
+    );
+
+    node.store
+        .put_setting("e1b.b", "3")
+        .await
+        .expect("settings write");
+    metrics.validation_confirm_now(node.applied_index());
+    node.store.validation_reset_operation_counts();
+    for _ in 0..4 {
+        assert_eq!(
+            view.setting("e1b.b").await.expect("view read").as_deref(),
+            Some("3")
+        );
+    }
+    assert_eq!(reloads_of(&view), 1, "a keyed read never reloads the table");
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .non_consistent_query_calls,
+        4,
+        "each keyed read of a stale memo reads its own keys"
+    );
+
+    node.store.validation_reset_operation_counts();
+    let snapshots = (0..16).map(|_| {
+        let view = view.clone();
+        tokio::spawn(async move { view.settings_snapshot().await })
+    });
+    let mut authority = 0;
+    for read in snapshots.collect::<Vec<_>>() {
+        let read = read.await.expect("join").expect("snapshot");
+        assert_eq!(read.values.get("e1b.b").map(String::as_str), Some("3"));
+        if read.source == ViewSource::Authority {
+            authority += 1;
+        }
+    }
+    assert_eq!(
+        reloads_of(&view),
+        2,
+        "one reload for sixteen concurrent snapshots"
+    );
+    let counts = node.store.validation_operation_counts();
+    assert_eq!(
+        counts.consistent_query_calls, authority,
+        "a snapshot that met the reload in flight read Authority, once"
+    );
+    if authority > 0 {
+        assert!(view
+            .observation()
+            .reads
+            .iter()
+            .any(|(table, source, reason, count)| *table == "settings"
+                && *source == "authority"
+                && *reason == "reload_in_flight"
+                && *count == authority));
+    }
+}
+
+/// No convoy (§4.2 "no wait", review S4): while one snapshot's memo reload
+/// is held in flight, another snapshot answers at once from Authority with
+/// reason `reload_in_flight`, and a keyed read reads its keys locally; the
+/// held reload then completes and fills the memo.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn applied_view_snapshot_never_waits_on_another_readers_reload() {
+    let node = EmbeddedSingleton::start().await;
+    node.store.put_setting("e1b.c", "1").await.expect("seed");
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    metrics.validation_confirm_now(node.applied_index());
+
+    let (held, release) = view.validation_pause_next_reload();
+    let first = {
+        let view = view.clone();
+        tokio::spawn(async move { view.settings_snapshot().await })
+    };
+    held.await.expect("the first snapshot holds its reload");
+    node.store.validation_reset_operation_counts();
+    let second = tokio::time::timeout(Duration::from_secs(5), view.settings_snapshot())
+        .await
+        .expect("a second snapshot does not wait on the held reload")
+        .expect("second snapshot");
+    assert_eq!(second.source, ViewSource::Authority);
+    assert_eq!(second.values.get("e1b.c").map(String::as_str), Some("1"));
+    assert_eq!(
+        view.observation().last_fallback,
+        Some(ViewFallback::ReloadInFlight)
+    );
+    let keyed = tokio::time::timeout(Duration::from_secs(5), view.settings(&["e1b.c"]))
+        .await
+        .expect("a keyed read does not wait either")
+        .expect("keyed read");
+    assert_eq!(keyed.source, ViewSource::View);
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        1,
+        "only the second snapshot asked the leader"
+    );
+
+    release.send(()).expect("release the held reload");
+    let first = first.await.expect("join").expect("first snapshot");
+    assert_eq!(first.source, ViewSource::View);
+    assert_eq!(reloads_of(&view), 1);
+    assert_eq!(
+        view.settings_snapshot().await.expect("memo hit").source,
+        ViewSource::View
+    );
+    assert_eq!(reloads_of(&view), 1);
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+fn reloads_of(view: &AppliedView) -> u64 {
+    view.observation()
+        .reloads
+        .iter()
+        .find(|(label, _)| *label == "settings")
+        .map(|(_, count)| *count)
+        .expect("the settings view counts reloads")
+}
+
+/// A learner in this process — local client, real applied mark, production
+/// registered tables — beside two child voters that hold the quorum.
+#[cfg(feature = "cluster-read-cost-validation")]
+struct LaggingLearner {
+    client: Client,
+    store: Arc<HiqliteAuthStore>,
+    _cluster: ContractCluster,
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+impl LaggingLearner {
+    async fn start() -> Self {
+        const ATTEMPTS: usize = 5;
+        install_contract_crypto_provider();
+        for attempt in 1..=ATTEMPTS {
+            let (cluster, specs) = match ContractCluster::try_start_sized(2, 1).await {
+                Ok(started) => started,
+                Err(ContractStartError::PortCollision) if attempt < ATTEMPTS => continue,
+                Err(ContractStartError::PortCollision) => {
+                    panic!("lagging-learner voters exhausted {ATTEMPTS} port attempts")
+                }
+                Err(ContractStartError::Failed(error)) => {
+                    panic!("lagging-learner voters failed to start: {error}")
+                }
+            };
+            // The plurx schema goes in through the voters, as production's
+            // voter installs it; the learner then opens the replicated store.
+            drop(open_contract_hiqlite_store(&cluster).await);
+            let learner = specs.last().expect("the learner spec").clone();
+            let data_dir = cluster._root.path().join(format!("node-{}", learner.id));
+            std::fs::create_dir_all(&data_dir).expect("learner data directory");
+            let started = hiqlite::start_node(NodeConfig {
+                node_id: learner.id,
+                learner_only: true,
+                nodes: specs
+                    .iter()
+                    .map(|node| Node {
+                        id: node.id,
+                        addr_raft: node.raft.clone(),
+                        addr_api: node.api.clone(),
+                    })
+                    .collect(),
+                listen_addr_api: Cow::Borrowed("127.0.0.1"),
+                listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+                data_dir: Cow::Owned(data_dir.to_string_lossy().into_owned()),
+                filename_db: Cow::Borrowed("contract.db"),
+                secret_raft: CONTRACT_RAFT_SECRET.to_owned(),
+                secret_api: CONTRACT_API_SECRET.to_owned(),
+                tls_raft: Some(ServerTlsConfig::TlsAutoCertificates),
+                tls_api: Some(ServerTlsConfig::TlsAutoCertificates),
+                health_check_delay_secs: 0,
+                wal_size: HIQLITE_WAL_SIZE_BYTES,
+                raft_config: NodeConfig::default_raft_config(10_000),
+                ..plurx_core::cluster::migration::production_hiqlite_defaults_with_read_pool(2)
+            })
+            .await;
+            let client = match started {
+                Ok(client) => client,
+                Err(error)
+                    if attempt < ATTEMPTS
+                        && error.to_string().to_ascii_lowercase().contains("in use") =>
+                {
+                    continue
+                }
+                Err(error) => panic!("start the in-process learner: {error}"),
+            };
+            tokio::time::timeout(Duration::from_secs(60), client.wait_until_healthy_db())
+                .await
+                .expect("the learner joins within a minute");
+            let store = HiqliteAuthStore::open(
+                client.clone(),
+                &cluster._root.path().join("learner-telemetry.db"),
+            )
+            .await
+            .expect("open the replicated store on the learner");
+            return Self {
+                client,
+                store: Arc::new(store),
+                _cluster: cluster,
+            };
+        }
+        unreachable!("the start loop returns or panics")
+    }
+
+    fn mark(&self) -> hiqlite::AppliedMarkHandle {
+        self.client
+            .local_db_applied_mark()
+            .expect("the learner's client is local")
+    }
+
+    /// The learner's own replica, read directly: what a lagging view would see.
+    async fn replica_value(&self, key: &str) -> Option<String> {
+        self.client
+            .query_map::<SettingValue, _>(
+                "SELECT value FROM settings WHERE key = $1",
+                hiqlite::params!(key.to_owned()),
+            )
+            .await
+            .expect("local read of the learner's replica")
+            .into_iter()
+            .next()
+            .map(|row| row.value)
+    }
+
+    async fn await_replica(&self, key: &str, value: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while self.replica_value(key).await.as_deref() != Some(value) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the learner applies {key}={value} within 30 s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+struct SettingValue {
+    value: String,
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+impl From<&mut hiqlite::Row<'_>> for SettingValue {
+    fn from(row: &mut hiqlite::Row<'_>) -> Self {
+        Self {
+            value: row.get("value"),
+        }
+    }
+}
+
+/// Read-your-write through a lagging replica (contract §8, the review's B1
+/// shape for settings). A learner saves through its own store while its own
+/// apply of that save is held, so its replica really is older than a write
+/// it has had acknowledged — and the serving proof, confirmed at an index the
+/// learner has not applied, is valid. Its applied view must answer the saved
+/// value (from Authority), never the old one its replica still holds; once
+/// the entry applies and a confirmation covers it, the view answers locally.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn applied_view_follower_save_never_reads_its_stale_replica() {
+    const KEY: &str = "e1b.lagging";
+    // put_settings' statement, which the learner's writer holds.
+    const SAVE: &str = "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3) \
+                        ON CONFLICT(key) DO UPDATE SET \
+                        value = excluded.value, updated_at = excluded.updated_at";
+    let _case = HIQLITE_CASE.lock().await;
+    let node = LaggingLearner::start().await;
+    node.store.put_setting(KEY, "old").await.expect("seed");
+    node.await_replica(KEY, "old").await;
+    let mark = node.mark();
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(mark.applied_index());
+    let authority: Arc<dyn Store> = node.store.clone();
+    let view = AppliedView::validation_replicated(
+        authority,
+        Arc::clone(&node.store),
+        metrics.clone(),
+        &node.client,
+    );
+    metrics.validation_confirm_now(mark.applied_index());
+    let read = view.settings(&[KEY]).await.expect("view read");
+    assert_eq!(read.source, ViewSource::View);
+    assert_eq!(read.values.get(KEY).map(String::as_str), Some("old"));
+
+    let (entered, release) = node
+        .client
+        .validation_hold_transaction_before_commit(
+            SAVE.to_owned(),
+            std::time::Instant::now() + Duration::from_secs(45),
+        )
+        .await
+        .expect("hold the learner's apply of the save");
+    node.store
+        .put_settings(&[(KEY, "new")])
+        .await
+        .expect("the voters commit the learner's save");
+    tokio::time::timeout(Duration::from_secs(30), entered)
+        .await
+        .expect("the learner's writer reaches the held save")
+        .expect("hold entered");
+    assert_eq!(
+        node.replica_value(KEY).await.as_deref(),
+        Some("old"),
+        "the learner's replica is behind its own acknowledged save"
+    );
+    // A confirmation started after the save, at the save's index at least
+    // (the entry the writer holds follows the last one it applied), which
+    // this replica has not applied: the proof is valid, the replica is stale.
+    metrics.validation_confirm_now(mark.applied_index() + 1);
+    node.store.validation_reset_operation_counts();
+    let read = view.settings(&[KEY]).await.expect("read back");
+    assert_eq!(
+        read.values.get(KEY).map(String::as_str),
+        Some("new"),
+        "the saving node never reads its stale replica"
+    );
+    assert_eq!(read.source, ViewSource::Authority);
+    assert_eq!(view.observation().last_fallback, Some(ViewFallback::Floor));
+    assert!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls
+            >= 1
+    );
+
+    release.send(()).expect("release the learner's writer");
+    node.await_replica(KEY, "new").await;
+    metrics.validation_confirm_now(mark.applied_index());
+    let read = view.settings(&[KEY]).await.expect("view read");
+    assert_eq!(read.source, ViewSource::View);
+    assert_eq!(read.values.get(KEY).map(String::as_str), Some("new"));
 }

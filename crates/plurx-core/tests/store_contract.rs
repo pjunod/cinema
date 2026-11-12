@@ -18301,13 +18301,28 @@ impl ContractCluster {
     }
 
     async fn try_start() -> Result<Self, ContractStartError> {
+        Self::try_start_sized(3, 0)
+            .await
+            .map(|(cluster, _)| cluster)
+    }
+
+    /// `voters` child voters, and the specs of every node: the voters first,
+    /// then `spares` further nodes whose ports were reserved in the same
+    /// allocation, for a caller that starts them itself (an in-process
+    /// learner with a local client and a mark).
+    async fn try_start_sized(
+        voters: u64,
+        spares: u64,
+    ) -> Result<(Self, Vec<ContractNodeSpec>), ContractStartError> {
         let root = tempfile::tempdir().expect("three-voter contract root");
-        // Select the complete six-port set while all probe listeners coexist,
+        // Select the complete port set while all probe listeners coexist,
         // so one call cannot contain duplicate port numbers. The listeners
         // must be released before Hiqlite can bind; try_start reports that
         // remaining cross-process race and start() reallocates the whole set.
-        let mut ports = contract_free_ports(6).into_iter();
-        let specs = (1..=3)
+        let mut ports =
+            contract_free_ports(2 * usize::try_from(voters + spares).expect("node count"))
+                .into_iter();
+        let mut specs = (1..=voters + spares)
             .map(|id| ContractNodeSpec {
                 id,
                 raft: format!(
@@ -18320,10 +18335,12 @@ impl ContractCluster {
                 ),
             })
             .collect::<Vec<_>>();
+        let all_specs = specs.clone();
+        specs.truncate(usize::try_from(voters).expect("voter count"));
         let executable = std::env::current_exe().expect("contract test executable");
         let mut starting = Vec::new();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
-        for node_id in 1..=3 {
+        for node_id in 1..=voters {
             let launch = ContractNodeLaunch {
                 node_id,
                 learner_only: false,
@@ -18412,11 +18429,14 @@ impl ContractCluster {
                     .expect("ready contract voter output"),
             });
         }
-        Ok(Self {
-            addresses: specs.into_iter().map(|node| node.api).collect(),
-            _root: root,
-            _nodes: nodes,
-        })
+        Ok((
+            Self {
+                addresses: specs.into_iter().map(|node| node.api).collect(),
+                _root: root,
+                _nodes: nodes,
+            },
+            all_specs,
+        ))
     }
 }
 

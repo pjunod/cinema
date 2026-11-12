@@ -861,6 +861,9 @@ async fn join_fresh_store(
         let credential_key = open_active_credential_key(config, &store, &identity).await?;
         let concrete_store = Arc::new(store);
         let store: Arc<dyn Store> = concrete_store.clone();
+        // Membership writes `settings` through its own client; it raises the
+        // same floor as the store (E1b, read-your-write).
+        let settings_floor = concrete_store.settings_write_floor();
         let replication = status::ReplicationMonitor::replicated(
             client.clone(),
             active.clone(),
@@ -883,6 +886,7 @@ async fn join_fresh_store(
             client.clone(),
             replication.clone(),
             Arc::clone(&store),
+            settings_floor,
             identity.clone(),
             local,
             configured_join_url(config)?,
@@ -3000,6 +3004,9 @@ async fn open_active_store_with_key(
         let activation_master = credential_key;
         let concrete_store = Arc::new(store);
         let store: Arc<dyn Store> = concrete_store.clone();
+        // Membership writes `settings` through its own client; it raises the
+        // same floor as the store (E1b, read-your-write).
+        let settings_floor = concrete_store.settings_write_floor();
         let replication = status::ReplicationMonitor::replicated(
             client.clone(),
             active.clone(),
@@ -3065,6 +3072,7 @@ async fn open_active_store_with_key(
             client.clone(),
             replication.clone(),
             Arc::clone(&store),
+            settings_floor,
             identity.clone(),
             membership_file.local,
             configured_join_url(config)?,
