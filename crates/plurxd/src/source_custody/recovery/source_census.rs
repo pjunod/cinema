@@ -100,6 +100,45 @@ struct Pass {
     silly_renames: u32,
     /// Tasks (outside the helper's own ancestry) naming the source in argv.
     path_references: u32,
+    /// Present when the helper could observe the live daemon's PID namespace.
+    #[serde(default)]
+    owner_teardown: Option<Teardown>,
+}
+
+/// The host's view of the dead owner's process tree, used only when the
+/// owner's job row is gone and with it the exact source binding.
+///
+/// The live daemon is PID 1 of its PID namespace, and every process in that
+/// namespace started after the owner's lease ended, so none of them is the
+/// owner or a survivor of it. A survivor could only live in another
+/// namespace. There, no process may be another `plurxd run`, an FFmpeg tool
+/// or a plurx helper, or hold any file, working directory, root, executable
+/// or mapping on media storage: any network or FUSE superblock in any mount
+/// namespace, every library root this daemon serves, and the census's. That
+/// holds whichever file the owner read.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+struct Teardown {
+    /// Inode of the observed daemon's `/proc/<pid>/ns/pid`.
+    pid_namespace: u64,
+    /// The observed daemon is PID 1 inside that namespace.
+    daemon_is_namespace_init: bool,
+    /// Processes in that namespace that started at or before the owner's
+    /// lease expiry.
+    preexisting: u32,
+    /// Other `plurxd run` processes anywhere on the host.
+    other_daemons: u32,
+    /// Open descriptors, cwd, root, exe or mappings on any storage superblock
+    /// held by processes outside that namespace (the helper excluded).
+    foreign_storage_holders: u32,
+    /// FFmpeg tools or plurx helpers outside that namespace: an idle survivor
+    /// between opens holds nothing yet.
+    foreign_media_tools: u32,
+    /// Processes that existed but could not be read; never skipped.
+    unreadable: u32,
+    /// Every superblock the helper scanned: the census's, every network or
+    /// FUSE filesystem in any mount namespace, and named library roots.
+    storage_devices: Vec<u64>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -140,6 +179,37 @@ impl Proof {
                 .iter()
                 .map(|sb| sb.device)
                 .eq(second.superblocks.iter().map(|sb| sb.device))
+    }
+    /// Both passes observed this daemon's own PID namespace with no process
+    /// older than the owner's death in it and no foreign storage holder.
+    fn owner_teardown_verified(&self, context: &Context<'_>) -> bool {
+        let (Some(namespace), Some(storage)) = (context.namespace_init, &context.storage_devices)
+        else {
+            return false;
+        };
+        self.passes.iter().all(|pass| {
+            // A census taken before this daemon existed observed another one,
+            // even if the namespace inode was reused.
+            pass.at_ms >= context.process_started_ms
+                && pass.owner_teardown.as_ref().is_some_and(|teardown| {
+                    teardown.pid_namespace == namespace
+                        && teardown.daemon_is_namespace_init
+                        && teardown.preexisting == 0
+                        && teardown.other_daemons == 0
+                        && teardown.foreign_storage_holders == 0
+                        && teardown.foreign_media_tools == 0
+                        && teardown.unreadable == 0
+                        && storage
+                            .iter()
+                            .chain(pass.superblocks.iter().map(|sb| &sb.device))
+                            .all(|device| teardown.storage_devices.contains(device))
+                        // The census file lives on storage this daemon serves.
+                        && pass
+                            .superblocks
+                            .iter()
+                            .any(|sb| storage.contains(&sb.device))
+                })
+        })
     }
     fn census_devices(&self) -> impl Iterator<Item = u64> + '_ {
         self.passes[0].superblocks.iter().map(|sb| sb.device)
@@ -296,6 +366,15 @@ pub(super) async fn replay(
         return Ok(());
     }
     let kernel = reader::kernel_instance().ok_or("source census kernel identity unavailable")?;
+    // Library roots on local disk must also have been scanned; an unreadable
+    // root leaves the teardown path unavailable rather than narrower.
+    let storage = store.list_libraries().await.ok().and_then(|libraries| {
+        let roots: Vec<_> = libraries
+            .iter()
+            .flat_map(|library| library.paths.iter().cloned())
+            .collect();
+        storage_devices(&roots)
+    });
     let started = crate::source_custody::process_started_ms()
         .or_else(process_started_ms)
         .ok_or("daemon process start time unavailable")?;
@@ -310,6 +389,8 @@ pub(super) async fn replay(
                 kernel: &kernel,
                 process_started_ms: started,
                 now_ms: crate::state::clock_ms(),
+                namespace_init: namespace_init(),
+                storage_devices: storage.clone(),
             },
             &proof,
         )
@@ -327,6 +408,101 @@ pub(super) struct Context<'a> {
     pub(super) kernel: &'a str,
     pub(super) process_started_ms: i64,
     pub(super) now_ms: i64,
+    /// This daemon's PID namespace inode when it is that namespace's init.
+    pub(super) namespace_init: Option<u64>,
+    /// Every network or FUSE superblock mounted for this daemon, and the
+    /// superblock of every library root it serves.
+    pub(super) storage_devices: Option<Vec<u64>>,
+}
+
+/// `(mount point, device, fstype)` for every mount in this process's mount
+/// namespace, from `/proc/self/mountinfo`.
+fn mounts() -> Option<Vec<(std::path::PathBuf, u64, String)>> {
+    let table = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let unescape = |raw: &str| {
+        use std::os::unix::ffi::OsStringExt;
+        // mountinfo escapes space, tab, newline and backslash as \ooo.
+        let bytes = raw.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            let octal = (bytes[at] == b'\\' && at + 4 <= bytes.len())
+                .then(|| std::str::from_utf8(&bytes[at + 1..at + 4]).ok())
+                .flatten()
+                .and_then(|digits| u8::from_str_radix(digits, 8).ok());
+            match octal {
+                Some(value) => {
+                    out.push(value);
+                    at += 4;
+                }
+                None => {
+                    out.push(bytes[at]);
+                    at += 1;
+                }
+            }
+        }
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(out))
+    };
+    table
+        .lines()
+        .map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let mut fields = left.split_whitespace();
+            let device = fields.nth(2)?;
+            let point = fields.nth(1)?;
+            let (major, minor) = device.split_once(':')?;
+            Some((
+                unescape(point),
+                libc::makedev(major.parse().ok()?, minor.parse().ok()?),
+                right.split_whitespace().next()?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// Media storage this daemon reads: every network or FUSE superblock in its
+/// mount namespace, and for each library root, the superblock it is on and
+/// every mount beneath it. A root on btrfs (whose subvolumes carry their own
+/// device numbers) or one that cannot be read leaves this unavailable, so
+/// the teardown path refuses rather than scanning less than it serves.
+fn storage_devices(roots: &[std::path::PathBuf]) -> Option<Vec<u64>> {
+    const NETWORK: [&str; 7] = ["nfs", "nfs4", "cifs", "smb3", "9p", "ceph", "glusterfs"];
+    let table = mounts()?;
+    let mut devices: Vec<u64> = table
+        .iter()
+        .filter(|(_, _, fstype)| NETWORK.contains(&fstype.as_str()) || fstype.starts_with("fuse"))
+        .map(|(_, device, _)| *device)
+        .collect();
+    for root in roots {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::fs::canonicalize(root).ok()?;
+        devices.push(std::fs::metadata(&root).ok()?.dev());
+        let (_, _, fstype) = table
+            .iter()
+            .filter(|(point, _, _)| root.starts_with(point))
+            .max_by_key(|(point, _, _)| point.as_os_str().len())?;
+        if fstype == "btrfs" {
+            return None;
+        }
+        devices.extend(
+            table
+                .iter()
+                .filter(|(point, _, _)| point.starts_with(&root))
+                .map(|(_, device, _)| *device),
+        );
+    }
+    devices.sort_unstable();
+    devices.dedup();
+    Some(devices)
+}
+
+/// This process's PID namespace inode, when it is PID 1 of that namespace.
+fn namespace_init() -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    (std::process::id() == 1)
+        .then(|| std::fs::metadata("/proc/self/ns/pid").ok())
+        .flatten()
+        .map(|metadata| metadata.ino())
 }
 
 pub(super) async fn apply(
@@ -412,8 +588,24 @@ pub(super) async fn apply(
         let job = store
             .background_job(&original.job_id)
             .await
-            .map_err(|e| e.to_string())?
-            .ok_or("census job unavailable for source binding")?;
+            .map_err(|e| e.to_string())?;
+        let Some(job) = job else {
+            // The owner's job row is gone, and with it the exact source
+            // binding. Release needs the owner's whole process tree proved
+            // gone instead.
+            if !proof.owner_teardown_verified(context) {
+                return Err("census job unavailable for source binding".into());
+            }
+            // The owner's own record of the inode it opened still binds.
+            if witness.source.is_some_and(|(device, inode)| {
+                inode != proof.source.inode
+                    || !proof.census_devices().any(|counted| counted == device)
+            }) {
+                return Err("census source is not the inode the owner opened".into());
+            }
+            settle_released(store, token, &witness).await?;
+            return finish(legacy, witnesses, &witness, anchor, token, proof);
+        };
         if job.id != original.job_id
             || job.token.as_ref().is_some_and(|live| {
                 proof.owner.matches(live) && live.lease_expires_ms >= proof.passes[0].at_ms
@@ -453,16 +645,36 @@ pub(super) async fn apply(
         {
             return Err("census source differs from the job's exact source".into());
         }
-        settle_records(store, std::slice::from_ref(&witness.record)).await?;
-        if store
-            .resolve_background_source_custody(token.clone())
-            .await
-            .map_err(|e| e.to_string())?
-            .is_some()
-        {
-            return Err("census settlement awaits exact release acknowledgement".into());
-        }
+        settle_released(store, token, &witness).await?;
     }
+    finish(legacy, witnesses, &witness, anchor, token, proof)
+}
+
+async fn settle_released(
+    store: &Arc<dyn Store>,
+    token: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+    witness: &reader::CensusWitness,
+) -> Result<(), String> {
+    settle_records(store, std::slice::from_ref(&witness.record)).await?;
+    if store
+        .resolve_background_source_custody(token.clone())
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        return Err("census settlement awaits exact release acknowledgement".into());
+    }
+    Ok(())
+}
+
+fn finish(
+    legacy: &Path,
+    witnesses: &Path,
+    witness: &reader::CensusWitness,
+    anchor: std::fs::File,
+    token: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+    proof: &Proof,
+) -> Result<(), String> {
     clear_at(legacy, &witness.record)?;
     reader::complete_at(witnesses, &witness.record)?;
     drop(anchor);

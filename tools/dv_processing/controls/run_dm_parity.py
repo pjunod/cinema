@@ -131,6 +131,15 @@ for tgt in ("600 0 1 4000", "1000 0 1 4000", "100 0.005 2 4000", "2000 0 0 4000"
 cm29b = cm29.replace('2020 2030 512', '2048 2030 65535', 1).replace('2048 2294 512', '2048 2294 65535', 1).replace('2050 2179 512', '2048 2179 65535', 1)
 for tgt in ("1000 0 1 4000", "100 0.005 2 4000"):
     ok &= run('cm29b_' + tgt.split()[0] + '_p' + tgt.split()[2], cm29b + 'target ' + tgt + '\n', frames[2], W, H)
+# CM v2.9 L5 active areas, as for CM4 above: both detail planes (cm29: live chroma weight) and the
+# single plane (cm29b) must stay inside the rectangle on both separable passes; bars take the
+# pointwise mapping. The adversarial bar checker turns a one-row or one-column leak into a failure.
+for fam, meta in (('cm29', cm29), ('cm29b', cm29b)):
+    for name, l5, img, synthetic in (('real', '7 11 20 13', frames[2], False), ('syn', '0 0 31 29', syn, True),
+                                     ('row', '0 0 128 127', frames[2], False), ('col', '255 256 0 0', frames[2], False)):
+        img = with_bars(img, *map(int, l5.split()))
+        for tgt in ("1000 0 1 4000", "100 0.005 2 4000"):
+            ok &= run(fam + '_l5_' + name + '_' + tgt.split()[0] + '_p' + tgt.split()[2], meta + 'l5 ' + l5 + '\ntarget ' + tgt + '\n', img, W, H, synthetic)
 # raw ms_weight 0 is MS weight -1: the detail stage is skipped (single-pass shader path)
 cm29c = cm29.replace(' 512\n', ' 0\n')
 ok &= run('cm29_nodetail_1000_p1', cm29c + 'target 1000 0 1 4000\n', frames[2], W, H)

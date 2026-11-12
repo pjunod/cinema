@@ -13,8 +13,9 @@ use crate::domain::DolbyVisionFacts;
 
 mod display_target;
 pub use display_target::{
-    DvDisplayManagement, DvDisplayTarget, DvDisplayTargetChoice, DvDisplayTargetDecline,
-    DvSourceMastering, DISPLAY_TARGET_BUCKETS, DISPLAY_TARGET_METHOD,
+    display_target_max_cll, DvDisplayManagement, DvDisplayTarget, DvDisplayTargetChoice,
+    DvDisplayTargetDecline, DvMasterMetadata, DvSourceMastering, DISPLAY_TARGET_BUCKETS,
+    DISPLAY_TARGET_METHOD,
 };
 
 fn encoder_token(encoder: Encoder) -> &'static str {
@@ -1563,6 +1564,13 @@ pub enum DvExportPolicy {
     PqBilinearYuv420p10V1 {
         raster: (u32, u32),
     },
+    /// The same master-grade export, with the source's own HDR10 static
+    /// metadata authored onto the encoded window. The declarations are output
+    /// bytes, so they are part of the policy and of its digest.
+    MasterMetadataYuv420p10V1 {
+        raster: (u32, u32),
+        metadata: DvMasterMetadata,
+    },
     DisplayTargetYuv420p10V1 {
         raster: (u32, u32),
         target: DvDisplayTarget,
@@ -1574,6 +1582,19 @@ impl DvExportPolicy {
             Self::DisplayTargetYuv420p10V1 { target, .. } => Some(target),
             _ => None,
         }
+    }
+    pub fn master_metadata(self) -> Option<DvMasterMetadata> {
+        match self {
+            Self::MasterMetadataYuv420p10V1 { metadata, .. } => Some(metadata),
+            _ => None,
+        }
+    }
+    /// The master-grade HDR10 export for `raster`: with the source's static
+    /// metadata when it states any, otherwise exactly the undeclared export.
+    pub fn for_master(raster: (u32, u32), metadata: Option<DvMasterMetadata>) -> Self {
+        metadata.map_or(Self::PqBilinearYuv420p10V1 { raster }, |metadata| {
+            Self::MasterMetadataYuv420p10V1 { raster, metadata }
+        })
     }
     pub fn output_policy(self) -> String {
         self.display_target().map_or_else(
@@ -1600,6 +1621,7 @@ impl DvExportPolicy {
         let raster = match self {
             Self::NativeRgb48V1 => native,
             Self::PqBilinearYuv420p10V1 { raster }
+            | Self::MasterMetadataYuv420p10V1 { raster, .. }
             | Self::DisplayTargetYuv420p10V1 { raster, .. } => raster,
         };
         if raster.0 < 32
@@ -1620,6 +1642,10 @@ impl DvExportPolicy {
             Self::PqBilinearYuv420p10V1 { .. } => {
                 serde_json::to_vec(&("bt2020-pq-master-clip-export-v3", self))
                     .expect("bounded export policy serializes")
+            }
+            Self::MasterMetadataYuv420p10V1 { .. } => {
+                serde_json::to_vec(&("bt2020-pq-master-clip-source-metadata-export-v1", self))
+                    .expect("bounded master export policy serializes")
             }
             Self::DisplayTargetYuv420p10V1 { .. } => {
                 serde_json::to_vec(&(DISPLAY_TARGET_METHOD, self))
@@ -1702,6 +1728,8 @@ pub fn dv_plan_completed_window(
         .is_some_and(|target| target.is_sdr() != (input.destination == DvDestination::Sdr))
         || input.destination == DvDestination::Profile81
             && input.export_policy.display_target().is_some()
+        || input.destination != DvDestination::Hdr10
+            && input.export_policy.master_metadata().is_some()
     {
         return Err(invalid(
             "display targeting cannot change native/P8.1 delivery",
@@ -1755,6 +1783,7 @@ pub fn dv_plan_completed_window(
     if matches!(
         input.export_policy,
         DvExportPolicy::PqBilinearYuv420p10V1 { .. }
+            | DvExportPolicy::MasterMetadataYuv420p10V1 { .. }
             | DvExportPolicy::DisplayTargetYuv420p10V1 { .. }
     ) && export_raster != input.raster
     {

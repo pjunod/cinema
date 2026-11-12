@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "cd3252b803e5ad984149cc5371c015f26a92615bbfa13ce2f78cc64765fd4a7f"
+        "sha256": "ce4fa16d5bd1a9aa3568b420974d49e7a0774c53dfd1c15dc4abd1c895b733fb"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "cd3252b803e5ad984149cc5371c015f26a92615bbfa13ce2f78cc64765fd4a7f"
+        "sha256": "ce4fa16d5bd1a9aa3568b420974d49e7a0774c53dfd1c15dc4abd1c895b733fb"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "cd3252b803e5ad984149cc5371c015f26a92615bbfa13ce2f78cc64765fd4a7f"
+        "sha256": "ce4fa16d5bd1a9aa3568b420974d49e7a0774c53dfd1c15dc4abd1c895b733fb"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "7d1122fbe96b922149c907c5b50e3837617db4ee8ec0fd5aa5dd1933031a92b6"
+        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa"
       },
       {
         "table": "31 authority implementation",
@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "7358e1d5111b5d85feb2b062e9d38fe47510f47f3a090bc7e197ad3362ffa21d"
+        "sha256": "66e66866ec9b371a60c6f783627af589b0e16de598338aa92721a4ccfc1a76bf"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",

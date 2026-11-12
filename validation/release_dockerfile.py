@@ -382,8 +382,10 @@ def render(source: str, runtime_image: str | None = None, linux_dolby_package: b
     )
     generated = (
         "# syntax=docker/dockerfile:1\n\n"
-        + (MEDIA_REPOSITORY_DECLARATION + "\n" if "${PLURX_MEDIA_RUNTIME_REPOSITORY}" in runtime else "")
-        + (MEDIA_REGISTRY_DECLARATION + "\n" if "${PLURX_MEDIA_REGISTRY}" in runtime else "")
+        # A kept asset stage may start from the published repository even when
+        # the runtime itself was bound to an explicit image digest.
+        + (MEDIA_REPOSITORY_DECLARATION + "\n" if "${PLURX_MEDIA_RUNTIME_REPOSITORY}" in dependencies + runtime else "")
+        + (MEDIA_REGISTRY_DECLARATION + "\n" if "${PLURX_MEDIA_REGISTRY}" in dependencies + runtime else "")
         + "# Generated from the tagged runtime stage by "
         "validation.release_dockerfile.\n"
         + dependencies

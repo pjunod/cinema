@@ -3624,6 +3624,7 @@ impl TranscodeManager {
                     );
                     let source_mastering = crate::decode_facts::mastering::source_mastering_metadata(stream);
                     let source_mastering_minimum = crate::decode_facts::mastering::source_mastering_minimum(stream);
+                    let source_master_metadata = crate::decode_facts::mastering::source_master_metadata(stream);
                     let display_target = req.candidate_context.as_ref().filter(|_| processed_trial).and_then(|context| context.display_target);
                     // Recheck against the exact stored document compared with
                     // this held source. A title scan replacement cannot reuse
@@ -3658,7 +3659,7 @@ impl TranscodeManager {
                         display_target,
                         display: req.candidate_context.as_ref().and_then(|context| context.canonical_caps.as_ref()).and_then(|caps| caps.display.clone()),
                         display_target_note: req.candidate_context.as_ref().and_then(|context| context.display_target_note.clone()),
-                        source_mastering, source_mastering_minimum,
+                        source_mastering, source_mastering_minimum, source_master_metadata,
                         destination, mode, decode: renderer_decode, reconstruction_slot, encoder: processed_encoder,
                         vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
                         runtime_cache: self.runtime_cache.clone(),
@@ -6623,7 +6624,7 @@ mod display_target_policy_tests {
                 [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450],
                 1000,
                 1,
-                1000,
+                plurx_core::transcode::dv_processing::display_target_max_cll(1000),
             )
             .expect("exact expected source-backed declarations")
         );

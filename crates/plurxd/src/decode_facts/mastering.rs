@@ -194,3 +194,100 @@ pub(crate) fn source_mastering_minimum_from_frames(
     }
     Ok(observed)
 }
+
+/// What a master-grade HDR10 render re-declares: the selected stream's own
+/// mastering display and, when it states them, its content light levels. A
+/// stream with no mastering record (a Profile 5 source carries none) declares
+/// nothing, and malformed or conflicting records are not repaired or guessed.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn source_master_metadata(
+    stream: &serde_json::Value,
+) -> Option<plurx_core::transcode::dv_processing::DvMasterMetadata> {
+    let source = source_mastering_metadata_details(stream).ok()??;
+    let maximum = u32::try_from(source.max_1e4_nits).ok()?;
+    let mut light = None;
+    for record in stream
+        .get("side_data_list")?
+        .as_array()?
+        .iter()
+        .filter(|record| {
+            record
+                .get("side_data_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("Content light level metadata")
+        })
+    {
+        let level = |field| {
+            record
+                .get(field)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+        };
+        let next = [level("max_content")?, level("max_average")?];
+        if light.is_some_and(|old| old != next) {
+            return None;
+        }
+        light = Some(next);
+    }
+    plurx_core::transcode::dv_processing::DvMasterMetadata::new(
+        source.mastering.primaries_rgbw,
+        maximum,
+        source.mastering.min_1e4_nits,
+        light,
+    )
+    .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream(extra: serde_json::Value) -> serde_json::Value {
+        let mut records = vec![serde_json::json!({
+            "side_data_type":"Mastering display metadata",
+            "red_x":"34000/50000","red_y":"16000/50000","green_x":"13250/50000","green_y":"34500/50000",
+            "blue_x":"7500/50000","blue_y":"3000/50000","white_point_x":"15635/50000","white_point_y":"16450/50000",
+            "min_luminance":"1/10000","max_luminance":"10000000/10000"})];
+        records.extend(extra.as_array().expect("records").iter().cloned());
+        serde_json::json!({"index":0,"side_data_list":records})
+    }
+
+    #[test]
+    fn master_grade_metadata_is_the_selected_streams_own_declaration() {
+        use plurx_core::transcode::dv_processing::DvMasterMetadata;
+        let p3 = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
+        let light = |content: u64, average: u64| {
+            serde_json::json!([{"side_data_type":"Content light level metadata",
+                "max_content":content,"max_average":average}])
+        };
+        assert_eq!(
+            source_master_metadata(&stream(serde_json::json!([]))),
+            Some(DvMasterMetadata::new(p3, 10_000_000, 1, None).expect("mastering only"))
+        );
+        assert_eq!(
+            source_master_metadata(&stream(light(450, 120))),
+            Some(DvMasterMetadata::new(p3, 10_000_000, 1, Some([450, 120])).expect("stated light"))
+        );
+        // An unstated (zero) MaxCLL stays unstated.
+        assert_eq!(
+            source_master_metadata(&stream(light(0, 120))),
+            source_master_metadata(&stream(serde_json::json!([])))
+        );
+        // No mastering record (a Profile 5 source), a conflicting pair, an
+        // unrepresentable level and a malformed record all declare nothing.
+        for silent in [
+            serde_json::json!({"index":0}),
+            serde_json::json!({"index":0,"side_data_list":light(450, 120)}),
+            stream(serde_json::json!([light(450, 120)[0], light(451, 120)[0]])),
+            stream(light(70_000, 120)),
+            stream(
+                serde_json::json!([{"side_data_type":"Content light level metadata","max_content":"450"}]),
+            ),
+            stream(
+                serde_json::json!([{"side_data_type":"Mastering display metadata","red_x":"unknown"}]),
+            ),
+        ] {
+            assert_eq!(source_master_metadata(&silent), None, "{silent}");
+        }
+    }
+}

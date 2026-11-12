@@ -256,5 +256,19 @@
     ],
     "private_root": "$FEL_ROI_ROOT/coding-loss",
     "status": "Michael fixtures: A00P, Zfn1 (as executed; the declared map Zfn1d scores within 0.001) pass; stacks NP1/P1 pass the Michael bar but fail the stack protocol's held-out rule. Held-out Beekeeper: no recipe beats F at 130 Mb/s, nor P0/P1 at <=158 Mb/s in all four models. Decoded planes deleted after scoring; mp4s, recipes, maps and qualifications retained."
+  },
+  "rpu_refit": {
+    "protocol": "protocol-rpu-refit-20261112.json",
+    "tools": [
+      "rpu_refit_eval.py",
+      "rpu_refit_write/",
+      "inject_rpu.py",
+      "dv_display_check.swift",
+      "dv_patch_check.py",
+      "dv_patch_clips.sh"
+    ],
+    "portable_results": "results/rpu-refit-20261112.json",
+    "private_root": "$FEL_ROI_ROOT/rpu-refit",
+    "status": "F+ (Fp_safe: monotone, continuous luma pieces and a ridge chroma MMR) on the untouched BL removes 54-59% (Michael) and 26-34% (Beekeeper) of F's pooled error with no encode; it beats F in all 48 frames on all fixtures and models, and the cross-fitted curves lose under 0.005. It beats the best re-encode pooled but not on Michael frame 0 or several shadow tails. Real RPUs round-trip to the fit exactly. macOS applies the curves closely (flat-patch check); the Lenovo TB322FC's Dolby mobile decoder ignores the mapping (F+ looks like F there)."
   }
 }

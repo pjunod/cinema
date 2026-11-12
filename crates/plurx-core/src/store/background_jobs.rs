@@ -468,7 +468,9 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
           AND remaining.kind = 'fragment_index_build'
           AND json_extract(remaining.snapshot_json, '$.cache_key') = json_extract(job.payload_json, '$.cache_key'))
         AND NOT EXISTS (SELECT 1 FROM background_job_waiters
-          WHERE job_id = job.id AND state IN ('pending','awaiting_hydration'))) THEN 'queue_full'
+          WHERE job_id = job.id AND state IN ('pending','awaiting_hydration'))
+        AND NOT EXISTS (SELECT 1 FROM background_source_custody custody
+          WHERE custody.owner_kind = 'job' AND custody.work_id = job.id)) THEN 'queue_full'
     WHEN active_job IS NULL AND (SELECT COUNT(*) FROM background_jobs
       WHERE state IN ('queued','running','cancelling')) >=
         CASE WHEN json_extract(body, '$.priority') >= 2 THEN 4096 ELSE 3840 END THEN 'queue_full'

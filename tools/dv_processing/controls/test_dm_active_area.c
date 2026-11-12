@@ -1,5 +1,6 @@
 // CPU-only L5 semantic controls. No GPU/device or licensed reference required.
-// The oracle is the unchanged CM4 mapper applied to a separately cropped image.
+// The oracle is the unchanged full-frame mapper (CM v4.0 or CM v2.9) applied to a
+// separately cropped image.
 #include <assert.h>
 #ifdef NDEBUG
 #error "active-area controls require assert()"
@@ -11,7 +12,16 @@
 #include <string.h>
 #include <libdovi/rpu_parser.h>
 #define DM_STATIC static inline
+// gcc 13 reports dm_mat_inv's untaken singular-matrix path once the CM v2.9 prepare is inlined into
+// this unit; the primaries matrices are constant and invertible. Scoped to the header, not this file.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
 #include "../dv_dm.h"
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 static dv_dm_frame frame(DoviExtMetadataBlockLevel5 *l5) {
   DoviExtMetadataBlockLevel1 l1 = {.min_pq=12, .avg_pq=1229, .max_pq=2167};
@@ -25,10 +35,25 @@ static dv_dm_frame frame(DoviExtMetadataBlockLevel5 *l5) {
   return f;
 }
 
-static void test_l5_owned_offsets_and_rectangles(void) {
-  DoviExtMetadataBlockLevel5 l5 = {.active_area_left_offset=3,
-      .active_area_right_offset=4, .active_area_top_offset=2, .active_area_bottom_offset=3};
-  dv_dm_frame f=frame(&l5); memset(&l5,0,sizeof(l5));
+// CM v2.9 (no L254, no L8). `two_planes`: a live chroma weight, so the second detail plane
+// (Io) filters too; otherwise Io follows Ib. Raw ms_weight 512 keeps the detail stage on.
+static dv_dm_frame frame29(DoviExtMetadataBlockLevel5 *l5, bool two_planes) {
+  DoviExtMetadataBlockLevel1 l1 = {.min_pq=80, .avg_pq=1528, .max_pq=3728};
+  DoviExtMetadataBlockLevel6 l6 = {.max_display_mastering_luminance=4000, .min_display_mastering_luminance=50};
+  DoviExtMetadataBlockLevel2 l2 = {.target_max_pq=3079, .trim_slope=2010, .trim_offset=2180, .trim_power=2075,
+      .trim_chroma_weight=two_planes?2050:2048, .trim_saturation_gain=2179, .ms_weight=512};
+  const DoviExtMetadataBlockLevel2 *list[1] = {&l2};
+  DoviVdrDmData dm = {0};
+  dm.dm_data.level1=&l1; dm.dm_data.level6=&l6; dm.dm_data.level5=l5;
+  dm.dm_data.level2.list=(__typeof__(dm.dm_data.level2.list))list; dm.dm_data.level2.len=1;
+  dv_dm_frame f;
+  assert(dv_dm_prepare(&dm,1000,.005,DM_P3D65,4000,true,true,&f)==NULL);
+  assert(f.algo==29 && f.weight>-1 && (f.c29.tr.cw!=0)==two_planes);
+  return f;
+}
+
+static void owned_offsets_and_rectangles(dv_dm_frame f, DoviExtMetadataBlockLevel5 *l5) {
+  memset(l5,0,sizeof(*l5));
   dv_dm_rect r;
   assert(dv_dm_active_rect(&f,19,13,&r));
   assert(r.x0==3 && r.x1==15 && r.y0==2 && r.y1==10);
@@ -50,7 +75,22 @@ static void test_l5_owned_offsets_and_rectangles(void) {
     assert(!dv_dm_cpu_render(&f,in,19,13,out));
     for(size_t j=0;j<sizeof(out)/sizeof(*out);j++)assert(out[j]==-7);
   }
+}
+
+static void test_l5_owned_offsets_and_rectangles(void) {
+  DoviExtMetadataBlockLevel5 l5 = {.active_area_left_offset=3,
+      .active_area_right_offset=4, .active_area_top_offset=2, .active_area_bottom_offset=3};
+  owned_offsets_and_rectangles(frame(&l5),&l5);
   puts("test_l5_owned_offsets_and_rectangles: PASS");
+}
+
+static void test_l5_cm29_owned_offsets_and_rectangles(void) {
+  for(int planes=0;planes<2;planes++) {
+    DoviExtMetadataBlockLevel5 l5 = {.active_area_left_offset=3,
+        .active_area_right_offset=4, .active_area_top_offset=2, .active_area_bottom_offset=3};
+    owned_offsets_and_rectangles(frame29(&l5,planes),&l5);
+  }
+  puts("test_l5_cm29_owned_offsets_and_rectangles: PASS");
 }
 
 static void test_l5_absent_and_zero_preserve_full_frame(void) {
@@ -63,23 +103,67 @@ static void test_l5_absent_and_zero_preserve_full_frame(void) {
     in[4*i+2]=.4f; in[4*i+3]=1;
   }
   dv_dm_rect r;
-  assert(dv_dm_active_rect(&absent,W,H,&r)&&!dv_dm_active_cm4(&absent,&r,W,H));
-  assert(dv_dm_active_rect(&present,W,H,&r)&&!dv_dm_active_cm4(&present,&r,W,H));
+  assert(dv_dm_active_rect(&absent,W,H,&r)&&!dv_dm_active_partial(&r,W,H));
+  assert(dv_dm_active_rect(&present,W,H,&r)&&!dv_dm_active_partial(&r,W,H));
   DoviExtMetadataBlockLevel5 side={.active_area_left_offset=1};
   dv_dm_frame partial=frame(&side);
-  assert(dv_dm_active_rect(&partial,W,H,&r)&&dv_dm_active_cm4(&partial,&r,W,H));
-  partial.algo=29; // CM v2.9 never selects the active-area shaders
-  assert(dv_dm_active_rect(&partial,W,H,&r)&&!dv_dm_active_cm4(&partial,&r,W,H));
+  assert(dv_dm_active_rect(&partial,W,H,&r)&&dv_dm_active_partial(&r,W,H));
   assert(dv_dm_cpu_render(&absent,in,W,H,a));
   assert(dv_dm_cpu_render(&present,in,W,H,b));
   assert(!memcmp(a,b,sizeof(a)));
   puts("test_l5_absent_and_zero_preserve_full_frame: PASS");
 }
 
-static void crop_domain_case(int w,int h,int left,int right,int top,int bottom,bool constant) {
+// FNV-1a 64 of every full-frame shader literal as it was before any active-area body existed for
+// its family (main c0a23481). A frame without a partial L5 compiles exactly these bytes.
+static uint64_t fnv1a(const char *s) {
+  uint64_t h=UINT64_C(0xcbf29ce484222325);
+  for(;*s;s++){ h^=(unsigned char)*s; h*=UINT64_C(0x100000001b3); }
+  return h;
+}
+
+static void test_l5_cm29_absent_and_zero_preserve_full_frame(void) {
+  const struct { const char *name,*text; size_t bytes; uint64_t hash; } pinned[]={
+    {"dv_dm_glsl_common",dv_dm_glsl_common,sizeof(dv_dm_glsl_common)-1,UINT64_C(0x995c4c58b3fdb052)},
+    {"dv_dm_body_point_cm29",dv_dm_body_point_cm29,sizeof(dv_dm_body_point_cm29)-1,UINT64_C(0x7bfd1b52f554394d)},
+    {"dv_dm_body_lattice",dv_dm_body_lattice,sizeof(dv_dm_body_lattice)-1,UINT64_C(0x03994d4550df62ee)},
+    {"dv_dm_body_h",dv_dm_body_h,sizeof(dv_dm_body_h)-1,UINT64_C(0xf0a6ba996a6b0485)},
+    {"dv_dm_body_final_cm29",dv_dm_body_final_cm29,sizeof(dv_dm_body_final_cm29)-1,UINT64_C(0x634cb0da7594b1a5)},
+    {"dv_dm_body_final_cm4",dv_dm_body_final_cm4,sizeof(dv_dm_body_final_cm4)-1,UINT64_C(0xa8af44f878d1b639)},
+    {"dv_dm_body_final_active_cm4",dv_dm_body_final_active_cm4,sizeof(dv_dm_body_final_active_cm4)-1,UINT64_C(0x9748865b596d93b4)},
+    {"dv_dm_body_h_active",dv_dm_body_h_active,sizeof(dv_dm_body_h_active)-1,UINT64_C(0xe407f680f7c710a2)},
+  };
+  for(size_t i=0;i<sizeof(pinned)/sizeof(*pinned);i++) {
+    assert(strlen(pinned[i].text)==pinned[i].bytes);
+    if(fnv1a(pinned[i].text)!=pinned[i].hash){ fprintf(stderr,"literal changed: %s\n",pinned[i].name); abort(); }
+  }
+  for(int planes=0;planes<2;planes++) {
+    DoviExtMetadataBlockLevel5 zero={0},side={.active_area_bottom_offset=1};
+    dv_dm_frame absent=frame29(NULL,planes),present=frame29(&zero,planes),partial=frame29(&side,planes);
+    assert(!absent.has_l5 && present.has_l5 && partial.has_l5 && partial.l5_bottom==1);
+    assert(!memcmp(absent.u,present.u,sizeof(absent.u)) && !memcmp(absent.u,partial.u,sizeof(absent.u)));
+    enum {W=9,H=7}; float in[W*H*4],a[W*H*4],b[W*H*4],c[W*H*4];
+    for(int i=0;i<W*H;i++) {
+      in[4*i]=.1f+(i%W)*.05f; in[4*i+1]=.2f+(i%H)*.02f;
+      in[4*i+2]=.4f; in[4*i+3]=1;
+    }
+    dv_dm_rect r;
+    assert(dv_dm_active_rect(&absent,W,H,&r)&&!dv_dm_active_partial(&r,W,H));
+    assert(dv_dm_active_rect(&present,W,H,&r)&&!dv_dm_active_partial(&r,W,H));
+    assert(dv_dm_active_rect(&partial,W,H,&r)&&dv_dm_active_partial(&r,W,H)&&r.y1==H-1);
+    assert(dv_dm_cpu_render(&absent,in,W,H,a));
+    assert(dv_dm_cpu_render(&present,in,W,H,b));
+    assert(dv_dm_cpu_render(&partial,in,W,H,c));
+    assert(!memcmp(a,b,sizeof(a)));
+    assert(memcmp(a,c,sizeof(a))); // a one-row bar moves the picture: the rectangle is live for CM v2.9
+  }
+  puts("test_l5_cm29_absent_and_zero_preserve_full_frame: PASS");
+}
+
+static void crop_domain_case(int cm,int w,int h,int left,int right,int top,int bottom,bool constant) {
   DoviExtMetadataBlockLevel5 l5={.active_area_left_offset=left,
       .active_area_right_offset=right,.active_area_top_offset=top,.active_area_bottom_offset=bottom};
-  dv_dm_frame bounded=frame(&l5),plain=frame(NULL);
+  dv_dm_frame bounded=cm==4?frame(&l5):frame29(&l5,cm==292),plain=cm==4?frame(NULL):frame29(NULL,cm==292);
   assert(!memcmp(bounded.u,plain.u,sizeof(plain.u))); // L5 changes no colour/curve parameter.
   int cw=w-left-right,ch=h-top-bottom;
   size_t n=(size_t)w*h,cn=(size_t)cw*ch;
@@ -124,12 +208,25 @@ static void crop_domain_case(int w,int h,int left,int right,int top,int bottom,b
 }
 
 static void test_l5_crop_domain_excludes_adversarial_bars(void) {
-  crop_domain_case(19,13,3,4,2,3,false); // all four edges, asymmetric nonconstant picture
-  crop_domain_case(19,13,0,0,2,3,true);  // top/bottom constant picture
-  crop_domain_case(19,13,3,4,0,0,true);  // left/right constant picture
-  crop_domain_case(11,5,2,1,2,2,false); // height1 with a nonconstant horizontal picture
-  crop_domain_case(7,5,3,3,2,2,true);   // width1/height1, repeated neighbors
+  crop_domain_case(4,19,13,3,4,2,3,false); // all four edges, asymmetric nonconstant picture
+  crop_domain_case(4,19,13,0,0,2,3,true);  // top/bottom constant picture
+  crop_domain_case(4,19,13,3,4,0,0,true);  // left/right constant picture
+  crop_domain_case(4,11,5,2,1,2,2,false); // height1 with a nonconstant horizontal picture
+  crop_domain_case(4,7,5,3,3,2,2,true);   // width1/height1, repeated neighbors
   puts("test_l5_crop_domain_excludes_adversarial_bars: PASS");
+}
+
+// 291: one detail plane (Io follows Ib); 292: both planes filter (live chroma weight).
+static void test_l5_cm29_crop_domain_excludes_adversarial_bars(void) {
+  for(int cm=291;cm<=292;cm++) {
+    crop_domain_case(cm,19,13,3,4,2,3,false);
+    crop_domain_case(cm,19,13,0,0,2,3,true);
+    crop_domain_case(cm,19,13,3,4,0,0,true);
+    crop_domain_case(cm,11,5,2,1,2,2,false);
+    crop_domain_case(cm,7,5,3,3,2,2,true);
+    crop_domain_case(cm,23,17,0,0,1,0,false); // a single bar row above a larger picture
+  }
+  puts("test_l5_cm29_crop_domain_excludes_adversarial_bars: PASS");
 }
 
 int main(int argc,char **argv) {
@@ -139,6 +236,9 @@ int main(int argc,char **argv) {
   RUN(test_l5_owned_offsets_and_rectangles);
   RUN(test_l5_absent_and_zero_preserve_full_frame);
   RUN(test_l5_crop_domain_excludes_adversarial_bars);
+  RUN(test_l5_cm29_owned_offsets_and_rectangles);
+  RUN(test_l5_cm29_absent_and_zero_preserve_full_frame);
+  RUN(test_l5_cm29_crop_domain_excludes_adversarial_bars);
 #undef RUN
   if(!matched)return 2;
   puts("test_dm_active_area: PASS");
