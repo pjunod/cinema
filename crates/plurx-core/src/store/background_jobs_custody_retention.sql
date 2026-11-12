@@ -9,6 +9,11 @@
 -- yields like any other. The enqueue and upkeep triggers are replaced under
 -- their own names, copied from v85 (enqueue) and v86 (upkeep) with only that
 -- clause added (pinned by test).
+-- Each eviction looks its candidate up by owner job; custody rows are few,
+-- but the lookup runs inside every replicated enqueue at the bound.
+CREATE INDEX IF NOT EXISTS background_source_custody_owner_work
+    ON background_source_custody(owner_kind, work_id);
+-- next statement
 DROP TRIGGER IF EXISTS background_job_enqueue_command;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS background_job_enqueue_command

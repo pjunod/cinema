@@ -12,10 +12,10 @@ use std::sync::LazyLock;
 use crate::error::StoreError;
 
 pub(crate) const SCHEMA: &str = include_str!("background_jobs_custody_retention.sql");
-pub const SQLITE_INTRODUCED_SCHEMA: i64 = 129;
 pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN \
     ('background_custody_retention_schema','background_job_enqueue_command',\
-    'background_job_maintenance_command') AND sql IS NOT NULL ORDER BY name";
+    'background_job_maintenance_command','background_source_custody_owner_work') \
+    AND sql IS NOT NULL ORDER BY name";
 pub(crate) const MARKER_SQL: &str =
     "SELECT count(*) AS count FROM background_custody_retention_schema WHERE singleton=1 AND version=1";
 const MARKER_TABLE: &str = "background_custody_retention_schema";

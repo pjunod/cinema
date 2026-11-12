@@ -583,6 +583,7 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
     assert_eq!(marker, 1, "custody retention requires its exact marker");
     let plan = [
         "DROP TABLE background_custody_retention_schema;".to_owned(),
+        "DROP INDEX background_source_custody_owner_work;".to_owned(),
         "DROP TRIGGER background_job_enqueue_command;".to_owned(),
         "DROP TRIGGER background_job_maintenance_command;".to_owned(),
         format!(
