@@ -13,14 +13,16 @@ use crate::copy_ride_along::{CopyRidePlan, ProbedCopyClock};
 const VIDEO: transcode::CopyVideoOptions = transcode::CopyVideoOptions::new(false, false);
 const BUDGET: Duration = Duration::from_secs(120);
 
-/// The catalogue row of a generated fixture: `clean-cra` (HEVC) or `h264`.
-pub(crate) fn fixture_file(kind: &str) -> MediaFile {
+/// The catalogue row of a generated fixture, `clean-cra` (HEVC) or `h264`,
+/// as file `id`. A failed ride is remembered per file, so every test rides
+/// a file id of its own.
+pub(crate) fn fixture_file(kind: &str, id: i64) -> MediaFile {
     let path = plurx_core::testfixtures::source(kind);
     let metadata = std::fs::metadata(&path).expect("fixture metadata");
     let hevc = kind != "h264";
     MediaFile {
         downloaded_subtitles: Vec::new(),
-        id: 1,
+        id,
         item_id: 1,
         path,
         size: metadata.len() as i64,
@@ -92,6 +94,12 @@ async fn probed(file: &MediaFile) -> (VideoCompletionExpectation, ProbedCopyCloc
     )
 }
 
+fn stamp(file: &MediaFile) -> crate::fragment_index_cluster::SourceStamp {
+    crate::fragment_index_cluster::source_stamp(
+        &std::fs::metadata(&file.path).expect("fixture metadata"),
+    )
+}
+
 /// A pass over the fixture's path, as the lower-level tests drive one, with
 /// `ride` as its copy ride.
 async fn pass_with(file: &MediaFile, cache: &Path, ride: Option<CopyRidePlan>) -> IndexBuild {
@@ -125,8 +133,8 @@ async fn pass_with(file: &MediaFile, cache: &Path, ride: Option<CopyRidePlan>) -
 #[tokio::test]
 async fn the_pass_builds_the_same_index_with_and_without_the_copy_ride() {
     plurx_core::testfixtures::require_ffmpeg();
-    for kind in ["clean-cra", "h264"] {
-        let file = fixture_file(kind);
+    for (kind, id) in [("clean-cra", 73_001), ("h264", 73_002)] {
+        let file = fixture_file(kind, id);
         let cache = crate::test_tempdir().expect("cache");
         let baseline = pass(&file, cache.path(), false).await;
         let IndexOutcome::Built(index) = &baseline.outcome else {
@@ -166,7 +174,7 @@ async fn the_pass_builds_the_same_index_with_and_without_the_copy_ride() {
 #[tokio::test]
 async fn the_copy_ride_appends_one_output_and_leaves_the_hashed_argv_alone() {
     plurx_core::testfixtures::require_ffmpeg();
-    let file = fixture_file("clean-cra");
+    let file = fixture_file("clean-cra", 73_003);
     let (expectation, clock) = probed(&file).await;
     let input = file.path.to_string_lossy().into_owned();
     let pass = index_pass(&file, VIDEO, Some(&input), expectation, None).expect("a pass");
@@ -176,7 +184,7 @@ async fn the_copy_ride_appends_one_output_and_leaves_the_hashed_argv_alone() {
         "a pass that does not ride is the hashed argv"
     );
 
-    let ride = CopyRidePlan::for_pass(&file, VIDEO, Some(clock)).expect("a ride");
+    let ride = CopyRidePlan::for_pass(&file, VIDEO, Some(clock), stamp(&file)).expect("a ride");
     let riding = pass.riding_args(&file, &ride);
     assert_eq!(
         riding[..hashed.len()],
@@ -199,27 +207,35 @@ async fn the_copy_ride_appends_one_output_and_leaves_the_hashed_argv_alone() {
         "the argv every cluster cache key hashes"
     );
 
-    // A title whose clock cannot be placed does not ride at all.
+    // A container outside the allow-list, or a title with no probed clock,
+    // does not ride at all.
     let mut transport = file.clone();
     transport.container = Some("ts".into());
-    assert!(CopyRidePlan::for_pass(&transport, VIDEO, Some(clock)).is_none());
-    assert!(CopyRidePlan::for_pass(&file, VIDEO, None).is_none());
+    assert!(CopyRidePlan::for_pass(&transport, VIDEO, Some(clock), stamp(&file)).is_none());
+    assert!(CopyRidePlan::for_pass(&file, VIDEO, None, stamp(&file)).is_none());
 }
 
 /// A ride that fails costs the index nothing: here the probed clock's
 /// witness disagrees with the child's first packet, so the observer refuses
-/// at the origin, and the pass still builds the baseline's index.
+/// at the origin, and the pass still builds the baseline's index. The
+/// failure is remembered: this source's next pass does not ride.
 #[tokio::test]
-async fn a_failed_copy_ride_leaves_the_index_built() {
+async fn a_failed_copy_ride_leaves_the_index_built_and_is_not_ridden_again() {
     plurx_core::testfixtures::require_ffmpeg();
-    let file = fixture_file("clean-cra");
+    let file = fixture_file("clean-cra", 73_004);
     let cache = crate::test_tempdir().expect("cache");
     let baseline = pass_with(&file, cache.path(), None).await;
     assert!(matches!(baseline.outcome, IndexOutcome::Built(_)));
 
     let (_, clock) = probed(&file).await;
-    let ride = CopyRidePlan::for_pass(&file, VIDEO, Some(clock.with_start_pts_for_test(1)))
-        .expect("a ride");
+    let abandoned = crate::copy_analysis::rides(crate::copy_analysis::RideOutcome::Abandoned);
+    let ride = CopyRidePlan::for_pass(
+        &file,
+        VIDEO,
+        Some(clock.with_start_pts_for_test(1)),
+        stamp(&file),
+    )
+    .expect("a ride");
     let riding = pass_with(&file, cache.path(), Some(ride)).await;
     assert_eq!(
         riding.outcome, baseline.outcome,
@@ -229,27 +245,39 @@ async fn a_failed_copy_ride_leaves_the_index_built() {
         riding.copy_ride.is_none(),
         "an unplaced clock keeps no rows"
     );
+    assert!(
+        crate::copy_analysis::rides(crate::copy_analysis::RideOutcome::Abandoned) > abandoned,
+        "the abandonment is counted"
+    );
+    assert!(
+        CopyRidePlan::for_pass(&file, VIDEO, Some(clock), stamp(&file)).is_none(),
+        "the same source does not ride again"
+    );
+    // The production entry agrees: asked to ride, the next pass does not.
+    let next = pass(&file, cache.path(), true).await;
+    assert_eq!(next.outcome, baseline.outcome);
+    assert!(next.copy_ride.is_none());
 }
 
-/// A consumer of descriptor 7 that never takes anything, for longer than the
-/// pass runs: the clock reader keeps draining, the backlog bound abandons
-/// the ride, and the pass ends when its child does with the baseline's
-/// index.
+/// A ride whose packets are never heard, for longer than the pass runs: the
+/// clock reader keeps draining descriptor 7, the ride is abandoned at its
+/// bound of unpaired media, and the pass ends when its child does with the
+/// baseline's index.
 #[tokio::test]
-async fn a_stalled_copy_ride_consumer_does_not_hold_the_pass() {
+async fn a_copy_ride_that_falls_behind_does_not_hold_the_pass() {
     plurx_core::testfixtures::require_ffmpeg();
-    let file = fixture_file("clean-cra");
+    let file = fixture_file("clean-cra", 73_005);
     let cache = crate::test_tempdir().expect("cache");
     let baseline = pass_with(&file, cache.path(), None).await;
     assert!(matches!(baseline.outcome, IndexOutcome::Built(_)));
 
     let (_, clock) = probed(&file).await;
-    let ride = CopyRidePlan::for_pass(&file, VIDEO, Some(clock))
+    let ride = CopyRidePlan::for_pass(&file, VIDEO, Some(clock), stamp(&file))
         .expect("a ride")
-        .stalled_for_test(4 * 1024);
-    let stalled = tokio::time::timeout(BUDGET, pass_with(&file, cache.path(), Some(ride)))
+        .without_clock_for_test(4 * 1024);
+    let behind = tokio::time::timeout(BUDGET, pass_with(&file, cache.path(), Some(ride)))
         .await
-        .expect("a stalled consumer must not keep the pass from ending");
-    assert_eq!(stalled.outcome, baseline.outcome);
-    assert!(stalled.copy_ride.is_none());
+        .expect("a ride that falls behind must not keep the pass from ending");
+    assert_eq!(behind.outcome, baseline.outcome);
+    assert!(behind.copy_ride.is_none());
 }

@@ -191,14 +191,16 @@ impl CanonicalNormalizer {
     pub(crate) fn canonical_init(&self) -> &Init {
         &self.canonical.served_init
     }
-    pub(crate) fn normalize(
-        &mut self,
-        canonical: &mut Fragment,
-    ) -> Result<(), CopyNormalizationError> {
+    /// Admit one fragment its reader has already converted, where this
+    /// identity converts: the parameter-set check a pair's normalization
+    /// makes, without the conversion. Conversion rewrites RPU NAL units
+    /// only, so the parameter sets checked are the ones the muxer wrote.
+    pub(crate) fn admit(&mut self, canonical: &Fragment) -> Result<(), CopyNormalizationError> {
         if self.failed {
             return Err(CopyNormalizationError::Failed);
         }
-        let result = normalize_fragment(&mut self.canonical, canonical, &self.raw_parameters);
+        let result =
+            check_parameter_sets(&self.canonical.raw_init, canonical, &self.raw_parameters);
         if result.is_err() {
             self.failed = true;
         }
@@ -210,15 +212,26 @@ fn normalize_fragment(
     fragment: &mut Fragment,
     expected: &PromotionInputs,
 ) -> Result<(), CopyNormalizationError> {
-    let mut observed = PromotionInputs::from_fragment(fragment, &pipe.raw_init);
-    observed.hdr10_sei.clear();
-    if !expected.matches_later_parameter_sets(&observed) {
-        return Err(CopyNormalizationError::ParameterSetsChanged);
-    }
+    check_parameter_sets(&pipe.raw_init, fragment, expected)?;
     if let Some(converter) = &mut pipe.converter {
         converter
             .convert(fragment)
             .map_err(|error| CopyNormalizationError::Conversion(error.to_string()))?;
+    }
+    Ok(())
+}
+
+/// A later fragment may omit the head's parameter sets; it may not carry
+/// different ones.
+fn check_parameter_sets(
+    raw_init: &Init,
+    fragment: &Fragment,
+    expected: &PromotionInputs,
+) -> Result<(), CopyNormalizationError> {
+    let mut observed = PromotionInputs::from_fragment(fragment, raw_init);
+    observed.hdr10_sei.clear();
+    if !expected.matches_later_parameter_sets(&observed) {
+        return Err(CopyNormalizationError::ParameterSetsChanged);
     }
     Ok(())
 }

@@ -75,6 +75,23 @@ pub(crate) struct PassProgress {
     pub(crate) copy_index_riding: bool,
     /// Copy-index rows that ride has observed so far.
     pub(crate) copy_index_rows: usize,
+    /// Whether that ride was abandoned; the pass itself goes on.
+    pub(crate) copy_index_abandoned: bool,
+}
+
+/// What a copy ride-along takes from the lead output's reader: the parsed
+/// init, and each parsed fragment once the index has measured it. Nothing
+/// here waits or fails; the reader's own result does not depend on it.
+pub(crate) trait LeadFragments: Send + Sync {
+    /// False once the ride has ended, so the reader keeps its fragments.
+    fn wants_fragments(&self) -> bool;
+    fn init(&self, init: &Init);
+    /// One fragment, by move, as the index measured it. `unconverted` is
+    /// its sample tables before a Dolby Vision conversion, when the reader
+    /// converted it.
+    fn fragment(&self, unconverted: Option<Vec<fmp4::TrackFragment>>, fragment: fmp4::Fragment);
+    /// The reader read its output through to the end.
+    fn end(&self);
 }
 
 /// What the header trace hands a copy ride-along: every packet it closes,
@@ -783,7 +800,15 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
                 provenance: CompletionProvenance::StreamSeconds,
                 source_object_version: "test-helper".to_owned(),
             });
-    index_stream_with_progress(src, identity, expectation.as_ref(), dolby_vision, None).await
+    index_stream_with_progress(
+        src,
+        identity,
+        expectation.as_ref(),
+        dolby_vision,
+        None,
+        None,
+    )
+    .await
 }
 
 /// What this index pass does about the muxer's Dolby Vision record.
@@ -811,6 +836,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     expectation: Option<&VideoCompletionExpectation>,
     dolby_vision: DolbyVisionPass,
     progress: Option<&IndexProgress>,
+    ride: Option<&dyn LeadFragments>,
 ) -> IndexOutcome {
     let convert = matches!(dolby_vision, DolbyVisionPass::Rewrite(_));
     // A converting identity's index has to describe the CONVERTED bytes. An
@@ -904,6 +930,9 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     }
                     timescale = video.timescale.max(1);
                     init_sha = hex(Sha256::digest(&parsed.bytes));
+                    if let Some(ride) = ride {
+                        ride.init(&parsed);
+                    }
                     init = Some(parsed);
                 }
                 Unit::Fragment(fragment) => {
@@ -913,6 +942,13 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         );
                     };
                     let mut fragment = fragment;
+                    // A copy ride pairs packets with the samples as the
+                    // muxer wrote them; a conversion below changes their
+                    // sizes, so their tables are kept first. No media is
+                    // copied.
+                    let unconverted = ride
+                        .filter(|ride| convert && ride.wants_fragments())
+                        .map(|_| fragment.tracks.clone());
                     if convert {
                         if converter.is_none() {
                             match crate::dvpipe::Converter::for_init(init) {
@@ -968,6 +1004,11 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     }
 
                     rows.push(row);
+                    // The index is done with this fragment. A copy ride
+                    // takes it as it stands, parsed and measured.
+                    if let Some(ride) = ride.filter(|ride| ride.wants_fragments()) {
+                        ride.fragment(unconverted, fragment);
+                    }
                 }
                 // ffmpeg's random-access index, written at EOF. Seeing it is
                 // the strongest evidence the pass was complete.
@@ -985,6 +1026,9 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
             };
             progress(bytes_read, media_ms, rows.len());
         }
+    }
+    if let Some(ride) = ride {
+        ride.end();
     }
 
     if rows.is_empty() {
@@ -2641,12 +2685,16 @@ async fn build_attested_pass(
             .as_ref()
             .map_or(input, |bridge| bridge.url().to_owned());
         let output_count = outputs.len();
-        // The ride observes the pass's lead output, whichever identity that is.
+        // The ride observes the pass's lead output, whichever identity that
+        // is, of the object the held descriptor names now.
         #[cfg(unix)]
-        let copy_plan = match (copy_ride, outputs.first()) {
-            (true, Some(lead)) => {
-                crate::copy_ride_along::CopyRidePlan::for_pass(file, lead.video, probed.copy_clock)
-            }
+        let copy_plan = match (copy_ride, outputs.first(), source.metadata()) {
+            (true, Some(lead), Ok(metadata)) => crate::copy_ride_along::CopyRidePlan::for_pass(
+                file,
+                lead.video,
+                probed.copy_clock,
+                crate::fragment_index_cluster::source_stamp(&metadata),
+            ),
             _ => None,
         };
         #[allow(unused_mut)]
@@ -3145,11 +3193,12 @@ async fn build_with_args_owned(
                 None => (0, 0),
             };
             #[cfg(unix)]
-            let (copy_index_riding, copy_index_rows) = copy_meter
-                .as_ref()
-                .map_or((false, 0), |meter| (true, meter.rows()));
+            let (copy_index_riding, copy_index_rows, copy_index_abandoned) =
+                copy_meter.as_ref().map_or((false, 0, false), |meter| {
+                    (true, meter.rows(), meter.abandoned())
+                });
             #[cfg(not(unix))]
-            let (copy_index_riding, copy_index_rows) = (false, 0);
+            let (copy_index_riding, copy_index_rows, copy_index_abandoned) = (false, 0, false);
             progress(&PassProgress {
                 bytes_read: bytes,
                 media_ms,
@@ -3158,6 +3207,7 @@ async fn build_with_args_owned(
                 pgs_bytes_written,
                 copy_index_riding,
                 copy_index_rows,
+                copy_index_abandoned,
             });
         }
     };
@@ -3172,20 +3222,22 @@ async fn build_with_args_owned(
     // behaviour: its reader closes with the refusal and the child ends early.
     let shared = identities.len() > 1;
     let mut dolby_vision = outputs.into_iter().map(|output| output.dolby_vision);
-    let mut streams: Vec<OutputRead<'_>> = Vec::with_capacity(identities.len());
-    // The lead's reader also hands what it reads to the copy ride, which
-    // takes a copy and never delays the read.
+    // The lead's reader also hands the copy ride each fragment it has
+    // parsed and measured, by move, once the index is done with it.
     #[cfg(unix)]
-    let stdout: Box<dyn AsyncRead + Unpin + Send> = match &copy_ride {
-        Some(ride) => Box::new(crate::copy_ride_along::RideTee::new(stdout, ride.tap())),
-        None => Box::new(stdout),
-    };
+    let lead_tap = copy_ride.as_ref().map(|ride| ride.tap());
+    #[cfg(unix)]
+    let lead_ride = lead_tap.as_ref().map(|tap| tap as &dyn LeadFragments);
+    #[cfg(not(unix))]
+    let lead_ride: Option<&dyn LeadFragments> = None;
+    let mut streams: Vec<OutputRead<'_>> = Vec::with_capacity(identities.len());
     streams.push(Box::pin(index_output(
         stdout,
         identities[0].clone(),
         &expectation,
         dolby_vision.next().unwrap_or_default(),
         Some(&record_progress),
+        lead_ride,
         shared,
     )));
     for (reader, identity) in sibling_readers.into_iter().zip(identities.iter().skip(1)) {
@@ -3194,6 +3246,7 @@ async fn build_with_args_owned(
             identity.clone(),
             &expectation,
             dolby_vision.next().unwrap_or_default(),
+            None,
             None,
             shared,
         )));
@@ -3485,6 +3538,7 @@ async fn index_output<R: AsyncRead + Unpin>(
     expectation: &VideoCompletionExpectation,
     dolby_vision: DolbyVisionPass,
     progress: Option<&IndexProgress>,
+    ride: Option<&dyn LeadFragments>,
     drain: bool,
 ) -> (IndexOutcome, bool) {
     let outcome = index_stream_with_progress(
@@ -3493,6 +3547,7 @@ async fn index_output<R: AsyncRead + Unpin>(
         Some(expectation),
         dolby_vision,
         progress,
+        ride,
     )
     .await;
     // Whether the stream answered before its output ended: a refusal of
@@ -3675,8 +3730,8 @@ fn hex(bytes: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests;
 
-/// The copy-index ride: the same index with and without it, rows equal to
-/// the engine's, and a ride that fails or stalls costing the pass nothing.
+/// The copy-index ride: the same index with and without it, and a ride that
+/// fails or falls behind costing the pass nothing.
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) mod copy_ride_tests;
 

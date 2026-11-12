@@ -90,8 +90,10 @@ pub(crate) struct PendingSource {
     /// Whether this demand came back from a previous process and still has
     /// the recipe rebuilt for it rather than a playback's own.
     recovered: bool,
-    /// Whether rows of a content-analysis pass are in this set. Such a set
-    /// may publish where no healthy head stands; it never quarantines one.
+    /// Whether every row of this set came from a content-analysis pass.
+    /// Such a set may publish where no healthy head stands; it never
+    /// quarantines one. A viewer's range folding in clears it, and a pass
+    /// folding into rows a viewer or a fill left never sets it.
     ridden: bool,
     observed: Instant,
     /// Not before this instant: a busy source domain or a contended claim
@@ -309,6 +311,26 @@ impl PendingSources {
         }
     }
 
+    /// Room for one more set of a pass's rows. At the bound only another
+    /// such set is forgotten, the least recently observed; never a demand
+    /// and never rows a viewer or a fill left. False when there is none.
+    fn make_room_for_pass(&mut self) -> bool {
+        if self.sources.len() + self.working.len() < MAX_PENDING_SOURCES {
+            return true;
+        }
+        let Some(oldest) = self
+            .sources
+            .iter()
+            .filter(|(_, pending)| pending.ridden && !pending.demanded)
+            .min_by_key(|(_, pending)| pending.observed)
+            .map(|(key, _)| key.clone())
+        else {
+            return false;
+        };
+        self.sources.remove(&oldest);
+        true
+    }
+
     /// [`Self::settle`] for a source a test worked itself.
     #[cfg(test)]
     pub(super) fn settle_for_test(
@@ -362,6 +384,23 @@ impl PendingSources {
                     CopyObservationSet::new(&message).map(|set| *held = Held::Rows(Box::new(set)))
                 }
             };
+            let folded = match folded {
+                // A viewer's own range outranks rows a pass rode in with:
+                // the pass's rows are dropped and the range starts this
+                // source's set again, so it is the range that is judged
+                // against the head.
+                Err(error) if pending.ridden => {
+                    tracing::warn!(
+                        file_id = message.source.file_id,
+                        range_id = %message.range_id,
+                        ?error,
+                        "a playback range disagrees with a content-analysis pass's copy rows; keeping the range"
+                    );
+                    CopyObservationSet::new(&message)
+                        .map(|set| pending.held = Held::Rows(Box::new(set)))
+                }
+                folded => folded,
+            };
             if let Err(error) = folded {
                 tracing::warn!(
                     file_id = message.source.file_id,
@@ -373,6 +412,8 @@ impl PendingSources {
                     self.dropped.extend(dropped_request(&discarded));
                 }
             } else {
+                // Not a pass's rows alone any more.
+                pending.ridden = false;
                 pending.observed = Instant::now();
                 pending.interest = interest;
                 pending.recipe = message.recipe;
@@ -432,15 +473,22 @@ impl PendingSources {
             );
         };
         if let Some(pending) = self.sources.get_mut(&key) {
+            // Whether the set is then the pass's rows and nothing else.
             let folded = match &mut pending.held {
-                Held::Rows(set) => set.observe_pass(&observation),
+                Held::Rows(set) => set.observe_pass(&observation).map(|()| false),
                 // The first rows of a source so far only asked for.
-                held @ Held::Demand { .. } => CopyObservationSet::from_pass(&observation)
-                    .map(|set| *held = Held::Rows(Box::new(set))),
+                held @ Held::Demand { .. } => {
+                    CopyObservationSet::from_pass(&observation).map(|set| {
+                        *held = Held::Rows(Box::new(set));
+                        true
+                    })
+                }
             };
             match folded {
-                Ok(()) => {
-                    pending.ridden = true;
+                Ok(only_pass_rows) => {
+                    if only_pass_rows {
+                        pending.ridden = true;
+                    }
                     pending.observed = Instant::now();
                     // Whole now: nothing is left to wait for.
                     pending.retry_after = None;
@@ -451,7 +499,14 @@ impl PendingSources {
         }
         match CopyObservationSet::from_pass(&observation) {
             Ok(set) => {
-                self.make_room();
+                if !self.make_room_for_pass() {
+                    tracing::info!(
+                        file_id = observation.source.file_id,
+                        job_id = observation.custody.job_id(),
+                        "every held copy source is a viewer's or a demand's; the content-analysis pass's rows are dropped"
+                    );
+                    return;
+                }
                 tracing::info!(
                     file_id = observation.source.file_id,
                     job_id = observation.custody.job_id(),
@@ -916,8 +971,9 @@ pub(super) async fn publish_source(
         Err(error) => return Attempt::Retry(error),
     };
     // A content-analysis pass's rows only ever add an index where none
-    // stands. A disagreement with a healthy head is reported and the head
-    // kept: a quarantine is for a viewer's own range to ask for.
+    // stands. When they are all a set holds, a disagreement with a healthy
+    // head is reported and the head kept: a quarantine is for a viewer's own
+    // range to ask for, and a set that holds one is not `ridden`.
     if pending.ridden && contradicted.is_some() {
         return Attempt::Discard(
             "content-analysis copy rows disagree with the published index; the head stands".into(),

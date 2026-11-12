@@ -266,8 +266,10 @@ function analysisRideAlong(row){
   const pgs=tracks?`<div class="analysis-sub">Also keeping ${tracks} PGS track${tracks===1?"":"s"} · ${fmtBytes(row.pgs_bytes_written)||"0 B"} written · <a href="#/settings/maintenance/subsrccard" title="Turning stored subtitle tracks off lets this pass finish its index and discards the tracks it kept">stored subtitle tracks setting</a></div>`:"";
   // The same read is also observing the title's copy index: no second pass
   // over the file, and cancelling this job stops it with the pass.
+  // An abandoned observation leaves the pass and its index alone; the row
+  // says so rather than going quiet.
   const copyRows=Number(row.copy_index_rows||0);
-  const copy=row.copy_index_riding?`<div class="analysis-sub">Also observing this title's copy index from the same read · ${copyRows} row${copyRows===1?"":"s"}</div>`:"";
+  const copy=!row.copy_index_riding?"":row.copy_index_abandoned?`<div class="analysis-sub">Copy index observation abandoned for this pass; its index is unaffected and the title's copy index is built on demand</div>`:`<div class="analysis-sub">Also observing this title's copy index from the same read · ${copyRows} row${copyRows===1?"":"s"}</div>`;
   return pgs+copy;
 }
 // A shared read builds several copy identities of one file from one pass over

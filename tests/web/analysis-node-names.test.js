@@ -387,8 +387,11 @@ test("a live index row says its pass is also observing the copy index", () => {
   assert.match(starting, /copy index from the same read · 0 rows/, "a ride with no rows yet still shows");
   const both = live({ progress: [{ ...base, pgs_tracks: 1, pgs_bytes_written: 10, copy_index_riding: true, copy_index_rows: 1 }] }, {});
   assert.match(both, /Also keeping 1 PGS track ·[\s\S]*copy index from the same read · 1 row</, "both rides show, tracks first");
+  const abandoned = live({ progress: [{ ...base, copy_index_riding: true, copy_index_rows: 7, copy_index_abandoned: true }] }, {});
+  assert.match(abandoned, /Copy index observation abandoned for this pass; its index is unaffected/);
+  assert.doesNotMatch(abandoned, /from the same read/, "an abandoned ride no longer reads as observing");
   const plain = live({ progress: [base] }, {});
-  assert.doesNotMatch(plain, /copy index/, "a pass that is not riding, or an older peer, says nothing");
+  assert.doesNotMatch(plain, /[Cc]opy index/, "a pass that is not riding, or an older peer, says nothing");
 });
 
 test("a subtitle_source progress row names text and PGS tracks and bytes read", () => {

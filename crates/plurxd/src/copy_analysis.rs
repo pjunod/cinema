@@ -171,14 +171,28 @@ pub(crate) struct AnalysisCopyRows {
 pub(crate) struct IndexPassCustody {
     token: plurx_core::store::background_jobs::JobToken,
     custody: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+    /// The file the claimed job builds and the object version it attested
+    /// and read. An observation is accepted only for that file and object.
+    file_id: i64,
+    object_version: String,
 }
 impl IndexPassCustody {
-    /// The claim and custody `fence` holds now. None when the claim is lost
-    /// or past its lease, is not a fragment-index build, or holds no source
-    /// custody of its own.
-    pub(crate) async fn held_by(fence: &crate::background_jobs::JobFence) -> Option<Self> {
+    /// The claim and custody `fence` holds now, bound to the file its job
+    /// builds and the object version that job attested. None when the claim
+    /// is lost or past its lease, is not a fragment-index build, or holds no
+    /// source custody of its own.
+    pub(crate) async fn held_by(
+        fence: &crate::background_jobs::JobFence,
+        file_id: i64,
+        object_version: &str,
+    ) -> Option<Self> {
         let (kind, token, custody) = fence.held_source_claim().await?;
-        let value = Self { token, custody };
+        let value = Self {
+            token,
+            custody,
+            file_id,
+            object_version: object_version.to_owned(),
+        };
         (kind == plurx_core::store::background_jobs::JobKind::FragmentIndexBuild && value.valid())
             .then_some(value)
     }
@@ -187,6 +201,8 @@ impl IndexPassCustody {
     fn valid(&self) -> bool {
         use plurx_core::store::background_jobs_resources::BackgroundSourceOwner;
         self.token.validate().is_ok()
+            && self.file_id > 0
+            && !self.object_version.is_empty()
             && uuid::Uuid::parse_str(&self.custody.custody_id).is_ok()
             && matches!(
                 &self.custody.owner,
@@ -197,15 +213,21 @@ impl IndexPassCustody {
                         && token.fence == self.token.fence
             )
     }
-    pub(crate) fn node_id(&self) -> &str {
-        &self.token.node_id
+    /// Whether this custody is of `source`'s own file and object, read on
+    /// the node that holds them.
+    fn reads(&self, source: &AnalysisCoordinationSource) -> bool {
+        self.valid()
+            && self.token.node_id == source.origin_node_id
+            && self.file_id == source.file_id
+            && self.object_version == source.object_version
     }
     pub(crate) fn job_id(&self) -> &str {
         &self.token.job_id
     }
-    /// A well-formed custody of `node_id` that no store issued.
+    /// A well-formed custody of `node_id`, for this file and object, that no
+    /// store issued.
     #[cfg(test)]
-    pub(crate) fn for_test(node_id: &str) -> Self {
+    pub(crate) fn for_test(node_id: &str, file_id: i64, object_version: &str) -> Self {
         let token = plurx_core::store::background_jobs::JobToken {
             job_id: uuid::Uuid::new_v4().to_string(),
             node_id: node_id.to_owned(),
@@ -223,8 +245,58 @@ impl IndexPassCustody {
                 },
             },
             token,
+            file_id,
+            object_version: object_version.to_owned(),
         }
     }
+}
+
+/// How one copy ride of a content-analysis pass ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RideOutcome {
+    /// The whole title was observed and its rows returned to the pass.
+    Observed,
+    /// The ride ended early or could not be completed; the pass went on.
+    Abandoned,
+    /// The pass itself did not build, so there was nothing to keep.
+    NotBuilt,
+}
+const RIDE_OUTCOMES: [(RideOutcome, &str); 3] = [
+    (RideOutcome::Observed, "observed"),
+    (RideOutcome::Abandoned, "abandoned"),
+    (RideOutcome::NotBuilt, "not_built"),
+];
+static RIDES: [std::sync::atomic::AtomicU64; 3] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+/// Count one ride's end.
+pub(crate) fn record_ride(outcome: RideOutcome) {
+    RIDES[outcome as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Rides that ended this way since this process started.
+pub(crate) fn rides(outcome: RideOutcome) -> u64 {
+    RIDES[outcome as usize].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Prometheus exposition for the content-analysis pass's copy ride.
+pub(crate) fn ride_prometheus() -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from(
+        "# HELP plurx_copy_index_ride_total Copy index observations the fragment-index pass rode along with, by how they ended.\n\
+         # TYPE plurx_copy_index_ride_total counter\n",
+    );
+    for (outcome, label) in RIDE_OUTCOMES {
+        let _ = writeln!(
+            out,
+            "plurx_copy_index_ride_total{{outcome=\"{label}\"}} {}",
+            rides(outcome)
+        );
+    }
+    out
 }
 
 /// The whole-title rows a content-analysis pass observed beside its own
@@ -542,10 +614,26 @@ impl CopyAnalysisRegistry {
         sent
     }
     /// Hand the worker the whole-title rows a content-analysis pass observed.
-    /// A full inbox refuses, and nothing is lost but this read's rows: a
-    /// demand or a later pass builds the same index.
-    pub(crate) fn notify_pass(&self, observation: PassCopyObservation) -> bool {
-        self.send(CopyAnalysisMessage::Pass(Box::new(observation)))
+    /// The pass waits for room in the inbox while it holds its claim: the
+    /// dispatcher is woken first and drains the inbox on every pass, so the
+    /// wait ends at its next one. `lost` ends it when the claim is lost;
+    /// false then, and nothing is lost but this read's rows.
+    pub(crate) async fn deliver_pass(
+        &self,
+        observation: PassCopyObservation,
+        lost: &tokio_util::sync::CancellationToken,
+    ) -> bool {
+        crate::state::wake_fragment_analysis();
+        let message = CopyAnalysisMessage::Pass(Box::new(observation));
+        let sent = tokio::select! {
+            biased;
+            () = lost.cancelled() => false,
+            sent = self.sender.send(message) => sent.is_ok(),
+        };
+        if sent {
+            crate::state::wake_fragment_analysis();
+        }
+        sent
     }
     /// The already-asked keys, for the worker to clear as sources settle.
     pub(crate) fn asked(&self) -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
@@ -921,8 +1009,9 @@ impl CopyObservationSet {
     }
 
     /// Rows from a content-analysis pass. The pass's custody stands where an
-    /// Analysis fill's phase does: it must be the origin node's, for this
-    /// exact file and source as playback observes it. The rows then pass the
+    /// Analysis fill's phase does: it must be the origin node's, bound to
+    /// this exact file and object version, for the source as playback
+    /// observes it. The rows then pass the
     /// same init, inspection and overlap-equality checks as any other
     /// observation's, and must be the whole title.
     pub(crate) fn observe_pass(
@@ -935,8 +1024,7 @@ impl CopyObservationSet {
             || observation.file.mtime != self.source.source_mtime
             || observation.source != self.observed_source
             || observation.catalog_namespace != self.catalog_namespace
-            || !observation.custody.valid()
-            || observation.custody.node_id() != self.source.origin_node_id
+            || !observation.custody.reads(&self.source)
             || !rows.boundaries.begins_title
             || !rows.boundaries.eof
         {

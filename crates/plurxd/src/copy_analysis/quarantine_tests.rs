@@ -1362,10 +1362,10 @@ async fn a_demand_makes_its_request_before_its_source_is_idle() {
 }
 
 /// The whole-title rows a content-analysis pass hands over for the fixture's
-/// source: `origin` holds the object, `custody_node` ran the pass.
-fn pass_observation(
+/// source: `origin` holds the object, `custody` names the read.
+fn pass_rows(
     origin: &str,
-    custody_node: &str,
+    custody: IndexPassCustody,
     init: &Arc<Init>,
     rows: Vec<IndexRow>,
     eof: bool,
@@ -1382,7 +1382,7 @@ fn pass_observation(
         file: Arc::new(file),
         catalog_namespace: NAMESPACE.into(),
         source,
-        custody: IndexPassCustody::for_test(custody_node),
+        custody,
         recipe,
         rows: AnalysisCopyRows {
             init: Arc::clone(init),
@@ -1408,50 +1408,123 @@ fn pass_observation(
     }))
 }
 
+/// The custody of a pass this node ran over the fixture's file and object.
+fn pass_custody() -> IndexPassCustody {
+    IndexPassCustody::for_test(NODE, 100, "dev:1:ino:2")
+}
+
+fn pass_observation(init: &Arc<Init>, rows: Vec<IndexRow>) -> CopyAnalysisMessage {
+    pass_rows(NODE, pass_custody(), init, rows, true)
+}
+
+/// One committed range of a local viewer's own playback over the fixture's
+/// source, holding `rows` from the title's first tick.
+fn viewer_range(init: &Arc<Init>, rows: &[IndexRow], eof: bool) -> CopyAnalysisMessage {
+    let timescale = init.video().expect("video track").timescale;
+    let file = media_file();
+    let recipe = CopyRecipe::playback_default(
+        &file,
+        plurx_core::transcode::CopyVideoOptions::new(false, false),
+    );
+    CopyAnalysisMessage::Range(Box::new(CompletedCopyRange {
+        file: Arc::new(file),
+        catalog_namespace: NAMESPACE.into(),
+        source: source(),
+        authority: CopyObservationAuthority::Local(
+            LocalCopyAuthority::of(&local_viewer(7)).expect("a local user's own playback"),
+        ),
+        range_id: uuid::Uuid::new_v4(),
+        range_epoch: 1,
+        init: Arc::clone(init),
+        checkpoint: Arc::new(CopyRangeCheckpoint {
+            manifest_path: PathBuf::from("/ranges/manifest.json"),
+            manifest_sha256: hex64('a'),
+            timescale,
+            canonical_title_start: 0,
+            source_origin: SourceTimestamp {
+                dts: 0,
+                time_base_num: 1,
+                time_base_den: timescale,
+            },
+            rows: rows.to_vec().into(),
+            boundaries: RangeBoundaries {
+                begins_title: true,
+                eof,
+            },
+            first_frame_rendered: true,
+            inspection: eof.then(|| plurx_core::hevc_configuration::RangeInspection {
+                packets: 2 * rows.len() as u64,
+                slices: 3 * rows.len() as u64,
+                configuration_sha256: hex64('d'),
+            }),
+            row_inspections: inspections(rows).into(),
+            promotion: PromotionInputs::default(),
+        }),
+        recipe,
+    }))
+}
+
+fn ready(pending: &mut PendingSources) -> Vec<(String, super::work::PendingSource)> {
+    pending.start_ready(std::time::Instant::now())
+}
+
 /// The content-analysis pass is a third observation source. Its whole-title
-/// rows establish a complete set under the pass's own custody, turn a
-/// row-less demand into rows, and are dropped, leaving what is held, when
-/// the custody is another node's, the read was not the whole title, or the
-/// rows disagree with rows already held. Pure: no store, no source read.
+/// rows establish a complete set under the pass's own custody and turn a
+/// row-less demand into rows. They are dropped, leaving what is held, when
+/// the custody is another node's, another file's or another object's, when
+/// the read was not the whole title, or when the rows disagree with rows
+/// already held. Pure: no store, no source read.
 #[test]
 fn a_pass_observation_folds_as_a_third_source_under_the_pass_custody() {
     let init = muxer_init();
     let all = rows(4, 4_500);
-    let now = std::time::Instant::now;
 
     let mut pending = PendingSources::default();
-    pending.fold(
-        pass_observation(NODE, NODE, &init, all.clone(), true),
-        NO_WAIT,
-    );
-    let (key, held) = pending.start_ready(now()).pop().expect("the unit");
+    pending.fold(pass_observation(&init, all.clone()), NO_WAIT);
+    let (key, held) = ready(&mut pending).pop().expect("the unit");
     assert_eq!(
         key,
         copy_index_v3_source_key(NAMESPACE, &source()).expect("source key")
     );
     assert_eq!(held.held_rows(), (all.clone(), true), "the whole title");
 
-    // Custody of a node that is not the source's origin, and a read that
-    // stopped before the end of the title, are not this source's index.
+    // A read that is not this source's: another node's custody, a claim
+    // over another file or another object, and one that stopped early.
     for refused in [
-        pass_observation(NODE, "node-two", &init, all.clone(), true),
-        pass_observation(NODE, NODE, &init, all.clone(), false),
+        pass_rows(
+            NODE,
+            IndexPassCustody::for_test("node-two", 100, "dev:1:ino:2"),
+            &init,
+            all.clone(),
+            true,
+        ),
+        pass_rows(
+            NODE,
+            IndexPassCustody::for_test(NODE, 101, "dev:1:ino:2"),
+            &init,
+            all.clone(),
+            true,
+        ),
+        pass_rows(
+            NODE,
+            IndexPassCustody::for_test(NODE, 100, "dev:1:ino:3"),
+            &init,
+            all.clone(),
+            true,
+        ),
+        pass_rows(NODE, pass_custody(), &init, all.clone(), false),
     ] {
         let mut pending = PendingSources::default();
         pending.fold(refused, NO_WAIT);
-        assert!(pending.start_ready(now()).is_empty());
+        assert!(ready(&mut pending).is_empty());
     }
 
     // A demand waiting out its first interval has its rows at once.
     let mut asked = PendingSources::default();
     asked.fold(local_demand(NODE), std::time::Duration::from_secs(60));
-    assert!(asked.start_ready(now()).is_empty());
-    asked.fold(
-        pass_observation(NODE, NODE, &init, all.clone(), true),
-        NO_WAIT,
-    );
-    let (_, held) = asked
-        .start_ready(now())
+    assert!(ready(&mut asked).is_empty());
+    asked.fold(pass_observation(&init, all.clone()), NO_WAIT);
+    let (_, held) = ready(&mut asked)
         .pop()
         .expect("whole now: nothing left to wait for");
     assert_eq!(held.held_rows(), (all.clone(), true));
@@ -1460,21 +1533,118 @@ fn a_pass_observation_folds_as_a_third_source_under_the_pass_custody() {
     let mut other = all.clone();
     other[1].bytes += 1;
     let mut first = PendingSources::default();
-    first.fold(
-        pass_observation(NODE, NODE, &init, all.clone(), true),
-        NO_WAIT,
-    );
-    first.fold(pass_observation(NODE, NODE, &init, other, true), NO_WAIT);
-    let (_, held) = first.start_ready(now()).pop().expect("the unit");
+    first.fold(pass_observation(&init, all.clone()), NO_WAIT);
+    first.fold(pass_observation(&init, other), NO_WAIT);
+    let (_, held) = ready(&mut first).pop().expect("the unit");
     assert_eq!(held.held_rows(), (all, true));
+}
+
+/// `ridden` means a pass's rows and nothing else. A viewer's range folding
+/// in clears it; a pass folding into rows a viewer left never sets it; and a
+/// viewer's range that disagrees with a pass's rows replaces them, so it is
+/// the viewer's rows that are judged against the head. Pure.
+#[test]
+fn a_viewers_range_makes_a_set_its_own_whatever_a_pass_rode_in_with() {
+    let init = muxer_init();
+    let all = rows(4, 4_500);
+    let mut other = all.clone();
+    other[1].bytes += 1;
+
+    // A pass, then the viewer's agreeing range.
+    let mut pending = PendingSources::default();
+    pending.fold(pass_observation(&init, all.clone()), NO_WAIT);
+    pending.fold(viewer_range(&init, &all[..2], false), NO_WAIT);
+    let (_, held) = ready(&mut pending).pop().expect("the unit");
+    assert_eq!(held.held_rows(), (all.clone(), false));
+
+    // The viewer's range, then a pass over it.
+    let mut pending = PendingSources::default();
+    pending.fold(viewer_range(&init, &all[..2], false), NO_WAIT);
+    pending.fold(pass_observation(&init, all.clone()), NO_WAIT);
+    let (_, held) = ready(&mut pending).pop().expect("the unit");
+    assert_eq!(held.held_rows(), (all.clone(), false));
+
+    // A pass, then a viewer's range that disagrees with it: the range wins.
+    let mut pending = PendingSources::default();
+    pending.fold(pass_observation(&init, all.clone()), NO_WAIT);
+    pending.fold(viewer_range(&init, &other[..2], false), NO_WAIT);
+    let (_, held) = ready(&mut pending).pop().expect("the unit");
+    assert_eq!(held.held_rows(), (other[..2].to_vec(), false));
+
+    // The viewer's range first: a disagreeing pass is dropped.
+    let mut pending = PendingSources::default();
+    pending.fold(viewer_range(&init, &other[..2], false), NO_WAIT);
+    pending.fold(pass_observation(&init, all), NO_WAIT);
+    let (_, held) = ready(&mut pending).pop().expect("the unit");
+    assert_eq!(held.held_rows(), (other[..2].to_vec(), false));
+}
+
+/// A pass may make room only among other passes' sets. With every slot
+/// held by a demand, its rows are dropped and no demand is forgotten; with
+/// a ridden set among them, that one gives way. Pure.
+#[test]
+fn a_pass_evicts_only_another_ridden_set() {
+    let init = muxer_init();
+    let all = rows(4, 4_500);
+    let other_file = |file_id: i64| {
+        let mut message = pass_rows(
+            NODE,
+            IndexPassCustody::for_test(NODE, file_id, "dev:1:ino:2"),
+            &init,
+            all.clone(),
+            true,
+        );
+        if let CopyAnalysisMessage::Pass(observation) = &mut message {
+            let mut file = media_file();
+            file.id = file_id;
+            observation.file = Arc::new(file);
+            observation.source.file_id = file_id;
+        }
+        message
+    };
+
+    // Sixty-four demands, one per file: the bound.
+    let mut demands = PendingSources::default();
+    for file_id in 1..=64 {
+        demands.fold(
+            CopyAnalysisMessage::Demand(Box::new(demand_for(NODE, file_id))),
+            NO_WAIT,
+        );
+    }
+    demands.fold(other_file(500), NO_WAIT);
+    let held = ready(&mut demands);
+    assert_eq!(held.len(), 64, "no demand gave way");
+    assert!(held.iter().all(|(_, source)| !source.held_rows().1));
+
+    // Sixty-three demands and one ridden set: the ridden set gives way.
+    let mut mixed = PendingSources::default();
+    for file_id in 1..=63 {
+        mixed.fold(
+            CopyAnalysisMessage::Demand(Box::new(demand_for(NODE, file_id))),
+            NO_WAIT,
+        );
+    }
+    mixed.fold(other_file(500), NO_WAIT);
+    mixed.fold(other_file(501), NO_WAIT);
+    let held = ready(&mut mixed);
+    assert_eq!(held.len(), 64);
+    assert_eq!(
+        held.iter()
+            .filter(|(_, source)| source.held_rows().1)
+            .count(),
+        1,
+        "one ridden set, the later one"
+    );
 }
 
 /// A pass's rows only ever add an index. Against a healthy head of this
 /// same engine they are done when they agree, and when they disagree the
 /// source is discarded with the head untouched: no request, no claim, no
-/// quarantine. A real store and blob; no source is read.
+/// quarantine. A viewer's own range with the same disagreement still
+/// quarantines the head, whether or not a pass rode in first. A real store
+/// and blob; no source is read.
 #[tokio::test]
-async fn ridden_rows_never_quarantine_a_healthy_head() {
+async fn ridden_rows_never_quarantine_a_healthy_head_and_a_viewers_range_still_does() {
     let fixture = store_fixture().await;
     let init = muxer_init();
     let all = rows(4, 4_500);
@@ -1484,27 +1654,18 @@ async fn ridden_rows_never_quarantine_a_healthy_head() {
     fixture.install(&artifact, &blob).await;
 
     let mut agreeing = PendingSources::default();
-    agreeing.fold(
-        pass_observation(NODE, NODE, &init, all.clone(), true),
-        NO_WAIT,
-    );
-    let (key, mut held) = agreeing
-        .start_ready(std::time::Instant::now())
-        .pop()
-        .expect("the unit");
+    agreeing.fold(pass_observation(&init, all.clone()), NO_WAIT);
+    let (key, mut held) = ready(&mut agreeing).pop().expect("the unit");
     assert!(matches!(
         publish_source(&fixture.context, &key, &mut held).await,
         Attempt::Done
     ));
 
-    let mut other = all;
+    let mut other = all.clone();
     other[1].bytes += 1;
     let mut differing = PendingSources::default();
-    differing.fold(pass_observation(NODE, NODE, &init, other, true), NO_WAIT);
-    let (key, mut held) = differing
-        .start_ready(std::time::Instant::now())
-        .pop()
-        .expect("the unit");
+    differing.fold(pass_observation(&init, other.clone()), NO_WAIT);
+    let (key, mut held) = ready(&mut differing).pop().expect("the unit");
     assert!(matches!(
         publish_source(&fixture.context, &key, &mut held).await,
         Attempt::Discard(_)
@@ -1519,5 +1680,21 @@ async fn ridden_rows_never_quarantine_a_healthy_head() {
             .expect("requests"),
         0,
         "a ride that disagrees costs a read and writes nothing"
+    );
+
+    // The pass's agreeing rows, then the viewer's own contradicting range:
+    // the set is the viewer's, and the head is quarantined under a claim.
+    // What follows the quarantine (the seal's attestation of a file this
+    // fixture does not have) is not this test's.
+    let mut viewer = PendingSources::default();
+    viewer.fold(pass_observation(&init, all), NO_WAIT);
+    viewer.fold(viewer_range(&init, &other, true), NO_WAIT);
+    let (key, mut held) = ready(&mut viewer).pop().expect("the unit");
+    assert_eq!(held.held_rows(), (other, false));
+    let _ = publish_source(&fixture.context, &key, &mut held).await;
+    assert_eq!(
+        fixture.quarantine_code().as_deref(),
+        Some(plurx_core::store::COPY_INDEX_V3_CONTRADICTION_CODE),
+        "a viewer's own range still quarantines"
     );
 }

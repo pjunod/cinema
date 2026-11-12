@@ -1,11 +1,11 @@
 //! The copy index rides the content-analysis pass.
 //!
-//! The fragment-index pass already reads the whole file once and writes the
-//! canonical video-only stream of its lead identity on `pipe:1`. That stream
-//! is what a v3 copy-index row is defined on. This module turns the same read
-//! into the title's whole-title copy observation, so the Analysis worker can
-//! seal and publish the v3 index without a second pass over the video. The
-//! standalone form of the same job is a row-less demand filled by
+//! The fragment-index pass already reads the whole file once, and its lead
+//! output's reader already parses the canonical video-only stream that a v3
+//! copy-index row is defined on. This module turns the same read into the
+//! title's whole-title copy observation, so the Analysis worker can seal and
+//! publish the v3 index without a second pass over the video. The standalone
+//! form of the same job is a row-less demand filled by
 //! `copyrange::fill_copy_gap`.
 //!
 //! What it adds to the pass, and nothing else:
@@ -21,50 +21,58 @@
 //!   held descriptor gives that start and the video stream's first
 //!   presentation time; the source origin is recovered from the first and
 //!   checked against the second. Anything inexact abandons the ride.
-//! - **No second derivation.** The canonical bytes go through the engine's
-//!   own packet-clock association, head normalization contract, row
-//!   measurement (`CopyCompanionVerifier`, the stream standing as its own
-//!   companion: the index holds no AV) and row inspection.
+//! - **No second read, parse or conversion.** The lead reader hands over
+//!   each fragment it has parsed, measured and (for a converting identity)
+//!   converted, by move. The ride pairs it with its packets through the
+//!   engine's `associate_fragment_clock`, checks it against the engine's
+//!   head normalization contract, and takes its row from the engine's
+//!   `CopyCompanionVerifier` (the stream standing as its own companion: the
+//!   index holds no AV) and its inspection from `inspect_canonical_row`.
+//!   That inspection walks the fragment's NAL headers for HDR10 SEI; it is
+//!   the one thing done again, and it reads headers, not payload.
 //!
-//! The ride can only ever add an answer. Its clock reader drains descriptor 7
-//! to the end of the file whatever happens, so FFmpeg never waits on it. Its
-//! observer runs behind a bounded backlog that the pass's readers never wait
-//! on: when it falls behind, or anything it sees is not what the engine would
-//! accept, the ride is abandoned and the pass builds its index as before.
-use crate::copy_analysis::{AnalysisCopyRows, CopyRecipe, CopyRowInspection, PendingCopyRide};
+//! The ride has no task of its own beyond the clock reader. Its state is fed
+//! in place by the three readers the pass already runs (the lead output, the
+//! header trace on stderr, the clock), each doing a few microseconds of
+//! pairing under one lock. It can only ever add an answer: the clock reader
+//! drains descriptor 7 to the end of the file whatever happens, so FFmpeg
+//! never waits on it, and anything the engine would not accept, or more
+//! unpaired media than the engine itself would hold, abandons the ride and
+//! leaves the pass to build its index as before. An abandoned ride is
+//! counted, logged, shown on the pass's Analysis row and remembered, so the
+//! file's next pass does not ride.
+use crate::copy_analysis::{
+    record_ride, AnalysisCopyRows, CopyRecipe, CopyRowInspection, PendingCopyRide, RideOutcome,
+};
 use crate::copy_normalization::{CanonicalNormalizer, CopyNormalizationContract};
 use crate::copyrange::{
     copy_cut_policy, head_origin, inspect_canonical_row, COPY_TARGET_SECONDS, MAX_HELD, MAX_PACKETS,
 };
+use crate::fragment_index_cluster::SourceStamp;
 use plurx_core::{
     domain::MediaFile,
-    fmp4::{Fragment, Init},
+    fmp4::{Fragment, Init, TrackFragment},
     hevc_configuration::{PacketInspection, RangeInspection},
     segplan::{
         companion::CopyCompanionVerifier,
         copy_cursor::CopyPlanCursor,
-        observed_range::{ObservedRangeAssembler, ObservedUnit},
-        packet_clock::{PacketClockParser, SourceFragmentClock, SourcePacketObservation},
+        packet_clock::{
+            associate_fragment_clock, PacketClockParser, SourcePacketObservation,
+            MAX_PACKET_CLOCK_LINE_BYTES,
+        },
         ranges::{RangeBoundaries, SourceTimestamp},
         IndexRow,
     },
     transcode::{CopyVideoOptions, VodSourceClock},
 };
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// The inherited descriptor the pass's packet clock is written to. The
 /// source is 3 and the sibling identities' outputs are 4 to 6.
 pub(crate) const CLOCK_FD: i32 = 7;
-
-/// How far the observer may fall behind the pass's readers before the ride is
-/// abandoned: the bytes of everything handed to it and not yet taken.
-const BACKLOG_BYTES: usize = 32 * 1024 * 1024;
-
-/// The clock's header and first packet line, read before the origin exists.
-const MAX_HEAD_CLOCK: usize = 64 * 1024;
 
 /// What the pass's own probe of the held descriptor says about the clock:
 /// the container's start time and the selected video stream's time base and
@@ -146,35 +154,92 @@ impl ProbedCopyClock {
     }
 }
 
+/// The containers a ride is taken on: Matroska and ISO base media. Their
+/// demuxers apply no discontinuity correction, so FFmpeg's input clock
+/// without `-copyts` differs from the source's by the format start alone.
+/// The scanner records the lowercased extension. Every other container, and
+/// a file with none, is left to the standalone form.
+fn rides_container(file: &MediaFile) -> bool {
+    matches!(
+        file.container.as_deref(),
+        Some("mkv" | "webm" | "mp4" | "m4v" | "mov")
+    )
+}
+
+/// Files whose last riding pass abandoned its ride or did not build, with
+/// the source identity that pass read. The next pass on the same source does
+/// not ride, so a ride can never be why a title's pass keeps failing, and a
+/// title the ride cannot observe is not observed again on every pass. In
+/// memory, as the subtitle ride-along's is: a restart is a new build, which
+/// is when the question deserves asking again.
+static FAILED_RIDES: Mutex<BTreeMap<i64, SourceStamp>> = Mutex::new(BTreeMap::new());
+
+/// Latched files kept. Past it the lowest file id is forgotten.
+const MAX_FAILED_RIDES: usize = 4_096;
+
+fn failed_rides() -> std::sync::MutexGuard<'static, BTreeMap<i64, SourceStamp>> {
+    FAILED_RIDES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn record_failed_ride(file_id: i64, stamp: SourceStamp) {
+    let mut failed = failed_rides();
+    if failed.len() >= MAX_FAILED_RIDES && !failed.contains_key(&file_id) {
+        failed.pop_first();
+    }
+    failed.insert(file_id, stamp);
+}
+
 /// One pass's decision to ride: the lead identity whose canonical stream is
 /// observed, and the probed clock that places it.
 pub(crate) struct CopyRidePlan {
     video: CopyVideoOptions,
     clock: ProbedCopyClock,
-    backlog_bytes: usize,
+    stamp: SourceStamp,
+    held_limit: usize,
     #[cfg(test)]
-    stall_observer: bool,
+    deaf_clock: bool,
 }
 
 impl CopyRidePlan {
-    /// The ride of a pass whose lead output is `video`, or None when this
-    /// title's clock cannot be placed: no probed clock, or a transport
-    /// stream, whose discontinuities FFmpeg corrects without `-copyts` and
-    /// the engine, with it, does not.
+    /// The ride of a pass over `stamp` whose lead output is `video`, or None
+    /// when this title does not ride: a container outside the allow-list, no
+    /// probed clock, or a source whose last riding pass failed.
     pub(crate) fn for_pass(
         file: &MediaFile,
         video: CopyVideoOptions,
         clock: Option<ProbedCopyClock>,
+        stamp: SourceStamp,
     ) -> Option<Self> {
-        if crate::subtitle_source::is_mpegts_container(file) {
+        if !rides_container(file) {
             return None;
+        }
+        let clock = clock?;
+        {
+            let mut failed = failed_rides();
+            match failed.get(&file.id) {
+                Some(last) if *last == stamp => {
+                    tracing::debug!(
+                        file_id = file.id,
+                        "the last riding pass on this source failed; no copy ride"
+                    );
+                    return None;
+                }
+                // Another source identity is another question.
+                Some(_) => {
+                    failed.remove(&file.id);
+                }
+                None => {}
+            }
         }
         Some(Self {
             video,
-            clock: clock?,
-            backlog_bytes: BACKLOG_BYTES,
+            clock,
+            stamp,
+            held_limit: MAX_HELD,
             #[cfg(test)]
-            stall_observer: false,
+            deaf_clock: false,
         })
     }
 
@@ -187,133 +252,124 @@ impl CopyRidePlan {
         )
     }
 
-    /// An observer that never takes anything, behind a backlog of
-    /// `backlog_bytes`: the stalled consumer the pass must not wait on.
+    /// A ride whose clock is drained but never heard, holding at most
+    /// `held_limit` bytes of unpaired media: the ride that falls behind.
     #[cfg(test)]
-    pub(crate) fn stalled_for_test(mut self, backlog_bytes: usize) -> Self {
-        self.stall_observer = true;
-        self.backlog_bytes = backlog_bytes;
+    pub(crate) fn without_clock_for_test(mut self, held_limit: usize) -> Self {
+        self.deaf_clock = true;
+        self.held_limit = held_limit;
         self
     }
 }
 
-enum RideEvent {
-    Canonical(Vec<u8>),
-    CanonicalEof,
-    Clock(Vec<u8>),
-    ClockEof,
-    Packet(PacketInspection),
-    TraceEnd(Result<RangeInspection, String>),
+enum RideState {
+    Observing(Box<CanonicalObserver>),
+    /// The ride ended early, for a reason already counted and logged. The
+    /// pass goes on without it.
+    Abandoned,
+    Finished,
 }
 
-impl RideEvent {
-    fn weight(&self) -> usize {
-        match self {
-            Self::Canonical(bytes) | Self::Clock(bytes) => bytes.len(),
-            Self::Packet(packet) => {
-                std::mem::size_of::<PacketInspection>() + packet.configuration_sha256.len()
-            }
-            Self::CanonicalEof | Self::ClockEof | Self::TraceEnd(_) => 0,
-        }
-    }
-}
-
-/// What the taps and the observer share. It holds no sender, so the
-/// observer's inbox closes when the last tap is dropped.
-struct TapShared {
-    /// Bytes handed over and not yet taken by the observer.
-    queued: AtomicUsize,
-    limit: usize,
+/// What the pass's three readers and the ride share.
+struct RideShared {
+    file_id: i64,
+    state: Mutex<RideState>,
+    /// Set with `RideState::Abandoned`, so a reader can skip the lock.
     abandoned: AtomicBool,
     /// Rows observed so far, for the pass's progress report.
     rows: AtomicUsize,
 }
 
-/// Rows a ride has observed so far, for the pass's progress report.
+impl RideShared {
+    fn state(&self) -> std::sync::MutexGuard<'_, RideState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Hand the observer one thing a reader read. It is taken in place: a
+    /// few sample-table comparisons, never a wait. A refusal ends the ride.
+    fn feed(&self, feed: impl FnOnce(&mut CanonicalObserver) -> Result<(), String>) {
+        if self.abandoned.load(Ordering::Acquire) {
+            return;
+        }
+        let mut state = self.state();
+        let RideState::Observing(observer) = &mut *state else {
+            return;
+        };
+        match feed(observer) {
+            Ok(()) => self.rows.store(observer.rows.len(), Ordering::Relaxed),
+            Err(reason) => {
+                *state = RideState::Abandoned;
+                drop(state);
+                self.abandoned_notice(&reason);
+            }
+        }
+    }
+
+    /// End the ride for a reason no observation gave.
+    fn abandon(&self, reason: &str) {
+        let mut state = self.state();
+        if matches!(&*state, RideState::Observing(_)) {
+            *state = RideState::Abandoned;
+            drop(state);
+            self.abandoned_notice(reason);
+        }
+    }
+
+    /// Once per ride: counted, and logged with the observer's own reason.
+    fn abandoned_notice(&self, reason: &str) {
+        self.abandoned.store(true, Ordering::Release);
+        record_ride(RideOutcome::Abandoned);
+        tracing::warn!(
+            file_id = self.file_id,
+            reason,
+            "the fragment-index pass abandoned its copy index observation; the pass itself is unaffected"
+        );
+    }
+}
+
+/// Rows a ride has observed so far and whether it was abandoned, for the
+/// pass's progress report.
 #[derive(Clone)]
-pub(crate) struct CopyRideMeter(Arc<TapShared>);
+pub(crate) struct CopyRideMeter(Arc<RideShared>);
 impl CopyRideMeter {
     pub(crate) fn rows(&self) -> usize {
         self.0.rows.load(Ordering::Relaxed)
     }
+    pub(crate) fn abandoned(&self) -> bool {
+        self.0.abandoned.load(Ordering::Acquire)
+    }
 }
 
-/// Where the pass's readers hand the ride what they read. Nothing here ever
-/// waits: an offer past the backlog bound abandons the ride instead. Every
-/// tap is dropped by its reader when that reader ends, which is what tells
-/// the observer that nothing more is coming.
+/// Where the pass's readers hand the ride what they read.
 #[derive(Clone)]
-pub(crate) struct CopyRideTap {
-    shared: Arc<TapShared>,
-    sender: tokio::sync::mpsc::UnboundedSender<RideEvent>,
-}
+pub(crate) struct CopyRideTap(Arc<RideShared>);
 
 impl CopyRideTap {
-    fn offer(&self, event: RideEvent) {
-        if self.shared.abandoned.load(Ordering::Acquire) {
-            return;
-        }
-        let weight = event.weight();
-        let queued = self.shared.queued.fetch_add(weight, Ordering::AcqRel) + weight;
-        if queued > self.shared.limit || self.sender.send(event).is_err() {
-            self.shared.abandoned.store(true, Ordering::Release);
-        }
-    }
-    /// Bytes the lead output's reader just read.
-    pub(crate) fn canonical(&self, bytes: &[u8]) {
-        self.offer(RideEvent::Canonical(bytes.to_vec()));
-    }
-    pub(crate) fn canonical_eof(&self) {
-        self.offer(RideEvent::CanonicalEof);
-    }
     /// One packet the header trace closed.
     pub(crate) fn packet(&self, packet: PacketInspection) {
-        self.offer(RideEvent::Packet(packet));
+        self.0.feed(|observer| observer.packet(packet));
     }
     /// The header trace reached the end of the child's stderr.
     pub(crate) fn trace_end(&self, end: Result<RangeInspection, String>) {
-        self.offer(RideEvent::TraceEnd(end));
+        self.0.feed(|observer| observer.trace_end(end));
     }
 }
 
-/// The lead output's reader, also handing every byte it reads to the ride.
-/// The index reads exactly what it would have read; the tap takes a copy and
-/// never delays or fails the read.
-pub(crate) struct RideTee<R> {
-    inner: R,
-    tap: CopyRideTap,
-    ended: bool,
-}
-
-impl<R> RideTee<R> {
-    pub(crate) fn new(inner: R, tap: CopyRideTap) -> Self {
-        Self {
-            inner,
-            tap,
-            ended: false,
-        }
+impl crate::fragindex::LeadFragments for CopyRideTap {
+    fn wants_fragments(&self) -> bool {
+        !self.0.abandoned.load(Ordering::Acquire)
     }
-}
-
-impl<R: AsyncRead + Unpin> AsyncRead for RideTee<R> {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        context: &mut std::task::Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let before = buffer.filled().len();
-        let wanted = buffer.remaining();
-        let poll = std::pin::Pin::new(&mut self.inner).poll_read(context, buffer);
-        if let std::task::Poll::Ready(Ok(())) = &poll {
-            let read = &buffer.filled()[before..];
-            if !read.is_empty() {
-                self.tap.canonical(read);
-            } else if wanted != 0 && !self.ended {
-                self.ended = true;
-                self.tap.canonical_eof();
-            }
-        }
-        poll
+    fn init(&self, init: &Init) {
+        self.0.feed(|observer| observer.init(init));
+    }
+    fn fragment(&self, unconverted: Option<Vec<TrackFragment>>, fragment: Fragment) {
+        self.0
+            .feed(|observer| observer.fragment(unconverted, fragment));
+    }
+    fn end(&self) {
+        self.0.feed(CanonicalObserver::lead_end);
     }
 }
 
@@ -327,57 +383,46 @@ pub(crate) fn clock_pipe(
     Ok((reader, writer.into()))
 }
 
-/// One running ride: the clock reader, the observer and the tap between the
-/// pass's readers and it.
+/// One running ride: its shared state and the clock reader.
 pub(crate) struct CopyRide {
-    /// Handed to the lead output's reader and the header trace's, once each.
-    tap: CopyRideTap,
-    shared: Arc<TapShared>,
+    shared: Arc<RideShared>,
     video: CopyVideoOptions,
-    file_id: i64,
+    stamp: SourceStamp,
     clock_reader: tokio::task::JoinHandle<()>,
-    observer: tokio::task::JoinHandle<Result<AnalysisCopyRows, String>>,
 }
 
 impl CopyRide {
     /// Start reading `clock`, the parent's end of the child's descriptor 7.
-    /// The reader runs to the end of the file whether or not anything is
-    /// still listening, so the child never blocks on that descriptor.
+    /// The reader runs to the end of the file whether or not the ride is
+    /// still observing, so the child never blocks on that descriptor.
     pub(crate) fn start(
         plan: CopyRidePlan,
         file: &MediaFile,
         clock: impl AsyncRead + Unpin + Send + 'static,
     ) -> Self {
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let shared = Arc::new(TapShared {
-            queued: AtomicUsize::new(0),
-            limit: plan.backlog_bytes,
+        let observer =
+            CanonicalObserver::new(file.clone(), plan.video, plan.clock, plan.held_limit);
+        let shared = Arc::new(RideShared {
+            file_id: file.id,
+            state: Mutex::new(RideState::Observing(Box::new(observer))),
             abandoned: AtomicBool::new(false),
             rows: AtomicUsize::new(0),
         });
-        let tap = CopyRideTap {
-            shared: Arc::clone(&shared),
-            sender,
-        };
-        let clock_reader = tokio::spawn(read_clock(clock, tap.clone()));
-        let observer = CanonicalObserver::new(file.clone(), plan.video, plan.clock);
         #[cfg(test)]
-        let stall = plan.stall_observer;
+        let deaf = plan.deaf_clock;
         #[cfg(not(test))]
-        let stall = false;
-        let observer = tokio::spawn(observe(receiver, Arc::clone(&shared), observer, stall));
+        let deaf = false;
+        let clock_reader = tokio::spawn(read_clock(clock, Arc::clone(&shared), deaf));
         Self {
-            tap,
             shared,
             video: plan.video,
-            file_id: file.id,
+            stamp: plan.stamp,
             clock_reader,
-            observer,
         }
     }
 
     pub(crate) fn tap(&self) -> CopyRideTap {
-        self.tap.clone()
+        CopyRideTap(Arc::clone(&self.shared))
     }
 
     pub(crate) fn meter(&self) -> CopyRideMeter {
@@ -387,57 +432,57 @@ impl CopyRide {
     /// The whole-title rows, when the pass's lead output built and the ride
     /// saw the same stream through to its end.
     ///
-    /// The caller has reaped the child, read every output and joined its
-    /// stderr reader, so every tap but this ride's own is dropped and the
-    /// clock's writers are closed. The clock reader is therefore at the end
-    /// of its file, and the observer's inbox closes behind what it still
-    /// holds: it ends after at most its bounded backlog, on no clock of its
-    /// own. An abandoned ride, or one whose pass did not build, is stopped
-    /// rather than waited for. Both tasks are joined before this returns.
+    /// The clock reader is joined only when that is certain to end: the lead
+    /// built, so the child exited successfully and closed the clock, and the
+    /// ride is still observing. In every other case (a child that failed,
+    /// was killed or could not be waited for, or a ride already abandoned)
+    /// the reader is stopped instead; nothing here waits without a bound.
+    /// A ride that was abandoned, or whose pass did not build, is remembered
+    /// so this source's next pass does not ride.
     pub(crate) async fn finish(self, lead_built: bool) -> Option<PendingCopyRide> {
         let Self {
-            tap,
             shared,
             video,
-            file_id,
+            stamp,
             clock_reader,
-            observer,
         } = self;
-        drop(tap);
-        let abandoned = shared.abandoned.load(Ordering::Acquire);
+        if !lead_built || shared.abandoned.load(Ordering::Acquire) {
+            clock_reader.abort();
+        }
         let _ = clock_reader.await;
-        let observed = if lead_built && !abandoned {
-            match observer.await {
-                Ok(result) => result,
-                Err(error) => Err(format!("copy ride observer failed: {error}")),
+        let state = std::mem::replace(&mut *shared.state(), RideState::Finished);
+        let observed = match state {
+            RideState::Observing(observer) if lead_built => match observer.finish() {
+                Ok(rows) => Some(rows),
+                Err(reason) => {
+                    shared.abandoned_notice(&reason);
+                    None
+                }
+            },
+            // The pass did not build: there was nothing to observe to the end.
+            RideState::Observing(_) => {
+                record_ride(RideOutcome::NotBuilt);
+                None
             }
-        } else {
-            observer.abort();
-            let _ = observer.await;
-            Err(if abandoned {
-                "copy_ride_backlog"
-            } else {
-                "the pass's lead output did not build"
-            }
-            .to_owned())
+            RideState::Abandoned | RideState::Finished => None,
         };
         match observed {
-            Ok(rows) => {
+            Some(rows) => {
+                record_ride(RideOutcome::Observed);
                 tracing::info!(
-                    file_id,
+                    file_id = shared.file_id,
                     rows = rows.rows.len(),
                     "the fragment-index pass also observed this file's whole copy index"
                 );
                 Some(PendingCopyRide { video, rows })
             }
-            Err(reason) => {
-                if lead_built {
-                    tracing::info!(
-                        file_id,
-                        %reason,
-                        "the fragment-index pass kept no copy index observation"
-                    );
-                }
+            None => {
+                tracing::warn!(
+                    file_id = shared.file_id,
+                    built = lead_built,
+                    "a riding fragment-index pass kept no copy index observation; this file's next pass will not ride"
+                );
+                record_failed_ride(shared.file_id, stamp);
                 None
             }
         }
@@ -445,83 +490,76 @@ impl CopyRide {
 }
 
 /// Drain the child's packet clock to the end of the file. What is read goes
-/// to the ride while it is still listening and nowhere once it is not.
-async fn read_clock(mut clock: impl AsyncRead + Unpin, tap: CopyRideTap) {
+/// to the ride while it is still observing and nowhere once it is not.
+///
+/// A read error ends the ride, never the read: the descriptor stays open and
+/// is tried again, so the child is never handed a broken pipe. The pass
+/// stops this task once its child is gone.
+async fn read_clock(mut clock: impl AsyncRead + Unpin, shared: Arc<RideShared>, deaf: bool) {
     let mut buffer = vec![0_u8; 32 * 1024];
     loop {
         match clock.read(&mut buffer).await {
             Ok(0) => {
-                tap.offer(RideEvent::ClockEof);
+                shared.feed(CanonicalObserver::clock_end);
                 return;
             }
-            Ok(read) => tap.offer(RideEvent::Clock(buffer[..read].to_vec())),
-            // The descriptor is gone; there is nothing left to keep open.
-            Err(_) => {
-                tap.shared.abandoned.store(true, Ordering::Release);
-                return;
+            Ok(read) => {
+                if !deaf {
+                    shared.feed(|observer| observer.clock(&buffer[..read]));
+                }
+            }
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    shared.abandon("copy_clock_read_failed");
+                }
+                tokio::task::yield_now().await;
             }
         }
     }
 }
 
-/// Take what the taps hand over until every stream has ended or every tap
-/// is gone. It waits on nothing but its own inbox.
-async fn observe(
-    mut receiver: tokio::sync::mpsc::UnboundedReceiver<RideEvent>,
-    shared: Arc<TapShared>,
-    mut observer: CanonicalObserver,
-    stall: bool,
-) -> Result<AnalysisCopyRows, String> {
-    if stall {
-        std::future::pending::<()>().await;
-    }
-    while let Some(event) = receiver.recv().await {
-        shared.queued.fetch_sub(event.weight(), Ordering::AcqRel);
-        if shared.abandoned.load(Ordering::Acquire) {
-            return Err("copy_ride_backlog".into());
-        }
-        if let Err(reason) = observer.feed(event) {
-            // Stop the pass's readers copying for an observer that is gone.
-            shared.abandoned.store(true, Ordering::Release);
-            return Err(reason);
-        }
-        shared.rows.store(observer.rows.len(), Ordering::Relaxed);
-        if observer.ended() {
-            break;
-        }
-    }
-    observer.finish()
+/// One fragment the lead reader handed over, not yet paired with its packets.
+struct HeldFragment {
+    /// The sample tables before conversion, as a media-less fragment, when
+    /// the lead converted this fragment: packet sizes are of unconverted
+    /// samples. None when the fragment is as the muxer wrote it.
+    timing: Option<Fragment>,
+    /// The fragment as the index measured it.
+    fragment: Fragment,
 }
 
 /// The canonical-only observer: the engine's observed mux without the AV
-/// half. Media and clock bytes are paired by the engine's assembler, the
-/// first fragment establishes the engine's normalization contract, and each
-/// fragment is inspected, normalized and measured by the engine's own code.
+/// half and without a parser of its own. Fragments arrive parsed from the
+/// lead reader, packets from the clock, inspections from the header trace;
+/// each fragment is paired, checked, inspected and measured by the engine's
+/// own functions as soon as its packets are all here.
 struct CanonicalObserver {
     file: MediaFile,
     video: CopyVideoOptions,
     probed: ProbedCopyClock,
     inspect_hevc: bool,
     max_rows: usize,
-    /// Clock bytes held until the first packet line names the origin.
-    clock_head: Vec<u8>,
+    held_limit: usize,
+    clock_line: Vec<u8>,
+    clocks: PacketClockParser,
+    packets: VecDeque<SourcePacketObservation>,
+    /// The first packet on FFmpeg's input clock, which every later packet
+    /// is measured from, and the same instant on the source's clock, which
+    /// the observation reports.
+    origin: Option<SourceTimestamp>,
     source_origin: Option<SourceTimestamp>,
-    assembler: Option<ObservedRangeAssembler>,
-    pending_media: VecDeque<(Vec<u8>, usize)>,
-    pending_clock: VecDeque<(Vec<u8>, usize)>,
-    held_bytes: usize,
+    next_sequence: u64,
     raw_init: Option<Init>,
     established: Option<Established>,
-    fragments: VecDeque<(Fragment, SourceFragmentClock)>,
+    fragments: VecDeque<HeldFragment>,
+    held_bytes: usize,
     inspected: VecDeque<PacketInspection>,
     inspection: Option<RangeInspection>,
     rows: Vec<IndexRow>,
     row_inspections: Vec<CopyRowInspection>,
-    media_eof: bool,
+    lead_eof: bool,
     clock_eof: bool,
     trace_eof: bool,
-    media_marked: bool,
-    clock_marked: bool,
 }
 
 /// What the first canonical fragment establishes for the rest of the title.
@@ -535,7 +573,12 @@ struct Established {
 }
 
 impl CanonicalObserver {
-    fn new(file: MediaFile, video: CopyVideoOptions, probed: ProbedCopyClock) -> Self {
+    fn new(
+        file: MediaFile,
+        video: CopyVideoOptions,
+        probed: ProbedCopyClock,
+        held_limit: usize,
+    ) -> Self {
         // The engine's own predicate (`copyrange::fill_copy_gap`).
         let inspect_hevc = file.video_codec.as_deref() == Some("hevc");
         Self {
@@ -544,242 +587,188 @@ impl CanonicalObserver {
             probed,
             inspect_hevc,
             max_rows: plurx_core::store::MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES / 28,
-            clock_head: Vec::new(),
+            held_limit,
+            clock_line: Vec::new(),
+            clocks: PacketClockParser::new(),
+            packets: VecDeque::new(),
+            origin: None,
             source_origin: None,
-            assembler: None,
-            pending_media: VecDeque::new(),
-            pending_clock: VecDeque::new(),
-            held_bytes: 0,
+            next_sequence: 0,
             raw_init: None,
             established: None,
             fragments: VecDeque::new(),
+            held_bytes: 0,
             inspected: VecDeque::new(),
             inspection: None,
             rows: Vec::new(),
             row_inspections: Vec::new(),
-            media_eof: false,
+            lead_eof: false,
             clock_eof: false,
             trace_eof: false,
-            media_marked: false,
-            clock_marked: false,
         }
     }
 
-    /// Every stream this observer reads has ended.
-    fn ended(&self) -> bool {
-        self.media_eof && self.clock_eof && (self.trace_eof || !self.inspect_hevc)
-    }
-
-    fn hold(&mut self, bytes: usize) -> Result<(), String> {
-        self.held_bytes = self
-            .held_bytes
-            .checked_add(bytes)
-            .filter(|held| *held <= MAX_HELD)
-            .ok_or("copy_range_input_limit")?;
+    fn init(&mut self, init: &Init) -> Result<(), String> {
+        if init.tracks.len() != 1 || init.video().is_none() {
+            return Err("copy_canonical_observation_failed".into());
+        }
+        if self.raw_init.replace(init.clone()).is_some() {
+            return Err("copy_init_contract_changed".into());
+        }
         Ok(())
     }
 
-    fn feed(&mut self, event: RideEvent) -> Result<(), String> {
-        match event {
-            RideEvent::Canonical(bytes) => {
-                if self.media_eof {
-                    return Err("copy_observation_closed".into());
-                }
-                self.hold(bytes.len())?;
-                self.pending_media.push_back((bytes, 0));
-            }
-            RideEvent::CanonicalEof => self.media_eof = true,
-            RideEvent::Clock(bytes) => {
-                if self.clock_eof {
-                    return Err("copy_observation_closed".into());
-                }
-                if self.assembler.is_some() {
-                    self.hold(bytes.len())?;
-                    self.pending_clock.push_back((bytes, 0));
-                } else {
-                    self.clock_head.extend_from_slice(&bytes);
-                    self.establish_origin()?;
-                }
-            }
-            RideEvent::ClockEof => {
-                if self.assembler.is_none() {
-                    return Err("copy_head_clock_missing".into());
-                }
-                self.clock_eof = true;
-            }
-            RideEvent::Packet(packet) => {
-                if self.trace_eof {
-                    return Err("copy_observation_closed".into());
-                }
-                if self.inspect_hevc {
-                    if self.inspected.len() >= MAX_PACKETS {
-                        return Err("copy_inspection_limit".into());
-                    }
-                    self.inspected.push_back(packet);
-                }
-            }
-            RideEvent::TraceEnd(end) => {
-                self.trace_eof = true;
-                if self.inspect_hevc {
-                    self.inspection =
-                        Some(end.map_err(|_| "copy_hevc_inspection_failed".to_owned())?);
-                }
-            }
+    /// One fragment the lead reader has measured. `unconverted` is its
+    /// sample tables before a Dolby Vision conversion, when there was one.
+    fn fragment(
+        &mut self,
+        unconverted: Option<Vec<TrackFragment>>,
+        fragment: Fragment,
+    ) -> Result<(), String> {
+        if self.lead_eof {
+            return Err("copy_observation_closed".into());
         }
-        self.pump()?;
+        // Unpaired media beyond what the engine's own mux would hold.
+        self.held_bytes = self
+            .held_bytes
+            .checked_add(fragment.len())
+            .filter(|held| *held <= self.held_limit)
+            .ok_or("copy_range_input_limit")?;
+        self.fragments.push_back(HeldFragment {
+            timing: unconverted.map(|tracks| Fragment {
+                bytes: Vec::new(),
+                mdat_payload: 0..0,
+                tracks,
+            }),
+            fragment,
+        });
         self.measure()
     }
 
-    /// Find the title's first clock packet in the held head of the clock
-    /// output. It names both origins: FFmpeg's, which every later packet is
-    /// measured from, and the source's, which the observation reports.
-    fn establish_origin(&mut self) -> Result<(), String> {
-        let Some(complete) = self.clock_head.iter().rposition(|byte| *byte == b'\n') else {
-            if self.clock_head.len() > MAX_HEAD_CLOCK {
-                return Err("copy_head_output_limit".into());
+    fn lead_end(&mut self) -> Result<(), String> {
+        self.lead_eof = true;
+        self.measure()
+    }
+
+    /// Clock bytes, a line at a time through the engine's packet parser. The
+    /// first packet names both origins.
+    fn clock(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if self.clock_eof {
+            return Err("copy_observation_closed".into());
+        }
+        for byte in bytes {
+            if *byte != b'\n' {
+                if self.clock_line.len() == MAX_PACKET_CLOCK_LINE_BYTES {
+                    return Err("copy_clock_unknown".into());
+                }
+                self.clock_line.push(*byte);
+                continue;
             }
-            return Ok(());
-        };
-        let text = std::str::from_utf8(&self.clock_head[..=complete])
-            .map_err(|_| "copy_head_clock_encoding".to_owned())?;
-        let mut parser = PacketClockParser::new();
-        let mut first = None;
-        for line in text.lines() {
-            if let Some(packet) = parser
+            let line = std::mem::take(&mut self.clock_line);
+            let line = std::str::from_utf8(&line).map_err(|_| "copy_clock_unknown".to_owned())?;
+            let Some(packet) = self
+                .clocks
                 .push_line(line)
-                .map_err(|_| "copy_head_clock_invalid".to_owned())?
-            {
-                first = Some(packet);
-                break;
+                .map_err(|_| "copy_clock_unknown".to_owned())?
+            else {
+                continue;
+            };
+            if self.origin.is_none() {
+                self.origin = Some(head_origin(&packet)?);
+                self.source_origin = Some(self.probed.source_origin(&packet)?);
             }
+            if self.packets.len() == MAX_PACKETS {
+                return Err("copy_observation_limit".into());
+            }
+            self.packets.push_back(packet);
         }
-        let Some(first) = first else {
-            if self.clock_head.len() > MAX_HEAD_CLOCK {
-                return Err("copy_head_output_limit".into());
-            }
-            return Ok(());
-        };
-        let origin = head_origin(&first)?;
-        self.source_origin = Some(self.probed.source_origin(&first)?);
-        self.assembler = Some(
-            ObservedRangeAssembler::new(origin, 0, MAX_PACKETS, MAX_HELD)
-                .map_err(|_| "copy_observation_limit".to_owned())?,
-        );
-        // The assembler reads the clock from its first byte.
-        let head = std::mem::take(&mut self.clock_head);
-        self.hold(head.len())?;
-        self.pending_clock.push_back((head, 0));
-        Ok(())
+        self.measure()
     }
 
-    fn observed(&mut self, unit: ObservedUnit) -> Result<(), String> {
-        match unit {
-            ObservedUnit::Init(init) => {
-                if self.raw_init.replace(init).is_some() {
-                    return Err("copy_init_contract_changed".into());
-                }
-            }
-            ObservedUnit::Fragment { fragment, clock } => {
-                self.hold(fragment.len())?;
-                self.fragments.push_back((fragment, clock));
-            }
+    fn clock_end(&mut self) -> Result<(), String> {
+        if !self.clock_line.is_empty() || self.clocks.finish().is_err() {
+            return Err("copy_clock_unknown".into());
         }
-        Ok(())
+        self.clock_eof = true;
+        self.measure()
     }
 
-    /// The engine's media and clock pairing (`ObservedCopyMux`'s pump), with
-    /// this observer's own held-byte bound.
-    fn pump(&mut self) -> Result<(), String> {
-        if self.assembler.is_none() {
-            return Ok(());
+    fn packet(&mut self, packet: PacketInspection) -> Result<(), String> {
+        if self.trace_eof {
+            return Err("copy_observation_closed".into());
         }
-        loop {
-            let mut progress = false;
-            if let Some((bytes, at)) = self.pending_media.front() {
-                let fed = self
-                    .assembler
-                    .as_mut()
-                    .ok_or("copy_observation_closed")?
-                    .feed_media(&bytes[*at..])
-                    .map_err(observation_error)?;
-                progress |= fed.consumed > 0 || fed.event.is_some();
-                self.consumed(true, fed.consumed);
-                if let Some(event) = fed.event {
-                    self.observed(event)?;
-                }
+        if self.inspect_hevc {
+            if self.inspected.len() >= MAX_PACKETS {
+                return Err("copy_inspection_limit".into());
             }
-            if let Some((bytes, at)) = self.pending_clock.front() {
-                let fed = self
-                    .assembler
-                    .as_mut()
-                    .ok_or("copy_observation_closed")?
-                    .feed_clock(&bytes[*at..])
-                    .map_err(observation_error)?;
-                progress |= fed.consumed > 0 || fed.event.is_some();
-                self.consumed(false, fed.consumed);
-                if let Some(event) = fed.event {
-                    self.observed(event)?;
-                }
-            }
-            if !progress {
-                break;
-            }
+            self.inspected.push_back(packet);
         }
-        // A held fragment can be released by the last clock line with no
-        // media chunk after it; empty feeds drain that event.
-        loop {
-            let assembler = self.assembler.as_mut().ok_or("copy_observation_closed")?;
-            let mut event = None;
-            if !self.media_marked {
-                event = assembler.feed_media(&[]).map_err(observation_error)?.event;
-            }
-            if event.is_none() && !self.clock_marked {
-                event = assembler.feed_clock(&[]).map_err(observation_error)?.event;
-            }
-            match event {
-                Some(event) => self.observed(event)?,
-                None => break,
-            }
-        }
-        let assembler = self.assembler.as_mut().ok_or("copy_observation_closed")?;
-        if self.media_eof && self.pending_media.is_empty() && !self.media_marked {
-            assembler.mark_media_eof().map_err(observation_error)?;
-            self.media_marked = true;
-        }
-        if self.clock_eof && self.pending_clock.is_empty() && !self.clock_marked {
-            assembler.mark_clock_eof().map_err(observation_error)?;
-            self.clock_marked = true;
-        }
-        Ok(())
+        self.measure()
     }
 
-    fn consumed(&mut self, media: bool, consumed: usize) {
-        let queue = if media {
-            &mut self.pending_media
-        } else {
-            &mut self.pending_clock
-        };
-        if let Some((bytes, at)) = queue.front_mut() {
-            *at += consumed;
-            if *at == bytes.len() {
-                queue.pop_front();
-            }
+    fn trace_end(&mut self, end: Result<RangeInspection, String>) -> Result<(), String> {
+        self.trace_eof = true;
+        if self.inspect_hevc {
+            self.inspection = Some(end.map_err(|_| "copy_hevc_inspection_failed".to_owned())?);
         }
-        self.held_bytes = self.held_bytes.saturating_sub(consumed);
+        self.measure()
     }
 
-    /// Turn every paired fragment whose packets have all been inspected into
-    /// its row, exactly as the engine's mux does for the canonical half.
+    /// Turn every held fragment whose packets and inspections are all here
+    /// into its row, as the engine's mux does for the canonical half.
     fn measure(&mut self) -> Result<(), String> {
-        while let Some((canonical, clock)) = self.fragments.front() {
+        loop {
+            let (Some(held), Some(raw_init), Some(origin)) =
+                (self.fragments.front(), self.raw_init.as_ref(), self.origin)
+            else {
+                return Ok(());
+            };
+            let video = raw_init.video().ok_or("copy_video_missing")?;
+            let packets = held
+                .timing
+                .as_ref()
+                .unwrap_or(&held.fragment)
+                .track(video.id)
+                .ok_or("copy_video_missing")?
+                .sample_count();
+            if packets == 0 {
+                return Err("copy_canonical_observation_failed".into());
+            }
+            if packets > MAX_PACKETS {
+                return Err("copy_observation_limit".into());
+            }
+            if self.packets.len() < packets || (self.inspect_hevc && self.inspected.len() < packets)
+            {
+                return Ok(());
+            }
+            let held = self.fragments.pop_front().ok_or("copy_pair_missing")?;
+            self.held_bytes = self.held_bytes.saturating_sub(held.fragment.len());
+            // The engine's association of a fragment with its packets, on
+            // the sample tables the packets were cut from.
+            let clock = associate_fragment_clock(
+                held.timing.as_ref().unwrap_or(&held.fragment),
+                raw_init,
+                &self.packets.make_contiguous()[..packets],
+                self.next_sequence,
+                origin,
+                0,
+            )
+            .map_err(|_| "copy_clock_unknown".to_owned())?;
+            self.packets.drain(..packets);
+            self.next_sequence = clock.next_packet_sequence;
             if self.established.is_none() {
-                let raw_init = self.raw_init.clone().ok_or("copy_init_missing")?;
+                // Promotion is read from the head's parameter sets and SEI,
+                // which a conversion (it rewrites RPU NAL units only) leaves
+                // as the muxer wrote them.
                 let contract = CopyNormalizationContract::from_head(
-                    &self.file, self.video, &raw_init, canonical,
+                    &self.file,
+                    self.video,
+                    raw_init,
+                    &held.fragment,
                 )
                 .map_err(|error| error.to_string())?;
                 let normalizer = contract
-                    .begin_canonical(raw_init)
+                    .begin_canonical(raw_init.clone())
                     .map_err(|error| error.to_string())?;
                 let served = normalizer.canonical_init().clone();
                 let timescale = served.video().ok_or("copy_video_missing")?.timescale;
@@ -802,45 +791,33 @@ impl CanonicalObserver {
                 });
             }
             let established = self.established.as_mut().ok_or("copy_init_missing")?;
-            let video = established
-                .normalizer
-                .canonical_init()
-                .video()
-                .ok_or("copy_video_missing")?;
-            let packets = canonical
-                .track(video.id)
-                .ok_or("copy_video_missing")?
-                .sample_count();
             let first_sequence = clock
                 .next_packet_sequence
                 .checked_sub(packets as u64)
                 .ok_or("copy_inspection_sequence")?;
-            if self.inspect_hevc && self.inspected.len() < packets {
-                break;
-            }
             let inspection = if self.inspect_hevc {
-                Some(inspect_canonical_row(
-                    canonical,
+                let inspection = inspect_canonical_row(
+                    &held.fragment,
                     established.normalizer.canonical_init(),
-                    clock,
+                    &clock,
                     first_sequence,
                     self.inspected.iter().take(packets),
-                )?)
+                )?;
+                self.inspected.drain(..packets);
+                Some(inspection)
             } else {
                 None
             };
-            let (mut canonical, clock) = self.fragments.pop_front().ok_or("copy_pair_missing")?;
-            self.held_bytes = self.held_bytes.saturating_sub(canonical.len());
-            if self.inspect_hevc {
-                self.inspected.drain(..packets);
-            }
+            // The lead reader's conversion is the engine's (the same
+            // converter over the same track); what remains of the engine's
+            // normalization is its parameter-set check.
             established
                 .normalizer
-                .normalize(&mut canonical)
+                .admit(&held.fragment)
                 .map_err(|error| error.to_string())?;
             let row = established
                 .verifier
-                .verify(&canonical, clock, &canonical)
+                .verify(&held.fragment, clock, &held.fragment)
                 .map_err(|error| format!("copy_fragment_verification:{error:?}"))?;
             // What the engine's kernel refuses for any audio selection: a
             // row, or a segment of rows, longer than the copy target.
@@ -856,37 +833,25 @@ impl CanonicalObserver {
             } else {
                 established.pending_ticks
             };
-            let ticks = ticks
+            established.pending_ticks = ticks
                 .checked_add(row.duration)
                 .filter(|ticks| *ticks <= established.max_ticks)
                 .ok_or("copy_target_exceeded")?;
-            established.pending_ticks = ticks;
             if self.rows.len() >= self.max_rows {
                 return Err("copy_range_row_limit".into());
             }
             self.rows.push(row);
             self.row_inspections.extend(inspection);
         }
-        Ok(())
     }
 
     /// The whole-title observation, or why this read is not one.
     fn finish(mut self) -> Result<AnalysisCopyRows, String> {
-        if !self.ended() {
+        if !self.lead_eof || !self.clock_eof || (self.inspect_hevc && !self.trace_eof) {
             return Err("copy_output_incomplete".into());
         }
-        self.pump()?;
-        self.assembler
-            .as_mut()
-            .ok_or("copy_head_clock_missing")?
-            .finish()
-            .map_err(observation_error)?;
         self.measure()?;
-        if !self.fragments.is_empty()
-            || !self.pending_media.is_empty()
-            || !self.pending_clock.is_empty()
-            || !self.inspected.is_empty()
-        {
+        if !self.fragments.is_empty() || !self.packets.is_empty() || !self.inspected.is_empty() {
             return Err("copy_pair_incomplete".into());
         }
         let established = self.established.ok_or("copy_fill_empty")?;
@@ -909,15 +874,6 @@ impl CanonicalObserver {
             row_inspections: self.row_inspections,
             promotion: established.contract.promotion().clone(),
         })
-    }
-}
-
-fn observation_error(error: plurx_core::segplan::observed_range::ObservationError) -> String {
-    use plurx_core::segplan::observed_range::ObservationError;
-    match error {
-        ObservationError::InitContractChanged => "copy_init_contract_changed".into(),
-        ObservationError::Clock => "copy_clock_unknown".into(),
-        _ => "copy_canonical_observation_failed".into(),
     }
 }
 

@@ -3897,19 +3897,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # source in `working` has exactly one), bounded by MAX_PENDING_SOURCES, which
 # ends when publish_source returns. Its supervisor task awaits that unit's
 # JoinHandle and always returns the key, a panic included, then ends.
-# Copy index ride-along (item 6, plan step 3), +2 owned spawns, both in
-# `copy_ride_along.rs::CopyRide::start` and both joined by `CopyRide::finish`
-# before the index pass returns its builds:
+# Copy index ride-along (item 6, plan step 3), +1 owned spawn, in
+# `copy_ride_along.rs::CopyRide::start` and joined or stopped by
+# `CopyRide::finish` before the index pass returns its builds:
 # - The clock reader drains the pass child's descriptor 7 to end of file. It
-#   ends when the child's write end closes, which the pass's own reap
-#   guarantees; it holds no source and starts no child.
-# - The observer takes what the pass's readers hand it and waits on nothing
-#   but its inbox, which closes when the lead reader, the stderr reader and
-#   the clock reader end. A ride that was abandoned, or whose pass did not
-#   build, is aborted and joined instead.
-# If the pass future is dropped both still end with the child (kill-on-drop
-# closes the clock; dropped readers close the inbox).
-expected_occurrences = 1146
+#   holds no source and starts no child. `finish` joins it only when the
+#   lead output built and the ride is still observing, which is when the
+#   child has exited successfully and closed the clock; in every other case
+#   (a failed, killed or unwaitable child, an abandoned ride) it is aborted,
+#   so nothing waits on it without a bound. A read error ends the ride, not
+#   the read: the descriptor stays open so the child never sees EPIPE.
+# The ride has no observer task: its state is fed in place, under one lock,
+# by the pass's own lead reader, stderr reader and this clock reader.
+# If the pass future is dropped the reader still ends with the child
+# (kill-on-drop closes the clock).
+expected_occurrences = 1145
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5776,8 +5778,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # - `copy_analysis/gap_fill_tests.rs`, around one whole-title fill and one
 #   riding pass per fixture; an elapsed bound cancels the fill's stop token,
 #   awaits its settlement and fails the test, as the test above it does.
-# - `fragindex/copy_ride_tests.rs`, around the pass with a stalled ride
-#   consumer; elapsing is the failure the test exists to catch.
+# - `fragindex/copy_ride_tests.rs`, around the pass whose ride falls
+#   behind; elapsing is the failure the test exists to catch.
 # The ride itself adds no timer: it has no deadline, grace or poll of its
 # own, and is joined on the pass's existing reap.
 expected_occurrences = 2204

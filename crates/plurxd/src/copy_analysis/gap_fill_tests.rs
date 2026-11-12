@@ -382,9 +382,9 @@ fn sealed_blob(set: &CopyObservationSet, source: &AnalysisCoordinationSource) ->
 #[tokio::test]
 async fn the_content_analysis_ride_seals_the_blob_a_whole_title_fill_seals() {
     plurx_core::testfixtures::require_ffmpeg();
-    for kind in ["clean-cra", "h264"] {
+    for (kind, id) in [("clean-cra", 73_101), ("h264", 73_102)] {
         let stop = CancellationToken::new();
-        let run = ride_equals_the_whole_title_fill(kind, stop.clone());
+        let run = ride_equals_the_whole_title_fill(kind, id, stop.clone());
         tokio::pin!(run);
         match tokio::time::timeout(Duration::from_secs(240), &mut run).await {
             Ok(result) => result.unwrap_or_else(|error| panic!("{kind}: {error}")),
@@ -399,9 +399,10 @@ async fn the_content_analysis_ride_seals_the_blob_a_whole_title_fill_seals() {
 
 async fn ride_equals_the_whole_title_fill(
     kind: &str,
+    id: i64,
     stop: CancellationToken,
 ) -> Result<(), String> {
-    let file = crate::fragindex::copy_ride_tests::fixture_file(kind);
+    let file = crate::fragindex::copy_ride_tests::fixture_file(kind, id);
     let bytes = Arc::new(std::fs::read(&file.path).expect("fixture bytes"));
     let held = Arc::new(Mutex::new(Vec::new()));
     let cache = crate::test_tempdir().expect("runtime cache");
@@ -470,7 +471,7 @@ async fn ride_equals_the_whole_title_fill(
         file: Arc::new(file.clone()),
         catalog_namespace: NAMESPACE.into(),
         source: source.clone(),
-        custody: IndexPassCustody::for_test(NODE),
+        custody: IndexPassCustody::for_test(NODE, file.id, &object_version),
         recipe: recipe.clone(),
         rows: ride.rows,
     };
