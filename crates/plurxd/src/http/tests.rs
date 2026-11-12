@@ -21926,6 +21926,70 @@ async fn an_unmounted_root_is_a_503_path_unreadable_and_an_outside_path_is_a_422
     );
 }
 
+/// Regression: a `library-targeted-v1` job holds no `source_io` custody, so a
+/// targeted probe that really reads bytes (a real, ffprobe-readable file —
+/// not a few placeholder bytes) must read them directly. Routed through the
+/// byte service it waits for a grant nothing can give, and the request never
+/// leaves `202`.
+#[tokio::test]
+async fn a_targeted_scan_of_a_readable_media_file_answers_200_placed_within_wait_ms() {
+    plurx_core::testfixtures::require_ffmpeg();
+    let (app, state) = test_app_with_state();
+    let _worker = scan_worker(&state);
+    let admin = setup_admin(&app).await;
+    let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let root = dir.path().canonicalize().expect("canonical");
+    std::fs::create_dir_all(&root).expect("mkdir");
+    v2_library(&app, &admin, &root).await;
+    scan_and_settle(&app, &key, json!({ "path": root })).await;
+
+    // A new, genuinely probeable file lands after the initial scan.
+    let folder = root.join("Dune (2021)");
+    std::fs::create_dir_all(&folder).expect("mkdir");
+    let file = folder.join("Dune (2021).mkv");
+    plurx_core::testfixtures::run(
+        std::process::Command::new(plurx_core::testfixtures::ffmpeg())
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=64x64:rate=5:duration=1")
+            .args(["-c:v", "mpeg4", "-f", "matroska"])
+            .arg(&file),
+    );
+    let meta = std::fs::metadata(&file).expect("stat");
+    let mtime_ns = i64::try_from(
+        meta.modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_nanos(),
+    )
+    .expect("fits");
+
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({
+                "path": folder,
+                "request_key": "op/60/d0/1",
+                "wait_ms": 20_000,
+                "expected_files": [{ "path": file, "bytes": meta.len(), "mtime_ns": mtime_ns }],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the probe read the file inside wait_ms: {body}"
+    );
+    let files = body["files"].as_array().expect("per-file report");
+    assert_eq!(files.len(), 1, "{body}");
+    assert_eq!(files[0]["state"], "placed", "{body}");
+    assert_eq!(files[0]["path"], file.display().to_string());
+}
+
 /// Contract v2 §4.2/§5.1: with `wait_ms` the answer is a `200` carrying the
 /// per-file report when the worker finishes in time. The expected file is a
 /// same-path replacement with equal size and the same whole-second mtime —
