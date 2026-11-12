@@ -5896,6 +5896,20 @@ session, a title or a path. Nothing here names content.
 | `plurx_http_bodies_total{route_group,outcome="complete\|aborted"}` | How bodies ended. `complete` is a body that handed the connection everything it promised: it reached its end, or — for a response with a `Content-Length`, which is every direct play range and HLS segment — it yielded the declared number of bytes (hyper stops polling a fixed-length body once those are written, so "reached its end" alone would miss every one of them). `aborted` is a body let go of short of that, or one that ended in an error. `complete` means handed to the connection, not acknowledged by the client. A HEAD, 204 or 304 response promises no body and counts `complete`. **`aborted` is not an error rate**: on a media route a consumer that leaves mid-body — a seek, a player that drops a segment it no longer needs — is ordinary. But a body delivered in full is `complete` whatever its framing, so `aborted` counts real departures only. Read it against `complete` on the *same* route group, and read a change in the ratio rather than its level. |
 | `plurx_panics_total{subsystem}` | Panics the process hook saw, by a fixed allowlist of module names with `other` for everything else, including dependencies. Any movement at all is worth the daemon log: the matching line is at ERROR on target `plurxd::panic` with the panic's location and a redacted message. The counter reports a panic; it does not repair whatever the panicking task left behind. |
 
+Store operations per request are counted by `plurx_http_store_reads_total{route_group,class,role}`
+and, split by the Store method that issued each, by
+`plurx_http_store_operations_by_method_total{route_group,class,method}`
+(`method` is a Store method name chosen in source, never SQL or a request value;
+at most 4096 series, with `plurx_http_store_operations_by_method_dropped_total`
+counting what the cap refused: any movement means a reading is incomplete). The
+split sums to the totals apart from the per-request `other` fold. **From the D3a
+landing the owner-start scope adds a remote owner's own start operations to
+`route_group="cluster"`**; before it a spawned start counted nothing, so a
+`cluster` before/after pair that straddles that deploy, or the 2026-11-07
+`cluster` figure, is not comparable. Take baselines on a D3a-or-later build. A
+`session_layout` method line is the session-layout marker reads a store pays
+only while its cached layout is not the permanent v82 one.
+
 Every 5xx also writes one `WARN` line on target `plurxd::http` carrying the
 route group, the status, the latency, the redacted target and the request id.
 Successful requests are deliberately **not** logged: the in-memory ring behind
