@@ -755,6 +755,16 @@ impl From<&mut Row<'_>> for WatchMapRow {
     }
 }
 
+/// How many offloaded leaves sit under each of `$1`'s items (JSON ids).
+const OFFLOADED_COUNTS_SQL: &str = "WITH RECURSIVE tree(root, id) AS ( \
+         SELECT id, id FROM items WHERE id IN (SELECT value FROM json_each($1)) \
+         UNION \
+         SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id \
+     ) \
+     SELECT t.root AS root, COUNT(*) AS offloaded FROM tree t \
+     JOIN items i ON i.id = t.id \
+     WHERE i.offloaded_at IS NOT NULL GROUP BY t.root";
+
 struct OffloadedCountRow {
     root: i64,
     offloaded: i64,
@@ -1110,6 +1120,23 @@ impl HiqliteAuthStore {
                 .await
                 .map_err(database_error)?,
         )
+    }
+
+    pub(super) async fn local_offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        Ok(self
+            .client()
+            .query_map::<OffloadedCountRow, _>(OFFLOADED_COUNTS_SQL, params!(ids_json(ids)?))
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| (row.root, row.offloaded))
+            .collect())
     }
 
     pub(super) async fn local_get_item_children(
@@ -1934,14 +1961,7 @@ impl MediaStore for HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map::<OffloadedCountRow, _>(
-                "WITH RECURSIVE tree(root, id) AS ( \
-                     SELECT id, id FROM items WHERE id IN (SELECT value FROM json_each($1)) \
-                     UNION \
-                     SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                 ) \
-                 SELECT t.root AS root, COUNT(*) AS offloaded FROM tree t \
-                 JOIN items i ON i.id = t.id \
-                 WHERE i.offloaded_at IS NOT NULL GROUP BY t.root",
+                OFFLOADED_COUNTS_SQL,
                 params!(ids_json(ids)?),
             )
             .await
@@ -1950,37 +1970,6 @@ impl MediaStore for HiqliteAuthStore {
             .into_iter()
             .map(|row| (row.root, row.offloaded))
             .collect())
-    }
-
-    async fn mark_items_offloaded(&self, item_ids: &[i64], at: i64) -> Result<u64, StoreError> {
-        let ids = ids_json(item_ids)?;
-        let rows = self
-            .client()
-            .execute(
-                "UPDATE items SET offloaded_at = COALESCE(offloaded_at, $2) \
-                 WHERE id IN (SELECT value FROM json_each($1)) \
-                   AND kind IN ('movie','episode','video')",
-                params!(ids, at),
-            )
-            .await
-            .map_err(database_error)?;
-        Ok(rows as u64)
-    }
-
-    async fn clear_offloaded_with_files(&self, item_ids: &[i64]) -> Result<u64, StoreError> {
-        let ids = ids_json(item_ids)?;
-        let rows = self
-            .client()
-            .execute(
-                "UPDATE items SET offloaded_at = NULL \
-                 WHERE id IN (SELECT value FROM json_each($1)) \
-                   AND offloaded_at IS NOT NULL \
-                   AND id IN (SELECT item_id FROM files)",
-                params!(ids),
-            )
-            .await
-            .map_err(database_error)?;
-        Ok(rows as u64)
     }
 
     async fn find_movies_by_directory(
@@ -4048,10 +4037,13 @@ impl MediaStore for HiqliteAuthStore {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
     ) -> Result<ReconcileOutcome, StoreError> {
         if let Some(refusal) = super::reconcile_payload_refusal(gone_file_ids, prune_limit) {
             return Ok(refusal);
         }
+        let keep_json = ids_json(offload_keep)?;
         let expected = self
             .client()
             .query_consistent_map::<RootFingerprintRow, _>(
@@ -4112,6 +4104,19 @@ impl MediaStore for HiqliteAuthStore {
                    AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1)"
                     .to_owned(),
                 params!(library_id, &gone_file_ids),
+            ),
+            (
+                // Inside the same transaction as the delete above and the
+                // prune below: an offloaded leaf is marked before the prune
+                // can see it fileless, and a failed reconcile marks nothing.
+                format!(
+                    "UPDATE items SET offloaded_at = COALESCE(offloaded_at, $3) \
+                     WHERE library_id = $1 \
+                       AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1) \
+                       AND {}",
+                    crate::store::offload::MARK_KEPT_PREDICATE
+                ),
+                params!(library_id, &keep_json, offloaded_at),
             ),
             (
                 concat!(

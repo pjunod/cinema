@@ -23028,6 +23028,45 @@ async fn fake_curator(
     (base, seen)
 }
 
+/// Offload an item the way a removal does: its files go and the reconcile
+/// marks it in its own transaction.
+async fn offload_item(state: &AppState, item_id: i64) {
+    let item = state.store.get_item(item_id).await.expect("get").expect("item");
+    let library = state
+        .store
+        .list_libraries()
+        .await
+        .expect("libraries")
+        .into_iter()
+        .find(|library| library.id == item.library_id)
+        .expect("library");
+    let files: Vec<i64> = state
+        .store
+        .files_for_item(item_id)
+        .await
+        .expect("files")
+        .iter()
+        .map(|file| file.id)
+        .collect();
+    state
+        .store
+        .ensure_library_root_fingerprint(library.id, &library.paths, "offload-test", true)
+        .await
+        .expect("root");
+    state
+        .store
+        .reconcile_library(
+            library.id,
+            "offload-test",
+            &files,
+            files.len() as u64,
+            &[item_id],
+            1_700_000_000,
+        )
+        .await
+        .expect("reconcile");
+}
+
 async fn pair_curator(app: &Router, admin: &str, url: &str) {
     let (status, _) = call(
         app,
@@ -23169,11 +23208,7 @@ async fn get_it_back_asks_curator_and_says_what_it_answered() {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "not_offloaded", "{body}");
 
-    state
-        .store
-        .mark_items_offloaded(&[seed.movie], 1_700_000_000)
-        .await
-        .expect("mark");
+    offload_item(&state, seed.movie).await;
 
     let (status, body) = call(&app, post(&uri, Some(&admin), json!({}))).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -23232,11 +23267,7 @@ async fn get_it_back_asks_curator_and_says_what_it_answered() {
     assert_eq!(body["code"], "curator_unreachable", "{body}");
 
     // No ids: Curator cannot be asked.
-    state
-        .store
-        .mark_items_offloaded(&[seed.movie], 1_700_000_000)
-        .await
-        .expect("mark");
+    offload_item(&state, seed.movie).await;
     call(
         &app,
         post(

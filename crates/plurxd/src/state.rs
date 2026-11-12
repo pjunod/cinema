@@ -5752,16 +5752,16 @@ impl JobManager {
                     .probe_only
                     .then(|| canonical.iter().cloned().collect()),
                 force_probe: canonical,
-                offload_hint: requests
+                offload_hints: targeted
+                    .offload_hints
                     .iter()
-                    .find_map(|request| request.ids.as_ref())
-                    .map(|ids| scan::OffloadHint {
-                        // An episode request's own `ids` are the episode's;
-                        // the show's id travels in `series_tmdb`.
-                        tmdb: (!ids.episodeish).then_some(ids.tmdb).flatten(),
-                        imdb: (!ids.episodeish).then(|| ids.imdb.clone()).flatten(),
-                        series_tmdb: ids.series_tmdb,
-                    }),
+                    .filter_map(|(raw, hint)| match force_probe.get(raw) {
+                        Some(library_work::ExpectedPath::Canonical(path)) => {
+                            Some((path.clone(), hint.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
             },
         )
         .await?;

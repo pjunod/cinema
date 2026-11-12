@@ -428,7 +428,12 @@ pub async fn search(
         })
         .unwrap_or_default();
     let hits = state.catalogue.search_items(&query, 50).await?;
-    let items: Vec<Item> = hits.into_iter().map(|r| r.item).collect();
+    // Offloaded titles have no file to play: the façade does not list them.
+    let items: Vec<Item> = hits
+        .into_iter()
+        .map(|r| r.item)
+        .filter(|item| item.offloaded_at.is_none())
+        .collect();
     let views = views(&state, user.id, &items).await?;
     let mut elements = Vec::with_capacity(items.len());
     for item in &items {

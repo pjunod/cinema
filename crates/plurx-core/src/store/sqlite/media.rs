@@ -583,35 +583,6 @@ impl MediaStore for SqliteStore {
         .await
     }
 
-    async fn mark_items_offloaded(&self, item_ids: &[i64], at: i64) -> Result<u64, StoreError> {
-        let ids = serde_json::to_string(item_ids).map_err(|e| StoreError::Task(e.to_string()))?;
-        self.with_conn(move |conn| {
-            let marked = conn.execute(
-                "UPDATE items SET offloaded_at = COALESCE(offloaded_at, ?2)
-                 WHERE id IN (SELECT value FROM json_each(?1))
-                   AND kind IN ('movie','episode','video')",
-                params![ids, at],
-            )?;
-            Ok(marked as u64)
-        })
-        .await
-    }
-
-    async fn clear_offloaded_with_files(&self, item_ids: &[i64]) -> Result<u64, StoreError> {
-        let ids = serde_json::to_string(item_ids).map_err(|e| StoreError::Task(e.to_string()))?;
-        self.with_conn(move |conn| {
-            let cleared = conn.execute(
-                "UPDATE items SET offloaded_at = NULL
-                 WHERE id IN (SELECT value FROM json_each(?1))
-                   AND offloaded_at IS NOT NULL
-                   AND id IN (SELECT item_id FROM files)",
-                params![ids],
-            )?;
-            Ok(cleared as u64)
-        })
-        .await
-    }
-
     async fn find_movies_by_directory(
         &self,
         library_id: i64,
@@ -2667,12 +2638,15 @@ impl MediaStore for SqliteStore {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
     ) -> Result<ReconcileOutcome, StoreError> {
         if let Some(refusal) = crate::store::reconcile_payload_refusal(gone_file_ids, prune_limit) {
             return Ok(refusal);
         }
         let root_fingerprint = root_fingerprint.to_owned();
         let ids = gone_file_ids.to_vec();
+        let keep = offload_keep.to_vec();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let expected: Option<String> = tx
@@ -2713,6 +2687,7 @@ impl MediaStore for SqliteStore {
                     deleted_files += delete.execute(params![id, library_id])? as u64;
                 }
             }
+            crate::store::offload::mark_kept_fileless(&tx, library_id, &keep, offloaded_at)?;
             let mut pruned_items = 0_u64;
             pruned_items += tx.execute(
                 concat!(

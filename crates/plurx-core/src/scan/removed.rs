@@ -206,6 +206,10 @@ pub struct AbsentPath {
     /// like a removed path's, but the item stays, marked offloaded once it is
     /// left with no files.
     pub offload: bool,
+    /// The library root lists nothing on its parent's filesystem and the
+    /// path belongs to an offload: nothing here tells that from an unmounted
+    /// share, so the record is kept (`retained`, `root_empty`).
+    pub root_empty: bool,
 }
 
 /// What forgetting the absent paths did.
@@ -224,6 +228,7 @@ struct Target {
     /// As the caller sent it.
     path: String,
     offload: bool,
+    root_empty: bool,
     root: PathBuf,
     /// Every file recorded at it (or below it, for a folder).
     files: Vec<(i64, PathBuf)>,
@@ -287,6 +292,7 @@ pub async fn remove_absent(
             Some(item_id) if !files.is_empty() => targets.push(Target {
                 path: entry.path.clone(),
                 offload: entry.offload,
+                root_empty: entry.root_empty,
                 root: entry.root.clone(),
                 files,
                 item_id,
@@ -314,6 +320,25 @@ pub async fn remove_absent(
                     .to_owned(),
             ));
         }
+        sort_in_request_order(&mut removal.reports, absent);
+        return Ok(removal);
+    }
+
+    // An offload that emptied its library root: kept, not retryable, and
+    // never `path_unreadable`. Cinema keeps the record until a file lands or
+    // Curator re-acquires; a full scan would prune it, so none is admitted.
+    let (emptied, targets): (Vec<Target>, Vec<Target>) =
+        targets.into_iter().partition(|target| target.root_empty);
+    for target in &emptied {
+        removal.reports.push(retained(
+            target,
+            RetainedCode::RootEmpty,
+            "the offload left this library root empty, which this node cannot tell from an \
+             unmounted share, so the record is kept until a file lands or Curator re-acquires"
+                .to_owned(),
+        ));
+    }
+    if targets.is_empty() {
         sort_in_request_order(&mut removal.reports, absent);
         return Ok(removal);
     }
@@ -371,29 +396,19 @@ pub async fn remove_absent(
                 .collect();
             ids.sort_unstable();
             ids.dedup();
-            // An offload keeps its items, but the prune inside the removal
-            // deletes a file-less leaf unless it is already marked, so mark
-            // first every item this call leaves with no files, and take the
-            // mark back off any that still has one afterwards (a refused or
-            // partial removal, or a copy elsewhere).
-            let mut marks: Vec<i64> = Vec::new();
-            for target in targets.iter().filter(|target| target.offload) {
-                for item_id in &target.item_ids {
-                    if marks.contains(item_id) {
-                        continue;
-                    }
-                    let remaining = store.files_for_item(*item_id).await?;
-                    if remaining
-                        .iter()
-                        .all(|file| ids.binary_search(&file.id).is_ok())
-                    {
-                        marks.push(*item_id);
-                    }
-                }
-            }
-            if !marks.is_empty() {
-                store.mark_items_offloaded(&marks, now_seconds()).await?;
-            }
+            // An offload keeps its movie and episode items: the removal
+            // itself marks the ones it leaves with no file, inside its own
+            // transaction between the file delete and the leaf prune, so a
+            // refused or failed removal marks nothing and no prune can see
+            // such an item unmarked.
+            let mut keep: Vec<i64> = targets
+                .iter()
+                .filter(|target| target.offload)
+                .flat_map(|target| target.item_ids.iter().copied())
+                .collect();
+            keep.sort_unstable();
+            keep.dedup();
+            let offloaded_at = now_seconds();
             for batch in ids.chunks(MAX_RECONCILE_FILE_IDS) {
                 // The fourth argument is the most files this call may delete,
                 // not a ratio of the library: the caller named these files, so
@@ -401,7 +416,14 @@ pub async fn remove_absent(
                 // `batch`, the root identity is still checked, and a request
                 // names at most 64 paths.
                 match store
-                    .reconcile_library(library.id, &fingerprint, batch, batch.len() as u64)
+                    .reconcile_library(
+                        library.id,
+                        &fingerprint,
+                        batch,
+                        batch.len() as u64,
+                        &keep,
+                        offloaded_at,
+                    )
                     .await?
                 {
                     ReconcileOutcome::Applied {
@@ -439,9 +461,6 @@ pub async fn remove_absent(
                     }
                 }
             }
-            if !marks.is_empty() {
-                store.clear_offloaded_with_files(&marks).await?;
-            }
         }
     }
 
@@ -469,24 +488,33 @@ pub async fn remove_absent(
             removal.reports.push(retained(&target, code, reason));
         } else {
             if target.offload {
+                // Report `offloaded` only for items that still exist. A kind
+                // an offload does not keep (a book, a photo) was removed by
+                // the prune and is reported `gone` like a removed path.
+                let mut existing: Vec<i64> = Vec::new();
                 let mut offloaded_items = 0_u64;
                 for id in &target.item_ids {
-                    if store
-                        .get_item(*id)
-                        .await?
-                        .is_some_and(|item| item.offloaded_at.is_some())
-                    {
-                        offloaded_items += 1;
+                    if let Some(item) = store.get_item(*id).await? {
+                        existing.push(*id);
+                        if item.offloaded_at.is_some() {
+                            offloaded_items += 1;
+                        }
                     }
                 }
-                removal.offloaded_items += offloaded_items;
-                removal.reports.push(PlacedReport::Offloaded {
-                    path: target.path,
-                    item_id: target.item_id,
-                    item_ids: target.item_ids,
-                    offloaded_items,
-                });
-                continue;
+                if let Some(first) = existing.first().copied() {
+                    removal.offloaded_items += offloaded_items;
+                    removal.reports.push(PlacedReport::Offloaded {
+                        path: target.path,
+                        item_id: if existing.contains(&target.item_id) {
+                            target.item_id
+                        } else {
+                            first
+                        },
+                        item_ids: existing,
+                        offloaded_items,
+                    });
+                    continue;
+                }
             }
             let mut item_removed = true;
             for id in &target.item_ids {

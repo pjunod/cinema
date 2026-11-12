@@ -19,7 +19,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tv.plurx.app.data.Item
+import tv.plurx.app.data.OFFLOAD_POLL_MS
 import tv.plurx.app.data.OFFLOAD_UNREACHABLE
+import tv.plurx.app.data.offloadComeBack
+import tv.plurx.app.data.offloadNoLongerOffloaded
 import tv.plurx.app.data.offloadStatusLine
 import tv.plurx.app.ui.theme.Muted
 
@@ -30,7 +33,7 @@ import tv.plurx.app.ui.theme.Muted
  * read from Curator while the page is open.
  */
 @Composable
-internal fun OffloadSection(vm: AppViewModel, item: Item) {
+internal fun OffloadSection(vm: AppViewModel, item: Item, onReload: () -> Unit = {}) {
     val admin = vm.currentUser?.is_admin == true
     val scope = rememberCoroutineScope()
     var line by remember(item.id) { mutableStateOf("Offloaded \u00b7 the files were removed to free disk space") }
@@ -38,14 +41,17 @@ internal fun OffloadSection(vm: AppViewModel, item: Item) {
     if (item.offloaded) {
         LaunchedEffect(item.id) {
             while (true) {
-                line = try {
-                    offloadStatusLine(vm.offloadStatus(item.id))
+                try {
+                    val answer = vm.offloadStatus(item.id)
+                    if (offloadComeBack(answer)) { onReload(); break }
+                    line = offloadStatusLine(answer)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    OFFLOAD_UNREACHABLE
+                    if (offloadNoLongerOffloaded(e)) { onReload(); break }
+                    line = OFFLOAD_UNREACHABLE
                 }
-                delay(5_000)
+                delay(OFFLOAD_POLL_MS)
             }
         }
     }

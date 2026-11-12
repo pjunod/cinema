@@ -1781,6 +1781,8 @@ impl FencedPublicationStore for HiqliteAuthStore {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError> {
@@ -1788,6 +1790,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
             return Ok(refusal);
         }
         let ids = serde_json::to_string(gone_file_ids).map_err(database_error)?;
+        let keep_json = serde_json::to_string(offload_keep).map_err(database_error)?;
         let limit = i64::try_from(prune_limit).unwrap_or(i64::MAX);
         let statements = vec![
             (
@@ -1834,6 +1837,29 @@ impl FencedPublicationStore for HiqliteAuthStore {
                     lease_i64("fence", lease.fence)?,
                     lease_i64("revision", lease.revision)?,
                     lease.expires_at_unix_ms
+                ),
+            ),
+            (
+                // Same transaction as the delete above and the prune below.
+                format!(
+                    "UPDATE items SET offloaded_at = COALESCE(offloaded_at, $8)
+                     WHERE library_id = $1
+                       AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1)
+                       AND {}
+                       AND EXISTS (SELECT 1 FROM job_leases WHERE resource = $3
+                         AND owner_node_id = $4 AND fence = $5 AND revision = $6
+                         AND expires_at_ms = $7)",
+                    crate::store::offload::MARK_KEPT_PREDICATE
+                ),
+                params!(
+                    library_id,
+                    keep_json.as_str(),
+                    lease.resource.as_str(),
+                    lease.owner_node_id.as_str(),
+                    lease_i64("fence", lease.fence)?,
+                    lease_i64("revision", lease.revision)?,
+                    lease.expires_at_unix_ms,
+                    offloaded_at
                 ),
             ),
             (

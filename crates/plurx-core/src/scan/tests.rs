@@ -2449,7 +2449,7 @@ async fn a_probe_only_targeted_scan_records_exactly_the_named_files() {
         &TargetedOptions {
             force_probe: [dune.clone()].into_iter().collect(),
             only: Some(vec![dune.clone(), outside]),
-            offload_hint: None,
+            offload_hints: Default::default(),
         },
     )
     .await
@@ -2529,6 +2529,7 @@ async fn removed_paths_forget_their_records_and_the_items_left_without_files() {
                 spellings,
                 root: root.clone(),
                 offload: false,
+                root_empty: false,
             }),
             other => panic!("{path:?} is absent, not {other:?}"),
         }
@@ -2587,6 +2588,7 @@ async fn removed_paths_forget_their_records_and_the_items_left_without_files() {
             spellings: vec![alien.clone()],
             root: other.path().to_path_buf(),
             offload: false,
+            root_empty: false,
         }],
         false,
     )
@@ -2620,6 +2622,7 @@ async fn absent_path(root: &Path, path: &Path) -> removed::AbsentPath {
             spellings,
             root: root.to_path_buf(),
             offload: false,
+            root_empty: false,
         },
         other => panic!("{path:?} is absent, not {other:?}"),
     }
@@ -3031,7 +3034,9 @@ async fn returning_files_are_placed_on_the_offloaded_item_by_ids() {
     let hinted = |hint: Option<OffloadHint>| TargetedOptions {
         force_probe: [returned.clone()].into_iter().collect(),
         only: Some(vec![returned.clone()]),
-        offload_hint: hint,
+        offload_hints: hint
+            .map(|hint| [(returned.clone(), hint)].into_iter().collect())
+            .unwrap_or_default(),
     };
     let (placed, _) = scan_path_targeted(
         &PublicationStore::unfenced(&store),
@@ -3054,4 +3059,78 @@ async fn returning_files_are_placed_on_the_offloaded_item_by_ids() {
         .expect("list")
         .total;
     assert_eq!(after, before, "no duplicate item appeared");
+}
+
+/// The ids belong to the files the request named, not to the folder: another
+/// file found in the same pass is placed by its own name, and a second file
+/// of the named title (another version, a second part) still lands on the
+/// kept item even though the first file's attach already cleared the offload.
+#[tokio::test]
+async fn a_hint_covers_only_the_files_its_request_named_and_every_part_of_them() {
+    use crate::domain::MetadataPatch;
+    let (store, lib, dir) = removal_fixture(&["Tar (2022)/Tar (2022).mkv"]).await;
+    let root = dir.path().to_path_buf();
+    let original = root.join("Tar (2022)").join("Tar (2022).mkv");
+    let item = store
+        .get_file_by_path(&original.to_string_lossy())
+        .await
+        .expect("lookup")
+        .expect("file")
+        .item_id;
+    store
+        .apply_metadata(
+            item,
+            &MetadataPatch {
+                title: Some("T\u{e1}r".into()),
+                tmdb_id: Some(817758),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("enriched");
+    std::fs::remove_dir_all(root.join("Tar (2022)")).expect("rm");
+    removed::remove_absent(
+        &PublicationStore::unfenced(&store),
+        &lib,
+        &[offloaded_path(&root, &root.join("Tar (2022)")).await],
+        false,
+    )
+    .await
+    .expect("offload");
+
+    let part_a = write_fake_video(dir.path(), "Tar.2022.1080p.WEB-DL/Tar.2022.1080p.mkv").await;
+    let part_b = write_fake_video(dir.path(), "Tar.2022.1080p.WEB-DL/Tar.2022.2160p.mkv").await;
+    let stranger = write_fake_video(dir.path(), "Tar.2022.1080p.WEB-DL/Other.Film.1999.mkv").await;
+    let hint = OffloadHint {
+        tmdb: Some(817758),
+        ..Default::default()
+    };
+    let (placed, _) = scan_path_targeted(
+        &PublicationStore::unfenced(&store),
+        &lib,
+        &root,
+        &TargetedOptions {
+            force_probe: [part_a.clone(), part_b.clone(), stranger.clone()]
+                .into_iter()
+                .collect(),
+            only: Some(vec![part_a.clone(), part_b.clone(), stranger.clone()]),
+            offload_hints: [(part_a.clone(), hint.clone()), (part_b.clone(), hint)]
+                .into_iter()
+                .collect(),
+        },
+    )
+    .await
+    .expect("scan");
+    let item_of = |path: &Path| {
+        let want = path.to_string_lossy().to_string();
+        placed
+            .items
+            .iter()
+            .find(|placed| placed.path == want)
+            .map(|placed| placed.item_id)
+    };
+    assert_eq!(item_of(&part_a), Some(item), "{:?}", placed.items);
+    assert_eq!(item_of(&part_b), Some(item), "the second part finds it too: {:?}", placed.items);
+    let other = item_of(&stranger).expect("stranger placed");
+    assert_ne!(other, item, "an unnamed file is not placed by the hint");
 }

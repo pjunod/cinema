@@ -537,7 +537,7 @@ pub async fn list_items(
     // Which containers are (partly) offloaded, only where the grid can show
     // one: `disk` lists only shows with something to play.
     let offloaded_leaves = if presence != ItemPresence::OnDisk && !container_ids.is_empty() {
-        state.store.offloaded_leaf_counts(&container_ids).await?
+        state.catalogue.offloaded_leaf_counts(&container_ids).await?
     } else {
         HashMap::new()
     };
@@ -791,7 +791,7 @@ pub async fn item_detail(
     let offloaded_leaves = if rollup_ids.is_empty() {
         HashMap::new()
     } else {
-        state.store.offloaded_leaf_counts(&rollup_ids).await?
+        state.catalogue.offloaded_leaf_counts(&rollup_ids).await?
     };
     let summary = state
         .catalogue

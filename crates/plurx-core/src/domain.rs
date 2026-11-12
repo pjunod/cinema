@@ -1913,8 +1913,8 @@ pub struct RecentItem {
 /// now, what Curator offloaded (greyed out, Get it back), or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ItemPresence {
-    /// Playable now: not offloaded, and for a show at least one episode that
-    /// is not offloaded.
+    /// Playable now: not offloaded, and a show is hidden only when it has
+    /// offloaded episodes and none on disk (an empty show stays).
     #[default]
     OnDisk,
     /// Offloaded, or a show with at least one offloaded episode.
@@ -1925,9 +1925,9 @@ pub enum ItemPresence {
 impl ItemPresence {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
-            "disk" | "on_disk" => Some(Self::OnDisk),
+            "disk" => Some(Self::OnDisk),
             "offloaded" => Some(Self::Offloaded),
-            "everything" | "all" => Some(Self::Everything),
+            "everything" => Some(Self::Everything),
             _ => None,
         }
     }
@@ -1937,10 +1937,15 @@ impl ItemPresence {
     pub const fn sql(self) -> &'static str {
         match self {
             Self::OnDisk => {
-                "(items.offloaded_at IS NULL AND (items.kind <> 'show' OR EXISTS ( \
-                 SELECT 1 FROM items s JOIN items e ON e.parent_id = s.id \
-                 WHERE s.parent_id = items.id AND e.kind = 'episode' \
-                   AND e.offloaded_at IS NULL)))"
+                "(items.offloaded_at IS NULL AND (items.kind <> 'show' \
+                 OR NOT EXISTS ( \
+                   SELECT 1 FROM items s JOIN items e ON e.parent_id = s.id \
+                   WHERE s.parent_id = items.id AND e.kind = 'episode' \
+                     AND e.offloaded_at IS NOT NULL) \
+                 OR EXISTS ( \
+                   SELECT 1 FROM items s JOIN items e ON e.parent_id = s.id \
+                   WHERE s.parent_id = items.id AND e.kind = 'episode' \
+                     AND e.offloaded_at IS NULL)))"
             }
             Self::Offloaded => {
                 "(items.offloaded_at IS NOT NULL OR (items.kind = 'show' AND EXISTS ( \

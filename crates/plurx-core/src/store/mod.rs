@@ -3154,15 +3154,6 @@ pub trait MediaStore: Send + Sync + 'static {
         &self,
         ids: &[i64],
     ) -> Result<std::collections::HashMap<i64, i64>, StoreError>;
-    /// Mark these leaf items offloaded as of `at` (unix seconds), keeping an
-    /// earlier mark. Called *before* the offload's files are removed, because
-    /// the removal's prune keeps a file-less leaf only if it is already
-    /// marked; [`clear_offloaded_with_files`](Self::clear_offloaded_with_files)
-    /// then takes the mark back off any item that still holds a file.
-    async fn mark_items_offloaded(&self, item_ids: &[i64], at: i64) -> Result<u64, StoreError>;
-    /// Clear the offloaded mark of every listed item that still has a file:
-    /// an offload only marks an item it leaves with no files.
-    async fn clear_offloaded_with_files(&self, item_ids: &[i64]) -> Result<u64, StoreError>;
     async fn find_book(
         &self,
         library_id: i64,
@@ -3687,12 +3678,19 @@ pub trait MediaStore: Send + Sync + 'static {
     /// Atomically remove vanished files and their empty item hierarchy only
     /// when the scanner sees the expected roots and stays within its deletion
     /// budget. This is the M1c publication boundary; M4 adds its lease fence.
+    ///
+    /// `offload_keep` names movie/episode items an offload wants kept: any
+    /// of them left with no files by this very removal is marked offloaded
+    /// (`offloaded_at`) between the file delete and the leaf prune, in the
+    /// same transaction, so nothing can observe it fileless and unmarked.
     async fn reconcile_library(
         &self,
         library_id: i64,
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
     ) -> Result<ReconcileOutcome, StoreError>;
     /// Remove `file_ids` — files of the library that the caller found under
     /// none of `configured_paths`, which is what an operator removing a
@@ -5081,6 +5079,8 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError>;
@@ -6799,6 +6799,25 @@ impl CatalogueReader {
             return Ok(result);
         }
         self.authority.get_item(id).await
+    }
+
+    /// Offloaded leaves under each container, from the bounded replica when
+    /// it is proven fresh enough, like the item reads beside it.
+    pub async fn offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let owned = ids.to_vec();
+            if let Some(result) = self
+                .bounded(move |store| async move { store.local_offloaded_leaf_counts(&owned).await })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.offloaded_leaf_counts(ids).await
     }
 
     pub async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {

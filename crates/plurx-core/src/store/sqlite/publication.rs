@@ -336,6 +336,8 @@ impl FencedPublicationStore for SqliteStore {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError> {
@@ -344,8 +346,17 @@ impl FencedPublicationStore for SqliteStore {
         }
         let root_fingerprint = root_fingerprint.to_owned();
         let ids = gone_file_ids.to_vec();
+        let keep = offload_keep.to_vec();
         self.with_fenced_conn(lease, replacement, move |conn| {
-            reconcile_library(conn, library_id, &root_fingerprint, &ids, prune_limit)
+            reconcile_library(
+                conn,
+                library_id,
+                &root_fingerprint,
+                &ids,
+                prune_limit,
+                &keep,
+                offloaded_at,
+            )
         })
         .await
     }
@@ -1378,6 +1389,8 @@ fn reconcile_library(
     root_fingerprint: &str,
     ids: &[i64],
     prune_limit: u64,
+    keep: &[i64],
+    offloaded_at: i64,
 ) -> Result<ReconcileOutcome, StoreError> {
     let expected: Option<String> = conn
         .query_row(
@@ -1412,6 +1425,7 @@ fn reconcile_library(
             deleted_files += delete.execute(params![id, library_id])? as u64;
         }
     }
+    crate::store::offload::mark_kept_fileless(conn, library_id, keep, offloaded_at)?;
     let mut pruned_items = 0_u64;
     pruned_items += conn.execute(
         concat!(

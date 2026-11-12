@@ -89,20 +89,46 @@ async function getItBack(id){
 }
 // While an offloaded title's page is open, read Curator's state for it. The
 // read is a pass-through: nothing is stored, and the loop ends with the page.
+// The page body is inserted after the renderer that calls this returns, so the
+// first read is deferred a tick and a missing status line is tolerated a few
+// times before the loop gives up. It polls every 15 s while the page is
+// visible, and a title that is no longer offloaded (409 not_offloaded, or
+// Curator says on_disk) re-renders the page.
 let OFFWATCH=null;
+const OFFWATCH_MS=15000;
+function stopOffloadWatch(){
+  if(!OFFWATCH) return;
+  clearInterval(OFFWATCH.timer);
+  document.removeEventListener("visibilitychange",OFFWATCH.onVisible);
+  OFFWATCH=null;
+}
 function watchOffload(id){
   if(OFFWATCH&&OFFWATCH.id===id) return;
-  if(OFFWATCH) clearInterval(OFFWATCH.timer);
+  stopOffloadWatch();
+  const watch={id,misses:0,busy:false};
   const tick=async()=>{
+    if(OFFWATCH!==watch||document.hidden||watch.busy) return;
     const line=document.getElementById("offstatus");
-    if(!line||!location.hash.endsWith("/item/"+id)){ if(OFFWATCH&&OFFWATCH.id===id){clearInterval(OFFWATCH.timer);OFFWATCH=null;} return; }
+    if(!line||!location.hash.endsWith("/item/"+id)){
+      if(++watch.misses>=3) stopOffloadWatch();
+      return;
+    }
+    watch.misses=0; watch.busy=true;
     try{
       const a=await api(`/items/${id}/offload-status`);
-      if(a.state==="on_disk") line.textContent="Curator has it; it will play as soon as it is indexed.";
-      else if(a.state==="not_found"||a.state==="not_offloaded") line.textContent="Offloaded · "+offloadLine(a);
-      else line.textContent="Offloaded · "+offloadLine(a);
-    }catch(e){ line.textContent="Offloaded · curator unreachable"; }
+      if(OFFWATCH!==watch) return;
+      if(a.state==="on_disk"){ stopOffloadWatch(); render(); return; }
+      line.textContent="Offloaded · "+offloadLine(a);
+    }catch(e){
+      if(OFFWATCH!==watch) return;
+      if(e&&e.code==="not_offloaded"){ stopOffloadWatch(); render(); return; }
+      line.textContent="Offloaded · curator unreachable";
+    }finally{ watch.busy=false; }
   };
-  OFFWATCH={id,timer:setInterval(tick,5000)};
-  tick();
+  watch.onVisible=()=>{ if(!document.hidden) tick(); };
+  watch.tick=tick;
+  watch.timer=setInterval(tick,OFFWATCH_MS);
+  document.addEventListener("visibilitychange",watch.onVisible);
+  OFFWATCH=watch;
+  setTimeout(tick,0);
 }

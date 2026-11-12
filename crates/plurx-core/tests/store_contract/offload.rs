@@ -39,34 +39,63 @@ async fn an_offloaded_item_survives_prunes_is_found_by_ids_and_clears_when_a_fil
             .await
             .expect("tmdb");
 
-        // Marked, then pruned: only the unmarked fileless leaf goes.
+        // Files for both, a second copy for `twin`.
+        let twin = store.insert_item(&movie("Twin")).await.expect("twin");
+        let probe = ProbeResult::default();
+        let kept_file = store
+            .upsert_file(kept, &format!("/offload-{backend}/Tar.mkv"), 10, 10, &probe)
+            .await
+            .expect("file");
+        let plain_file = store
+            .upsert_file(plain, &format!("/offload-{backend}/Plain.mkv"), 10, 10, &probe)
+            .await
+            .expect("file");
+        let twin_a = store
+            .upsert_file(twin, &format!("/offload-{backend}/Twin-a.mkv"), 10, 10, &probe)
+            .await
+            .expect("file");
+        store
+            .upsert_file(twin, &format!("/offload-{backend}/Twin-b.mkv"), 10, 10, &probe)
+            .await
+            .expect("file");
+        store
+            .ensure_library_root_fingerprint(library.id, &library.paths, "fp", true)
+            .await
+            .expect("root");
+
+        // A refused reconcile (wrong root) marks nothing and removes nothing.
+        let refused = store
+            .reconcile_library(library.id, "wrong", &[kept_file], 1, &[kept], 100)
+            .await
+            .expect("reconcile");
+        assert!(matches!(refused, ReconcileOutcome::RefusedRoot { .. }), "{backend}");
+        let item = store.get_item(kept).await.expect("get").expect("item");
+        assert_eq!(item.offloaded_at, None, "{backend}: a refused removal marks nothing");
+
+        // Applied: `kept` is marked inside the transaction and survives the
+        // prune, `plain` goes, and `twin` still holds a file so it stays
+        // on disk, unmarked.
+        let applied = store
+            .reconcile_library(
+                library.id,
+                "fp",
+                &[kept_file, plain_file, twin_a],
+                3,
+                &[kept, twin],
+                100,
+            )
+            .await
+            .expect("reconcile");
+        assert!(matches!(applied, ReconcileOutcome::Applied { .. }), "{backend}");
+        let item = store.get_item(kept).await.expect("get").expect("kept");
+        assert_eq!(item.offloaded_at, Some(100), "{backend}");
+        assert!(store.get_item(plain).await.expect("get").is_none(), "{backend}");
+        let item = store.get_item(twin).await.expect("get").expect("twin");
+        assert_eq!(item.offloaded_at, None, "{backend}: another copy remains");
+        assert_eq!(store.prune_empty_items(library.id).await.expect("prune"), 0, "{backend}");
+        assert!(store.get_item(kept).await.expect("get").is_some(), "{backend}");
         assert_eq!(
-            store
-                .mark_items_offloaded(&[kept], 100)
-                .await
-                .expect("mark"),
-            1,
-            "{backend}"
-        );
-        assert_eq!(
-            store.prune_empty_items(library.id).await.expect("prune"),
-            1,
-            "{backend}"
-        );
-        assert!(
-            store.get_item(kept).await.expect("get").is_some(),
-            "{backend}"
-        );
-        assert!(
-            store.get_item(plain).await.expect("get").is_none(),
-            "{backend}"
-        );
-        assert_eq!(
-            store
-                .offloaded_leaf_counts(&[kept])
-                .await
-                .expect("counts")
-                .get(&kept),
+            store.offloaded_leaf_counts(&[kept]).await.expect("counts").get(&kept),
             Some(&1),
             "{backend}"
         );
@@ -88,7 +117,7 @@ async fn an_offloaded_item_survives_prunes_is_found_by_ids_and_clears_when_a_fil
         store
             .upsert_file(
                 kept,
-                &format!("/offload-{backend}/Tar.mkv"),
+                &format!("/offload-{backend}/Tar-returned.mkv"),
                 10,
                 10,
                 &ProbeResult::default(),

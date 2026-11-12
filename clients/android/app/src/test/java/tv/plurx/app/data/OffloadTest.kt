@@ -65,4 +65,16 @@ class OffloadTest {
         assertEquals("Curator is too old for Get it back; update it", thrown.message)
         assertEquals("Offloaded · curator unreachable", OFFLOAD_UNREACHABLE)
     }
+
+    @Test
+    fun aTitleThatCameBackOrIsNoLongerOffloadedReloadsThePage() {
+        assertTrue(offloadComeBack(OffloadAnswer(matched = true, state = "on_disk")))
+        assertFalse(offloadComeBack(OffloadAnswer(matched = true, state = "downloading")))
+        val body = """{"code":"not_offloaded","message":"this title is not offloaded"}"""
+            .toResponseBody("application/json".toMediaType())
+        val gone = retrofit2.HttpException(Response.error<OffloadAnswer>(409, body))
+        assertTrue(offloadNoLongerOffloaded(gone))
+        assertFalse(offloadNoLongerOffloaded(java.io.IOException("down")))
+        assertEquals(15_000L, OFFLOAD_POLL_MS)
+    }
 }

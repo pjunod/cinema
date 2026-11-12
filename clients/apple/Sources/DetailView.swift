@@ -1107,7 +1107,7 @@ struct DetailView: View {
     private func content(_ detail: ItemDetail) -> some View {
         if detail.item.hasOffloadedLeaves {
             VStack(alignment: .leading, spacing: 16) {
-                OffloadBanner(item: detail.item)
+                OffloadBanner(item: detail.item) { Task { detail = try? await model.itemDetail(itemId) } }
                 detailBody(detail)
             }
         } else {

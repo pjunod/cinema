@@ -26,6 +26,37 @@ macro_rules! fileless_prunable_leaf {
 }
 pub(crate) use fileless_prunable_leaf;
 
+/// Only movies and episodes are kept by an offload (Get it back places them
+/// by ids); other kinds are removed as for `removed_paths` and reported `gone`.
+/// `$2` is a JSON array of item ids: the ones an offload keeps, restricted to
+/// those now holding no file. Used inside the reconcile transaction, between
+/// the file delete and the leaf prune.
+pub(crate) const MARK_KEPT_PREDICATE: &str = "kind IN ('movie','episode') \
+     AND id IN (SELECT value FROM json_each($2)) \
+     AND id NOT IN (SELECT item_id FROM files)";
+
+/// SQLite twin of the replicated statement: mark the listed movie/episode
+/// items that this transaction left with no file.
+pub(crate) fn mark_kept_fileless(
+    conn: &rusqlite::Connection,
+    library_id: i64,
+    keep: &[i64],
+    at: i64,
+) -> Result<(), crate::store::StoreError> {
+    if keep.is_empty() {
+        return Ok(());
+    }
+    let keep = serde_json::to_string(keep).map_err(|e| crate::store::StoreError::Database(e.to_string()))?;
+    conn.execute(
+        "UPDATE items SET offloaded_at = COALESCE(offloaded_at, ?3) \
+         WHERE library_id = ?1 AND kind IN ('movie','episode') \
+           AND id IN (SELECT value FROM json_each(?2)) \
+           AND id NOT IN (SELECT item_id FROM files)",
+        rusqlite::params![library_id, keep, at],
+    )?;
+    Ok(())
+}
+
 /// The SQLite migration introducing the column and the attach triggers.
 pub(crate) const SQLITE_INTRODUCED_SCHEMA: i64 = 130;
 pub(crate) const COLUMN_SQL: &str = "ALTER TABLE items ADD COLUMN offloaded_at INTEGER";

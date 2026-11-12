@@ -192,7 +192,7 @@ async fn require_offloaded(state: &AppState, item: &Item) -> Result<(), ApiError
     let offloaded = match item.kind {
         ItemKind::Show | ItemKind::Season => {
             state
-                .store
+                .catalogue
                 .offloaded_leaf_counts(&[item.id])
                 .await?
                 .get(&item.id)
