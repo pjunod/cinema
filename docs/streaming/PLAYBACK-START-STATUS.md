@@ -414,12 +414,29 @@ physical phases, admitted only while the source domain is idle and paused
 under foreground pressure.
 
 The rest of item 6 has a build plan any agent can work:
-[LOCAL-COPY-ENGINE-BUILD.md](LOCAL-COPY-ENGINE-BUILD.md), eight ordered
+[LOCAL-COPY-ENGINE-BUILD.md](LOCAL-COPY-ENGINE-BUILD.md), ten ordered
 steps with an Execution log. Its step 1, durable demand, is built on
-`item6b` (not pushed): a demand makes its coordination request on its first
-attempt and a restarted worker takes up the queued ones it can rebuild.
+`item6b` (not pushed), with its review fixes:
 
-Remaining for item 6, not started (plan steps 2-8):
+- A demand makes its coordination request once, on its first attempt,
+  before the source is idle. A demand dropped unbuilt retires it.
+- A restarted worker takes up the `local-play.` requests its predecessor
+  left, queued or still claimed by that dead process, and keeps them out of
+  the stranded retirement. It opens no file: the request's recorded object
+  version is carried and the unit's source fence refuses a changed object.
+  A store error fails the step, which the next pass makes again.
+- A recovered demand's audio is playback's default (the first track copied
+  when the copy pipe carries its codec, encoded otherwise) until a fresh
+  local demand brings its own recipe. A user who no longer exists is not
+  named.
+- Found, not fixed here: a coordination request newer than a legacy
+  `fragment_index` request of the same file and target stops that legacy
+  publication from advancing the v2 head (the "no newer request" guard of
+  `background_job_publish_fragment_command`). Source coordination rows
+  have done so since item 2. The fix redefines that trigger and is one
+  schema version on both backends; it is plan step 2.
+
+Remaining for item 6, not started (plan steps 2-10):
 
 - Local rolling copy and indexed-VOD copy still run their own producers
   (`copy_pipe_args` to the rolling segmenter, and plan-verified VOD
@@ -440,9 +457,8 @@ Remaining for item 6, not started (plan steps 2-8):
   row-less demand becomes redundant for that start.
 - A demand that has not yet made its first attempt (one retry interval
   after the start) is in memory only; a restart inside that window forgets
-  it and the next local start asks again. A recovered demand fills with no
-  audio companion, the request not recording the playback's audio choice.
-  Demands are dropped on non-unix builds, which have no copy engine.
+  it and the next local start asks again. Demands are dropped on non-unix
+  builds, which have no copy engine.
 - The persisted trigger is not `local_playback` (see Attribution). Doing
   that is one migration: rebuild `analysis_requests` with the wider CHECK
   on SQLite and hiqlite, and add the value to both `valid_request`s.
