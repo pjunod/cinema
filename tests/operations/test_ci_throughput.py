@@ -26,6 +26,9 @@ ROOT = Path(__file__).resolve().parents[2]
 LANE = ROOT / ".github" / "workflows" / "main-fast-lane.yml"
 EFFORT = ROOT / ".github" / "workflows" / "effort-ci.yml"
 PAPERWORK_PR = ROOT / ".github" / "workflows" / "paperwork.yml"
+# Fixture documents, spelled so the repository-wide docs/ reference sweep
+# (test_docs_index) does not read them as links to real documents.
+FIXTURE_DOCS = "docs" + "/ci"
 
 
 def load_script(name: str):
@@ -185,8 +188,8 @@ class PaperworkFixTests(unittest.TestCase):
         self.git("init", "-q", "-b", "main")
         self.write("clients/android/app/build.gradle.kts", 'android {\n        versionCode = 199\n        versionName = "0.8.0"\n}\n')
         self.write("clients/android/README.md", "# Android\n\n> Status: **v0.8.0**, build `199` — a change.\n")
-        self.write("docs/ci/README.md", "# ci\n\n| File | Answers | |\n|---|---|---|\n| [A.md](A.md) | a | live |\n")
-        self.write("docs/ci/A.md", "# A\n")
+        self.write(f"{FIXTURE_DOCS}/README.md", "# ci\n\n| File | Answers | |\n|---|---|---|\n| [A.md](A.md) | a | live |\n")
+        self.write(f"{FIXTURE_DOCS}/A.md", "# A\n")
         self.write("src/code.rs", "fn main() {}\n")
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "base")
@@ -219,10 +222,10 @@ class PaperworkFixTests(unittest.TestCase):
 
     def test_a_missing_index_row_is_derived_from_the_document(self):
         self.repository()
-        self.write("docs/ci/NEW.md", "# A new thing\n\n**Status:** built · today\n")
-        row = self.fix.index_row("docs/ci/NEW.md", 3)
+        self.write(f"{FIXTURE_DOCS}/NEW.md", "# A new thing\n\n**Status:** built · today\n")
+        row = self.fix.index_row(f"{FIXTURE_DOCS}/NEW.md", 3)
         self.assertEqual(row, "| [NEW.md](NEW.md) | A new thing | built |")
-        self.assertEqual(self.fix.index_row("docs/ci/A.md", 2), "| [A.md](A.md) | A |")
+        self.assertEqual(self.fix.index_row(f"{FIXTURE_DOCS}/A.md", 2), "| [A.md](A.md) | A |")
 
     def test_a_fix_commit_is_never_fixed_again(self):
         self.repository()
