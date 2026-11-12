@@ -22296,7 +22296,11 @@ async fn indexed_movies(app: &Router, state: &AppState, admin: &str, root: &std:
     let report = plurx_core::scan::scan_library(state.store.as_ref(), &library)
         .await
         .expect("full scan");
-    assert_eq!(report.errors, 0, "{report:?}");
+    // The fixtures are one-byte placeholders, so a host with a real ffprobe
+    // reports each as degraded (catalogued, no media details). That is the
+    // only error this scan may have: nothing unreadable, nothing else wrong.
+    assert_eq!(report.unreadable, 0, "{report:?}");
+    assert_eq!(report.errors, report.degraded, "{report:?}");
 }
 
 /// Full-scan requests admitted at or after `since_ms`.
