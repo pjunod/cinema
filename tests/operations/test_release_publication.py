@@ -329,10 +329,13 @@ class ReleasePublicationContractCase(unittest.TestCase):
                 f"COPY --chmod=0755 release-bin/{name} /usr/local/bin/{name}",
                 generated,
             )
-        for forbidden in ("apt-get", "AS dv-processing-dependencies", "AS dv-processing-helpers",
-                          "AS subtitle-engine-build", "FROM node:", "FROM runtime-assets AS ci",
+        for forbidden in ("apt-get", "AS subtitle-engine-build", "FROM node:", "FROM runtime-assets AS ci",
                           "cargo build", "COPY --from=build", "repo.jellyfin.org"):
             self.assertNotIn(forbidden, generated)
+        # The helper bundle is application source, so packaging keeps the two
+        # stages that compile it against the published dependency image.
+        self.assertRegex(generated, r"(?m)^FROM \S+@sha256:[0-9a-f]{64} AS dv-processing-dependencies$")
+        self.assertIn("FROM dv-processing-dependencies AS dv-processing-helpers", generated)
 
     def test_normal_build_has_no_media_acquisition_or_compilation(self):
         source = (ROOT / "Dockerfile").read_text()
@@ -340,8 +343,9 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertNotIn("RUN ", assets)
         self.assertNotIn("COPY ", assets)
         self.assertNotIn("ARG DEBIAN_SNAPSHOT", source)
-        for stage in ("subtitle-engine-build", "dv-processing-dependencies",
-                      "linux-dolby-package-build", "linux-dolby-install"):
+        self.assertNotIn("apt-get", source.split(" AS runtime-assets\n", 1)[0].split(" AS dv-processing-dependencies\n", 1)[1])
+        self.assertNotIn("build-dependencies.sh ", source)
+        for stage in ("subtitle-engine-build", "linux-dolby-package-build", "linux-dolby-install"):
             self.assertNotIn(f"AS {stage}", source)
         exported = render_binary_export(source)
         self.assertNotIn("runtime-assets", exported)

@@ -3,22 +3,55 @@
 Companion to [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how changes
 reach main) and [RUNNER-DISK.md](RUNNER-DISK.md) (builder storage limits).
 
-**Status:** built; initial publication and validation evidence are recorded in
-this change. The runtime pin is the `runtime-assets` base in `Dockerfile`.
+**Status:** built; the runtime pin is the `runtime-assets` base in
+`Dockerfile`. The DV helper bundle moved back to the application build on
+2026-11-11; its dependency image is the `dv-processing-dependencies` pin
+beside it, published and pinned on 2026-11-12.
 
 ## Application builds consume the committed digest
 
 `make docker`, `make docker-up`, package smoke and current-source release
-publication reuse the immutable media image. The application Dockerfile compiles
-Rust binaries and copies notices; its runtime dependency closure contains no
-APT installs, FFmpeg compilation, Dolby helper compilation or subtitle engine
-compilation. A cold application build downloads image layers and Rust crates;
-it does not contact the Debian snapshot service.
+publication reuse two immutable images from one repository: the media runtime
+and the DV helper build dependencies. The application Dockerfile compiles the
+Rust binaries and the DV helper bundle and copies notices; its runtime
+dependency closure contains no APT installs, FFmpeg compilation or subtitle
+engine compilation. A cold application build downloads image layers and Rust
+crates; it does not contact the Debian snapshot service.
 
 `Dockerfile.media-runtime` owns the Debian snapshot, FFmpeg and driver packages,
-static probe, VMAF scorer, DV helper bundle, subtitle recognizer and the service
-account. Changing application source never rebuilds these dependencies. Changes
-to those inputs take effect only after publishing and committing a new pin.
+static probe, VMAF scorer, subtitle recognizer, the service account, and the
+DV helper *dependencies*: FFmpeg, libplacebo and libdovi built from pinned
+sources, published with the compiler and headers the helpers need. Changing
+application source never rebuilds these dependencies. Changes to those inputs
+take effect only after publishing and committing a new pin.
+
+## The application owns the DV helper bundle
+
+The bundle at `/usr/lib/plurx/dv-processing` is application source.
+`plurxd` compiles the identity of `tools/dv_processing` into itself
+(`renderer_source_identity` in `crates/plurxd/src/dv_runtime.rs`) and refuses a
+bundle whose `build-identity.json` names any other sources, so a bundle and the
+daemon that loads it must come from one tree. The `dv-processing-helpers` stage
+of `Dockerfile` therefore compiles the bundle from the build context against
+the pinned dependency image, and the `runtime` stage removes whatever a media
+base left in that directory, installs the bundle and requires every helper to
+load. No published image carries a bundle.
+
+**Why it moved:** from 2026-11-09 the bundle shipped inside the published
+runtime. Helper changes merged afterwards never reached an image, and an image
+built from them would have carried a daemon expecting sources its bundle did
+not have: DV processing disabled, with "unsupported DV build identity".
+
+The dependency image records the files it was built from
+(`/opt/dv-dependencies/build-inputs.sha256`, printed by
+`tools/dv_processing/dependency-inputs.sh`): the dependency recipe, the decoder
+patch, the Python build requirements, the renderer source fetcher (libplacebo
+7.387 and its Vulkan headers) and the two parser pin files under
+`tools/dv_quality/backends/parsed-rpu`. `Dockerfile` records the same identity beside the
+pin. A change to any of them fails
+`tests/operations/test_dv_helper_ownership.py` in the fast lane and fails the
+image build, until new dependencies are published and pinned. The helper
+sources themselves need no publication: edit, build, ship.
 
 The default repository is public: `ghcr.io/pjunod/cinema-media-runtime`. Docker,
 Make and Compose use it without a login or host configuration, regardless of
@@ -37,14 +70,31 @@ breaks cold builds.
 Run the manual **publish media runtime** workflow (`media-runtime.yml`) from
 the source revision whose media inputs you intend to ship. Its default audited amd64 option builds and verifies the Dolby package; disable
 that option only for an ordinary local-build base. It builds natively on amd64
-and arm64, publishes both platform images, assembles their index and
-uploads a private-candidate publication receipt. It does not prepare or modify
-an application Dockerfile. Copy that exact index to the public repository with
-the manual public-copy workflow, then run `scripts/media-runtime pin` against
-the public digest. The pin command obtains an anonymous GHCR token, verifies
-the raw index digest and both platform manifests without Docker credentials,
-and only then updates source. A private candidate alone cannot support external
-builders. Review and commit the pin with its media input changes and evidence.
+and arm64 and publishes two images per platform: the runtime and the DV helper
+build dependencies. Before recording either digest it builds the application
+`Dockerfile`'s `runtime` target against both candidates, with placeholder
+daemon binaries, so the bundle is proven to compile from that revision's
+`tools/dv_processing` and load in the new runtime. It then assembles one index
+for each image and uploads a private-candidate publication receipt naming
+both. It does not prepare or modify an application Dockerfile.
+
+Then, in order:
+
+1. Run the manual public-copy workflow (`media-runtime-public.yml`) once for
+   each index in the receipt: `Media-Runtime` and `DV-Build-Dependencies`.
+2. Pin the runtime: `scripts/media-runtime pin
+   ghcr.io/pjunod/cinema-media-runtime@sha256:<runtime index>`.
+3. Pin the dependencies from a checkout of the published source revision:
+   `scripts/media-runtime pin-dv-dependencies
+   ghcr.io/pjunod/cinema-media-runtime@sha256:<dependency index>`. It writes
+   the digest and that tree's dependency input identity together.
+4. Review and commit both pins with the media input changes and evidence.
+
+Each pin command obtains an anonymous GHCR token, verifies the raw index digest
+and both platform manifests without Docker credentials, and only then updates
+source. A private candidate alone cannot support external builders. The two
+pins are independent: a decoder-patch change needs only step 3's image, and a
+runtime package change only step 2's.
 
 For an operator-managed builder, the equivalent maintenance commands are:
 
@@ -53,6 +103,9 @@ For an operator-managed builder, the equivalent maintenance commands are:
 scripts/media-runtime build \
   --image forge.lan:3000/noirr/plurx-media-runtime:reviewed-update \
   --metadata "$TMPDIR/media-runtime-metadata.json"
+scripts/media-runtime build --target dv-processing-dependencies \
+  --image forge.lan:3000/noirr/plurx-media-runtime:reviewed-dv-dependencies \
+  --metadata "$TMPDIR/dv-dependencies-metadata.json"
 # Copy that exact index to the public repository using the public-copy workflow.
 # Pin the public index digest after anonymous verification, never a moving tag.
 scripts/media-runtime pin \
@@ -65,76 +118,6 @@ always requires the same digest to be available anonymously from the canonical
 public repository before updating source. Publish publicly first, then commit
 the source update. A missing base fails at image resolution; application builds
 never fall back to rebuilding it.
-
-## Renderer sources travel with the pin
-
-The DV helper bundle is built from `tools/dv_processing` when the runtime is
-published, and plurxd refuses a bundle built from any other renderer sources
-(`DV backend unavailable: unsupported DV build identity`). Processed Dolby
-Vision is then off on every node that deploys the build. That happened on
-2026-11-11, when a renderer change merged without a republish.
-
-The pin therefore records the bundle's `source_sha256` beside the digest
-(`ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256` in `Dockerfile`). Three checks hold
-it in place:
-
-- `tests/operations/test_media_runtime_dv_identity.py` (recomputing plurxd's
-  own input list) and the plurxd unit test
-  `this_daemon_accepts_the_pinned_media_runtimes_dv_helpers` fail any change
-  whose `tools/dv_processing` inputs differ from the recorded identity, so a
-  renderer change must arrive with a republished runtime and a new pin.
-- The application build fails if the pinned image's bundle differs from the
-  record.
-- The publish workflow reads the identity from both platform images, requires
-  them to agree, and prints it in the receipt. `scripts/media-runtime pin`
-  requires it as `--dv-source-sha256`.
-
-## Qualification and rollback stay explicit
-
-The `media-runtime` maintenance target preserves the incumbent ordinary runtime.
-Pinned amd64 release publication requires the audited Dolby capsule, executable
-identity and complete shipping system-library checksums. The initial ordinary
-base preserves local-build behavior and does not satisfy that release contract.
-Publish and promote an audited base before attempting a release.
-
-The separate `runtime-assets-dolby-amd64` target still accepts an audited Dolby
-package through the named `linux-dolby-package` build context. Building the base
-alone does not establish hardware playback or audited-package qualification.
-For that target, publish amd64 separately, compose it with the reviewed arm64
-image using `docker manifest create --insecure` followed by `docker manifest push --insecure`, then pin the combined index.
-The retired `build-linux-dolby-ffmpeg --step docker-build` route prints this
-migration instead of rebuilding dependencies during an application build.
-
-Historical release tags with inline runtime recipes retain their original
-packaging path. New tags consume their committed base and continue recording the
-selected runtime digest and Debian package inventory. The CI tooling target can
-install compiler and browser test tools; it is not in the application runtime
-closure.
-
-Rollback restores the previous committed digest and rebuilds the application.
-Retain previous runtime manifests and layers for as long as those application
-revisions remain supported. Run focused packaging contracts and platform runtime
-smoke checks before promoting a dependency update.
-
-## Initial publication — 2026-11-09
-
-The first ordinary base is pinned to index digest
-`sha256:17b3bf9f0d3ed5dd167540a3c805e30a7624fbd93dad250e9e866799ecb22cae`.
-On 2026-11-11 the pin moved to `sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67`,
-rebuilt from main `c0a234817`: its DV helper bundle carries the source identity
-that main's plurxd expects (the previous pin carried a Nov 7 `dv_dm.h`, so plurxd
-refused it and declined processed upgrades). Building the bundle from the
-application tree instead of the runtime follows separately.
-Both native platform builds succeeded. Media executable version checks passed;
-the amd64 helper loaders returned their expected usage errors. A cold
-`runtime-assets` application build with an empty source context resolved the
-published index and executed no `RUN` instructions.
-
-Validation: 97 focused publication, maintenance, snapshot, readiness and Dolby
-package tests completed with one platform-specific skip; nine affected Docker
-contracts passed; paperwork passed all 15 checks. This evidence covers base
-publication and consumption, without asserting a full daemon rebuild, hardware
-playback qualification or audited amd64 release readiness.
 
 ## Republication — 2026-11-12
 
@@ -157,3 +140,33 @@ identity of `tools/dv_processing` at `c0a234817`. The public copy (GitHub run
 copy credential was removed afterwards. `scripts/media-runtime pin` verified
 both platforms and the public index before rewriting the pin.
 
+That republication was the immediate repair. Its guard recorded the bundle's
+identity beside the pin (`PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256`) and checked the
+pinned image against it; both went when the bundle returned to the application
+build, below, because the runtime no longer supplies the bundle.
+
+## Helper bundle returned to the application build — 2026-11-12
+
+The runtime pinned on 2026-11-09 carried a bundle whose `source_sha256` was
+`cfb13f96…` while main's daemon expected `0ae1fc25…`. The dependency image is
+pinned to index digest
+`sha256:9130f0ce818833dea3361c93b50eaa4d25ceef3f0275593a2ab57877a389a050`,
+published natively for amd64 and arm64 by the maintenance workflow, which also
+built the application recipe against both candidates on each platform.
+`pin-dv-dependencies` read the input record out of both platform images and
+found this tree's identity in each.
+
+On a lab host, with a capped builder, the helper stage built against that
+published image: its inputs matched the tree, the bundle compiled against
+libplacebo 7.387 and the six active-area C controls passed. The `runtime`
+target, given a daemon built from the same tree, installed the bundle, loaded
+all four helpers and had `plurxd dv-helper-identity` accept it as the service
+account. With one line appended to `dv_dm.h` after the daemon was built, the
+image build stopped at that step with "unsupported DV build identity"; with
+one byte appended to the decoder patch, the helper stage refused the
+dependency image and printed the differing input. The bundle's `scan_title`
+hashes the same as the one in the pinned runtime, so the title-scanner key
+does not move.
+
+Not yet done: the daemon check on an arm64 image (the workflow's qualification
+uses placeholder daemon binaries), and playback served against the new bundle.

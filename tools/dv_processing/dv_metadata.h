@@ -133,7 +133,8 @@ static inline bool dv_map_metadata(const AVDOVIMetadata *data, size_t size,
     if (!isfinite(result.dovi.nonlinear_offset[comp]) ||
         (fel && (!isfinite(result.dovi.nlq[comp].offset) ||
                  !isfinite(result.dovi.nlq[comp].deadzone_slope) ||
-                 !isfinite(result.dovi.nlq[comp].deadzone_threshold))))
+                 !isfinite(result.dovi.nlq[comp].deadzone_threshold) ||
+                 !isfinite(result.dovi.nlq[comp].hdr_in_max))))
       return false;
     const AVDOVIReshapingCurve *curve = &m->curves[comp];
     for (int i = 0; i < curve->num_pivots; i++)

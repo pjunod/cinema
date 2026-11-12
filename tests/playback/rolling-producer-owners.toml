@@ -6252,7 +6252,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # (the source-reading cat child and the unmediated sh launch), each reaped.
 # +2 more (338 -> 340) with the A1/B1 batch (#1495): two test-only `/bin/sh` fixtures
 # (output_pipe descriptor collision, prodrun natural exit).
-expected_occurrences = 340
+# PR1527: +1 test-only command (340 -> 341) in dv_runtime.rs's
+# this_daemon_accepts_the_pinned_media_runtimes_dv_helpers: python3 runs the
+# bundle installer's --identity once; the synchronous output() joins and reaps it
+# before the assertion. No production producer.
+expected_occurrences = 341
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6955,7 +6959,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # (output_pipe's descriptor test `.output()`, prodrun's natural-exit `.spawn()`)
 # and one HTTP `response.status()` read in shared_source_forwarding, which is
 # not a process.
-expected_occurrences = 923
+# PR1527: +1 (923 -> 924), the synchronous `.output()` of the test-only
+# bundle-installer --identity child above; it waits for and reaps the child.
+expected_occurrences = 924
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

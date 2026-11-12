@@ -48,7 +48,7 @@ typedef struct { int x0, y0, x1, y1; } dv_dm_rect;
 static inline bool dv_dm_active_rect(const dv_dm_frame *f, int w, int h, dv_dm_rect *r) {
   if (w <= 0 || h <= 0) return false;
   *r = (dv_dm_rect){0, 0, w, h};
-  if (f->algo != 4 || !f->has_l5) return true;
+  if (!f->has_l5) return true;
   uint64_t width = (uint64_t)w, height = (uint64_t)h;
   if (f->l5_left >= width || f->l5_right >= width - f->l5_left ||
       f->l5_top >= height || f->l5_bottom >= height - f->l5_top) return false;
@@ -57,11 +57,11 @@ static inline bool dv_dm_active_rect(const dv_dm_frame *f, int w, int h, dv_dm_r
   return true;
 }
 
-// True only for a valid partial CM4 active area: the one case that selects the
-// boundary-aware shaders. No L5, zero or full-frame L5 and every CM v2.9 frame
-// return false and keep the original full-frame literals.
-static inline bool dv_dm_active_cm4(const dv_dm_frame *f, const dv_dm_rect *r, int w, int h) {
-  return f->algo == 4 && (r->x0 || r->y0 || r->x1 != w || r->y1 != h);
+// True only for a valid partial active area, CM v4.0 or CM v2.9: the one case
+// that selects the boundary-aware shaders. No L5 and zero or full-frame L5
+// return false and keep each family's original full-frame literals.
+static inline bool dv_dm_active_partial(const dv_dm_rect *r, int w, int h) {
+  return r->x0 || r->y0 || r->x1 != w || r->y1 != h;
 }
 
 // Preset target displays referenced by L8 target_display_index (no L10 needed).
@@ -155,14 +155,17 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
   enum dm_prim sprim = d->level9 ? dv_dm_l9_prim(d->level9->source_primary_index) : DM_P3D65;
   double tmin = floor_nits > 0 ? dm_pq_oetf(floor_nits) : 0, tmax = dm_pq_oetf(nits), smast = dm_pq_oetf(smast_nits);
   bool cm4 = d->level254 != NULL || d->level8.len > 0;
+  // L5 is a CM v2.9 block that CM v4.0 titles carry too: one active area for both families.
+  bool has_l5 = d->level5 != NULL;
+  uint64_t l5[4] = {0, 0, 0, 0};
+  if (has_l5) {
+    l5[0] = d->level5->active_area_left_offset; l5[1] = d->level5->active_area_right_offset;
+    l5[2] = d->level5->active_area_top_offset; l5[3] = d->level5->active_area_bottom_offset;
+  }
+#define DV_DM_KEEP_L5(f) do { (f)->has_l5 = has_l5; (f)->l5_left = l5[0]; (f)->l5_right = l5[1]; \
+                              (f)->l5_top = l5[2]; (f)->l5_bottom = l5[3]; } while (0)
   if (cm4) {
-    if (d->level5) {
-      f->has_l5 = true;
-      f->l5_left = d->level5->active_area_left_offset;
-      f->l5_right = d->level5->active_area_right_offset;
-      f->l5_top = d->level5->active_area_top_offset;
-      f->l5_bottom = d->level5->active_area_bottom_offset;
-    }
+    DV_DM_KEEP_L5(f);
     // effective L1: L1 + L3, anchors held one 12-bit code apart (measured on real titles)
     double q = 1.0 / 4095, e[3] = {L1[0] + L3[0], L1[1] + L3[1], L1[2] + L3[2]};
     e[0] = dm_mind(e[0], e[1] - q); e[2] = dm_maxd(e[2], e[1] + q);
@@ -251,7 +254,9 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
   f->trim_targets = found ? (int)d->level2.len : 0; f->trim = found == 2 ? "l2-exact" : (found ? "l2-interpolated" : "l1-only");
   f->c29 = s;
   dv_dm_pack_cm29(f, &s);
+  DV_DM_KEEP_L5(f);
   return NULL;
+#undef DV_DM_KEEP_L5
 }
 
 // Double-precision CPU reference of the whole frame (controls only): rgba in/out, BT.2020/PQ.
@@ -259,8 +264,8 @@ static inline bool dv_dm_cpu_render(const dv_dm_frame *f, const float *in, int w
   dv_dm_rect active;
   if (!dv_dm_active_rect(f, w, h, &active)) return false;
   if ((size_t)w > SIZE_MAX / (size_t)h / (3 * sizeof(double))) return false;
-  if (dv_dm_active_cm4(f, &active, w, h)) {
-    // Reference definition: map the cropped active picture with the unchanged
+  if (dv_dm_active_partial(&active, w, h)) {
+    // Reference definition (both families): map the cropped active picture with the unchanged
     // full-frame equations. This excludes bars from both separable spatial
     // passes, including one-row/one-column pictures. Pixels outside the active
     // area keep their source content and take the pointwise mapping (no detail
@@ -706,8 +711,9 @@ static const char dv_dm_body_h[] =       // pass 2: horizontal Gaussian and deri
   "for(int j=-5;j<=5;j++){ int x=clamp(q.x-j,0,w-1); vec2 d=texelFetch(dpass,ivec2(x,q.y),0).xy; float g=GX[j+5], dg=-float(j)/4.0*g;\n"
   " acc+=vec4(g*d.x,dg*d.x,g*d.y,dg*d.y); }\n"
   "color=acc;\n";
-// Only partial CM4 active areas use this shader; full-frame bodies stay literal-identical.
-static const char dv_dm_body_h_active_cm4[] =       // pass 2: horizontal Gaussian and derivative
+// Only partial active areas use this shader (both families; CM4 reads acc.xy alone);
+// full-frame bodies stay literal-identical.
+static const char dv_dm_body_h_active[] =       // pass 2: horizontal Gaussian and derivative
   "ivec2 q=ivec2(gl_FragCoord.xy); vec4 acc=vec4(0.0);\n"
   "int lo=int(u[20].x),hi=int(u[20].z)-1;\n"
   "for(int j=-5;j<=5;j++){ int x=clamp(q.x-j,lo,hi); vec2 d=texelFetch(dpass,ivec2(x,q.y),0).xy; float g=GX[j+5], dg=-float(j)/4.0*g;\n"
@@ -749,6 +755,21 @@ static const char dv_dm_body_final_cm29[] =  // pass 3: vertical, detail, finish
   ;
 
 static struct { pl_dispatch dispatch; pl_tex dtex, htex, ltex, out; } dv_dm_gpu;
+
+// Only partial CM v2.9 active areas use this shader. Both detail planes (Ib, and Io when the
+// chroma weight is live) filter inside the rectangle; bars take the pointwise mapping alone.
+static const char dv_dm_body_final_active_cm29[] =  // pass 3: vertical, detail, finish
+  "ivec2 q=ivec2(gl_FragCoord.xy); vec3 rgb=texelFetch(master,q,0).rgb; float wgt=u[18].y;\n"
+  "ivec4 a=ivec4(u[20]);\n"
+  "vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); float Ib=b.x, Io=b.y;\n"
+  "if(wgt>-1.0 && q.x>=a.x && q.y>=a.y && q.x<a.z && q.y<a.w){\n"
+  " float B1=0.0,dx1=0.0,dy1=0.0,B2=0.0,dx2=0.0,dy2=0.0;\n"
+  " for(int j=-2;j<=2;j++){ int y=clamp(q.y-j,a.y,a.w-1); vec4 t=texelFetch(hpass,ivec2(q.x,y),0); float g=GY[j+2], dg=-float(j)*g;\n"
+  "  B1+=g*t.x; dx1+=g*t.y; dy1+=dg*t.x; B2+=g*t.z; dx2+=g*t.w; dy2+=dg*t.z; }\n"
+  " float r1=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); Ib=Ib+r1*((I-b.x)-B1);\n"
+  " if(u[17].y>0.5){ float r2=clamp(1.0+wgt-4.0*(4.0*abs(dx2)+abs(dy2)),0.0,1.0); Io=Io+r2*((I-b.y)-B2); } else Io=Ib; }\n"
+  "vec3 res=c29finish(lpass,p,Ib,Io); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
+  ;
 
 static inline pl_tex dv_dm_tex(pl_gpu gpu, pl_tex *t, int w, int h) {
   if (*t && ((*t)->params.w != w || (*t)->params.h != h)) pl_tex_destroy(gpu, t);
@@ -793,8 +814,8 @@ static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_f
   // u[20] was unused. Full-frame/no-L5 keeps its old all-zero words; the
   // other colour/curve words remain unchanged.
   dv_dm_put(f->u[20], 0, 0, 0, 0);
-  bool active_cm4 = dv_dm_active_cm4(f, &active, w, h);
-  if (active_cm4)
+  bool partial = dv_dm_active_partial(&active, w, h);
+  if (partial)
     dv_dm_put(f->u[20], active.x0, active.y0, active.x1, active.y1);
   if (!dv_dm_gpu.dispatch) dv_dm_gpu.dispatch = pl_dispatch_create(log, gpu);
   if (!dv_dm_gpu.dispatch || !dv_dm_tex(gpu, &dv_dm_gpu.dtex, w, h) || !dv_dm_tex(gpu, &dv_dm_gpu.htex, w, h) ||
@@ -825,12 +846,13 @@ static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_f
     if (!ok ||
         !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.dtex))) return NULL;
     sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
-    if (!dv_dm_pass(sh, desc, DV_DM_HEADER_LEGACY, active_cm4 ? dv_dm_body_h_active_cm4 : dv_dm_body_h, dv_dm_gpu.dtex, "dpass", NULL, "unused", NULL, "unused2", f->u, w, h) ||
+    if (!dv_dm_pass(sh, desc, DV_DM_HEADER_LEGACY, partial ? dv_dm_body_h_active : dv_dm_body_h, dv_dm_gpu.dtex, "dpass", NULL, "unused", NULL, "unused2", f->u, w, h) ||
         !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.htex))) return NULL;
   }
   sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
   const char *final_body = f->algo == 4 ?
-      (active_cm4 ? dv_dm_body_final_active_cm4 : dv_dm_body_final_cm4) : dv_dm_body_final_cm29;
+      (partial ? dv_dm_body_final_active_cm4 : dv_dm_body_final_cm4) :
+      (partial ? dv_dm_body_final_active_cm29 : dv_dm_body_final_cm29);
   if (!dv_dm_pass(sh, desc, f->algo == 4 ? DV_DM_HEADER_CM4_FINAL : DV_DM_HEADER_LEGACY, final_body, source, "master", dv_dm_gpu.htex, "hpass", lattice, "lpass", f->u, w, h) ||
       !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.out))) return NULL;
   return dv_dm_gpu.out;

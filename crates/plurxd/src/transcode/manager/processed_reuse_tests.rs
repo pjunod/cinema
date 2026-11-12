@@ -1555,6 +1555,7 @@ printf '%s\n' '{}'
         source_clock,
         source_mastering: Ok(None),
         source_mastering_minimum: Ok(None),
+        source_master_metadata: None,
         source_frame_probe: None,
         preferences,
         destination,
