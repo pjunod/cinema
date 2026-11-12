@@ -11,7 +11,45 @@ use std::io::Read;
 #[cfg(target_os = "linux")]
 mod physical_stop;
 mod reader;
+#[cfg(target_os = "linux")]
+mod source_census;
 pub(super) use reader::Witness;
+
+pub(super) fn declared_background_spawn<T>(
+    receipt: &BackgroundSourceCustodyToken,
+    spawn: impl FnOnce() -> T,
+) -> T {
+    reader::declared_background_spawn(receipt, spawn)
+}
+pub(super) fn record_background_source(
+    store: &Arc<dyn Store>,
+    receipt: &BackgroundSourceCustodyToken,
+    source: &std::fs::File,
+) -> Result<(), String> {
+    let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
+        return Ok(());
+    };
+    reader::record_source(&context.dir.with_file_name("v2"), receipt, source)
+}
+
+pub(super) fn live_background_join(
+    store: &Arc<dyn Store>,
+    receipt: &BackgroundSourceCustodyToken,
+) -> super::LiveJoin {
+    let context = match context_snapshot(store) {
+        Ok(context) => context,
+        Err(_) => return super::LiveJoin::Refused("source recovery context unavailable"),
+    };
+    // Without an authoritative backend no witness exists or ever existed.
+    let Some(context) = context.filter(|context| context.authoritative) else {
+        return super::LiveJoin::Unwitnessed;
+    };
+    match reader::live_background_escape(&context.dir.with_file_name("v2"), receipt) {
+        None => super::LiveJoin::Refused("authoritative reader witness missing"),
+        Some(None) => super::LiveJoin::Clean,
+        Some(Some(tick)) => super::LiveJoin::EscapedSince(tick),
+    }
+}
 
 const MAX_BYTES: u64 = 1_048_576;
 const MAX_RECORDS: usize = 128;
@@ -494,6 +532,10 @@ pub(super) async fn replay(store: &Arc<dyn Store>, node: &str) -> Result<(), Str
     };
     #[cfg(target_os = "linux")]
     let legacy_result = legacy_result.and(physical_stop::replay(store, &context.dir, node).await);
+    #[cfg(target_os = "linux")]
+    let legacy_result = legacy_result.and(
+        source_census::replay(store, &context.dir.with_file_name("v2"), &context.dir, node).await,
+    );
     reader_result.and(legacy_result)
 }
 

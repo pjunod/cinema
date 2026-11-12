@@ -1,6 +1,7 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[derive(Default)]
 pub(super) struct UnlimitedBudget(AtomicU64);
 impl SourceInputByteBudget for UnlimitedBudget {
     fn allowance(
@@ -12,12 +13,20 @@ impl SourceInputByteBudget for UnlimitedBudget {
         Box::pin(async move { Ok(max) })
     }
 }
-pub(super) struct ReadGate {
+pub(crate) struct ReadGate {
     reached: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     released: std::sync::Mutex<bool>,
     changed: std::sync::Condvar,
 }
 impl ReadGate {
+    #[cfg(target_os = "linux")]
+    pub(super) fn new(reached: tokio::sync::oneshot::Sender<()>) -> Self {
+        Self {
+            reached: std::sync::Mutex::new(Some(reached)),
+            released: std::sync::Mutex::new(false),
+            changed: std::sync::Condvar::new(),
+        }
+    }
     pub(super) fn park(&self) -> std::io::Result<()> {
         if let Some(reached) = self.reached.lock().expect("read gate").take() {
             let _ = reached.send(());
@@ -37,7 +46,7 @@ impl ReadGate {
         }
         Ok(())
     }
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         *self.released.lock().expect("read gate") = true;
         self.changed.notify_all();
     }
@@ -63,6 +72,7 @@ pub(super) async fn input(
     let allocator = Arc::new(UnlimitedBudget(AtomicU64::new(0)));
     let state = Arc::new(InputState {
         source: std::sync::Mutex::new(Some(source)),
+        _background_holder: None,
         custody: std::sync::Mutex::new(None),
         observer: None,
         purpose_budget: None,
@@ -140,6 +150,7 @@ async fn companion_read_window_tracks_selected_purpose_at_physical_read() {
     });
     let state = Arc::new(InputState {
         source: std::sync::Mutex::new(Some(source)),
+        _background_holder: None,
         custody: std::sync::Mutex::new(None),
         observer: None,
         purpose_budget: Some(budget.clone()),

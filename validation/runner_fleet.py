@@ -26,10 +26,13 @@ IMPLICIT = "self-hosted"
 # are accepted; an unknown or mixed alias cannot disappear from fleet checks.
 FORGEJO_ROLE_LABEL_SETS = frozenset({
     ("ci-nonvoter-heavy-amd64",),
+    ("ci-nonvoter-compile-amd64",),
     ("ci-nonvoter-store",),
     ("incus", "ci-nonvoter-heavy-amd64"),
 })
-FORGEJO_ROLE_LABELS = frozenset({"ci-nonvoter-heavy-amd64", "ci-nonvoter-store"})
+FORGEJO_ROLE_LABELS = frozenset({
+    "ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store",
+})
 
 
 def load_roster(source: str | Path) -> dict:

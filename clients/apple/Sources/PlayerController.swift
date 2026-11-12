@@ -547,14 +547,35 @@ final class PlayerController: ObservableObject {
     /// reads it back, and no decision, capability, or session request depends
     /// on it (MEDIA-BADGES-PLAN.md §9).
     @Published private(set) var effectiveProcessing: EffectiveProcessingReport?
-    @Published private(set) var effectiveProcessingGeneration: String?
+    @Published private(set) var effectiveProcessingGeneration: String? {
+        didSet { projectPlaybackEnhancement() }
+    }
     /// The server's Dolby Vision enhancement answer for the current HLS
     /// session (FEL / RPU / DYN). Held for the session and cleared wherever
     /// the session's delivery answer is — but not on a seek: a seek clears
     /// `effectiveProcessing`, and `PlaybackEnhancement.presented` hides a
     /// report-gated answer until the next generation's report returns, while
     /// a native Dolby Vision answer stays true across the seek.
+    /// The one published enhancement surface: the session's answer, explained
+    /// by the owner's current-generation skip report when one applies. Its
+    /// inputs are plain state, so the player still publishes one surface.
     @Published private(set) var playbackEnhancement: PlaybackEnhancement?
+    private var basePlaybackEnhancement: PlaybackEnhancement? {
+        didSet { projectPlaybackEnhancement() }
+    }
+    private var processingSkip: ProcessingSkip? {
+        didSet { projectPlaybackEnhancement() }
+    }
+    private func projectPlaybackEnhancement() {
+        let projected = basePlaybackEnhancement?.explainingSkip(
+            processingSkip, generation: effectiveProcessingGeneration)
+        if playbackEnhancement != projected { playbackEnhancement = projected }
+    }
+    /// A new session answer replaces the old one and its skip report.
+    private func adoptPlaybackEnhancement(_ enhancement: PlaybackEnhancement?) {
+        processingSkip = nil
+        basePlaybackEnhancement = enhancement
+    }
     @Published private(set) var deliveredRange: String?
     /// Take a delivery answer, both halves at once.
     ///
@@ -577,7 +598,7 @@ final class PlayerController: ObservableObject {
         } else {
             effectiveProcessing = nil
             effectiveProcessingGeneration = nil
-            playbackEnhancement = nil
+            adoptPlaybackEnhancement(nil)
             deliveredRange = decision.deliveredDynamicRange
             deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
         }
@@ -1854,7 +1875,7 @@ final class PlayerController: ObservableObject {
         selectedSubtitle = offline.subtitleIndex == nil ? nil : 0
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
-        playbackEnhancement = nil
+        adoptPlaybackEnhancement(nil)
         deliveredRange = "sdr"
         encoder = "offline"
         isVOD = true
@@ -3517,7 +3538,7 @@ final class PlayerController: ObservableObject {
         lastPreparedAccessLogSequence = nil
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
-        playbackEnhancement = nil
+        adoptPlaybackEnhancement(nil)
         retireAutoTransferMetrics()
         abandonSeekMeasurement()
         requestedSeekGeneration = nil
@@ -4075,7 +4096,7 @@ final class PlayerController: ObservableObject {
             // it, for the reason `adoptSessionDelivery` gives.
             effectiveProcessing = nil
             effectiveProcessingGeneration = nil
-            playbackEnhancement = nil
+            adoptPlaybackEnhancement(nil)
             deliveredRange = decision.deliveredDynamicRange
             deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
             let deliveryPath = try contextForFile(fileId).translatedDeliveryPath(decision.delivery?.url ?? decision.playUrl)
@@ -5751,7 +5772,7 @@ final class PlayerController: ObservableObject {
     private func fail(_ error: Error) {
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
-        playbackEnhancement = nil
+        adoptPlaybackEnhancement(nil)
         isChangingStream = false
         ttffMeasurement.reset()
         // M5: the create-retry owner has already stopped the player and raised
@@ -5833,7 +5854,7 @@ final class PlayerController: ObservableObject {
     private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
-        playbackEnhancement = nil
+        adoptPlaybackEnhancement(nil)
         abandonSeekMeasurement()
         player.pause()
         isPlaying = false
@@ -9217,7 +9238,7 @@ extension PlayerController {
         effectiveProcessingGeneration = nil
         // The enhancement answer belongs to this response, controllable or
         // not; a report-gated one stays hidden without a matching report.
-        playbackEnhancement = hls.enhancement
+        adoptPlaybackEnhancement(hls.enhancement)
         guard let bootstrap = hls.control, bootstrap.isValid else { return }
         effectiveProcessingGeneration = bootstrap.generation
         if let report = hls.effectiveProcessing,
@@ -9270,12 +9291,13 @@ extension PlayerController {
                 guard let self, self.selectedSubtitle != nil else { return }
                 self.showPlaybackNotice("That subtitle could not be prepared. Playback was kept unchanged.")
             },
-            onProcessingGeneration: { [weak self] generation, report in
+            onProcessingGeneration: { [weak self] generation, report, skip in
                 guard let self else { return }
                 self.effectiveProcessing = report.flatMap {
                     $0.matches(generation: generation, delivered: self.deliveredRange) ? $0 : nil
                 }
                 self.effectiveProcessingGeneration = generation
+                self.processingSkip = skip.flatMap { $0.matches(generation: generation) ? $0 : nil }
             },
             // Deliberately ungated at this call site. Everything that could
             // refuse a staging — one already live, one already settled, a
@@ -10797,7 +10819,7 @@ extension PlayerController: PreparedSuccessorHost {
         // The successor's own answer, as its prepare action carries it (nil
         // when the server sent none). A report-gated one still stays hidden
         // until a current effective-processing report is held.
-        playbackEnhancement = action.enhancement
+        adoptPlaybackEnhancement(action.enhancement)
         adoptWarmPlayer(successor)
         player.volume = incumbentVolume
         player.isMuted = incumbentMuted

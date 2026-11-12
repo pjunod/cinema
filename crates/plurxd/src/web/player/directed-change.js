@@ -784,7 +784,10 @@ function startPlaybackControl(v,p,bootstrap){
             reporter.bootstrap.generation,p.deliveredRange);
           const processingChanged=JSON.stringify(p.effectiveProcessing)!==JSON.stringify(processing);
           p.effectiveProcessing=processing;
-          if(processingChanged&&p===PLAYER&&typeof renderPlayerInfo==="function") renderPlayerInfo();
+          const skip=processingSkipFromWire(response?.processing_skip,reporter.bootstrap.generation);
+          const skipChanged=JSON.stringify(p.processingSkip)!==JSON.stringify(skip);
+          p.processingSkip=skip;
+          if((processingChanged||skipChanged)&&p===PLAYER&&typeof renderPlayerInfo==="function") renderPlayerInfo();
         }
         p.controlLastRequest=request;
         settlePlaybackControlWaiters(p,request,response,error);

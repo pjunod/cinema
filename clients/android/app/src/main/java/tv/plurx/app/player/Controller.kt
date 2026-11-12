@@ -696,8 +696,11 @@ class Controller internal constructor(
      * gated on [effectiveProcessing] matching the current generation
      * ([tv.plurx.app.data.PlaybackEnhancement.shown]).
      */
-    var enhancement: tv.plurx.app.data.PlaybackEnhancement? by mutableStateOf(null)
-        private set
+    private var baseEnhancement: tv.plurx.app.data.PlaybackEnhancement? by mutableStateOf(null)
+    private var processingSkip: tv.plurx.app.data.ProcessingSkip? by mutableStateOf(null)
+    var enhancement: tv.plurx.app.data.PlaybackEnhancement?
+        get() = baseEnhancement?.explainingSkip(processingSkip, effectiveProcessingGeneration)
+        private set(value) { baseEnhancement = value; processingSkip = null }
     var deliveredRange: String? by mutableStateOf(plan.deliveredDynamicRange)
         private set
 
@@ -3417,9 +3420,10 @@ class Controller internal constructor(
                 observe = ::playbackControlObservation,
                 linkReceipt = { if (playbackControlBootstrapFence.isCurrent(claim, sessionId)) currentLinkReceipt() else null },
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
-                onProcessingGeneration = { generation, report ->
+                onProcessingGeneration = { generation, report, skip ->
                     effectiveProcessing = report?.takeIf { it.matches(generation, deliveredRange) }
                     effectiveProcessingGeneration = generation
+                    processingSkip = skip?.takeIf { it.matches(generation) }
                 },
                 onSubtitleUnavailable = {
                     if (selectedSubtitle != null) raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)

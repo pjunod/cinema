@@ -3867,6 +3867,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # moves inside its owning helper (zero net).
 # Main df710af12 merged into effort/pipeline-v2 (2026-11-11): both sides' additions
 # are present; the total is the merge base plus each side's delta.
+# PR1491 DV GPU qualification: +11. The completion ledger actor (completion.rs)
+# owns enrolled custody until a clean live join and descendant exit; dropping it
+# never settles. processed_upgrade_qualification.rs adds one control task bounded
+# by its 4 s CHECK_BUDGET that owns no child; any upgrade it starts goes through
+# start_upgrade_claim. Nine are test fixtures (decode_facts, processed upgrade
+# runs, reader tests) joined or aborted before the test returns.
 # A1/B1 batch (#1495), +6 owned spawns:
 # - The fragments loop spawns one copy-observation pass only when this node may
 #   execute fragment_index_publish. The registry admits one pass at a time, and
@@ -3881,7 +3887,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 #   actor's stop token.
 # - source_resource's spawn_blocking reads the opened held file's metadata and
 #   is awaited inline.
-expected_occurrences = 1131
+expected_occurrences = 1142
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4131,9 +4137,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # http/activity_starts/tests.rs, joined before the test returns; no production launcher.
 # Gate fixes (2026-11-08): +1 is the replicated browse K04 fixture's 8 MiB test thread in
 # http/browse.rs, joined before the test returns; no production launcher.
+# PR1491: +1 decode_facts.rs routes spawn_job_owned through the retirement
+# custody's declared spawn (same owned job, escape tick recorded first); +3
+# reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 94
+expected_occurrences = 98
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4156,7 +4165,10 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # declaration, not a second task. Its actual task/cancellation is noted above.
 # D2 start contract: +1 the `fn spawn(` declaration of `OwnedCreate`, not a
 # task call.
-expected_occurrences = 19
+# PR1491: +3 closure calls, not task calls: producer_spawn.rs calls its
+# `spawn` builder argument twice (mediated and direct), and reader.rs's
+# declared_background_spawn calls `spawn()` after recording the escape tick.
+expected_occurrences = 22
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5705,6 +5717,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Deadline; tests/source_actor.rs adds one 50 ms fixture wait. None retries.
 # Main df710af12 merged into effort/pipeline-v2 (2026-11-11): both sides' additions
 # are present; the total is the merge base plus each side's delta.
+# PR1491: +20. completion.rs: 1 s abandonment poll, 25 ms readiness wait and
+# 250 ms descendant-exit poll (its 60 s elapsed only logs; settlement still
+# needs physical exit). processed_upgrade_qualification.rs: one timeout_at
+# deadline and its Instant (timeout is a terminal refusal, never admission).
+# The other 15 are test fixture bounds (decode_facts, processed upgrade runs,
+# reader and census tests); elapsed bounds fail the test, never certify closure.
 # A1/B1 batch (#1495), +8:
 # - Three 250 ms phase-retry sleeps in the physical Analysis phases. Each loop is
 #   bounded by its claim fence.
@@ -5712,7 +5730,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 #   production).
 # - A route-change `timeout_at` and a 10 s lease-renewal interval in the growing
 #   actor, both owned by that actor's lifetime.
-expected_occurrences = 2182
+expected_occurrences = 2202
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6209,9 +6227,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # normal exit under a 20-second timeout with kill_on_drop as cancellation's
 # backstop. They run only after the session and reconstruction slot settle;
 # neither launches a production producer or turns timeout into valid evidence.
-# 336 -> 338 with the A1/B1 batch (#1495): two test-only `/bin/sh` fixtures
+# PR1491: +2 test-only commands in source_custody/recovery/reader/tests.rs
+# (the source-reading cat child and the unmediated sh launch), each reaped.
+# +2 more (338 -> 340) with the A1/B1 batch (#1495): two test-only `/bin/sh` fixtures
 # (output_pipe descriptor collision, prodrun natural exit).
-expected_occurrences = 338
+expected_occurrences = 340
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6908,11 +6928,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # read in shared_source_playback/tests.rs; it launches no process.
 # Main df710af12 merged into effort/pipeline-v2 (2026-11-11): both sides' additions
 # are present; the total is the merge base plus each side's delta.
+# PR1491: +4. decode_facts.rs +1 is the declared spawn_job_owned call above;
+# reader/tests.rs +3 spawn/wait the same two reaped fixture children.
 # 916 -> 919 with the A1/B1 batch (#1495): two test-only child launches
 # (output_pipe's descriptor test `.output()`, prodrun's natural-exit `.spawn()`)
 # and one HTTP `response.status()` read in shared_source_forwarding, which is
 # not a process.
-expected_occurrences = 919
+expected_occurrences = 923
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7216,11 +7238,14 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Playback start Phase 1: the create-time processed credit D1 left unreachable is
 # removed (PreparedCandidateOnce, session_request.rs). -2: barrier waits and the
 # thread join in its removed consume-once test.
+# PR1491: +2 test-only waits in source_custody/recovery/reader/tests.rs: the
+# unmediated sh launch and the cat source reader are each reaped before the
+# assertions; neither wait is settlement evidence.
 # 384 -> 387 with the A1/B1 batch (#1495): prodrun's owned reap task now
 # stops waiting when generation retirement is cancelled, kills the child once,
 # and keeps waiting under the same retained admission. There is still exactly
 # one reaper per child; the added wait/start_kill sites are its select arms.
-expected_occurrences = 387
+expected_occurrences = 389
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

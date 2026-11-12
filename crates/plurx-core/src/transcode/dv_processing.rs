@@ -1350,9 +1350,11 @@ pub fn dv_author_profile81_window(
     }
     let mut adapted = Vec::with_capacity(source_rpus.len());
     for raw in source_rpus {
-        // Authoring retains valid opaque display metadata. The completed
-        // pixel-graph factory separately enforces its narrower render subset.
-        DvParsedMetadata::from_raw_rpu(raw)?;
+        // Authoring retains valid opaque display metadata and removes the
+        // already-applied mapping, so the source's reshaping shape does not
+        // enter the authored RPU. Admit exactly what the qualified FEL
+        // reconstruction admits, not the synthetic identity subset.
+        DvFelMetadata::from_raw_rpu(raw, raster)?;
         let mut rpu = DoviRpu::parse_unspec62_nalu(raw).map_err(|_| invalid())?;
         rpu.convert_with_mode(ConversionMode::To81)
             .map_err(|_| invalid())?;
@@ -1801,13 +1803,9 @@ pub fn dv_plan_completed_window(
             target.validate_rpu(raw)?;
         }
         if full_fel {
-            if matches!(input.destination, DvDestination::Hdr10 | DvDestination::Sdr) {
-                DvFelMetadata::from_raw_rpu(raw, (bl_shape.width, bl_shape.height))?;
-            } else if !DvParsedMetadata::from_raw_rpu(raw)?.runtime_supported() {
-                return Err(invalid(
-                    "completed DV window: RPU outside the renderer's supported subset",
-                ));
-            }
+            // One reconstruction for every destination: Profile 8.1 authors a
+            // fresh RPU over the same reconstructed master as HDR10 and SDR.
+            DvFelMetadata::from_raw_rpu(raw, (bl_shape.width, bl_shape.height))?;
         } else {
             let metadata = DvBaseMetadata::from_raw_rpu(raw, (bl_shape.width, bl_shape.height))?;
             if Some(i64::from(metadata.profile)) != input.source.catalog.profile
@@ -2917,6 +2915,13 @@ pub fn dv_receipt_completed_window(
             let shape = plan.capability.bl_shape;
             let parsed = DvFelMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
             (parsed.applied_operations, parsed.metadata_levels)
+        } else if requires_el && plan.source.el_kind == DvElKind::Fel {
+            // Profile 8.1 authors a fresh RPU over the same reconstructed
+            // master as HDR10/SDR: admit the qualified FEL reconstruction
+            // predicate; the plan's graph names the operations it performs.
+            let shape = plan.capability.bl_shape;
+            let parsed = DvFelMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
+            (plan.graph.required_operations(), parsed.metadata_levels)
         } else if requires_el {
             let parsed = DvParsedMetadata::from_raw_rpu(raw)?;
             if !parsed.runtime_supported() || parsed.source_el_kind != plan.source.el_kind {

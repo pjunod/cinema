@@ -20,9 +20,12 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.8.0**, build `196` — shared playback carries signed native
+> Status: **v0.8.0**, build `197` — shared playback carries signed native
 > media origins and announces the bounded-range receiver capability, so a
 > Source can serve a deep resume from its growing copy engine.
+>
+> Build `196` — Playback Info shows the server's
+> real reason a Dolby Vision enhancement was skipped or is still qualifying.
 >
 > Build `195` — the HEVC decoder envelope is the one
 > Media3's own decoder selector reports, rather than a re-derivation of it.

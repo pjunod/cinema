@@ -31,6 +31,7 @@ pub(crate) enum PeerAuthMode {
 #[derive(Debug)]
 pub(crate) struct PeerResponse {
     pub(crate) dv_processing_header: Option<String>,
+    pub(crate) processing_skip_header: Option<String>,
     pub(crate) status: reqwest::StatusCode,
     pub(crate) body: Vec<u8>,
     pub(crate) clock_timing: Option<(i64, i64, plurx_core::cluster::clock::ClockDecisionTicket)>,
@@ -340,7 +341,7 @@ impl PeerTransport {
                 .map(SignedPeerAuth::Activity),
             // A stream has no complete body to authenticate at this layer.
             PeerAuthMode::ExactRequestAndResponse | PeerAuthMode::ExactRequestAndMemberResponse => {
-                return Err(PeerTransportError::InvalidResponse)
+                return Err(PeerTransportError::InvalidResponse);
             }
             PeerAuthMode::ExactRequest => self
                 .membership
@@ -560,6 +561,12 @@ pub(crate) async fn read_bounded(
         .filter(|value| value.as_bytes().len() <= 4096)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let processing_skip_header = response
+        .headers()
+        .get("x-plurx-processing-skip")
+        .filter(|value| value.as_bytes().len() <= 4096)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let mut body = Vec::new();
     loop {
         let chunk = tokio::time::timeout_at(deadline, response.chunk())
@@ -582,6 +589,7 @@ pub(crate) async fn read_bounded(
     }
     Ok(PeerResponse {
         dv_processing_header,
+        processing_skip_header,
         status,
         body,
         clock_timing: None,

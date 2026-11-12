@@ -629,6 +629,7 @@ fn every_graft_the_application_writes_is_in_its_namespace() {
         plurx_core::scan::dv_title::PROBE_FIELD,
         plurx_core::transcode::dv_fel_qualification::PROBE_KEY,
         plurx_core::transcode::dv_fel_qualification::REQUESTS_KEY,
+        plurx_core::transcode::dv_fel_qualification::VARIANTS_KEY,
     ] {
         assert!(
             is_application_graft(key),

@@ -37,6 +37,10 @@ pub(crate) struct Witness {
     #[cfg(unix)]
     anchor_ctime: (i64, i64),
     disqualified: Mutex<bool>,
+    unknown_escape: std::sync::atomic::AtomicBool,
+    /// Boot-clock tick of the first unknown escape (`u64::MAX`: none). Any
+    /// child that could hold this source started at or after it.
+    escape_tick: std::sync::atomic::AtomicU64,
 }
 
 impl Witness {
@@ -61,7 +65,16 @@ impl Witness {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn observe_child(&self, mediated: bool) -> std::io::Result<()> {
+    fn observe_launch(&self, mediated: bool, declared: bool) -> std::io::Result<()> {
+        if !mediated && !declared {
+            // Observed before the spawn, so the child's start tick follows.
+            self.escape_tick.fetch_min(
+                crate::source_custody::boot_tick(),
+                std::sync::atomic::Ordering::AcqRel,
+            );
+            self.unknown_escape
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         if mediated {
             return Ok(());
         }
@@ -110,7 +123,7 @@ impl Witness {
 }
 
 #[cfg(unix)]
-fn anchor_ctime(metadata: &std::fs::Metadata) -> (i64, i64) {
+pub(super) fn anchor_ctime(metadata: &std::fs::Metadata) -> (i64, i64) {
     use std::os::unix::fs::MetadataExt;
     (metadata.ctime(), metadata.ctime_nsec())
 }
@@ -260,6 +273,8 @@ pub(super) fn prepare_at(
             _anchor: anchor,
             anchor_ctime: anchor_ctime(&metadata),
             disqualified: Mutex::new(false),
+            unknown_escape: std::sync::atomic::AtomicBool::new(false),
+            escape_tick: std::sync::atomic::AtomicU64::new(u64::MAX),
         });
         owned.insert(path, Arc::clone(&witness));
         Ok(Some(witness))
@@ -295,7 +310,7 @@ pub(super) fn complete_at(directory: &Path, record: &Record) -> Result<(), Strin
     }
     // The caller already has authoritative exact-owner acknowledgement. Keep
     // the JSON until subsidiary cleanup succeeds so interrupted retries finish.
-    for suffix in ["anchor", "unmediated", "armed", "json"] {
+    for suffix in ["anchor", "unmediated", "armed", "source", "json"] {
         match std::fs::remove_file(directory.join(format!("{name}.{suffix}"))) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -342,6 +357,87 @@ fn read_private_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, S
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
+thread_local! { static DECLARED_RAW: std::cell::RefCell<Option<BackgroundSourceCustodyToken>> = const { std::cell::RefCell::new(None) }; }
+
+pub(super) fn declared_background_spawn<T>(
+    receipt: &BackgroundSourceCustodyToken,
+    spawn: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<BackgroundSourceCustodyToken>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DECLARED_RAW.with(|value| {
+                value.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(DECLARED_RAW.with(|value| value.replace(Some(receipt.clone()))));
+    spawn()
+}
+
+/// `<name>.source`: "<dev> <ino>" of the source an enrolled owner opened.
+/// Written once, beside its live witness; removed with it.
+pub(super) fn record_source(
+    directory: &Path,
+    receipt: &BackgroundSourceCustodyToken,
+    source: &std::fs::File,
+) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let record = Record::Background {
+        token: receipt.clone(),
+    };
+    let name = record.name()?.trim_end_matches(".json").to_owned();
+    if !OWNED
+        .lock()
+        .map_err(|_| "reader registry poisoned")?
+        .contains_key(&directory.join(format!("{name}.json")))
+    {
+        return Ok(());
+    }
+    let metadata = source.metadata().map_err(|error| error.to_string())?;
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(directory.join(format!("{name}.source")))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    file.write_all(format!("{} {}", metadata.dev(), metadata.ino()).as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| error.to_string())
+}
+
+/// The live witness's escape state: `None` when this exact owner has no live
+/// witness, `Some(None)` when no unknown launch was observed, otherwise the
+/// boot tick of the first one.
+pub(super) fn live_background_escape(
+    directory: &Path,
+    receipt: &BackgroundSourceCustodyToken,
+) -> Option<Option<u64>> {
+    let record = Record::Background {
+        token: receipt.clone(),
+    };
+    let name = record.name().ok()?;
+    let witness = OWNED.lock().ok()?.get(&directory.join(name)).cloned()?;
+    if !witness.record.same_owner(&record) {
+        return None;
+    }
+    Some(
+        witness
+            .unknown_escape
+            .load(std::sync::atomic::Ordering::Acquire)
+            .then(|| {
+                witness
+                    .escape_tick
+                    .load(std::sync::atomic::Ordering::Acquire)
+            }),
+    )
+}
+
 pub(super) fn observe_children(mediated: bool) -> std::io::Result<()> {
     if mediated {
         return Ok(());
@@ -353,7 +449,16 @@ pub(super) fn observe_children(mediated: bool) -> std::io::Result<()> {
         .cloned()
         .collect();
     for witness in witnesses {
-        witness.observe_child(false)?;
+        let declared = DECLARED_RAW.with(|value| {
+            value.borrow().as_ref().is_some_and(|receipt| {
+                witness.record.same_owner(&Record::Background {
+                    token: receipt.clone(),
+                })
+            })
+        });
+        // Declared raw children STILL invalidate the durable anchor. Only the
+        // in-memory exact-owner ledger can later prove their explicit joins.
+        witness.observe_launch(false, declared)?;
     }
     Ok(())
 }
@@ -539,6 +644,56 @@ pub(super) async fn replay_at(
         }
         Ok(())
     }
+}
+
+/// The worker-written witness fields a host census must match. Only a
+/// witness the ordinary replay refuses (a poisoned anchor) needs one.
+#[cfg(target_os = "linux")]
+pub(super) struct CensusWitness {
+    pub(super) kernel_instance: String,
+    pub(super) node_id: String,
+    pub(super) anchor_device: u64,
+    pub(super) anchor_inode: u64,
+    pub(super) anchor_ctime: Option<(i64, i64)>,
+    pub(super) record: Record,
+    /// (dev, ino) the enrolled owner opened, when recorded.
+    pub(super) source: Option<(u64, u64)>,
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn census_witness(
+    directory: &Path,
+    custody_id: &str,
+) -> Result<Option<CensusWitness>, String> {
+    let path = directory.join(format!("background-{custody_id}.json"));
+    if !path.try_exists().map_err(|error| error.to_string())? {
+        return Ok(None);
+    }
+    let evidence: Evidence = read_private_json(&path)?;
+    if evidence.version != 2 || evidence.reader_model != "daemon_mediated_v1" {
+        return Err("unsupported reader witness for a host source census".into());
+    }
+    let sidecar = directory.join(format!("background-{custody_id}.source"));
+    let source = match read_private_text(&sidecar, 64) {
+        Ok(text) => {
+            let mut parts = text.split_whitespace().map(str::parse::<u64>);
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some(Ok(dev)), Some(Ok(ino)), None) => Some((dev, ino)),
+                _ => return Err("unreadable source identity beside the witness".into()),
+            }
+        }
+        Err(_) if !sidecar.exists() => None,
+        Err(error) => return Err(error),
+    };
+    Ok(Some(CensusWitness {
+        kernel_instance: evidence.kernel_instance,
+        node_id: evidence.node_id,
+        anchor_device: evidence.anchor_device,
+        anchor_inode: evidence.anchor_inode,
+        anchor_ctime: evidence.anchor_ctime,
+        record: evidence.record,
+        source,
+    }))
 }
 
 fn read_private_text(path: &Path, limit: u64) -> Result<String, String> {

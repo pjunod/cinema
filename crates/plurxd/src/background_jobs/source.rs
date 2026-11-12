@@ -11,6 +11,11 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+// `source.rs` is itself a #[path] module, so children resolve beside it.
+#[path = "source/completion.rs"]
+mod completion;
+pub(crate) use completion::{Holder as SourceHolder, Operation as SourceOperation, RawRetirement};
+
 struct Spent {
     bytes: u64,
     retain_until_ms: i64,
@@ -189,6 +194,7 @@ pub(crate) struct SourceReadBudget {
     changed: tokio::sync::Notify,
     pacing_waiters: AtomicUsize,
     pause_controller: Mutex<Option<plurx_core::process::bounded::SourcePauseController>>,
+    completion: Option<Arc<completion::Completion>>,
 }
 impl SourceReadBudget {
     pub(crate) fn new(
@@ -225,7 +231,74 @@ impl SourceReadBudget {
             changed: tokio::sync::Notify::new(),
             pacing_waiters: AtomicUsize::new(0),
             pause_controller: Mutex::new(None),
+            completion: None,
         })
+    }
+    pub(crate) fn with_completion(
+        store: Arc<dyn Store>,
+        custody: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+        cancel: CancellationToken,
+        authorize: CancellationToken,
+    ) -> Arc<Self> {
+        let mut budget = Self::new(Arc::clone(&store), custody.owner.clone(), cancel.clone());
+        // This bounded enrollment audits the Linux strict probe collector.
+        // Other platform parser lifetimes retain their existing explicit join.
+        if cfg!(target_os = "linux") {
+            Arc::get_mut(&mut budget)
+                .expect("new source budget")
+                .completion = Some(completion::Completion::start(
+                store,
+                custody.clone(),
+                cancel,
+                authorize,
+            ));
+        }
+        budget
+    }
+    pub(crate) fn enroll_preparation(
+        &self,
+        source: Arc<std::fs::File>,
+    ) -> Result<Option<SourceOperation>, String> {
+        self.completion
+            .as_ref()
+            .map(|owner| owner.enroll(source))
+            .transpose()
+    }
+    pub(crate) fn register_source_file(&self, source: Arc<std::fs::File>) -> Result<(), String> {
+        self.completion
+            .as_ref()
+            .map_or(Ok(()), |owner| owner.file(source))
+    }
+    pub(crate) fn source_holder(&self) -> Result<Option<SourceHolder>, String> {
+        self.completion
+            .as_ref()
+            .map(|owner| owner.holder())
+            .transpose()
+            .map(Option::flatten)
+    }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn raw_retirement(&self) -> Result<Option<RawRetirement>, String> {
+        self.completion
+            .as_ref()
+            .map(|owner| owner.raw())
+            .transpose()
+            .map(Option::flatten)
+    }
+    /// Call after the loss token fired. True when the live completion ledger
+    /// (not the caller) settles this custody once every holder retires.
+    pub(crate) fn completion_owns_settlement(&self) -> bool {
+        self.completion
+            .as_ref()
+            .is_some_and(|owner| owner.owns_settlement())
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn completion_observation(&self) -> Option<(usize, usize, bool)> {
+        self.completion.as_ref().map(|owner| owner.observation())
+    }
+    pub(crate) fn untracked_source_capability(&self) {
+        if let Some(owner) = &self.completion {
+            owner.veto();
+        }
     }
     pub(super) fn job_token(&self) -> Option<&plurx_core::store::background_jobs::JobToken> {
         match &self.owner {

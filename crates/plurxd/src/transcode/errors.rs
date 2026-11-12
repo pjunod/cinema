@@ -163,6 +163,76 @@ pub(crate) fn vod_refusal(error: &str) -> Option<(&str, &str)> {
     Some((code, message))
 }
 
+/// Process-private continuation data for a missing exact FEL quality receipt.
+/// The tagged error crosses existing String-returning preparation seams; only
+/// this validated payload, never explanatory text, can arm a later retry.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PendingFelQualification {
+    pub(crate) file_id: i64,
+    pub(crate) settings_generation: i64,
+    pub(crate) source_object_version: String,
+    pub(crate) request: plurx_core::transcode::dv_fel_qualification::FelRecipeRequest,
+}
+
+impl PendingFelQualification {
+    pub(crate) fn valid(&self) -> bool {
+        self.file_id > 0
+            && self.settings_generation >= 0
+            && self.request.valid()
+            && !self.source_object_version.is_empty()
+            && self.source_object_version.len() <= 1024
+            && !self.source_object_version.chars().any(char::is_control)
+    }
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    pub(crate) fn matches(
+        &self,
+        file_id: i64,
+        settings_generation: i64,
+        source_object_version: &str,
+        request: &plurx_core::transcode::dv_fel_qualification::FelRecipeRequest,
+    ) -> bool {
+        self.valid()
+            && self.file_id == file_id
+            && self.settings_generation == settings_generation
+            && self.source_object_version == source_object_version
+            && &self.request == request
+    }
+    pub(crate) fn reason(&self) -> &'static str {
+        "waiting for this title and reconstruction recipe's quality measurement (queued or running)"
+    }
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub(crate) fn pending_fel_qualification_error(wait: PendingFelQualification) -> String {
+    debug_assert!(wait.valid());
+    vod_refusal_error(
+        "fel_qualification_pending",
+        serde_json::to_string(&wait).expect("bounded FEL request"),
+    )
+}
+
+pub(crate) fn pending_fel_qualification(error: &str) -> Option<PendingFelQualification> {
+    if error.len() > 8192 {
+        return None;
+    }
+    let (code, body) = vod_refusal(error)?;
+    if code != "fel_qualification_pending" {
+        return None;
+    }
+    let wait: PendingFelQualification = serde_json::from_str(body).ok()?;
+    wait.valid().then_some(wait)
+}
+
+/// Ordinary delivery reports an explanation, never the private continuation
+/// data that a deferred upgrade alone is allowed to consume.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub(crate) fn ordinary_processing_decline(reason: String) -> String {
+    pending_fel_qualification(&reason)
+        .map(|wait| wait.reason().to_owned())
+        .unwrap_or(reason)
+}
+
 /// Catalog evidence became unavailable before dispatch; the existing create
 /// owner may retry discovery, while request identity and selection remain.
 pub(crate) fn catalog_input_error(message: impl AsRef<str>) -> String {

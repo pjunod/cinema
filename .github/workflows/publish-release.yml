@@ -155,8 +155,15 @@ jobs:
           set -eu
           cgroup_membership=/proc/self/cgroup
           cgroup_mount=/sys/fs/cgroup
-          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
-          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
           case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="$cgroup_mount$relative"
