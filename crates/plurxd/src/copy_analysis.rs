@@ -3,10 +3,14 @@
 //! Rows the playback ranges left unobserved are produced by an Analysis-owned
 //! generation of the same copy engine, inside its own exact physical phase.
 
+#[cfg(all(test, target_os = "linux"))]
+mod gap_fill_tests;
 mod physical;
 mod work;
 
-pub(crate) use work::{work_copy_observations, CopyAnalysisContext};
+pub(crate) use work::{
+    install_blob, v3_blob_path, v3_root, work_copy_observations, CopyAnalysisContext,
+};
 
 use plurx_core::{
     fmp4::{Init, PromotionInputs},
@@ -305,47 +309,62 @@ impl CopyObservationSet {
         self.rows.rows().len()
     }
     pub(crate) fn new(message: &CompletedCopyRange) -> Result<Self, CopyObservationError> {
-        use plurx_core::segplan::ranges::{RangeBinding, SparseIndexRows};
-        let init_contract_sha256 = plurx_core::fmp4::copy_video_init_contract_sha256(&message.init)
-            .map_err(|_| CopyObservationError::Init)?;
-        let key = plurx_core::store::copy_index_v3_source_key(
+        let mut value = Self::empty(
             &message.catalog_namespace,
             &message.source,
-        )
-        .map_err(|_| CopyObservationError::Binding)?;
+            &message.init,
+            message.checkpoint.timescale,
+            message.checkpoint.source_origin,
+            message.checkpoint.canonical_title_start,
+            &message.checkpoint.promotion,
+        )?;
+        value.observe(message)?;
+        Ok(value)
+    }
+
+    /// The set of one exact source before any rows: its binding is the source
+    /// key, generation and the init contract its observations must share.
+    fn empty(
+        catalog_namespace: &str,
+        source: &AnalysisCoordinationSource,
+        init: &Arc<Init>,
+        timescale: u32,
+        source_origin: SourceTimestamp,
+        canonical_title_start: u64,
+        promotion: &PromotionInputs,
+    ) -> Result<Self, CopyObservationError> {
+        use plurx_core::segplan::ranges::{RangeBinding, SparseIndexRows};
+        let init_contract_sha256 = plurx_core::fmp4::copy_video_init_contract_sha256(init)
+            .map_err(|_| CopyObservationError::Init)?;
+        let key = plurx_core::store::copy_index_v3_source_key(catalog_namespace, source)
+            .map_err(|_| CopyObservationError::Binding)?;
         let binding = RangeBinding {
-            source_generation: message.source.requested_generation.clone(),
-            contract: format!(
-                "{}:{key}:{init_contract_sha256}",
-                message.source.contract_version
-            ),
+            source_generation: source.requested_generation.clone(),
+            contract: format!("{}:{key}:{init_contract_sha256}", source.contract_version),
         };
         let rows = SparseIndexRows::new(
             binding,
-            message.checkpoint.timescale,
-            message.checkpoint.canonical_title_start,
+            timescale,
+            canonical_title_start,
             plurx_core::store::MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES / 28,
         )
         .map_err(|_| CopyObservationError::Coverage)?;
-        let hevc = message
-            .init
+        let hevc = init
             .video()
             .is_some_and(|track| track.codec == Some(plurx_core::fmp4::VideoCodec::Hevc));
-        let mut value = Self {
-            source: message.source.clone(),
-            catalog_namespace: message.catalog_namespace.clone(),
-            init: Arc::clone(&message.init),
+        Ok(Self {
+            source: source.clone(),
+            catalog_namespace: catalog_namespace.to_owned(),
+            init: Arc::clone(init),
             init_contract_sha256,
-            source_origin: message.checkpoint.source_origin,
-            canonical_title_start: message.checkpoint.canonical_title_start,
-            promotion: message.checkpoint.promotion.clone(),
+            source_origin,
+            canonical_title_start,
+            promotion: promotion.clone(),
             rows,
             inspections: Default::default(),
             hdr10: Default::default(),
             hevc,
-        };
-        value.observe(message)?;
-        Ok(value)
+        })
     }
 
     pub(crate) fn observe(

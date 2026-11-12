@@ -2290,6 +2290,38 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         source_key: &str,
     ) -> Result<Option<super::copy_index_v3::CopyIndexV3Head>, StoreError>;
+    /// One head by source key, the variant row it points at, and whether
+    /// `node_id` is a recorded holder; primary-key reads only.
+    async fn copy_index_v3_variant(
+        &self,
+        source_key: &str,
+        node_id: &str,
+    ) -> Result<Option<super::copy_index_v3::CopyIndexV3Variant>, StoreError>;
+    /// Readable heads any origin published for the same catalogue file,
+    /// video identity and contract; a consumer proves content equivalence.
+    async fn copy_index_v3_healthy_heads(
+        &self,
+        catalog_namespace: &str,
+        source: &super::analysis_coordination::AnalysisCoordinationSource,
+    ) -> Result<Vec<super::copy_index_v3::CopyIndexV3Head>, StoreError>;
+    async fn copy_index_v3_locations(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+    ) -> Result<Vec<super::copy_index_v3::CopyIndexV3Location>, StoreError>;
+    /// Record a verified holder of the variant the readable head named by
+    /// `source_key` points at; false when that is not this exact variant.
+    async fn put_copy_index_v3_location(
+        &self,
+        source_key: &str,
+        location: super::copy_index_v3::CopyIndexV3Location,
+    ) -> Result<bool, StoreError>;
+    async fn forget_copy_index_v3_location(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<bool, StoreError>;
     async fn ensure_copy_index_v3_head(
         &self,
         catalog_namespace: &str,
@@ -3062,6 +3094,42 @@ impl<T: QueueSql> BackgroundJobStore for T {
         source_key: &str,
     ) -> Result<Option<super::copy_index_v3::CopyIndexV3Head>, StoreError> {
         super::copy_index_v3::read_head(self, source_key).await
+    }
+    async fn copy_index_v3_variant(
+        &self,
+        source_key: &str,
+        node_id: &str,
+    ) -> Result<Option<super::copy_index_v3::CopyIndexV3Variant>, StoreError> {
+        super::copy_index_v3::read_variant(self, source_key, node_id).await
+    }
+    async fn copy_index_v3_healthy_heads(
+        &self,
+        catalog_namespace: &str,
+        source: &super::analysis_coordination::AnalysisCoordinationSource,
+    ) -> Result<Vec<super::copy_index_v3::CopyIndexV3Head>, StoreError> {
+        super::copy_index_v3::healthy_heads_for_file(self, catalog_namespace, source).await
+    }
+    async fn copy_index_v3_locations(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+    ) -> Result<Vec<super::copy_index_v3::CopyIndexV3Location>, StoreError> {
+        super::copy_index_v3::list_locations(self, contract_key, blob_sha256).await
+    }
+    async fn put_copy_index_v3_location(
+        &self,
+        source_key: &str,
+        location: super::copy_index_v3::CopyIndexV3Location,
+    ) -> Result<bool, StoreError> {
+        super::copy_index_v3::put_location(self, source_key, location).await
+    }
+    async fn forget_copy_index_v3_location(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<bool, StoreError> {
+        super::copy_index_v3::forget_location(self, contract_key, blob_sha256, node_id).await
     }
     async fn ensure_copy_index_v3_head(
         &self,

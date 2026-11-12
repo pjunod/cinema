@@ -5744,7 +5744,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleeps become one `expired` helper, and an Analysis census passes no deadline
 # (only its phase's lease-loss token ends it, because foreground pressure may
 # pause its budget indefinitely).
-expected_occurrences = 2201
+# 2201 -> 2202 with the gap-fill end-to-end test: one `tokio::time::timeout` in
+# `copy_analysis/gap_fill_tests.rs` bounding its three real fills (seven ffmpeg
+# children with their censuses). `#[cfg(test)]`-only; an elapsed bound cancels
+# the fills' stop token, awaits the running fill's own settlement (child, pipe
+# tasks, Input and reap are joined by `fill_copy_gap` itself) and then fails
+# the test. It settles nothing itself. The v3 consumer and its peer route add no timer: hydration reuses
+# the peer transport's per-request deadline, as the v2 read does.
+expected_occurrences = 2202
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "ae31eb1c91dacc2f38f0020785e885db60b4276709ecee2fa60fbb901fdf14d0"
+        "sha256": "5278a91e3262fcf7592e0355e981b8ec6d48cf260f3c1c0fc9b3bc0ab949f9fe"
       },
       {
         "table": "31 authority implementation",
@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "e0d6ca9df980767d555d1118f7f40c1c1eb716a144d9c2fac63e8d706b1ce3c8"
+        "sha256": "7358e1d5111b5d85feb2b062e9d38fe47510f47f3a090bc7e197ad3362ffa21d"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
