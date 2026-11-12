@@ -398,6 +398,9 @@ class WaylandDisplayErrorSpin(unittest.TestCase):
         # The failure path stops using the display and asks the player to close.
         self.assertIn("+    wl->display_fd = -1;", text)
         self.assertIn("+    mp_input_put_key(wl->vo->input_ctx, MP_KEY_CLOSE_WIN);", text)
+        # A dead display still sleeps on the wakeup pipe, and a protocol error is logged in full.
+        self.assertIn("+        mp_poll(&wakeup, nfds > 1, timeout_ns);", text)
+        self.assertIn("+        uint32_t code = wl_display_get_protocol_error(wl->display, &interface, &id);", text)
         # The loop that spun forever no longer ignores the dispatch result.
         self.assertNotIn("\n+        wl_display_dispatch_pending(wl->display);", text)
 

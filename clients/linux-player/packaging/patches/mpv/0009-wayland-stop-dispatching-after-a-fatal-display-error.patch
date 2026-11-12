@@ -11,8 +11,8 @@ wayland_dispatch_events() waits for the display with
 Once the connection is in a fatal error state, wl_display_dispatch_pending()
 returns -1 without ever dispatching anything and wl_display_prepare_read()
 keeps failing, so the loop never ends: the VO thread spins at 100% CPU, the
-POLLHUP handling below is never reached, and the player no longer answers
-IPC or SIGTERM. The compositor ending the connection over a protocol error
+POLLHUP handling below is never reached, and the player no longer ends on
+SIGTERM. The compositor ending the connection over a protocol error
 (for example Weston refusing a zero maxFALL) or a lost connection both get
 there. A player was seen holding the GPU for 15 hours this way, with only
 wl_display_prepare_read_queue(), wl_display_dispatch_queue_pending() and
@@ -22,37 +22,64 @@ Check wl_display_dispatch_pending() in that loop, wl_display_read_events()
 and the final wl_display_dispatch_pending() for failure. A failure is
 handled like the existing error on the display fd: log the error the
 display reports, stop using the display and ask the player to close.
+
+Once the display is gone, the dispatch function still sleeps on the wakeup
+pipe for the timeout instead of returning at once, so the VO thread does not
+spin until the core processes the close request. A protocol error is logged
+with the code, interface and object id the compositor reported.
 ---
- video/out/wayland_common.c | 26 ++++++++++++++++++++++----
- 1 file changed, 22 insertions(+), 4 deletions(-)
+ video/out/wayland_common.c | 46 +++++++++++++++++++++++++++++++++-----
+ 1 file changed, 41 insertions(+), 5 deletions(-)
 
 diff --git a/video/out/wayland_common.c b/video/out/wayland_common.c
-index 9192ac7..f751e92 100644
+index 9192ac7..68e8181 100644
 --- a/video/out/wayland_common.c
 +++ b/video/out/wayland_common.c
-@@ -4177,6 +4177,21 @@ static int update_window_title(struct vo_wayland_state *wl, const char *title)
+@@ -4177,24 +4177,60 @@ static int update_window_title(struct vo_wayland_state *wl, const char *title)
      return VO_TRUE;
  }
  
+-static void wayland_dispatch_events(struct vo_wayland_state *wl, int nfds, int64_t timeout_ns)
 +// Once the connection is in an error state (the compositor ended it over a
 +// protocol error, or it was lost), wl_display_prepare_read() and the dispatch
 +// and read calls fail forever. Treat that like an error on the display fd.
 +static bool wayland_display_failed(struct vo_wayland_state *wl, int ret)
-+{
+ {
 +    if (ret >= 0)
 +        return false;
+     if (wl->display_fd == -1)
++        return true;
 +
 +    int err = wl_display_get_error(wl->display);
-+    MP_FATAL(wl, "Wayland display error: %s\n", mp_strerror(err ? err : errno));
++    if (err == EPROTO) {
++        const struct wl_interface *interface = NULL;
++        uint32_t id = 0;
++        uint32_t code = wl_display_get_protocol_error(wl->display, &interface, &id);
++        MP_FATAL(wl, "Wayland protocol error %u on %s#%u\n",
++                 code, interface ? interface->name : "unknown", id);
++    } else {
++        MP_FATAL(wl, "Wayland display error: %s\n", mp_strerror(err ? err : errno));
++    }
 +    wl->display_fd = -1;
 +    mp_input_put_key(wl->vo->input_ctx, MP_KEY_CLOSE_WIN);
 +    return true;
 +}
 +
- static void wayland_dispatch_events(struct vo_wayland_state *wl, int nfds, int64_t timeout_ns)
- {
-     if (wl->display_fd == -1)
-@@ -4187,14 +4202,17 @@ static void wayland_dispatch_events(struct vo_wayland_state *wl, int nfds, int64
++static void wayland_dispatch_events(struct vo_wayland_state *wl, int nfds, int64_t timeout_ns)
++{
++    if (wl->display_fd == -1) {
++        // The display is gone and the player is closing. Keep sleeping until the
++        // timeout or a wakeup, so the VO thread does not spin until the core
++        // processes the close request.
++        struct pollfd wakeup = {.fd = wl->wakeup_pipe[0], .events = POLLIN};
++        mp_poll(&wakeup, nfds > 1, timeout_ns);
++        if (nfds > 1 && (wakeup.revents & POLLIN))
++            mp_flush_wakeup_pipe(wl->wakeup_pipe[0]);
+         return;
++    }
+ 
+     struct pollfd fds[2] = {
+         {.fd = wl->display_fd,     .events = POLLIN },
          {.fd = wl->wakeup_pipe[0], .events = POLLIN },
      };
  
@@ -73,7 +100,7 @@ index 9192ac7..f751e92 100644
      } else {
          wl_display_cancel_read(wl->display);
      }
-@@ -4208,7 +4226,7 @@ static void wayland_dispatch_events(struct vo_wayland_state *wl, int nfds, int64
+@@ -4208,7 +4244,7 @@ static void wayland_dispatch_events(struct vo_wayland_state *wl, int nfds, int64
      if (fds[1].revents & POLLIN)
          mp_flush_wakeup_pipe(wl->wakeup_pipe[0]);
  
