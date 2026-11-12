@@ -23,8 +23,8 @@
 //!   VOD start emits the demand here.
 use super::work::{
     coordination_request, forget_settled, publish_source, quarantine_defect, reconcile_demand,
-    reconcile_with_head, recover_demands, Attempt, Coordination, CopyIndexCacheOwner, HeadDecision,
-    PendingSources,
+    reconcile_with_head, recover_demands, work_copy_observations, Attempt, Coordination,
+    CopyIndexCacheOwner, HeadDecision, PendingSources,
 };
 use super::*;
 use crate::playback_cache::{CacheCandidate, CacheOwner};
@@ -1098,68 +1098,99 @@ fn a_source_is_asked_for_once_until_its_work_settles() {
     );
 }
 
+impl Fixture {
+    /// The same store and node as `context`, as the dispatcher hands a pass.
+    fn shared_context(&self) -> Arc<CopyAnalysisContext> {
+        Arc::new(CopyAnalysisContext {
+            store: Arc::clone(&self.context.store),
+            node_id: self.context.node_id.clone(),
+            cache_dir: self.context.cache_dir.clone(),
+            checkpoint_root: None,
+            lease_ms: self.context.lease_ms,
+            renew_every: self.context.renew_every,
+            retry_ms: self.context.retry_ms,
+            metrics: Default::default(),
+        })
+    }
+
+    /// The source a local copy start of the fixture's catalogue file asks
+    /// for: the video identity of the plain copy recipe over the stored
+    /// facts, and the fixture's recorded object version. No file exists at
+    /// the catalogue path; nothing here may open it.
+    async fn local_source(&self) -> (String, AnalysisCoordinationSource) {
+        let store = &self.context.store;
+        let file = store.get_file(100).await.expect("file read").expect("file");
+        let video = plurx_core::transcode::CopyVideoOptions::from_probe(
+            &file,
+            None,
+            crate::ffmpeg::has_dovi_rpu().await,
+            false,
+        );
+        let namespace = store.instance_id().await.expect("namespace");
+        let source = source_for_copy(
+            &namespace,
+            &file,
+            &crate::fragindex::identity_for(&file, video).argv_fingerprint,
+            "dev:1:ino:2",
+            NODE,
+        )
+        .expect("copy source");
+        (namespace, source)
+    }
+
+    /// Make every Analysis request look as if a previous process made it.
+    fn age_requests(&self) {
+        self.sql()
+            .execute("UPDATE analysis_requests SET created_at_ms=1", [])
+            .expect("aged requests");
+    }
+
+    fn request_state(&self, request_id: &str) -> (String, String) {
+        self.sql()
+            .query_row(
+                "SELECT state,COALESCE(last_error_code,'') FROM analysis_requests WHERE request_id=?1",
+                [request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("request")
+    }
+}
+
 /// A demand outlives its process: the coordination request it made is found
-/// by the next process, which rebuilds the demand from the catalogue row,
-/// this node's current object and the copy recipe with the request's video
-/// identity, under the user and playback that asked. A file that changed
-/// since is left out. Covers the recovery read and rebuild against a real
-/// store and file; the first pass that calls it, and the demand making its
-/// request before the source is idle, are not run here.
+/// by the next process, which rebuilds the demand from the catalogue row
+/// and the request's own recorded object and video identity, without
+/// opening the file (none exists at the fixture's path). A claim the dead
+/// process still held is handed back to the queue. A user who no longer
+/// exists is not named. A file that changed in the catalogue is left out.
+/// The attributed case (an existing user) is covered only by the id parse.
 #[tokio::test]
 async fn a_restarted_worker_takes_up_the_demands_its_predecessor_left() {
     let fixture = store_fixture().await;
-    let store = &fixture.context.store;
-    let path = fixture
-        .context
-        .cache_dir
-        .parent()
-        .expect("fixture directory")
-        .join("film.mkv");
-    std::fs::write(&path, b"the catalogued source object").expect("source");
-    let metadata = std::fs::metadata(&path).expect("source metadata");
-    let mtime = metadata
-        .modified()
-        .expect("mtime")
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("unix mtime")
-        .as_secs() as i64;
-    fixture
-        .sql()
-        .execute(
-            "UPDATE files SET path=?1,size=?2,mtime=?3 WHERE id=100",
-            rusqlite::params![path.to_string_lossy(), metadata.len() as i64, mtime],
-        )
-        .expect("catalogue row of the real file");
-    let file = store.get_file(100).await.expect("file read").expect("file");
-    let object_version = crate::fragment_index_cluster::inspect_source(&file)
-        .await
-        .expect("object version");
-    let video = plurx_core::transcode::CopyVideoOptions::from_probe(
-        &file,
-        None,
-        crate::ffmpeg::has_dovi_rpu().await,
-        false,
-    );
-    let namespace = store.instance_id().await.expect("namespace");
-    let source = source_for_copy(
-        &namespace,
-        &file,
-        &crate::fragindex::identity_for(&file, video).argv_fingerprint,
-        &object_version,
-        NODE,
-    )
-    .expect("copy source");
-
-    // What the previous process left: one queued request under the id a
-    // local demand runs under.
+    let (namespace, source) = fixture.local_source().await;
     let asked = LocalCopyAuthority::of(&local_viewer(7)).expect("local playback");
-    let Coordination::Queued(_) =
+    let Coordination::Queued(request) =
         coordination_request(&fixture.context, &source, asked.request_id())
             .await
             .expect("coordination")
     else {
         panic!("a fresh generation is queued");
     };
+    // The predecessor died holding the claim.
+    let now = crate::state::clock_ms();
+    fixture
+        .context
+        .store
+        .claim_analysis_coordination(
+            &request.request_id,
+            source.clone(),
+            NODE,
+            request.fence,
+            now,
+            now + 600_000,
+        )
+        .await
+        .expect("claim")
+        .expect("the predecessor's claim");
     let later = crate::state::clock_ms() + 60_000;
 
     let mut demands = recover_demands(&fixture.context, later)
@@ -1169,20 +1200,34 @@ async fn a_restarted_worker_takes_up_the_demands_its_predecessor_left() {
     let demand = demands.pop().expect("the demand");
     assert_eq!(demand.source, source, "as playback observes it");
     assert_eq!(demand.catalog_namespace, namespace);
-    assert_eq!(demand.file.id, 100);
+    assert_eq!(
+        demand.durable_request.as_deref(),
+        Some(request.request_id.as_str())
+    );
     assert!(
-        matches!(&demand.authority, CopyObservationAuthority::Local(local) if *local == asked),
-        "under the user and playback that asked"
+        matches!(&demand.authority, CopyObservationAuthority::Local(local)
+            if *local == LocalCopyAuthority::unattributed()),
+        "user 7 is not in this catalogue: attribution is dropped, the build is not"
     );
     assert_eq!(
         crate::fragindex::identity_for(&demand.file, demand.recipe.video).argv_fingerprint,
         source.video_identity,
         "the recipe a fill of this source needs"
     );
-    let key = copy_index_v3_source_key(&namespace, &source).expect("key");
-    let mut pending = PendingSources::default();
-    pending.fold(CopyAnalysisMessage::Demand(Box::new(demand)), NO_WAIT);
-    assert!(pending.holds(&key) || !cfg!(unix));
+    assert!(
+        !demand.recipe.transcode_audio,
+        "a file with no audio track asks for no encode"
+    );
+    assert!(
+        plurx_core::playback::audio::copy_pipe_admits_audio("eac3")
+            && !plurx_core::playback::audio::copy_pipe_admits_audio("truehd"),
+        "a track the copy pipe cannot carry is encoded, never copied"
+    );
+    assert_eq!(
+        fixture.request_state(&request.request_id).0,
+        "queued",
+        "the dead process's claim is handed back"
+    );
 
     assert!(
         recover_demands(&fixture.context, 1)
@@ -1202,4 +1247,116 @@ async fn a_restarted_worker_takes_up_the_demands_its_predecessor_left() {
             .is_empty(),
         "a demand for a file that changed is not taken up"
     );
+}
+
+/// The first pass of a process takes up what its predecessor left: the
+/// demand is held, its request stays queued rather than being cancelled and
+/// made again, and a coordination request with nothing behind it is
+/// retired. The second pass does none of it again.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_first_pass_takes_up_durable_demands_and_keeps_their_requests() {
+    let fixture = store_fixture().await;
+    let (namespace, source) = fixture.local_source().await;
+    let asked = LocalCopyAuthority::of(&local_viewer(7)).expect("local playback");
+    let Coordination::Queued(durable) =
+        coordination_request(&fixture.context, &source, asked.request_id())
+            .await
+            .expect("coordination")
+    else {
+        panic!("a fresh generation is queued");
+    };
+    let mut other = source.clone();
+    other.requested_generation = hex64('d');
+    let Coordination::Queued(stranded) =
+        coordination_request(&fixture.context, &other, uuid::Uuid::new_v4().to_string())
+            .await
+            .expect("coordination")
+    else {
+        panic!("a fresh generation is queued");
+    };
+    fixture.age_requests();
+
+    let registry = CopyAnalysisRegistry::default();
+    work_copy_observations(&registry, fixture.shared_context()).await;
+    let key = copy_index_v3_source_key(&namespace, &source).expect("key");
+    assert!(registry.pending().lock().await.holds(&key));
+    assert_eq!(
+        fixture.request_state(&durable.request_id),
+        ("queued".to_owned(), String::new()),
+        "kept, not cancelled and made again"
+    );
+    assert_eq!(
+        fixture.request_state(&stranded.request_id),
+        ("cancelled".to_owned(), "coordination_stranded".to_owned())
+    );
+
+    // Once per process: a request aged after the first pass is left alone.
+    let mut later = source.clone();
+    later.requested_generation = hex64('9');
+    let Coordination::Queued(later) =
+        coordination_request(&fixture.context, &later, uuid::Uuid::new_v4().to_string())
+            .await
+            .expect("coordination")
+    else {
+        panic!("a fresh generation is queued");
+    };
+    fixture.age_requests();
+    work_copy_observations(&registry, fixture.shared_context()).await;
+    assert_eq!(fixture.request_state(&later.request_id).0, "queued");
+}
+
+/// A demand's request is made on its first attempt even while a viewer
+/// holds the source, so a restart finds it; the attempt is then busy, and a
+/// second attempt against the busy source makes no second request.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_demand_makes_its_request_before_its_source_is_idle() {
+    let fixture = store_fixture().await;
+    // A foreground owner of the whole source domain, as a playing viewer is.
+    fixture
+        .sql()
+        .execute(
+            "INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms) VALUES('viewer','{}','[\"source_io\"]',1,'startup','{}',?1,?1,?2)",
+            rusqlite::params![NOW, i64::MAX],
+        )
+        .expect("a playing viewer");
+    let requests = || {
+        fixture
+            .sql()
+            .prepare("SELECT request_id,state FROM analysis_requests")
+            .expect("statement")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("requests")
+    };
+
+    let mut pending = PendingSources::default();
+    pending.fold(local_demand(NODE), NO_WAIT);
+    let (key, mut source) = pending
+        .start_ready(std::time::Instant::now())
+        .pop()
+        .expect("the unit");
+    assert!(matches!(
+        publish_source(&fixture.context, &key, &mut source).await,
+        Attempt::Busy
+    ));
+    let made = requests();
+    assert_eq!(made.len(), 1, "{made:?}");
+    assert!(
+        made[0].0.starts_with("local-play.u7.playback-1.") && made[0].1 == "queued",
+        "made before the busy source was looked at: {made:?}"
+    );
+    assert!(matches!(
+        publish_source(&fixture.context, &key, &mut source).await,
+        Attempt::Busy
+    ));
+    assert_eq!(requests(), made, "a busy source costs no further request");
+
+    // Dropped unbuilt, the demand's request is named for retirement.
+    pending.settle_for_test(key, source, &Attempt::Discard("dropped".into()));
+    assert_eq!(pending.take_dropped(), vec![made[0].0.clone()]);
 }

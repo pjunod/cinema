@@ -74,11 +74,20 @@ pub(crate) struct PendingSource {
     /// The local playback that asked for this source, when one did. It
     /// names the Analysis request the build runs under.
     asked_by: Option<super::LocalCopyAuthority>,
-    /// Whether this source's coordination request is known to exist in the
-    /// store. A demand's is made on its first attempt, before the source
-    /// domain is even looked at, so that a restart finds it; after that a
-    /// busy source costs no write.
-    persisted: bool,
+    /// Whether a demand asked for this source. Only such a source has a
+    /// request of its own to make early and to retire when it is dropped.
+    demanded: bool,
+    /// Whether the early attempt to make this source's coordination request
+    /// was made. A demand's is made once, on its first attempt, before the
+    /// source domain is even looked at, so that a restart finds it; whatever
+    /// that attempt answered, a busy source costs no write after it.
+    persist_tried: bool,
+    /// The queued request made or taken up for this demand, to be retired
+    /// if the source is dropped before it is built.
+    request_id: Option<String>,
+    /// Whether this demand came back from a previous process and still has
+    /// the recipe rebuilt for it rather than a playback's own.
+    recovered: bool,
     observed: Instant,
     /// Not before this instant: a busy source domain or a contended claim
     /// waits for the next dispatch wake after it, never a private timer.
@@ -140,6 +149,11 @@ fn source_interest(
     }
 }
 
+/// The request to retire when `source` is dropped unbuilt, if it has one.
+fn dropped_request(source: &PendingSource) -> Option<String> {
+    source.request_id.clone().filter(|_| source.demanded)
+}
+
 #[derive(Default)]
 pub(crate) struct PendingSources {
     sources: HashMap<String, PendingSource>,
@@ -147,6 +161,9 @@ pub(crate) struct PendingSources {
     working: HashMap<String, Vec<CompletedCopyRange>>,
     /// Defects readers reported since the last pass, by source key.
     defects: HashMap<String, CopyIndexDefect>,
+    /// Requests of demands dropped since the last pass or settle, for the
+    /// worker to retire: nothing will build under them now.
+    dropped: Vec<String>,
 }
 
 impl PendingSources {
@@ -181,7 +198,20 @@ impl PendingSources {
         else {
             return;
         };
-        if self.working.contains_key(&key) || self.sources.contains_key(&key) {
+        if self.working.contains_key(&key) {
+            return;
+        }
+        if let Some(held) = self.sources.get_mut(&key) {
+            // A demand taken up after a restart runs on a recipe rebuilt
+            // from the catalogue. The first playback to ask again brings
+            // its own, and its own name.
+            if held.recovered && demand.durable_request.is_none() {
+                if let CopyObservationAuthority::Local(local) = &demand.authority {
+                    held.asked_by = Some(local.clone());
+                }
+                held.recipe = demand.recipe;
+                held.recovered = false;
+            }
             return;
         }
         // A demand costs nothing to ask again; rows cost a playback. So a
@@ -195,15 +225,20 @@ impl PendingSources {
                 .min_by_key(|(_, pending)| pending.observed)
                 .map(|(key, _)| key.clone())
             else {
+                // Refused: the request a restarted worker kept for it has
+                // no demand behind it.
+                self.dropped.extend(demand.durable_request);
                 return;
             };
-            self.sources.remove(&oldest);
+            if let Some(evicted) = self.sources.remove(&oldest) {
+                self.dropped.extend(dropped_request(&evicted));
+            }
         }
         let asked_by = match &demand.authority {
             CopyObservationAuthority::Local(local) => Some(local.clone()),
             CopyObservationAuthority::Source { .. } => None,
         };
-        if let Some(local) = &asked_by {
+        if let Some(local) = asked_by.as_ref().filter(|local| local.is_attributed()) {
             // Attribution of the background build this starts.
             tracing::info!(
                 file_id = demand.source.file_id,
@@ -219,7 +254,11 @@ impl PendingSources {
                 file: demand.file,
                 interest: source_interest(&demand.authority),
                 asked_by,
-                persisted: false,
+                demanded: true,
+                // A request taken up from a previous process already exists.
+                persist_tried: demand.durable_request.is_some(),
+                recovered: demand.durable_request.is_some(),
+                request_id: demand.durable_request,
                 held: Held::Demand {
                     catalog_namespace: demand.catalog_namespace,
                     observed: Box::new(demand.source.clone()),
@@ -246,9 +285,28 @@ impl PendingSources {
                 .min_by_key(|(_, pending)| pending.observed)
                 .map(|(key, _)| key.clone())
             {
-                self.sources.remove(&oldest);
+                if let Some(evicted) = self.sources.remove(&oldest) {
+                    self.dropped.extend(dropped_request(&evicted));
+                }
             }
         }
+    }
+
+    /// [`Self::settle`] for a source a test worked itself.
+    #[cfg(test)]
+    pub(super) fn settle_for_test(
+        &mut self,
+        key: String,
+        source: PendingSource,
+        attempt: &Attempt,
+    ) {
+        self.working.insert(key.clone(), Vec::new());
+        self.settle(key, Some(source), attempt, Duration::ZERO);
+    }
+
+    /// The requests of demands dropped since this was last taken.
+    pub(super) fn take_dropped(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.dropped)
     }
 
     fn take_defects(&mut self) -> Vec<CopyIndexDefect> {
@@ -294,7 +352,9 @@ impl PendingSources {
                     ?error,
                     "copy observations of one source disagree; discarding them"
                 );
-                self.sources.remove(&key);
+                if let Some(discarded) = self.sources.remove(&key) {
+                    self.dropped.extend(dropped_request(&discarded));
+                }
             } else {
                 pending.observed = Instant::now();
                 pending.interest = interest;
@@ -313,7 +373,10 @@ impl PendingSources {
                         recipe: message.recipe,
                         interest,
                         asked_by: None,
-                        persisted: false,
+                        demanded: false,
+                        persist_tried: false,
+                        request_id: None,
+                        recovered: false,
                         observed: Instant::now(),
                         retry_after: None,
                     },
@@ -361,11 +424,15 @@ impl PendingSources {
         retry: Duration,
     ) {
         let deferred = self.working.remove(&key).unwrap_or_default();
-        if let Some(mut source) =
-            source.filter(|_| matches!(attempt, Attempt::Busy | Attempt::Retry(_)))
-        {
-            source.retry_after = Some(Instant::now() + retry);
-            self.sources.insert(key, source);
+        match source {
+            Some(mut source) if matches!(attempt, Attempt::Busy | Attempt::Retry(_)) => {
+                source.retry_after = Some(Instant::now() + retry);
+                self.sources.insert(key, source);
+            }
+            // Done, discarded or ended: a request this demand made and that
+            // is still queued has nothing left to build.
+            Some(source) => self.dropped.extend(dropped_request(&source)),
+            None => {}
         }
         for message in deferred {
             self.observe(message);
@@ -413,9 +480,10 @@ pub(crate) async fn work_copy_observations(
     context: Arc<CopyAnalysisContext>,
 ) {
     // Before this process joins or creates any coordination request: what
-    // its predecessor left queued has no worker. Once per process.
-    // Durable demands are read first: retiring ends their requests, and each
-    // recovered demand makes its own again on its first attempt.
+    // its predecessor left has no worker. Once per process. The demands
+    // that can be taken up are read first and their requests kept; the rest
+    // are retired. A store error fails the whole step, which the next pass
+    // makes again, so no demand is lost to a transient fault.
     let recovered = Arc::new(std::sync::Mutex::new(Vec::new()));
     registry
         .retire_stranded_once(|created_before_ms| {
@@ -423,30 +491,30 @@ pub(crate) async fn work_copy_observations(
             let recovered = Arc::clone(&recovered);
             async move {
                 let demands = recover_demands(&context, created_before_ms).await?;
-                if !demands.is_empty() {
-                    tracing::info!(
-                        demands = demands.len(),
-                        "took up the copy index demands a previous process left"
-                    );
-                }
-                *recovered
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = demands;
+                let keep = demands
+                    .iter()
+                    .filter_map(|demand| demand.durable_request.clone())
+                    .collect::<Vec<_>>();
                 let retired = context
                     .store
                     .retire_stranded_analysis_coordination(
                         &context.node_id,
                         created_before_ms,
                         crate::state::clock_ms(),
+                        &keep,
                     )
                     .await
                     .map_err(|error| error.to_string())?;
-                if retired > 0 {
+                if retired > 0 || !demands.is_empty() {
                     tracing::info!(
                         retired,
-                        "retired copy coordination requests a previous process left queued"
+                        taken_up = demands.len(),
+                        "settled the copy coordination requests a previous process left"
                     );
                 }
+                *recovered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = demands;
                 Ok(())
             }
         })
@@ -454,7 +522,7 @@ pub(crate) async fn work_copy_observations(
     let retry = Duration::from_millis(context.retry_ms.max(1_000) as u64);
     let asked = registry.asked();
     let pending = registry.pending();
-    let (units, defects) = {
+    let (units, defects, dropped) = {
         let mut sources = pending.lock().await;
         let recovered = std::mem::take(
             &mut *recovered
@@ -467,13 +535,19 @@ pub(crate) async fn work_copy_observations(
         for message in registry.take_pending() {
             sources.fold(message, retry);
         }
-        let ready = (sources.start_ready(Instant::now()), sources.take_defects());
+        let ready = (
+            sources.start_ready(Instant::now()),
+            sources.take_defects(),
+            sources.take_dropped(),
+        );
         forget_settled(&asked, &sources);
         ready
     };
+    retire_dropped(&context, dropped).await;
     for (key, mut source) in units {
         let pending = Arc::clone(&pending);
         let context = Arc::clone(&context);
+        let settling = Arc::clone(&context);
         let asked = Arc::clone(&asked);
         let unit_key = key.clone();
         let unit = tokio::spawn(async move {
@@ -508,6 +582,9 @@ pub(crate) async fn work_copy_observations(
                 }
             }
             forget_settled(&asked, &sources);
+            let dropped = sources.take_dropped();
+            drop(sources);
+            retire_dropped(&settling, dropped).await;
         });
     }
     // Reader-reported defects are a few store writes each. This pass does
@@ -551,18 +628,35 @@ async fn source_is_busy(context: &CopyAnalysisContext, file_id: i64) -> Option<A
     }
 }
 
-/// The demands a previous process of this node left durable: its queued
-/// coordination requests under the local-playback id, each rebuilt from the
-/// catalogue and this node's current object. One that cannot be rebuilt
-/// (the file changed or went, no copy recipe has the request's video
-/// identity) is left out; the title asks again when it is next played.
+/// Retire the queued requests of demands that were dropped. Best-effort: a
+/// request that stays is retired as stranded by the next process.
+async fn retire_dropped(context: &CopyAnalysisContext, dropped: Vec<String>) {
+    for request_id in dropped {
+        if let Err(error) = context
+            .store
+            .retire_queued_analysis_coordination(&request_id, crate::state::clock_ms())
+            .await
+        {
+            tracing::debug!(request_id, %error, "a dropped demand's request was not retired");
+        }
+    }
+}
+
+/// The demands a previous process of this node left durable: its
+/// coordination requests under the local-playback id, queued or still
+/// claimed by that dead process, each rebuilt from the catalogue without
+/// touching the file. One that cannot be rebuilt (the file went or changed
+/// in the catalogue, no copy recipe has the request's video identity) is
+/// left out, and its request is retired with the rest; the title asks again
+/// when it is next played. A store error is returned, never taken for a
+/// demand that cannot be rebuilt.
 pub(super) async fn recover_demands(
     context: &CopyAnalysisContext,
     created_before_ms: i64,
 ) -> Result<Vec<CopyIndexDemand>, String> {
     let rows = context
         .store
-        .queued_analysis_coordination_with_prefix(
+        .predecessor_analysis_coordination_with_prefix(
             &context.node_id,
             created_before_ms,
             super::LOCAL_PLAYBACK_REQUEST_PREFIX,
@@ -580,7 +674,7 @@ pub(super) async fn recover_demands(
     let mut demands = Vec::new();
     for row in rows {
         let file_id = row.source.file_id;
-        match rebuild_demand(context, &namespace, row).await {
+        match rebuild_demand(context, &namespace, row).await? {
             Some(demand) => demands.push(demand),
             None => tracing::debug!(file_id, "a durable copy index demand could not be rebuilt"),
         }
@@ -592,37 +686,31 @@ async fn rebuild_demand(
     context: &CopyAnalysisContext,
     namespace: &str,
     row: plurx_core::store::analysis_coordination::AnalysisCoordination,
-) -> Option<CopyIndexDemand> {
-    let coordinated = row.source;
-    if coordinated.origin_node_id != context.node_id {
-        return None;
+) -> Result<Option<CopyIndexDemand>, String> {
+    let store = &context.store;
+    let failed = |error: plurx_core::error::StoreError| error.to_string();
+    if row.source.origin_node_id != context.node_id {
+        return Ok(None);
     }
-    let authority = super::LocalCopyAuthority::of_durable_request(&row.request_id)?;
-    let file = context
-        .store
-        .get_file(coordinated.file_id)
+    let Some(recorded) = super::LocalCopyAuthority::of_durable_request(&row.request_id) else {
+        return Ok(None);
+    };
+    let Some(file) = store
+        .get_file(row.source.file_id)
         .await
-        .ok()
-        .flatten()
+        .map_err(failed)?
         .filter(|file| {
-            file.size == coordinated.source_size && file.mtime == coordinated.source_mtime
-        })?;
-    // The object this node holds now must be the one the request was for.
-    let object_version = crate::fragment_index_cluster::inspect_source(&file)
-        .await
-        .ok()
-        .filter(|object_version| *object_version == coordinated.object_version)?;
+            file.size == row.source.source_size && file.mtime == row.source.source_mtime
+        })
+    else {
+        return Ok(None);
+    };
     // The request records the copy-video identity, not the options that
     // gave it. The stored probe and the three copy shapes a start can ask
     // for give the candidates; the one with that identity is the recipe.
-    let probe = context
-        .store
-        .get_file_probe_json(file.id)
-        .await
-        .ok()
-        .flatten();
+    let probe = store.get_file_probe_json(file.id).await.map_err(failed)?;
     let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
-    let video = [(false, false), (true, false), (false, true)]
+    let Some(video) = [(false, false), (true, false), (false, true)]
         .into_iter()
         .map(|(preserve, convert)| {
             plurx_core::transcode::CopyVideoOptions::from_probe(
@@ -635,30 +723,85 @@ async fn rebuild_demand(
         })
         .find(|video| {
             crate::fragindex::identity_for(&file, *video).argv_fingerprint
-                == coordinated.video_identity
-        })?;
-    // As playback observes it, under its own generation: a quarantined
-    // head's repair generation is adopted again by the head decision.
-    let source = super::source_for_copy(
+                == row.source.video_identity
+        })
+    else {
+        return Ok(None);
+    };
+    // The user is attribution only. One who has since been removed is not
+    // named; the build is still the title's.
+    let authority = if recorded.is_attributed()
+        && store
+            .get_user(recorded.user_id())
+            .await
+            .map_err(failed)?
+            .is_none()
+    {
+        super::LocalCopyAuthority::unattributed()
+    } else {
+        recorded
+    };
+    // The predecessor is dead: a claim it held has no holder and a phase it
+    // left open has no reader. Close the phase and hand the claim back, so
+    // this worker can claim the request it is taking up.
+    if row.physical_node_id.as_deref() == Some(context.node_id.as_str()) {
+        physical::settle_dead_phase(store, &row).await;
+    }
+    if let Some(request) = store
+        .analysis_request(&row.request_id)
+        .await
+        .map_err(failed)?
+        .filter(|request| request.state == "running" && request.owner_node_id == context.node_id)
+    {
+        let now = crate::state::clock_ms();
+        // False when the lease already ran out; the claim then returns to
+        // the queue by the store's own lease expiry.
+        store
+            .retry_analysis_request(
+                &request,
+                "coordination_owner_restarted",
+                now,
+                now.saturating_add(1),
+                false,
+            )
+            .await
+            .map_err(failed)?;
+    }
+    // No file is opened here. The object the request was for is carried as
+    // it was recorded; the unit's source fence refuses it if this node's
+    // object has changed since. As playback observes it, under its own
+    // generation: a quarantined head's repair generation is adopted again
+    // by the head decision.
+    let source = match super::source_for_copy(
         namespace,
         &file,
-        &coordinated.video_identity,
-        &object_version,
+        &row.source.video_identity,
+        &row.source.object_version,
         &context.node_id,
-    )
-    .ok()?;
-    Some(CopyIndexDemand {
+    ) {
+        Ok(source) => source,
+        Err(_) => return Ok(None),
+    };
+    // Playback's default audio: the first track copied when the copy pipe
+    // can carry its codec, encoded when it cannot. Never a bare copy the
+    // muxer may refuse. A playback that asks again brings its own choice.
+    let transcode_audio = file
+        .audio_streams
+        .first()
+        .is_some_and(|audio| !plurx_core::playback::audio::copy_pipe_admits_audio(&audio.codec));
+    Ok(Some(CopyIndexDemand {
         file: Arc::new(file),
         catalog_namespace: namespace.to_owned(),
         source,
         recipe: super::CopyRecipe {
             video,
             audio_index: None,
-            transcode_audio: false,
+            transcode_audio,
             audio_delivery: None,
         },
         authority: CopyObservationAuthority::Local(authority),
-    })
+        durable_request: Some(row.request_id),
+    }))
 }
 
 /// Let a title ask again once nothing holds or works its source.
@@ -703,7 +846,10 @@ pub(super) async fn publish_source(
     // attempt therefore makes the request before it looks at the source
     // domain, once; a restart then finds the request and takes the demand
     // up again.
-    let persist_first = !pending.persisted && matches!(pending.held, Held::Demand { .. });
+    let persist_first = pending.demanded && !pending.persist_tried;
+    // Once, whatever it answers: after this attempt a busy source is asked
+    // about without a write, like any other.
+    pending.persist_tried = true;
     if waits_for_idle && !persist_first {
         if let Some(busy) = source_is_busy(context, source.file_id).await {
             return busy;
@@ -720,9 +866,20 @@ pub(super) async fn publish_source(
         // Nothing will ever claim this generation again, so holding the
         // source would only repeat this answer on every pass.
         Ok(Coordination::Ended) => return Attempt::Ended,
-        Err(reason) => return Attempt::Retry(reason),
+        Err(reason) => {
+            if persist_first {
+                tracing::warn!(
+                    file_id = source.file_id,
+                    %reason,
+                    "a copy index demand's request was not made; a restart before its build would forget it"
+                );
+            }
+            return Attempt::Retry(reason);
+        }
     };
-    pending.persisted = true;
+    if pending.demanded {
+        pending.request_id = Some(request.request_id.clone());
+    }
     if waits_for_idle && persist_first {
         if let Some(busy) = source_is_busy(context, source.file_id).await {
             return busy;
