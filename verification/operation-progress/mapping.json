@@ -255,13 +255,13 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "0c85f37f730dde2fd455836c72a20f8d22b96cbc7524b7e8e8bbc9fdb919af1c"
+        "sha256": "da5453dbee0f0b692bbe64d9db20fb77acf5a19a84e295225ba7ec87313e1ae4"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "0c85f37f730dde2fd455836c72a20f8d22b96cbc7524b7e8e8bbc9fdb919af1c"
+        "sha256": "da5453dbee0f0b692bbe64d9db20fb77acf5a19a84e295225ba7ec87313e1ae4"
       },
       {
         "table": "44 main worker spawn no shutdown arg",

@@ -1813,7 +1813,13 @@ pattern = "DurableRouteResolution"
 # 102 -> 105 with playback-start E1a's route-read baseline: the status
 # resolution and the two site-labelled authoritative helpers return the same
 # enum. Counting only (`site="status"`); no new resolution, no producer.
-expected_occurrences = 105
+# 105 -> 113 with E1c (route view): status.rs's view-first first resolution
+# names the two active arms it admits (+2); the site-carrying forms of the
+# cached lookups (`route_resolution_at`, `media_route_resolution_at`,
+# `status_view_media_route_resolution_before`) return it (+3); the route
+# inventory pins status's match (+2) and the B1 case asserts a terminal
+# answer (+1), both test-only. No new producer.
+expected_occurrences = 113
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
@@ -1821,7 +1827,9 @@ pattern = "authoritative_route_resolution_before"
 # 9 -> 8 with E1a's route-read baseline: the media form now reaches the shared
 # body through `authoritative_route_resolution_at`, which carries the site
 # label. The same quorum read, counted; no call site changed authority.
-expected_occurrences = 8
+# 8 -> 9 with E1c: route_view_tests.rs's fence guard calls it once to prove
+# the verdict never asks the applied view. Test-only.
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-owner-bound-vod-facade"
@@ -2121,7 +2129,9 @@ expected_occurrences = 29
 [[module_symbols]]
 id = "m4-terminal-route-proof-cache"
 pattern = "cache_terminal_route"
-expected_occurrences = 4
+# 4 -> 5 with E1c: the B1 case in route_view_tests.rs publishes a release
+# tombstone through it. Test-only; the shipped callers are unchanged.
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "m4-activation-publication-handoff-fence"
@@ -2235,7 +2245,9 @@ pattern = "publication_ready_at_ms"
 # sentinel, and three read-only checks refuse a route whose session or fence
 # moved. The engine never advances or clears the fence; the actor slot remains
 # the only authority that publishes.
-expected_occurrences = 167
+# 167 -> 168 with E1c: route_view_tests.rs's committed-row helper activates
+# with a publishable fence. Test-only.
+expected_occurrences = 168
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -2605,7 +2617,9 @@ pattern = "cache_route_if_generation"
 # this row: the paused-time sweep test calls it once, on a coordinator it owns, to run
 # the generation-insert sweep over expired entries, and names it once in a comment.
 # Test-only; the shipped function still has its one production caller.
-expected_occurrences = 5
+# 5 -> 3 with E1c: the paused-time sweep test is gone with the sweeps
+# (ROUTE_CACHE_TTL deleted); the function keeps its one caller.
+expected_occurrences = 3
 
 [[module_symbols]]
 id = "m4-predetermined-takeover-worker-id"
@@ -5736,7 +5750,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 #   production).
 # - A route-change `timeout_at` and a 10 s lease-renewal interval in the growing
 #   actor, both owned by that actor's lifetime.
-expected_occurrences = 2202
+# 2202 -> 2205 with E1c (route view): `raw_route_before` bounds its view read
+# and its quorum read (alternative arms) by the lookup's existing request
+# deadline, one `timeout_at` more than the single Store read had (+1); two
+# test-only 40-50 ms pacing sleeps in route_view_tests.rs drive real-time
+# lease cases (+2). No new task, timer or producer: the cache has no clock.
+expected_occurrences = 2205
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
