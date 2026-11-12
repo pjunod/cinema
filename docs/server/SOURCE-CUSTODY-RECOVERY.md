@@ -189,6 +189,22 @@ mtime therefore refuses. Superblocks are found by the file's NFS handle
 plus the daemon's own stat.
 
 It then uses the ordinary typed settlement and clears only its own witness.
+
+**When the owner's job row is gone.** Retention can delete a settled job while
+its custody is still charged. That row is the custody's only exact source
+binding, so the census alone cannot release it. For each pass the helper also
+records an `owner_teardown` view, taken from the host:
+
+- the PID namespace of the `plurxd run` that is PID 1 of its namespace;
+- how many processes in that namespace started at or before the owner's lease
+  expiry;
+- how many processes outside it hold a descriptor, cwd, root, executable or
+  mapping on any counted superblock.
+
+The daemon accepts that view only if it is PID 1 of that same namespace, both
+counts are zero in both passes, and the owner's recorded source inode (when
+there is one) is the census inode. When the owner's namespace init exited, the
+kernel killed that whole namespace, so no survivor can still be reading.
 The operator removes the proof file after release. The model never repairs a
 nonce, rewrites a witness or treats lease expiry as stop evidence. A future
 unmediated launch still poisons live witnesses; reducing those launches
