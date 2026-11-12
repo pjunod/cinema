@@ -314,7 +314,7 @@ impl HiqliteAuthStore {
             bind_atomic_authority(params, lease)?;
         }
         statements.insert(0, renewal);
-        let transaction = self.client().txn(statements).await;
+        let transaction = self.client().txn("atomic_publication", statements).await;
         let results = match transaction {
             Ok(results) => results,
             Err(error)
@@ -367,7 +367,7 @@ impl HiqliteAuthStore {
         .map_err(database_error)?;
         let count = self
             .client()
-            .query_consistent_map::<CountRow, _>(
+            .query_consistent_map::<CountRow, _>("identity_repair_mapping_applied", 
                 "SELECT COUNT(*) AS count FROM items survivor \
                   WHERE survivor.id=$1 AND survivor.library_id=$2 AND survivor.kind='show' \
                     AND NOT EXISTS (SELECT 1 FROM json_each($3) r JOIN items i ON i.id=r.value) \
@@ -1044,13 +1044,13 @@ impl FencedPublicationStore for HiqliteAuthStore {
         };
         let now = self.now()?;
         // authority: current allocator installation selects the identity-fenced write path.
-        let allocated = self.client().query_consistent_map::<ItemIdentityValue,_>("SELECT count(*) AS value FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",params!()).await.map_err(database_error)?.first().is_some_and(|r|r.value==1);
+        let allocated = self.client().query_consistent_map::<ItemIdentityValue,_>("insert_item_fenced", "SELECT count(*) AS value FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",params!()).await.map_err(database_error)?.first().is_some_and(|r|r.value==1);
         #[cfg(feature = "hiqlite-contract-tests")]
         let seam = self.insertion_seam.installed();
         for attempt in 0..4 {
             let id = if allocated {
                 // authority: select the next candidate against the committed monotonic watermark.
-                self.client().query_consistent_map::<ItemIdentityValue,_>("SELECT high_water+1 AS value FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water<9223372036854775807",params!()).await.map_err(database_error)?.first().map(|r|r.value).ok_or_else(||StoreError::Database("item identity allocation unavailable".into()))?
+                self.client().query_consistent_map::<ItemIdentityValue,_>("insert_item_fenced", "SELECT high_water+1 AS value FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water<9223372036854775807",params!()).await.map_err(database_error)?.first().map(|r|r.value).ok_or_else(||StoreError::Database("item identity allocation unavailable".into()))?
             } else {
                 publication_row_id()
             };
@@ -1647,7 +1647,11 @@ impl FencedPublicationStore for HiqliteAuthStore {
         )
         .await?;
         self.client()
-            .query_consistent_map::<IdRow, _>("SELECT id FROM files WHERE path = $1", params!(path))
+            .query_consistent_map::<IdRow, _>(
+                "upsert_file_fenced",
+                "SELECT id FROM files WHERE path = $1",
+                params!(path),
+            )
             .await?
             .into_iter()
             .next()
@@ -1722,6 +1726,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let expected = self
             .client()
             .query_consistent_map::<FingerprintRow, _>(
+                "ensure_library_root_fingerprint_fenced",
                 "SELECT fingerprint FROM library_roots WHERE library_id = $1",
                 params!(library_id),
             )
@@ -1922,6 +1927,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
             let expected = self
                 .client()
                 .query_consistent_map::<FingerprintRow, _>(
+                    "reconcile_library_fenced",
                     "SELECT fingerprint FROM library_roots WHERE library_id = $1",
                     params!(library_id),
                 )
@@ -1937,6 +1943,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
             let requested = self
                 .client()
                 .query_consistent_map::<CountRow, _>(
+                    "reconcile_library_fenced",
                     "SELECT COUNT(*) AS count FROM files f JOIN items i ON i.id = f.item_id
                      WHERE i.library_id = $1
                        AND f.id IN (SELECT value FROM json_each($2))",

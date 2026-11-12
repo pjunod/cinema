@@ -22,8 +22,13 @@
 //! [`CONSISTENT_DISPATCH`], or its callers are invisible here. The per-request number is what `plurx_http_store_reads_total`
 //! measures (K-04 M0), and only that measurement is evidence about latency.
 //!
-//! Two rules:
+//! Three rules:
 //!
+//! - every consistent read names the Store method that issued it
+//!   ([`unlabelled_sites`]): the first argument of `query_consistent_map*` is a
+//!   string literal, or the `method` a wrapper was handed, so a quorum read
+//!   cannot reach `plurx_http_store_operations_by_method_total` unattributed.
+//!   The label is the method's name (`&'static str`), never a `file:line`;
 //! - each file's count is pinned exactly in [`CONSISTENT_READ_SITES`], so a
 //!   file that gains a site fails until the same change raises its entry
 //!   (and one that loses a site lowers it, which keeps the ratchet tight);
@@ -120,6 +125,62 @@ fn dispatch_sites(line: &str) -> usize {
                 .count()
         })
         .sum()
+}
+
+/// The consistent-read call sites whose first argument is neither a string
+/// literal nor the forwarded `method` label, as `(line, text)`. A call on the
+/// raw vendor client (`self.inner().`, which the one `TimedClient` wrapper
+/// makes) is not a site of this rule: it has no label to take.
+fn unlabelled_sites(source: &str) -> Vec<(usize, String)> {
+    let text = production(source);
+    let mut found = Vec::new();
+    for (at, _) in text.match_indices(".query_consistent_map") {
+        let line_start = text[..at].rfind('\n').map_or(0, |index| index + 1);
+        let line_end = text[at..].find('\n').map_or(text.len(), |index| at + index);
+        let line = &text[line_start..line_end];
+        if line.trim_start().starts_with("//") || text[..at].trim_end().ends_with("inner()") {
+            continue;
+        }
+        let mut rest = &text[at + ".query_consistent_map".len()..];
+        rest = rest.strip_prefix("_scoped").unwrap_or(rest);
+        if let Some(turbofish) = rest.strip_prefix("::<") {
+            let mut depth = 1_usize;
+            let mut end = 0;
+            for (index, character) in turbofish.char_indices() {
+                match character {
+                    '<' => depth += 1,
+                    '>' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    end = index + 1;
+                    break;
+                }
+            }
+            rest = &turbofish[end..];
+        }
+        let Some(arguments) = rest.strip_prefix('(') else {
+            continue;
+        };
+        let first = arguments.trim_start();
+        // A label is an identifier-shaped literal, so an SQL literal in the
+        // first position (an unlabelled read) is not mistaken for one.
+        let labelled = first.strip_prefix('"').is_some_and(|literal| {
+            literal.split_once("\",").is_some_and(|(name, _)| {
+                !name.is_empty()
+                    && name.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            })
+        }) || first
+            .strip_prefix("method")
+            .is_some_and(|after| after.trim_start().starts_with(','));
+        if !labelled {
+            let number = text[..at].matches('\n').count() + 1;
+            found.push((number, line.trim().to_owned()));
+        }
+    }
+    found
 }
 
 fn production(source: &str) -> &str {
@@ -335,4 +396,62 @@ fn consistent_read_census_admits_a_raised_entry_with_an_authority_reason() {
         saturated_fixture_ceiling(),
     )
     .expect_err("an empty authority reason must not admit the read");
+}
+
+/// Consistent reads made on a raw `hiqlite::Client`, not through
+/// `TimedClient`: schema bootstrap, migration and compatibility checks that
+/// run before the store serves a request. They never reach
+/// `HttpStoreOperationCounts` or the by-method metric, so there is no label
+/// for them to take. Pinned per slice: a new raw read fails here until it is
+/// either labelled (made through `TimedClient`) or consciously added.
+const RAW_CLIENT_SITES: &[(&str, usize)] = &[
+    // Watch-column migration, sharing object shape, the cluster compatibility
+    // probe and its two committed-marker readers, and two Source/custody
+    // shape guards.
+    ("hiqlite.rs", 7),
+    // The producer payload column shape before a bootstrap ALTER.
+    ("hiqlite_background_jobs.rs", 1),
+    // The analysis-component and subtitle-source schema currency probes.
+    ("hiqlite_fragment_index_cluster.rs", 2),
+];
+
+/// The D3a rule (`docs/streaming/PLAYBACK-START-D3-BUILD.md` section 7.1-1):
+/// no consistent read without a Store-method label.
+#[test]
+fn every_consistent_read_names_its_store_method() {
+    let mut failures = Vec::new();
+    for (name, source) in STORE_SOURCES {
+        let found = unlabelled_sites(source);
+        let allowed = RAW_CLIENT_SITES
+            .iter()
+            .find(|(entry, _)| entry == name)
+            .map_or(0, |(_, count)| *count);
+        if found.len() != allowed {
+            failures.push(format!(
+                "{name}: {} consistent reads without a method label, {allowed} raw-client reads pinned:\n{}",
+                found.len(),
+                found
+                    .iter()
+                    .map(|(line, text)| format!("  {name}:{line}: {text}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn the_label_rule_refuses_an_unlabelled_read_and_admits_labelled_ones() {
+    let unlabelled = "fn f() {\n    client\n        .query_consistent_map::<Row, _>(\"SELECT 1\", params!())\n        .await;\n    client.query_consistent_map::<Map<K, V>, _>(sql, params!());\n}\n";
+    let found = unlabelled_sites(unlabelled);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!((found[0].0, found[1].0), (3, 5));
+    // A literal, a forwarded label, the scoped variant and the raw client.
+    let labelled = "client.query_consistent_map::<Row, _>(\"list_users\", sql, p);\n\
+                    client.query_consistent_map(method, sql, p);\n\
+                    client.query_consistent_map_scoped(\n    method,\n    sql,\n    p,\n    s);\n\
+                    self.inner().query_consistent_map(sql.clone(), p);\n\
+                    // client.query_consistent_map(sql, p) in a comment\n";
+    assert!(unlabelled_sites(labelled).is_empty());
 }

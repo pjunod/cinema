@@ -203,7 +203,7 @@ struct JsonValueRow {
 
 async fn rows(client: &TimedClient, sql: &'static str) -> Result<Vec<String>, StoreError> {
     Ok(client
-        .query_map::<JsonValueRow, _>(sql, params!())
+        .query_map::<JsonValueRow, _>("rows", sql, params!())
         .await
         .map_err(database_error)?
         .into_iter()
@@ -440,6 +440,7 @@ impl HiqliteAuthStore {
         one_library(
             self.client()
                 .query_map::<LibraryRow, _>(
+                    "local_get_library",
                     format!("SELECT {LIB_COLS} FROM libraries WHERE id = $1"),
                     params!(id),
                 )
@@ -450,6 +451,7 @@ impl HiqliteAuthStore {
     pub(super) async fn local_list_libraries(&self) -> Result<Vec<Library>, StoreError> {
         self.client()
             .query_map::<LibraryRow, _>(
+                "local_list_libraries",
                 format!("SELECT {LIB_COLS} FROM libraries ORDER BY name"),
                 params!(),
             )
@@ -473,6 +475,7 @@ impl LibraryStore for HiqliteAuthStore {
         let row = self
             .client()
             .execute_returning_map_one::<_, LibraryRow>(
+                "create_library",
                 sql,
                 params!(
                     library.name.as_str(),
@@ -501,6 +504,7 @@ impl LibraryStore for HiqliteAuthStore {
         let row = self
             .client()
             .execute_returning_map_one::<_, LibraryRow>(
+                "create_library_with_scan_interval",
                 sql,
                 params!(
                     library.name.as_str(),
@@ -529,6 +533,7 @@ impl LibraryStore for HiqliteAuthStore {
         one_returning_library(
             self.client()
                 .execute_returning_map::<_, LibraryRow>(
+                    "update_library",
                     sql,
                     params!(
                         library.name.as_str(),
@@ -556,6 +561,7 @@ impl LibraryStore for HiqliteAuthStore {
         one_returning_library(
             self.client()
                 .execute_returning_map::<_, LibraryRow>(
+                    "set_library_schedule",
                     sql,
                     params!(scan_interval_mins.max(0), refresh_interval_mins.max(0), id),
                 )
@@ -576,7 +582,7 @@ impl LibraryStore for HiqliteAuthStore {
     }
 
     async fn delete_library(&self, id: i64) -> Result<bool, StoreError> {
-        let results=self.client().txn(vec![
+        let results=self.client().txn("delete_library", vec![
             ("UPDATE sharing_exports SET scope_generation=scope_generation+1,catalogue_generation=catalogue_generation+1,mutation_generation=mutation_generation+1 WHERE id IN (SELECT grant_id FROM sharing_export_libraries WHERE library_id=$1)".to_owned(),params!(id)),
             ("DELETE FROM sharing_export_libraries WHERE library_id=$1".to_owned(),params!(id)),
             ("DELETE FROM libraries WHERE id=$1".to_owned(),params!(id)),
@@ -592,6 +598,7 @@ impl LibraryStore for HiqliteAuthStore {
         one_library(
             self.client()
                 .query_consistent_map::<LibraryRow, _>(
+                    "get_library",
                     format!("SELECT {LIB_COLS} FROM libraries WHERE id = $1"),
                     params!(id),
                 )
@@ -602,6 +609,7 @@ impl LibraryStore for HiqliteAuthStore {
     async fn list_libraries(&self) -> Result<Vec<Library>, StoreError> {
         self.client()
             .query_consistent_map::<LibraryRow, _>(
+                "list_libraries",
                 format!("SELECT {LIB_COLS} FROM libraries ORDER BY name"),
                 params!(),
             )

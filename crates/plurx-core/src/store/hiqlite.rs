@@ -1004,15 +1004,23 @@ pub fn validation_store_operation_metric_count() -> u64 {
 struct StoreOperationTimer {
     metrics: &'static StoreOperationMetrics,
     class: StoreOperationClass,
+    /// The Store method that issued the operation (`&'static`, so a metric
+    /// label can never be built from SQL text or a request value).
+    method: &'static str,
     started_at: Instant,
     completed: bool,
 }
 
 impl StoreOperationTimer {
-    fn start(metrics: &'static StoreOperationMetrics, class: StoreOperationClass) -> Self {
+    fn start(
+        metrics: &'static StoreOperationMetrics,
+        class: StoreOperationClass,
+        method: &'static str,
+    ) -> Self {
         Self {
             metrics,
             class,
+            method,
             started_at: Instant::now(),
             completed: false,
         }
@@ -1021,7 +1029,7 @@ impl StoreOperationTimer {
     fn complete(mut self, outcome: StoreOperationOutcome) {
         let elapsed = self.started_at.elapsed();
         self.metrics.record(self.class, outcome, elapsed);
-        super::record_http_store_operation(self.class.index(), elapsed);
+        super::record_http_store_operation(self.class.index(), self.method, elapsed);
         self.completed = true;
     }
 }
@@ -1032,7 +1040,7 @@ impl Drop for StoreOperationTimer {
             let elapsed = self.started_at.elapsed();
             self.metrics
                 .record(self.class, StoreOperationOutcome::Cancelled, elapsed);
-            super::record_http_store_operation(self.class.index(), elapsed);
+            super::record_http_store_operation(self.class.index(), self.method, elapsed);
         }
     }
 }
@@ -1040,6 +1048,7 @@ impl Drop for StoreOperationTimer {
 async fn time_store_operation<T>(
     metrics: &'static StoreOperationMetrics,
     class: StoreOperationClass,
+    method: &'static str,
     operation: impl Future<Output = Result<T, StoreError>>,
     successful: impl FnOnce(&T) -> bool,
 ) -> Result<T, StoreError> {
@@ -1048,6 +1057,7 @@ async fn time_store_operation<T>(
         time_store_operation_controlled(
             metrics,
             class,
+            method,
             operation,
             successful,
             validation_store_operation_instrumentation_enabled(),
@@ -1056,7 +1066,7 @@ async fn time_store_operation<T>(
     }
     #[cfg(not(feature = "cluster-read-cost-validation"))]
     {
-        let timer = StoreOperationTimer::start(metrics, class);
+        let timer = StoreOperationTimer::start(metrics, class, method);
         let result = operation.await;
         timer.complete(match result.as_ref() {
             Ok(value) if successful(value) => StoreOperationOutcome::Ok,
@@ -1082,6 +1092,7 @@ pub async fn validation_time_http_store_operation(class_index: usize) {
     time_store_operation(
         &STORE_OPERATION_METRICS,
         class,
+        "validation_time_http_store_operation",
         async { Ok::<_, StoreError>(()) },
         |_| true,
     )
@@ -1093,6 +1104,7 @@ pub async fn validation_time_http_store_operation(class_index: usize) {
 async fn time_store_operation_controlled<T>(
     metrics: &'static StoreOperationMetrics,
     class: StoreOperationClass,
+    method: &'static str,
     operation: impl Future<Output = Result<T, StoreError>>,
     successful: impl FnOnce(&T) -> bool,
     enabled: bool,
@@ -1100,7 +1112,7 @@ async fn time_store_operation_controlled<T>(
     if !enabled {
         return operation.await;
     }
-    let timer = StoreOperationTimer::start(metrics, class);
+    let timer = StoreOperationTimer::start(metrics, class, method);
     let result = operation.await;
     timer.complete(match result.as_ref() {
         Ok(value) if successful(value) => StoreOperationOutcome::Ok,
@@ -1154,6 +1166,7 @@ fn is_replicated_store_timeout<T>(result: &Result<T, StoreError>) -> bool {
 
 async fn time_scoped_authority_read_with_retry<T, F, Fut>(
     metrics: &'static StoreOperationMetrics,
+    method: &'static str,
     scope: Option<&TakeoverAuthorityReadMetrics>,
     mut operation: F,
 ) -> Result<T, StoreError>
@@ -1174,6 +1187,7 @@ where
             let result = time_store_operation(
                 metrics,
                 StoreOperationClass::AuthorityRead,
+                method,
                 operation(),
                 |_| true,
             )
@@ -1250,6 +1264,7 @@ where
 /// [`STORE_TIMEOUT`] for any other call.
 async fn time_idempotent_write_with_retry<T, F, Fut>(
     metrics: &'static StoreOperationMetrics,
+    method: &'static str,
     mut operation: F,
 ) -> Result<T, StoreError>
 where
@@ -1257,8 +1272,14 @@ where
     Fut: Future<Output = Result<T, StoreError>>,
 {
     for attempt in 1..=IDEMPOTENT_WRITE_MAX_ATTEMPTS {
-        let result =
-            time_store_operation(metrics, StoreOperationClass::Write, operation(), |_| true).await;
+        let result = time_store_operation(
+            metrics,
+            StoreOperationClass::Write,
+            method,
+            operation(),
+            |_| true,
+        )
+        .await;
         if !is_replicated_store_timeout(&result) || attempt == IDEMPOTENT_WRITE_MAX_ATTEMPTS {
             return result;
         }
@@ -1379,6 +1400,7 @@ impl TimedClient {
 
     pub(super) async fn query_consistent_map<T, S>(
         &self,
+        method: &'static str,
         sql: S,
         params: hiqlite::Params,
     ) -> Result<Vec<T>, StoreError>
@@ -1386,12 +1408,13 @@ impl TimedClient {
         T: for<'a, 'r> From<&'a mut hiqlite::Row<'r>> + Send + 'static,
         S: Into<Cow<'static, str>>,
     {
-        self.query_consistent_map_scoped(sql, params, AuthorityReadScope::Unattributed)
+        self.query_consistent_map_scoped(method, sql, params, AuthorityReadScope::Unattributed)
             .await
     }
 
     async fn query_consistent_map_scoped<T, S>(
         &self,
+        method: &'static str,
         sql: S,
         params: hiqlite::Params,
         scope: AuthorityReadScope,
@@ -1404,6 +1427,7 @@ impl TimedClient {
         validate_sql(&sql)?;
         time_scoped_authority_read_with_retry(
             &STORE_OPERATION_METRICS,
+            method,
             scope.metrics(self.takeover_authority_read_metrics()),
             || async {
                 #[cfg(feature = "cluster-read-cost-validation")]
@@ -1446,6 +1470,7 @@ impl TimedClient {
 
     pub(super) async fn query_map<T, S>(
         &self,
+        method: &'static str,
         sql: S,
         params: hiqlite::Params,
     ) -> Result<Vec<T>, StoreError>
@@ -1472,6 +1497,7 @@ impl TimedClient {
         time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::LocalRead,
+            method,
             timeout_store(self.inner().query_map(sql, params)),
             |_| true,
         )
@@ -1480,6 +1506,7 @@ impl TimedClient {
 
     pub(super) async fn execute<S>(
         &self,
+        method: &'static str,
         sql: S,
         params: hiqlite::Params,
     ) -> Result<usize, StoreError>
@@ -1494,6 +1521,7 @@ impl TimedClient {
         let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
+            method,
             timeout_store(self.inner().execute(sql, params)),
             |_| true,
         )
@@ -1506,6 +1534,7 @@ impl TimedClient {
     /// index when the leader reported it (see [`hiqlite::WriteAck`]).
     pub(super) async fn execute_acked<S>(
         &self,
+        method: &'static str,
         sql: S,
         params: hiqlite::Params,
     ) -> Result<hiqlite::WriteAck<usize>, StoreError>
@@ -1520,6 +1549,7 @@ impl TimedClient {
         let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
+            method,
             timeout_store(self.inner().execute_acked(sql, params)),
             |_| true,
         )
@@ -1530,6 +1560,7 @@ impl TimedClient {
 
     pub(super) async fn execute_idempotent<S>(
         &self,
+        method: &'static str,
         sql: S,
         params: hiqlite::Params,
     ) -> Result<usize, StoreError>
@@ -1545,7 +1576,7 @@ impl TimedClient {
         // injection and failing the contract for the wrong reason.
         #[cfg(feature = "cluster-read-cost-validation")]
         let injectable = sql.contains("UPDATE media_sessions");
-        let result = time_idempotent_write_with_retry(&STORE_OPERATION_METRICS, || {
+        let result = time_idempotent_write_with_retry(&STORE_OPERATION_METRICS, method, || {
             #[cfg(feature = "cluster-read-cost-validation")]
             self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
             let operation = timeout_store(self.inner().execute(sql.clone(), params.clone()));
@@ -1573,13 +1604,14 @@ impl TimedClient {
     /// activation confirmation, while each attempt uses guarded layout dispatch.
     pub(super) async fn source_layout_idempotent<F, Fut>(
         &self,
+        method: &'static str,
         mut operation: F,
     ) -> Result<usize, StoreError>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<usize, StoreError>>,
     {
-        time_idempotent_write_with_retry(&STORE_OPERATION_METRICS, || {
+        time_idempotent_write_with_retry(&STORE_OPERATION_METRICS, method, || {
             let operation = operation();
             async move {
                 let result = operation.await;
@@ -1600,6 +1632,7 @@ impl TimedClient {
 
     pub(super) async fn execute_returning_map<S, T>(
         &self,
+        method: &'static str,
         sql: S,
         params: hiqlite::Params,
     ) -> Result<Vec<Result<T, hiqlite::Error>>, StoreError>
@@ -1615,6 +1648,7 @@ impl TimedClient {
         let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
+            method,
             timeout_store(self.inner().execute_returning_map(sql, params)),
             |rows| rows.iter().all(Result::is_ok),
         )
@@ -1627,6 +1661,7 @@ impl TimedClient {
     /// entry's Raft log index when the leader reported it.
     pub(super) async fn execute_returning_map_acked<S, T>(
         &self,
+        method: &'static str,
         sql: S,
         params: hiqlite::Params,
     ) -> Result<hiqlite::WriteAck<Vec<Result<T, hiqlite::Error>>>, StoreError>
@@ -1642,6 +1677,7 @@ impl TimedClient {
         let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
+            method,
             timeout_store(self.inner().execute_returning_map_acked(sql, params)),
             |ack| ack.result.iter().all(Result::is_ok),
         )
@@ -1652,6 +1688,7 @@ impl TimedClient {
 
     pub(super) async fn execute_returning_map_one<S, T>(
         &self,
+        method: &'static str,
         sql: S,
         params: hiqlite::Params,
     ) -> Result<T, StoreError>
@@ -1667,6 +1704,7 @@ impl TimedClient {
         let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
+            method,
             timeout_store(self.inner().execute_returning_map_one(sql, params)),
             |_| true,
         )
@@ -1677,6 +1715,7 @@ impl TimedClient {
 
     pub(super) async fn txn<C, Q>(
         &self,
+        method: &'static str,
         statements: Q,
     ) -> Result<Vec<Result<usize, hiqlite::Error>>, StoreError>
     where
@@ -1696,6 +1735,7 @@ impl TimedClient {
         let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
+            method,
             timeout_store(self.inner().txn(statements)),
             |results| results.iter().all(Result::is_ok),
         )
@@ -1708,6 +1748,7 @@ impl TimedClient {
     /// StoreError. None proves a first-layout-guard failure and explicit rollback.
     pub(super) async fn txn_source_layout_attempt(
         &self,
+        method: &'static str,
         statements: Vec<(String, hiqlite::Params)>,
     ) -> Result<Option<Vec<Result<usize, hiqlite::Error>>>, StoreError> {
         for (sql, _) in &statements {
@@ -1719,6 +1760,7 @@ impl TimedClient {
         let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
+            method,
             timeout_store(async {
                 match self.inner().txn(statements).await {
                     Err(error) if error.is_source_layout_guard_rollback() => Ok(None),
@@ -1738,6 +1780,7 @@ impl TimedClient {
 
     pub(super) async fn batch(
         &self,
+        method: &'static str,
         sql: &'static str,
     ) -> Result<Vec<Result<usize, hiqlite::Error>>, StoreError> {
         validate_sql(sql)?;
@@ -1747,6 +1790,7 @@ impl TimedClient {
         let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
+            method,
             timeout_store(self.inner().batch(sql)),
             |results| results.iter().all(Result::is_ok),
         )
@@ -1778,6 +1822,7 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             .query_map::<SettingValueRow, _>(
+                "local_bounded_reads_enabled",
                 "SELECT value FROM settings WHERE key = $1",
                 params!(super::keys::BOUNDED_REPLICA_READS),
             )
@@ -1803,6 +1848,7 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             .query_map::<SettingEntryRow, _>(
+                "local_settings_snapshot",
                 "SELECT key, value FROM settings ORDER BY key",
                 params!(),
             )
@@ -1819,7 +1865,7 @@ impl HiqliteAuthStore {
         let keys = super::selected_settings_json(keys)?;
         let rows = self
             .client()
-            .query_map::<SettingEntryRow, _>(
+            .query_map::<SettingEntryRow, _>("local_get_settings", 
                 "SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each($1)) ORDER BY key",
                 params!(keys),
             )
@@ -1849,7 +1895,7 @@ impl HiqliteAuthStore {
         transaction.push((CREDENTIAL_MUTATION_INTENT_END_SQL, params!()));
         let results = self
             .client()
-            .txn(transaction)
+            .txn("credential_mutation", transaction)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -2249,7 +2295,11 @@ impl HiqliteAuthStore {
         validate_sql(sql)?;
         let rows = self
             .client()
-            .query_consistent_map::<CountRow, _>(sql, params!())
+            .query_consistent_map::<CountRow, _>(
+                "analysis_component_schema_is_current",
+                sql,
+                params!(),
+            )
             .await?;
         Ok(rows.len() == 1
             && rows[0].count
@@ -2263,7 +2313,7 @@ impl HiqliteAuthStore {
         let version = self.committed_schema_version_unchecked().await?;
         if version < SHARING_SCHEMA_VERSION {
             // authority: shape recognition must precede any migration write.
-            let rows = self.client().query_consistent_map::<CountRow,_>(
+            let rows = self.client().query_consistent_map::<CountRow,_>("refuse_ambiguous_sharing_lineage", 
                 "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('sharing_identity','sharing_source_schema_installation','sharing_source_session_bindings','sharing_ingress_custody')",params!()).await?;
             if sharing_lineage_is_ambiguous(version, rows.first().map_or(0, |row| row.count)) {
                 return Err(StoreError::Migration(
@@ -2287,7 +2337,10 @@ impl HiqliteAuthStore {
             .into_iter()
             .map(|(sql, params)| (sql.into(), params))
             .collect();
-        Box::pin(self.client().txn(statements))
+        Box::pin(
+            self.client()
+                .txn("schema_migration_transaction", statements),
+        )
     }
 
     async fn migrate_schema(
@@ -2301,7 +2354,7 @@ impl HiqliteAuthStore {
                        FROM cluster_meta WHERE singleton = 1";
             let rows = self
                 .client()
-                .query_consistent_map::<CompatibilityRow, _>(sql, params!())
+                .query_consistent_map::<CompatibilityRow, _>("migrate_schema", sql, params!())
                 .await?;
             admit_schema_migration(admission)?;
             match schema_migration_action(&rows, ClusterCompatibility::CURRENT)? {
@@ -3709,7 +3762,10 @@ impl HiqliteAuthStore {
                     // before the marker advance resumes the same batch.
                     for result in self
                         .client()
-                        .batch(super::background_jobs::VIEWER_ANALYSIS_SCHEMA)
+                        .batch(
+                            "migrate_schema",
+                            super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
+                        )
                         .await?
                     {
                         result.map_err(database_error)?;
@@ -3777,7 +3833,7 @@ impl HiqliteAuthStore {
                     // an already-present additive column during upgrade replay.
                     // An incompatible type/nullability is not an audio snapshot.
                     // authority: a stale replica could miss a committed audio_recipe column and replay its ADD COLUMN.
-                    let columns = self.client().query_consistent_map::<CountRow, _>(
+                    let columns = self.client().query_consistent_map::<CountRow, _>("migrate_schema", 
                         "SELECT COUNT(*) AS count FROM pragma_table_info('offline_packages') WHERE name = 'audio_recipe' AND upper(type) = 'TEXT' AND \"notnull\" = 0", params!()).await?;
                     let mut statements = vec![(
                         SCHEMA_STEP_SOURCE_GUARD.to_owned(),
@@ -3791,7 +3847,7 @@ impl HiqliteAuthStore {
                     }
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(OFFLINE_AUDIO_SCHEMA_VERSION, now, OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE)));
                     admit_schema_migration(admission)?;
-                    let attempt = self.client().txn(statements).await;
+                    let attempt = self.client().txn("migrate_schema", statements).await;
                     self.settle_migration_attempt(OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
@@ -3808,14 +3864,14 @@ impl HiqliteAuthStore {
                     );
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(COPY_OUTPUT_SCHEMA_VERSION, now, COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE)));
                     admit_schema_migration(admission)?;
-                    let attempt = self.client().txn(statements).await;
+                    let attempt = self.client().txn("migrate_schema", statements).await;
                     self.settle_migration_attempt(COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     admit_schema_migration(admission)?;
-                    let attempt = self.client().txn([
+                    let attempt = self.client().txn("migrate_schema", [
                         (SCHEMA_STEP_SOURCE_GUARD, params!(CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE)),
                         (super::candidate_recovery::SCHEMA, params!()),
                         ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3", params!(CANDIDATE_RECOVERY_SCHEMA_VERSION, now, CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE)),
@@ -3839,7 +3895,7 @@ impl HiqliteAuthStore {
                     );
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(ENCODED_OUTPUT_SCHEMA_VERSION, now, ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE)));
                     admit_schema_migration(admission)?;
-                    let attempt = self.client().txn(statements).await;
+                    let attempt = self.client().txn("migrate_schema", statements).await;
                     self.settle_migration_attempt(ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
@@ -3847,14 +3903,17 @@ impl HiqliteAuthStore {
                     admit_schema_migration(admission)?;
                     for result in self
                         .client()
-                        .batch(super::jellyfin_identity::JELLYFIN_IDENTITY_SCHEMA)
+                        .batch(
+                            "migrate_schema",
+                            super::jellyfin_identity::JELLYFIN_IDENTITY_SCHEMA,
+                        )
                         .await?
                     {
                         result.map_err(database_error)?;
                     }
                     admit_schema_migration(admission)?;
                     let now = self.now()?;
-                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(JELLYFIN_IDENTITY_SCHEMA_VERSION,now,JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE))]).await;
+                    let attempt = self.client().txn("migrate_schema", vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(JELLYFIN_IDENTITY_SCHEMA_VERSION,now,JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE))]).await;
                     self.settle_migration_attempt(
                         JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE,
                         attempt,
@@ -3865,25 +3924,32 @@ impl HiqliteAuthStore {
                     admit_schema_migration(admission)?;
                     for result in self
                         .client()
-                        .batch(super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA)
+                        .batch(
+                            "migrate_schema",
+                            super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA,
+                        )
                         .await?
                     {
                         result.map_err(database_error)?;
                     }
                     admit_schema_migration(admission)?;
                     let now = self.now()?;
-                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_LOGIN_SCHEMA_VERSION,now,JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE))]).await;
+                    let attempt = self.client().txn("migrate_schema", vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_LOGIN_SCHEMA_VERSION,now,JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE))]).await;
                     self.settle_migration_attempt(JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE) => {
                     admit_schema_migration(admission)?;
-                    for result in self.client().batch(super::jellyfin_play::SCHEMA).await? {
+                    for result in self
+                        .client()
+                        .batch("migrate_schema", super::jellyfin_play::SCHEMA)
+                        .await?
+                    {
                         result.map_err(database_error)?;
                     }
                     admit_schema_migration(admission)?;
                     let now = self.now()?;
-                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_PLAY_SCHEMA_VERSION,now,JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE))]).await;
+                    let attempt = self.client().txn("migrate_schema", vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_PLAY_SCHEMA_VERSION,now,JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE))]).await;
                     self.settle_migration_attempt(JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
@@ -3892,6 +3958,7 @@ impl HiqliteAuthStore {
                         .client()
                         // authority: the manual-edit schema and marker migrate atomically even after partial setup or another coordinator.
                         .query_consistent_map::<super::jellyfin_watch::ColumnRow, _>(
+                            "migrate_schema",
                             "SELECT name FROM pragma_table_info('watch_state')",
                             params!(),
                         )
@@ -3899,7 +3966,7 @@ impl HiqliteAuthStore {
                     let mut statements = super::jellyfin_watch::migration_statements(&columns);
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_WATCH_SCHEMA_VERSION,self.now()?,JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE)));
                     admit_schema_migration(admission)?;
-                    let attempt = self.client().txn(statements).await;
+                    let attempt = self.client().txn("migrate_schema", statements).await;
                     self.settle_migration_attempt(JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
@@ -3961,7 +4028,11 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             // authority: installed schema shape and marker fence adjunct migration and admission.
-            .query_consistent_map::<RemoteShapeRow, _>(super::remote::SHAPE_SQL, params!())
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "remote_schema_current",
+                super::remote::SHAPE_SQL,
+                params!(),
+            )
             .await?;
         let shape = rows
             .into_iter()
@@ -3974,6 +4045,7 @@ impl HiqliteAuthStore {
             .client()
             // authority: installed schema shape and marker fence adjunct migration and admission.
             .query_consistent_map::<CountRow, _>(
+                "remote_schema_current",
                 "SELECT count(*) AS count FROM remote_schema WHERE singleton=1 AND version=1",
                 params!(),
             )
@@ -4032,7 +4104,7 @@ impl HiqliteAuthStore {
             .collect::<Vec<_>>()
             .join(",");
         // authority: all canonical source-owner objects must match the committed extension, not just its singleton marker.
-        let installed=self.client().query_consistent_map::<RemoteShapeRow,_>(format!("SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names}) ORDER BY name"),params!()).await?;
+        let installed=self.client().query_consistent_map::<RemoteShapeRow,_>("source_arbitration_shape", format!("SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names}) ORDER BY name"),params!()).await?;
         if installed.is_empty() {
             return Ok(None);
         }
@@ -4047,7 +4119,7 @@ impl HiqliteAuthStore {
             ));
         }
         // authority: reader admission requires the committed source-arbitration singleton.
-        let marker=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1",params!()).await?;
+        let marker=self.client().query_consistent_map::<CountRow,_>("source_arbitration_shape", "SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1",params!()).await?;
         Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
     }
     async fn install_source_arbitration_schema(
@@ -4089,7 +4161,7 @@ impl HiqliteAuthStore {
 
     async fn analysis_coordination_shape(&self) -> Result<bool, StoreError> {
         // authority: a marker plus canonical objects fences adjunct admission.
-        let marker = self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='analysis_coordination_schema'",params!()).await?;
+        let marker = self.client().query_consistent_map::<CountRow,_>("analysis_coordination_shape", "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='analysis_coordination_schema'",params!()).await?;
         if !matches!(marker.as_slice(),[row] if row.count==1) {
             return Ok(false);
         }
@@ -4100,7 +4172,7 @@ impl HiqliteAuthStore {
             .collect::<Vec<_>>()
             .join(",");
         // authority: unknown/mutated coordination objects are not inferred safe.
-        let installed=self.client().query_consistent_map::<RemoteShapeRow,_>(format!("SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names}) ORDER BY name"),params!()).await?;
+        let installed=self.client().query_consistent_map::<RemoteShapeRow,_>("analysis_coordination_shape", format!("SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names}) ORDER BY name"),params!()).await?;
         if installed.len() != expected.len()
             || installed
                 .iter()
@@ -4112,7 +4184,7 @@ impl HiqliteAuthStore {
             ));
         }
         // authority: protocol marker and shape are checked together at startup.
-        let marker=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM analysis_coordination_schema WHERE singleton=1 AND version=1",params!()).await?;
+        let marker=self.client().query_consistent_map::<CountRow,_>("analysis_coordination_shape", "SELECT count(*) AS count FROM analysis_coordination_schema WHERE singleton=1 AND version=1",params!()).await?;
         if !matches!(marker.as_slice(),[row] if row.count==1) {
             return Err(StoreError::Migration(
                 "analysis coordination marker missing".into(),
@@ -4150,6 +4222,7 @@ impl HiqliteAuthStore {
             .client()
             // authority: current schema shape decides whether replicated DDL may run.
             .query_consistent_map::<RemoteShapeRow, _>(
+                "subtitle_managed_schema_version",
                 super::subtitle_managed_schema::SHAPE_SQL,
                 params!(),
             )
@@ -4163,7 +4236,7 @@ impl HiqliteAuthStore {
             let rows = self
                 .client()
                 // authority: the installed marker must agree with the current replicated shape.
-                .query_consistent_map::<CountRow, _>(
+                .query_consistent_map::<CountRow, _>("subtitle_managed_schema_version", 
                     "SELECT count(*) AS count FROM subtitle_managed_schema WHERE singleton=1 AND version=$1",
                     params!(version),
                 )
@@ -4307,6 +4380,7 @@ impl HiqliteAuthStore {
             .client()
             // authority: committed translation shape fences extension migration and admission.
             .query_consistent_map::<RemoteShapeRow, _>(
+                "subtitle_translation_schema_version",
                 super::subtitle_translation_schema::SHAPE_SQL,
                 params!(),
             )
@@ -4318,7 +4392,7 @@ impl HiqliteAuthStore {
         let version = super::subtitle_translation_schema::version(&shape)?;
         if version.is_some() {
             // authority: admission must observe the committed singleton marker paired with the extension shape.
-            let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM subtitle_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
+            let rows=self.client().query_consistent_map::<CountRow,_>("subtitle_translation_schema_version", "SELECT count(*) AS count FROM subtitle_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
             if !matches!(rows.as_slice(),[row] if row.count==1) {
                 return Err(StoreError::Migration(
                     "progressive translation subtitle schema marker missing".into(),
@@ -4363,6 +4437,7 @@ impl HiqliteAuthStore {
             .client()
             // authority: committed translation shape fences extension migration and admission.
             .query_consistent_map::<RemoteShapeRow, _>(
+                "subtitle_text_translation_schema_version",
                 super::subtitle_text_translation_schema::SHAPE_SQL,
                 params!(),
             )
@@ -4374,7 +4449,7 @@ impl HiqliteAuthStore {
         let version = super::subtitle_text_translation_schema::version(&shape)?;
         if version == Some(1) {
             // authority: admission must observe the committed singleton marker paired with the extension shape.
-            let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM subtitle_text_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
+            let rows=self.client().query_consistent_map::<CountRow,_>("subtitle_text_translation_schema_version", "SELECT count(*) AS count FROM subtitle_text_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
             if !matches!(rows.as_slice(),[row] if row.count==1) {
                 return Err(StoreError::Migration(
                     "text translation subtitle schema marker missing".into(),
@@ -4411,6 +4486,7 @@ impl HiqliteAuthStore {
             .client()
             // authority: committed translation shape fences extension migration and admission.
             .query_consistent_map::<RemoteShapeRow, _>(
+                "shared_caption_schema_version",
                 super::shared_caption_schema::SHAPE_SQL,
                 params!(),
             )
@@ -4422,7 +4498,7 @@ impl HiqliteAuthStore {
         let version = super::shared_caption_schema::version(&shape)?;
         if version == Some(1) {
             // authority: admission must observe the committed singleton marker paired with the extension shape.
-            let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM shared_caption_schema WHERE singleton=1 AND version=1",params!()).await?;
+            let rows=self.client().query_consistent_map::<CountRow,_>("shared_caption_schema_version", "SELECT count(*) AS count FROM shared_caption_schema WHERE singleton=1 AND version=1",params!()).await?;
             if !matches!(rows.as_slice(),[row] if row.count==1) {
                 return Err(StoreError::Migration(
                     "Shared caption read schema marker missing".into(),
@@ -4459,6 +4535,7 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map::<RemoteShapeRow, _>(
+                "dv_title_jobs_schema_version",
                 super::dv_title_jobs_schema::SHAPE_SQL,
                 params!(),
             )
@@ -4473,6 +4550,7 @@ impl HiqliteAuthStore {
             let rows = self
                 .client()
                 .query_consistent_map::<CountRow, _>(
+                    "dv_title_jobs_schema_version",
                     super::dv_title_jobs_schema::MARKER_SQL,
                     params!(),
                 )
@@ -4512,6 +4590,7 @@ impl HiqliteAuthStore {
             .client()
             // authority: committed handoff shape fences extension migration and admission.
             .query_consistent_map::<RemoteShapeRow, _>(
+                "playback_handoffs_schema_version",
                 super::playback_handoffs::SHAPE_SQL,
                 params!(),
             )
@@ -4526,6 +4605,7 @@ impl HiqliteAuthStore {
                 .client()
                 // authority: admission must observe the committed marker paired with the shape.
                 .query_consistent_map::<CountRow, _>(
+                    "playback_handoffs_schema_version",
                     super::playback_handoffs::MARKER_SQL,
                     params!(),
                 )
@@ -4566,7 +4646,11 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             // authority: committed sidecar shape fences extension migration and admission.
-            .query_consistent_map::<RemoteShapeRow, _>(super::scan_request_v2::SHAPE_SQL, params!())
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "scan_request_v2_schema_version",
+                super::scan_request_v2::SHAPE_SQL,
+                params!(),
+            )
             .await?;
         let shape = rows
             .into_iter()
@@ -4577,7 +4661,11 @@ impl HiqliteAuthStore {
             let rows = self
                 .client()
                 // authority: admission must observe the committed marker paired with the shape.
-                .query_consistent_map::<CountRow, _>(super::scan_request_v2::MARKER_SQL, params!())
+                .query_consistent_map::<CountRow, _>(
+                    "scan_request_v2_schema_version",
+                    super::scan_request_v2::MARKER_SQL,
+                    params!(),
+                )
                 .await?;
             if !matches!(rows.as_slice(), [row] if row.count == 1) {
                 return Err(StoreError::Migration(
@@ -4618,6 +4706,7 @@ impl HiqliteAuthStore {
             .client()
             // authority: committed annotations shape fences extension migration and admission.
             .query_consistent_map::<RemoteShapeRow, _>(
+                "library_annotations_schema_version",
                 super::library_annotations_schema::SHAPE_SQL,
                 params!(),
             )
@@ -4632,6 +4721,7 @@ impl HiqliteAuthStore {
                 .client()
                 // authority: admission must observe the committed marker paired with the shape.
                 .query_consistent_map::<CountRow, _>(
+                    "library_annotations_schema_version",
                     super::library_annotations_schema::MARKER_SQL,
                     params!(),
                 )
@@ -4672,7 +4762,11 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             // authority: installed schema shape and marker fence adjunct migration and admission.
-            .query_consistent_map::<RemoteShapeRow, _>(super::invitations::SHAPE_SQL, params!())
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "invitation_schema_version",
+                super::invitations::SHAPE_SQL,
+                params!(),
+            )
             .await?;
         let shape = rows
             .into_iter()
@@ -4699,6 +4793,7 @@ impl HiqliteAuthStore {
             .client()
             // authority: installed schema shape and marker fence adjunct migration and admission.
             .query_consistent_map::<CountRow, _>(
+                "invitation_schema_version",
                 "SELECT count(*) AS count FROM invitation_schema WHERE singleton=1 AND version=$1",
                 params!(version),
             )
@@ -4804,7 +4899,11 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             // authority: marker, protocol and exact custody shape must share one settlement snapshot.
-            .query_consistent_map::<CustodyMigrationSnapshot, _>(sql, params!())
+            .query_consistent_map::<CustodyMigrationSnapshot, _>(
+                "custody_migration_settled",
+                sql,
+                params!(),
+            )
             .await?;
         let [snapshot] = rows.as_slice() else {
             return Err(StoreError::Migration(
@@ -4816,7 +4915,7 @@ impl HiqliteAuthStore {
 
     async fn committed_schema_version_unchecked(&self) -> Result<i64, StoreError> {
         // authority: committed cluster marker selects the permitted migration lineage.
-        let rows=self.client().query_consistent_map::<CompatibilityRow,_>(
+        let rows=self.client().query_consistent_map::<CompatibilityRow,_>("committed_schema_version_unchecked", 
             "SELECT schema_version,protocol_min,protocol_max FROM cluster_meta WHERE singleton=1",params!()).await?;
         match rows.as_slice() {
             [row] => Ok(row.schema_version),
@@ -4844,7 +4943,7 @@ impl HiqliteAuthStore {
         let mut rows = self
             .client()
             // authority: the bridge decides from the committed marker and schema, never a lagging replica's.
-            .query_consistent_map::<LineageReadRow, _>(sql, params!())
+            .query_consistent_map::<LineageReadRow, _>("read_lineage_snapshot", sql, params!())
             .await?;
         if rows.len() != 1 {
             return Err(StoreError::Migration(format!(
@@ -4922,7 +5021,10 @@ impl HiqliteAuthStore {
         // preparation/execution failure, including either read-only CAS guard.
         // There is no partially committed bridge or private-marker rewind.
         admit_schema_migration(admission)?;
-        let attempt = self.client().txn(statements).await;
+        let attempt = self
+            .client()
+            .txn("bridge_private_lineage_inner", statements)
+            .await;
         let failure = match attempt {
             Ok(results) => results
                 .into_iter()
@@ -4979,6 +5081,7 @@ impl HiqliteAuthStore {
             .client()
             // authority: contract validation fingerprints the committed schema, not replica lag.
             .query_consistent_map::<super::schema_lineage::SchemaObject, _>(
+                "validation_lineage_union_fingerprint",
                 super::schema_lineage::OBJECT_QUERY,
                 params!(),
             )
@@ -5077,7 +5180,7 @@ impl HiqliteAuthStore {
             params!(marker, self.now()?),
         ));
         self.client()
-            .txn(statements)
+            .txn("validation_set_schema_lineage", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -5091,11 +5194,15 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         let now = self.now()?;
         admit_schema_migration(admission)?;
-        for result in self.client().batch(super::PLAYBACK_INPUT_SCHEMA).await? {
+        for result in self
+            .client()
+            .batch("migrate_playback_inputs", super::PLAYBACK_INPUT_SCHEMA)
+            .await?
+        {
             result.map_err(database_error)?;
         }
         admit_schema_migration(admission)?;
-        let attempt = self.client().txn(vec![(
+        let attempt = self.client().txn("migrate_playback_inputs", vec![(
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(PLAYBACK_INPUT_SCHEMA_VERSION, now, PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE),
                     )]).await;
@@ -5120,6 +5227,7 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map::<CountRow, _>(
+                "pointer_desired_revision_column_present",
                 "SELECT COUNT(*) AS count FROM pragma_table_info('media_playback_pointers') \
                  WHERE name = 'desired_revision'",
                 params!(),
@@ -5137,6 +5245,7 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map::<CountRow, _>(
+                "drain_deadline_column_present",
                 "SELECT COUNT(*) AS count FROM pragma_table_info('media_sessions') \
                  WHERE name = 'drain_deadline_ms'",
                 params!(),
@@ -5173,7 +5282,10 @@ impl HiqliteAuthStore {
             params!(target, now, source),
         ));
         admit_schema_migration(admission)?;
-        let attempt = self.client().txn(statements).await;
+        let attempt = self
+            .client()
+            .txn("migrate_additive_schema_step", statements)
+            .await;
         self.settle_migration_attempt(source, attempt).await
     }
 
@@ -5197,7 +5309,7 @@ impl HiqliteAuthStore {
                    FROM cluster_meta WHERE singleton = 1";
         let rows = self
             .client()
-            .query_consistent_map::<CompatibilityRow, _>(sql, params!())
+            .query_consistent_map::<CompatibilityRow, _>("settle_migration_attempt", sql, params!())
             .await?;
         let version = rows
             .first()
@@ -5284,7 +5396,7 @@ impl HiqliteAuthStore {
                    FROM cluster_meta WHERE singleton = 1";
         let meta = self
             .client()
-            .query_consistent_map::<CompatibilityRow, _>(sql, params!())
+            .query_consistent_map::<CompatibilityRow, _>("verify_compatibility", sql, params!())
             .await?;
         verify_compatibility_rows(meta, supported)?;
         Self::verify_source_schema_version(self.client().inner()).await
@@ -5538,7 +5650,7 @@ impl HiqliteAuthStore {
             validate_sql(sql)?;
         }
         self.client()
-            .txn(statements)
+            .txn("validation_reset_contract_state", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -5592,7 +5704,7 @@ impl HiqliteAuthStore {
             .map_err(|_| StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))??,
             cluster_meta: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT singleton, schema_version, protocol_min, protocol_max, migrated_at \
                      FROM cluster_meta ORDER BY singleton",
                     params!(),
@@ -5600,14 +5712,14 @@ impl HiqliteAuthStore {
                 .await?,
             settings: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT key, value, updated_at FROM settings ORDER BY key",
                     params!(),
                 )
                 .await?,
             users: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT id, username, password_hash, is_admin, created_at \
                      FROM users ORDER BY id",
                     params!(),
@@ -5615,7 +5727,7 @@ impl HiqliteAuthStore {
                 .await?,
             tokens: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT token_hash, user_id, device, created_at, last_seen_at \
                      FROM tokens ORDER BY token_hash",
                     params!(),
@@ -5623,7 +5735,7 @@ impl HiqliteAuthStore {
                 .await?,
             api_keys: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT id, name, key_hash, scopes, created_at, last_used_at, disabled \
                      FROM api_keys ORDER BY id",
                     params!(),
@@ -5631,7 +5743,7 @@ impl HiqliteAuthStore {
                 .await?,
             job_leases: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms \
                      FROM job_leases ORDER BY resource",
                     params!(),
@@ -5639,7 +5751,7 @@ impl HiqliteAuthStore {
                 .await?,
             media_session_requests: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT user_id, request_id, request_fingerprint, playback_id, state, \
                         claim_expires_at_ms, incarnation_id, owner_node_id, response_json, \
                         updated_at_ms \
@@ -5649,7 +5761,7 @@ impl HiqliteAuthStore {
                 .await?,
             library_channel_session_recipes: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT user_id, request_id, incarnation_id, recipe_json, created_at_ms \
                    FROM library_channel_session_recipes ORDER BY user_id, request_id",
                     params!(),
@@ -5657,7 +5769,7 @@ impl HiqliteAuthStore {
                 .await?,
             media_playback_pointers: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms \
                    FROM media_playback_pointers ORDER BY user_id, playback_id",
                     params!(),
@@ -5665,7 +5777,7 @@ impl HiqliteAuthStore {
                 .await?,
             media_sessions: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, \
                         owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, \
                         publication_ready_at_ms, recipe_json, response_json, \
@@ -5677,7 +5789,7 @@ impl HiqliteAuthStore {
                 .await?,
             continuous_quality_ledgers: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT generation, owner_node_id, owner_epoch, revision, attachment_id, \
                         ledger_json, updated_at_ms \
                    FROM continuous_quality_ledgers ORDER BY generation",
@@ -5686,7 +5798,7 @@ impl HiqliteAuthStore {
                 .await?,
             quality_preparation_owners: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT staged_incarnation_id, cancellation_key \
                    FROM quality_preparation_owners ORDER BY staged_incarnation_id",
                     params!(),
@@ -5694,7 +5806,7 @@ impl HiqliteAuthStore {
                 .await?,
             quality_cancellation_receipts: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT receipt_key, generation, session_id, owner_node_id, owner_epoch, \
                         client_instance_id, lifetime_id, recipe_revision, accepted_sequence, \
                         state, created_at_ms, updated_at_ms \
@@ -5704,7 +5816,7 @@ impl HiqliteAuthStore {
                 .await?,
             media_session_terminal_acks: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, \
                         client_instance_id, sequence, request_fingerprint, response_json, \
                         expires_at_ms, updated_at_ms \
@@ -5714,7 +5826,7 @@ impl HiqliteAuthStore {
                 .await?,
             media_session_preparations: self
                 .client()
-                .query_map(
+                .query_map("local_auth_dump", 
                     "SELECT user_id, playback_id, staged_incarnation_id, \
                         expected_predecessor_incarnation_id, deadline_ms, \
                         created_at_ms, updated_at_ms \
@@ -5788,6 +5900,7 @@ impl HiqliteAuthStore {
                 let rows = self
                     .client()
                     .query_consistent_map::<ActivityTimestampRow, _>(
+                        "refresh_token_activity_if_due",
                         "SELECT last_seen_at AS last_activity_at \
                          FROM tokens WHERE token_hash = $1",
                         params!(token_hash),
@@ -5820,6 +5933,7 @@ impl HiqliteAuthStore {
                 let rows = self
                     .client()
                     .query_consistent_map::<ActivityTimestampRow, _>(
+                        "refresh_api_key_activity",
                         "SELECT last_used_at AS last_activity_at \
                          FROM api_keys WHERE id = $1 AND disabled = 0",
                         params!(id),
@@ -5852,7 +5966,7 @@ impl HiqliteAuthStore {
         params: hiqlite::Params,
     ) -> Result<usize, StoreError> {
         validate_sql(sql)?;
-        self.client().execute(sql, params).await
+        self.client().execute("execute", sql, params).await
     }
 
     async fn execute_idempotent(
@@ -5861,7 +5975,9 @@ impl HiqliteAuthStore {
         params: hiqlite::Params,
     ) -> Result<usize, StoreError> {
         validate_sql(sql)?;
-        self.client().execute_idempotent(sql, params).await
+        self.client()
+            .execute_idempotent("execute_idempotent", sql, params)
+            .await
     }
 
     async fn user_optional(
@@ -5872,7 +5988,7 @@ impl HiqliteAuthStore {
         validate_sql(sql)?;
         let mut rows = self
             .client()
-            .query_consistent_map::<UserRow, _>(sql, params)
+            .query_consistent_map::<UserRow, _>("user_optional", sql, params)
             .await?;
         Ok(rows.pop().map(Into::into))
     }
@@ -5885,7 +6001,7 @@ impl HiqliteAuthStore {
         validate_sql(sql)?;
         let mut rows = self
             .client()
-            .query_consistent_map::<ApiKeyRow, _>(sql, params)
+            .query_consistent_map::<ApiKeyRow, _>("key_optional", sql, params)
             .await?;
         Ok(rows.pop().map(Into::into))
     }
@@ -6030,7 +6146,11 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
         for id in file_ids {
             let rows: Vec<IdRow> = self
                 .client
-                .query_map("SELECT id FROM files WHERE id = $1", hiqlite::params!(*id))
+                .query_map(
+                    "surviving_file_ids",
+                    "SELECT id FROM files WHERE id = $1",
+                    hiqlite::params!(*id),
+                )
                 .await?;
             if !rows.is_empty() {
                 alive.push(*id);
@@ -6166,7 +6286,7 @@ impl MetricsStore for HiqliteAuthStore {
         let request_health = super::analysis_request_health_sql("$2", "$3");
         let row = self
             .client()
-            .query_consistent_map::<PrometheusStoreRow, _>(
+            .query_consistent_map::<PrometheusStoreRow, _>("prometheus_store_snapshot_with", 
                 String::from("SELECT \
                     (SELECT COUNT(*) FROM libraries) AS libraries, \
                     (SELECT COUNT(*) FROM users) AS users, \
@@ -6319,7 +6439,7 @@ impl SettingsStore for HiqliteAuthStore {
         validate_sql(sql)?;
         let rows = self
             .client()
-            .query_consistent_map::<PingRow, _>(sql, params!())
+            .query_consistent_map::<PingRow, _>("ping", sql, params!())
             .await?;
         if rows.len() == 1 && rows[0].healthy == 1 {
             Ok(())
@@ -6335,7 +6455,7 @@ impl SettingsStore for HiqliteAuthStore {
         validate_sql(sql)?;
         let rows = self
             .client()
-            .query_consistent_map::<SettingValueRow, _>(sql, params!(key))
+            .query_consistent_map::<SettingValueRow, _>("get_setting", sql, params!(key))
             .await?;
         Ok(rows.into_iter().next().map(|row| row.value))
     }
@@ -6363,6 +6483,7 @@ impl SettingsStore for HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map_scoped::<SettingEntryRow, _>(
+                "get_setting_pair",
                 sql,
                 params!(first, second),
                 AuthorityReadScope::settings_pair(first, second),
@@ -6386,7 +6507,7 @@ impl SettingsStore for HiqliteAuthStore {
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         let keys = super::selected_settings_json(keys)?;
         // authority: related playback preferences share one committed settings snapshot.
-        let rows = self.client().query_consistent_map::<SettingEntryRow, _>(
+        let rows = self.client().query_consistent_map::<SettingEntryRow, _>("get_settings", 
             "SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each($1)) ORDER BY key",
             params!(keys),
         ).await?;
@@ -6400,7 +6521,7 @@ impl SettingsStore for HiqliteAuthStore {
         validate_sql(sql)?;
         let rows = self
             .client()
-            .query_consistent_map::<SettingEntryRow, _>(sql, params!())
+            .query_consistent_map::<SettingEntryRow, _>("settings_snapshot", sql, params!())
             .await?;
         Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
     }
@@ -6412,7 +6533,7 @@ impl SettingsStore for HiqliteAuthStore {
         // proposal. See the trait method for why a stale answer is safe.
         let rows = self
             .client()
-            .query_map::<SettingValueRow, _>(sql, params!(key))
+            .query_map::<SettingValueRow, _>("local_setting_hint", sql, params!(key))
             .await?;
         Ok(rows.into_iter().next().map(|row| row.value))
     }
@@ -6496,6 +6617,7 @@ impl SettingsStore for HiqliteAuthStore {
         validate_sql(sql)?;
         self.client()
             .txn(
+                "put_settings",
                 values
                     .iter()
                     .map(|(key, value)| (sql.to_owned(), params!(*key, *value, now))),
@@ -6536,12 +6658,15 @@ impl SettingsStore for HiqliteAuthStore {
         );
         let results = self
             .client()
-            .txn(ordered.iter().map(|(key, value)| {
-                (
-                    sql.clone(),
-                    params!(*key, *value, now, generation_key, expected_generation),
-                )
-            }))
+            .txn(
+                "put_settings_if_generation",
+                ordered.iter().map(|(key, value)| {
+                    (
+                        sql.clone(),
+                        params!(*key, *value, now, generation_key, expected_generation),
+                    )
+                }),
+            )
             .await
             .map_err(database_error)?
             .into_iter()
@@ -6564,7 +6689,7 @@ impl UserStore for HiqliteAuthStore {
         validate_sql(sql)?;
         let rows = self
             .client()
-            .query_consistent_map::<CountRow, _>(sql, params!())
+            .query_consistent_map::<CountRow, _>("count_users", sql, params!())
             .await?;
         one_count(rows)
     }
@@ -6584,6 +6709,7 @@ impl UserStore for HiqliteAuthStore {
         let row = self
             .client()
             .execute_returning_map_one::<_, UserRow>(
+                "create_user",
                 sql,
                 params!(username, password_hash, is_admin, now),
             )
@@ -6615,7 +6741,7 @@ impl UserStore for HiqliteAuthStore {
         validate_sql(sql)?;
         Ok(self
             .client()
-            .query_consistent_map::<UserRow, _>(sql, params!())
+            .query_consistent_map::<UserRow, _>("list_users", sql, params!())
             .await?
             .into_iter()
             .map(Into::into)
@@ -6631,7 +6757,7 @@ impl UserStore for HiqliteAuthStore {
         validate_sql(sql)?;
         Ok(self
             .client()
-            .query_consistent_map::<UserRow, _>(sql, params!(after_id, limit))
+            .query_consistent_map::<UserRow, _>("list_users_page", sql, params!(after_id, limit))
             .await?
             .into_iter()
             .map(Into::into)
@@ -6683,7 +6809,7 @@ impl UserStore for HiqliteAuthStore {
         validate_sql(sql)?;
         let rows = self
             .client()
-            .query_consistent_map::<CountRow, _>(sql, params!())
+            .query_consistent_map::<CountRow, _>("count_admins", sql, params!())
             .await?;
         one_count(rows)
     }
@@ -6924,6 +7050,7 @@ impl UserStore for HiqliteAuthStore {
         let mut rows = self
             .client()
             .query_consistent_map::<TokenUserRow, _>(
+                "authenticate_token_for",
                 sql,
                 params!(
                     keys::AUTH_TOKEN_EXPIRY_ENABLED,
@@ -7007,6 +7134,7 @@ impl UserStore for HiqliteAuthStore {
         Ok(self
             .client()
             .query_consistent_map::<TokenSummaryRow, _>(
+                "list_tokens_for_user",
                 sql,
                 params!(
                     MAX_DEVICE_LABEL_BYTES as i64,
@@ -7053,7 +7181,11 @@ impl UserStore for HiqliteAuthStore {
         validate_sql(count_sql)?;
         let count = one_count(
             self.client()
-                .query_consistent_map::<CountRow, _>(count_sql, params!(user_id, prefix))
+                .query_consistent_map::<CountRow, _>(
+                    "delete_token_by_prefix_for_user",
+                    count_sql,
+                    params!(user_id, prefix),
+                )
                 .await?,
         )?;
         Ok(match count {
@@ -7082,7 +7214,11 @@ impl ApiKeyStore for HiqliteAuthStore {
         validate_sql(sql)?;
         let row = self
             .client()
-            .execute_returning_map_one::<_, ApiKeyRow>(sql, params!(name, key_hash, scopes, now))
+            .execute_returning_map_one::<_, ApiKeyRow>(
+                "create_api_key",
+                sql,
+                params!(name, key_hash, scopes, now),
+            )
             .await?;
         Ok(row.into())
     }
@@ -7093,7 +7229,7 @@ impl ApiKeyStore for HiqliteAuthStore {
         validate_sql(sql)?;
         Ok(self
             .client()
-            .query_consistent_map::<ApiKeyRow, _>(sql, params!())
+            .query_consistent_map::<ApiKeyRow, _>("list_api_keys", sql, params!())
             .await?
             .into_iter()
             .map(Into::into)

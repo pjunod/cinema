@@ -854,7 +854,7 @@ async fn read_recordings(
 ) -> Result<Vec<DvrRecording>, StoreError> {
     store
         .client()
-        .query_consistent_map::<RecordingRow, _>(sql, values)
+        .query_consistent_map::<RecordingRow, _>("read_recordings", sql, values)
         .await?
         .into_iter()
         .map(TryInto::try_into)
@@ -868,7 +868,7 @@ async fn read_reminders(
 ) -> Result<Vec<DvrReminder>, StoreError> {
     store
         .client()
-        .query_consistent_map::<ReminderRow, _>(sql, values)
+        .query_consistent_map::<ReminderRow, _>("read_reminders", sql, values)
         .await?
         .into_iter()
         .map(TryInto::try_into)
@@ -880,6 +880,7 @@ impl DvrStore for HiqliteAuthStore {
     async fn list_dvr_rules(&self) -> Result<Vec<DvrRule>, StoreError> {
         self.client()
             .query_consistent_map::<RuleRow, _>(
+                "list_dvr_rules",
                 format!("SELECT {RULE_COLS} FROM dvr_rules ORDER BY priority, id"),
                 params!(),
             )
@@ -892,6 +893,7 @@ impl DvrStore for HiqliteAuthStore {
     async fn get_dvr_rule(&self, id: &str) -> Result<Option<DvrRule>, StoreError> {
         self.client()
             .query_consistent_map::<RuleRow, _>(
+                "get_dvr_rule",
                 format!("SELECT {RULE_COLS} FROM dvr_rules WHERE id = $1"),
                 params!(id),
             )
@@ -913,6 +915,7 @@ impl DvrStore for HiqliteAuthStore {
         let changed = self
             .client()
             .execute(
+                "put_dvr_rule",
                 format!(
                     "INSERT INTO dvr_rules ({RULE_COLS}) \
                      SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15 \
@@ -979,6 +982,7 @@ impl DvrStore for HiqliteAuthStore {
         let current = self
             .client()
             .query_consistent_map::<RulePriorityRow, _>(
+                "reorder_dvr_rules",
                 "SELECT id, priority FROM dvr_rules",
                 params!(),
             )
@@ -1023,7 +1027,7 @@ impl DvrStore for HiqliteAuthStore {
         }
         let counts = self
             .client()
-            .txn(statements)
+            .txn("reorder_dvr_rules", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1047,55 +1051,58 @@ impl DvrStore for HiqliteAuthStore {
     ) -> Result<DvrInsertOutcome, StoreError> {
         let inserted = self
             .client()
-            .txn([(
-                format!(
-                    "INSERT INTO dvr_recordings ({RECORDING_COLS}) \
+            .txn(
+                "insert_dvr_airing_if_absent",
+                [(
+                    format!(
+                        "INSERT INTO dvr_recordings ({RECORDING_COLS}) \
                      SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
                        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, \
                        $30, $31, $32, $33, $34, $35, $36, $37 \
                      WHERE NOT EXISTS(SELECT 1 FROM dvr_recordings \
                        WHERE channel_id = $5 AND airing_start = $8)"
-                ),
-                params!(
-                    row.id.as_str(),
-                    row.origin.as_str(),
-                    row.rule_id.as_deref(),
-                    row.requested_by_user_id,
-                    row.channel_id.as_str(),
-                    row.guide_number.as_str(),
-                    row.channel_name.as_str(),
-                    row.airing_start,
-                    row.airing_end,
-                    row.capture_start,
-                    row.capture_end,
-                    row.title.as_str(),
-                    row.episode_title.as_deref(),
-                    row.episode.as_deref(),
-                    row.synopsis.as_deref(),
-                    row.image_url.as_deref(),
-                    row.original_air_date.as_deref(),
-                    row.series_id.as_deref(),
-                    row.programme_id.as_deref(),
-                    row.state.as_str(),
-                    row.state_reason.as_deref(),
-                    row.attempt,
-                    row.gap_s,
-                    row.late_start_s,
-                    row.tuner_owner_node_id.as_deref(),
-                    row.path.as_deref(),
-                    row.bytes,
-                    row.last_progress_ms,
-                    row.stop_requested_at_ms,
-                    row.stop_requested_by_user_id,
-                    row.item_id,
-                    row.file_id,
-                    row.started_at_ms,
-                    row.finished_at_ms,
-                    row.stopped_by_user_id,
-                    row.created_at_ms,
-                    row.updated_at_ms
-                ),
-            )])
+                    ),
+                    params!(
+                        row.id.as_str(),
+                        row.origin.as_str(),
+                        row.rule_id.as_deref(),
+                        row.requested_by_user_id,
+                        row.channel_id.as_str(),
+                        row.guide_number.as_str(),
+                        row.channel_name.as_str(),
+                        row.airing_start,
+                        row.airing_end,
+                        row.capture_start,
+                        row.capture_end,
+                        row.title.as_str(),
+                        row.episode_title.as_deref(),
+                        row.episode.as_deref(),
+                        row.synopsis.as_deref(),
+                        row.image_url.as_deref(),
+                        row.original_air_date.as_deref(),
+                        row.series_id.as_deref(),
+                        row.programme_id.as_deref(),
+                        row.state.as_str(),
+                        row.state_reason.as_deref(),
+                        row.attempt,
+                        row.gap_s,
+                        row.late_start_s,
+                        row.tuner_owner_node_id.as_deref(),
+                        row.path.as_deref(),
+                        row.bytes,
+                        row.last_progress_ms,
+                        row.stop_requested_at_ms,
+                        row.stop_requested_by_user_id,
+                        row.item_id,
+                        row.file_id,
+                        row.started_at_ms,
+                        row.finished_at_ms,
+                        row.stopped_by_user_id,
+                        row.created_at_ms,
+                        row.updated_at_ms
+                    ),
+                )],
+            )
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1106,6 +1113,7 @@ impl DvrStore for HiqliteAuthStore {
         let existing = self
             .client()
             .query_consistent_map::<StateRow, _>(
+                "insert_dvr_airing_if_absent",
                 "SELECT state FROM dvr_recordings WHERE channel_id = $1 AND airing_start = $2",
                 params!(row.channel_id.as_str(), row.airing_start),
             )
@@ -1172,7 +1180,7 @@ impl DvrStore for HiqliteAuthStore {
         ];
         let counts = self
             .client()
-            .txn(statements)
+            .txn("insert_dvr_airing_with_event", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1183,6 +1191,7 @@ impl DvrStore for HiqliteAuthStore {
         let existing = self
             .client()
             .query_consistent_map::<StateRow, _>(
+                "insert_dvr_airing_with_event",
                 "SELECT state FROM dvr_recordings WHERE channel_id=$1 AND airing_start=$2",
                 params!(row.channel_id.as_str(), row.airing_start),
             )
@@ -1275,6 +1284,7 @@ impl DvrStore for HiqliteAuthStore {
         let total = self
             .client()
             .query_consistent_map::<CountRow, _>(
+                "dvr_overview_rows",
                 format!(
                     "SELECT COUNT(*) AS count FROM dvr_recordings \
                      WHERE {DVR_ACTIVE_RECORDING_PREDICATE}"
@@ -1297,6 +1307,7 @@ impl DvrStore for HiqliteAuthStore {
         let next = self
             .client()
             .query_consistent_map::<OptionalStartRow, _>(
+                "dvr_overview_rows",
                 "SELECT MIN(capture_start) AS capture_start FROM dvr_recordings \
                  WHERE state='scheduled' AND capture_start>$1",
                 params!(now_s),
@@ -1340,6 +1351,7 @@ impl DvrStore for HiqliteAuthStore {
         let conflicts = self
             .client()
             .query_consistent_map::<CountRow, _>(
+                "list_dvr_schedule_window",
                 format!(
                     "SELECT COUNT(*) AS count FROM dvr_recordings \
                      WHERE {count_predicate} AND state='conflict'"
@@ -1395,13 +1407,19 @@ impl DvrStore for HiqliteAuthStore {
             transition.fence_generation,
             transition.now_ms,
         );
-        let changed = self.client().execute(sql, values).await?;
+        let changed = self
+            .client()
+            .execute("transition_dvr_recording", sql, values)
+            .await?;
         Ok(changed == 1)
     }
 
     async fn purge_dvr_recording_catalog(&self, id: &str) -> Result<(), StoreError> {
         self.client()
-            .txn(crate::dvr::DVR_PURGE_CATALOG.map(|sql| (sql, params!(id))))
+            .txn(
+                "purge_dvr_recording_catalog",
+                crate::dvr::DVR_PURGE_CATALOG.map(|sql| (sql, params!(id))),
+            )
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1424,7 +1442,10 @@ impl DvrStore for HiqliteAuthStore {
         }
         let counts = self
             .client()
-            .txn(transition_event_statements(transition, event))
+            .txn(
+                "transition_dvr_recording_with_event",
+                transition_event_statements(transition, event),
+            )
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1528,7 +1549,7 @@ impl DvrStore for HiqliteAuthStore {
              params!(at_ms, by_user, id)),
         ];
         self.client()
-            .txn(statements)
+            .txn("request_dvr_stop_with_event", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1573,7 +1594,7 @@ impl DvrStore for HiqliteAuthStore {
             })
             .collect::<Vec<_>>();
         self.client()
-            .txn(statements)
+            .txn("repoint_dvr_rule_rows", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1638,7 +1659,7 @@ impl DvrStore for HiqliteAuthStore {
         ];
         let counts = self
             .client()
-            .txn(statements)
+            .txn("link_dvr_recording_media_with_event", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1682,7 +1703,7 @@ impl DvrStore for HiqliteAuthStore {
         ];
         let counts = self
             .client()
-            .txn(statements)
+            .txn("append_dvr_observation_event", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1699,6 +1720,7 @@ impl DvrStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "mark_dvr_history_gap",
                 "UPDATE dvr_event_heads SET history_has_gap=1
                   WHERE recording_id=$1
                     AND EXISTS(SELECT 1 FROM dvr_recordings r
@@ -1717,7 +1739,7 @@ impl DvrStore for HiqliteAuthStore {
         after: Option<i64>,
         limit: i64,
     ) -> Result<DvrEventPage, StoreError> {
-        let heads = self.client().query_consistent_map::<EventHeadRow, _>(
+        let heads = self.client().query_consistent_map::<EventHeadRow, _>("list_dvr_events", 
             "SELECT recording_id,next_sequence,latest_attention_sequence,latest_attention_at_ms,
                     history_started_at_ms,history_has_gap,pruned_through_sequence
                FROM dvr_event_heads WHERE recording_id=$1",
@@ -1739,7 +1761,7 @@ impl DvrStore for HiqliteAuthStore {
             };
         let rows = self
             .client()
-            .query_consistent_map::<EventRow, _>(sql, values)
+            .query_consistent_map::<EventRow, _>("list_dvr_events", sql, values)
             .await?
             .into_iter()
             .map(TryInto::try_into)
@@ -1772,6 +1794,7 @@ impl DvrStore for HiqliteAuthStore {
         let head = self
             .client()
             .query_consistent_map::<EventHeadRow, _>(
+                "acknowledge_dvr_attention",
                 "SELECT recording_id,next_sequence,latest_attention_sequence,
                         latest_attention_at_ms,history_started_at_ms,history_has_gap,
                         pruned_through_sequence
@@ -1835,12 +1858,12 @@ impl DvrStore for HiqliteAuthStore {
             params!(user_id, target, acknowledged_at_ms, recording_id),
         ));
         self.client()
-            .txn(statements)
+            .txn("acknowledge_dvr_attention", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        Ok(self.client().query_consistent_map::<AckRow, _>(
+        Ok(self.client().query_consistent_map::<AckRow, _>("acknowledge_dvr_attention", 
             "SELECT through_sequence FROM dvr_attention_acks WHERE user_id=$1 AND recording_id=$2",
             params!(user_id, recording_id),
         ).await?.into_iter().next().map(|row| row.through_sequence))
@@ -1857,7 +1880,7 @@ impl DvrStore for HiqliteAuthStore {
         let (count_sql, count_values) = attention_count_statement(section, user_id);
         let total = self
             .client()
-            .query_consistent_map::<CountRow, _>(count_sql, count_values)
+            .query_consistent_map::<CountRow, _>("list_dvr_attention", count_sql, count_values)
             .await?
             .into_iter()
             .next()
@@ -1865,7 +1888,7 @@ impl DvrStore for HiqliteAuthStore {
         let (sql, values) = attention_page_statement(section, user_id, after, upper, limit);
         let raw = self
             .client()
-            .query_consistent_map::<AttentionRowRaw, _>(sql, values)
+            .query_consistent_map::<AttentionRowRaw, _>("list_dvr_attention", sql, values)
             .await?;
         let rows = raw
             .into_iter()
@@ -1885,6 +1908,7 @@ impl DvrStore for HiqliteAuthStore {
         let counts = self
             .client()
             .query_consistent_map::<CountRow, _>(
+                "prune_dvr_events",
                 "SELECT COUNT(*) AS count FROM dvr_events",
                 params!(),
             )
@@ -1893,6 +1917,7 @@ impl DvrStore for HiqliteAuthStore {
         let aged = self
             .client()
             .query_consistent_map::<CountRow, _>(
+                "prune_dvr_events",
                 "SELECT COUNT(*) AS count FROM dvr_events WHERE occurred_at_ms<$1",
                 params!(cutoff_ms),
             )
@@ -1908,6 +1933,7 @@ impl DvrStore for HiqliteAuthStore {
         let victims = self
             .client()
             .query_consistent_map::<EventIdentityRow, _>(
+                "prune_dvr_events",
                 "SELECT recording_id,sequence FROM dvr_events
              ORDER BY occurred_at_ms,event_id LIMIT $1",
                 params!(remove),
@@ -1927,7 +1953,7 @@ impl DvrStore for HiqliteAuthStore {
             ));
         }
         self.client()
-            .txn(statements)
+            .txn("prune_dvr_events", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1990,6 +2016,7 @@ impl DvrStore for HiqliteAuthStore {
         let changed = self
             .client()
             .execute(
+                "put_dvr_reminder",
                 format!(
                     "INSERT INTO dvr_reminders ({REMINDER_COLS}) \
                      SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13 \
@@ -2055,6 +2082,7 @@ impl DvrStore for HiqliteAuthStore {
         let fired = self
             .client()
             .execute_returning_map::<_, ReminderRow>(
+                "transition_dvr_reminders",
                 format!(
                     // A reminder's whole job is to warn someone *before* the
                     // programme starts, so the lead time opens the window and
