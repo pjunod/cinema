@@ -429,11 +429,26 @@ pub async fn search(
         .unwrap_or_default();
     let hits = state.catalogue.search_items(&query, 50).await?;
     // Offloaded titles have no file to play: the façade does not list them.
-    let items: Vec<Item> = hits
+    let mut items: Vec<Item> = hits
         .into_iter()
         .map(|r| r.item)
         .filter(|item| item.offloaded_at.is_none())
         .collect();
+    // A show or season whose every episode is offloaded has nothing to play
+    // either, and carries no mark of its own.
+    let containers: Vec<i64> = items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::Show | ItemKind::Season))
+        .map(|item| item.id)
+        .collect();
+    if !containers.is_empty() {
+        let counts = state.catalogue.offloaded_leaf_counts(&containers).await?;
+        items.retain(|item| {
+            counts
+                .get(&item.id)
+                .is_none_or(|count| count.offloaded < count.leaves)
+        });
+    }
     let views = views(&state, user.id, &items).await?;
     let mut elements = Vec::with_capacity(items.len());
     for item in &items {
