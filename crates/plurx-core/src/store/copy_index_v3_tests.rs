@@ -522,3 +522,223 @@ async fn a_quarantined_head_adopts_a_new_variant_but_never_the_quarantined_blob(
     );
     assert_eq!(head.head_epoch, epoch + 1);
 }
+
+const HYDRATOR: &str = "hydrating-node";
+
+async fn published(fixture: &Fixture, artifact: &CopyIndexV3Artifact) {
+    let token = publisher(fixture, artifact).await;
+    let outcome = fixture
+        .store
+        .publish_copy_index_v3(publish(fixture, &token, artifact, NOW + 1))
+        .await
+        .expect("publish");
+    assert!(
+        matches!(outcome, JobPublishOutcome::Published { .. }),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_consumer_reads_the_healthy_head_its_variant_and_its_publisher_location() {
+    let fixture = fixture(true).await;
+    let artifact = artifact('a', '1');
+    assert!(
+        fixture
+            .store
+            .copy_index_v3_healthy_heads(NAMESPACE, 100)
+            .await
+            .expect("pending heads")
+            .is_empty(),
+        "a pending head is never offered to a consumer"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .copy_index_v3_artifact(&artifact.contract_key, &artifact.blob_sha256)
+            .await
+            .expect("unpublished variant"),
+        None
+    );
+    published(&fixture, &artifact).await;
+    let key = super::copy_index_v3_source_key(NAMESPACE, &fixture.source).expect("key");
+    let head = fixture
+        .store
+        .copy_index_v3_head(&key)
+        .await
+        .expect("head")
+        .expect("published head");
+    assert_eq!(
+        fixture
+            .store
+            .copy_index_v3_healthy_heads(NAMESPACE, 100)
+            .await
+            .expect("healthy heads"),
+        vec![head]
+    );
+    for (namespace, file_id) in [("another-catalogue", 100), (NAMESPACE, 101)] {
+        assert!(
+            fixture
+                .store
+                .copy_index_v3_healthy_heads(namespace, file_id)
+                .await
+                .expect("unrelated heads")
+                .is_empty(),
+            "{namespace} {file_id}"
+        );
+    }
+    assert_eq!(
+        fixture
+            .store
+            .copy_index_v3_artifact(&artifact.contract_key, &artifact.blob_sha256)
+            .await
+            .expect("variant"),
+        Some(artifact.clone())
+    );
+    assert_eq!(
+        fixture
+            .store
+            .copy_index_v3_artifact(&artifact.contract_key, &"9".repeat(64))
+            .await
+            .expect("another blob"),
+        None
+    );
+    let locations = fixture
+        .store
+        .copy_index_v3_locations(&artifact.contract_key, &artifact.blob_sha256)
+        .await
+        .expect("locations");
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].node_id, NODE);
+    assert_eq!(locations[0].bytes, artifact.bytes);
+    assert!(fixture
+        .store
+        .copy_index_v3_artifact("not-a-digest", &artifact.blob_sha256)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn a_hydrating_node_records_and_forgets_only_its_own_verified_location() {
+    let fixture = fixture(true).await;
+    let artifact = artifact('a', '1');
+    let put = |blob: String, bytes: i64, at: i64| {
+        let store = &fixture.store;
+        let contract_key = artifact.contract_key.clone();
+        async move {
+            store
+                .put_copy_index_v3_location(&contract_key, &blob, HYDRATOR, bytes, at)
+                .await
+                .expect("put location")
+        }
+    };
+    assert!(
+        !put(artifact.blob_sha256.clone(), artifact.bytes, NOW).await,
+        "an unpublished variant has no holders"
+    );
+    published(&fixture, &artifact).await;
+    assert!(
+        !put(artifact.blob_sha256.clone(), artifact.bytes - 1, NOW + 2).await,
+        "the holder must have the variant's exact size"
+    );
+    assert!(
+        !put("9".repeat(64), artifact.bytes, NOW + 2).await,
+        "an unknown blob is not a variant"
+    );
+    assert!(put(artifact.blob_sha256.clone(), artifact.bytes, NOW + 2).await);
+    assert!(
+        put(artifact.blob_sha256.clone(), artifact.bytes, NOW + 5).await,
+        "a later verification refreshes the same row"
+    );
+    let locations = fixture
+        .store
+        .copy_index_v3_locations(&artifact.contract_key, &artifact.blob_sha256)
+        .await
+        .expect("locations");
+    assert_eq!(
+        locations
+            .iter()
+            .map(|location| (location.node_id.as_str(), location.verified_at_ms))
+            .collect::<Vec<_>>(),
+        vec![(HYDRATOR, NOW + 5), (NODE, NOW + 1)],
+        "most recently seen first"
+    );
+    assert!(fixture
+        .store
+        .put_copy_index_v3_location(
+            &artifact.contract_key,
+            &artifact.blob_sha256,
+            "bad node",
+            artifact.bytes,
+            NOW
+        )
+        .await
+        .is_err());
+    assert!(fixture
+        .store
+        .forget_copy_index_v3_location(&artifact.contract_key, &artifact.blob_sha256, HYDRATOR)
+        .await
+        .expect("forget"));
+    assert!(
+        !fixture
+            .store
+            .forget_copy_index_v3_location(&artifact.contract_key, &artifact.blob_sha256, HYDRATOR)
+            .await
+            .expect("forget again"),
+        "forgetting is idempotent"
+    );
+    let locations = fixture
+        .store
+        .copy_index_v3_locations(&artifact.contract_key, &artifact.blob_sha256)
+        .await
+        .expect("locations");
+    assert_eq!(locations.len(), 1, "the publisher's row is untouched");
+    assert_eq!(locations[0].node_id, NODE);
+}
+
+#[tokio::test]
+async fn a_quarantined_variant_gains_no_new_holder() {
+    let mut fixture = fixture(true).await;
+    let bad = artifact('a', '1');
+    published(&fixture, &bad).await;
+    let key = super::copy_index_v3_source_key(NAMESPACE, &fixture.source).expect("key");
+    let epoch = fixture.head_epoch + 1;
+    fixture.source.requested_generation =
+        super::copy_index_v3_rebuild_generation(&key, &bad.blob_sha256, epoch).expect("successor");
+    fixture.claim = coordinate(&fixture.store, &fixture.source, NOW + 10).await;
+    assert!(fixture
+        .store
+        .quarantine_copy_index_v3_head(super::background_jobs::QuarantineCopyIndexV3Head {
+            catalog_namespace: NAMESPACE.into(),
+            source: fixture.source.clone(),
+            claim: fixture.claim.clone(),
+            expected_epoch: epoch,
+            bad_blob_sha256: bad.blob_sha256.clone(),
+            code: "row_mismatch".into(),
+            now_ms: NOW + 11,
+        })
+        .await
+        .expect("quarantine"));
+    assert!(
+        fixture
+            .store
+            .copy_index_v3_healthy_heads(NAMESPACE, 100)
+            .await
+            .expect("heads")
+            .is_empty(),
+        "a quarantined head is not offered to a consumer"
+    );
+    assert!(
+        !fixture
+            .store
+            .put_copy_index_v3_location(
+                &bad.contract_key,
+                &bad.blob_sha256,
+                HYDRATOR,
+                bad.bytes,
+                NOW + 12
+            )
+            .await
+            .expect("put"),
+        "no healthy head points at the quarantined variant"
+    );
+}

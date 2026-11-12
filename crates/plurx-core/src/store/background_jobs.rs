@@ -2290,6 +2290,39 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         source_key: &str,
     ) -> Result<Option<super::copy_index_v3::CopyIndexV3Head>, StoreError>;
+    /// Healthy heads of one catalogue file, for a consumer that selects its
+    /// exact source key or proves another origin's content equivalent.
+    async fn copy_index_v3_healthy_heads(
+        &self,
+        catalog_namespace: &str,
+        file_id: i64,
+    ) -> Result<Vec<super::copy_index_v3::CopyIndexV3Head>, StoreError>;
+    async fn copy_index_v3_artifact(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+    ) -> Result<Option<super::copy_index_v3::CopyIndexV3Artifact>, StoreError>;
+    async fn copy_index_v3_locations(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+    ) -> Result<Vec<super::copy_index_v3::CopyIndexV3Location>, StoreError>;
+    /// Record this node as a verified holder; false when the variant is not
+    /// the exact bytes a healthy head points at.
+    async fn put_copy_index_v3_location(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+        node_id: &str,
+        bytes: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn forget_copy_index_v3_location(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<bool, StoreError>;
     async fn ensure_copy_index_v3_head(
         &self,
         catalog_namespace: &str,
@@ -3062,6 +3095,46 @@ impl<T: QueueSql> BackgroundJobStore for T {
         source_key: &str,
     ) -> Result<Option<super::copy_index_v3::CopyIndexV3Head>, StoreError> {
         super::copy_index_v3::read_head(self, source_key).await
+    }
+    async fn copy_index_v3_healthy_heads(
+        &self,
+        catalog_namespace: &str,
+        file_id: i64,
+    ) -> Result<Vec<super::copy_index_v3::CopyIndexV3Head>, StoreError> {
+        super::copy_index_v3::healthy_heads_for_file(self, catalog_namespace, file_id).await
+    }
+    async fn copy_index_v3_artifact(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+    ) -> Result<Option<super::copy_index_v3::CopyIndexV3Artifact>, StoreError> {
+        super::copy_index_v3::read_artifact(self, contract_key, blob_sha256).await
+    }
+    async fn copy_index_v3_locations(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+    ) -> Result<Vec<super::copy_index_v3::CopyIndexV3Location>, StoreError> {
+        super::copy_index_v3::list_locations(self, contract_key, blob_sha256).await
+    }
+    async fn put_copy_index_v3_location(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+        node_id: &str,
+        bytes: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::copy_index_v3::put_location(self, contract_key, blob_sha256, node_id, bytes, now_ms)
+            .await
+    }
+    async fn forget_copy_index_v3_location(
+        &self,
+        contract_key: &str,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<bool, StoreError> {
+        super::copy_index_v3::forget_location(self, contract_key, blob_sha256, node_id).await
     }
     async fn ensure_copy_index_v3_head(
         &self,
