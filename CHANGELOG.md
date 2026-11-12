@@ -227,6 +227,15 @@ bump may break compatibility and a **patch** bump never does.
   other nodes see it within about a second. Planning, encoder admission,
   background workers, the save response, fences, auth, membership, ownership
   and pre-mutation reads stay quorum reads (playback-start E1b).
+- `POST /api/v1/scan` accepts `removed_paths`, so Curator can say which media
+  files left a folder (a Re-match). Such a request probes exactly its expected
+  and removed paths, walks nothing else and never becomes a full scan; each
+  removed path is reported `gone` (its file record removed, and the item too
+  when that was its last file), `unknown`, `present` or `retained`. A missing
+  removed path is not `path_unreadable`; an unreadable chain or an empty mount
+  point is, and removes nothing. The connection test advertises
+  `"features": ["removed_paths"]`.
+
 - Pipeline contract v2 at the scan seam (docs/features/PIPELINE-CONTRACT.md):
   `POST /api/v1/scan` accepts `request_key` (a repeated key returns the same
   request and result), `wait_ms` (hold the answer up to 15 s for a `200` with

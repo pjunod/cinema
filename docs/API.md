@@ -1130,6 +1130,7 @@ the wire as built.
   "wait_ms": 10000,                     // hold the answer up to this long; cap 15000
   "expected_files": [{ "path": "…/Show.S01E01.mkv", "bytes": 8123456789,
                        "mtime_ns": 1794076138123456789 }],   // at most 64
+  "removed_paths": ["…/Old Folder/Show.S01E01.mkv"],         // at most 64; probe-only
   "probe_paths": ["/media/tv", "/media/movies"] }           // connection test, no path
 ```
 
@@ -1160,7 +1161,29 @@ scan finishes, in `files`, as `placed {item_id, file_id, bytes, mtime_ns}`
 Expected paths outside the requested directory or library, and paths containing
 a symlink below the configured root, are skipped without probing their targets.
 Existing and missing out-of-scope paths receive the same skip reason.
-Other files under `path` are scanned as before.
+Other files under `path` are scanned as before — unless the request names
+removed paths.
+
+**Removed paths.** `removed_paths` lists files, or emptied-and-removed folders,
+under `path` that no longer exist (a Curator Re-match moved them). Such a
+request is **probe-only**: plurx looks at exactly its `expected_files` and
+`removed_paths`, walks nothing else under `path` (which may be a library root,
+as the common parent of old and new folders), and admits no full scan. When
+`path` itself no longer exists the request is scoped to its nearest existing
+ancestor under the root. After the expected files are placed, each removed
+path is reported in `files` as `gone {item_id, item_removed}` (absent, its
+file records — for a folder, every file catalogued below it — removed, and the
+item too when that left it with no files), `unknown` (absent, never
+catalogued), `present` (still there; nothing removed), `retained {item_id,
+reason}` (absent, but the record was kept: this node's root identity does not
+match the library's, or a Dolby Vision conversion holds the file) or `skipped`
+(outside the request path or library). Removal is the full scan's reconcile
+step bounded to those files, under the library's mutation fence and root
+identity check. A missing removed path is not `path_unreadable`: plurx `lstat`s
+from the root down and treats `ENOENT`/`ENOTDIR` as absence; any other error
+on that chain, or a root that cannot be listed or lists nothing (an empty
+mount point), fails the whole request as `503 path_unreadable` before anything
+is placed or removed. [INTEGRATION.md](INTEGRATION.md) §1.10 has the wire.
 
 **Containment is lexical first.** The request path, with `.` and `..` resolved
 and no symlink followed, is matched component-wise against every configured
@@ -1182,8 +1205,8 @@ mount point, `ENOTCONN`, `EIO`, or the path missing beneath it — is a transien
 |---|---|
 | 200 `{"status":"scanned", "request_id", "report", "items", "files", …}` | The request finished — within `wait_ms`, or before the handler re-read it, or it is a replay of a finished `request_key` |
 | 202 `{"status":"queued", "request_id", …}` | Durably accepted for an eligible cluster worker. Requests survive process restart; same-path requests share a scan while retaining each caller’s hints and result |
-| 200 `{"roots", "visible", "missing", "outside_roots"}` | `probe_paths` with no `path`: which roots plurx can see. Only a configured root or a path under one is looked at; a symlink beneath the root is found with `lstat` and listed as `outside_roots` without being followed; anything else is `outside_roots`. Nothing is scanned or queued |
-| 400 | Relative path, nonpositive `series.tmdb`, invalid `book` fields, a malformed `request_key` or `expected_files`, `{"code":"path_required"}` (neither `path` nor `probe_paths`), or `{"code":"probe_paths_with_path"}` (both) |
+| 200 `{"features", "roots", "visible", "missing", "outside_roots"}` | `probe_paths` with no `path`: which roots plurx can see, and in `features` the optional contract features this build implements (`["removed_paths"]`). Only a configured root or a path under one is looked at; a symlink beneath the root is found with `lstat` and listed as `outside_roots` without being followed; anything else is `outside_roots`. Nothing is scanned or queued |
+| 400 | Relative path, a `removed_paths` entry that is relative or not under `path`, nonpositive `series.tmdb`, invalid `book` fields, a malformed `request_key` or `expected_files`, `{"code":"path_required"}` (neither `path` nor `probe_paths`), or `{"code":"probe_paths_with_path"}` (both) |
 | 500 `{"code":"scan_failed", "status":"failed", "request_id", "error"}` | The request (or the finished request a replayed `request_key` names) failed for a reason other than an unreadable root; the same `request_id` the record carries |
 | 500 `{"code":"cancelled", "status":"failed", "request_id", "error"}` | The same failed shape for a request whose job was cancelled (Activity's Cancel); send a new attempt |
 | 422 `path_outside_roots` | Path under no library root — permanent |

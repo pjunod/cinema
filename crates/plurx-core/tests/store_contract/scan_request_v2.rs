@@ -35,6 +35,7 @@ fn seed(key_id: i64, request_key: &str) -> ScanRequestV2Seed {
             bytes: 8_123_456_789,
             mtime_ns: 1_794_076_138_123_456_789,
         }],
+        removed_paths: Vec::new(),
     }
 }
 
@@ -201,6 +202,66 @@ async fn scan_request_sidecar_round_trips_and_key_is_unique_on_every_backend() {
                 .expect("original lookup"),
             Some(first.request_id)
         );
+    })
+    .await;
+}
+
+/// Contract amendment `removed_paths`: the removed paths a request names are
+/// stored with it in the admission and read back apart from its expected
+/// files, and the report's removal states round-trip, on every backend.
+#[tokio::test]
+async fn scan_request_removed_paths_round_trip_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("Removed {backend}"),
+                kind: LibraryKind::Movies,
+                paths: vec![format!("/movies-{backend}").into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let request = targeted(library.id, "/movies");
+        let mut moved = seed(9, "op/41/abc/1");
+        moved.removed_paths = vec![
+            "/movies/Dune (1984)/Dune.1984.mkv".into(),
+            "/movies/Dune (1984)".into(),
+        ];
+        store
+            .enqueue_library_work_v2(request.clone(), moved.clone())
+            .await
+            .expect("admission");
+        let row = store
+            .scan_request_v2(&request.request_id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(row.expected_files, moved.expected_files, "{backend}");
+        assert_eq!(row.removed_paths, moved.removed_paths, "{backend}");
+        let files = vec![
+            PlacedReport::Gone {
+                path: "/movies/Dune (1984)/Dune.1984.mkv".into(),
+                item_id: 77,
+                item_removed: true,
+            },
+            PlacedReport::Unknown {
+                path: "/movies/Dune (1984)".into(),
+            },
+            PlacedReport::Present {
+                path: "/movies/Other".into(),
+            },
+        ];
+        assert!(store
+            .set_scan_request_files(&request.request_id, &files, 3_000)
+            .await
+            .expect("files"));
+        let row = store
+            .scan_request_v2(&request.request_id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(row.files, files, "{backend}");
+        assert_eq!(row.removed_paths, moved.removed_paths, "{backend}");
     })
     .await;
 }

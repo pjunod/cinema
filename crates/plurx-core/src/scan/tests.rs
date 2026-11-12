@@ -2426,3 +2426,157 @@ async fn problem_list_is_capped_with_a_trailing_count() {
         "summary must say how many were hidden, got: {last}"
     );
 }
+
+/// Contract amendment `removed_paths`: a probe-only targeted scan of a
+/// library root records exactly the files it names. A new folder elsewhere
+/// under the root is not found, because nothing walked it.
+#[tokio::test]
+async fn a_probe_only_targeted_scan_records_exactly_the_named_files() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let dir = tempfile::tempdir().expect("tmp");
+    write_fake_video(dir.path(), "Heat (1995)/Heat (1995).mkv").await;
+    let lib = movie_library(&store, dir.path()).await;
+    scan_library(&store, &lib).await.expect("full scan");
+
+    let dune = write_fake_video(dir.path(), "Dune (2021)/Dune (2021).mkv").await;
+    let brazil = write_fake_video(dir.path(), "Brazil (1985)/Brazil (1985).mkv").await;
+    let root = dir.path().canonicalize().expect("root");
+    let outside = std::env::temp_dir().join("never-probed.mkv");
+    let (out, detail) = scan_path_targeted(
+        &PublicationStore::unfenced(&store),
+        &lib,
+        &root,
+        &TargetedOptions {
+            force_probe: [dune.clone()].into_iter().collect(),
+            only: Some(vec![dune.clone(), outside]),
+        },
+    )
+    .await
+    .expect("probe-only");
+    assert_eq!(out.report.added, 1, "{:?}", out.report);
+    assert_eq!(out.items.len(), 1);
+    assert_eq!(out.items[0].path, dune.to_string_lossy());
+    assert_eq!(
+        detail.candidates.len(),
+        1,
+        "only the named file is a candidate"
+    );
+    assert!(store
+        .get_file_by_path(&brazil.to_string_lossy())
+        .await
+        .expect("lookup")
+        .is_none());
+    assert!(
+        !format!("{:?}", out.report).contains("no media files"),
+        "a probe-only pass does not claim the path holds nothing"
+    );
+}
+
+/// Contract amendment `removed_paths`: an absent file's record goes, and
+/// the item with it when that was its last file; an absent folder takes
+/// every record below it; a path never catalogued is `unknown`; and a
+/// library whose root identity was never recorded keeps its records
+/// (`retained`) rather than trusting this node's view.
+#[tokio::test]
+async fn removed_paths_forget_their_records_and_the_items_left_without_files() {
+    use crate::store::scan_request_v2::PlacedReport;
+    let store = SqliteStore::open_in_memory().expect("store");
+    let dir = tempfile::tempdir().expect("tmp");
+    let dune = write_fake_video(dir.path(), "Dune (1984)/Dune (1984).mkv").await;
+    let ran = write_fake_video(dir.path(), "Ran (1985)/Ran (1985).mkv").await;
+    let heat = write_fake_video(dir.path(), "Heat (1995)/Heat (1995).mkv").await;
+    let lib = movie_library(&store, dir.path()).await;
+    scan_library(&store, &lib).await.expect("full scan");
+    let item = |path: &Path| {
+        let path = path.to_string_lossy().into_owned();
+        let store = &store;
+        async move {
+            store
+                .get_file_by_path(&path)
+                .await
+                .expect("lookup")
+                .map(|file| file.item_id)
+        }
+    };
+    let dune_item = item(&dune).await.expect("Dune");
+    let ran_item = item(&ran).await.expect("Ran");
+    let heat_item = item(&heat).await.expect("Heat");
+
+    std::fs::remove_dir_all(dune.parent().expect("folder")).expect("rm Dune");
+    std::fs::remove_dir_all(ran.parent().expect("folder")).expect("rm Ran");
+    let root = dir.path().to_path_buf();
+    let mut absent = Vec::new();
+    for path in [
+        dune.clone(),
+        ran.parent().expect("folder").to_path_buf(),
+        root.join("Never (2000)").join("Never (2000).mkv"),
+    ] {
+        match removed::probe_removed(&root, &path).expect("readable") {
+            removed::RemovedProbe::Absent { spellings } => absent.push(removed::AbsentPath {
+                path: path.display().to_string(),
+                spellings,
+            }),
+            other => panic!("{path:?} is absent, not {other:?}"),
+        }
+    }
+    let removal = removed::remove_absent(&PublicationStore::unfenced(&store), &lib, &absent)
+        .await
+        .expect("removal");
+    assert_eq!(
+        removal.reports,
+        vec![
+            PlacedReport::Gone {
+                path: dune.display().to_string(),
+                item_id: dune_item,
+                item_removed: true
+            },
+            PlacedReport::Gone {
+                path: ran.parent().expect("folder").display().to_string(),
+                item_id: ran_item,
+                item_removed: true
+            },
+            PlacedReport::Unknown {
+                path: absent[2].path.clone()
+            },
+        ]
+    );
+    assert_eq!(removal.deleted_files, 2);
+    assert!(store.get_item(dune_item).await.expect("get").is_none());
+    assert!(store.get_item(ran_item).await.expect("get").is_none());
+    assert!(store.get_item(heat_item).await.expect("get").is_some());
+
+    // A library only ever scanned by targeted passes has no recorded root
+    // identity: nothing is removed, and the report says why.
+    let other = tempfile::tempdir().expect("tmp2");
+    let alien = write_fake_video(other.path(), "Alien (1979)/Alien (1979).mkv").await;
+    let unscanned = store
+        .create_library(&NewLibrary {
+            name: "Movies 2".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![other.path().to_path_buf()],
+            anime: false,
+        })
+        .await
+        .expect("second library");
+    scan_path(&store, &unscanned, &other.path().join("Alien (1979)"))
+        .await
+        .expect("targeted");
+    let alien_item = item(&alien).await.expect("Alien");
+    std::fs::remove_file(&alien).expect("rm Alien");
+    let removal = removed::remove_absent(
+        &PublicationStore::unfenced(&store),
+        &unscanned,
+        &[removed::AbsentPath {
+            path: alien.display().to_string(),
+            spellings: vec![alien.clone()],
+        }],
+    )
+    .await
+    .expect("removal");
+    assert!(
+        matches!(&removal.reports[..], [PlacedReport::Retained { item_id, .. }] if *item_id == alien_item),
+        "{:?}",
+        removal.reports
+    );
+    assert!(item(&alien).await.is_some(), "the record was kept");
+}

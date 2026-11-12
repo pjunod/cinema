@@ -224,8 +224,7 @@ pub(super) async fn enqueue_with<T: QueueSql>(
     body["library_request"] =
         serde_json::from_str(&input_json).map_err(|error| StoreError::Task(error.to_string()))?;
     if let Some(seed) = seed {
-        body["scan_request_v2"] =
-            serde_json::to_value(&seed).map_err(|error| StoreError::Task(error.to_string()))?;
+        body["scan_request_v2"] = seed.admission_value()?;
     }
     let rows = store
         .queue_sql(ENQUEUE_SQL.into(), encode(&body)?, true, true)

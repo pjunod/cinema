@@ -64,6 +64,7 @@ class IntegrationDocLiterals(unittest.TestCase):
             ("MAX_PROBE_PATHS", SCAN),
             ("MAX_REQUEST_KEY_BYTES", SIDECAR),
             ("MAX_EXPECTED_FILES", SIDECAR),
+            ("MAX_REMOVED_PATHS", SIDECAR),
             ("MAX_WAITING_ON_BYTES", SIDECAR),
         ]:
             with self.subTest(code=code):
@@ -80,13 +81,21 @@ class IntegrationDocLiterals(unittest.TestCase):
 
     def test_expected_file_bounds_and_the_recent_list_match_the_code(self) -> None:
         sidecar = SIDECAR.read_text()
-        total = re.search(r"encode\(&self\.expected_files\)\?\.len\(\) > (\d+) \* 1024", sidecar)
+        total = re.search(r"const MAX_EXPECTED_JSON_BYTES: usize = (\d+) \* 1024;", sidecar)
         path = re.search(r"file\.path\.len\(\) > (\d+)", sidecar)
         self.assertIsNotNone(total, "the expected_files total bound moved")
         self.assertIsNotNone(path, "the expected_files path bound moved")
         row = self.limits["MAX_EXPECTED_FILES"]
         self.assertIn(f"{total.group(1)} KiB of JSON", row)
         self.assertIn(f"each path at most {path.group(1)} bytes", row)
+        self.assertIn(
+            "MAX_EXPECTED_JSON_BYTES",
+            re.search(r"fn validate\(.*?\n    \}\n", sidecar, re.S).group(0),
+            "the 16 KiB bound is no longer what validation checks",
+        )
+        removed = self.limits["MAX_REMOVED_PATHS"]
+        self.assertIn(f"each at most {path.group(1)} bytes", removed)
+        self.assertIn(f"at most {total.group(1)} KiB of JSON together", removed)
         recent = rust_const(
             ROOT / "crates" / "plurx-core" / "src" / "store" / "background_jobs_library.rs",
             "MAX_LIBRARY_REQUESTS",
