@@ -2317,7 +2317,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # blocked activation before its existing Confirm settlement; no shipped write.
 # 58 -> 59 with the A1/B1 growing engine's route registration (#1495), which
 # writes the blocked sentinel the way every other actor registration does.
-expected_occurrences = 59
+# 59 -> 60 with E1c: route_view_tests.rs's committed-row helper activates
+# behind the blocked sentinel, as every activation must. Test-only.
+expected_occurrences = 60
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
