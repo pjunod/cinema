@@ -2988,7 +2988,27 @@ pub fn copy_pipe_args_with_index_and_packet_clock(
         return Err("packet clock and measurement require different descriptors");
     }
     args.insert(0, "-copyts".to_owned());
-    args.extend(["-map", "0:v:0?", "-an", "-sn"].map(str::to_owned));
+    args.extend(copy_packet_clock_output_args(source, video, clock_url));
+    Ok(args)
+}
+
+/// The packet-clock output block alone: the selected video, through the same
+/// copy recipe as the canonical output, written as `framecrc` in the demux
+/// time base with no muxer clock shift. Every option is an output option, so
+/// the block can follow any other output of the same input.
+///
+/// The copy engine prepends the global `-copyts`
+/// ([`copy_pipe_args_with_index_and_packet_clock`]), so its clock carries
+/// source timestamps. A caller that appends this block to a child without
+/// `-copyts` reads the same packets, sizes, durations and composition
+/// offsets on FFmpeg's own input clock, which sits the format start time
+/// before the source's; that caller owns the correction.
+pub fn copy_packet_clock_output_args(
+    source: &MediaFile,
+    video: CopyVideoOptions,
+    clock_url: &str,
+) -> Vec<String> {
+    let mut args: Vec<String> = ["-map", "0:v:0?", "-an", "-sn"].map(str::to_owned).to_vec();
     args.extend(strip_plurx_markers(&copy_video_args(source, video)));
     args.extend(
         [
@@ -3002,7 +3022,7 @@ pub fn copy_pipe_args_with_index_and_packet_clock(
         ]
         .map(str::to_owned),
     );
-    Ok(args)
+    args
 }
 
 /// A bounded head census using the identical measured recipe. All three

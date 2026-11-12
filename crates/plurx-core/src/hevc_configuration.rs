@@ -53,7 +53,7 @@ const FAULT_KEEP: usize = 64;
 
 /// Line-oriented, bounded scan of all stderr for [`SOURCE_FAULTS`]. It sees
 /// every byte, including after the trace has been refused.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct FaultScan {
     line: Vec<u8>,
     fault: Option<&'static str>,
@@ -199,7 +199,9 @@ pub struct RangeInspection {
     pub configuration_sha256: String,
 }
 
-#[derive(Default)]
+/// `Clone` lets a whole-file pass close a copy as a range
+/// ([`Trace::finish_range`]) and still finish the original as its proof.
+#[derive(Clone, Default)]
 pub struct Trace {
     line: Vec<u8>,
     sets: [Option<Vec<u8>>; 3],
