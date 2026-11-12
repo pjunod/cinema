@@ -118,8 +118,8 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     def test_reviewed_historical_jobs_do_not_relax_current_admission(self):
         from pathlib import Path
         current = Path('.github/workflows/ci.yml').read_text()
-        self.assertEqual(proof.HISTORICAL_JOBS, (proof.ORIGINAL_JOB, proof.PRE_NONVOTER_JOB, proof.NONVOTER_JOB, proof.CURRENT_JOB))
-        self.assertEqual(len(set(proof.HISTORICAL_JOBS)), 4)
+        self.assertEqual(proof.HISTORICAL_JOBS, (proof.ORIGINAL_JOB, proof.PRE_NONVOTER_JOB, proof.NONVOTER_JOB, proof.CGROUP_PARSE_JOB, proof.CURRENT_JOB))
+        self.assertEqual(len(set(proof.HISTORICAL_JOBS)), 5)
         for identity in proof.HISTORICAL_JOBS:
             with self.subTest(identity=identity), patch.object(proof.retention, 'digest', return_value=identity):
                 proof.check_workflow_environment(current, proof.HISTORICAL_JOBS)

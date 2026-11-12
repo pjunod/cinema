@@ -115,7 +115,9 @@ never start it alongside this allocation. Nominal container limits alone do
 not reserve memory or prevent accidental overcommit.
 
 Keep the pinned CI image, `make ci-rust-gate`, test profile, two Rust test
-threads and 120-minute full-unit timeout unchanged. Compilation uses one
+threads and 180-minute full-unit timeout unchanged (raised from 120 on
+2026-11-11: run 7243 measured ~175 minutes for the full suite on the four-CPU
+nonvoter). Compilation uses one
 Cargo job. Full run 5991 exhausted a 12 GiB cgroup during daemon test code
 generation; an unchanged source-only control peaked at 15.74 GiB under the
 former 16/18 GiB envelope. A later native test compile also exceeded 12 GiB
