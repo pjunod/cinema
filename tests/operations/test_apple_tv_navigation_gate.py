@@ -88,8 +88,12 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                     self.assertIn("cancel-in-progress: false", apple_job)
         build = (ROOT / "Makefile").read_text().split("apple-build:", 1)[1].split(".PHONY:", 1)[0]
         for platform in ("iOS", "tvOS"):
-            self.assertIn('-destination "generic/platform=' + platform + ' Simulator"', build)
-        for override in ("ARCHS=", "EXCLUDED_ARCHS", "ONLY_ACTIVE_ARCH"):
+            # A generic simulator destination builds x86_64 too, for Intel Macs
+            # nothing here runs on; each compile builds the arm64 slice alone.
+            self.assertIn('-destination "generic/platform=' + platform + ' Simulator" \\\n'
+                          '\t  ARCHS=arm64 \\\n', build)
+        self.assertEqual(build.count("ARCHS=arm64"), 2)
+        for override in ("x86_64", "EXCLUDED_ARCHS", "ONLY_ACTIVE_ARCH"):
             self.assertNotIn(override, build)
 
     def test_fast_apple_jobs_run_independently_with_isolated_native_owners(self):

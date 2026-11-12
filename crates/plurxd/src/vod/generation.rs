@@ -1300,7 +1300,7 @@ async fn run_generation(
                 );
             }
             Ok((consumed, muxer)) => {
-                if let Err(outcome) = establish_or_verify(&rendition, &muxer).await {
+                if let Err(outcome) = establish_or_verify(&shared, &rendition, &muxer).await {
                     return (Some(outcome), None);
                 }
                 Box::new(std::io::Cursor::new(consumed).chain(stdout))
@@ -1392,25 +1392,68 @@ pub(super) fn sealed_init_refusal(
     recipe: &Recipe,
     index: Option<&FragmentIndex>,
     muxer: &Init,
-) -> Option<String> {
+) -> Option<SealedInitRefusal> {
     let sealed = recipe.copy_index_init_contract.as_deref()?;
     let Some(index) = index else {
-        return Some("the recipe names a sealed init contract but carries no index".to_owned());
+        return Some(SealedInitRefusal::Unverifiable(
+            "the recipe names a sealed init contract but carries no index".to_owned(),
+        ));
     };
     match crate::copy_normalization::served_init_contract_sha256(muxer, &index.promotion) {
         Ok(served) if served == sealed => None,
-        Ok(served) => Some(format!(
+        Ok(served) => Some(SealedInitRefusal::Mismatch(format!(
             "this engine's promoted init has contract {served}, and the index was sealed with {sealed}"
-        )),
-        Err(error) => Some(format!(
+        ))),
+        Err(error) => Some(SealedInitRefusal::Unverifiable(format!(
             "this engine's init cannot be promoted with the sealed inputs: {error}"
-        )),
+        ))),
+    }
+}
+
+/// Why a generation does not serve its v3 recipe. Either way the generation
+/// fails and this process plans the title from its next index.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SealedInitRefusal {
+    /// The init was promoted and its contract is not the sealed one. This is
+    /// the one refusal that is evidence about the variant, so it alone is
+    /// reported to the Analysis worker.
+    Mismatch(String),
+    /// No contract could be computed to compare: the promotion failed, or
+    /// the recipe lost its index. Nothing is known about the variant, so
+    /// nothing is reported and no head is touched.
+    Unverifiable(String),
+}
+impl SealedInitRefusal {
+    pub(super) fn reason(&self) -> &str {
+        match self {
+            Self::Mismatch(reason) | Self::Unverifiable(reason) => reason,
+        }
+    }
+}
+
+/// Tell the Analysis worker which head a mismatched sealed init was planned
+/// from. This path cannot claim; the worker decides whether the variant or
+/// only this node's engine is at fault, and quarantines only the former.
+fn report_sealed_init(shared: &Shared, recipe: &Recipe) {
+    let Some(registry) = shared.copy_analysis.get() else {
+        return;
+    };
+    let defect = recipe
+        .cluster_cache_key
+        .as_deref()
+        .and_then(crate::copy_index_v3::sealed_init_defect);
+    if let Some(defect) = defect {
+        registry.notify_defect(defect);
     }
 }
 
 /// The identity half of a pre-read generation. `false` means the generation
 /// is over (drift handled or failure recorded) and the caller must return.
-async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result<(), Outcome> {
+async fn establish_or_verify(
+    shared: &Shared,
+    rendition: &Arc<Rendition>,
+    muxer: &Init,
+) -> Result<(), Outcome> {
     // Hold publication ownership while identity and init are written. The
     // exact byte reservations below may evict other idle cache entries.
     let _cache_pin = crate::playback_cache::pin(rendition.dir.path())
@@ -1428,6 +1471,10 @@ async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result
         if let Some(key) = rendition.recipe.cluster_cache_key.as_deref() {
             crate::copy_index_v3::refuse_on_this_engine(key);
         }
+        if matches!(refused, SealedInitRefusal::Mismatch(_)) {
+            report_sealed_init(shared, &rendition.recipe);
+        }
+        let refused = refused.reason().to_owned();
         tracing::warn!(
             target: "plurxd::vodserve",
             rendition = %rendition.key,
