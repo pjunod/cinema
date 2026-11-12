@@ -22,7 +22,7 @@ use plurx_core::domain::{
     MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::error::StoreError;
-use plurx_core::store::Store;
+use plurx_core::store::{AppliedView, FactInstant, StampCheck, Store, ViewSource, ViewStamp};
 use plurx_core::transcode::OutputGrade;
 use serde::{Deserialize, Serialize};
 
@@ -140,7 +140,11 @@ pub(crate) const REMOTE_ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::fro
         + 10,
 );
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
-const ROUTE_CACHE_TTL: Duration = Duration::from_secs(1);
+/// How long the route cache holds a fact it observed directly (a row this
+/// process committed, or a quorum read) while this replica is not proven to
+/// contain it: the serving proof's own lease, and no other clock (§4.4).
+const OBSERVED_ROUTE_LEASE: Duration =
+    plurx_core::cluster::migration::status::QUORUM_WATERMARK_LEASE;
 const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
 const MAX_CONTROL_RATE_ENTRIES: usize = 4_096;
 const CONTROL_RATE_WINDOW: Duration = Duration::from_secs(1);
@@ -889,11 +893,12 @@ impl Drop for TakeoverMetricGuard {
 /// E1c can size each move on its own numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RouteReadSite {
-    /// The cached route lookup behind media and status routing
-    /// (`raw_route_before`; moves to the view in E1c).
+    /// The cached route lookup behind media routing (`raw_route_before`):
+    /// a view read since E1c, or a quorum read where the view cannot answer.
     Routing,
     /// The first status resolution (`http/hls/status.rs`, before local actor
-    /// state; §12-5 moves it view-first).
+    /// state): view-first since E1c (§12-5), with a quorum read confirming a
+    /// verdict that is not active.
     StatusFirst,
     /// The post-publication half of the status pre/post bracket (stays).
     StatusBracket,
@@ -945,7 +950,9 @@ impl RouteReadSite {
     }
 }
 
-/// Every read is a Store read until E1c moves `routing` onto the view.
+/// What answered a route read: a Store (quorum) read, or the applied view.
+/// Only `read_media_session_route_view`'s callers (routing, status first,
+/// the Activity observer) can count `view`.
 const ROUTE_READ_SOURCES: [&str; 2] = ["authority", "view"];
 
 static ROUTE_READS: [[AtomicU64; ROUTE_READ_SOURCES.len()]; RouteReadSite::ALL.len()] =
@@ -963,6 +970,135 @@ where
 {
     ROUTE_READS[site.index()][0].fetch_add(1, Ordering::Relaxed);
     store.media_session_route(session_id).await
+}
+
+/// The one way production code reads a session-keyed route through the
+/// node's applied view (E1c, §4.4), counted by the site that asked and by
+/// what answered. Only ordinary routing and read-only observers may call it;
+/// a fence, a final verdict or a read before a write never does
+/// (`http/applied_route_inventory.rs` pins the callers).
+pub(crate) async fn read_media_session_route_view(
+    applied: &dyn RouteView,
+    site: RouteReadSite,
+    session_id: &str,
+) -> Result<RouteViewAnswer, StoreError> {
+    let answer = applied.route(session_id).await?;
+    let source = match answer.source {
+        ViewSource::Authority => 0,
+        ViewSource::View => 1,
+    };
+    ROUTE_READS[site.index()][source].fetch_add(1, Ordering::Relaxed);
+    Ok(answer)
+}
+
+/// What the route cache asks of this node's applied view (E1 §4.4). The
+/// production implementation is [`AppliedView`]; unit tests drive the cache
+/// through a replica double.
+pub(crate) trait RouteView: Send + Sync + 'static {
+    /// One route read under the view's rule: the replica when it may answer,
+    /// else Authority (a quorum read on a replicated node).
+    fn route<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, Result<RouteViewAnswer, StoreError>>;
+    /// Whether an entry made from an earlier view answer may still answer.
+    fn check(&self, stamp: RouteStamp) -> StampCheck;
+    /// [`Self::check`] without the proof and floor: whether the table moved.
+    fn same_image(&self, stamp: RouteStamp) -> bool;
+    /// The instant of a per-row fact, taken after the write was acknowledged
+    /// or the quorum read returned.
+    fn observe(&self) -> RouteFact;
+    /// Whether this replica is proven to contain `fact`.
+    fn floor_met(&self, fact: RouteFact) -> bool;
+    /// Close the route view until `fact` is applied here, for an `Observed`
+    /// entry dropped before its floor was met.
+    fn hold_floor(&self, fact: RouteFact);
+    /// Count one cache re-read a stale stamp caused.
+    fn note_reload(&self);
+}
+
+/// [`RouteView::route`]'s answer.
+#[derive(Clone, Debug)]
+pub(crate) struct RouteViewAnswer {
+    pub(crate) route: Option<MediaSessionRoute>,
+    /// `None` for an Authority answer and on SQLite, which hands out none.
+    pub(crate) stamp: Option<RouteStamp>,
+    pub(crate) source: ViewSource,
+}
+
+/// A view answer's stamp, as the route cache keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RouteStamp {
+    Applied(ViewStamp),
+    #[cfg(test)]
+    Test(u64),
+}
+
+/// A per-row fact's instant, as the route cache keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RouteFact {
+    Applied(FactInstant),
+    #[cfg(test)]
+    Test(u64),
+}
+
+impl RouteView for AppliedView {
+    fn route<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, Result<RouteViewAnswer, StoreError>> {
+        Box::pin(async move {
+            AppliedView::route(self, session_id)
+                .await
+                .map(|answer| RouteViewAnswer {
+                    route: answer.route,
+                    stamp: answer.stamp.map(RouteStamp::Applied),
+                    source: answer.source,
+                })
+        })
+    }
+
+    fn check(&self, stamp: RouteStamp) -> StampCheck {
+        match stamp {
+            RouteStamp::Applied(stamp) => AppliedView::check(self, &stamp),
+            #[cfg(test)]
+            RouteStamp::Test(_) => StampCheck::Stale,
+        }
+    }
+
+    fn same_image(&self, stamp: RouteStamp) -> bool {
+        match stamp {
+            RouteStamp::Applied(stamp) => AppliedView::same_image(self, &stamp),
+            #[cfg(test)]
+            RouteStamp::Test(_) => false,
+        }
+    }
+
+    fn observe(&self) -> RouteFact {
+        RouteFact::Applied(AppliedView::observe(self))
+    }
+
+    fn floor_met(&self, fact: RouteFact) -> bool {
+        match fact {
+            RouteFact::Applied(fact) => AppliedView::floor_met(self, fact),
+            #[cfg(test)]
+            RouteFact::Test(_) => false,
+        }
+    }
+
+    fn hold_floor(&self, fact: RouteFact) {
+        match fact {
+            RouteFact::Applied(fact) => {
+                AppliedView::hold_floor(self, plurx_core::store::AppliedTable::MediaSessions, fact);
+            }
+            #[cfg(test)]
+            RouteFact::Test(_) => {}
+        }
+    }
+
+    fn note_reload(&self) {
+        AppliedView::note_reload(self, plurx_core::store::AppliedTable::MediaSessions);
+    }
 }
 
 fn route_reads_prometheus() -> String {
@@ -1038,24 +1174,38 @@ const ROUTE_LOCK_BUCKETS: [(u64, &str); 5] = [
     (100_000_000, "0.1"),
 ];
 /// Upper bounds of `plurx_media_session_route_prune_entries`: how many
-/// entries one expired-entry sweep walks, up to the cache's own ceiling.
+/// entries one eviction scan walks, up to the cache's own ceiling.
 const ROUTE_PRUNE_BUCKETS: [u64; 7] =
     [0, 16, 64, 256, 1_024, 2_048, MAX_ROUTE_CACHE_ENTRIES as u64];
-const ROUTE_LOOKUP_RESULTS: [&str; 3] = ["cache_hit", "single_flight_hit", "store"];
+const ROUTE_LOOKUP_RESULTS: [&str; 5] = [
+    "cache_hit",
+    "single_flight_hit",
+    "observed",
+    "view",
+    "store",
+];
 const ROUTE_LOCK_SITES: [&str; 4] = ["lookup", "insert", "queried_insert", "generation_insert"];
 
 /// How `raw_route_before` answered one cached route lookup (an HLS media or
 /// status GET, or a session DELETE, routed through `relay_if_remote`).
 #[derive(Clone, Copy, Debug)]
 enum RouteLookup {
-    /// The first `cached_route`, before any single-flight shard is taken.
+    /// The first `cached_route` found a current `View` entry, before any
+    /// single-flight shard is taken.
     CacheHit = 0,
     /// The second `cached_route`, after waiting on the lookup's
-    /// `route_queries` shard: another lookup of the same capability did the
-    /// Store read this one would otherwise have repeated.
+    /// `route_queries` shard, found a current `View` entry: another lookup of
+    /// the same capability did the read this one would otherwise have
+    /// repeated.
     SingleFlightHit = 1,
-    /// A `store.media_session_route` read.
-    Store = 2,
+    /// An unretired `Observed` entry answered: a fact this process holds
+    /// that the replica is not yet proven to contain.
+    Observed = 2,
+    /// A read the applied view answered locally.
+    View = 3,
+    /// A Store (quorum) read: the view could not answer, or an `Observed`
+    /// entry outlived its lease unretired.
+    Store = 4,
 }
 
 /// The four places the route-cache map mutex is taken in shipping code.
@@ -1128,7 +1278,7 @@ impl RouteCacheMetrics {
 
     pub(crate) fn prometheus(&self) -> String {
         let mut out = String::from(
-            "# HELP plurx_media_session_route_lookups_total Media-session route lookups through the route cache (HLS media and status GETs, session DELETEs) by how they were answered: the one-second route cache, the cache re-read after waiting on the lookup's single-flight shard, or a Store read. Control and final-status reads bypass the cache and are not counted here.\n\
+            "# HELP plurx_media_session_route_lookups_total Media-session route lookups through the route cache (HLS media GETs, the first status resolution, session DELETEs) by how they were answered: cache_hit and single_flight_hit a cached view answer whose stamp is still current (before and after waiting on the lookup's single-flight shard), observed a fact this process holds directly (a row it committed or a quorum read) that the replica is not yet proven to contain, view a node-local applied-view read, store a Store (quorum) read. Cached view answers are invalidated by what the replica applies, not by a clock. Control and final-status reads bypass the cache and are not counted here.\n\
              # TYPE plurx_media_session_route_lookups_total counter\n",
         );
         for (index, result) in ROUTE_LOOKUP_RESULTS.iter().enumerate() {
@@ -1164,7 +1314,7 @@ impl RouteCacheMetrics {
             ));
         }
         out.push_str(
-            "# HELP plurx_media_session_route_prune_entries Entries walked by one expired-entry sweep of the route cache; the sweep runs under the map lock on every insert.\n\
+            "# HELP plurx_media_session_route_prune_entries Entries walked by one eviction scan of the route cache; the scan runs under the map lock, only when an insert finds the cache full.\n\
              # TYPE plurx_media_session_route_prune_entries histogram\n",
         );
         let mut cumulative = 0_u64;
@@ -2294,6 +2444,11 @@ pub(crate) struct MediaSessionCoordinator {
     control_admission: Arc<StdMutex<ControlAdmission>>,
     quality_admission: Arc<StdMutex<ControlAdmission>>,
     route_cache_metrics: Arc<RouteCacheMetrics>,
+    /// This node's applied view of `media_sessions` (E1c, §4.4): what the
+    /// route cache reads on a miss and checks its entries against.
+    applied: Arc<dyn RouteView>,
+    /// Insert order of route-cache entries, for eviction at capacity.
+    route_sequence: Arc<AtomicU64>,
     /// Test-only: while set, a lookup that reaches the Store read waits here
     /// until the semaphore is closed, so a test can hold one read open and
     /// observe what concurrent lookups of the same capability do meanwhile.
@@ -2301,10 +2456,47 @@ pub(crate) struct MediaSessionCoordinator {
     route_store_gate: Arc<StdMutex<Option<Arc<tokio::sync::Semaphore>>>>,
 }
 
+/// One route-cache entry (§4.4). No entry carries a clock of its own: a
+/// `View` answer is current while the replica's route slot has not moved,
+/// and an `Observed` fact is held for the proof's lease at most.
 #[derive(Clone)]
 struct CachedRoute {
     route: Option<MediaSessionRoute>,
-    expires_at: tokio::time::Instant,
+    origin: RouteOrigin,
+    /// Insert order; the lowest is evicted when the cache is full and no
+    /// entry is stale.
+    sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RouteOrigin {
+    /// A view answer, a hit while its stamp is current. A renewal, release,
+    /// takeover or expiry sweep applied here moves the slot, and the next
+    /// lookup re-reads the replica.
+    View(RouteStamp),
+    /// A fact this process holds directly: a row it committed (the
+    /// `cache_route*` publications) or the result of a quorum read. It is the
+    /// answer until it is retired — the replica is proven to contain `fact`
+    /// and the image is stable — and only while `at` is inside the proof's
+    /// lease; after that one fresh quorum read replaces it. A view read never
+    /// replaces it: that is what stops a replica behind a release this
+    /// process made from reviving the pre-release row.
+    Observed {
+        fact: RouteFact,
+        at: tokio::time::Instant,
+    },
+}
+
+/// What a route-cache lookup found. Returned and consumed at once, never
+/// stored, so the route is not boxed for the sake of the empty variants.
+#[allow(clippy::large_enum_variant)]
+enum CachedLookup {
+    /// Answer with this route.
+    Hit(Option<MediaSessionRoute>, RouteLookup),
+    /// Read through the applied view.
+    View,
+    /// An `Observed` entry outlived its lease unretired: a quorum read.
+    Quorum,
 }
 
 /// Durable resolution used when HTTP status depends on more than whether a
@@ -2405,7 +2597,20 @@ impl ControlAdmission {
 }
 
 impl MediaSessionCoordinator {
+    /// A coordinator whose route view is the store itself, as on SQLite.
+    #[cfg(test)]
     pub(crate) fn new(membership: MembershipManager, store: Arc<dyn Store>) -> Arc<Self> {
+        let applied = AppliedView::authority(Arc::clone(&store));
+        Self::with_applied_view(membership, store, Arc::new(applied))
+    }
+
+    /// The coordinator over this node's store and applied view (`AppState`'s
+    /// `applied`, which reads the same store's replica).
+    pub(crate) fn with_applied_view(
+        membership: MembershipManager,
+        store: Arc<dyn Store>,
+        applied: Arc<dyn RouteView>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             transport: PeerTransport::new(membership.clone()),
             membership,
@@ -2431,6 +2636,8 @@ impl MediaSessionCoordinator {
             control_admission: Arc::new(StdMutex::new(ControlAdmission::default())),
             quality_admission: Arc::new(StdMutex::new(ControlAdmission::default())),
             route_cache_metrics: Arc::new(RouteCacheMetrics::default()),
+            applied,
+            route_sequence: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             route_store_gate: Arc::new(StdMutex::new(None)),
         })
@@ -2499,17 +2706,18 @@ impl MediaSessionCoordinator {
             .admitted
     }
 
-    /// Cache active routes and short negative answers. Deterministic query
-    /// shards single-flight repeated capabilities and hard-bound concurrent
-    /// consensus reads even when an unauthenticated caller sprays random UUIDs.
-    /// Activation overwrites a prior miss immediately, and no cache entry can
-    /// extend the exact durable lease boundary.
+    /// Cache active routes and negative answers. Deterministic query shards
+    /// single-flight repeated capabilities and hard-bound concurrent reads
+    /// even when an unauthenticated caller sprays random UUIDs. Activation
+    /// overwrites a prior miss immediately, and no cache entry can extend the
+    /// exact durable lease boundary.
     #[cfg(test)]
     pub(crate) async fn route(
         &self,
         session_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
         self.raw_route_before(
+            RouteReadSite::Routing,
             session_id,
             tokio::time::Instant::now() + ROUTE_QUERY_DEADLINE,
         )
@@ -2523,6 +2731,22 @@ impl MediaSessionCoordinator {
         local_node_id: &str,
         request_deadline: Instant,
     ) -> Result<DurableRouteResolution, StoreError> {
+        self.route_resolution_at(
+            RouteReadSite::Routing,
+            session_id,
+            local_node_id,
+            request_deadline,
+        )
+        .await
+    }
+
+    async fn route_resolution_at(
+        &self,
+        site: RouteReadSite,
+        session_id: &str,
+        local_node_id: &str,
+        request_deadline: Instant,
+    ) -> Result<DurableRouteResolution, StoreError> {
         let now = tokio::time::Instant::now();
         let remaining = request_deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -2531,7 +2755,7 @@ impl MediaSessionCoordinator {
             ));
         }
         let deadline = now + remaining.min(ROUTE_QUERY_DEADLINE);
-        let route = self.raw_route_before(session_id, deadline).await?;
+        let route = self.raw_route_before(site, session_id, deadline).await?;
         validate_route_resolution(
             session_id,
             classify_durable_route(route, local_node_id, unix_ms()),
@@ -2551,8 +2775,43 @@ impl MediaSessionCoordinator {
         local_node_id: &str,
         request_deadline: Instant,
     ) -> Result<DurableRouteResolution, StoreError> {
+        self.media_route_resolution_at(
+            RouteReadSite::Routing,
+            session_id,
+            local_node_id,
+            request_deadline,
+        )
+        .await
+    }
+
+    /// [`Self::media_route_resolution_before`] for the first status
+    /// resolution (§6.1, §12-5): the cached view read, counted under
+    /// `status_first`. Its caller confirms any verdict that is not active
+    /// with [`Self::status_media_route_resolution_before`].
+    pub(crate) async fn status_view_media_route_resolution_before(
+        &self,
+        session_id: &str,
+        local_node_id: &str,
+        request_deadline: Instant,
+    ) -> Result<DurableRouteResolution, StoreError> {
+        self.media_route_resolution_at(
+            RouteReadSite::StatusFirst,
+            session_id,
+            local_node_id,
+            request_deadline,
+        )
+        .await
+    }
+
+    async fn media_route_resolution_at(
+        &self,
+        site: RouteReadSite,
+        session_id: &str,
+        local_node_id: &str,
+        request_deadline: Instant,
+    ) -> Result<DurableRouteResolution, StoreError> {
         let resolution = self
-            .route_resolution_before(session_id, local_node_id, request_deadline)
+            .route_resolution_at(site, session_id, local_node_id, request_deadline)
             .await?;
         self.authorize_prepared_media_before(resolution, local_node_id, request_deadline)
             .await
@@ -2722,19 +2981,25 @@ impl MediaSessionCoordinator {
         ))
     }
 
+    /// The cached route lookup (§4.4): a current cache entry, else one read
+    /// under the lookup's single-flight shard — through the applied view, or
+    /// a quorum read when an `Observed` entry outlived its lease unretired —
+    /// between the pending-release checks.
     async fn raw_route_before(
         &self,
+        site: RouteReadSite,
         session_id: &str,
         deadline: tokio::time::Instant,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        let admission_timeout =
+            || StoreError::Database("media-session route admission timed out".to_owned());
         self.reject_pending_release(session_id).await?;
-        if let Some(cached) = tokio::time::timeout_at(deadline, self.cached_route(session_id))
-            .await
-            .map_err(|_| {
-                StoreError::Database("media-session route admission timed out".to_owned())
-            })?
+        if let CachedLookup::Hit(cached, lookup) =
+            tokio::time::timeout_at(deadline, self.cached_route(session_id, false))
+                .await
+                .map_err(|_| admission_timeout())?
         {
-            self.route_cache_metrics.lookup(RouteLookup::CacheHit);
+            self.route_cache_metrics.lookup(lookup);
             self.reject_pending_release(session_id).await?;
             return Ok(cached);
         }
@@ -2743,39 +3008,80 @@ impl MediaSessionCoordinator {
         let generation_shard = hash % self.route_generations.len();
         let _query = tokio::time::timeout_at(deadline, self.route_queries[shard].lock())
             .await
-            .map_err(|_| {
-                StoreError::Database("media-session route admission timed out".to_owned())
-            })?;
-        if let Some(cached) = tokio::time::timeout_at(deadline, self.cached_route(session_id))
+            .map_err(|_| admission_timeout())?;
+        // Under the shard: no other read of this session is in flight, so an
+        // `Observed` entry may be retired or replaced here, never earlier.
+        let refresh = match tokio::time::timeout_at(deadline, self.cached_route(session_id, true))
             .await
-            .map_err(|_| {
-                StoreError::Database("media-session route admission timed out".to_owned())
-            })?
+            .map_err(|_| admission_timeout())?
         {
-            self.route_cache_metrics
-                .lookup(RouteLookup::SingleFlightHit);
-            self.reject_pending_release(session_id).await?;
-            return Ok(cached);
-        }
+            CachedLookup::Hit(cached, lookup) => {
+                self.route_cache_metrics.lookup(match lookup {
+                    RouteLookup::CacheHit => RouteLookup::SingleFlightHit,
+                    other => other,
+                });
+                self.reject_pending_release(session_id).await?;
+                return Ok(cached);
+            }
+            refresh => refresh,
+        };
         let observed_generation =
             self.route_generations[generation_shard].load(std::sync::atomic::Ordering::Acquire);
-        self.route_cache_metrics.lookup(RouteLookup::Store);
         #[cfg(test)]
         self.wait_route_store_gate().await;
+        let lookup_timeout =
+            || StoreError::Database("media-session route lookup timed out".to_owned());
+        let (route, origin, lookup) = match refresh {
+            CachedLookup::Quorum => {
+                let route = tokio::time::timeout_at(
+                    deadline,
+                    read_media_session_route(&*self.store, site, session_id),
+                )
+                .await
+                .map_err(|_| lookup_timeout())??;
+                (route, Some(self.observed_now()), RouteLookup::Store)
+            }
+            CachedLookup::View | CachedLookup::Hit(..) => {
+                let answer = tokio::time::timeout_at(
+                    deadline,
+                    read_media_session_route_view(&*self.applied, site, session_id),
+                )
+                .await
+                .map_err(|_| lookup_timeout())??;
+                match (answer.source, answer.stamp) {
+                    (ViewSource::View, Some(stamp)) => (
+                        answer.route,
+                        Some(RouteOrigin::View(stamp)),
+                        RouteLookup::View,
+                    ),
+                    // SQLite: the store is the only copy and hands out no
+                    // stamp, so there is nothing to keep the answer against.
+                    (ViewSource::View, None) => (answer.route, None, RouteLookup::View),
+                    // A quorum read is a fact this process now holds.
+                    (ViewSource::Authority, _) => {
+                        (answer.route, Some(self.observed_now()), RouteLookup::Store)
+                    }
+                }
+            }
+        };
+        self.route_cache_metrics.lookup(lookup);
         let route = tokio::time::timeout_at(
             deadline,
-            read_media_session_route(&*self.store, RouteReadSite::Routing, session_id),
+            self.cache_queried_route_result(session_id, route, origin, observed_generation),
         )
         .await
-        .map_err(|_| StoreError::Database("media-session route lookup timed out".to_owned()))??;
-        let route = tokio::time::timeout_at(
-            deadline,
-            self.cache_queried_route_result(session_id, route, observed_generation),
-        )
-        .await
-        .map_err(|_| StoreError::Database("media-session route lookup timed out".to_owned()))?;
+        .map_err(|_| lookup_timeout())?;
         self.reject_pending_release(session_id).await?;
         Ok(route)
+    }
+
+    /// An `Observed` origin for a fact learned now, after its write was
+    /// acknowledged or its quorum read returned.
+    fn observed_now(&self) -> RouteOrigin {
+        RouteOrigin::Observed {
+            fact: self.applied.observe(),
+            at: tokio::time::Instant::now(),
+        }
     }
 
     /// Authoritative, admission-bounded route read for a control mutation.
@@ -3136,12 +3442,8 @@ impl MediaSessionCoordinator {
         observed_generation: u64,
     ) -> bool {
         let session_id = route.session_id.clone();
-        let now = tokio::time::Instant::now();
+        let origin = self.observed_now();
         let mut routes = self.lock_routes(RouteLockSite::GenerationInsert).await;
-        let walked = routes.len();
-        routes.retain(|_, cached| cached.expires_at > now);
-        self.route_cache_metrics.pruned(walked);
-        self.route_cache_metrics.cache_entries(routes.len());
         let shard = route_hash(&session_id) % self.route_generations.len();
         if self.route_generations[shard].load(std::sync::atomic::Ordering::Acquire)
             != observed_generation
@@ -3150,8 +3452,7 @@ impl MediaSessionCoordinator {
         }
         self.route_generations[shard].fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         crate::telemetry::diagnostics(Arc::clone(&self.store)).route(&route);
-        insert_cached_route(&mut routes, &session_id, Some(route), now);
-        self.route_cache_metrics.cache_entries(routes.len());
+        self.insert_cached_route(&mut routes, &session_id, Some(route), origin);
         true
     }
 
@@ -3170,49 +3471,89 @@ impl MediaSessionCoordinator {
         self.cache_route(route).await;
     }
 
-    async fn cached_route(&self, session_id: &str) -> Option<Option<MediaSessionRoute>> {
+    /// The cache's answer for `session_id`, or what to read instead. A stale
+    /// or closed `View` entry is removed when touched. An `Observed` entry is
+    /// retired (removed) or found past its lease only while `exclusive` — the
+    /// lookup holds the session's single-flight shard — so a lookup's read in
+    /// flight never loses the publication it must defer to; without the
+    /// shard either is simply a miss.
+    async fn cached_route(&self, session_id: &str, exclusive: bool) -> CachedLookup {
         let now = tokio::time::Instant::now();
         let mut routes = self.lock_routes(RouteLockSite::Lookup).await;
-        let cached = routes.get(session_id)?;
-        if cached.expires_at > now {
-            return Some(cached.route.clone());
+        let Some(cached) = routes.get(session_id) else {
+            return CachedLookup::View;
+        };
+        match cached.origin {
+            RouteOrigin::View(stamp) => match self.applied.check(stamp) {
+                StampCheck::Current => {
+                    return CachedLookup::Hit(cached.route.clone(), RouteLookup::CacheHit);
+                }
+                StampCheck::Stale => self.applied.note_reload(),
+                StampCheck::Closed(_) => {}
+            },
+            RouteOrigin::Observed { fact, at } => {
+                if !self.applied.floor_met(fact) {
+                    if now.saturating_duration_since(at) < OBSERVED_ROUTE_LEASE {
+                        return CachedLookup::Hit(cached.route.clone(), RouteLookup::Observed);
+                    }
+                    if !exclusive {
+                        return CachedLookup::Quorum;
+                    }
+                    // Replaced by the quorum read this lookup now makes.
+                    routes.remove(session_id);
+                    self.route_cache_metrics.cache_entries(routes.len());
+                    return CachedLookup::Quorum;
+                }
+                if !exclusive {
+                    return CachedLookup::View;
+                }
+                // Retired: the replica holds the fact and the image is stable.
+            }
         }
         routes.remove(session_id);
         self.route_cache_metrics.cache_entries(routes.len());
-        None
+        CachedLookup::View
+    }
+
+    /// The entry the cache holds for `session_id`, as it is, without
+    /// checking or retiring it.
+    #[cfg(test)]
+    pub(crate) async fn cached_route_entry(
+        &self,
+        session_id: &str,
+    ) -> Option<Option<MediaSessionRoute>> {
+        self.routes
+            .lock()
+            .await
+            .get(session_id)
+            .map(|cached| cached.route.clone())
     }
 
     async fn cache_route_result(&self, session_id: &str, route: Option<MediaSessionRoute>) {
         if let Some(route) = &route {
             crate::telemetry::diagnostics(Arc::clone(&self.store)).route(route);
         }
-        let now = tokio::time::Instant::now();
+        let origin = self.observed_now();
         let mut routes = self.lock_routes(RouteLockSite::Insert).await;
-        let walked = routes.len();
-        routes.retain(|_, cached| cached.expires_at > now);
-        self.route_cache_metrics.pruned(walked);
         let generation_shard = route_hash(session_id) % self.route_generations.len();
         self.route_generations[generation_shard].fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        insert_cached_route(&mut routes, session_id, route, now);
-        self.route_cache_metrics.cache_entries(routes.len());
+        self.insert_cached_route(&mut routes, session_id, route, origin);
     }
 
-    /// Publish a Store lookup only if no activation or terminal transition
+    /// Publish a lookup's answer only if no activation or terminal transition
     /// produced a newer authoritative cache entry while the read was in
     /// flight. This closes the miss-before-activation race without making
-    /// activation wait behind a potentially slow consensus lookup.
+    /// activation wait behind a potentially slow consensus lookup. An
+    /// unretired `Observed` entry is never replaced by a view answer; an
+    /// answer with no origin (SQLite's unstamped view) is returned uncached.
     async fn cache_queried_route_result(
         &self,
         session_id: &str,
         route: Option<MediaSessionRoute>,
+        origin: Option<RouteOrigin>,
         observed_generation: u64,
     ) -> Option<MediaSessionRoute> {
-        let now = tokio::time::Instant::now();
         let mut routes = self.lock_routes(RouteLockSite::QueriedInsert).await;
-        let walked = routes.len();
-        routes.retain(|_, cached| cached.expires_at > now);
-        self.route_cache_metrics.pruned(walked);
-        self.route_cache_metrics.cache_entries(routes.len());
         let generation_shard = route_hash(session_id) % self.route_generations.len();
         if self.route_generations[generation_shard].load(std::sync::atomic::Ordering::Acquire)
             != observed_generation
@@ -3222,14 +3563,74 @@ impl MediaSessionCoordinator {
                 .and_then(|cached| cached.route.clone());
         }
         if let Some(cached) = routes.get(session_id) {
-            return cached.route.clone();
+            if matches!(cached.origin, RouteOrigin::Observed { .. }) {
+                return cached.route.clone();
+            }
         }
+        let Some(origin) = origin else {
+            return route;
+        };
         if let Some(route) = &route {
             crate::telemetry::diagnostics(Arc::clone(&self.store)).route(route);
         }
-        insert_cached_route(&mut routes, session_id, route.clone(), now);
-        self.route_cache_metrics.cache_entries(routes.len());
+        self.insert_cached_route(&mut routes, session_id, route.clone(), origin);
         route
+    }
+
+    /// Insert one entry. A full cache first evicts by one scan: the first
+    /// `View` entry whose table moved, else the lowest insert sequence. An
+    /// `Observed` entry evicted before its floor is met closes the route view
+    /// until the replica contains its fact (`hold_floor`), so dropping it can
+    /// never let a lagging replica answer that row.
+    fn insert_cached_route(
+        &self,
+        routes: &mut HashMap<String, CachedRoute>,
+        session_id: &str,
+        route: Option<MediaSessionRoute>,
+        origin: RouteOrigin,
+    ) {
+        if routes.len() >= MAX_ROUTE_CACHE_ENTRIES && !routes.contains_key(session_id) {
+            let mut walked = 0_usize;
+            let mut stale = None;
+            let mut oldest: Option<(&String, u64)> = None;
+            for (key, cached) in routes.iter() {
+                walked += 1;
+                if let RouteOrigin::View(stamp) = cached.origin {
+                    if !self.applied.same_image(stamp) {
+                        stale = Some(key);
+                        break;
+                    }
+                }
+                if oldest.is_none_or(|(_, sequence)| cached.sequence < sequence) {
+                    oldest = Some((key, cached.sequence));
+                }
+            }
+            self.route_cache_metrics.pruned(walked);
+            let victim = stale.or(oldest.map(|(key, _)| key)).cloned();
+            if let Some(victim) = victim {
+                if let Some(CachedRoute {
+                    origin: RouteOrigin::Observed { fact, .. },
+                    ..
+                }) = routes.remove(&victim)
+                {
+                    if !self.applied.floor_met(fact) {
+                        self.applied.hold_floor(fact);
+                    }
+                }
+            }
+        }
+        let sequence = self
+            .route_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        routes.insert(
+            session_id.to_owned(),
+            CachedRoute {
+                route,
+                origin,
+                sequence,
+            },
+        );
+        self.route_cache_metrics.cache_entries(routes.len());
     }
 
     /// Hand a freshly activated local worker to the renewal loop before its
@@ -3952,30 +4353,6 @@ fn validated_control_relay_response(
     builder
         .body(Body::from(body))
         .map_err(|_| PeerTransportError::InvalidResponse)
-}
-
-fn insert_cached_route(
-    routes: &mut HashMap<String, CachedRoute>,
-    session_id: &str,
-    route: Option<MediaSessionRoute>,
-    now: tokio::time::Instant,
-) {
-    if routes.len() >= MAX_ROUTE_CACHE_ENTRIES && !routes.contains_key(session_id) {
-        if let Some(oldest) = routes
-            .iter()
-            .min_by_key(|(_, cached)| cached.expires_at)
-            .map(|(session_id, _)| session_id.clone())
-        {
-            routes.remove(&oldest);
-        }
-    }
-    routes.insert(
-        session_id.to_owned(),
-        CachedRoute {
-            route,
-            expires_at: now + ROUTE_CACHE_TTL,
-        },
-    );
 }
 
 fn route_hash(session_id: &str) -> usize {
@@ -7067,6 +7444,10 @@ mod tests;
 #[cfg(test)]
 #[path = "media_sessions/cleanup_tests.rs"]
 mod cleanup_tests;
+
+/// E1c: the route cache over the applied view, through a replica double.
+#[cfg(test)]
+mod route_view_tests;
 
 /// K-03: the takeover loop's switch reads, on a virtual clock.
 #[cfg(test)]

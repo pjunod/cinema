@@ -1368,9 +1368,10 @@ impl AppState {
             serving.clone(),
         );
         let media_pool = crate::media_pool::MediaPool::new(membership.clone());
-        let media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+        let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_applied_view(
             membership.clone(),
             Arc::clone(&store),
+            Arc::new(applied.clone()),
         );
         let cache_only_admin_proofs =
             crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());

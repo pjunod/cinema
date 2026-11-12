@@ -252,10 +252,11 @@ fn is_test_path(rel: &str) -> bool {
         || stem.ends_with("_test")
         || stem.starts_with("test_")
         || rel == "http/applied_settings_inventory.rs"
+        || rel == "http/applied_route_inventory.rs"
 }
 
 /// Every production Rust file under `src/`, masked by [`production`].
-fn sources() -> Vec<(String, String)> {
+pub(super) fn sources() -> Vec<(String, String)> {
     fn walk(path: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(path).expect("read a source directory") {
             let path = entry.expect("a source entry").path();
@@ -297,7 +298,7 @@ fn blank(out: &mut [u8], from: usize, to: usize) {
 
 /// The source with comment and literal contents blanked, offsets kept, so
 /// nothing inside a string or a comment can look like code.
-fn mask(src: &str) -> String {
+pub(super) fn mask(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out = bytes.to_vec();
     let mut i = 0;
@@ -372,7 +373,7 @@ fn mask(src: &str) -> String {
 }
 
 /// A masked source with every `#[cfg(test)]` item blanked.
-fn production(masked: &str) -> String {
+pub(super) fn production(masked: &str) -> String {
     let mut out = masked.as_bytes().to_vec();
     let mut at = 0;
     while let Some(offset) = masked[at..].find("#[cfg(test)]") {
@@ -409,12 +410,12 @@ fn production(masked: &str) -> String {
     String::from_utf8(out).expect("blanking keeps ASCII")
 }
 
-fn is_ident(byte: u8) -> bool {
+pub(super) fn is_ident(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 /// The identifier ending just before `pos` (whitespace skipped).
-fn ident_before(text: &str, pos: usize) -> &str {
+pub(super) fn ident_before(text: &str, pos: usize) -> &str {
     let bytes = text.as_bytes();
     let mut end = pos;
     while end > 0 && bytes[end - 1].is_ascii_whitespace() {
@@ -428,7 +429,7 @@ fn ident_before(text: &str, pos: usize) -> &str {
 }
 
 /// The function a position sits in: the last `fn name` before it.
-fn enclosing(text: &str, pos: usize) -> String {
+pub(super) fn enclosing(text: &str, pos: usize) -> String {
     let bytes = text.as_bytes();
     let mut search = pos;
     while let Some(found) = text[..search].rfind("fn ") {
@@ -450,7 +451,7 @@ fn enclosing(text: &str, pos: usize) -> String {
 
 /// `(position, method)` of every `.method(` call in `text`, with the
 /// receiver identifier.
-fn method_calls<'a>(text: &'a str, names: &[&'a str]) -> Vec<(usize, &'a str, &'a str)> {
+pub(super) fn method_calls<'a>(text: &'a str, names: &[&'a str]) -> Vec<(usize, &'a str, &'a str)> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
     for (dot, _) in text.match_indices('.') {

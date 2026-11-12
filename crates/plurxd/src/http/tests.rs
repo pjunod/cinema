@@ -308,7 +308,9 @@ async fn each_router_counts_only_its_own_facade_requests() {
 
 /// C-07 M5 (PLEX-FACADE-PAGING §5.4 acceptance): `/metrics` carries the
 /// four route-cache families, rendered from the coordinator serving this
-/// router, so the counts are exactly this test's lookups.
+/// router, so the counts are exactly this test's lookups. The test app is
+/// SQLite, where the applied view is the store itself and hands out no
+/// stamp (E1c, §4.2 "Standalone"): each lookup is one local view read.
 #[tokio::test]
 async fn metrics_render_the_media_session_route_cache_families() {
     let (app, state) = test_app_with_state();
@@ -323,7 +325,7 @@ async fn metrics_render_the_media_session_route_cache_families() {
         .media_sessions
         .route(session_id)
         .await
-        .expect("hit")
+        .expect("second miss")
         .is_none());
     let metrics = app.oneshot(get("/metrics", None)).await.expect("response");
     assert_eq!(metrics.status(), StatusCode::OK);
@@ -336,8 +338,10 @@ async fn metrics_render_the_media_session_route_cache_families() {
         "# TYPE plurx_media_session_route_lock_seconds histogram\n",
         "# TYPE plurx_media_session_route_prune_entries histogram\n",
         "# TYPE plurx_media_session_route_cache_entries gauge\n",
-        "plurx_media_session_route_lookups_total{result=\"store\"} 1\n",
-        "plurx_media_session_route_lookups_total{result=\"cache_hit\"} 1\n",
+        "plurx_media_session_route_lookups_total{result=\"view\"} 2\n",
+        "plurx_media_session_route_lookups_total{result=\"store\"} 0\n",
+        "plurx_media_session_route_lookups_total{result=\"observed\"} 0\n",
+        "plurx_media_session_route_lookups_total{result=\"cache_hit\"} 0\n",
         "plurx_media_session_route_lookups_total{result=\"single_flight_hit\"} 0\n",
     ] {
         assert!(exposition.contains(line), "/metrics is missing {line:?}");

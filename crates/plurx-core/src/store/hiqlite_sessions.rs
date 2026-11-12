@@ -2044,6 +2044,53 @@ async fn route_by(
         .transpose()
 }
 
+impl HiqliteAuthStore {
+    /// Whether this process has seen the installed principal session layout
+    /// (`media_session_projection == 2`). The layout is permanent once
+    /// installed, so a `true` never goes stale; `false` (legacy, or not yet
+    /// read) sends the route view to Authority, whose read re-checks it.
+    pub(super) fn media_session_layout_installed(&self) -> bool {
+        self.media_session_projection
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 2
+    }
+
+    /// Return this process's layout hint to legacy, as a node that last read
+    /// the predecessor layout holds it, so a contract can drive the route
+    /// view's legacy arm. Reads re-verify the layout and raise it again.
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[doc(hidden)]
+    pub fn validation_forget_installed_session_layout(&self) {
+        self.media_session_projection
+            .store(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// [`MediaSessionStore::media_session_route`] from this node's own
+    /// replica (playback-start E1c, §4.4): the same projection as `route_by`,
+    /// as a local read. For [`super::AppliedView::route`] only, which runs it
+    /// under the view's rule and only once the principal layout is installed;
+    /// it never dispatches on the layout itself.
+    pub(super) async fn local_media_session_route(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        if !valid_uuid(session_id) {
+            return Ok(None);
+        }
+        let sql = resolve_session_sql(
+            "SELECT __PLURX_ROUTE_PROJECTION__ FROM media_sessions WHERE session_id = $1",
+            SessionLayout::Principal,
+        )?;
+        self.client()
+            .query_map::<RouteRow, _>(sql, params!(session_id))
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0)
+            .transpose()
+    }
+}
+
 async fn live_local_route(
     store: &HiqliteAuthStore,
     incarnation_id: &str,

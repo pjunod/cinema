@@ -39,8 +39,20 @@
 //! (`TimedClient` for the store, the membership manager's client for its own
 //! statements), so the node that saved a setting reads it back from Authority
 //! until its replica has applied the save.
+//!
+//! **The route view** (§4.4) answers one session-keyed route read
+//! ([`AppliedView::route`]) from the replica once the principal session
+//! layout is installed, and from Authority while the layout is legacy. It
+//! keeps no memo: the daemon's route cache keeps the answer with its stamp,
+//! and holds a fact it learned directly (a row it committed, a quorum read) as
+//! an entry of its own whose instant it takes from [`AppliedView::observe`].
+//! That fact is per key, so it does not close the view for the table; the
+//! cache asks [`AppliedView::floor_met`] when to retire it, and
+//! [`AppliedView::hold_floor`] closes the table only if it must drop such an
+//! entry before then.
 
 use super::{Store, StoreError};
+use crate::domain::MediaSessionRoute;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -226,6 +238,15 @@ pub struct AppliedSettings {
     pub stamp: Option<ViewStamp>,
 }
 
+/// [`AppliedView::route`]: the route, where it came from, and — for a view
+/// answer on a replica — the stamp an entry made from it is checked against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedRoute {
+    pub route: Option<MediaSessionRoute>,
+    pub stamp: Option<ViewStamp>,
+    pub source: ViewSource,
+}
+
 /// Advisory facts for Settings → Developer and `/metrics`, loaded at read
 /// time. Carries no authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,6 +279,17 @@ impl AppliedViewObservation {
         self.reads
             .iter()
             .filter(|(_, read_source, _, _)| *read_source == label)
+            .map(|(_, _, _, count)| *count)
+            .sum()
+    }
+
+    /// [`Self::total`] for one view (`settings` or `route`).
+    #[must_use]
+    pub fn view_total(&self, table: AppliedTable, source: ViewSource) -> u64 {
+        let (view, label) = (table.label(), source_label(source));
+        self.reads
+            .iter()
+            .filter(|(read_view, read_source, _, _)| *read_view == view && *read_source == label)
             .map(|(_, _, _, count)| *count)
             .sum()
     }
@@ -480,6 +512,14 @@ impl Replicated {
             return Err(ViewFallback::RevokedDuringRead);
         }
         Ok((value, admission.stamp))
+    }
+
+    /// Whether the image and the stamp's table revision are what they were
+    /// when the stamp was taken; the proof and floor are not consulted.
+    fn same_image(&self, stamp: &ViewStamp) -> bool {
+        self.slot(stamp.table).is_ok_and(|slot| {
+            self.mark.generation() == stamp.generation && self.mark.revision(slot) == stamp.revision
+        })
     }
 
     /// Step 4.
@@ -730,6 +770,40 @@ impl AppliedView {
         let at = Instant::now();
         self.floors.raise(table, at);
         FactInstant(at)
+    }
+
+    /// The instant of a fact about **one row** that the caller keeps in an
+    /// entry of its own — the route cache's `Observed` entry (§4.4) — rather
+    /// than closing the view for the whole table: call it, like
+    /// [`Self::note_fact`], after the write was acknowledged or the quorum
+    /// read returned. The caller must not read that row through the view
+    /// until [`Self::floor_met`] says the replica contains the fact; if it
+    /// drops the entry before then, [`Self::hold_floor`] keeps the promise
+    /// for the table.
+    #[must_use]
+    pub fn observe(&self) -> FactInstant {
+        FactInstant(Instant::now())
+    }
+
+    /// Close the view for `table` until `fact` is applied here: for a caller
+    /// that drops the per-row entry holding `fact` ([`Self::observe`]) while
+    /// its floor is still unmet, so no later read of that row can come from a
+    /// replica older than the fact.
+    pub fn hold_floor(&self, table: AppliedTable, fact: FactInstant) {
+        self.floors.raise(table, fact.0);
+    }
+
+    /// Whether the image and the table revision a stamp was taken at are
+    /// still current — [`Self::check`] without the proof and floor, which
+    /// are the same for every entry of a table. `false` on SQLite and on a
+    /// remote-authority process, which hand out no stamps.
+    #[must_use]
+    pub fn same_image(&self, stamp: &ViewStamp) -> bool {
+        match &self.mode {
+            Mode::Standalone | Mode::RemoteAuthority => false,
+            #[cfg(feature = "hiqlite-store")]
+            Mode::Replicated(replicated) => replicated.same_image(stamp),
+        }
     }
 
     /// Whether the view may answer for a fact noted at `fact`: the image is
@@ -994,6 +1068,47 @@ impl AppliedView {
         }
     }
 
+    /// One session-keyed route (§4.4): [`super::MediaSessionStore::media_session_route`]
+    /// from the replica when the view may answer, else from Authority. The
+    /// local twin runs only once this process has seen the installed
+    /// principal session layout; while the layout is legacy (or not yet
+    /// read) the answer is Authority's, whose read re-checks it. On SQLite
+    /// the store answers, unstamped.
+    pub async fn route(&self, session_id: &str) -> Result<AppliedRoute, StoreError> {
+        let table = AppliedTable::MediaSessions;
+        let local = match &self.mode {
+            #[cfg(feature = "hiqlite-store")]
+            Mode::Replicated(replicated) if !replicated.store.media_session_layout_installed() => {
+                Err(LocalFailure::Authority(ViewFallback::LegacyLayout))
+            }
+            _ => {
+                let owned = session_id.to_owned();
+                self.local(table, |reader| async move { reader.route(&owned).await })
+                    .await
+            }
+        };
+        match local {
+            Ok((route, stamp)) => {
+                self.counters.view(table);
+                Ok(AppliedRoute {
+                    route,
+                    stamp,
+                    source: ViewSource::View,
+                })
+            }
+            // SQLite: the store is the only copy; asking it again is a retry.
+            Err(LocalFailure::Store(error)) => Err(error),
+            Err(LocalFailure::Authority(reason)) => {
+                self.counters.authority(table, reason);
+                Ok(AppliedRoute {
+                    route: self.authority.media_session_route(session_id).await?,
+                    stamp: None,
+                    source: ViewSource::Authority,
+                })
+            }
+        }
+    }
+
     /// Advisory facts, loaded now.
     #[must_use]
     pub fn observation(&self) -> AppliedViewObservation {
@@ -1035,6 +1150,14 @@ impl LocalReader {
             Self::Standalone(store) => store.get_settings(keys).await,
             #[cfg(feature = "hiqlite-store")]
             Self::Replica(store) => store.local_get_settings(keys).await,
+        }
+    }
+
+    async fn route(&self, session_id: &str) -> Result<Option<MediaSessionRoute>, StoreError> {
+        match self {
+            Self::Standalone(store) => store.media_session_route(session_id).await,
+            #[cfg(feature = "hiqlite-store")]
+            Self::Replica(store) => store.local_media_session_route(session_id).await,
         }
     }
 }

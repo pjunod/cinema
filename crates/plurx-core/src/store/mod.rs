@@ -173,7 +173,7 @@ pub use scan_identity_repair::{
 
 pub mod applied_view;
 pub use applied_view::{
-    AppliedSettings, AppliedSnapshot, AppliedTable, AppliedView, AppliedViewMetrics,
+    AppliedRoute, AppliedSettings, AppliedSnapshot, AppliedTable, AppliedView, AppliedViewMetrics,
     AppliedViewObservation, FactInstant, SettingsDigest, SettingsWriteFloor, StampCheck,
     ViewFallback, ViewSource, ViewStamp, APPLIED_VIEW_TABLES,
 };
