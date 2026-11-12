@@ -166,9 +166,9 @@ pub use scan_identity_repair::{
 
 pub mod applied_view;
 pub use applied_view::{
-    AppliedSettings, AppliedTable, AppliedView, AppliedViewMetrics, AppliedViewObservation,
-    FactInstant, SettingsDigest, StampCheck, ViewFallback, ViewSource, ViewStamp,
-    APPLIED_VIEW_TABLES,
+    AppliedSettings, AppliedSnapshot, AppliedTable, AppliedView, AppliedViewMetrics,
+    AppliedViewObservation, FactInstant, SettingsDigest, SettingsWriteFloor, StampCheck,
+    ViewFallback, ViewSource, ViewStamp, APPLIED_VIEW_TABLES,
 };
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite;

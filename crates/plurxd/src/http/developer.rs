@@ -413,7 +413,8 @@ pub(crate) async fn readiness(
     // Propagated, not defaulted. An empty map from a failed replicated read
     // would render as "the switch is off", which is a reading this route did
     // not take — the same dishonesty it exists to remove, one layer down.
-    let settings = state.store.settings_snapshot().await?;
+    // A polled page: this node's applied view (E1b, contract §6.3).
+    let settings = state.applied.settings_snapshot().await?.values;
     let live_tv = crate::live_tv::LiveTvConfig::from_snapshot(&settings, &state.node_id);
     let dvr_config = crate::live_tv::DvrConfig::from_snapshot(&settings);
     let dvr_on = dvr_config.enabled;
@@ -1162,7 +1163,7 @@ pub(crate) fn applied_view(
     let (reads_status, reads_evidence) = if view_reads == 0 && authority_reads == 0 {
         (
             Unknown,
-            "No readers yet: settings (E1b) and media-session routes (E1c) move onto this view in later lanes.".to_owned(),
+            "No view reads since start: settings read through this view once a request or page asks for one; media-session routes join it with E1c.".to_owned(),
         )
     } else {
         (
@@ -4006,7 +4007,7 @@ mod tests {
 
     /// E1a: the Applied view row reports what the observation says, with a
     /// failed restore named as closed until a restore completes or a restart,
-    /// and no readers named as such.
+    /// and no reads since start named as such.
     #[test]
     fn applied_view_rows_name_proof_image_and_readers() {
         let store: std::sync::Arc<dyn plurx_core::store::Store> =
@@ -4035,7 +4036,7 @@ mod tests {
         );
         let (reads, evidence) = status(&item, "applied_view_reads");
         assert_eq!(reads, super::RequirementStatus::Unknown);
-        assert!(evidence.starts_with("No readers yet"));
+        assert!(evidence.starts_with("No view reads since start"));
 
         observation.mode = "replicated";
         observation.proof_present = false;

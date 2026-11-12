@@ -29,7 +29,16 @@
 //! no local replica (a remote-authority client) answers every read from
 //! Authority and never meets a floor. Neither hands out stamps.
 //!
-//! E1a builds the view and its counters; no call site reads through it yet.
+//! **The settings view** (§4.3) is a memo of the whole `settings` table,
+//! stamped like any view answer. Keyed reads answer from it while its stamp
+//! is current and otherwise read their keys locally; only a whole-table
+//! snapshot reloads it, and a snapshot that finds a reload in flight answers
+//! from Authority rather than wait. The settings floor is raised by the
+//! writers themselves: every replicated statement that may change `settings`
+//! — directly or through a trigger — arms a [`SettingsWriteFloor`] guard
+//! (`TimedClient` for the store, the membership manager's client for its own
+//! statements), so the node that saved a setting reads it back from Authority
+//! until its replica has applied the save.
 
 use super::{Store, StoreError};
 use std::collections::BTreeMap;
@@ -111,10 +120,13 @@ pub enum ViewFallback {
     LocalError,
     /// The applied mark has no slot for this table.
     Unregistered,
+    /// A snapshot found the memo stale while another reader was reloading
+    /// it; it answers from Authority instead of waiting on that reload.
+    ReloadInFlight,
 }
 
 impl ViewFallback {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::NoProof,
         Self::ImageReplacing,
         Self::Floor,
@@ -122,6 +134,7 @@ impl ViewFallback {
         Self::LegacyLayout,
         Self::LocalError,
         Self::Unregistered,
+        Self::ReloadInFlight,
     ];
 
     /// The `reason` label of `plurx_applied_view_reads_total`.
@@ -135,6 +148,7 @@ impl ViewFallback {
             Self::LegacyLayout => "legacy_layout",
             Self::LocalError => "local_error",
             Self::Unregistered => "unregistered",
+            Self::ReloadInFlight => "reload_in_flight",
         }
     }
 
@@ -147,6 +161,7 @@ impl ViewFallback {
             Self::LegacyLayout => 5,
             Self::LocalError => 6,
             Self::Unregistered => 7,
+            Self::ReloadInFlight => 8,
         }
     }
 
@@ -256,7 +271,7 @@ const fn source_label(source: ViewSource) -> &'static str {
 }
 
 /// `[view][outcome]`, outcome 0 = answered by the view, else a fallback code.
-const OUTCOMES: usize = 8;
+const OUTCOMES: usize = 9;
 
 #[derive(Default)]
 struct ViewCounters {
@@ -278,31 +293,107 @@ impl ViewCounters {
 
 /// Per-table floors: the latest monotonic instant at which this process
 /// learned a fact the replica must contain before the view may answer.
-struct TableFloors {
+///
+/// A replicated store owns one (its `TimedClient` raises the settings floor
+/// on every settings write) and the applied view built over that store reads
+/// the same one; [`AppliedView::note_fact`] raises it too.
+pub(crate) struct TableFloors {
     base: Instant,
     /// Nanoseconds after `base`, plus one; zero means no floor.
     at: [AtomicU64; 2],
 }
 
 impl TableFloors {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             base: Instant::now(),
             at: Default::default(),
         }
     }
 
-    fn raise(&self, table: AppliedTable, at: Instant) {
+    pub(crate) fn raise(&self, table: AppliedTable, at: Instant) {
         let nanos = u64::try_from(at.saturating_duration_since(self.base).as_nanos())
             .unwrap_or(u64::MAX - 1)
             .saturating_add(1);
         self.at[table.index()].fetch_max(nanos, Ordering::AcqRel);
     }
 
-    fn get(&self, table: AppliedTable) -> Option<Instant> {
+    pub(crate) fn get(&self, table: AppliedTable) -> Option<Instant> {
         match self.at[table.index()].load(Ordering::Acquire) {
             0 => None,
             nanos => Some(self.base + std::time::Duration::from_nanos(nanos - 1)),
+        }
+    }
+}
+
+/// Tables whose triggers write `settings`, each with the SQL literal the
+/// trigger's `WHEN` requires of the firing statement (`None`: any write
+/// arms). A census over every trigger definition keeps this list true.
+pub(crate) const SETTINGS_TRIGGER_TABLES: &[(&str, Option<&str>)] = &[
+    // `subtitle_translation_settings_saved` (subtitle_translation.sql).
+    ("subtitle_translation_commands", None),
+    // `subtitle_managed_config_write` (subtitle_managed_schema.sql):
+    // `WHEN NEW.operation='subtitle_managed_config'`.
+    ("background_job_commands", Some("'subtitle_managed_config'")),
+];
+
+/// Whether a replicated statement may write `settings`: directly, or by
+/// writing a table whose trigger does.
+pub(crate) fn writes_settings(sql: &str) -> bool {
+    use super::replicated::writes_table;
+    writes_table(sql, AppliedTable::Settings.table())
+        || SETTINGS_TRIGGER_TABLES.iter().any(|(table, when)| {
+            writes_table(sql, table) && when.is_none_or(|literal| sql.contains(literal))
+        })
+}
+
+/// This process's settings floor, as the writers that raise it hold it: the
+/// store's `TimedClient` and the membership manager's client share one with
+/// the applied view built over that store (§4.3, read-your-write).
+#[derive(Clone)]
+pub struct SettingsWriteFloor(Arc<TableFloors>);
+
+impl SettingsWriteFloor {
+    /// A floor no applied view reads, for a client outside a daemon.
+    #[must_use]
+    pub fn detached() -> Self {
+        Self(Arc::new(TableFloors::new()))
+    }
+
+    pub(crate) fn floors(&self) -> Arc<TableFloors> {
+        Arc::clone(&self.0)
+    }
+
+    /// Arm the floor for one write whose statements are `statements`. The
+    /// guard raises it when dropped — after the write returned, acknowledged
+    /// or failed, or when its caller went away — never before: a watermark
+    /// confirmation that started before the commit may carry a read index
+    /// below it. A write that commits only after the guard dropped (one that
+    /// timed out here and committed later) is not covered; its caller was
+    /// never told it succeeded, and read-your-write is owed for acknowledged
+    /// writes.
+    pub(crate) fn arm<'a>(
+        &self,
+        statements: impl IntoIterator<Item = &'a str>,
+    ) -> SettingsWriteGuard {
+        self.guard(statements.into_iter().any(writes_settings))
+    }
+
+    /// The guard for a write already classified: `wrote` is whether any of
+    /// its statements may write `settings` ([`writes_settings`]).
+    pub(crate) fn guard(&self, wrote: bool) -> SettingsWriteGuard {
+        SettingsWriteGuard(wrote.then(|| Arc::clone(&self.0)))
+    }
+}
+
+/// Raises the settings floor when dropped; see [`SettingsWriteFloor::arm`].
+#[must_use = "the floor is raised when the guard drops: hold it across the write"]
+pub(crate) struct SettingsWriteGuard(Option<Arc<TableFloors>>);
+
+impl Drop for SettingsWriteGuard {
+    fn drop(&mut self) {
+        if let Some(floors) = &self.0 {
+            floors.raise(AppliedTable::Settings, Instant::now());
         }
     }
 }
@@ -420,6 +511,56 @@ impl Replicated {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FactInstant(Instant);
 
+/// The settings view (§4.3): the whole table as this replica applied it,
+/// with the stamp of the read that loaded it. One snapshot reloads it at a
+/// time; others answer from Authority meanwhile.
+#[derive(Default)]
+#[cfg_attr(not(feature = "hiqlite-store"), allow(dead_code))]
+struct SettingsMemo {
+    current: std::sync::Mutex<Option<MemoEntry>>,
+    reload: tokio::sync::Mutex<()>,
+    /// Holds the next reload, lock held, until released.
+    #[cfg(feature = "cluster-read-cost-validation")]
+    pause: std::sync::Mutex<Option<ReloadPause>>,
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+type ReloadPause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[derive(Clone)]
+#[cfg_attr(not(feature = "hiqlite-store"), allow(dead_code))]
+struct MemoEntry {
+    values: Arc<BTreeMap<String, String>>,
+    stamp: ViewStamp,
+}
+
+impl SettingsMemo {
+    fn current(&self) -> Option<MemoEntry> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg_attr(not(feature = "hiqlite-store"), allow(dead_code))]
+    fn replace(&self, entry: MemoEntry) {
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(entry);
+    }
+}
+
+/// [`AppliedView::settings_snapshot`]: every setting, and where it came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedSnapshot {
+    pub values: Arc<BTreeMap<String, String>>,
+    pub source: ViewSource,
+}
+
 /// Why a local read did not answer.
 enum LocalFailure {
     /// The view may not answer; Authority does, once.
@@ -454,6 +595,7 @@ pub struct AppliedView {
     mode: Mode,
     floors: Arc<TableFloors>,
     counters: Arc<ViewCounters>,
+    memo: Arc<SettingsMemo>,
 }
 
 impl AppliedView {
@@ -461,22 +603,23 @@ impl AppliedView {
     /// read forwards to it and every proof and floor is met.
     #[must_use]
     pub fn authority(store: Arc<dyn Store>) -> Self {
-        Self::with_mode(store, Mode::Standalone)
+        Self::with_mode(store, Mode::Standalone, Arc::new(TableFloors::new()))
     }
 
     /// A replicated process without a local replica: every read is a quorum
     /// read and no floor is ever met.
     #[must_use]
     pub fn remote_authority(store: Arc<dyn Store>) -> Self {
-        Self::with_mode(store, Mode::RemoteAuthority)
+        Self::with_mode(store, Mode::RemoteAuthority, Arc::new(TableFloors::new()))
     }
 
-    fn with_mode(authority: Arc<dyn Store>, mode: Mode) -> Self {
+    fn with_mode(authority: Arc<dyn Store>, mode: Mode, floors: Arc<TableFloors>) -> Self {
         Self {
             authority,
             mode,
-            floors: Arc::new(TableFloors::new()),
+            floors,
             counters: Arc::new(ViewCounters::default()),
+            memo: Arc::new(SettingsMemo::default()),
         }
     }
 
@@ -510,6 +653,8 @@ impl AppliedView {
                  answer from Authority"
             );
         }
+        // The store's own floors: its writes raise the settings floor.
+        let floors = store.settings_write_floor().floors();
         Self::with_mode(
             authority,
             Mode::Replicated(Arc::new(Replicated {
@@ -520,6 +665,7 @@ impl AppliedView {
                 #[cfg(feature = "cluster-read-cost-validation")]
                 revoke_after_next_local: std::sync::atomic::AtomicBool::new(false),
             })),
+            floors,
         )
     }
 
@@ -547,6 +693,26 @@ impl AppliedView {
                 .revoke_after_next_local
                 .store(true, Ordering::Relaxed);
         }
+    }
+
+    /// Hold the next memo reload, with the reload lock taken, until the
+    /// returned sender fires; the receiver fires once it is held.
+    #[cfg(all(feature = "hiqlite-store", feature = "cluster-read-cost-validation"))]
+    #[doc(hidden)]
+    pub fn validation_pause_next_reload(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, held) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        *self
+            .memo
+            .pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, released));
+        (held, release)
     }
 
     /// Record that this process now holds a fact about `table` that the
@@ -643,17 +809,70 @@ impl AppliedView {
         Ok(super::stored_switch(value.as_deref(), default))
     }
 
-    /// Several settings read together, with their digest.
+    /// Several settings read together, as [`super::SettingsStore::get_settings`]
+    /// returns them.
+    pub async fn setting_values(
+        &self,
+        keys: &[&str],
+    ) -> Result<BTreeMap<String, String>, StoreError> {
+        Ok(self.settings(keys).await?.values)
+    }
+
+    /// Two settings read together.
+    pub async fn setting_pair(
+        &self,
+        first: &str,
+        second: &str,
+    ) -> Result<(Option<String>, Option<String>), StoreError> {
+        let mut values = self.settings(&[first, second]).await?.values;
+        Ok((values.remove(first), values.remove(second)))
+    }
+
+    /// Several settings read together, with their digest. On a replica the
+    /// answer comes from the memo; on SQLite from the store, keyed.
     pub async fn settings(&self, keys: &[&str]) -> Result<AppliedSettings, StoreError> {
         let table = AppliedTable::Settings;
-        let owned: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
-        match self
-            .local(table, |reader| async move {
-                let keys: Vec<&str> = owned.iter().map(String::as_str).collect();
-                reader.settings(&keys).await
-            })
-            .await
-        {
+        let local = match &self.mode {
+            Mode::Standalone => {
+                let owned: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+                self.local(table, |reader| async move {
+                    let keys: Vec<&str> = owned.iter().map(String::as_str).collect();
+                    reader.settings(&keys).await
+                })
+                .await
+            }
+            _ => {
+                // The same bound Authority enforces, so the two never differ
+                // in what they accept.
+                super::selected_settings_json(keys)?;
+                match self.memo_hit() {
+                    Ok(Some((all, stamp))) => {
+                        let values = keys
+                            .iter()
+                            .filter_map(|key| {
+                                all.get(*key)
+                                    .map(|value| ((*key).to_owned(), value.clone()))
+                            })
+                            .collect();
+                        Ok((values, stamp))
+                    }
+                    Err(failure) => Err(failure),
+                    // A stale memo is not reloaded for a keyed read: settings
+                    // also hold job cursors and stamps, and a whole-table load
+                    // per change would make the request path pay for them.
+                    // The keys are read locally, under the same rule.
+                    Ok(None) => {
+                        let owned: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+                        self.local(table, |reader| async move {
+                            let keys: Vec<&str> = owned.iter().map(String::as_str).collect();
+                            reader.settings(&keys).await
+                        })
+                        .await
+                    }
+                }
+            }
+        };
+        match local {
             Ok((values, stamp)) => {
                 self.counters.view(table);
                 Ok(AppliedSettings {
@@ -675,6 +894,103 @@ impl AppliedView {
                     stamp: None,
                 })
             }
+        }
+    }
+
+    /// The whole settings table: the administrative pages' one snapshot.
+    pub async fn settings_snapshot(&self) -> Result<AppliedSnapshot, StoreError> {
+        let table = AppliedTable::Settings;
+        match self.settings_memo().await {
+            Ok((values, _)) => {
+                self.counters.view(table);
+                Ok(AppliedSnapshot {
+                    values,
+                    source: ViewSource::View,
+                })
+            }
+            Err(LocalFailure::Store(error)) => Err(error),
+            Err(LocalFailure::Authority(reason)) => {
+                self.counters.authority(table, reason);
+                Ok(AppliedSnapshot {
+                    values: Arc::new(self.authority.settings_snapshot().await?),
+                    source: ViewSource::Authority,
+                })
+            }
+        }
+    }
+
+    /// The whole table from the view, or why Authority must answer: a memo
+    /// hit while its stamp is current, else one local reload under §4.2's
+    /// rule unless another is in flight. Counts reloads, not reads.
+    async fn settings_memo(
+        &self,
+    ) -> Result<(Arc<BTreeMap<String, String>>, Option<ViewStamp>), LocalFailure> {
+        match &self.mode {
+            Mode::Standalone => self
+                .authority
+                .settings_snapshot()
+                .await
+                .map(|values| (Arc::new(values), None))
+                .map_err(LocalFailure::Store),
+            Mode::RemoteAuthority => Err(LocalFailure::Authority(ViewFallback::NoProof)),
+            #[cfg(feature = "hiqlite-store")]
+            Mode::Replicated(replicated) => {
+                if let Some(hit) = self.memo_hit()? {
+                    return Ok(hit);
+                }
+                // No convoy behind a slow or failing reload (§4.2: no wait):
+                // while one is in flight, this read is a quorum read.
+                let Ok(_reload) = self.memo.reload.try_lock() else {
+                    return Err(LocalFailure::Authority(ViewFallback::ReloadInFlight));
+                };
+                // Another reader may have just finished a reload.
+                if let Some(hit) = self.memo_hit()? {
+                    return Ok(hit);
+                }
+                #[cfg(feature = "cluster-read-cost-validation")]
+                {
+                    let pause = self
+                        .memo
+                        .pause
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    if let Some((entered, release)) = pause {
+                        let _ = entered.send(());
+                        let _ = release.await;
+                    }
+                }
+                let table = AppliedTable::Settings;
+                let (values, stamp) = replicated
+                    .read(table, self.floors.get(table), |store| async move {
+                        store.local_settings_snapshot().await
+                    })
+                    .await
+                    .map_err(LocalFailure::Authority)?;
+                let values = Arc::new(values);
+                self.note_reload(table);
+                self.memo.replace(MemoEntry {
+                    values: Arc::clone(&values),
+                    stamp,
+                });
+                Ok((values, Some(stamp)))
+            }
+        }
+    }
+
+    /// The memo, while its stamp is current; `None` when it is stale or
+    /// absent. Standalone and remote-authority views never fill it.
+    #[allow(clippy::type_complexity)]
+    fn memo_hit(
+        &self,
+    ) -> Result<Option<(Arc<BTreeMap<String, String>>, Option<ViewStamp>)>, LocalFailure> {
+        let Some(entry) = self.memo.current() else {
+            return Ok(None);
+        };
+        match self.check(&entry.stamp) {
+            StampCheck::Current => Ok(Some((entry.values, Some(entry.stamp)))),
+            StampCheck::Stale => Ok(None),
+            StampCheck::Closed(reason) => Err(LocalFailure::Authority(reason)),
         }
     }
 
@@ -862,6 +1178,439 @@ mod tests {
             .all(|code| *code != 0 && usize::from(*code) < OUTCOMES));
         for reason in ViewFallback::ALL {
             assert_eq!(ViewFallback::from_code(reason.code()), Some(reason));
+        }
+    }
+
+    /// The settings floor's classifier: every way plurx writes `settings`
+    /// arms it, reads and look-alike names do not.
+    #[test]
+    fn a_settings_write_is_recognised_in_every_form_plurx_uses() {
+        use crate::store::replicated::writes_table;
+        for sql in [
+            "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3)",
+            "insert or replace into settings(key,value) values($1,'1')",
+            "REPLACE INTO settings VALUES ($1, $2, $3)",
+            "UPDATE settings SET value = $1 WHERE key = $2",
+            "UPDATE OR IGNORE settings SET value = $1",
+            "DELETE FROM settings\n             WHERE key <> $1",
+            "delete from main.settings where key = $1",
+            "UPDATE main . settings SET value = $1",
+            "INSERT INTO \"settings\" (key, value) VALUES ($1, $2)",
+            "WITH v(k) AS (SELECT $1) INSERT INTO settings SELECT k, 'x', 0 FROM v",
+            "CREATE TRIGGER t AFTER INSERT ON files BEGIN DELETE FROM settings WHERE key = NEW.k; END",
+        ] {
+            assert!(writes_table(sql, "settings"), "{sql}");
+        }
+        for sql in [
+            "SELECT key, value FROM settings ORDER BY key",
+            "INSERT INTO libraries (name) SELECT value FROM settings WHERE key = $1",
+            "UPDATE media_sessions SET lease = $1 WHERE (SELECT value FROM settings) = '1'",
+            "INSERT INTO transcode_settings (k) VALUES ($1)",
+            "UPDATE settings_history SET v = 1",
+            "INSERT INTO notes (body) VALUES ('update settings now')",
+            "DELETE FROM files -- then DELETE FROM settings\n WHERE id = $1",
+            "/* INSERT INTO settings */ DELETE FROM files WHERE id = $1",
+        ] {
+            assert!(!writes_table(sql, "settings"), "{sql}");
+        }
+    }
+
+    /// Every replicated write method of the store's one client arms the
+    /// settings floor, holds the guard across the write and drops it after:
+    /// whatever its visibility, and however the write is spelled.
+    #[test]
+    fn every_timed_client_write_arms_the_settings_floor() {
+        let source = include_str!("hiqlite.rs");
+        let start = source
+            .find("impl TimedClient {")
+            .expect("the TimedClient impl");
+        let end = start
+            + source[start..]
+                .find("\n}\n")
+                .expect("the end of the TimedClient impl");
+        let block = &source[start..end];
+        let mut methods = Vec::new();
+        let mut at = 0;
+        while let Some(offset) = block[at..].find("fn ") {
+            let begin = at + offset;
+            let line_start = block[..begin].rfind('\n').map_or(0, |index| index + 1);
+            // A method of the impl: `fn` at the impl's indentation, after an
+            // optional visibility and `async`.
+            let prefix = &block[line_start..begin];
+            if prefix.starts_with("    ")
+                && !prefix.starts_with("     ")
+                && prefix
+                    .split_whitespace()
+                    .all(|word| word.starts_with("pub") || word == "async")
+            {
+                methods.push(line_start);
+            }
+            at = begin + 3;
+        }
+        methods.push(block.len());
+        let mut writers = Vec::new();
+        for window in methods.windows(2) {
+            let method = &block[window[0]..window[1]];
+            let name = method
+                .split("fn ")
+                .nth(1)
+                .and_then(|rest| rest.split(['<', '(']).next())
+                .unwrap_or_default();
+            let compact: String = method.chars().filter(|c| !c.is_whitespace()).collect();
+            let write = [
+                "self.inner().execute",
+                "self.inner().txn(",
+                "self.inner().batch(",
+            ]
+            .iter()
+            .filter_map(|call| compact.rfind(call))
+            .max();
+            let Some(write) = write else { continue };
+            writers.push(name.to_owned());
+            let armed = compact
+                .find("letsettings=self.settings_write(")
+                .unwrap_or_else(|| panic!("TimedClient::{name} writes without arming the floor"));
+            let dropped = compact
+                .rfind("drop(settings);")
+                .unwrap_or_else(|| panic!("TimedClient::{name} never drops its guard"));
+            assert!(
+                armed < write && write < dropped,
+                "TimedClient::{name} must arm before the write and drop the guard after it"
+            );
+        }
+        writers.sort();
+        assert_eq!(
+            writers,
+            [
+                "batch",
+                "execute",
+                "execute_acked",
+                "execute_idempotent",
+                "execute_returning_map",
+                "execute_returning_map_acked",
+                "execute_returning_map_one",
+                "txn",
+                "txn_source_layout_attempt",
+            ],
+            "the census of TimedClient write methods moved; review the new one"
+        );
+    }
+
+    /// The crate's production sources under `dir` (relative to `src/`):
+    /// `(path, text)`, test files left out and inline test modules cut.
+    fn production_sources(root: &std::path::Path, dir: &str) -> Vec<(String, String)> {
+        fn walk(path: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(path).expect("read a source directory") {
+                let path = entry.expect("a source entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(&root.join(dir), &mut files);
+        files.sort();
+        files
+            .into_iter()
+            .filter_map(|path| {
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("under the source root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let sql = rel.ends_with(".sql");
+                let stem = rel
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end_matches(".rs")
+                    .trim_end_matches(".sql");
+                let test = rel.split('/').any(|part| part == "tests")
+                    || stem == "tests"
+                    || stem.ends_with("_tests")
+                    || stem.ends_with("_test")
+                    || stem.starts_with("test_");
+                if !(sql || rel.ends_with(".rs")) || test {
+                    return None;
+                }
+                let text = std::fs::read_to_string(&path).expect("read a source file");
+                let text = match text.find("\n#[cfg(test)]\nmod tests") {
+                    Some(cut) if !sql => text[..cut].to_owned(),
+                    _ => text,
+                };
+                Some((rel, text))
+            })
+            .collect()
+    }
+
+    /// The SQL a source holds: a `.sql` file whole, a Rust file's string
+    /// literals (plain, raw and byte).
+    fn sql_texts<'a>(path: &str, text: &'a str) -> Vec<&'a str> {
+        if path.ends_with(".sql") {
+            return vec![text];
+        }
+        let bytes = text.as_bytes();
+        let mut out = Vec::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            let rest = &text[index..];
+            if rest.starts_with("//") {
+                index += rest.find('\n').unwrap_or(rest.len());
+            } else if rest.starts_with("/*") {
+                index += rest.find("*/").map_or(rest.len(), |end| end + 2);
+            } else if let Some(raw) = rest
+                .strip_prefix("br")
+                .or_else(|| rest.strip_prefix('r'))
+                .filter(|_| {
+                    index == 0
+                        || !(bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_')
+                })
+                .filter(|raw| raw.trim_start_matches('#').starts_with('"'))
+            {
+                let hashes = raw.len() - raw.trim_start_matches('#').len();
+                let open = rest.len() - raw.len() + hashes + 1;
+                let close = format!("\"{}", "#".repeat(hashes));
+                let body = &rest[open..];
+                let end = body.find(&close).unwrap_or(body.len());
+                out.push(&body[..end]);
+                index += open + end + close.len();
+            } else if rest.starts_with('"') {
+                let mut end = 1;
+                while end < rest.len() && bytes[index + end] != b'"' {
+                    end += if bytes[index + end] == b'\\' { 2 } else { 1 };
+                }
+                out.push(&rest[1..end.min(rest.len())]);
+                index += end + 1;
+            } else if let Some(after) = rest.strip_prefix('\'') {
+                // A char literal ('x', '\'', '\u{..}'), else a lifetime.
+                index += match after.find('\'') {
+                    Some(end) if end < 10 && !after[..end].contains(' ') => end + 2,
+                    _ => 1,
+                };
+            } else {
+                index += rest.chars().next().map_or(1, char::len_utf8);
+            }
+        }
+        out
+    }
+
+    /// `(on table, WHEN text, body)` of every `CREATE TRIGGER` in `sql`.
+    fn triggers(sql: &str) -> Vec<(String, String, String)> {
+        let idents = crate::store::replicated::sql_identifiers(sql);
+        let mut out = Vec::new();
+        for (index, (_, _, word)) in idents.iter().enumerate() {
+            if word != "create" {
+                continue;
+            }
+            let mut k = index + 1;
+            while idents
+                .get(k)
+                .is_some_and(|(_, _, w)| w == "temp" || w == "temporary")
+            {
+                k += 1;
+            }
+            if idents.get(k).map(|(_, _, w)| w.as_str()) != Some("trigger") {
+                continue;
+            }
+            let Some(on) = (k..idents.len()).find(|&i| idents[i].2 == "on") else {
+                continue;
+            };
+            let Some((_, table_end, table)) = idents.get(on + 1) else {
+                continue;
+            };
+            let Some(begin) = (on + 2..idents.len()).find(|&i| idents[i].2 == "begin") else {
+                continue;
+            };
+            let mut depth = 0_i32;
+            let mut end = sql.len();
+            for (_, stop, word) in &idents[begin..] {
+                match word.as_str() {
+                    "begin" | "case" => depth += 1,
+                    "end" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = *stop;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let body_start = idents[begin].0;
+            out.push((
+                table.clone(),
+                sql[*table_end..body_start].to_owned(),
+                sql[body_start..end].to_owned(),
+            ));
+        }
+        out
+    }
+
+    fn crate_src() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+    }
+
+    /// The trigger half of the settings floor: [`SETTINGS_TRIGGER_TABLES`]
+    /// names exactly the tables whose triggers write `settings` — directly,
+    /// or by writing a listed table the way its trigger fires — and each
+    /// discriminator is the trigger's own `WHEN` literal, never a bound value.
+    #[test]
+    fn settings_trigger_tables_name_every_trigger_that_writes_settings() {
+        use crate::store::replicated::writes_table;
+        let root = crate_src();
+        let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (path, text) in production_sources(&root, "") {
+            for sql in sql_texts(&path, &text) {
+                for (table, when, body) in triggers(sql) {
+                    let writes = writes_table(&body, "settings")
+                        || SETTINGS_TRIGGER_TABLES.iter().any(|(listed, literal)| {
+                            writes_table(&body, listed)
+                                && literal.is_none_or(|literal| body.contains(literal))
+                        });
+                    if writes && table != "settings" {
+                        found.entry(table).or_default().push(when);
+                    }
+                }
+            }
+        }
+        let listed: Vec<&str> = SETTINGS_TRIGGER_TABLES
+            .iter()
+            .map(|(table, _)| *table)
+            .collect();
+        let mut tables: Vec<&str> = found.keys().map(String::as_str).collect();
+        let mut expected = listed.clone();
+        tables.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            tables, expected,
+            "a trigger writes settings: list its table"
+        );
+        for (table, literal) in SETTINGS_TRIGGER_TABLES {
+            if let Some(literal) = literal {
+                for when in &found[*table] {
+                    assert!(
+                        when.contains(literal),
+                        "{table}: a settings trigger fires without {literal}; arm every write"
+                    );
+                }
+            }
+        }
+        // The discriminator is matched against the statement's SQL, so it
+        // must always be written into the SQL, never bound as a parameter.
+        let bare: Vec<&str> = SETTINGS_TRIGGER_TABLES
+            .iter()
+            .filter_map(|(_, literal)| literal.map(|literal| literal.trim_matches('\'')))
+            .collect();
+        for dir in [root.clone(), root.join("../../plurxd/src")] {
+            for (path, text) in production_sources(&dir, "") {
+                for literal in sql_texts(&path, &text) {
+                    assert!(
+                        !bare.contains(&literal),
+                        "{path} binds a trigger discriminator as a value"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The other half: every production statement that may write `settings`
+    /// runs through a floored writer, or writes no replicated row. A new file
+    /// holding one fails here until its writer is named.
+    #[test]
+    fn every_settings_writer_is_floored_or_writes_no_replicated_row() {
+        let root = crate_src();
+        let daemon = root.join("../../plurxd/src");
+        let mut writers = std::collections::BTreeSet::new();
+        for (crate_name, dir) in [("plurx-core", &root), ("plurxd", &daemon)] {
+            for (path, text) in production_sources(dir, "") {
+                if sql_texts(&path, &text).into_iter().any(writes_settings) {
+                    writers.insert(format!("{crate_name}/{path}"));
+                }
+            }
+        }
+        let unfloored: Vec<&String> = writers
+            .iter()
+            .filter(|path| {
+                // The store: every replicated write goes through TimedClient
+                // (pinned above); SQLite has no replica and no view.
+                !(path.starts_with("plurx-core/store/")
+                    // FlooredClient, pinned below.
+                    || *path == "plurx-core/cluster/membership.rs"
+                    // rusqlite on a restore image, before any node serves it.
+                    || *path == "plurx-core/cluster/migration.rs"
+                    // `UPDATE settings … WHERE 0`: a backup anchor, no row.
+                    || *path == "plurxd/backup.rs")
+            })
+            .collect();
+        assert!(
+            unfloored.is_empty(),
+            "settings writers outside a floored path: {unfloored:?}"
+        );
+
+        // The store's raw-client writes are schema installation and
+        // provisioning at store construction, before the applied view
+        // exists; anything else goes through TimedClient.
+        for (path, text) in production_sources(&root, "store") {
+            if path.starts_with("store/sqlite/") || !path.ends_with(".rs") {
+                continue;
+            }
+            let mut at = 0;
+            while let Some(offset) = text[at..].find("client") {
+                let begin = at + offset;
+                at = begin + 6;
+                let after = text[at..].trim_start();
+                let Some(call) = after.strip_prefix('.') else {
+                    continue;
+                };
+                let call = call.trim_start();
+                if !["execute", "txn(", "batch("]
+                    .iter()
+                    .any(|name| call.starts_with(name))
+                {
+                    continue;
+                }
+                if begin > 0 && {
+                    let previous = text.as_bytes()[begin - 1];
+                    previous.is_ascii_alphanumeric() || previous == b'_' || previous == b'.'
+                } {
+                    continue;
+                }
+                let function = text[..begin]
+                    .rfind("fn ")
+                    .map(|fn_at| {
+                        text[fn_at + 3..]
+                            .split(['<', '('])
+                            .next()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_owned()
+                    })
+                    .unwrap_or_default();
+                assert!(
+                    function.starts_with("bootstrap")
+                        || function.starts_with("install_")
+                        || function.starts_with("provision_")
+                        || function == "seal_legacy",
+                    "{path}: a raw-client write in `{function}` bypasses TimedClient"
+                );
+            }
+        }
+
+        // Membership's client is floored, and writes only through the two
+        // methods that arm it.
+        let membership =
+            std::fs::read_to_string(root.join("cluster/membership.rs")).expect("membership source");
+        let membership = &membership[..membership
+            .find("\n#[cfg(test)]\nmod tests")
+            .unwrap_or(membership.len())];
+        assert!(membership.contains("struct ReplicatedMembership {\n    client: FlooredClient,"));
+        for unarmed in [".batch(", ".execute_returning", ".execute_acked("] {
+            assert!(
+                !membership.contains(unarmed),
+                "membership writes through `{unarmed}`, which FlooredClient does not arm"
+            );
         }
     }
 }

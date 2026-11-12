@@ -249,6 +249,7 @@ mod causal_tests {
             learner_client.clone(),
             selected.replication_monitor(),
             Arc::clone(&selected.store),
+            plurx_core::store::SettingsWriteFloor::detached(),
             identity,
             local,
             source_config.cluster.join_url.clone(),

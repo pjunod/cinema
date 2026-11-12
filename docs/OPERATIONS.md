@@ -2843,7 +2843,8 @@ session-keyed route read by the decision it serves (`routing`, `status_first`,
 `receipt_candidate`, `observer`); `source` is `authority` until E1c.
 `plurx_applied_view_reads_total{view,source,reason}` and
 `plurx_applied_view_reloads_total{view}` count applied-view reads and stamp
-reloads (both 0 until E1b/E1c have readers);
+reloads (`view="settings"` since E1b, whose settings memo reloads at most once
+per settings change a reader saw; `view="route"` stays 0 until E1c);
 `plurx_applied_view_table_changes_total{view}` is how often this replica
 applied a change to `settings` or `media_sessions`, the most a per-table memo
 would reload. `plurx_applied_view_proof{mode}`,
@@ -2851,6 +2852,11 @@ would reload. `plurx_applied_view_proof{mode}`,
 `plurx_applied_view_failed_replacements_total` say whether the view could
 answer now, and `plurx_hiqlite_read_pool_wait_seconds` is the wait for a local
 read-pool connection. Settings → Developer → Applied view shows the same facts.
+
+Since E1b, request-path settings reads answer from this replica while it
+holds the proof; `reason="floor"` is this node reading back its own settings
+write until its replica applied it, `reason="reload_in_flight"` a page that
+met another reader's memo reload. Inventory: `http/applied_settings_inventory.rs`.
 
 Backups do not become interchangeable merely because the database is
 replicated. Preserve the data directory, node identity, and cluster secrets for

@@ -1,7 +1,6 @@
 # streaming/ — delivery: VOD, Dolby Vision, capabilities, reliability
 
-Delivery, Dolby Vision, capabilities and playback reliability. The
-[docs index](../README.md) defines status words and documentation rules.
+The [docs index](../README.md) defines status words and documentation rules.
 Add each document's row here in the same commit.
 
 Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
@@ -10,7 +9,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 |---|---|---|
 | [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |
-| [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 build contract (local-replica reads). | open |
+| [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 contract; build record: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md). | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Playback-start effort: rulings, lanes, reviews, lane status. | open |
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions; current state is in the plan. | live |

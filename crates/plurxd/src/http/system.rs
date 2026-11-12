@@ -73,18 +73,18 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
     let setup_required = state.store.count_users().await? == 0;
     let android_app = super::web::android_apk_path(&state.system.data_dir).is_some();
     let playback_auto_abr = state
-        .store
-        .get_setting(keys::PLAYBACK_AUTO_ABR)
+        .applied
+        .setting(keys::PLAYBACK_AUTO_ABR)
         .await?
         .is_some_and(|value| value.trim() == "1");
     let playback_display_aware_auto = state
-        .store
-        .get_setting(keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        .applied
+        .setting(keys::PLAYBACK_DISPLAY_AWARE_AUTO)
         .await?
         .is_some_and(|value| value.trim() == "1");
     let display_mode_match = state
-        .store
-        .get_setting(keys::PLAYBACK_DISPLAY_MODE_MATCH)
+        .applied
+        .setting(keys::PLAYBACK_DISPLAY_MODE_MATCH)
         .await?
         .is_some_and(|value| value.trim() == "1");
     Ok(Json(ServerInfo {
@@ -112,8 +112,8 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
 /// The server name an operator configured (Settings first, then config).
 async fn configured_server_name(state: &AppState) -> Result<String, ApiError> {
     Ok(state
-        .store
-        .get_setting(keys::SERVER_NAME)
+        .applied
+        .setting(keys::SERVER_NAME)
         .await?
         .unwrap_or_else(|| state.server_name.clone()))
 }
@@ -204,7 +204,7 @@ pub async fn features(
     // Every client reads this on each home load, so it names its four keys
     // instead of taking the whole settings table, which grows with the
     // catalogue. One snapshot keeps the four mutually consistent.
-    let settings = state.store.get_settings(&FeaturesDto::KEYS).await?;
+    let settings = state.applied.setting_values(&FeaturesDto::KEYS).await?;
     Ok(Json(FeaturesDto::from_snapshot(&settings, &state.node_id)))
 }
 
@@ -416,8 +416,8 @@ pub async fn system_info(
     let (hw_in_use, hw_max) = state.transcode.hardware_slots().await;
     let replication = state.replication.status().await;
     let hwaccel_requested = state
-        .store
-        .get_setting(&crate::state::node_hwaccel_key(&state.node_id))
+        .applied
+        .setting(&crate::state::node_hwaccel_key(&state.node_id))
         .await?;
     let optimization =
         crate::transcoder_optimization::status(&state.system, &state.transcode).await;
@@ -425,15 +425,15 @@ pub async fn system_info(
         && hwaccel_requested != state.system.hwaccel_override)
         || optimization.restart_required;
     let name = state
-        .store
-        .get_setting(keys::SERVER_NAME)
+        .applied
+        .setting(keys::SERVER_NAME)
         .await?
         .unwrap_or_else(|| state.server_name.clone());
     let hostname = state.node_hostname.clone();
     let ffmpeg_support = crate::ffmpeg_support::report(&state.system).await;
     let current_preference = state
-        .store
-        .get_setting(keys::HWACCEL)
+        .applied
+        .setting(keys::HWACCEL)
         .await?
         .unwrap_or_default();
     let encoder = state.transcode.encoder_for_preference(&current_preference);
@@ -2727,13 +2727,30 @@ async fn subtitle_store_diagnostics(
     diagnostics
 }
 
-async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
+/// Where [`settings_dto`] reads the settings table (E1b, contract §4.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsDtoSource {
+    /// `GET`: a polled page, from this node's applied view.
+    View,
+    /// The `PUT` response: the web client renders it as the saved state, and
+    /// it carries `live_tv_config_generation`, which the next save must echo
+    /// — a lagging replica's older generation would make that save conflict.
+    Authority,
+}
+
+async fn settings_dto(
+    state: &AppState,
+    source: SettingsDtoSource,
+) -> Result<SettingsDto, ApiError> {
     // This page renders the settings as one administrative snapshot. On the
     // clustered backend, reading each field independently turns one response
     // into dozens of leader barriers; it can also mix values from different
     // commits. Cache usage below is the node-local physical inventory shared
     // by all playback writers, including restart leftovers and reservations.
-    let settings = state.store.settings_snapshot().await?;
+    let settings = match source {
+        SettingsDtoSource::View => state.applied.settings_snapshot().await?.values,
+        SettingsDtoSource::Authority => Arc::new(state.store.settings_snapshot().await?),
+    };
     let setting = |key: &str| settings.get(key).cloned();
     let decoder_health_requested =
         setting(keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS).as_deref() == Some("1");
@@ -3264,7 +3281,7 @@ pub async fn get_settings(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<SettingsDto>, ApiError> {
-    Ok(Json(settings_dto(&state).await?))
+    Ok(Json(settings_dto(&state, SettingsDtoSource::View).await?))
 }
 
 #[derive(Deserialize)]
@@ -4873,7 +4890,9 @@ pub async fn update_settings(
             .await?;
         tracing::info!(armed = on, "genre backfill");
     }
-    Ok(Json(settings_dto(&state).await?))
+    Ok(Json(
+        settings_dto(&state, SettingsDtoSource::Authority).await?,
+    ))
 }
 
 /// GET /api/v1/scan/status — per-library scan status (keyed by library id).
@@ -6279,7 +6298,7 @@ fn render_applied_view_metrics(
         ));
     }
     out.push_str(
-        "# HELP plurx_applied_view_reloads_total Memo or route-cache reloads caused by an applied-view stamp that no longer matched, by view. Zero until the settings memo (E1b) and route cache (E1c) read through the view; until then plurx_applied_view_table_changes_total is the upper bound per-table invalidation would reload at.\n\
+        "# HELP plurx_applied_view_reloads_total Memo or route-cache reloads caused by an applied-view stamp that no longer matched, by view. view=settings counts settings-memo reloads, at most one per settings change a reader saw; view=route stays zero until the route cache (E1c) reads through the view. plurx_applied_view_table_changes_total is the upper bound per-table invalidation can reload at.\n\
          # TYPE plurx_applied_view_reloads_total counter\n",
     );
     for (view, count) in &observation.reloads {
