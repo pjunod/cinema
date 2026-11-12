@@ -343,14 +343,37 @@ async fn a_description_without_production_proof_still_reaches_the_trial() {
     let playback = unique_playback_id("upgrade-repeat-description");
     let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
     let (mut intent, run, _) = upgrade_after_playing_to(&fixture, &session_id, &route, 60_000).await;
+    // A 4K source: the projection only describes a source with a height.
+    let unprobed = fixture
+        .store
+        .get_file(intent.request.file_id)
+        .await
+        .expect("file read")
+        .expect("source");
+    fixture
+        .store
+        .upsert_file(
+            unprobed.item_id,
+            unprobed.path.to_str().expect("fixture source path"),
+            unprobed.size,
+            unprobed.mtime,
+            &plurx_core::domain::ProbeResult {
+                duration_ms: unprobed.duration_ms,
+                width: Some(3840),
+                height: Some(2160),
+                ..plurx_core::domain::ProbeResult::default()
+            },
+        )
+        .await
+        .expect("probe the fixture's source");
     let source = fixture
         .store
         .get_file(intent.request.file_id)
         .await
         .expect("file read")
         .expect("source");
-    let height = u32::try_from(source.height.expect("the fixture's source height") & !1)
-        .expect("height");
+    let height = 2160;
+    assert_eq!(source.height, Some(2160));
     intent.auto_policy = true;
     intent.request.candidate_context = Some(Box::new(
         crate::transcode::continuous_test_candidate_context(
