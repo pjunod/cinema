@@ -2819,39 +2819,28 @@ their codec/HDR fallback ladders. Counters and latency are exported as
 `plurx_media_session_takeovers_total{method,outcome}` and
 `plurx_media_session_takeover_seconds{method}`.
 
-The media-session route cache that authorizes segment GETs is measured by
-four families (plan [PLEX-FACADE-PAGING](server/PLEX-FACADE-PAGING.md) §3.5).
-Since playback-start E1c ([PLAYBACK-START-E1-BUILD.md](streaming/PLAYBACK-START-E1-BUILD.md)
-§4.4) it reads through the node's applied view and has no clock: a cached
-view answer is current until this replica applies a change to
-`media_sessions`, and a fact the process holds directly (a row it committed, a
-quorum read) is kept until the replica is proven to contain it, for one
-proof lease at most. `plurx_media_session_route_lookups_total{result}` splits
-the cache's lookups (HLS media GETs, the first status resolution and session
-DELETEs; direct plays never reach it) into `cache_hit`, `single_flight_hit`
-(a cached view answer after waiting on another lookup's read of the same
-session), `observed` (a fact held directly), `view` (a local applied-view read)
-and `store` (a quorum read: no proof, legacy session layout, or an observed fact
-past its lease); `plurx_media_session_route_lock_seconds{site}` is the wait for
-the cache's map lock at each of its four call sites;
-`plurx_media_session_route_prune_entries` is how many entries each eviction
-scan walks (it runs only when an insert finds the cache full); and
-`plurx_media_session_route_cache_entries` is the cache's size against its
-4,096 ceiling. Control mutations and final-status reads bypass the cache and
-are not in the lookup counts.
+The media-session route cache that authorizes segment GETs reads through the
+applied view and has no clock (E1c, [PLAYBACK-START-E1-BUILD.md](streaming/PLAYBACK-START-E1-BUILD.md)
+§4.4). Four families measure it (plan [PLEX-FACADE-PAGING](server/PLEX-FACADE-PAGING.md) §3.5):
+`plurx_media_session_route_lookups_total{result}` splits lookups (HLS media
+GETs, first status reads, DELETEs) into `cache_hit`, `single_flight_hit`,
+`observed` (a fact this node committed or read by quorum, not yet applied
+here), `view` and `store` (a quorum read);
+`plurx_media_session_route_lock_seconds{site}` is the map-lock wait per site;
+`plurx_media_session_route_prune_entries` is the entries an eviction scan
+walks (only when full); `plurx_media_session_route_cache_entries` is the size
+against 4,096. Control and final-status reads bypass the cache.
 
 The playback-start E1a baseline ([PLAYBACK-START-E1-BUILD.md](streaming/PLAYBACK-START-E1-BUILD.md)
 §7, §9) adds, all loaded from atomics at scrape time:
 `plurx_media_session_route_reads_total{site,source}` counts every
 session-keyed route read by the decision it serves (`routing`, `status_first`,
 `status_bracket`, `status_reclassify`, `control`, `verdict`, `receipt_fence`,
-`receipt_candidate`, `observer`); `source` is `view` where E1c reads through
-the applied view (`routing`, `status_first`, `observer`) and the view answered.
+`receipt_candidate`, `observer`); `source` is `view` when the view answered.
 `plurx_applied_view_reads_total{view,source,reason}` and
 `plurx_applied_view_reloads_total{view}` count applied-view reads and stamp
 reloads (`view="settings"` since E1b, whose settings memo reloads at most once
-per settings change a reader saw; `view="route"` since E1c, counting route-cache
-entries a moved route slot made stale);
+per settings change a reader saw; `view="route"`: stale route-cache stamps);
 `plurx_applied_view_table_changes_total{view}` is how often this replica
 applied a change to `settings` or `media_sessions`, the most a per-table memo
 would reload. `plurx_applied_view_proof{mode}`,
