@@ -1085,10 +1085,7 @@ async fn a_request_feeds_the_by_method_metric_under_its_route_group() {
     // test counts exactly one request on `home` while this one runs.
     let (_, state) = test_app_with_state();
     let app = Router::new()
-        .route(
-            "/api/v1/search",
-            axum::routing::get(recorded_store_handler),
-        )
+        .route("/api/v1/search", axum::routing::get(recorded_store_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             http_store_attribution,
