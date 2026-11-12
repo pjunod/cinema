@@ -191,6 +191,40 @@ impl ActivePhase {
     }
 }
 
+/// Close the physical phase a dead predecessor of this node left open on a
+/// coordinator, through the same two steps a phase that never exposed an
+/// Input is closed with: the custody receipt is released as having no
+/// reader (the process that could have read is gone), and the role's phase
+/// is finished once that receipt is absent. A receipt the durable release
+/// refuses, because its Input was armed, stays for the source-custody
+/// recovery that owns it, and the role stays closed to a new phase until
+/// then.
+pub(super) async fn settle_dead_phase(store: &Arc<dyn Store>, role: &AnalysisCoordination) {
+    let (Some(custody_id), Some(node_id), Some(fence)) = (
+        role.active_custody_id.as_ref(),
+        role.physical_node_id.as_ref(),
+        role.physical_fence,
+    ) else {
+        return;
+    };
+    let claim = AnalysisCoordinationClaim {
+        request_id: role.request_id.clone(),
+        node_id: node_id.clone(),
+        fence,
+    };
+    let phase = AnalysisPhysicalPhase {
+        custody: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken {
+            custody_id: custody_id.clone(),
+            owner: claim.physical_owner(),
+        },
+        claim,
+        source: role.source.clone(),
+        phase_sequence: role.phase_sequence,
+    };
+    crate::background_jobs::settle_no_reader_source_custody(store, phase.custody.clone()).await;
+    finish_exact_phase(store, &phase).await;
+}
+
 /// Returns None when the physical source domain is occupied.
 pub(super) async fn attest_full_source(
     store: Arc<dyn Store>,

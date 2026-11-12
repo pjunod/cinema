@@ -217,7 +217,7 @@ async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(
         file: &file,
         recipe: &recipe,
         phase: &phase,
-        init_contract_sha256: &init_contract,
+        init_contract_sha256: Some(&init_contract),
         canonical_title_start: 0,
         timescale,
         gap,
@@ -226,12 +226,18 @@ async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(
         stop: &stop,
     };
 
-    // One whole-title observation: the reference.
+    // One whole-title observation: the reference. It is given no contract
+    // to check against, as the first generation of a source nothing has
+    // observed is (a local viewer's row-less demand), and establishes the
+    // same one the census did.
     let whole = fill_copy_gap(
-        fill(RangeGap {
-            start: None,
-            end: None,
-        }),
+        CopyGapFill {
+            init_contract_sha256: None,
+            ..fill(RangeGap {
+                start: None,
+                end: None,
+            })
+        },
         opener(&bytes, &held),
     )
     .await
@@ -242,11 +248,10 @@ async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(
         "the fixture has several GOPs: {}",
         whole.rows.len()
     );
-    let mut title = set_for(&source, &whole, timescale);
-    title
-        .observe_analysis(&phase, &whole)
-        .expect("whole-title rows");
+    let title = CopyObservationSet::from_analysis(NAMESPACE, &source, &phase, &whole)
+        .expect("the set a first generation establishes");
     assert!(title.is_complete());
+    assert_eq!(title.timescale(), timescale);
     assert_eq!(title.init_contract_sha256(), init_contract);
 
     // The head: an Analysis generation from the title start, retired once a
@@ -283,7 +288,7 @@ async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(
     // The gap, filled separately by a seeked Analysis generation.
     let filled = fill_copy_gap(
         CopyGapFill {
-            init_contract_sha256: set.init_contract_sha256(),
+            init_contract_sha256: Some(set.init_contract_sha256()),
             timescale: set.timescale(),
             canonical_title_start: set.canonical_title_start(),
             ..fill(gap)

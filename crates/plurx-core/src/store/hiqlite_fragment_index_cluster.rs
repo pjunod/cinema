@@ -2026,7 +2026,16 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                        WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4
                          AND argv_fingerprint = $13 AND publication_priority = 'forced'
                     ) THEN 'ready' ELSE 'queued' END,
-                    NULL, 0, NULL, 0, $14,
+                    NULL, 0, NULL,
+                    -- A coordinator retired as stranded hands its attempts on.
+                    COALESCE((SELECT MAX(stranded.attempts) FROM analysis_requests stranded
+                      WHERE stranded.file_id = $2 AND stranded.source_size = $3
+                        AND stranded.source_mtime = $4 AND stranded.component = $5
+                        AND stranded.pipeline_version = $6 AND stranded.video_identity = $7
+                        AND stranded.requested_generation = $8
+                        AND stranded.target_node_id = $12 AND stranded.state = 'cancelled'
+                        AND stranded.last_error_code = 'coordination_stranded'), 0),
+                    $14,
                     CASE WHEN $11 = 0 AND $5 = 'skip_markers' THEN (
                       SELECT generation_id FROM timeline_annotation_sets
                        WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4
@@ -2077,7 +2086,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4
                       AND component = $5 AND pipeline_version = $6
                       AND video_identity = $7
-                      AND requested_generation = $8 AND target_node_id = $12)
+                      AND requested_generation = $8 AND target_node_id = $12
+                      -- A coordinator retired as stranded was never worked;
+                      -- it does not use up its generation.
+                      AND NOT (state = 'cancelled'
+                        AND last_error_code = 'coordination_stranded'))
                 ))
              ON CONFLICT DO NOTHING"
                     ),
