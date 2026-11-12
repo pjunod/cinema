@@ -521,17 +521,26 @@ Z6 (Michael5400 / Michael1800); model A tracks within 0.001 except where noted.
 
 | Arm | Δ mean | Result |
 |---|---:|---|
-| Zfn1: FEL-benefit map (−6 where the EL changes the block least, 0.5-octave span) | −0.035 / −0.052 | **accept** |
+| Zfn1 as executed: FEL-benefit map, −6 where the EL changes a dark block least, tapering over half an octave; dark blocks past the taper take the positive balance (see note) | −0.035 / −0.052 | **accept** |
 | A00P: AQ off + psy-RD/RDOQ off | −0.024 / −0.055 | **accept** (psy: Paul's call) |
-| **NP1 = Zfn1 + chroma −9/−12 + AQ off** | **−0.051 / −0.073** | **accept**; Michael5400 48/48 frames beat F |
-| **P1 = NP1 with psy off** | **−0.068 / −0.103** | **accept** |
+| **NP1 = Zfn1 + chroma −9/−12 + AQ off** | **−0.051 / −0.073** | passes the Michael bar (Michael5400 48/48 frames beat F); fails the stack's held-out rule |
+| **P1 = NP1 with psy off** | **−0.068 / −0.103** | passes the Michael bar; fails the stack's held-out rule |
 | −4 / −3 QP map | −0.061 / −0.075, −0.081 / −0.097 | reject: loses 2 / 5 shadow frames (dose is Paul's choice) |
 | veryslow; chroma −12/−12; −9/−12 | −0.021 / −0.014; −0.020 / −0.015; −0.018 / −0.014 | reject (near misses) |
 | psy-rd 0; psy-rdoq 0; both; AQ 0; AQ 0.5 | −0.017 / −0.039 at best | reject |
-| flat-block exclusion; FEL map with it; 0.3–3 nit ramp | −0.018, −0.026, −0.011 (M5400) | reject: lose 4–5 shadow frames |
+| flat-block exclusion; FEL map with it; 0.3–3 nit ramp | −0.018, −0.026, −0.011 (M5400) | reject: lose 4–6 shadow frames |
 | oracle plane-domain export, then Z6 | −0.055 / −0.025; model A +0.013 / +0.048 | reject |
 | B-frames (bf 4, landed) | −0.007 (M5400) | reject; no author change ([probe](../../tools/dv_processing/diagnostics/fel_quality/results/bframe-probe-20261112.json)) |
 
+- **Zfn1 is not the map its protocol declared.** The review of PR #1518 found
+  that harness v8 gave dark blocks whose weighted offset clamps to 0 (where
+  the EL changes the block most) no region, so they were coded at the
+  positive balance. The results are of that executed map; v9 names it
+  `lumazfsp` and reproduces the v8 arm bit for bit. It affects about 1.6% of
+  Michael5400's dark blocks. The declared map
+  ([protocol](../../tools/dv_processing/diagnostics/fel_quality/protocol-map-fix-20261112.json))
+  scores within 0.001 of it (−0.036 / −0.051) and also passes, so the stacks
+  keep the executed map.
 - **Flat dark blocks are not free.** Moving them to the positive balance
   loses shadow frames, because F is almost exact there.
 - **psy-off is a metric-alignment gain.** psy terms keep energy that a
@@ -540,8 +549,8 @@ Z6 (Michael5400 / Michael1800); model A tracks within 0.001 except where noted.
   on Michael5400: base 0.915, Z6 0.845, Zfn1 0.880, NP1 0.877, P1 0.862.
   NP1 keeps more texture than Z6; psy-off costs about 1.5 points of it.
 - **The export lever is model-dependent**: it helps models B–D and hurts A.
-- Harness v7/v8 passed the byte-identity gates and v7 reproduced Z6 bit for
-  bit ([receipts](../../tools/dv_processing/diagnostics/fel_quality/results/roi-gates-v7-v8-20261112.json)).
+- Harness v7/v8/v9 passed the byte-identity gates (v9 on all three
+  fixtures); v7 reproduced Z6 and v9 reproduced Zfn1 bit for bit ([receipts](../../tools/dv_processing/diagnostics/fel_quality/results/roi-gates-v7-v9-20261112.json)).
 
 ## Held-out Beekeeper: the encode still loses to F
 
@@ -572,7 +581,9 @@ above. There is no crossover in all four models at or below 160 Mb/s.
 
 - On scenes where the EL is worth more than the coding loss (both Michael
   windows), NP1 or P1 beats F by a wide margin, at the same rate, with the
-  shadows fixed. Adopt NP1 unless Paul accepts psy-off, then P1.
+  shadows fixed. Neither meets its own stack protocol, which also requires
+  the held-out scene; they are the recipe for titles a per-title decision
+  admits (NP1, or P1 if Paul accepts psy-off).
 - On scenes where it is not (Beekeeper), no encoder setting tested at
   130 Mb/s beats dropping the EL. Those titles should be served as F. This
   is the same per-title verdict the GPU served-route gate already makes.

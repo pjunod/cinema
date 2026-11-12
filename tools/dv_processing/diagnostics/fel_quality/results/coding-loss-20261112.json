@@ -1,6 +1,6 @@
 {
  "scope": "offline coding-loss readout; \u0394ITP four frozen models; no perceptual or conformance claim",
- "script_sha256": "80676ee7f2f7601da9a792342fdfcdd422c5a76bd2d9b8d0f31e1e31c7d86d3b",
+ "script_sha256": "acd9479ae19c34fc27425629077c510513f774de55f05a72cdc342b4a094a1d2",
  "fixtures": {
   "michael5400": {
    "arms": {
@@ -114,7 +114,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.70398401598402
      },
      "lattice": {
       "pooled_full_mean": {
@@ -146,6 +147,10 @@
      "landing": {
       "chosen": "michael5400-NP1-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.68968031968032
      }
     },
@@ -200,7 +205,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.52700099900102
      },
      "lattice": {
       "pooled_full_mean": {
@@ -232,6 +238,10 @@
      "landing": {
       "chosen": "michael5400-P1-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.51269730269732
      }
     },
@@ -286,7 +296,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.98568631368633
      },
      "lattice": {
       "pooled_full_mean": {
@@ -318,6 +329,10 @@
      "landing": {
       "chosen": "michael5400-Q0-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.97138261738263
      }
     },
@@ -372,7 +387,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.96574225774228
      },
      "lattice": {
       "pooled_full_mean": {
@@ -404,6 +420,10 @@
      "landing": {
       "chosen": "michael5400-R0Q0-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.95143856143858
      }
     },
@@ -458,7 +478,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.96626173826175
      },
      "lattice": {
       "pooled_full_mean": {
@@ -490,6 +511,10 @@
      "landing": {
       "chosen": "michael5400-Z4-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.95195804195805
      }
     },
@@ -544,7 +569,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.084015984016
      },
      "lattice": {
       "pooled_full_mean": {
@@ -576,6 +602,10 @@
      "landing": {
       "chosen": "michael5400-R0-L1",
       "attempts": 1,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.06971228771232
      }
     },
@@ -630,7 +660,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.98915084915086
      },
      "lattice": {
       "pooled_full_mean": {
@@ -662,6 +693,10 @@
      "landing": {
       "chosen": "michael5400-Rh-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.97484715284716
      }
     },
@@ -716,7 +751,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.75167232767234
      },
      "lattice": {
       "pooled_full_mean": {
@@ -748,6 +784,10 @@
      "landing": {
       "chosen": "michael5400-Zfn-L1",
       "attempts": 1,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.73736863136864
      }
     },
@@ -802,7 +842,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.8421818181818
      },
      "lattice": {
       "pooled_full_mean": {
@@ -834,6 +875,10 @@
      "landing": {
       "chosen": "michael5400-Z3-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.82787812187814
      }
     },
@@ -888,7 +933,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.92397202797204
      },
      "lattice": {
       "pooled_full_mean": {
@@ -920,6 +966,10 @@
      "landing": {
       "chosen": "michael5400-Zf-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.90966833166834
      }
     },
@@ -974,7 +1024,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.0232127872128
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1006,7 +1057,102 @@
      "landing": {
       "chosen": "michael5400-Zfn1-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.0089090909091
+     }
+    },
+    "Zfn1d": {
+     "fullres": {
+      "frames": {
+       "0": {
+        "A": {
+         "full_mean": 1.6277403998718891,
+         "dark_below_0.1_mean": 0.9951765510166638,
+         "dark_below_0.1_p99": 3.221876942291922
+        },
+        "B": {
+         "full_mean": 1.6445989306706723,
+         "dark_below_0.1_mean": 1.0241182197086094,
+         "dark_below_0.1_p99": 3.2433708371385244
+        },
+        "C": {
+         "full_mean": 1.6449298842652083,
+         "dark_below_0.1_mean": 1.0244723687934034,
+         "dark_below_0.1_p99": 3.244825040378679
+        },
+        "D": {
+         "full_mean": 1.6449630089067022,
+         "dark_below_0.1_mean": 1.0245296689047327,
+         "dark_below_0.1_p99": 3.243871337808222
+        }
+       },
+       "24": {
+        "A": {
+         "full_mean": 1.662777857265008,
+         "dark_below_0.1_mean": 1.3057135937480058,
+         "dark_below_0.1_p99": 3.5981781183606216
+        },
+        "B": {
+         "full_mean": 1.6829926936459294,
+         "dark_below_0.1_mean": 1.3307609858382052,
+         "dark_below_0.1_p99": 3.6172253597993014
+        },
+        "C": {
+         "full_mean": 1.6834084698436353,
+         "dark_below_0.1_mean": 1.3313528719937817,
+         "dark_below_0.1_p99": 3.6197670448126815
+        },
+        "D": {
+         "full_mean": 1.6834271966337404,
+         "dark_below_0.1_mean": 1.3314018861188939,
+         "dark_below_0.1_p99": 3.6187329036256464
+        }
+       }
+      },
+      "bar_rows_passing": [
+       8,
+       8
+      ],
+      "authored_video_packet_mbps": 129.0480999000999
+     },
+     "lattice": {
+      "pooled_full_mean": {
+       "A": 1.7480114929381643,
+       "B": 1.7659683839486375,
+       "C": 1.766391974534374,
+       "D": 1.766425382871783
+      },
+      "frames": 48,
+      "frames_beating_F": {
+       "A": {
+        "dark_p99_below_F": 47,
+        "all_three": 47
+       },
+       "B": {
+        "dark_p99_below_F": 46,
+        "all_three": 46
+       },
+       "C": {
+        "dark_p99_below_F": 46,
+        "all_three": 46
+       },
+       "D": {
+        "dark_p99_below_F": 46,
+        "all_three": 46
+       }
+      }
+     },
+     "landing": {
+      "chosen": "michael5400-Zfn1d-L2",
+      "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
+      "predicted_authored_mbps": 129.03379620379621
      }
     },
     "Zr": {
@@ -1060,7 +1206,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.09403396603398
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1092,6 +1239,10 @@
      "landing": {
       "chosen": "michael5400-Zr-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.07973026973028
      }
     },
@@ -1146,7 +1297,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.91154445554446
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1178,6 +1330,10 @@
      "landing": {
       "chosen": "michael5400-Zx-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.8972407592408
      }
     },
@@ -1232,7 +1388,8 @@
       "bar_rows_passing": [
        4,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.59399800199802
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1264,6 +1421,10 @@
      "landing": {
       "chosen": "michael5400-base-L3",
       "attempts": 3,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.57969430569432
      }
     },
@@ -1318,7 +1479,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.09457342657345
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1350,6 +1512,10 @@
      "landing": {
       "chosen": "michael5400-Z6-L1",
       "attempts": 1,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.08026973026975
      }
     },
@@ -1404,7 +1570,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.4746013986014
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1436,6 +1603,10 @@
      "landing": {
       "chosen": "michael5400-A00-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.4602977022977
      }
     },
@@ -1490,7 +1661,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.33868931068932
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1522,6 +1694,10 @@
      "landing": {
       "chosen": "michael5400-A00P-L3",
       "attempts": 3,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.32438561438565
      }
     },
@@ -1576,7 +1752,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.70137062937064
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1608,6 +1785,10 @@
      "landing": {
       "chosen": "michael5400-C912-L1",
       "attempts": 1,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.68706693306694
      }
     },
@@ -1662,7 +1843,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.58759640359642
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1694,6 +1876,10 @@
      "landing": {
       "chosen": "michael5400-C1212-L1",
       "attempts": 1,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.57329270729272
      }
     },
@@ -1748,7 +1934,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.2093186813187
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1780,6 +1967,10 @@
      "landing": {
       "chosen": "michael5400-QZ6-L1",
       "attempts": 1,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.195014985015
      }
     },
@@ -1834,7 +2025,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.46669330669332
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1866,6 +2058,10 @@
      "landing": {
       "chosen": "michael5400-A05-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.45238961038962
      }
     },
@@ -1920,7 +2116,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.667012987013
      },
      "lattice": {
       "pooled_full_mean": {
@@ -1952,6 +2149,10 @@
      "landing": {
       "chosen": "michael5400-V-L1",
       "attempts": 1,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.6527092907093
      }
     },
@@ -2006,7 +2207,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.66736863136865
      },
      "lattice": {
       "pooled_full_mean": {
@@ -2038,6 +2240,10 @@
      "landing": {
       "chosen": "michael5400-Qbase-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.65306493506495
      }
     },
@@ -2072,6 +2278,10 @@
      "landing": {
       "chosen": "michael5400-B10-L3",
       "attempts": 3,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.32135664335667
      }
     },
@@ -2106,6 +2316,10 @@
      "landing": {
       "chosen": "michael5400-B13-L3",
       "attempts": 3,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.23125074925076
      }
     }
@@ -2142,6 +2356,10 @@
     {
      "file": "fullres-Zfn1.json",
      "sha256": "6643a2faf4b2f88c429c597f953f4528e1ff87c4b8c9eb9a171ce91df55b7a04"
+    },
+    {
+     "file": "fullres-Zfn1d.json",
+     "sha256": "f3c35a7ff918ea91bc133029e369c7f5e9af31b4a36652e0de96593c94268ea4"
     },
     {
      "file": "fullres-Zr.json",
@@ -2190,6 +2408,10 @@
     {
      "file": "lattice-Zfn1.json",
      "sha256": "c64d07b492c05cb7fc44f4668e52ad1e70ed9d81c155f6694a55f1419ae43032"
+    },
+    {
+     "file": "lattice-Zfn1d.json",
+     "sha256": "9c308b2aae621304b9b6bb450b9ab8595ef8d5b68bc7cc42e9b7d3492c7ef52c"
     },
     {
      "file": "lattice-Zr.json",
@@ -2325,7 +2547,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.88675724275726
      },
      "lattice": {
       "pooled_full_mean": {
@@ -2357,6 +2580,10 @@
      "landing": {
       "chosen": "michael1800-NP1-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.87245354645356
      }
     },
@@ -2411,7 +2638,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.35573626373628
      },
      "lattice": {
       "pooled_full_mean": {
@@ -2443,6 +2671,10 @@
      "landing": {
       "chosen": "michael1800-P1-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.34143256743258
      }
     },
@@ -2497,7 +2729,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.8673006993007
      },
      "lattice": {
       "pooled_full_mean": {
@@ -2529,6 +2762,10 @@
      "landing": {
       "chosen": "michael1800-Q0-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.852997002997
      }
     },
@@ -2583,7 +2820,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.68296903096905
      },
      "lattice": {
       "pooled_full_mean": {
@@ -2615,6 +2853,10 @@
      "landing": {
       "chosen": "michael1800-R0Q0-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.66866533466535
      }
     },
@@ -2669,7 +2911,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.08428771228773
      },
      "lattice": {
       "pooled_full_mean": {
@@ -2701,6 +2944,10 @@
      "landing": {
       "chosen": "michael1800-Z4-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.06998401598403
      }
     },
@@ -2755,7 +3002,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.11329470529472
      },
      "lattice": {
       "pooled_full_mean": {
@@ -2787,6 +3035,10 @@
      "landing": {
       "chosen": "michael1800-R0-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.09899100899102
      }
     },
@@ -2841,7 +3093,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.74146653346654
      },
      "lattice": {
       "pooled_full_mean": {
@@ -2873,6 +3126,10 @@
      "landing": {
       "chosen": "michael1800-Rh-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.72716283716287
      }
     },
@@ -2927,7 +3184,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.0416063936064
      },
      "lattice": {
       "pooled_full_mean": {
@@ -2959,6 +3217,10 @@
      "landing": {
       "chosen": "michael1800-V-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.0273026973027
      }
     },
@@ -3013,7 +3275,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.04346053946057
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3045,6 +3308,10 @@
      "landing": {
       "chosen": "michael1800-Z3-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.02915684315687
      }
     },
@@ -3099,7 +3366,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.14143856143858
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3131,6 +3399,10 @@
      "landing": {
       "chosen": "michael1800-Zf-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.12713486513488
      }
     },
@@ -3185,7 +3457,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.1412227772228
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3217,6 +3490,10 @@
      "landing": {
       "chosen": "michael1800-Zfn-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.1269190809191
      }
     },
@@ -3271,7 +3548,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.10665734265737
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3303,7 +3581,102 @@
      "landing": {
       "chosen": "michael1800-Zfn1-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.09235364635367
+     }
+    },
+    "Zfn1d": {
+     "fullres": {
+      "frames": {
+       "0": {
+        "A": {
+         "full_mean": 1.2277583817030582,
+         "dark_below_0.1_mean": 0.7863445269680687,
+         "dark_below_0.1_p99": 1.860278701428841
+        },
+        "B": {
+         "full_mean": 1.2486341585255156,
+         "dark_below_0.1_mean": 0.8153144336722575,
+         "dark_below_0.1_p99": 1.9010559761736914
+        },
+        "C": {
+         "full_mean": 1.2489323380680828,
+         "dark_below_0.1_mean": 0.815536298133557,
+         "dark_below_0.1_p99": 1.9011591255247284
+        },
+        "D": {
+         "full_mean": 1.2489657158334269,
+         "dark_below_0.1_mean": 0.8155696489194328,
+         "dark_below_0.1_p99": 1.90178944843785
+        }
+       },
+       "24": {
+        "A": {
+         "full_mean": 1.411759760588967,
+         "dark_below_0.1_mean": 0.8175570939628977,
+         "dark_below_0.1_p99": 1.9109904278803007
+        },
+        "B": {
+         "full_mean": 1.4366242739764405,
+         "dark_below_0.1_mean": 0.8541329509985104,
+         "dark_below_0.1_p99": 1.9486134023026684
+        },
+        "C": {
+         "full_mean": 1.4369599842441585,
+         "dark_below_0.1_mean": 0.8543242752042501,
+         "dark_below_0.1_p99": 1.94853573313296
+        },
+        "D": {
+         "full_mean": 1.4369973305834591,
+         "dark_below_0.1_mean": 0.854421943280925,
+         "dark_below_0.1_p99": 1.9487877934422204
+        }
+       }
+      },
+      "bar_rows_passing": [
+       8,
+       8
+      ],
+      "authored_video_packet_mbps": 129.13284315684317
+     },
+     "lattice": {
+      "pooled_full_mean": {
+       "A": 1.4665478406506869,
+       "B": 1.4886842684177057,
+       "C": 1.489035806756618,
+       "D": 1.4890693751459914
+      },
+      "frames": 48,
+      "frames_beating_F": {
+       "A": {
+        "dark_p99_below_F": 48,
+        "all_three": 48
+       },
+       "B": {
+        "dark_p99_below_F": 48,
+        "all_three": 48
+       },
+       "C": {
+        "dark_p99_below_F": 48,
+        "all_three": 48
+       },
+       "D": {
+        "dark_p99_below_F": 48,
+        "all_three": 48
+       }
+      }
+     },
+     "landing": {
+      "chosen": "michael1800-Zfn1d-L2",
+      "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
+      "predicted_authored_mbps": 129.11853946053947
      }
     },
     "Zx": {
@@ -3357,7 +3730,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.03436163836164
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3389,6 +3763,10 @@
      "landing": {
       "chosen": "michael1800-Zx-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.02005794205795
      }
     },
@@ -3443,7 +3821,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.9632047952048
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3475,6 +3854,10 @@
      "landing": {
       "chosen": "michael1800-Zr-L1",
       "attempts": 1,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.9489010989011
      }
     },
@@ -3529,7 +3912,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.76449150849152
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3561,6 +3945,10 @@
      "landing": {
       "chosen": "michael1800-base-L1",
       "attempts": 1,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.75018781218782
      }
     },
@@ -3615,7 +4003,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.0911048951049
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3647,6 +4036,10 @@
      "landing": {
       "chosen": "michael1800-Z6-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.07680119880123
      }
     },
@@ -3701,7 +4094,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.1563316683317
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3733,6 +4127,10 @@
      "landing": {
       "chosen": "michael1800-A00-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.142027972028
      }
     },
@@ -3787,7 +4185,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.61875324675327
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3819,6 +4218,10 @@
      "landing": {
       "chosen": "michael1800-A00P-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.60444955044957
      }
     },
@@ -3873,7 +4276,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.01314685314688
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3905,6 +4309,10 @@
      "landing": {
       "chosen": "michael1800-C912-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.99884315684318
      }
     },
@@ -3959,7 +4367,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.81144455544458
      },
      "lattice": {
       "pooled_full_mean": {
@@ -3991,6 +4400,10 @@
      "landing": {
       "chosen": "michael1800-C1212-L1",
       "attempts": 1,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.79714085914088
      }
     },
@@ -4045,7 +4458,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.72065134865136
      },
      "lattice": {
       "pooled_full_mean": {
@@ -4077,6 +4491,10 @@
      "landing": {
       "chosen": "michael1800-Qbase-L1",
       "attempts": 1,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.70634765234766
      }
     },
@@ -4131,7 +4549,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 128.7355924075924
      },
      "lattice": {
       "pooled_full_mean": {
@@ -4163,6 +4582,10 @@
      "landing": {
       "chosen": "michael1800-A05-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 128.7212887112887
      }
     },
@@ -4217,7 +4640,8 @@
       "bar_rows_passing": [
        8,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.04198601398602
      },
      "lattice": {
       "pooled_full_mean": {
@@ -4249,6 +4673,10 @@
      "landing": {
       "chosen": "michael1800-QZ6-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.02768231768232
      }
     }
@@ -4293,6 +4721,10 @@
     {
      "file": "fullres-Zfn1.json",
      "sha256": "2f15bc8006135b7096cda1a81d81822f7e33c60b3b51fd79c749a9a5feca1e0f"
+    },
+    {
+     "file": "fullres-Zfn1d.json",
+     "sha256": "246d70bb2ffeced23b3e16d767bf66ed65770878d0f3ff1e93f86fbf830f361b"
     },
     {
      "file": "fullres-Zx-Zr.json",
@@ -4345,6 +4777,10 @@
     {
      "file": "lattice-Zfn1.json",
      "sha256": "09738ae4bc8ea92df72f92579ad576c9242d169dc4c24b9f5efb81fe011ffca2"
+    },
+    {
+     "file": "lattice-Zfn1d.json",
+     "sha256": "459dedef922f50b193ef5b7916f71ce5482b82773434d176be9cc7bf40092f9b"
     },
     {
      "file": "lattice-Zx-Zr.json",
@@ -4472,7 +4908,8 @@
       "bar_rows_passing": [
        3,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.063284
      },
      "lattice": {
       "pooled_full_mean": {
@@ -4504,6 +4941,10 @@
      "landing": {
       "chosen": "beekeeper1800-P0r129-L2",
       "attempts": 2,
+      "band": [
+       128.25,
+       129.75
+      ],
       "predicted_authored_mbps": 129.05124
      }
     },
@@ -4558,7 +4999,8 @@
       "bar_rows_passing": [
        0,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 145.41498
      },
      "lattice": {
       "pooled_full_mean": {
@@ -4590,6 +5032,10 @@
      "landing": {
       "chosen": "beekeeper1800-P0r145-L2",
       "attempts": 2,
+      "band": [
+       144.25,
+       145.75
+      ],
       "predicted_authored_mbps": 145.402936
      }
     },
@@ -4644,7 +5090,8 @@
       "bar_rows_passing": [
        0,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 158.604852
      },
      "lattice": {
       "pooled_full_mean": {
@@ -4676,6 +5123,10 @@
      "landing": {
       "chosen": "beekeeper1800-P0r158-L2",
       "attempts": 2,
+      "band": [
+       157.25,
+       158.75
+      ],
       "predicted_authored_mbps": 158.592808
      }
     },
@@ -4730,7 +5181,8 @@
       "bar_rows_passing": [
        0,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 145.325504
      },
      "lattice": {
       "pooled_full_mean": {
@@ -4762,6 +5214,10 @@
      "landing": {
       "chosen": "beekeeper1800-P1r145-L2",
       "attempts": 2,
+      "band": [
+       144.25,
+       145.75
+      ],
       "predicted_authored_mbps": 145.31346
      }
     },
@@ -4816,7 +5272,8 @@
       "bar_rows_passing": [
        0,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 158.260376
      },
      "lattice": {
       "pooled_full_mean": {
@@ -4848,6 +5305,10 @@
      "landing": {
       "chosen": "beekeeper1800-P1r158-L2",
       "attempts": 2,
+      "band": [
+       157.25,
+       158.75
+      ],
       "predicted_authored_mbps": 158.248332
      }
     },
@@ -4902,7 +5363,8 @@
       "bar_rows_passing": [
        3,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.539792
      },
      "lattice": {
       "pooled_full_mean": {
@@ -4934,6 +5396,10 @@
      "landing": {
       "chosen": "beekeeper1800-Z6-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.527748
      }
     },
@@ -4988,7 +5454,8 @@
       "bar_rows_passing": [
        3,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.569184
      },
      "lattice": {
       "pooled_full_mean": {
@@ -5020,6 +5487,10 @@
      "landing": {
       "chosen": "beekeeper1800-Zfn1-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.55714
      }
     },
@@ -5074,7 +5545,8 @@
       "bar_rows_passing": [
        3,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.491348
      },
      "lattice": {
       "pooled_full_mean": {
@@ -5106,6 +5578,10 @@
      "landing": {
       "chosen": "beekeeper1800-NP1-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.479304
      }
     },
@@ -5160,7 +5636,8 @@
       "bar_rows_passing": [
        3,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.49354
      },
      "lattice": {
       "pooled_full_mean": {
@@ -5192,6 +5669,10 @@
      "landing": {
       "chosen": "beekeeper1800-P1-L2",
       "attempts": 2,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.481496
      }
     },
@@ -5246,7 +5727,8 @@
       "bar_rows_passing": [
        3,
        8
-      ]
+      ],
+      "authored_video_packet_mbps": 129.441752
      },
      "lattice": {
       "pooled_full_mean": {
@@ -5278,6 +5760,10 @@
      "landing": {
       "chosen": "beekeeper1800-base-L4",
       "attempts": 4,
+      "band": [
+       128.5,
+       130.0
+      ],
       "predicted_authored_mbps": 129.429708
      }
     },
@@ -5746,12 +6232,13 @@
    }
   }
  },
- "accept_rule": "strict bar rows all pass; pooled full mean <= landed control (Z6; base for Qbase) - 0.02 in all four models on every fixture; shadow-p99 frames beating F >= the control in every model",
+ "accept_rule": "landed in band; strict bar 8/8 rows on each Michael fixture; pooled full mean <= landed control (Z6; base for Qbase) - 0.02 in all four models on every fixture; shadow-p99 frames beating F >= the control in every model",
  "verdicts": {
   "A00": {
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.007061893456826507,
@@ -5768,6 +6255,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.013006015305075946,
@@ -5790,6 +6278,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.023867344126099255,
@@ -5806,6 +6295,7 @@
      "pass": true
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.05484834866992694,
@@ -5828,6 +6318,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.005686391709617933,
@@ -5844,6 +6335,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.006181531427736031,
@@ -5866,6 +6358,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.019994438917749102,
@@ -5882,6 +6375,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.015511566752711481,
@@ -5904,6 +6398,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.017928729278170685,
@@ -5920,6 +6415,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.013695095019520487,
@@ -5942,6 +6438,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.05066547713121583,
@@ -5958,6 +6455,7 @@
      "pass": true
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.07253242676316995,
@@ -5974,12 +6472,15 @@
      "pass": true
     }
    },
-   "accept": true
+   "accept": false,
+   "michael_bar_pass": true,
+   "heldout_pass": false
   },
   "P1": {
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.06757645812393953,
@@ -5996,6 +6497,7 @@
      "pass": true
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.10342756206750092,
@@ -6012,12 +6514,15 @@
      "pass": true
     }
    },
-   "accept": true
+   "accept": false,
+   "michael_bar_pass": true,
+   "heldout_pass": false
   },
   "Q0": {
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.0032288806521079128,
@@ -6034,6 +6539,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.027099429323047985,
@@ -6056,6 +6562,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": 0.012840818699664025,
@@ -6072,6 +6579,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": 0.04781092162367839,
@@ -6094,6 +6602,7 @@
    "control": "base",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": 0.01087230252442506,
@@ -6110,6 +6619,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": 0.04108170473967454,
@@ -6132,6 +6642,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.008509427859506147,
@@ -6148,6 +6659,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.010065398378654278,
@@ -6170,6 +6682,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.016991434831326924,
@@ -6186,6 +6699,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.03880803225224638,
@@ -6208,6 +6722,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.013500566708795514,
@@ -6224,6 +6739,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.03438803120508438,
@@ -6246,6 +6762,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.02067763837787151,
@@ -6262,6 +6779,7 @@
      "pass": true
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.01374313828821161,
@@ -6284,6 +6802,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.08051613609290831,
@@ -6300,6 +6819,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.09721813002096935,
@@ -6322,6 +6842,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.06026442965374157,
@@ -6338,6 +6859,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.07501714372747381,
@@ -6360,6 +6882,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.025867703641794915,
@@ -6376,6 +6899,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.022957561635096102,
@@ -6398,6 +6922,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.008250636978743175,
@@ -6414,6 +6939,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.015087961593106547,
@@ -6436,6 +6962,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.035063536402412554,
@@ -6452,6 +6979,7 @@
      "pass": true
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.05221146734376858,
@@ -6470,10 +6998,51 @@
    },
    "accept": true
   },
+  "Zfn1d": {
+   "control": "Z6",
+   "per_fixture": {
+    "michael5400": {
+     "landed_in_band": true,
+     "bar_all_pass": true,
+     "pooled_mean_minus_control": {
+      "A": -0.035255275373878625,
+      "B": -0.03564258483638283,
+      "C": -0.03565089647318942,
+      "D": -0.035650955102988435
+     },
+     "shadow_wins_minus_control": {
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 0
+     },
+     "pass": true
+    },
+    "michael1800": {
+     "landed_in_band": true,
+     "bar_all_pass": true,
+     "pooled_mean_minus_control": {
+      "A": -0.05117787548646913,
+      "B": -0.05113128641203968,
+      "C": -0.05114227923122261,
+      "D": -0.05114457646492787
+     },
+     "shadow_wins_minus_control": {
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 0
+     },
+     "pass": true
+    }
+   },
+   "accept": true
+  },
   "Zr": {
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.010702911024580875,
@@ -6490,6 +7059,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": 0.016607300218248522,
@@ -6512,6 +7082,7 @@
    "control": "Z6",
    "per_fixture": {
     "michael5400": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.018141988980284518,
@@ -6528,6 +7099,7 @@
      "pass": false
     },
     "michael1800": {
+     "landed_in_band": true,
      "bar_all_pass": true,
      "pooled_mean_minus_control": {
       "A": -0.009391137459595633,

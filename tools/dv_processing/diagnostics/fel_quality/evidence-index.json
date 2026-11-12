@@ -238,7 +238,8 @@
       "protocol-psy-split-20261112.json",
       "protocol-map-family-20261112.json",
       "protocol-stack-20261112.json",
-      "protocol-beekeeper-rung-20261112.json"
+      "protocol-beekeeper-rung-20261112.json",
+      "protocol-map-fix-20261112.json"
     ],
     "tools": [
       "land_rate.py",
@@ -251,9 +252,9 @@
       "results/coding-loss-20261112.json",
       "results/bframe-probe-20261112.json",
       "results/grain-20261112.json",
-      "results/roi-gates-v7-v8-20261112.json"
+      "results/roi-gates-v7-v9-20261112.json"
     ],
     "private_root": "$FEL_ROI_ROOT/coding-loss",
-    "status": "Accepted on both Michael fixtures: A00P, Zfn1, stacks NP1 (Zfn1+C912+A00) and P1 (+psy off). Held-out Beekeeper: every recipe still loses to F on the whole picture at 130 Mb/s. Decoded planes deleted after scoring; mp4s, recipes, maps and qualifications retained."
+    "status": "Michael fixtures: A00P, Zfn1 (as executed; the declared map Zfn1d scores within 0.001) pass; stacks NP1/P1 pass the Michael bar but fail the stack protocol's held-out rule. Held-out Beekeeper: no recipe beats F at 130 Mb/s, nor P0/P1 at <=158 Mb/s in all four models. Decoded planes deleted after scoring; mp4s, recipes, maps and qualifications retained."
   }
 }
