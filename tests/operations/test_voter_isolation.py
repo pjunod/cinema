@@ -339,6 +339,17 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertTrue(started)
 
+    def test_hybrid_host_v1_hierarchy_before_the_unified_line_is_ignored(self):
+        # lab5 mounts a v1 net_cls hierarchy (VPN split tunnelling), so a job
+        # container's /proc/self/cgroup lists it ahead of the unified line.
+        for path, name, job in self.guarded_jobs():
+            script = self.verifier(job, name in {"package_smoke", "image", "platform"})
+            for membership in ("1:net_cls:/\n0::/\n", "2:net_cls,net_prio:/x\n0::/\n1:name=systemd:/\n"):
+                with self.subTest(workflow=path, job=name, membership=membership):
+                    result, started = self.run_verifier(script, membership=membership)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(started)
+
     def test_ignored_yaml_unlimited_swap_cpu_pid_and_missing_limits_stop_before_tools(self):
         variants = [{**self.EFFECTIVE, name: value} for name, value in (
             ("memory.max", "max"), ("memory.max", "17179869184"),
@@ -361,7 +372,8 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                     result, started = self.run_verifier(script, missing=missing)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertFalse(started)
-            for membership in ("1:memory:/\n", "0::relative\n", "0::/../escape\n", "0::/./escape\n"):
+            for membership in ("1:memory:/\n", "1:net_cls:/\n", "0::/\n0::/\n", "0:memory:/\n",
+                               "0::relative\n", "0::/../escape\n", "0::/./escape\n"):
                 with self.subTest(workflow=path, job=name, membership=membership):
                     result, started = self.run_verifier(script, membership=membership)
                     self.assertNotEqual(result.returncode, 0)
