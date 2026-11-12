@@ -31,7 +31,7 @@ locations. Media, decoded frames and binaries stay outside Git.
 | `coding_loss_readout.py` | Portable per-arm readout of the iso-rate coding-loss arms and the protocols' accept rules, including the held-out stack rule. |
 | `grain_ratio.py` | Report-only grain proxy: high-pass luma energy of the decode over the encoder input on 1–100 nit blocks. |
 | `rpu_refit_eval.py` | RPU re-fit: fits single-layer 8.1 mapping curves (luma polynomial, chroma MMR; the safe monotone, continuous, ridge-regularised form is what ships) to the FEL composition on the untouched BL and scores them, plus the parsed-back curves of real RPUs, through the frozen four models. |
-| `rpu_refit_write/` | Rust (dolby_vision 3.3.1): converts each source RPU to 8.1, writes the re-fitted curves, and prints them as parsed back from the written bytes. |
+| `rpu_refit_write/` | Rust (dolby_vision 3.3.1): converts each source RPU to 8.1, writes the re-fitted curves (and, for decoder checks only, an optional L1 override), and prints them as parsed back from the written bytes. |
 | `inject_rpu.py` | Puts one RPU NAL at the end of each access unit of an Annex B HEVC stream without B-frames (test clips only). |
 | `dv_display_check.swift` | macOS: renders an AVPlayerLayer offscreen and reports mean linear RGB (optionally dumping the texture), to check whether the platform display path applies an 8.1 RPU's mapping. |
 | `dv_patch_check.py`, `dv_patch_clips.sh` | Flat-patch decoder check: 48 patches played with the re-fit RPU, pre-mapped with the identity RPU, and unmapped; tells whether a decoder applies the curves as libplacebo does. |

@@ -269,6 +269,6 @@
     ],
     "portable_results": "results/rpu-refit-20261112.json",
     "private_root": "$FEL_ROI_ROOT/rpu-refit",
-    "status": "F+ (Fp_safe: monotone, continuous luma pieces and a ridge chroma MMR) on the untouched BL removes 54-59% (Michael) and 26-34% (Beekeeper) of F's pooled error with no encode; it beats F in all 48 frames on all fixtures and models, and the cross-fitted curves lose under 0.005. It beats the best re-encode pooled but not on Michael frame 0 or several shadow tails. Real RPUs round-trip to the fit exactly. macOS applies the curves closely (flat-patch check); Android not observed."
+    "status": "F+ (Fp_safe: monotone, continuous luma pieces and a ridge chroma MMR) on the untouched BL removes 54-59% (Michael) and 26-34% (Beekeeper) of F's pooled error with no encode; it beats F in all 48 frames on all fixtures and models, and the cross-fitted curves lose under 0.005. It beats the best re-encode pooled but not on Michael frame 0 or several shadow tails. Real RPUs round-trip to the fit exactly. macOS applies the curves closely (flat-patch check); the Lenovo TB322FC's Dolby mobile decoder ignores the mapping (F+ looks like F there)."
   }
 }

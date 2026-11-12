@@ -1,5 +1,5 @@
 {
- "scope": "RPU re-fit (protocol-rpu-refit-20261112.json incl. amendments 1-4): untouched BL plus re-fitted single-layer mapping curves, scored against the FEL composition with the frozen four-model operators; no encode. F+ = Fp_safe (the only arm written to RPUs). Device checks: macOS AVFoundation display path only.",
+ "scope": "RPU re-fit (protocol-rpu-refit-20261112.json incl. amendments 1-4): untouched BL plus re-fitted single-layer mapping curves, scored against the FEL composition with the frozen four-model operators; no encode. F+ = Fp_safe (the only arm written to RPUs). Device checks: macOS AVFoundation display path; Lenovo TB322FC Dolby mobile decoder.",
  "fixtures": {
   "michael5400": {
    "sources": {
@@ -1990,5 +1990,12 @@
   },
   "conclusion": "macOS applies a non-identity 8.1 luma polynomial and chroma MMR in the display path, close to libplacebo semantics (A matches B, not C); not bit-exact."
  },
- "device_check_android": "Not observed. Google TV Streamer: video plane black to screencap/screenrecord, HDR10-only monitor. Pixels: no Dolby Vision display support. Lenovo TB322FC (Dolby Vision decoder, screencap sees video) pending."
+ "device_check_android": {
+  "device": "Lenovo TB322FC (Qualcomm Adreno 830; display reports Dolby Vision); Google Photos player; decoder c2.dolby.decoder.hevc (Dolby Vision Mobile_3.1.0, GPU processing IMPL_TARGET_OTT_OPENGL, RGB output); adb screencap 2.5 s into playback",
+  "rpu_parsed": "yes: the decoder logs profile 8.1; its only parseRPU failure is at pts 0 (codec config buffer), the same for the production author's 8.1 output",
+  "dm_metadata_applied": "yes: the same frames with L1 max/avg overridden to 4095/3600 drop the picture mean from (76.5, 61.3, 56.5) to (48.0, 37.4, 33.9) 8-bit RGB",
+  "mapping_applied": "no: luma x0.5 is pixel-identical to the identity RPU (max difference 0); flat-patch A (F+ RPU) is pixel-identical to C (identity RPU) on all 48 patches in two repeats while B (pre-mapped pixels) differs; a +0.15 Cr constant shows no tint",
+  "conclusion": "This Dolby mobile decoder ignores the 8.1 composer mapping (luma polynomial and chroma MMR) and applies the DM metadata, so F+ shows exactly what F shows on it: no gain, no harm.",
+  "not_observed": "Google TV Streamer (video plane black to screencap; HDR10-only monitor); the Pixels have no Dolby Vision display support."
+ }
 }

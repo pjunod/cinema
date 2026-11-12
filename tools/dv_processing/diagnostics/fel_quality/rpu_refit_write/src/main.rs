@@ -3,13 +3,15 @@
 //!
 //! PLAN.json: {"frames": [{"src": "<P7 RPU NAL>", "out": "<P8.1 RPU NAL>"}, ...],
 //!             "luma": {"pivot_deltas": [u16; 9], "coef": [[c0, c1, c2]; 8]},
-//!             "chroma": [{"constant": f, "coef": [[f; 7]; 3]}; 2]}
+//!             "chroma": [{"constant": f, "coef": [[f; 7]; 3]}; 2],
+//!             "l1": [min_pq, max_pq, avg_pq]}   (optional, diagnostics only: overrides every frame's L1)
 //! Coefficients are in the composer's normalised domain (BL code / 2^bl_bit_depth in,
 //! 1.0 = 2^vdr_bit_depth out). Each source RPU is converted to 8.1 (dovi_tool mode 2) and its
 //! mapping replaced; everything else (L1/L2 etc.) is kept. Prints, per frame, the curves as
 //! parsed back from the written bytes so the caller can check the round trip.
 use anyhow::{ensure, Context, Result};
 use dolby_vision::rpu::dovi_rpu::DoviRpu;
+use dolby_vision::rpu::extension_metadata::blocks::{ExtMetadataBlock, ExtMetadataBlockLevel1};
 use dolby_vision::rpu::rpu_data_mapping::{DoviMMRCurve, DoviMappingMethod, DoviPolynomialCurve};
 use serde_json::{json, Value};
 use std::fs;
@@ -95,6 +97,11 @@ fn main() -> Result<()> {
             m.mmr_coef_int.push(oi);
             m.mmr_coef.push(of);
             cc.mmr = Some(m);
+        }
+        if let Some(l1) = plan.get("l1").and_then(|v| v.as_array()) {
+            let pq = |i: usize| l1[i].as_u64().expect("l1 value") as u16;
+            let dm = rpu.vdr_dm_data.as_mut().context("no DM data")?;
+            dm.replace_metadata_block(ExtMetadataBlock::Level1(ExtMetadataBlockLevel1 { min_pq: pq(0), max_pq: pq(1), avg_pq: pq(2) }))?;
         }
         rpu.modified = true;
         let out = rpu.write_hevc_unspec62_nalu()?;

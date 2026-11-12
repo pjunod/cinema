@@ -122,15 +122,28 @@ path.
   carry up to half a code of rounding. A repeat render is bit-identical.
 - iOS and tvOS share the AVFoundation pipeline but were not measured.
 
-**Android: not yet observed.** The Google TV Streamer's video plane is black
-to screencap and screenrecord, and its monitor is HDR10-only. The Pixels have
-no Dolby Vision display support. The Lenovo TB322FC has a Dolby Vision
-decoder, and screencap sees its video. The same patch clips are ready for it.
+**Android (Lenovo TB322FC): the mapping is ignored.** Google Photos plays
+the clips through `c2.dolby.decoder.hevc` (Dolby Vision Mobile 3.1, GPU
+processing, RGB output), and `adb screencap` sees the processed picture.
+- The decoder parses the RPUs. With L1 max/avg overridden (the writer's
+  diagnostic `l1` plan field), the same frames drop from a mean of 76.5 to
+  48.0 on 8-bit red.
+- The mapping curves change nothing. Luma ×0.5 is pixel-identical to the
+  identity RPU. Patch clip A is pixel-identical to C on all 48 patches, in
+  two repeats, while B differs. A +0.15 Cr constant shows no tint.
+- So on this decoder, F+ looks exactly like F: no gain and no harm. The
+  production author's own 8.1 output logs the same single parse failure at
+  pts 0 (the codec config buffer), so that failure is not specific to F+.
+- The Google TV Streamer still can't be observed: its video plane is black
+  to screencap and its monitor is HDR10-only. The Pixels have no Dolby Vision
+  display support.
 
 ## What it changes
 
-- F+ is a strict improvement over today's F at no encode cost. It should
-  replace identity curves in the 8.1 conversion for P7 FEL titles.
+- F+ is a strict improvement over today's F at no encode cost where the
+  decoder applies the 8.1 mapping (Apple), and identical to F where it
+  doesn't (Dolby's Android mobile decoder). It should replace identity
+  curves in the 8.1 conversion for P7 FEL titles.
 - It is not a replacement for re-encoding where frame detail matters. The
   per-title rule needs both arms: serve F+ by default, and re-encode only
   where a trial beats F+ by enough to pay for the encode.
