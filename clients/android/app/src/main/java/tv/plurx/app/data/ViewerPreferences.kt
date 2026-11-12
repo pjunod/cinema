@@ -145,12 +145,21 @@ enum class LibraryPresentation(val storageValue: String, val label: String) {
     }
 }
 
+/** Which titles a library lists: what plays now, what Curator offloaded, or both. */
+enum class LibraryPresence(val storageValue: String, val label: String) {
+    Disk("disk", "On disk"), Offloaded("offloaded", "Offloaded"), Everything("everything", "Everything");
+    companion object {
+        fun fromStorage(value: String?): LibraryPresence = entries.firstOrNull { it.storageValue == value } ?: Disk
+    }
+}
+
 data class ViewerPreferences(
     val theme: ThemeId = ThemeId.Classic,
     val layout: ViewerLayout = ViewerLayout.Standard,
     val appearance: Appearance = Appearance.System,
     val posterSize: PosterSize = PosterSize.Medium,
     val libraryPresentation: LibraryPresentation = LibraryPresentation.Rows,
+    val libraryPresence: LibraryPresence = LibraryPresence.Disk,
     val homeGrouping: HomeGrouping = HomeGrouping.Category,
     val playbackQuality: PlaybackQuality = PlaybackQuality.Auto,
     val hdrDisplayPeak: HdrDisplayPeak = HdrDisplayPeak.Auto,
