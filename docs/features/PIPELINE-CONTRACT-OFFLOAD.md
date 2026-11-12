@@ -1,5 +1,8 @@
 # Pipeline contract: Offload and Get it back
 
+**Status:** built · **Parent:** [PIPELINE-CONTRACT.md](PIPELINE-CONTRACT.md) ·
+**Wire:** [INTEGRATION.md](../INTEGRATION.md) §1.11, [API.md](../API.md)
+
 Curator can delete a title's files to free disk and keep the title. This is the
 cinema side of the amendment (built; Curator side open). It builds on the
 probe-only scan of [PIPELINE-CONTRACT-REMOVED-PATHS.md](PIPELINE-CONTRACT-REMOVED-PATHS.md).
