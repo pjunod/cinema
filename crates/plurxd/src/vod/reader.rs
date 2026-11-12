@@ -19,6 +19,10 @@ pub(super) struct Recipe {
     /// of the rendition directory key so weak legacy metadata cannot alias
     /// segments across an in-place source rewrite.
     pub(super) cluster_cache_key: Option<String>,
+    /// The init contract a v3 copy index was sealed with. A generation of
+    /// this recipe serves only when its promoted muxer init has this
+    /// contract. None for every other index.
+    pub(super) copy_index_init_contract: Option<String>,
     /// A frozen encoded strategy; None is the indexed compressed-copy path.
     pub(super) encoding: Option<Arc<crate::vodencode::Encoding>>,
 }

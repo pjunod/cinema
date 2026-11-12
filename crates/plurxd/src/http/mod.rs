@@ -616,7 +616,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/cluster/learner/join/finalize"
         | "/internal/media/cache-copy/{recipe}/{digest}/{object}"
         | "/internal/media/fragment-index/{cache_key}"
-        | "/internal/media/copy-index-v3/{contract_key}/{blob_sha256}"
+        | "/internal/media/copy-index-v3/{source_key}/{blob_sha256}"
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         crate::diagnostics::PEER_PATH
         | internal_activity::PATH
@@ -2410,7 +2410,7 @@ pub fn router(state: AppState) -> Router {
             get(internal_media::fragment_index),
         )
         .route(
-            "/internal/media/copy-index-v3/{contract_key}/{blob_sha256}",
+            "/internal/media/copy-index-v3/{source_key}/{blob_sha256}",
             get(internal_media::copy_index_v3),
         )
         .route(
@@ -2720,7 +2720,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
             .strip_prefix(crate::fragment_index_cluster::PEER_PATH_PREFIX)
             .is_some_and(|cache_key| !cache_key.is_empty() && !cache_key.contains('/'));
     // The v3 copy-index read hydrates from the same learner-inclusive
-    // directory: exactly one contract key and one blob digest.
+    // directory: exactly one source key and one blob digest.
     let copy_index_read =
         method == Method::GET && crate::copy_index_v3::peer_route_key(path).is_some();
     let subtitle_source_read = method == Method::GET

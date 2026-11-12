@@ -1519,7 +1519,7 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         assert!(learner_route_eligible(&method, path), "{method} {path}");
     }
     // Peer hydration of a v3 copy index uses the same learner-inclusive
-    // directory, and admits exactly one contract key and one blob digest.
+    // directory, and admits exactly one source key and one blob digest.
     let contract_key = "a".repeat(64);
     let blob_sha256 = "b".repeat(64);
     let copy_index = crate::copy_index_v3::peer_path(&contract_key, &blob_sha256);

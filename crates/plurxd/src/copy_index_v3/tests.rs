@@ -229,9 +229,63 @@ impl Fixture {
     }
 
     async fn resolve(&self) -> Option<ResolvedCopyIndex> {
-        resolve(&self.store, None, NODE, &self.cache, &self.file, self.video)
+        resolve(
+            &self.store,
+            None,
+            NODE,
+            &self.namespace,
+            &self.cache,
+            &self.file,
+            self.video,
+        )
+        .await
+        .expect("resolution")
+    }
+
+    /// This node's own head, quarantined while still pointing at the variant.
+    fn quarantine_own_head(&self, artifact: &CopyIndexV3Artifact) {
+        let identity = crate::fragindex::identity_for(&self.file, self.video);
+        let source = crate::copy_analysis::source_for_copy(
+            &self.namespace,
+            &self.file,
+            &identity.argv_fingerprint,
+            &self.object_version,
+            NODE,
+        )
+        .expect("copy source");
+        let key = copy_index_v3_source_key(&self.namespace, &source).expect("source key");
+        rusqlite::Connection::open(&self.db)
+            .expect("seed")
+            .execute(
+                "INSERT INTO copy_index_v3_heads(source_key,catalog_namespace,file_id,origin_node_id,object_version,source_size,source_mtime,raw_video_identity,contract_version,desired_generation,head_epoch,state,contract_key,blob_sha256,published_generation,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,'quarantined',?11,?12,?13,?14)",
+                rusqlite::params![
+                    key,
+                    self.namespace,
+                    source.file_id,
+                    source.origin_node_id,
+                    source.object_version,
+                    source.source_size,
+                    source.source_mtime,
+                    source.video_identity,
+                    source.contract_version,
+                    hex64('f'),
+                    artifact.contract_key,
+                    artifact.blob_sha256,
+                    source.requested_generation,
+                    NOW
+                ],
+            )
+            .expect("quarantined head");
+    }
+
+    async fn holders(&self, artifact: &CopyIndexV3Artifact) -> Vec<String> {
+        self.store
+            .copy_index_v3_locations(&artifact.contract_key, &artifact.blob_sha256)
             .await
-            .expect("resolution")
+            .expect("locations")
+            .into_iter()
+            .map(|location| location.node_id)
+            .collect()
     }
 }
 
@@ -269,6 +323,10 @@ async fn the_origin_plans_from_its_exact_head_and_local_blob() {
         resolved.rendition_cache_key,
         format!("copy-index-v3:{}", artifact.contract_key)
     );
+    assert_eq!(
+        resolved.init_contract_sha256, artifact.init_contract_sha256,
+        "the plan carries the contract its generations must serve"
+    );
     let proof = resolved
         .index
         .promotion
@@ -278,6 +336,16 @@ async fn the_origin_plans_from_its_exact_head_and_local_blob() {
         proof.permits_on_node(&fixture.object_version, NODE),
         "the proof is bound to this node's current object"
     );
+
+    // A holder row another node retired is restored by the next verified
+    // local hit, from what the head read already said.
+    assert!(fixture
+        .store
+        .forget_copy_index_v3_location(&artifact.contract_key, &artifact.blob_sha256, NODE)
+        .await
+        .expect("a peer retires this node's row"));
+    assert!(fixture.resolve().await.is_some());
+    assert_eq!(fixture.holders(&artifact).await, vec![NODE.to_owned()]);
 
     // A local blob that is not the catalogued bytes is discarded, never used.
     let path = crate::copy_analysis::v3_blob_path(
@@ -291,14 +359,16 @@ async fn the_origin_plans_from_its_exact_head_and_local_blob() {
     assert!(fixture.resolve().await.is_none());
     assert!(!path.exists(), "the corrupt blob is removed");
     assert!(
-        fixture
-            .store
-            .copy_index_v3_locations(&artifact.contract_key, &artifact.blob_sha256)
-            .await
-            .expect("locations")
-            .is_empty(),
+        fixture.holders(&artifact).await.is_empty(),
         "and this node no longer claims to hold it"
     );
+
+    // An engine that emitted another init than the sealed one stops this
+    // process planning from the contract; the caller uses its next index.
+    fixture.install(&artifact, &blob).await;
+    assert!(fixture.resolve().await.is_some());
+    refuse_on_this_engine(&resolved.rendition_cache_key);
+    assert!(fixture.resolve().await.is_none());
 }
 
 /// Another origin's head describes this node's bytes only when this node's
@@ -351,6 +421,18 @@ async fn another_origins_head_needs_this_nodes_own_full_source_receipt() {
         .hevc_configuration
         .expect("HEVC proof")
         .permits_on_node(&fixture.object_version, NODE));
+    let mut holders = fixture.holders(&artifact).await;
+    holders.sort();
+    assert_eq!(
+        holders,
+        vec![NODE.to_owned(), "node-two".to_owned()],
+        "a verified local copy this node was not listed for is recorded"
+    );
+
+    // The blob this node's own head was quarantined for is never adopted
+    // back through another origin's pointer.
+    fixture.quarantine_own_head(&artifact);
+    assert!(fixture.resolve().await.is_none());
 }
 
 /// A variant sealed before the whole-title HDR10 fold would serve another
@@ -464,6 +546,7 @@ fn a_v3_index_serves_the_init_its_seal_published_the_contract_of() {
 
 #[test]
 fn the_peer_route_names_exactly_one_variant() {
+    // A head's source key, then the blob digest it points at.
     let contract_key = hex64('a');
     let blob_sha256 = hex64('b');
     let path = peer_path(&contract_key, &blob_sha256);

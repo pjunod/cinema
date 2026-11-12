@@ -233,6 +233,7 @@ impl VodServe {
                 video: CopyVideoOptions::new(false, false),
                 source_object_version: None,
                 cluster_cache_key: None,
+                copy_index_init_contract: None,
                 encoding: None,
             },
             source: None,
@@ -455,6 +456,7 @@ impl VodServe {
                 cluster_node_id,
                 cluster_index_root,
                 cluster_membership,
+                catalog_namespace: tokio::sync::OnceCell::new(),
                 sessions: Mutex::new(HashMap::new()),
                 passive_grants: passive_grant::Registry::default(),
                 preparing_sessions: StdMutex::new(HashMap::new()),
@@ -582,25 +584,39 @@ impl VodServe {
         &self,
         file: &MediaFile,
         video: CopyVideoOptions,
-    ) -> Option<(FragmentIndex, String, String)> {
+    ) -> Option<crate::copy_index_v3::ResolvedCopyIndex> {
         let node_id = self.shared.cluster_node_id.as_deref()?;
-        match crate::copy_index_v3::resolve(
-            self.shared.store.as_ref(),
-            self.shared.cluster_membership.as_ref(),
-            node_id,
-            &self.shared.runtime_cache,
-            file,
-            video,
-        )
-        .await
-        {
-            Ok(resolved) => resolved.map(|resolved| {
-                (
-                    resolved.index,
-                    resolved.object_version,
-                    resolved.rendition_cache_key,
+        // A recipe planned from a shared index is fenced on the engine at
+        // every generation, exactly as a v2 one is. With a changed engine it
+        // could not produce, so the node-local index keeps the title playing.
+        if !crate::ffmpeg::fragment_index_engine_is_current().await {
+            return None;
+        }
+        let resolved =
+            async {
+                let namespace =
+                    self.shared
+                        .catalog_namespace
+                        .get_or_try_init(|| async {
+                            self.shared.store.instance_id().await.map_err(|error| {
+                                format!("reading the catalogue namespace: {error}")
+                            })
+                        })
+                        .await?;
+                crate::copy_index_v3::resolve(
+                    self.shared.store.as_ref(),
+                    self.shared.cluster_membership.as_ref(),
+                    node_id,
+                    namespace,
+                    &self.shared.runtime_cache,
+                    file,
+                    video,
                 )
-            }),
+                .await
+            }
+            .await;
+        match resolved {
+            Ok(resolved) => resolved,
             Err(reason) => {
                 tracing::debug!(target: "plurxd::vodserve", file_id = file.id, %reason, "v3 copy index unavailable");
                 None

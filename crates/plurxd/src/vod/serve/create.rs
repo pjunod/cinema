@@ -694,8 +694,15 @@ impl VodServe {
         } else {
             None
         };
+        let copy_index_init_contract = copy_index
+            .as_ref()
+            .map(|found| found.init_contract_sha256.clone());
         let cluster_index = if let Some(found) = copy_index {
-            Ok(Some(found))
+            Ok(Some((
+                found.index,
+                found.object_version,
+                found.rendition_cache_key,
+            )))
         } else if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
@@ -918,6 +925,7 @@ impl VodServe {
             video,
             source_object_version,
             cluster_cache_key,
+            copy_index_init_contract,
             encoding: prepared.encoding.take(),
         };
         Ok(PreparedVodRecipe {
@@ -2681,8 +2689,15 @@ impl VodServe {
         } else {
             None
         };
+        let copy_index_init_contract = copy_index
+            .as_ref()
+            .map(|found| found.init_contract_sha256.clone());
         let cluster_index = if let Some(found) = copy_index {
-            Ok(Some(found))
+            Ok(Some((
+                found.index,
+                found.object_version,
+                found.rendition_cache_key,
+            )))
         } else if prepared.encoding.is_some() || source_binding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
@@ -2898,6 +2913,7 @@ impl VodServe {
             video,
             source_object_version,
             cluster_cache_key,
+            copy_index_init_contract,
             encoding: prepared.encoding,
         };
         let key = source_binding.map_or_else(

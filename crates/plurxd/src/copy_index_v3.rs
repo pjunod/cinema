@@ -1,24 +1,26 @@
 //! The reader of published v3 copy indexes.
 //!
-//! VOD planning asks here first. A healthy head for this node's exact source
-//! key is used as it stands; a healthy head another origin published for the
-//! same catalogue file is used only when this node's own full-source
-//! attestation equals the variant's source digest. The variant's bytes come
-//! from this node's v3 root, or from a listed holder over the peer route, and
-//! are verified by size and SHA-256 before they are installed, recorded as a
-//! location or decoded. Nothing here reads the source, queues work or grants
-//! serving authority; without a usable head the caller keeps its existing
-//! index order.
-use std::collections::HashMap;
+//! VOD planning asks here first. This node's own head is read by its exact
+//! source key and used as it stands. Only on a miss, and only when this node
+//! holds its own full-source receipt, a readable head another origin
+//! published for the same catalogue file is used if that receipt names the
+//! variant's source digest. The variant's bytes come from this node's v3
+//! root, or from a listed holder over the peer route, and are verified by
+//! size and SHA-256 before they are installed, recorded as a location or
+//! decoded. Nothing here reads the source, queues work or grants serving
+//! authority; without a usable head the caller keeps its existing index
+//! order.
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::MediaFile;
-use plurx_core::segplan::FragmentIndex;
+use plurx_core::segplan::{FragmentIndex, SourceIdentity};
 use plurx_core::store::{
-    CopyIndexV3Artifact, CopyIndexV3Head, CopyIndexV3HeadState, FragmentIndexOutputIdentity, Store,
-    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    CopyIndexV3Artifact, CopyIndexV3HeadState, CopyIndexV3Location, CopyIndexV3Variant,
+    FragmentIndexOutputIdentity, Store, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
 };
 use plurx_core::transcode::CopyVideoOptions;
 
@@ -26,6 +28,12 @@ use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
 pub(crate) const PEER_PATH_PREFIX: &str = "/internal/media/copy-index-v3/";
 const PEER_DEADLINE: Duration = Duration::from_secs(8);
+
+/// The body of the one 404 that means "this route knows the variant and this
+/// node does not hold its bytes". Only that answer retires a holder's row: a
+/// node without the route, or a variant it will not serve, answers a plain
+/// 404 and proves nothing about what it holds.
+pub(crate) const ABSENT_BODY: &[u8] = b"copy-index-v3-variant-absent";
 
 /// A decoded v3 index bound to this node's current source object.
 pub(crate) struct ResolvedCopyIndex {
@@ -36,6 +44,38 @@ pub(crate) struct ResolvedCopyIndex {
     /// What a rendition planned from this index is keyed by: the semantic
     /// output contract, never a blob variant or engine.
     pub(crate) rendition_cache_key: String,
+    /// The init contract the seal published. A generation serves this index
+    /// only when its own muxer init, promoted, has exactly this contract.
+    pub(crate) init_contract_sha256: String,
+}
+
+/// Contracts whose sealed init this process's engine does not produce. The
+/// engine is fixed for the life of the process, so a refusal found by one
+/// generation holds for every later plan: planning then uses its next index
+/// instead of selecting the same contract again.
+static UNSERVED_CONTRACTS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+const MAX_UNSERVED_CONTRACTS: usize = 4096;
+
+/// Record that a generation of `rendition_cache_key` produced an init other
+/// than the sealed one.
+pub(crate) fn refuse_on_this_engine(rendition_cache_key: &str) {
+    let mut unserved = UNSERVED_CONTRACTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let unserved = unserved.get_or_insert_with(HashSet::new);
+    if unserved.len() >= MAX_UNSERVED_CONTRACTS {
+        // Forgetting only costs one more refused generation per contract.
+        unserved.clear();
+    }
+    unserved.insert(rendition_cache_key.to_owned());
+}
+
+fn refused_on_this_engine(rendition_cache_key: &str) -> bool {
+    UNSERVED_CONTRACTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|unserved| unserved.contains(rendition_cache_key))
 }
 
 fn digest(value: &str) -> bool {
@@ -45,176 +85,207 @@ fn digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// The peer path of one variant: `{contract_key}/{blob_sha256}`.
-pub(crate) fn peer_path(contract_key: &str, blob_sha256: &str) -> String {
-    format!("{PEER_PATH_PREFIX}{contract_key}/{blob_sha256}")
+/// The peer path of one head's variant: `{source_key}/{blob_sha256}`.
+pub(crate) fn peer_path(source_key: &str, blob_sha256: &str) -> String {
+    format!("{PEER_PATH_PREFIX}{source_key}/{blob_sha256}")
 }
 
-/// Exactly a contract key and a blob digest, nothing deeper or emptier.
+/// Exactly a source key and a blob digest, nothing deeper or emptier.
 pub(crate) fn peer_route_key(path: &str) -> Option<(&str, &str)> {
-    let (contract_key, blob_sha256) = path.strip_prefix(PEER_PATH_PREFIX)?.split_once('/')?;
-    (digest(contract_key) && digest(blob_sha256)).then_some((contract_key, blob_sha256))
+    let (source_key, blob_sha256) = path.strip_prefix(PEER_PATH_PREFIX)?.split_once('/')?;
+    (digest(source_key) && digest(blob_sha256)).then_some((source_key, blob_sha256))
 }
 
-/// A head a consumer may read: healthy, and published for the generation it
-/// still desires (a quarantine moves the desire before any successor exists).
-fn usable(head: &CopyIndexV3Head) -> Option<(&str, &str)> {
-    (head.state == CopyIndexV3HeadState::Healthy
-        && head.published_generation.as_deref() == Some(head.desired_generation.as_str()))
-    .then_some(())?;
-    Some((head.contract_key.as_deref()?, head.blob_sha256.as_deref()?))
+/// What one resolution needs of this node, fixed before any head is read.
+struct Consumer<'a> {
+    store: &'a dyn Store,
+    membership: Option<&'a MembershipManager>,
+    node_id: &'a str,
+    namespace: &'a str,
+    root: std::path::PathBuf,
+    file: &'a MediaFile,
+    identity: SourceIdentity,
+    object_version: String,
 }
 
 /// Resolve the v3 index for one copy of `file` on this node, or `None` when no
-/// usable head, holder or valid blob exists.
+/// usable head, holder or valid blob exists. `namespace` is the cluster's
+/// catalogue identity, as the publisher keyed it.
 pub(crate) async fn resolve(
     store: &dyn Store,
     membership: Option<&MembershipManager>,
     node_id: &str,
+    namespace: &str,
     runtime_cache: &Path,
     file: &MediaFile,
     video: CopyVideoOptions,
 ) -> Result<Option<ResolvedCopyIndex>, String> {
-    // The cluster's shared catalogue identity, as the publisher keyed it.
-    let namespace = store
-        .instance_id()
-        .await
-        .map_err(|error| format!("reading the catalogue namespace: {error}"))?;
-    let heads = store
-        .copy_index_v3_healthy_heads(&namespace, file.id)
-        .await
-        .map_err(|error| format!("reading copy index heads: {error}"))?;
-    if heads.is_empty() {
-        return Ok(None);
-    }
     // This node's current object: a stat checked against the scanner's facts.
     let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
     let identity = crate::fragindex::identity_for(file, video);
     let own = crate::copy_analysis::source_for_copy(
-        &namespace,
+        namespace,
         file,
         &identity.argv_fingerprint,
         &object_version,
         node_id,
     )
     .map_err(|error| format!("deriving the copy source: {error}"))?;
-    let own_key = plurx_core::store::copy_index_v3_source_key(&namespace, &own)
+    let own_key = plurx_core::store::copy_index_v3_source_key(namespace, &own)
         .map_err(|error| format!("deriving the copy source key: {error}"))?;
-    // This node's exact key first; then other origins' heads of the same
-    // catalogue file, video identity and contract.
-    let (exact, foreign): (Vec<_>, Vec<_>) = heads
-        .iter()
-        .filter(|head| {
-            head.source_size == file.size
-                && head.source_mtime == file.mtime
-                && head.raw_video_identity == identity.argv_fingerprint
-                && head.contract_version == own.contract_version
-        })
-        .partition(|head| head.source_key == own_key);
-    let root = crate::copy_analysis::v3_root(runtime_cache);
-    let mut attested: Option<Option<String>> = None;
-    for (head, is_exact) in exact
-        .into_iter()
-        .map(|head| (head, true))
-        .chain(foreign.into_iter().map(|head| (head, false)))
-    {
-        let Some((contract_key, blob_sha256)) = usable(head) else {
-            continue;
-        };
-        let artifact = match store
-            .copy_index_v3_artifact(contract_key, blob_sha256)
-            .await
-        {
-            Ok(Some(artifact))
-                if artifact.catalog_namespace == namespace
-                    && artifact.file_id == file.id
-                    && artifact.contract_version == head.contract_version =>
-            {
-                artifact
-            }
-            Ok(_) => continue,
-            Err(error) => return Err(format!("reading the copy index variant: {error}")),
-        };
-        if !is_exact {
-            // Another origin's opaque object version proves nothing here. Its
-            // index describes this node's bytes only when this node's own
-            // full-source receipt names the same content.
-            if attested.is_none() {
-                attested =
-                    Some(attested_source_sha256(store, node_id, file, &object_version).await?);
-            }
-            if attested.as_ref().and_then(Option::as_deref) != Some(artifact.source_sha256.as_str())
-            {
-                continue;
-            }
+    let consumer = Consumer {
+        store,
+        membership,
+        node_id,
+        namespace,
+        root: crate::copy_analysis::v3_root(runtime_cache),
+        file,
+        identity,
+        object_version,
+    };
+    // This node's own head, by primary key.
+    let own_variant = store
+        .copy_index_v3_variant(&own_key, node_id)
+        .await
+        .map_err(|error| format!("reading the copy index head: {error}"))?;
+    if let Some(variant) = &own_variant {
+        if let Some(resolved) = consumer.plan_from(variant).await? {
+            return Ok(Some(resolved));
         }
-        let Some(blob) = load_blob(store, membership, node_id, &root, &artifact).await? else {
+    }
+    // Another origin's opaque object version proves nothing here. Its index
+    // describes this node's bytes only when this node's own full-source
+    // receipt names the same content, so without one there is nothing to
+    // list.
+    let Some(attested) = consumer.attested_source_sha256().await? else {
+        return Ok(None);
+    };
+    // A blob this node's own head was quarantined for is never adopted back
+    // through another origin's pointer.
+    let quarantined = own_variant
+        .as_ref()
+        .filter(|variant| variant.head.state == CopyIndexV3HeadState::Quarantined)
+        .and_then(|variant| variant.head.blob_sha256.as_deref());
+    let heads = store
+        .copy_index_v3_healthy_heads(namespace, &own)
+        .await
+        .map_err(|error| format!("reading copy index heads: {error}"))?;
+    for head in heads {
+        if head.source_key == own_key
+            || (quarantined.is_some() && head.blob_sha256.as_deref() == quarantined)
+        {
+            continue;
+        }
+        let Some(variant) = store
+            .copy_index_v3_variant(&head.source_key, node_id)
+            .await
+            .map_err(|error| format!("reading the copy index variant: {error}"))?
+        else {
             continue;
         };
-        match decode_verified(&blob, &artifact) {
-            Ok(mut index) => {
-                index.source = identity.clone();
-                if let Some(proof) = index.promotion.hevc_configuration.as_mut() {
-                    if !proof.bind_equivalent_source(
-                        &artifact.source_sha256,
-                        node_id,
-                        &object_version,
-                    ) {
-                        tracing::warn!(
-                            file_id = file.id,
-                            contract_key,
-                            "copy index v3 HEVC proof is not bound to its attested source"
-                        );
-                        continue;
-                    }
-                }
-                return Ok(Some(ResolvedCopyIndex {
-                    index,
-                    object_version,
-                    rendition_cache_key: format!("copy-index-v3:{contract_key}"),
-                }));
-            }
-            Err(reason) => {
-                // Refused, not repaired: the caller falls back to its next
-                // index path and this head stays as published.
-                tracing::warn!(
-                    file_id = file.id,
-                    contract_key,
-                    blob_sha256,
-                    %reason,
-                    "copy index v3 variant refused"
-                );
-            }
+        if variant
+            .readable()
+            .is_none_or(|artifact| artifact.source_sha256 != attested)
+            || (quarantined.is_some() && variant.head.blob_sha256.as_deref() == quarantined)
+        {
+            continue;
+        }
+        if let Some(resolved) = consumer.plan_from(&variant).await? {
+            return Ok(Some(resolved));
         }
     }
     Ok(None)
 }
 
-/// This node's full-file SHA-256 of its current object, from the receipts the
-/// v3 publication itself accepts: a regime-1 attestation, or a full (never
-/// sampled) v2 source receipt.
-async fn attested_source_sha256(
-    store: &dyn Store,
-    node_id: &str,
-    file: &MediaFile,
-    object_version: &str,
-) -> Result<Option<String>, String> {
-    let receipt = store
-        .copy_index_source_attestation(node_id, file.id, object_version)
-        .await
-        .map_err(|error| format!("reading the source attestation: {error}"))?;
-    if let Some(receipt) = receipt
-        .filter(|receipt| receipt.source_size == file.size && receipt.source_mtime == file.mtime)
-    {
-        return Ok(Some(receipt.source_sha256));
+impl Consumer<'_> {
+    /// Plan from one head's variant, or `None` when it is unreadable, its
+    /// bytes are unavailable, or it is refused. A refusal repairs nothing:
+    /// the caller moves to its next index and the head stays as published.
+    async fn plan_from(
+        &self,
+        variant: &CopyIndexV3Variant,
+    ) -> Result<Option<ResolvedCopyIndex>, String> {
+        let Some(artifact) = variant.readable().filter(|artifact| {
+            artifact.catalog_namespace == self.namespace
+                && artifact.file_id == self.file.id
+                && artifact.contract_version == variant.head.contract_version
+        }) else {
+            return Ok(None);
+        };
+        let rendition_cache_key = format!("copy-index-v3:{}", artifact.contract_key);
+        if refused_on_this_engine(&rendition_cache_key) {
+            return Ok(None);
+        }
+        let Some(blob) = load_blob(
+            self.store,
+            self.membership,
+            self.node_id,
+            &self.root,
+            variant,
+            artifact,
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        let mut index = match decode_verified(&blob, artifact) {
+            Ok(index) => index,
+            Err(reason) => {
+                tracing::warn!(
+                    file_id = self.file.id,
+                    contract_key = artifact.contract_key,
+                    blob_sha256 = artifact.blob_sha256,
+                    %reason,
+                    "copy index v3 variant refused"
+                );
+                return Ok(None);
+            }
+        };
+        index.source = self.identity.clone();
+        if let Some(proof) = index.promotion.hevc_configuration.as_mut() {
+            if !proof.bind_equivalent_source(
+                &artifact.source_sha256,
+                self.node_id,
+                &self.object_version,
+            ) {
+                tracing::warn!(
+                    file_id = self.file.id,
+                    contract_key = artifact.contract_key,
+                    "copy index v3 HEVC proof is not bound to its attested source"
+                );
+                return Ok(None);
+            }
+        }
+        Ok(Some(ResolvedCopyIndex {
+            index,
+            object_version: self.object_version.clone(),
+            rendition_cache_key,
+            init_contract_sha256: artifact.init_contract_sha256.clone(),
+        }))
     }
-    let full = crate::fragment_index_cluster::full_copy_object_version(object_version);
-    Ok(store
-        .fragment_index_source(node_id, file.id, &full)
-        .await
-        .map_err(|error| format!("reading the source receipt: {error}"))?
-        .filter(|receipt| receipt.source_size == file.size && receipt.source_mtime == file.mtime)
-        .map(|receipt| receipt.source_sha256.to_ascii_lowercase()))
+
+    /// This node's full-file SHA-256 of its current object, from the receipts
+    /// the v3 publication itself accepts: a full (never sampled) v2 source
+    /// receipt, or a regime-1 attestation.
+    async fn attested_source_sha256(&self) -> Result<Option<String>, String> {
+        let (store, file) = (self.store, self.file);
+        let current = |size: i64, mtime: i64| size == file.size && mtime == file.mtime;
+        let full = crate::fragment_index_cluster::full_copy_object_version(&self.object_version);
+        if let Some(receipt) = store
+            .fragment_index_source(self.node_id, file.id, &full)
+            .await
+            .map_err(|error| format!("reading the source receipt: {error}"))?
+            .filter(|receipt| current(receipt.source_size, receipt.source_mtime))
+        {
+            return Ok(Some(receipt.source_sha256.to_ascii_lowercase()));
+        }
+        Ok(store
+            .copy_index_source_attestation(self.node_id, file.id, &self.object_version)
+            .await
+            .map_err(|error| format!("reading the source attestation: {error}"))?
+            .filter(|receipt| current(receipt.source_size, receipt.source_mtime))
+            .map(|receipt| receipt.source_sha256))
+    }
 }
 
 fn blob_matches(blob: &[u8], artifact: &CopyIndexV3Artifact) -> bool {
@@ -265,46 +336,106 @@ pub(crate) fn decode_verified(
     Ok(index)
 }
 
-async fn read_local(
-    root: &Path,
-    artifact: &CopyIndexV3Artifact,
-) -> Result<Option<Vec<u8>>, String> {
-    let path = crate::copy_analysis::v3_blob_path(root, &artifact.blob_sha256)
-        .ok_or("invalid v3 blob digest")?;
-    let metadata = match tokio::fs::metadata(&path).await {
+/// What this node's v3 root holds for one variant.
+enum LocalBlob {
+    Verified(Vec<u8>),
+    Missing,
+    /// The file could not be stated or read. Nothing is known about its
+    /// bytes, so nothing is deleted and no holder is retired.
+    Unreadable(String),
+    /// The file was read in full and is not the catalogued bytes.
+    Corrupt(String),
+}
+
+async fn read_local(path: &Path, artifact: &CopyIndexV3Artifact) -> LocalBlob {
+    let metadata = match tokio::fs::metadata(path).await {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("stat {}: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return LocalBlob::Missing,
+        Err(error) => return LocalBlob::Unreadable(format!("stat {}: {error}", path.display())),
     };
     if u64::try_from(artifact.bytes).ok() != Some(metadata.len()) {
-        return Err(format!(
-            "copy index v3 blob size is {}, expected {}",
+        return LocalBlob::Corrupt(format!(
+            "size is {}, expected {}",
             metadata.len(),
             artifact.bytes
         ));
     }
-    let blob = tokio::fs::read(&path)
-        .await
-        .map_err(|error| format!("read {}: {error}", path.display()))?;
-    if !blob_matches(&blob, artifact) {
-        return Err("copy index v3 blob checksum or size mismatch".into());
+    match tokio::fs::read(path).await {
+        Ok(blob) if blob_matches(&blob, artifact) => LocalBlob::Verified(blob),
+        Ok(_) => LocalBlob::Corrupt("checksum or size mismatch".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LocalBlob::Missing,
+        Err(error) => LocalBlob::Unreadable(format!("read {}: {error}", path.display())),
     }
-    Ok(Some(blob))
 }
 
-/// Remove this node's copy of a variant that failed verification.
+/// Remove this node's copy of a variant that failed verification. The caller
+/// holds no pin on it: eviction refuses a pinned path.
 pub(crate) async fn remove_local(root: &Path, blob_sha256: &str) {
     let Some(path) = crate::copy_analysis::v3_blob_path(root, blob_sha256) else {
         return;
     };
-    let Ok(_eviction) = crate::playback_cache::begin_eviction(&path) else {
-        return;
+    let _eviction = match crate::playback_cache::begin_eviction(&path) {
+        Ok(eviction) => eviction,
+        Err(error) => {
+            tracing::warn!(blob_sha256, %error, "a corrupt copy index v3 blob is in use");
+            return;
+        }
     };
     match tokio::fs::remove_file(&path).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => tracing::warn!(blob_sha256, %error, "removing a corrupt copy index v3 blob"),
     }
+}
+
+/// Record this node as a verified holder. Best-effort: the bytes are already
+/// verified and durable here, and a later hydration or local hit records the
+/// row again.
+async fn record_location(
+    store: &dyn Store,
+    node_id: &str,
+    source_key: &str,
+    artifact: &CopyIndexV3Artifact,
+) {
+    let now = crate::state::clock_ms();
+    let location = CopyIndexV3Location {
+        contract_key: artifact.contract_key.clone(),
+        blob_sha256: artifact.blob_sha256.clone(),
+        node_id: node_id.to_owned(),
+        bytes: artifact.bytes,
+        verified_at_ms: now,
+        last_seen_at_ms: now,
+    };
+    match store.put_copy_index_v3_location(source_key, location).await {
+        // False: the head moved on between the read and this write.
+        Ok(recorded) => tracing::debug!(
+            blob_sha256 = artifact.blob_sha256,
+            recorded,
+            "copy index v3 location recorded"
+        ),
+        Err(error) => tracing::warn!(
+            blob_sha256 = artifact.blob_sha256,
+            %error,
+            "copy index v3 location was not recorded"
+        ),
+    }
+}
+
+async fn forget_own_location(
+    store: &dyn Store,
+    node_id: &str,
+    artifact: &CopyIndexV3Artifact,
+    operation: crate::store_result::Operation,
+) {
+    // Best-effort: the bytes are not here either way; a peer that asks is
+    // answered by the route's own positive 404.
+    crate::store_result::observe(
+        operation,
+        crate::store_result::Discard::BestEffort,
+        store
+            .forget_copy_index_v3_location(&artifact.contract_key, &artifact.blob_sha256, node_id)
+            .await,
+    );
 }
 
 /// The variant's exact bytes: this node's verified blob, or one hydrated from
@@ -315,37 +446,63 @@ async fn load_blob(
     membership: Option<&MembershipManager>,
     node_id: &str,
     root: &Path,
+    variant: &CopyIndexV3Variant,
     artifact: &CopyIndexV3Artifact,
 ) -> Result<Option<Vec<u8>>, String> {
     let path = crate::copy_analysis::v3_blob_path(root, &artifact.blob_sha256)
         .ok_or("invalid v3 blob digest")?;
-    let _pin = crate::playback_cache::pin(&path)
-        .map_err(|error| format!("copy index v3 blob is busy: {error}"))?;
-    match read_local(root, artifact).await {
-        // The publisher's location was recorded with its publication, and a
-        // hydrator's when it installed; a start writes nothing here.
-        Ok(Some(blob)) => return Ok(Some(blob)),
-        Ok(None) => {}
-        Err(error) => {
+    let source_key = variant.head.source_key.as_str();
+    // The pin covers only the read: removing a corrupt blob needs it gone.
+    let local = {
+        let _pin = crate::playback_cache::pin(&path)
+            .map_err(|error| format!("copy index v3 blob is busy: {error}"))?;
+        read_local(&path, artifact).await
+    };
+    match local {
+        LocalBlob::Verified(blob) => {
+            // The head read already said whether this node is a listed
+            // holder, so the common start writes nothing and a row another
+            // node retired is restored without a further read.
+            if !variant.held {
+                record_location(store, node_id, source_key, artifact).await;
+            }
+            return Ok(Some(blob));
+        }
+        LocalBlob::Missing => {
+            if variant.held {
+                forget_own_location(
+                    store,
+                    node_id,
+                    artifact,
+                    crate::store_result::Operation::ForgetMissingInternalIndex,
+                )
+                .await;
+            }
+        }
+        LocalBlob::Unreadable(error) => {
             tracing::warn!(
                 blob_sha256 = artifact.blob_sha256,
                 %error,
+                "local copy index v3 blob is unreadable; leaving it in place"
+            );
+            return Ok(None);
+        }
+        LocalBlob::Corrupt(reason) => {
+            tracing::warn!(
+                blob_sha256 = artifact.blob_sha256,
+                %reason,
                 "discarding a corrupt local copy index v3 blob"
             );
             remove_local(root, &artifact.blob_sha256).await;
-            // Best-effort: the corrupt blob is gone and cannot be served; a
-            // peer that asks is answered 404 and retires the row itself.
-            crate::store_result::observe(
-                crate::store_result::Operation::ForgetCorruptLocalIndex,
-                crate::store_result::Discard::BestEffort,
-                store
-                    .forget_copy_index_v3_location(
-                        &artifact.contract_key,
-                        &artifact.blob_sha256,
-                        node_id,
-                    )
-                    .await,
-            );
+            if variant.held {
+                forget_own_location(
+                    store,
+                    node_id,
+                    artifact,
+                    crate::store_result::Operation::ForgetCorruptLocalIndex,
+                )
+                .await;
+            }
         }
     }
     let Some(membership) = membership else {
@@ -370,7 +527,7 @@ async fn load_blob(
         .filter(|(peer_node, (_, reachable))| peer_node != node_id && *reachable)
         .collect::<HashMap<_, _>>();
     let transport = PeerTransport::new(membership.clone());
-    let path = peer_path(&artifact.contract_key, &artifact.blob_sha256);
+    let request_path = peer_path(source_key, &artifact.blob_sha256);
     for location in locations {
         let Some((base, _)) = peers.get(&location.node_id) else {
             continue;
@@ -380,7 +537,7 @@ async fn load_blob(
                 &location.node_id,
                 base,
                 reqwest::Method::GET,
-                &path,
+                &request_path,
                 Vec::new(),
                 tokio::time::Instant::now() + PEER_DEADLINE,
                 MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
@@ -388,19 +545,12 @@ async fn load_blob(
             )
             .await;
         let Ok(response) = response else { continue };
-        let missing = response.status == reqwest::StatusCode::NOT_FOUND;
-        if !missing && !response.status.is_success() {
-            continue;
-        }
-        if missing || !blob_matches(&response.body, artifact) {
-            // Best-effort: this holder is already excluded from this attempt
-            // and nothing it sent was installed.
+        if response.status == reqwest::StatusCode::NOT_FOUND && response.body == ABSENT_BODY {
+            // Best-effort: the holder itself said it lacks these bytes. Any
+            // other answer (a node without this route, a refusal, a damaged
+            // transfer) leaves its row alone.
             crate::store_result::observe(
-                if missing {
-                    crate::store_result::Operation::ForgetMissingPeerIndex
-                } else {
-                    crate::store_result::Operation::ForgetCorruptPeerIndex
-                },
+                crate::store_result::Operation::ForgetMissingPeerIndex,
                 crate::store_result::Discard::BestEffort,
                 store
                     .forget_copy_index_v3_location(
@@ -412,6 +562,9 @@ async fn load_blob(
             );
             continue;
         }
+        if !response.status.is_success() || !blob_matches(&response.body, artifact) {
+            continue;
+        }
         crate::copy_analysis::install_blob(
             root,
             &artifact.contract_key,
@@ -420,23 +573,13 @@ async fn load_blob(
         )
         .await?;
         // Only now is this node a holder: the exact bytes are verified and
-        // durable. A refusal means the head moved on; the bytes still decode.
-        let recorded = store
-            .put_copy_index_v3_location(
-                &artifact.contract_key,
-                &artifact.blob_sha256,
-                node_id,
-                artifact.bytes,
-                crate::state::clock_ms(),
-            )
-            .await
-            .map_err(|error| format!("recording the copy index location: {error}"))?;
+        // durable. The installed blob is used whether or not the row lands.
+        record_location(store, node_id, source_key, artifact).await;
         tracing::info!(
             file_id = artifact.file_id,
             contract_key = artifact.contract_key,
             blob_sha256 = artifact.blob_sha256,
             holder = location.node_id,
-            recorded,
             "copy index v3 hydrated from a peer"
         );
         return Ok(Some(response.body));
