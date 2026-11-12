@@ -99,7 +99,7 @@ static void base_gpu_init(int width, int height) {
                            (EXPORT_YUV10 ? PL_FMT_CAP_SAMPLEABLE : 0));
   require(base_context.renderer && fmt && fmt->texel_size == 16,
           "base renderer/output format");
-  base_context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT) : NULL;
+  base_context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT, false) : NULL;
   if (!base_context.output_texture)
     base_context.output_texture = pl_tex_create(gpu,
         pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = fmt,
@@ -111,12 +111,11 @@ static void base_gpu_init(int width, int height) {
   require(base_context.output_texture && base_context.rgba, "base output buffer");
   if (dv_target.nits || !EXPORT_YUV10 || EXPORT_WIDTH != width || EXPORT_HEIGHT != height) {
     // As the FEL path and the player: reconstruct into UNORM16, then map/export.
-    base_context.native_texture = dv_yuv10_source_texture(gpu, width, height);
-    if (!base_context.native_texture)
-      base_context.native_texture = pl_tex_create(gpu,
-          pl_tex_params(.w = width, .h = height, .format = fmt,
-                        .renderable = true, .sampleable = true));
-    require(base_context.native_texture != NULL, "native base reconstruction texture");
+    // No float fallback: a master reconstructed into another format is not
+    // the picture the mapping was qualified on, so the device is refused.
+    base_context.native_texture = dv_yuv10_source_texture(gpu, width, height, true);
+    require(base_context.native_texture != NULL,
+            "reconstruction-target-unsupported: linearly sampled renderable UNORM16 RGBA");
   }
   base_context.staging = malloc((size_t)width * height * sizeof(uint16_t));
   require(base_context.staging != NULL, "bounded base plane staging");

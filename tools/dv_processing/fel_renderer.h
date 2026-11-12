@@ -426,7 +426,7 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
       require(context.textures[layer][c] != NULL, "persistent native plane texture");
     }
   }
-  context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT) : NULL;
+  context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT, false) : NULL;
   if (!context.output_texture)
     context.output_texture = pl_tex_create(gpu,
         pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = format,
@@ -438,12 +438,11 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
   if (dv_target.nits || !EXPORT_YUV10 || EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT) {
     // The player reconstructs into UNORM16 and maps from it; do the same, so
     // display management reads the same master codes on both sides.
-    context.native_texture = dv_yuv10_source_texture(gpu, WIDTH, HEIGHT);
-    if (!context.native_texture)
-      context.native_texture = pl_tex_create(gpu,
-          pl_tex_params(.w = WIDTH, .h = HEIGHT, .format = format,
-                        .renderable = true, .sampleable = true));
-    require(context.native_texture != NULL, "persistent native reconstructed texture");
+    // No float fallback: a master reconstructed into another format is not
+    // the picture the mapping was qualified on, so the device is refused.
+    context.native_texture = dv_yuv10_source_texture(gpu, WIDTH, HEIGHT, true);
+    require(context.native_texture != NULL,
+            "reconstruction-target-unsupported: linearly sampled renderable UNORM16 RGBA");
   }
   printf("{\"kind\":\"gpu_context_created\",\"width\":%d,\"height\":%d}\n",
          WIDTH, HEIGHT);

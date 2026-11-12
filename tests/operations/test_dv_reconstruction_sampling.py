@@ -65,6 +65,45 @@ class DvReconstructionSamplingTests(unittest.TestCase):
         # rescale a float target as if it held integer samples.
         self.assertNotIn(".color_depth = 32", fel + base)
 
+    def test_reconstruction_target_is_unorm16_or_the_device_is_refused(self):
+        export = (TOOLS / "yuv420p10.h").read_text()
+        helper = export[export.index("static pl_tex dv_yuv10_source_texture("):]
+        helper = helper[:helper.index("\n}\n")]
+        self.assertIn("int width, int height, bool linear)", helper)
+        self.assertIn("(linear ? PL_FMT_CAP_LINEAR : 0)", helper)
+        for name, target in (("fel_renderer.h", "context.native_texture"),
+                             ("base_dv_renderer.h", "base_context.native_texture")):
+            source = (TOOLS / name).read_text()
+            # One assignment: the linearly sampled UNORM16 target, with no
+            # float texture created in its place when the device lacks it.
+            self.assertEqual(len(re.findall(re.escape(target) + r" = ", source)), 1, name)
+            created = source[source.index(target + " = "):]
+            created = created[:created.index(";\n", created.index("require(")) + 1]
+            self.assertRegex(created, r"dv_yuv10_source_texture\(gpu, \w+, \w+, true\);")
+            self.assertNotIn("pl_tex_create", created)
+            self.assertIn('"reconstruction-target-unsupported: linearly sampled renderable UNORM16 RGBA"',
+                          created)
+
+    def test_targeted_refusals_name_their_cause(self):
+        target = (TOOLS / "display_target.h").read_text()
+        render = target[target.index("static inline pl_tex dv_target_render("):]
+        render = render[:render.index("\n}\n")]
+        reason = '"display-target-l5-invalid: active area outside the reconstructed master"'
+        self.assertIn(reason, render)
+        # The attributable refusal precedes the shader, whose NULL stays generic.
+        self.assertLess(render.index(reason), render.index("dv_dm_render(log, gpu, source, &dv_target.dm)"))
+        self.assertIn("dv_dm_active_rect(&dv_target.dm, source->params.w, source->params.h, &active)", render)
+        # Reasons are distinct, and the renderers refuse the same metadata first.
+        reasons = re.findall(r'"(display-target-[a-z0-9-]+-invalid): ', target)
+        self.assertEqual(sorted(reasons), ["display-target-dm-invalid", "display-target-l1-invalid",
+                                           "display-target-l5-invalid"])
+        self.assertIn('"invalid active area metadata"', (TOOLS / "fel_renderer.h").read_text())
+        self.assertIn('"invalid base active area"', (TOOLS / "base_dv_renderer.h").read_text())
+        # The daemon reports a refused segment with the helper's own words.
+        segment = (ROOT / "crates/plurxd/src/dv_segment.rs").read_text()
+        self.assertIn('"refused segment"', segment)
+        self.assertIn("String::from_utf8_lossy(&", segment[segment.index('"refused segment"'):][:400])
+
     @unittest.skipUnless(os.name == "posix", "the native helper is POSIX only")
     def test_shifted_storage_keeps_quarter_code_taps_exact(self):
         metadata_checks.MetadataAdmission().test_finite_rgb48_rounding()
