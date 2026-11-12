@@ -3148,12 +3148,13 @@ pub trait MediaStore: Send + Sync + 'static {
         season_number: i32,
         episode_number: i32,
     ) -> Result<Option<Item>, StoreError>;
-    /// How many offloaded leaves sit under each container (the item itself
-    /// counts when it is a leaf). A container with none is absent.
+    /// How many offloaded leaves sit under each container, of how many in
+    /// all (the item itself counts when it is a leaf). A container with none
+    /// offloaded is absent.
     async fn offloaded_leaf_counts(
         &self,
         ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, i64>, StoreError>;
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError>;
     async fn find_book(
         &self,
         library_id: i64,
@@ -6806,12 +6807,14 @@ impl CatalogueReader {
     pub async fn offloaded_leaf_counts(
         &self,
         ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError> {
         #[cfg(feature = "hiqlite-store")]
         {
             let owned = ids.to_vec();
             if let Some(result) = self
-                .bounded(move |store| async move { store.local_offloaded_leaf_counts(&owned).await })
+                .bounded(
+                    move |store| async move { store.local_offloaded_leaf_counts(&owned).await },
+                )
                 .await
             {
                 return Ok(result);

@@ -617,7 +617,9 @@ function catalogItemBody(p){
     const resume=p.resume;
     const watchBtn=watchControls(it);
     const playable=p.playable, pmeta=playbackMetaFor(p,playable);
-    if(playable){
+    if(it.offloaded){
+      acts=offloadActions(it); watchOffload(exactWireId(it));
+    } else if(playable){
       acts=`<div class="actions">
         <button class="btnplay" onclick='play(${playable.id},${esc(JSON.stringify(it.title))},${resume},${playable.duration_ms||0},${esc(JSON.stringify(pmeta))})'>▶ ${resume?`Resume · ${fmtDur(resume)}`:'Play'}</button>
         ${resume?`<button class="ghost" onclick='play(${playable.id},${esc(JSON.stringify(it.title))},0,${playable.duration_ms||0},${esc(JSON.stringify(pmeta))})'>Start over</button>`:''}
@@ -639,14 +641,14 @@ function catalogItemBody(p){
     }).join("");
   } else if(p.shape==="episodes"){
     const a=watchControls(it);
-    if(a) acts=`<div class="actions">${a}</div>`;
+    acts=(a?`<div class="actions">${a}</div>`:'')+offloadContainerActions(it);
     rest=`<h2 class="section">${d.children.length} episode${d.children.length>1?'s':''}</h2>
       <div class="eplist">${d.children.map(episodeRow).join("")}</div>`;
   } else if(p.shape==="children"){
     const label = it.kind==='folder'? 'Contents'
                 : p.childLabel==='Seasons'? 'Seasons' : 'Episodes';
     const a=watchControls(it);
-    if(a) acts=`<div class="actions">${a}</div>`;
+    acts=(a?`<div class="actions">${a}</div>`:'')+offloadContainerActions(it);
     rest=`<h2 class="section">${label}</h2>${grid(d.children)}`;
   } else if(it.kind==='folder'){
     rest=`<div class="empty">This folder is empty.</div>`;

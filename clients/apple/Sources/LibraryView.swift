@@ -26,8 +26,9 @@ struct LibraryView: View {
     @State private var sort: LibrarySort = .title
     @State private var filter: WatchFilter = .all
     /// Which titles to list: on disk (default), offloaded, or everything.
-    /// Remembered on this device.
-    @AppStorage("plurx.libraryPresence") private var presenceRaw = LibraryPresence.disk.rawValue
+    /// Remembered per signed-in user on this device: one "id=value" line each,
+    /// so two people sharing an Apple TV keep their own choice.
+    @AppStorage("plurx.libraryPresenceByUser") private var presenceByUser = ""
     @State private var query = ""
     @AppStorage("plurx.libraryPresentation") private var presentation = "rows"
     @State private var expandedGroup: String?
@@ -75,7 +76,16 @@ struct LibraryView: View {
         #endif
     }
 
-    private var presence: LibraryPresence { LibraryPresence(rawValue: presenceRaw) ?? .disk }
+    private var presenceKey: String { String(model.userId ?? 0) }
+    private var presence: LibraryPresence {
+        let line = presenceByUser.split(separator: "\n").first { $0.hasPrefix(presenceKey + "=") }
+        return line.flatMap { LibraryPresence(rawValue: String($0.dropFirst(presenceKey.count + 1))) } ?? .disk
+    }
+    private func setPresence(_ value: LibraryPresence) {
+        var lines = presenceByUser.split(separator: "\n").map(String.init).filter { !$0.hasPrefix(presenceKey + "=") }
+        lines.append("\(presenceKey)=\(value.rawValue)")
+        presenceByUser = lines.joined(separator: "\n")
+    }
     private var loadKey: String { "\(collection.id):\(sort.rawValue):\(presence.rawValue)" }
 
     var body: some View {
@@ -435,7 +445,7 @@ struct LibraryView: View {
             RemoteChoice(id: option.rawValue, label: option.label, selected: sort == option) { sort = option }
         }
         case "files": return LibraryPresence.allCases.map { option in
-            RemoteChoice(id: option.rawValue, label: option.label, selected: presence == option) { presenceRaw = option.rawValue }
+            RemoteChoice(id: option.rawValue, label: option.label, selected: presence == option) { setPresence(option) }
         }
         default: return WatchFilter.allCases.map { option in
             RemoteChoice(id: option.rawValue, label: option.label, selected: filter == option) { filter = option }

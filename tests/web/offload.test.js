@@ -43,8 +43,9 @@ test("Get it back replaces Play for admins and is absent for everyone else", () 
 });
 
 test("the library asks for a presence and remembers it without storage being required", () => {
-  assert.match(source, /presence=\$\{LIB_PRESENCE\}/);
-  assert.match(source, /let LIB_PRESENCE="disk";\ntry\{[^\n]*localStorage[^\n]*catch\(e\)\{\}/);
+  assert.match(source, /presence=\$\{libPresence\(\)\}/);
+  assert.match(source, /localStorage\.getItem\(who\)/);
+  assert.match(source, /"plurx\.libPresence\."\+\(ME&&ME\.id/);
   for (const layout of ["classicLibraryShell", "catalogLibraryShell", "theaterLibraryShell"]) {
     if (source.includes(`function ${layout}(`)) assert.match(declaration(layout), /libPresenceSelect\(m\.reload\)/, layout);
   }
@@ -97,4 +98,13 @@ test("an unreachable Curator reads so, and a title no longer offloaded reloads t
   vm.runInContext("watchOffload(7)", w.ctx);
   await w.timers[w.timers.length - 1]();
   assert.equal(w.ctx.rendered, 1, "a 409 not_offloaded reloads the item");
+});
+
+test("every item layout offers Get it back and the status line", () => {
+  const fs = require("node:fs");
+  for (const f of ["theater", "catalog"]) {
+    const src = fs.readFileSync(`crates/plurxd/src/web/layouts/${f}.js`, "utf8");
+    assert.match(src, /if\(it\.offloaded\)\{\s*acts=offloadActions\(it\); watchOffload\(exactWireId\(it\)\);/, f);
+    assert.equal((src.match(/offloadContainerActions\(it\)/g) || []).length, 2, f);
+  }
 });

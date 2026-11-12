@@ -558,7 +558,7 @@ impl MediaStore for SqliteStore {
     async fn offloaded_leaf_counts(
         &self,
         ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError> {
         if ids.is_empty() {
             return Ok(Default::default());
         }
@@ -570,12 +570,20 @@ impl MediaStore for SqliteStore {
                      UNION
                      SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id
                  )
-                 SELECT t.root, COUNT(*) FROM tree t JOIN items i ON i.id = t.id
-                 WHERE i.offloaded_at IS NOT NULL GROUP BY t.root",
+                 SELECT t.root, SUM(i.offloaded_at IS NOT NULL), COUNT(*)
+                 FROM tree t JOIN items i ON i.id = t.id
+                 WHERE i.kind IN ('movie', 'episode')
+                 GROUP BY t.root HAVING SUM(i.offloaded_at IS NOT NULL) > 0",
             )?;
             let rows = stmt
                 .query_map(params![ids], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        crate::domain::LeafOffload {
+                            offloaded: row.get::<_, i64>(1)?,
+                            leaves: row.get::<_, i64>(2)?,
+                        },
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows.into_iter().collect())

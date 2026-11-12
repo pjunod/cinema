@@ -947,6 +947,8 @@ fn apply_identity_repair(
                 .items
                 .iter()
                 .any(|item| item.id == *item_id && item.kind == kind)
+                // offload-exempt: identity repair retires one named duplicate
+                // after moving its files to the survivor; not a leaf prune.
                 && conn.execute(
                     "DELETE FROM items
                       WHERE id = ?1 AND library_id = ?2 AND kind = ?3

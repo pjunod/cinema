@@ -1909,6 +1909,15 @@ pub struct RecentItem {
 // Browse queries
 // ---------------------------------------------------------------------------
 
+/// How much of a container Curator offloaded: `offloaded` of its `leaves`
+/// (movies and episodes) have no file. Only containers with some offloaded
+/// leaves are ever reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeafOffload {
+    pub offloaded: i64,
+    pub leaves: i64,
+}
+
 /// Which titles a library grid lists with respect to offload: what plays
 /// now, what Curator offloaded (greyed out, Get it back), or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

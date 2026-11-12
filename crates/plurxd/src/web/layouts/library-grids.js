@@ -259,7 +259,7 @@ async function eachItemPage(libIds, sort, gen, onBatch){
     for(let offset=0;; offset+=LIB_PAGE){
       let page;
       try{
-        page=await api(`/libraries/${id}/items?limit=${LIB_PAGE}&offset=${offset}&sort=${sort}&presence=${LIB_PRESENCE}`);
+        page=await api(`/libraries/${id}/items?limit=${LIB_PAGE}&offset=${offset}&sort=${sort}&presence=${libPresence()}`);
       }catch(e){
         if(LIB_LOAD===gen) toast(e.message);
         return false;

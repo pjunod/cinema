@@ -1714,7 +1714,8 @@ async fn record_candidates(
                 offload_hints.get(&path),
                 &mut resolved_offloads,
             )
-            .await? {
+            .await?
+            {
                 Placement::Placed(placed) => placed,
                 Placement::Skipped(why) => {
                     report.skipped += 1;

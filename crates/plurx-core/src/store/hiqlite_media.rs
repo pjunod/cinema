@@ -761,13 +761,15 @@ const OFFLOADED_COUNTS_SQL: &str = "WITH RECURSIVE tree(root, id) AS ( \
          UNION \
          SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id \
      ) \
-     SELECT t.root AS root, COUNT(*) AS offloaded FROM tree t \
-     JOIN items i ON i.id = t.id \
-     WHERE i.offloaded_at IS NOT NULL GROUP BY t.root";
+     SELECT t.root AS root, SUM(i.offloaded_at IS NOT NULL) AS offloaded, COUNT(*) AS leaves \
+     FROM tree t JOIN items i ON i.id = t.id \
+     WHERE i.kind IN ('movie', 'episode') \
+     GROUP BY t.root HAVING SUM(i.offloaded_at IS NOT NULL) > 0";
 
 struct OffloadedCountRow {
     root: i64,
     offloaded: i64,
+    leaves: i64,
 }
 
 impl From<&mut Row<'_>> for OffloadedCountRow {
@@ -775,6 +777,7 @@ impl From<&mut Row<'_>> for OffloadedCountRow {
         Self {
             root: row.get("root"),
             offloaded: row.get("offloaded"),
+            leaves: row.get("leaves"),
         }
     }
 }
@@ -1125,7 +1128,7 @@ impl HiqliteAuthStore {
     pub(super) async fn local_offloaded_leaf_counts(
         &self,
         ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError> {
         if ids.is_empty() {
             return Ok(Default::default());
         }
@@ -1135,7 +1138,15 @@ impl HiqliteAuthStore {
             .await
             .map_err(database_error)?
             .into_iter()
-            .map(|row| (row.root, row.offloaded))
+            .map(|row| {
+                (
+                    row.root,
+                    crate::domain::LeafOffload {
+                        offloaded: row.offloaded,
+                        leaves: row.leaves,
+                    },
+                )
+            })
             .collect())
     }
 
@@ -1954,7 +1965,7 @@ impl MediaStore for HiqliteAuthStore {
     async fn offloaded_leaf_counts(
         &self,
         ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError> {
         if ids.is_empty() {
             return Ok(Default::default());
         }
@@ -1968,7 +1979,15 @@ impl MediaStore for HiqliteAuthStore {
             .map_err(database_error)?;
         Ok(rows
             .into_iter()
-            .map(|row| (row.root, row.offloaded))
+            .map(|row| {
+                (
+                    row.root,
+                    crate::domain::LeafOffload {
+                        offloaded: row.offloaded,
+                        leaves: row.leaves,
+                    },
+                )
+            })
             .collect())
     }
 

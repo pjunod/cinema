@@ -3,8 +3,8 @@
 //! watch state can be attached per user.
 
 use plurx_core::domain::{
-    AudioStream, InProgressItem, Item, ItemKind, Library, MediaFile, ReadingState, RecentItem,
-    SubtitleStream, User, WatchRollup, WatchState,
+    AudioStream, InProgressItem, Item, ItemKind, LeafOffload, Library, MediaFile, ReadingState,
+    RecentItem, SubtitleStream, User, WatchRollup, WatchState,
 };
 use plurx_core::mediafacts::MediaFacts;
 use plurx_core::tracks::{
@@ -346,12 +346,12 @@ impl ItemDto {
     /// Fold in how many of a container's leaves are offloaded: the rollup
     /// carries the count, and the container itself reads as offloaded only
     /// when every leaf is.
-    pub fn with_offloaded_leaves(mut self, count: Option<i64>) -> Self {
-        if let (Some(count), Some(rollup)) =
-            (count.filter(|count| *count > 0), self.rollup.as_mut())
-        {
-            rollup.offloaded = count;
-            if rollup.leaves > 0 && count >= rollup.leaves {
+    pub fn with_offloaded_leaves(mut self, count: Option<LeafOffload>) -> Self {
+        if let Some(count) = count.filter(|count| count.offloaded > 0) {
+            if let Some(rollup) = self.rollup.as_mut() {
+                rollup.offloaded = count.offloaded;
+            }
+            if count.offloaded >= count.leaves {
                 self.offloaded = true;
             }
         }

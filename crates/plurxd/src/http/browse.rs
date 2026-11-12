@@ -537,7 +537,10 @@ pub async fn list_items(
     // Which containers are (partly) offloaded, only where the grid can show
     // one: `disk` lists only shows with something to play.
     let offloaded_leaves = if presence != ItemPresence::OnDisk && !container_ids.is_empty() {
-        state.catalogue.offloaded_leaf_counts(&container_ids).await?
+        state
+            .catalogue
+            .offloaded_leaf_counts(&container_ids)
+            .await?
     } else {
         HashMap::new()
     };
@@ -951,6 +954,30 @@ pub async fn home_previews(
     Ok(Json(HomePreviews { libraries }))
 }
 
+/// Mark the shows and seasons among `items` that Curator offloaded in full,
+/// for the lists that can contain one (search, the user's lists). The
+/// rollup count is left to the pages that already read a rollup.
+pub(crate) async fn flag_offloaded_containers(
+    state: &AppState,
+    items: &mut [ItemDto],
+) -> Result<(), ApiError> {
+    let ids: Vec<i64> = items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::Show | ItemKind::Season))
+        .map(|item| item.id)
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let counts = state.catalogue.offloaded_leaf_counts(&ids).await?;
+    for item in items {
+        if let Some(count) = counts.get(&item.id) {
+            item.offloaded = item.offloaded || count.offloaded >= count.leaves;
+        }
+    }
+    Ok(())
+}
+
 /// GET /api/v1/hubs — the home screen rows.
 pub async fn hubs(
     AuthUser(user): AuthUser,
@@ -1062,13 +1089,14 @@ pub async fn search(
     let hits = state.catalogue.search_items(&query, limit).await?;
     let items: Vec<Item> = hits.iter().map(|r| r.item.clone()).collect();
     let watch = watch_lookup(&state, user.id, &items, read_after).await?;
-    let results = hits
+    let mut results: Vec<ItemDto> = hits
         .into_iter()
         .map(|r| {
             let w = watch.get(&r.item.id).copied();
             recent_dto(r, w)
         })
         .collect();
+    flag_offloaded_containers(&state, &mut results).await?;
     Ok(Json(SearchResponse { results }))
 }
 

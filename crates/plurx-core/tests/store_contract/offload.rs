@@ -47,15 +47,33 @@ async fn an_offloaded_item_survives_prunes_is_found_by_ids_and_clears_when_a_fil
             .await
             .expect("file");
         let plain_file = store
-            .upsert_file(plain, &format!("/offload-{backend}/Plain.mkv"), 10, 10, &probe)
+            .upsert_file(
+                plain,
+                &format!("/offload-{backend}/Plain.mkv"),
+                10,
+                10,
+                &probe,
+            )
             .await
             .expect("file");
         let twin_a = store
-            .upsert_file(twin, &format!("/offload-{backend}/Twin-a.mkv"), 10, 10, &probe)
+            .upsert_file(
+                twin,
+                &format!("/offload-{backend}/Twin-a.mkv"),
+                10,
+                10,
+                &probe,
+            )
             .await
             .expect("file");
         store
-            .upsert_file(twin, &format!("/offload-{backend}/Twin-b.mkv"), 10, 10, &probe)
+            .upsert_file(
+                twin,
+                &format!("/offload-{backend}/Twin-b.mkv"),
+                10,
+                10,
+                &probe,
+            )
             .await
             .expect("file");
         store
@@ -68,9 +86,15 @@ async fn an_offloaded_item_survives_prunes_is_found_by_ids_and_clears_when_a_fil
             .reconcile_library(library.id, "wrong", &[kept_file], 1, &[kept], 100)
             .await
             .expect("reconcile");
-        assert!(matches!(refused, ReconcileOutcome::RefusedRoot { .. }), "{backend}");
+        assert!(
+            matches!(refused, ReconcileOutcome::RefusedRoot { .. }),
+            "{backend}"
+        );
         let item = store.get_item(kept).await.expect("get").expect("item");
-        assert_eq!(item.offloaded_at, None, "{backend}: a refused removal marks nothing");
+        assert_eq!(
+            item.offloaded_at, None,
+            "{backend}: a refused removal marks nothing"
+        );
 
         // Applied: `kept` is marked inside the transaction and survives the
         // prune, `plain` goes, and `twin` still holds a file so it stays
@@ -86,18 +110,57 @@ async fn an_offloaded_item_survives_prunes_is_found_by_ids_and_clears_when_a_fil
             )
             .await
             .expect("reconcile");
-        assert!(matches!(applied, ReconcileOutcome::Applied { .. }), "{backend}");
+        assert!(
+            matches!(applied, ReconcileOutcome::Applied { .. }),
+            "{backend}"
+        );
         let item = store.get_item(kept).await.expect("get").expect("kept");
         assert_eq!(item.offloaded_at, Some(100), "{backend}");
-        assert!(store.get_item(plain).await.expect("get").is_none(), "{backend}");
+        assert!(
+            store.get_item(plain).await.expect("get").is_none(),
+            "{backend}"
+        );
         let item = store.get_item(twin).await.expect("get").expect("twin");
         assert_eq!(item.offloaded_at, None, "{backend}: another copy remains");
-        assert_eq!(store.prune_empty_items(library.id).await.expect("prune"), 0, "{backend}");
-        assert!(store.get_item(kept).await.expect("get").is_some(), "{backend}");
         assert_eq!(
-            store.offloaded_leaf_counts(&[kept]).await.expect("counts").get(&kept),
-            Some(&1),
+            store.prune_empty_items(library.id).await.expect("prune"),
+            0,
             "{backend}"
+        );
+        assert!(
+            store.get_item(kept).await.expect("get").is_some(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .offloaded_leaf_counts(&[kept])
+                .await
+                .expect("counts")
+                .get(&kept)
+                .copied(),
+            Some(plurx_core::domain::LeafOffload {
+                offloaded: 1,
+                leaves: 1
+            }),
+            "{backend}"
+        );
+
+        // The enrichment jobs leave it alone: there is nothing to match or
+        // fetch art for, and no file to probe. Its unmarked twin is still work.
+        let pending: Vec<i64> = store
+            .items_needing_metadata(Some(library.id), true, None)
+            .await
+            .expect("metadata work")
+            .iter()
+            .map(|item| item.id)
+            .collect();
+        assert!(
+            !pending.contains(&kept),
+            "{backend}: offloaded is not metadata work"
+        );
+        assert!(
+            pending.contains(&twin),
+            "{backend}: an on-disk title still is"
         );
 
         // Ids only, never a title.

@@ -46,7 +46,8 @@ pub(crate) fn mark_kept_fileless(
     if keep.is_empty() {
         return Ok(());
     }
-    let keep = serde_json::to_string(keep).map_err(|e| crate::store::StoreError::Database(e.to_string()))?;
+    let keep = serde_json::to_string(keep)
+        .map_err(|e| crate::store::StoreError::Database(e.to_string()))?;
     conn.execute(
         "UPDATE items SET offloaded_at = COALESCE(offloaded_at, ?3) \
          WHERE library_id = ?1 AND kind IN ('movie','episode') \
@@ -116,17 +117,10 @@ mod tests {
         &text[at..end]
     }
 
-    /// Statements that delete items on purpose without the predicate, each
-    /// with why. A new entry here is a decision, not a convenience.
+    /// Files whose item deletes are not leaf prunes at all, each with why. The
+    /// publication files are deliberately NOT here: they hold the real leaf
+    /// prunes, so every statement in them is checked. A new entry here is a decision, not a convenience.
     const INTENTIONAL: &[(&str, &str)] = &[
-        (
-            "hiqlite_publication.rs",
-            "identity repair retires a duplicate item after moving its files to the survivor",
-        ),
-        (
-            "sqlite/publication.rs",
-            "identity repair retires a duplicate item after moving its files to the survivor",
-        ),
         (
             "sharing_catalogue_source.rs",
             "removes one named shared-catalogue item",
@@ -135,6 +129,20 @@ mod tests {
         ("hiqlite_catalog.rs", "full-text-index triggers"),
         ("tests.rs", "test fixtures"),
     ];
+
+    /// A statement is exempt, on its own and with its reason, when an
+    /// `offload-exempt:` comment sits just above it. Nothing else exempts it.
+    fn exempt(text: &str, at: usize) -> bool {
+        let mut start = at.saturating_sub(400);
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        let before = &text[start..at];
+        // The comment must belong to this statement: no other delete between.
+        before
+            .rfind("offload-exempt:")
+            .is_some_and(|marker| !before[marker..].contains("DELETE FROM"))
+    }
 
     /// The SQLite migration carries exactly the statements the replicated
     /// install runs, so the two catalogues cannot drift.
@@ -173,7 +181,7 @@ mod tests {
                 let statement = &window[..end];
                 // Only the statements that decide by "no files"; seasons,
                 // shows and folders are kept alive by their offloaded child.
-                let leaf = statement.contains("FROM files");
+                let leaf = statement.contains("FROM files") && !exempt(&text, at);
                 if leaf
                     && !(statement.contains("fileless_prunable_leaf")
                         || statement.contains("offloaded_at"))
@@ -184,6 +192,7 @@ mod tests {
             for (at, _) in text.match_indices("DELETE FROM items\n") {
                 let statement = window(&text, at, 400);
                 if statement.contains("FROM files")
+                    && !exempt(&text, at)
                     && !(statement.contains("fileless_prunable_leaf")
                         || statement.contains("offloaded_at"))
                 {

@@ -190,16 +190,11 @@ async fn ids_for(state: &AppState, item: &Item) -> Result<Ids, ApiError> {
 /// Get it back to mean anything.
 async fn require_offloaded(state: &AppState, item: &Item) -> Result<(), ApiError> {
     let offloaded = match item.kind {
-        ItemKind::Show | ItemKind::Season => {
-            state
-                .catalogue
-                .offloaded_leaf_counts(&[item.id])
-                .await?
-                .get(&item.id)
-                .copied()
-                .unwrap_or(0)
-                > 0
-        }
+        ItemKind::Show | ItemKind::Season => state
+            .catalogue
+            .offloaded_leaf_counts(&[item.id])
+            .await?
+            .contains_key(&item.id),
         _ => item.offloaded_at.is_some(),
     };
     if offloaded {
@@ -241,11 +236,20 @@ async fn ask_curator(
         episode: ids.episode,
         user,
     };
-    let client = reqwest::Client::builder()
-        .timeout(CALL_TIMEOUT)
-        .user_agent(concat!("plurx/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    // One client for the process: the status poll calls this every few
+    // seconds per open page, and a client per call rebuilds the pool each time.
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    let client = CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(CALL_TIMEOUT)
+                .user_agent(concat!("plurx/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| ApiError::Internal(error.clone()))?;
     let response = client
         .post(format!("{url}/api/v1/webhooks/plurx"))
         .header("X-Api-Key", key)

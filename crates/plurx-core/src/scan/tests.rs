@@ -3061,6 +3061,144 @@ async fn returning_files_are_placed_on_the_offloaded_item_by_ids() {
     assert_eq!(after, before, "no duplicate item appeared");
 }
 
+/// An offload that empties a library root cannot be told from an unmounted
+/// share: nothing is removed, the record is kept, and the answer names the
+/// real item and is not retryable.
+#[tokio::test]
+async fn an_offload_that_empties_the_root_is_retained_with_its_item() {
+    use crate::store::scan_request_v2::{PlacedReport, RetainedCode};
+    let (store, lib, dir) = removal_fixture(&["Dune (1984)/Dune (1984).mkv"]).await;
+    let root = dir.path().to_path_buf();
+    let path = root.join("Dune (1984)").join("Dune (1984).mkv");
+    let item = store
+        .get_file_by_path(&path.to_string_lossy())
+        .await
+        .expect("lookup")
+        .expect("file")
+        .item_id;
+    std::fs::remove_dir_all(root.join("Dune (1984)")).expect("rm");
+    let mut absent = offloaded_path(&root, &path).await;
+    absent.root_empty = true;
+    let removal =
+        removed::remove_absent(&PublicationStore::unfenced(&store), &lib, &[absent], false)
+            .await
+            .expect("retained");
+    assert!(
+        matches!(
+            &removal.reports[..],
+            [PlacedReport::Retained { code: RetainedCode::RootEmpty, item_id, .. }] if *item_id == item
+        ),
+        "{:?}",
+        removal.reports
+    );
+    assert!(store.get_item(item).await.expect("get").is_some());
+    assert!(store
+        .get_file_by_path(&path.to_string_lossy())
+        .await
+        .expect("file")
+        .is_some());
+}
+
+/// An episode comes back by its show's TMDB id plus the season and episode in
+/// the returning file's name, onto the kept episode, with no new item beside it.
+#[tokio::test]
+async fn a_returning_episode_is_placed_on_the_offloaded_episode_by_ids() {
+    use crate::domain::MetadataPatch;
+    let store = SqliteStore::open_in_memory().expect("store");
+    let dir = tempfile::tempdir().expect("tmp");
+    let first = write_fake_video(dir.path(), "Severance/Season 1/Severance - S01E01.mkv").await;
+    write_fake_video(dir.path(), "Severance/Season 1/Severance - S01E02.mkv").await;
+    let lib = show_library(&store, dir.path()).await;
+    scan_library(&store, &lib).await.expect("full scan");
+    let episode = store
+        .get_file_by_path(&first.to_string_lossy())
+        .await
+        .expect("lookup")
+        .expect("file")
+        .item_id;
+    let show = store
+        .get_item(
+            store
+                .get_item(episode)
+                .await
+                .expect("ep")
+                .expect("ep")
+                .parent_id
+                .expect("season"),
+        )
+        .await
+        .expect("season")
+        .expect("season")
+        .parent_id
+        .expect("show");
+    store
+        .apply_metadata(
+            show,
+            &MetadataPatch {
+                tmdb_id: Some(95396),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("enriched");
+    std::fs::remove_file(&first).expect("rm");
+    let root = dir.path().to_path_buf();
+    removed::remove_absent(
+        &PublicationStore::unfenced(&store),
+        &lib,
+        &[offloaded_path(&root, &first).await],
+        false,
+    )
+    .await
+    .expect("offload");
+    assert!(store
+        .get_item(episode)
+        .await
+        .expect("get")
+        .expect("kept")
+        .offloaded_at
+        .is_some());
+
+    let returned = write_fake_video(
+        dir.path(),
+        "Severance.S01E01.1080p.WEB/Severance.S01E01.1080p.WEB.mkv",
+    )
+    .await;
+    let options = TargetedOptions {
+        force_probe: [returned.clone()].into_iter().collect(),
+        only: Some(vec![returned.clone()]),
+        offload_hints: [(
+            returned.clone(),
+            OffloadHint {
+                series_tmdb: Some(95396),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let (placed, _) =
+        scan_path_targeted(&PublicationStore::unfenced(&store), &lib, &root, &options)
+            .await
+            .expect("scan with ids");
+    assert_eq!(placed.items[0].item_id, episode, "{:?}", placed.items);
+    let item = store
+        .get_item(episode)
+        .await
+        .expect("get")
+        .expect("episode");
+    assert_eq!(item.offloaded_at, None, "the file cleared the offload");
+    assert_eq!(
+        store
+            .get_item_children(item.parent_id.expect("season"))
+            .await
+            .expect("kids")
+            .len(),
+        2,
+        "no duplicate episode appeared"
+    );
+}
+
 /// The ids belong to the files the request named, not to the folder: another
 /// file found in the same pass is placed by its own name, and a second file
 /// of the named title (another version, a second part) still lands on the
@@ -3130,7 +3268,12 @@ async fn a_hint_covers_only_the_files_its_request_named_and_every_part_of_them()
             .map(|placed| placed.item_id)
     };
     assert_eq!(item_of(&part_a), Some(item), "{:?}", placed.items);
-    assert_eq!(item_of(&part_b), Some(item), "the second part finds it too: {:?}", placed.items);
+    assert_eq!(
+        item_of(&part_b),
+        Some(item),
+        "the second part finds it too: {:?}",
+        placed.items
+    );
     let other = item_of(&stranger).expect("stranger placed");
     assert_ne!(other, item, "an unnamed file is not placed by the hint");
 }

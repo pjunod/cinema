@@ -744,6 +744,8 @@ impl FencedPublicationStore for HiqliteAuthStore {
                         lease.expires_at_unix_ms
                     );
                     statement_params[3] = Param::StmtOutputNamed(1, "id".into());
+                    // offload-exempt: identity repair retires one named duplicate
+                    // after moving its files to the survivor; not a leaf prune.
                     statements.push((
                         "DELETE FROM items WHERE id=$1 AND library_id=$2 AND kind=$3 AND $4=$5 \
                          AND NOT EXISTS (SELECT 1 FROM files WHERE item_id=$1) \

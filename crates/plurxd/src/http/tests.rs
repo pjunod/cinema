@@ -23031,7 +23031,12 @@ async fn fake_curator(
 /// Offload an item the way a removal does: its files go and the reconcile
 /// marks it in its own transaction.
 async fn offload_item(state: &AppState, item_id: i64) {
-    let item = state.store.get_item(item_id).await.expect("get").expect("item");
+    let item = state
+        .store
+        .get_item(item_id)
+        .await
+        .expect("get")
+        .expect("item");
     let library = state
         .store
         .list_libraries()
@@ -23065,6 +23070,121 @@ async fn offload_item(state: &AppState, item_id: i64) {
         )
         .await
         .expect("reconcile");
+}
+
+/// An offloaded episode keeps its place in the rails and the rollups: Next
+/// Up returns it flagged, Continue Watching never does, the season counts it
+/// as offloaded without being offloaded itself, and once every episode is
+/// offloaded the show and season are flagged and leave the default grid.
+#[tokio::test]
+async fn offloaded_episodes_roll_up_and_ride_the_rails_flagged() {
+    use plurx_core::domain::{ItemKind, NewItem};
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let ep2 = state
+        .store
+        .insert_item(&NewItem {
+            library_id: seed.lib,
+            kind: ItemKind::Episode,
+            parent_id: Some(seed.season),
+            title: "The Detail".into(),
+            year: None,
+            season_number: Some(1),
+            episode_number: Some(2),
+        })
+        .await
+        .expect("ep2");
+    let (status, _) = call(
+        &app,
+        post(
+            &format!("/api/v1/items/{}/scrobble", seed.ep),
+            Some(&admin),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    offload_item(&state, ep2).await;
+
+    let (_, hubs) = call(&app, get("/api/v1/hubs", Some(&admin))).await;
+    let next: Vec<&Value> = hubs["next_up"]
+        .as_array()
+        .expect("next_up")
+        .iter()
+        .collect();
+    let entry = next
+        .iter()
+        .find(|item| item["id"].as_i64() == Some(ep2))
+        .unwrap_or_else(|| panic!("next up still offers the offloaded episode: {hubs}"));
+    assert_eq!(
+        entry["offloaded"], true,
+        "flagged, so a client can offer Get it back: {entry}"
+    );
+    let resuming = hubs["continue_watching"].to_string();
+    assert!(
+        !resuming.contains(&format!("\"id\":{ep2},")),
+        "never resumable: {hubs}"
+    );
+
+    // Partial: the season counts one offloaded leaf but plays on.
+    let (_, season) = call(
+        &app,
+        get(&format!("/api/v1/items/{}", seed.season), Some(&admin)),
+    )
+    .await;
+    assert_eq!(season["item"]["rollup"]["offloaded"], 1, "{season}");
+    assert_ne!(
+        season["item"]["offloaded"], true,
+        "one episode is still on disk: {season}"
+    );
+
+    // Every episode gone: the containers read as offloaded and leave the grid.
+    offload_item(&state, seed.ep).await;
+    let (_, season) = call(
+        &app,
+        get(&format!("/api/v1/items/{}", seed.season), Some(&admin)),
+    )
+    .await;
+    assert_eq!(season["item"]["offloaded"], true, "{season}");
+    let (_, show) = call(
+        &app,
+        get(&format!("/api/v1/items/{}", seed.show), Some(&admin)),
+    )
+    .await;
+    assert_eq!(show["item"]["offloaded"], true, "{show}");
+    let grid = |query: &str| {
+        let uri = format!("/api/v1/libraries/{}/items{query}", seed.lib);
+        let app = app.clone();
+        let admin = admin.clone();
+        async move { call(&app, get(&uri, Some(&admin))).await.1.to_string() }
+    };
+    assert!(!grid("").await.contains("The Wire"), "hidden by default");
+    assert!(grid("?presence=offloaded").await.contains("The Wire"));
+    let (_, search) = call(&app, get("/api/v1/search?q=Wire", Some(&admin))).await;
+    assert!(
+        search.to_string().contains("\"offloaded\":true"),
+        "search flags it: {search}"
+    );
+
+    // The Plex facade has nothing to play, so it neither lists nor finds them.
+    let plex = |uri: String| {
+        Request::builder()
+            .uri(uri)
+            .header("x-plex-token", &admin)
+            .body(Body::empty())
+            .expect("req")
+    };
+    let (status, body) = body_of(&app, plex("/search?query=Wire".into())).await;
+    assert!(status.is_success());
+    assert!(
+        !String::from_utf8_lossy(&body).contains("The Wire"),
+        "plex search hides it"
+    );
+    assert_eq!(
+        status_of(&app, plex(format!("/library/metadata/{}", ep2))).await,
+        StatusCode::NOT_FOUND
+    );
 }
 
 async fn pair_curator(app: &Router, admin: &str, url: &str) {
