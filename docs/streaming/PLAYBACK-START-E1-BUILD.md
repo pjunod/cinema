@@ -1,6 +1,6 @@
 # Playback start — E1 build contract (replication classes as designed)
 
-**Status:** open — design and build contract for lane **E1** of [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) revision 3 (§3 E1). E1a in progress on `claude/ps-e1a` (draft PR #1500; what it built and where it departs from this text: §14); E1b and E1c not built. Revision 2: the adversarial review [PLAYBACK-START-E1-REVIEW.md](../reviews/PLAYBACK-START-E1-REVIEW-2026-11-11.md) is applied (§13). Needs Paul's answers to §12 before a build agent claims it. Where this contract and the plan disagree, the plan's §0 rulings win; raise the conflict in the lane PR.
+**Status:** open — design and build contract for lane **E1** of [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) revision 3 (§3 E1). E1a merged (PR #1500; what it built and where it departs from this text: §14); E1b built on `claude/ps-e1b` (§14); E1c not built. Revision 2: the adversarial review [PLAYBACK-START-E1-REVIEW.md](../reviews/PLAYBACK-START-E1-REVIEW-2026-11-11.md) is applied (§13). Needs Paul's answers to §12 before a build agent claims it. Where this contract and the plan disagree, the plan's §0 rulings win; raise the conflict in the lane PR.
 **Verified against:** `main @ 0c57d812` (2026-11-11), from source only — nothing was compiled or run. Re-anchor line numbers with `scripts/outline` and `rg` before editing.
 **Author:** Claude (claude-fable-5-2, session 01BCWL9xwmpSjitHqZMTRAht). **How to work:** [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) §0.
 
@@ -177,7 +177,7 @@ Rule: a read **moves** when its answer only chooses how to serve, plan or presen
 | Boot — `main.rs:1790, 3191, 3426` | **stays** | before the first proof |
 | Background workers — `state.rs` (37), `subtitle_*` (≈ 22), `live_tv*.rs`, `http/dvr.rs`, `library_search*`, `trakt.rs`, `watched.rs`, and the remaining `http/` singles | **not in E1** | not on the acceptance metric (§12-6) |
 
-The table becomes a pinned inventory test in the style of `bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate` (`http/tests.rs:1990`).
+The table becomes a pinned inventory test in the style of `bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate` (`http/tests.rs:1990`). *(Built in E1b as `crates/plurxd/src/http/applied_settings_inventory.rs`; the planning/describe group, encoder admission, FEL qualification and `media_pool.rs:1359` stay with the six sites the first build kept — E1b record, §14.)*
 
 ## 7. Sub-lanes, order, size
 
@@ -201,7 +201,7 @@ E1b and E1c may run in parallel after E1a. D3's applied-settings reads start aft
   - **Settings read-your-write:** save through F with F's apply held; `AppliedView::setting` on F answers the new value (authority) and returns to the view after the next applied watermark.
   - **Same-epoch renewal:** the next read returns the new lease, `owner_epoch` unchanged, zero consistent calls.
   - **Legacy layout:** the route view answers authority. **SQLite:** no proof object; every read is a store read (§4.2 "Standalone" as revised).
-- *Daemon:* **no clock in a `View` entry** — under steady renewals of *other* sessions and paused time advanced 10 s, lookups cost local reads only and zero consistent calls (old code: one quorum read per second); **degraded mode** — with no proof, quorum reads are one per session per lease, not one per request; **cache-miss storm** — 4,096 random ids under one proof, 0 consistent reads; `PUT /api/v1/settings` through a lagging follower returns the saved values; the settings inventory.
+- *Daemon:* **no clock in a `View` entry** — under steady renewals of *other* sessions and paused time advanced 10 s, lookups cost local reads only and zero consistent calls (old code: one quorum read per second); **degraded mode** — with no proof, quorum reads are one per session per lease, not one per request; **cache-miss storm** — 4,096 random ids under one proof, 0 consistent reads; `PUT /api/v1/settings` through a lagging follower returns the saved values (E1c's daemon harness: the one E1b case deferred, record §2); the settings inventory.
 
 **Guards — pass today, must keep passing; each gets a mutation counterfactual in the PR:**
 - **A fence never reads the view:** a counting double asserts zero view calls across `authoritative_route_resolution_before`, `control_route`, `authorize_prepared_media_before`, `verify_authority`, `status.rs:64, 141`, the three receipt fences, takeover and release; plus a source test on `ms.rs:2463-2491, 2620-2641`. Mutation: point one at `applied`.
@@ -214,7 +214,7 @@ From `/metrics` on each node; "built on effort" and "accepted on fleet" stay sep
 
 1. **Per comparable request:** `Δ plurx_http_store_reads_total{route_group,class="authority_read",role}` ÷ `Δ plurx_http_route_seconds_count{route_group,role}` for `playback` and `settings`, for each role present (`standalone, voter, learner, remote_authority, fenced, unknown`; the leader is a `voter`), before and after, over one scripted scenario (a direct play, a remote-owner play through a second ingress, a settings page left open; 10 minutes each).
 2. **Per session:** the same delta ÷ the time-integral of `plurx_transcode_sessions_active` (`http/system.rs:6587`) over the window.
-3. **Cache:** `plurx_media_session_route_lookups_total{result}` (`ms.rs:1028-1033`; fix its "one-second" help text) gains `view` and `observed`; `plurx_applied_view_reads_total{view,source,reason}`, `reason ∈ {ok, no_proof, image_replacing, floor, revoked_during_read, legacy_layout, local_error, unregistered}` (`unregistered`, added in E1a: a configuration error). Until E1b/E1c, view-side rows read 0: not a measurement.
+3. **Cache:** `plurx_media_session_route_lookups_total{result}` (`ms.rs:1028-1033`; fix its "one-second" help text) gains `view` and `observed`; `plurx_applied_view_reads_total{view,source,reason}`, `reason ∈ {ok, no_proof, image_replacing, floor, revoked_during_read, legacy_layout, local_error, unregistered, reload_in_flight}` (`unregistered`, added in E1a: a configuration error; `reload_in_flight`, added in E1b: a snapshot that met another reader's memo reload). Until E1b/E1c, view-side rows read 0: not a measurement.
 4. **Induced fences and degraded mode** (lab): a leader stop, a snapshot install on a learner, a release during play, a takeover, and a rolling upgrade with one old leader. Record the authority-read rate during each (expected ceiling: one per session per second) and its return to steady state; `plurx_playback_rolling_terminal_events_total{event="authority_fence"}` stays 0 outside the induced cases.
 5. **Target:** the review's order-of-magnitude drop for `settings` and `playback` at equal session counts. The stay-list is now larger (control exchanges, status `:64, :141`, receipt fences). E1a's baseline states the floor it leaves **before** E1c is sized; report that floor rather than moving a fence (§12-4).
 6. **Developer row "Applied view"** (`http/developer.rs:409`; `crates/plurxd/src/web/pages/settings-developer.js`, `devGraduation`): proof present, generation stable, last fallback reason, view/authority counts since start (computed at read time, no timer); reads "no readers yet" until E1b/E1c land. Advisory, no switch.
@@ -253,15 +253,6 @@ Every finding of [PLAYBACK-START-E1-REVIEW.md](../reviews/PLAYBACK-START-E1-REVI
 
 **Nits.** 1 fixed (§4.2 "Bound"; comment amended in E1c). 2 noted (§3). 3 fixed. 4 fixed (§4.4-3). 5 fixed (§9-6). 6 fixed (§12-2).
 
-## 14. E1a build record (2026-11-11)
+## 14. Build records
 
-Built on `claude/ps-e1a` (draft PR #1500): vendor patch 27, `confirmed_since`, `AppliedView`, the per-site route-read baseline, the applied-view metrics and the Developer card. No call site moves. Where the build departs from §4-§9, the departure and the reason:
-
-- **DDL through any arm (§4.1):** the schema cookie decides the all-slot bump.
-- **Restart (§5):** `MetadataRead` publishes the persisted applied index, so a caught-up node does not sit at index 0, failing every floor, until its next apply.
-- **Route-read sites (§7).** Nine labels instead of five: `status` and `receipt` are split by the decision each read waits on (§6.1: `status.rs:39` / `:64` / `:141`; the three receipt fences / the five reads that may move).
-- **Fallback reason `unregistered`** (§9-3): the mark does not register a view table.
-- **`note_fact(table) -> FactInstant`** (§4.2, §4.3): the view takes the instant itself, after the acknowledgement or quorum read; an earlier one would make the floor unsound. `floor_met` also requires a held proof, so an old leader's watermark never retires an `Observed` entry.
-- **SQLite hands out no stamps** (§4.2, §5, §8), and a failed SQLite read returns its error rather than asking the same store again.
-- **`AppliedView::route` lands with the local route twin in E1c.**
-- **Tests deferred (§8).** Replicated store-contract cases run on an embedded singleton (the three-voter contract cluster has only remote clients, which have no mark) with the validation proof. E1a covers the floor against the real mark, revocation mid-read, per-table stamps, and a replica held behind its own commit by the instance-local precommit hold (stamp current while held, stale the moment the entry applies, with no clock). Snapshot install, start-up restore, pending recovery, failed restore and restart are covered at the vendor layer. These need in-process multi-node clients with the real watermark sampler and move with the code they protect: the B1 release/takeover/activation sequence, the stale-replica release, the learner-join snapshot case, restart and leader change with routes → **E1c**; settings read-your-write through a lagging follower → **E1b**.
+What E1a and E1b built, and where each departs from this text: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md) §1 (E1a, 2026-11-11) and §2 (E1b, 2026-11-11). References to "§14" above point there.
