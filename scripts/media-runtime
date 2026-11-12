@@ -22,6 +22,8 @@ PIN = re.compile(
 DIGEST_ARG = re.compile(r'(?m)^ARG PLURX_MEDIA_RUNTIME_DIGEST="(sha256:[0-9a-f]{64})"$')
 DV_SOURCE_ARG = re.compile(r'(?m)^ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="([0-9a-f]{64})"$')
 DV_SOURCE = re.compile(r"[0-9a-f]{64}")
+READ_DV_SOURCE = ('import json; print(json.load(open('
+                  '"/usr/lib/plurx/dv-processing/build-identity.json"))["source_sha256"])')
 IMAGE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}"
 )
@@ -93,9 +95,10 @@ def pin_image(image: str, dockerfile: Path, dv_source_sha256: str, *, insecure: 
     """Require a published multi-platform image before changing application source.
 
     `dv_source_sha256` is the `source_sha256` of the published image's Dolby
-    Vision helper bundle, which its build prints when it verifies the bundle.
-    The application build checks the pinned image against it, and the
-    operations tests hold it to this tree's renderer sources.
+    Vision helper bundle (the publish receipt prints it). The pin reads it back
+    from the public image and refuses a mismatch; the application build checks
+    the pinned image against it, and the tests hold it to this tree's renderer
+    sources.
     """
     if not IMAGE.fullmatch(image):
         raise ValueError("image must be REGISTRY/REPOSITORY@sha256:<64 lowercase hex>")
@@ -121,6 +124,13 @@ def pin_image(image: str, dockerfile: Path, dv_source_sha256: str, *, insecure: 
         raise ValueError("media image index must contain both linux/amd64 and linux/arm64")
     digest = image.rsplit("@", 1)[1]
     verify_public_image(digest)
+    # Read the bundle's identity out of the published image itself, so a pin
+    # cannot record a value its runtime does not carry.
+    published = run(["docker", "run", "--rm", "--pull", "always", "--entrypoint", "python3",
+                     f"{PUBLIC_REPOSITORY}@{digest}", "-c", READ_DV_SOURCE], capture=True).strip()
+    if published != dv_source_sha256:
+        raise ValueError(f"the published DV helper bundle reports source_sha256 {published or '(none)'}, "
+                         f"not {dv_source_sha256}")
     updated = PIN.sub(lambda match: match[1] + digest + match[3], source)
     updated = DIGEST_ARG.sub(f'ARG PLURX_MEDIA_RUNTIME_DIGEST="{digest}"', updated)
     updated = DV_SOURCE_ARG.sub(f'ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="{dv_source_sha256}"', updated)

@@ -211,6 +211,8 @@ jobs:
           dv_source=$(cat media-digests/amd64.dv-source)
           [[ "$dv_source" =~ ^[0-9a-f]{64}$ ]]
           test "$(cat media-digests/arm64.dv-source)" = "$dv_source"
+          # ... and both must be this commit's renderer sources, not a cached layer.
+          test "$(python3 tools/dv_processing/bundle-manifest.py --identity tools/dv_processing)" = "$dv_source"
           tag="$RUNTIME_IMAGE:source-$GITHUB_SHA"
           docker manifest create --insecure --amend "$tag" "$RUNTIME_IMAGE@$amd64" "$RUNTIME_IMAGE@$arm64"
           digest=$(docker manifest push --insecure --purge "$tag" | tail -1)
