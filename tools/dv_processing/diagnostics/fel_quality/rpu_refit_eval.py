@@ -35,6 +35,10 @@ ap.add_argument('--stride', required=True, type=int, choices=[1, 8])
 ap.add_argument('--frames', default='all')
 ap.add_argument('--bands-json', required=True, type=Path)
 ap.add_argument('--output', required=True, type=Path)
+ap.add_argument('--rpu-list', type=Path, help='with --write-plan: the ordered source RPU list (path/sha256 entries)')
+ap.add_argument('--write-plan', type=Path, help='write the rpu_refit_write plan for Fp_poly (normative domain) and exit after fitting')
+ap.add_argument('--rpu-out-dir', type=Path, help='with --write-plan: where the 8.1 RPUs go')
+ap.add_argument('--readback', type=Path, help="rpu_refit_write's output: adds arm Fp_rpu (amendment_2)")
 a = ap.parse_args()
 assert not a.output.exists()
 
@@ -158,12 +162,53 @@ for f in range(48):
 fits = {'Fp_lut': (win.solve(), 'lut'), 'Fp_poly': (win.solve(quantize=True), 'poly'), 'Fp_cs': (wcs.solve(), 'lut')}
 print(json.dumps({'fitted': True, 'samples': int(win.ycnt.sum())}), flush=True)
 
+# Composer domain (amendment_2): x = code / 1024 in, s * 4096 out; the fit used code/1023 in, value/4095 out.
+K, RS = 4095 / 4096, 1024 / 1023
+DEG = [0] + [g * p for p in (1, 2, 3) for g in (1, 1, 1, 2, 2, 2, 3)]
+if a.write_plan:
+    pf = fits['Fp_poly'][0]
+    luma = [[K * c[0], K * c[1] * RS, K * c[2] * RS * RS] for c in pf['poly'].tolist()]
+    chroma = []
+    for ch in range(2):
+        m = [K * pf['mmr'][i, ch] * RS ** DEG[i] for i in range(22)]
+        chroma.append({'constant': m[0], 'coef': [m[1 + 7 * j:8 + 7 * j] for j in range(3)]})
+    srcs = json.loads(a.rpu_list.read_text()); assert len(srcs) == 48
+    a.rpu_out_dir.mkdir(parents=True, exist_ok=False)
+    for e in srcs:
+        assert sha(e['path']) == e['sha256'], e['path']
+    plan = {'frames': [{'src': e['path'], 'out': str(a.rpu_out_dir / f'frame-{i:03d}.nal')} for i, e in enumerate(srcs)],
+            'luma': {'pivot_deltas': [0] + [128] * 7 + [127], 'coef': luma}, 'chroma': chroma}
+    a.write_plan.write_text(json.dumps(plan, indent=1) + '\n'); print(json.dumps({'plan': str(a.write_plan)})); sys.exit(0)
+
+rb = None
+if a.readback:
+    rf = json.loads(a.readback.read_text())['frames']; assert len(rf) == 48
+    r0 = rf[0]
+    assert all((x['luma_coef'], x['chroma'], x['luma_pivot_deltas']) == (r0['luma_coef'], r0['chroma'], r0['luma_pivot_deltas']) for x in rf), 'per-window curves differ between frames'
+    assert (r0['profile'], r0['bl_bit_depth'], r0['vdr_bit_depth']) == (8, 10, 12)
+    piv = np.cumsum(r0['luma_pivot_deltas'])
+    rb = {'piv': piv, 'luma': np.array(r0['luma_coef']), 'mmr': [np.array([c['constant']] + [v for row in c['coef'] for v in row]) for c in r0['chroma']]}
+
+
+def apply_rpu(base):
+    """libplacebo pl_shader_dovi_reshape semantics on 10-bit BL codes; returns the centered code sample_codes would give."""
+    x = np.clip(base.astype(np.float64) / 1024, 0, 1023 / 1024)
+    yb = base[..., 0]
+    idx = np.clip(np.searchsorted(rb['piv'][1:-1], yb, side='right'), 0, len(rb['piv']) - 2)
+    c = rb['luma'][idx]; s0 = c[..., 0] + c[..., 1] * x[..., 0] + c[..., 2] * x[..., 0] ** 2
+    y, u, v = x[..., 0], x[..., 1], x[..., 2]; t = [y, u, v, y * u, y * v, u * v, y * u * v]
+    X = np.stack([np.ones_like(y)] + [tt ** p for p in (1, 2, 3) for tt in t], -1)
+    out = np.stack([s0, X @ rb['mmr'][0], X @ rb['mmr'][1]], -1)
+    comp = np.clip(np.floor(np.clip(out, 0, 1) * 4096 + .5), 0, 4095).astype(np.int64)
+    d = comp - 4 * base.astype(np.int64)
+    return np.where(d < 0, d - 1, d)
+
 if a.stride == 1:
     xs, ys = np.arange(x0, x1), np.arange(y0, y1)
 else:
     xs, ys = lattice((0, 1))
 frames = list(range(48)) if a.frames == 'all' else [int(x) for x in a.frames.split(',')]
-ARMS = ['F', 'Fp_lut', 'Fp_poly', 'Fp_frame', 'Fp_cs']
+ARMS = ['F', 'Fp_lut', 'Fp_poly', 'Fp_frame', 'Fp_cs'] + (['Fp_rpu'] if rb else [])
 
 
 def score(model, f):
@@ -173,6 +218,8 @@ def score(model, f):
         lums.append((10000 * fm.eotf(R.astype(np.float64) / 65535) @ fm.Y_WEIGHTS).ravel())
         arm_d = {'F': None, 'Fp_lut': apply(fits['Fp_lut'][0], 'lut', base), 'Fp_poly': apply(fits['Fp_poly'][0], 'poly', base),
                  'Fp_frame': apply(per[f], 'lut', base), 'Fp_cs': apply(fits['Fp_cs'][0], 'lut', base, ycs)}
+        if rb:
+            arm_d['Fp_rpu'] = apply_rpu(base)
         for k, d in arm_d.items():
             des[k].append(vm.delta(R, fm.model_rgb(model, base, d, matrix, offsets, lms)).ravel())
             yc = fm.composition12(base, d)[..., 0]; ymean[k][0] += float(yc.sum()); ymean[k][1] += yc.size
