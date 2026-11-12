@@ -75,27 +75,21 @@ impl TranscodeManager {
             scratch_grant_exhausted,
         });
         let source_observation = |held: bool| {
-            let rate = rolling_playback_rate(lease.demand.as_ref());
-            let (low, high) = rolling_source_watermarks(rate);
-            let fresh = lease
-                .demand_observation_age
-                .is_some_and(|age| age <= Duration::from_secs(5))
-                && !lease.startup.protects_from_time_hold();
-            let lead = lease
-                .demand
-                .as_ref()
-                .zip(produced_end_ms)
-                .map(|(demand, end)| {
-                    let position = crate::playback_control::rolling_estimated_position_ms(
-                        demand,
-                        lease.demand_observation_age.unwrap_or_default(),
-                    );
-                    ((session.media_origin_seconds * 1_000.0).round() as i64)
-                        .saturating_add(end)
-                        .saturating_sub(position)
-                        .max(0) as u64
-                });
-            (held, fresh, lead, low, high)
+            let observation = rolling_source_observation(
+                lease.demand.as_ref(),
+                lease.demand_observation_age,
+                lease.startup.protects_from_time_hold(),
+                (session.media_origin_seconds * 1_000.0).round() as i64,
+                produced_end_ms,
+                held,
+            );
+            (
+                observation.held,
+                observation.fresh,
+                observation.lead_ms,
+                observation.low_ms,
+                observation.high_ms,
+            )
         };
         let hold = evaluation.hold;
         let want_suspend = hold.is_some();

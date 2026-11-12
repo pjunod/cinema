@@ -284,6 +284,57 @@ pub(crate) fn rolling_source_watermarks(rate: f64) -> (u64, u64) {
         low.saturating_add((rolling_publication_batch_ms(rate).max(1) as u64).saturating_mul(2));
     (low, high)
 }
+
+/// What a rolling producer's flow evaluation tells the source domain about
+/// its read: its watermarks, its committed lead over the viewer, whether the
+/// viewer is fresh, and the hold it decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RollingSourceObservation {
+    pub(crate) held: bool,
+    pub(crate) fresh: bool,
+    pub(crate) lead_ms: Option<u64>,
+    pub(crate) low_ms: u64,
+    pub(crate) high_ms: u64,
+}
+
+/// The source observation of one flow evaluation: the rule a rolling session
+/// presses the source by, and the one a local copy range presses it by.
+///
+/// The viewer is fresh while its last accepted demand is at most 5 s old and
+/// the startup is not protected from a time hold. A paused or buffering
+/// viewer that is still reporting is fresh. The lead is measured from the
+/// estimated position of that demand to the produced end; with no demand or
+/// nothing produced there is none.
+pub(crate) fn rolling_source_observation(
+    demand: Option<&crate::playback_control::PlaybackDemandSnapshot>,
+    demand_observation_age: Option<Duration>,
+    startup_protected: bool,
+    media_origin_ms: i64,
+    produced_end_ms: Option<i64>,
+    held: bool,
+) -> RollingSourceObservation {
+    let rate = rolling_playback_rate(demand);
+    let (low_ms, high_ms) = rolling_source_watermarks(rate);
+    let fresh = demand_observation_age.is_some_and(|age| age <= Duration::from_secs(5))
+        && !startup_protected;
+    let lead_ms = demand.zip(produced_end_ms).map(|(demand, end)| {
+        let position = crate::playback_control::rolling_estimated_position_ms(
+            demand,
+            demand_observation_age.unwrap_or_default(),
+        );
+        media_origin_ms
+            .saturating_add(end)
+            .saturating_sub(position)
+            .max(0) as u64
+    });
+    RollingSourceObservation {
+        held,
+        fresh,
+        lead_ms,
+        low_ms,
+        high_ms,
+    }
+}
 pub(super) fn rolling_source_bank_target_ms(rate: f64, held: bool) -> i64 {
     let (low, high) = rolling_source_watermarks(rate);
     // At rates whose steady reserve already reaches the global bound, no
