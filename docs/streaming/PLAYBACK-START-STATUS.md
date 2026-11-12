@@ -134,7 +134,61 @@ Decisions (Paul away):
 Still open: fleet acceptance of the items below and the limits listed under
 items 4 and 5.
 
-## Current batch — the copy index rides the content-analysis pass (item 6, plan step 3)
+## Current batch — a local owner for the copy engine (item 6, plan step 4)
+
+Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
+agent on local branch `step4`, stacked on `step3`, not pushed.
+[Plan step 4](LOCAL-COPY-ENGINE-BUILD.md) is built. Clippy `-D warnings` and
+fmt are clean, the inventory and formal pins are green. No unit test has
+been run: the step's tests are written and wait for the fast lane.
+
+The engine's range storage and its generation ownership each have a typed
+local owner beside the Source one. Nothing constructs a local owner outside
+tests yet, so local playback is served exactly as before; steps 5 and 6
+give it an Input, a lifetime and a serving attachment.
+
+- `CopyRangeFiles::create` takes a `CopyRangeOwner`. A Source owner keeps
+  its directories and writes the manifest it always wrote, byte for byte.
+  A local owner's payload is `local-copy-ranges/<session>/<range>` and its
+  manifests are under `copy-ranges/local-observations`, named `owner:
+  "local"` with the session and viewer.
+- `CopyGenerationOwner::Local` is the session rendition's dispatch ledger
+  with no Source assignment, the viewer, and the session's admission claim
+  when it holds one, released only after the registered reap.
+- One copy pipeline derivation. The growing Source range and a Source
+  rendition now ask the node whether its FFmpeg can strip Dolby Vision, as
+  local playback always has, instead of answering "no". One file and
+  recipe therefore have one copy-index source key on a node, and an index
+  either path published is the one the other finds.
+- Behaviour change, shared playback only: a Dolby Vision HEVC copy served
+  stripped, on a node whose FFmpeg has `dovi_rpu`, now runs
+  `dovi_rpu=strip=1` as local playback of the same file does. Its v3
+  source key, Source rendition key and v1 index identity change. Heads a
+  Source range published under the old key are no longer found (and are
+  not deleted); the index is the local one if it exists, otherwise the
+  next Source range rebuilds it. Cached Source renditions of those titles
+  are not reused. Nodes without the filter, and every other copy, are
+  unchanged.
+- Decision (Paul away): the Source rendition path was changed together
+  with the range, which the plan did not name. It reads the copy index by
+  the key the range publishes under, so changing the range alone would
+  have left shared playback unable to find its own index.
+- Found: no binary reads a checkpoint manifest back, so the plan's
+  manifest compatibility is held by construction (identical Source bytes)
+  and pinned by a test rather than by a reader.
+- Found: a local copy rendition holds no admission permit today, so the
+  local owner's permit is optional. Step 5 decides whether a local range
+  takes copy admission.
+- Left as it was: Source planning's `vod_indexed` hint in `http/stream.rs`
+  still derives without the filter. It reads only the node-local v1 index.
+
+Open, post-deploy: on a node whose FFmpeg has `dovi_rpu`, play a Dolby
+Vision title stripped over a share before and after a local playback of
+it, and record that both resolve one v3 head and that the shared start
+plays. A node has the filter when its FFmpeg lists the `dovi_rpu`
+bitstream filter (FFmpeg 7.1 or later).
+
+## Previous batch — the copy index rides the content-analysis pass (item 6, plan step 3)
 
 Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
 agent on local branch `step3`, stacked on `item6b`, not pushed.
@@ -494,23 +548,22 @@ steps with an Execution log. Its step 1, durable demand, is built on
   have done so since item 2. The fix redefines that trigger and is one
   schema version on both backends; it is plan step 2.
 
-Plan step 3 is built on `step3`: see the current batch above.
+Plan step 3 is built on `step3` and plan step 4 on `step4`: see the two
+batches above.
 
-Remaining for item 6, not started (plan step 2 and steps 4-10):
+Remaining for item 6, not started (plan step 2 and steps 5-10):
 
 - Local rolling copy and indexed-VOD copy still run their own producers
   (`copy_pipe_args` to the rolling segmenter, and plan-verified VOD
   generations). Neither runs the growing engine, so local playback commits
   no ranges and contributes no rows: a locally played title is indexed by a
   second read, not by the read that served it.
-- The growing engine is bound to the Source worker: `CopyRangeFiles::create`
-  takes a `SourceDispatchAssignment` and names its payload directory by the
-  Source incarnation, `spawn_source_generation` is owned through
-  `SourceRenditionOwners` and the Source gate, and the range is served
-  through the Source viewer's own playlist. A local owner needs its own
-  variant at each of those four points and a local serving attachment
+- The growing engine is still run only by the Source worker. Range storage
+  and generation ownership have a local owner (plan step 4), which nothing
+  constructs yet: a local range still needs its Input admission, lifetime,
+  control state and reaping (plan step 5) and a local serving attachment
   (build contract step 4: growing attachment and A1-N admission for local
-  sessions) before any local path can be moved onto it.
+  sessions; plan step 6) before any local path can be moved onto it.
 - `CopyObservationSet::observe` accepts a `Local` range, but nothing
   produces one. When the engine runs for local playback, the range's
   `CompletedCopyRange` carries `CopyObservationAuthority::Local` and the
