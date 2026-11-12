@@ -167,12 +167,15 @@ struct HttpRouteCell {
 /// The most `(route_group, class, method)` series
 /// `plurx_http_store_operations_by_method_total` ever holds. The method label
 /// is a `&'static str` chosen at a Store call site, so the set is bounded by
-/// the source: at most one label per consistent-read site (365 at the census)
-/// and write site, over nine route groups and three classes. In practice a
-/// method is reached from two or three groups. This cap is the guarantee
-/// behind that arithmetic: past it a new series is not created and the
-/// operation is counted in `plurx_http_store_operations_by_method_dropped_total`
-/// instead, so a mistake can never grow the exposition without bound.
+/// the source (about 470 distinct labels today), but the product with route
+/// groups and classes is not what is expected to be reached: a method is
+/// issued in one or two classes, from two or three groups, so the live series
+/// number a few thousand at most. The cap is the guarantee, not the
+/// arithmetic: past it a new series is not created and the operation is counted
+/// in `plurx_http_store_operations_by_method_dropped_total` instead, so a
+/// mistake can never grow the exposition without bound. At the cap the series
+/// that arrived first are the ones kept, permanently until restart, and the
+/// dropped counter is what says a reading is incomplete.
 const HTTP_METHOD_SERIES_CAP: usize = 4096;
 
 /// Replicated Store operations by the Store method that issued them, per
@@ -197,6 +200,11 @@ impl HttpMethodMetrics {
     /// `HttpStoreOperationCounts::snapshot` uses; `HTTP_STORE_CLASSES` is in
     /// the same order.
     fn record(&self, group: usize, methods: &[(&'static str, [u64; 3])]) {
+        // Segment and playlist requests make no Store operation: they do not
+        // take the process-wide lock.
+        if methods.is_empty() {
+            return;
+        }
         let mut series = self
             .series
             .lock()

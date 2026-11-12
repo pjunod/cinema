@@ -2249,8 +2249,11 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     );
     measured.push(("index miss, rolling copy", line));
     // The fifth shape is the one a current client sends: capabilities (v2)
-    // and an intent envelope. The capabilities make the create read the
-    // catalog, and the intent adds the selection write, so both are pinned.
+    // and an intent envelope. The intent adds the selection write
+    // (`record_desired_selection`), which is pinned. The catalog read is NOT
+    // exercised: this fixture runs with the media pool off, so no
+    // `playback_planning_snapshot` per offer reads the catalog here. D3d
+    // measures that read, and owes its own pin.
     let (with_intent, line) = create_and_measure(
         &client,
         &mut node_b,
@@ -2358,110 +2361,128 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // (authority reads, local reads, writes). Measured on D3a's build
     // (nothing moved); `docs/streaming/PLAYBACK-START-D3-RECORD.md` explains
     // each row. Every later D3 lane changes these by exactly what it removes.
-    // `queue_sql` is the queue bridge's one non-forwarded label: it carries the
-    // foreground source custody register and activate, and, on the rolling
-    // fallback, `suspend_playback_analysis_interest`.
+    // `queue_sql` is the queue bridge's one non-forwarded label (D3b defers
+    // naming it). The writes it carries per shape: first play and reopen, none
+    // (its two reads are the copy-index consumer); Auto encode and caps-v2
+    // Auto, the foreground source custody `register` and `activate`; rolling
+    // copy, those two plus `suspend_playback_analysis_interest` (3). Swapping
+    // one queue write for another is invisible to this pin until D3b forwards
+    // the label.
+    // Layout reads: `session_layout` is its own label. Its reads (the
+    // `cluster_meta` marker and guard reads) are paid only by a store whose
+    // cached session layout is still Legacy, as this fresh fixture is; a store
+    // that has installed the permanent v82 layout makes none, so a fleet
+    // reading shows these rows without the `session_layout` line.
     #[allow(clippy::type_complexity)]
     let expected_methods: [(&str, &[(&str, (u64, u64, u64))]); 5] = [
         (
             "first play, VOD index",
             &[
-                ("activate_media_session", (4, 0, 1)),
+                ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
-                ("claim_media_session_request", (2, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
                 ("fragment_index_source", (1, 0, 0)),
                 ("get_file_probe_json", (1, 0, 0)),
                 ("get_setting", (2, 0, 0)),
                 ("get_settings", (2, 0, 0)),
                 ("local_get_settings", (0, 1, 0)),
-                ("maintain_media_sessions", (2, 0, 0)),
-                ("media_session_route_for_playback", (2, 0, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
                 ("playback_planning_snapshot", (3, 0, 0)),
-                ("publish_media_session_activation", (4, 0, 1)),
+                ("publish_media_session_activation", (2, 0, 1)),
                 ("queue_sql", (2, 0, 0)),
-                ("settle_media_session_activation", (2, 0, 2)),
+                ("session_layout", (8, 0, 0)),
+                // Two timed writes, one physical UPDATE: Confirm is double-timed
+                // (`source_layout_idempotent` times its retry loop and the inner
+                // `txn_source_layout_attempt` times the statement). Left as is
+                // for Paul; a Confirm retry makes it 4.
+                ("settle_media_session_activation", (1, 0, 2)),
                 ("timeline_annotation_set", (2, 0, 0)),
             ],
         ),
         (
             "reopen, new position",
             &[
-                ("activate_media_session", (6, 0, 1)),
+                ("activate_media_session", (3, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
-                ("claim_media_session_request", (2, 0, 1)),
-                ("complete_media_session_handoff", (2, 0, 1)),
-                ("complete_media_session_terminal_projection", (2, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
+                ("complete_media_session_handoff", (1, 0, 1)),
+                ("complete_media_session_terminal_projection", (1, 0, 1)),
                 ("fragment_index_source", (1, 0, 0)),
                 ("get_file_probe_json", (1, 0, 0)),
                 ("get_setting", (1, 0, 0)),
                 ("get_settings", (2, 0, 0)),
                 ("local_get_settings", (0, 1, 0)),
-                ("maintain_media_sessions", (2, 0, 0)),
-                ("media_session_route_by_incarnation", (2, 0, 0)),
-                ("media_session_route_for_playback", (2, 0, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_by_incarnation", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
                 ("playback_planning_snapshot", (3, 0, 0)),
-                ("publish_media_session_activation", (4, 0, 1)),
+                ("publish_media_session_activation", (2, 0, 1)),
                 ("queue_sql", (2, 0, 0)),
-                ("settle_media_session_activation", (2, 0, 2)),
+                ("session_layout", (12, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
                 ("timeline_annotation_set", (2, 0, 0)),
             ],
         ),
         (
             "Auto encode, VOD",
             &[
-                ("activate_media_session", (4, 0, 1)),
+                ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
-                ("claim_media_session_request", (2, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
                 ("get_file_probe_json", (3, 0, 0)),
                 ("get_setting", (4, 0, 0)),
                 ("get_settings", (2, 0, 0)),
                 ("local_get_settings", (0, 1, 0)),
-                ("maintain_media_sessions", (2, 0, 0)),
-                ("media_session_route_for_playback", (2, 0, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
                 ("playback_planning_snapshot", (3, 0, 0)),
-                ("publish_media_session_activation", (4, 0, 1)),
+                ("publish_media_session_activation", (2, 0, 1)),
                 ("queue_sql", (0, 0, 2)),
-                ("settle_media_session_activation", (2, 0, 2)),
+                ("session_layout", (8, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
                 ("timeline_annotation_set", (2, 0, 0)),
             ],
         ),
         (
             "index miss, rolling copy",
             &[
-                ("activate_media_session", (4, 0, 1)),
+                ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
-                ("claim_media_session_request", (2, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
                 ("fragment_index_source", (1, 0, 0)),
                 ("get_file", (1, 0, 0)),
                 ("get_file_probe_json", (1, 0, 0)),
                 ("get_setting", (1, 0, 0)),
                 ("get_settings", (2, 0, 0)),
                 ("local_get_settings", (0, 1, 0)),
-                ("maintain_media_sessions", (2, 0, 0)),
-                ("media_session_route_for_playback", (2, 0, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
                 ("playback_planning_snapshot", (4, 0, 0)),
-                ("publish_media_session_activation", (4, 0, 1)),
+                ("publish_media_session_activation", (2, 0, 1)),
                 ("queue_sql", (2, 0, 3)),
-                ("settle_media_session_activation", (2, 0, 2)),
+                ("session_layout", (8, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
             ],
         ),
         (
             "caps-v2 Auto, intent",
             &[
-                ("activate_media_session", (4, 0, 1)),
+                ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
-                ("claim_media_session_request", (2, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
                 ("get_file_probe_json", (3, 0, 0)),
                 ("get_setting", (4, 0, 0)),
                 ("get_settings", (2, 0, 0)),
                 ("local_get_settings", (0, 1, 0)),
-                ("maintain_media_sessions", (2, 0, 0)),
-                ("media_session_route_for_playback", (2, 0, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
                 ("playback_planning_snapshot", (3, 0, 0)),
-                ("publish_media_session_activation", (4, 0, 1)),
+                ("publish_media_session_activation", (2, 0, 1)),
                 ("queue_sql", (0, 0, 2)),
-                ("record_desired_selection", (2, 0, 1)),
-                ("settle_media_session_activation", (2, 0, 2)),
+                ("record_desired_selection", (1, 0, 1)),
+                ("session_layout", (9, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
                 ("timeline_annotation_set", (2, 0, 0)),
             ],
         ),

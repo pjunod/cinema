@@ -1883,6 +1883,7 @@ impl HiqliteAuthStore {
     /// and mutate authority with legacy SQL.
     pub(super) async fn credential_mutation(
         &self,
+        method: &'static str,
         statements: Vec<(&'static str, Params)>,
     ) -> Result<Vec<usize>, StoreError> {
         for (sql, _) in &statements {
@@ -1895,7 +1896,7 @@ impl HiqliteAuthStore {
         transaction.push((CREDENTIAL_MUTATION_INTENT_END_SQL, params!()));
         let results = self
             .client()
-            .txn("credential_mutation", transaction)
+            .txn(method, transaction)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -2137,6 +2138,7 @@ impl HiqliteAuthStore {
         // an operator explicitly narrows the active range.
         store
             .execute(
+                "bootstrap_with_clock",
                 "INSERT INTO cluster_meta \
                  (singleton, schema_version, protocol_min, protocol_max, migrated_at) \
                  VALUES (1, $1, $2, $2, $3) \
@@ -2150,6 +2152,7 @@ impl HiqliteAuthStore {
         let now = store.now()?;
         store
             .execute(
+                "bootstrap_with_clock",
                 "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3) \
                  ON CONFLICT(key) DO NOTHING",
                 params!(keys::INSTANCE_ID, instance_id, now),
@@ -5986,6 +5989,7 @@ impl HiqliteAuthStore {
                 };
                 if crate::auth::activity_refresh_due(current.last_activity_at, now) {
                     self.execute(
+                        "refresh_token_activity_if_due",
                         "UPDATE tokens SET last_seen_at = $1 \
                          WHERE token_hash = $2 AND last_seen_at < $3",
                         params!(
@@ -6019,6 +6023,7 @@ impl HiqliteAuthStore {
                 };
                 if crate::auth::activity_refresh_due(current.last_activity_at, now) {
                     self.execute(
+                        "refresh_api_key_activity",
                         "UPDATE api_keys SET last_used_at = $1 \
                          WHERE id = $2 AND disabled = 0 \
                            AND (last_used_at IS NULL OR last_used_at < $3)",
@@ -6037,46 +6042,48 @@ impl HiqliteAuthStore {
 
     pub(super) async fn execute(
         &self,
+        method: &'static str,
         sql: &'static str,
         params: hiqlite::Params,
     ) -> Result<usize, StoreError> {
         validate_sql(sql)?;
-        self.client().execute("execute", sql, params).await
+        self.client().execute(method, sql, params).await
     }
 
     async fn execute_idempotent(
         &self,
+        method: &'static str,
         sql: &'static str,
         params: hiqlite::Params,
     ) -> Result<usize, StoreError> {
         validate_sql(sql)?;
-        self.client()
-            .execute_idempotent("execute_idempotent", sql, params)
-            .await
+        self.client().execute_idempotent(method, sql, params).await
     }
 
     async fn user_optional(
         &self,
+        method: &'static str,
         sql: &'static str,
         params: hiqlite::Params,
     ) -> Result<Option<User>, StoreError> {
         validate_sql(sql)?;
         let mut rows = self
             .client()
-            .query_consistent_map::<UserRow, _>("user_optional", sql, params)
+            .query_consistent_map::<UserRow, _>(method, sql, params)
             .await?;
         Ok(rows.pop().map(Into::into))
     }
 
     async fn key_optional(
         &self,
+        method: &'static str,
         sql: &'static str,
         params: hiqlite::Params,
     ) -> Result<Option<ApiKey>, StoreError> {
         validate_sql(sql)?;
         let mut rows = self
             .client()
-            .query_consistent_map::<ApiKeyRow, _>("key_optional", sql, params)
+            .query_consistent_map::<ApiKeyRow, _>(method, sql, params)
             .await?;
         Ok(rows.pop().map(Into::into))
     }
@@ -6538,6 +6545,7 @@ impl SettingsStore for HiqliteAuthStore {
     async fn get_or_init_setting(&self, key: &str, seed: &str) -> Result<String, StoreError> {
         let now = self.now()?;
         self.execute(
+            "get_or_init_setting",
             "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3) \
              ON CONFLICT(key) DO NOTHING",
             params!(key, seed, now),
@@ -6616,6 +6624,7 @@ impl SettingsStore for HiqliteAuthStore {
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
         let now = self.now()?;
         self.execute_idempotent(
+            "put_setting",
             "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3) \
              ON CONFLICT(key) DO UPDATE SET \
              value = excluded.value, updated_at = excluded.updated_at",
@@ -6629,6 +6638,7 @@ impl SettingsStore for HiqliteAuthStore {
         let now = self.now()?;
         Ok(self
             .execute(
+                "put_setting_if_absent",
                 "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3) \
                  ON CONFLICT(key) DO NOTHING",
                 params!(key, value, now),
@@ -6647,6 +6657,7 @@ impl SettingsStore for HiqliteAuthStore {
         let now = self.now()?;
         Ok(self
             .execute(
+                "put_setting_if_absent_if_artwork_repair_current",
                 "INSERT INTO settings (key, value, updated_at) \
                  SELECT $1, $2, $3 WHERE $4 = $5 AND EXISTS (\
                    SELECT 1 FROM cluster_artwork_repairs \
@@ -6673,6 +6684,7 @@ impl SettingsStore for HiqliteAuthStore {
         filename: &str,
     ) -> Result<usize, StoreError> {
         self.execute(
+            "prune_unreferenced_book_cover_origins",
             "DELETE FROM settings
               WHERE substr(key, 1, 27) = 'internal.book_cover_origin.'
                 AND json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,
@@ -6794,6 +6806,7 @@ impl UserStore for HiqliteAuthStore {
 
     async fn get_user(&self, id: i64) -> Result<Option<User>, StoreError> {
         self.user_optional(
+            "get_user",
             "SELECT id, username, password_hash, is_admin, created_at \
              FROM users WHERE id = $1",
             params!(id),
@@ -6803,6 +6816,7 @@ impl UserStore for HiqliteAuthStore {
 
     async fn get_user_by_username(&self, username: &str) -> Result<Option<User>, StoreError> {
         self.user_optional(
+            "get_user_by_username",
             "SELECT id, username, password_hash, is_admin, created_at \
              FROM users WHERE username = $1",
             params!(username),
@@ -6841,7 +6855,10 @@ impl UserStore for HiqliteAuthStore {
 
     async fn delete_user(&self, id: i64) -> Result<bool, StoreError> {
         Ok(self
-            .credential_mutation(vec![("DELETE FROM users WHERE id = $1", params!(id))])
+            .credential_mutation(
+                "delete_user",
+                vec![("DELETE FROM users WHERE id = $1", params!(id))],
+            )
             .await?[0]
             > 0)
     }
@@ -6875,7 +6892,9 @@ impl UserStore for HiqliteAuthStore {
                 params!(id),
             ),
         };
-        let changed = self.credential_mutation(vec![statement]).await?[0];
+        let changed = self
+            .credential_mutation("delete_user_preserving_admin", vec![statement])
+            .await?[0];
         Ok(changed > 0)
     }
 
@@ -6894,10 +6913,13 @@ impl UserStore for HiqliteAuthStore {
         // parameter whose index follows first appearance. Keep `$1` first in
         // the SQL even when the SET clause precedes the predicate.
         Ok(self
-            .credential_mutation(vec![(
-                "UPDATE users SET password_hash = $1 WHERE id = $2",
-                params!(password_hash, id),
-            )])
+            .credential_mutation(
+                "set_password",
+                vec![(
+                    "UPDATE users SET password_hash = $1 WHERE id = $2",
+                    params!(password_hash, id),
+                )],
+            )
             .await?[0]
             > 0)
     }
@@ -6910,33 +6932,39 @@ impl UserStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         let results = match claim {
             Some(claim) => {
-                self.credential_mutation(vec![
-                    (
-                        "UPDATE users SET password_hash = $1
+                self.credential_mutation(
+                    "reset_password_and_revoke_tokens",
+                    vec![
+                        (
+                            "UPDATE users SET password_hash = $1
                              WHERE id = $2 AND EXISTS (
                                SELECT 1 FROM cluster_cache_admin_revocation_leases
                                WHERE claim_id = $3
                              )",
-                        params!(password_hash, id, claim.as_str()),
-                    ),
-                    (
-                        "DELETE FROM tokens WHERE user_id = $1 AND EXISTS (
+                            params!(password_hash, id, claim.as_str()),
+                        ),
+                        (
+                            "DELETE FROM tokens WHERE user_id = $1 AND EXISTS (
                                SELECT 1 FROM cluster_cache_admin_revocation_leases
                                WHERE claim_id = $2
                              )",
-                        params!(id, claim.as_str()),
-                    ),
-                ])
+                            params!(id, claim.as_str()),
+                        ),
+                    ],
+                )
                 .await?
             }
             None => {
-                self.credential_mutation(vec![
-                    (
-                        "UPDATE users SET password_hash = $1 WHERE id = $2",
-                        params!(password_hash, id),
-                    ),
-                    ("DELETE FROM tokens WHERE user_id = $1", params!(id)),
-                ])
+                self.credential_mutation(
+                    "reset_password_and_revoke_tokens",
+                    vec![
+                        (
+                            "UPDATE users SET password_hash = $1 WHERE id = $2",
+                            params!(password_hash, id),
+                        ),
+                        ("DELETE FROM tokens WHERE user_id = $1", params!(id)),
+                    ],
+                )
                 .await?
             }
         };
@@ -6958,33 +6986,39 @@ impl UserStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         let results = match claim {
             Some(claim) => {
-                self.credential_mutation(vec![
-                    (
-                        "UPDATE users SET password_hash = $1, is_admin = 1
+                self.credential_mutation(
+                    "promote_user_and_reset_password",
+                    vec![
+                        (
+                            "UPDATE users SET password_hash = $1, is_admin = 1
                              WHERE id = $2 AND EXISTS (
                                SELECT 1 FROM cluster_cache_admin_revocation_leases
                                WHERE claim_id = $3
                              )",
-                        params!(password_hash, id, claim.as_str()),
-                    ),
-                    (
-                        "DELETE FROM tokens WHERE user_id = $1 AND EXISTS (
+                            params!(password_hash, id, claim.as_str()),
+                        ),
+                        (
+                            "DELETE FROM tokens WHERE user_id = $1 AND EXISTS (
                                SELECT 1 FROM cluster_cache_admin_revocation_leases
                                WHERE claim_id = $2
                              )",
-                        params!(id, claim.as_str()),
-                    ),
-                ])
+                            params!(id, claim.as_str()),
+                        ),
+                    ],
+                )
                 .await?
             }
             None => {
-                self.credential_mutation(vec![
-                    (
-                        "UPDATE users SET password_hash = $1, is_admin = 1 WHERE id = $2",
-                        params!(password_hash, id),
-                    ),
-                    ("DELETE FROM tokens WHERE user_id = $1", params!(id)),
-                ])
+                self.credential_mutation(
+                    "promote_user_and_reset_password",
+                    vec![
+                        (
+                            "UPDATE users SET password_hash = $1, is_admin = 1 WHERE id = $2",
+                            params!(password_hash, id),
+                        ),
+                        ("DELETE FROM tokens WHERE user_id = $1", params!(id)),
+                    ],
+                )
                 .await?
             }
         };
@@ -7000,10 +7034,13 @@ impl UserStore for HiqliteAuthStore {
 
     async fn set_admin(&self, id: i64, is_admin: bool) -> Result<bool, StoreError> {
         Ok(self
-            .credential_mutation(vec![(
-                "UPDATE users SET is_admin = $1 WHERE id = $2",
-                params!(is_admin, id),
-            )])
+            .credential_mutation(
+                "set_admin",
+                vec![(
+                    "UPDATE users SET is_admin = $1 WHERE id = $2",
+                    params!(is_admin, id),
+                )],
+            )
             .await?[0]
             > 0)
     }
@@ -7037,16 +7074,18 @@ impl UserStore for HiqliteAuthStore {
                 params!(id),
             ),
         };
-        let changed = self.credential_mutation(vec![statement]).await?[0];
+        let changed = self
+            .credential_mutation("demote_user_preserving_admin", vec![statement])
+            .await?[0];
         Ok(changed > 0)
     }
 
     async fn delete_tokens_for_user(&self, user_id: i64) -> Result<u64, StoreError> {
         Ok(self
-            .credential_mutation(vec![(
-                "DELETE FROM tokens WHERE user_id = $1",
-                params!(user_id),
-            )])
+            .credential_mutation(
+                "delete_tokens_for_user",
+                vec![("DELETE FROM tokens WHERE user_id = $1", params!(user_id))],
+            )
             .await?[0] as u64)
     }
 
@@ -7060,12 +7099,15 @@ impl UserStore for HiqliteAuthStore {
         // Defence in depth behind the login admission check, so a replicated
         // row never carries a label above the documented byte bound.
         let device = bounded_device_label(device.map(str::to_owned));
-        self.credential_mutation(vec![(
-            "INSERT INTO tokens \
+        self.credential_mutation(
+            "create_token",
+            vec![(
+                "INSERT INTO tokens \
              (token_hash, user_id, device, created_at, last_seen_at) \
              VALUES ($1, $2, $3, $4, $4)",
-            params!(token_hash, user_id, device, now),
-        )])
+                params!(token_hash, user_id, device, now),
+            )],
+        )
         .await?;
         Ok(())
     }
@@ -7080,13 +7122,16 @@ impl UserStore for HiqliteAuthStore {
         let now = self.now()?;
         let device = bounded_device_label(device.map(str::to_owned));
         Ok(self
-            .credential_mutation(vec![(
-                "INSERT INTO tokens \
+            .credential_mutation(
+                "create_token_if_password_matches",
+                vec![(
+                    "INSERT INTO tokens \
                  (token_hash, user_id, device, created_at, last_seen_at) \
                  SELECT $1, id, $2, $3, $3 FROM users \
                  WHERE id = $4 AND password_hash = $5",
-                params!(token_hash, device, now, user_id, expected_password_hash),
-            )])
+                    params!(token_hash, device, now, user_id, expected_password_hash),
+                )],
+            )
             .await?[0]
             > 0)
     }
@@ -7099,7 +7144,10 @@ impl UserStore for HiqliteAuthStore {
         // A handoff token is never a row in `tokens`; its own table answers.
         if audience == super::TokenAudience::PlaybackHandoff {
             return Ok(
-                match self.authenticate_playback_handoff(token_hash).await? {
+                match self
+                    .authenticate_playback_handoff("authenticate_token_for", token_hash)
+                    .await?
+                {
                     Some(user) => TokenAuthentication::Authenticated(user),
                     None => TokenAuthentication::Unknown,
                 },
@@ -7156,10 +7204,13 @@ impl UserStore for HiqliteAuthStore {
 
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError> {
         Ok(self
-            .credential_mutation(vec![(
-                "DELETE FROM tokens WHERE token_hash = $1",
-                params!(token_hash),
-            )])
+            .credential_mutation(
+                "delete_token",
+                vec![(
+                    "DELETE FROM tokens WHERE token_hash = $1",
+                    params!(token_hash),
+                )],
+            )
             .await?[0]
             > 0)
     }
@@ -7182,7 +7233,9 @@ impl UserStore for HiqliteAuthStore {
                 params!(token_hash),
             ),
         };
-        let changed = self.credential_mutation(vec![statement]).await?[0];
+        let changed = self
+            .credential_mutation("delete_token_with_cache_admin_claim", vec![statement])
+            .await?[0];
         Ok(changed > 0)
     }
 
@@ -7248,7 +7301,11 @@ impl UserStore for HiqliteAuthStore {
                 params!(user_id, prefix),
             ),
         };
-        if self.credential_mutation(vec![statement]).await?[0] > 0 {
+        if self
+            .credential_mutation("delete_token_by_prefix_for_user", vec![statement])
+            .await?[0]
+            > 0
+        {
             return Ok(DeleteTokenByPrefixOutcome::Deleted);
         }
         let count_sql = "SELECT COUNT(*) AS count FROM tokens \
@@ -7313,6 +7370,7 @@ impl ApiKeyStore for HiqliteAuthStore {
 
     async fn api_key_for_hash(&self, key_hash: &str) -> Result<Option<ApiKey>, StoreError> {
         self.key_optional(
+            "api_key_for_hash",
             "SELECT id, name, key_hash, scopes, created_at, last_used_at, disabled \
              FROM api_keys WHERE key_hash = $1",
             params!(key_hash),
@@ -7327,7 +7385,11 @@ impl ApiKeyStore for HiqliteAuthStore {
 
     async fn delete_api_key(&self, id: i64) -> Result<bool, StoreError> {
         Ok(self
-            .execute("DELETE FROM api_keys WHERE id = $1", params!(id))
+            .execute(
+                "delete_api_key",
+                "DELETE FROM api_keys WHERE id = $1",
+                params!(id),
+            )
             .await?
             > 0)
     }
@@ -7335,6 +7397,7 @@ impl ApiKeyStore for HiqliteAuthStore {
     async fn set_api_key_disabled(&self, id: i64, disabled: bool) -> Result<bool, StoreError> {
         Ok(self
             .execute(
+                "set_api_key_disabled",
                 "UPDATE api_keys SET disabled = $1 WHERE id = $2",
                 params!(disabled, id),
             )

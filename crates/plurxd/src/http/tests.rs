@@ -1079,9 +1079,13 @@ fn the_by_method_series_are_capped_and_the_overflow_is_counted() {
         text.contains("plurx_http_store_operations_by_method_dropped_total 7\n"),
         "{text}"
     );
-    // The production cap covers every consistent-read site over every route
-    // group and class with room to spare, so it bounds only a mistake.
-    assert!(HTTP_METHOD_SERIES_CAP >= 365 * HTTP_ROUTE_GROUPS.len());
+    // A request that made no Store operation records nothing.
+    let empty = HttpMethodMetrics::with_cap(HTTP_METHOD_SERIES_CAP);
+    empty.record(5, &[]);
+    assert!(!empty
+        .render()
+        .lines()
+        .any(|line| line.starts_with("plurx_http_store_operations_by_method_total{")),);
 }
 
 #[tokio::test]

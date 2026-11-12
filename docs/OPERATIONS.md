@@ -2819,28 +2819,32 @@ their codec/HDR fallback ladders. Counters and latency are exported as
 `plurx_media_session_takeovers_total{method,outcome}` and
 `plurx_media_session_takeover_seconds{method}`.
 
-The media-session route cache that authorizes segment GETs reads through the
-applied view and has no clock (E1c, [PLAYBACK-START-E1-BUILD.md](streaming/PLAYBACK-START-E1-BUILD.md)
-§4.4). Four families measure it (plan [PLEX-FACADE-PAGING](server/PLEX-FACADE-PAGING.md) §3.5):
-`plurx_media_session_route_lookups_total{result}` splits lookups (HLS media
-GETs, first status reads, DELETEs) into `cache_hit`, `single_flight_hit`,
-`observed` (a fact this node committed or read by quorum, not yet applied
-here), `view` and `store` (a quorum read);
-`plurx_media_session_route_lock_seconds{site}` is the map-lock wait per site;
-`plurx_media_session_route_prune_entries` is the entries an eviction scan
-walks (only when full); `plurx_media_session_route_cache_entries` is the size
-against 4,096 (no expiry, so it sits near the cap). Control and final-status reads bypass the cache.
+The one-second media-session route cache that authorizes segment GETs is
+measured, not tuned, by four families (plan
+[PLEX-FACADE-PAGING](server/PLEX-FACADE-PAGING.md) §3.5):
+`plurx_media_session_route_lookups_total{result}` splits the cache's lookups
+(HLS media and status GETs and session DELETEs; direct plays never reach it)
+into
+`cache_hit`, `single_flight_hit` (answered by the cache after waiting on
+another lookup's Store read for the same session) and `store`;
+`plurx_media_session_route_lock_seconds{site}` is the wait for the cache's map
+lock at each of its four call sites; `plurx_media_session_route_prune_entries`
+is how many entries each expired-entry sweep walks; and
+`plurx_media_session_route_cache_entries` is the cache's size against its
+4,096 ceiling. Control mutations and final-status reads bypass the cache and
+are not in the lookup counts. None of these changes the cache; the plan's §6.4
+says how to read them.
 
 The playback-start E1a baseline ([PLAYBACK-START-E1-BUILD.md](streaming/PLAYBACK-START-E1-BUILD.md)
 §7, §9) adds, all loaded from atomics at scrape time:
 `plurx_media_session_route_reads_total{site,source}` counts every
 session-keyed route read by the decision it serves (`routing`, `status_first`,
 `status_bracket`, `status_reclassify`, `control`, `verdict`, `receipt_fence`,
-`receipt_candidate`, `observer`); `source` is `view` when the view answered.
+`receipt_candidate`, `observer`); `source` is `authority` until E1c.
 `plurx_applied_view_reads_total{view,source,reason}` and
 `plurx_applied_view_reloads_total{view}` count applied-view reads and stamp
 reloads (`view="settings"` since E1b, whose settings memo reloads at most once
-per settings change a reader saw; `view="route"`: stale route-cache stamps);
+per settings change a reader saw; `view="route"` stays 0 until E1c);
 `plurx_applied_view_table_changes_total{view}` is how often this replica
 applied a change to `settings` or `media_sessions`, the most a per-table memo
 would reload. `plurx_applied_view_proof{mode}`,

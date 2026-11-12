@@ -69,6 +69,7 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         Ok(self
             .execute(
+                "create_playback_handoff",
                 ph::INSERT_SQL,
                 params!(
                     handoff.id,
@@ -116,19 +117,22 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
         let r = redemption;
         let device = bounded_device_label(r.device.clone());
         // One Raft transaction: the claim and the token it mints.
-        self.credential_mutation(vec![
-            (ph::CLAIM_SQL, params!(r.now, r.code_hash.clone())),
-            (
-                ph::MINT_TOKEN_SQL,
-                params!(
-                    r.token_hash.clone(),
-                    device,
-                    r.now,
-                    r.token_expires_at,
-                    r.code_hash.clone()
+        self.credential_mutation(
+            "redeem_playback_handoff",
+            vec![
+                (ph::CLAIM_SQL, params!(r.now, r.code_hash.clone())),
+                (
+                    ph::MINT_TOKEN_SQL,
+                    params!(
+                        r.token_hash.clone(),
+                        device,
+                        r.now,
+                        r.token_expires_at,
+                        r.code_hash.clone()
+                    ),
                 ),
-            ),
-        ])
+            ],
+        )
         .await?;
         validate_sql(ph::OUTCOME_SQL)?;
         let row = self
@@ -174,17 +178,23 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
         now: i64,
     ) -> Result<bool, StoreError> {
         Ok(self
-            .credential_mutation(vec![(
-                ph::ADVANCE_SQL,
-                params!(next_file_id, token_hash, expected_file_id, now),
-            )])
+            .credential_mutation(
+                "advance_playback_handoff",
+                vec![(
+                    ph::ADVANCE_SQL,
+                    params!(next_file_id, token_hash, expected_file_id, now),
+                )],
+            )
             .await?[0]
             > 0)
     }
 
     async fn revoke_playback_handoff_token(&self, token_hash: &str) -> Result<bool, StoreError> {
         Ok(self
-            .credential_mutation(vec![(ph::REVOKE_SQL, params!(token_hash))])
+            .credential_mutation(
+                "revoke_playback_handoff_token",
+                vec![(ph::REVOKE_SQL, params!(token_hash))],
+            )
             .await?[0]
             > 0)
     }
@@ -195,7 +205,10 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
         prefix: &str,
     ) -> Result<bool, StoreError> {
         Ok(self
-            .credential_mutation(vec![(ph::REVOKE_PREFIX_SQL, params!(user_id, prefix))])
+            .credential_mutation(
+                "revoke_playback_handoff_token_by_prefix",
+                vec![(ph::REVOKE_PREFIX_SQL, params!(user_id, prefix))],
+            )
             .await?[0]
             > 0)
     }
@@ -206,10 +219,13 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
         codes_before: i64,
     ) -> Result<u64, StoreError> {
         let changed = self
-            .credential_mutation(vec![
-                (ph::PRUNE_TOKENS_SQL, params!(now)),
-                (ph::PRUNE_CODES_SQL, params!(codes_before)),
-            ])
+            .credential_mutation(
+                "prune_playback_handoffs",
+                vec![
+                    (ph::PRUNE_TOKENS_SQL, params!(now)),
+                    (ph::PRUNE_CODES_SQL, params!(codes_before)),
+                ],
+            )
             .await?;
         Ok(changed.into_iter().map(|count| count as u64).sum())
     }
@@ -220,6 +236,7 @@ impl HiqliteAuthStore {
     /// Read from its own table, never from `tokens`.
     pub(super) async fn authenticate_playback_handoff(
         &self,
+        method: &'static str,
         token_hash: &str,
     ) -> Result<Option<User>, StoreError> {
         validate_sql(ph::AUTHENTICATE_SQL)?;
@@ -228,7 +245,7 @@ impl HiqliteAuthStore {
             .client()
             // authority: a handoff token is revoked with its minting token; a stale replica would keep accepting it.
             .query_consistent_map::<HandoffUserRow, _>(
-                "authenticate_playback_handoff",
+                method,
                 ph::AUTHENTICATE_SQL,
                 params!(token_hash, now),
             )

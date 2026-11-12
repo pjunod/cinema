@@ -106,3 +106,54 @@ async fn a_request_folds_methods_past_the_cap_into_one_overflow_label() {
     let total: u64 = snapshot.iter().map(|(_, counts)| counts[AUTHORITY]).sum();
     assert_eq!(total, counts.snapshot()[AUTHORITY]);
 }
+
+/// The owner's start (`ims.rs::start`) runs in a spawned task. The ingress
+/// and the owner are different processes, so the owner's operations belong to
+/// the internal request the owner is serving and to no other request; a bare
+/// `tokio::spawn` would make them belong to nothing, which reads as zero.
+#[tokio::test]
+async fn a_spawned_start_counts_into_its_own_request_and_a_bare_spawn_counts_nowhere() {
+    let owner_request = HttpStoreOperationCounts::default();
+    let unrelated_request = HttpStoreOperationCounts::default();
+    scope_http_store_operations(owner_request.clone(), async {
+        let window = spawn_in_http_store_scope(|counts| async move {
+            let before = counts.method_snapshot();
+            record_http_store_operation(AUTHORITY, "playback_planning_snapshot", Duration::ZERO);
+            record_http_store_operation(LOCAL, "get_settings", Duration::ZERO);
+            counts.method_snapshot_since(&before)
+        })
+        .await
+        .expect("the start task");
+        assert_eq!(
+            window,
+            vec![
+                ("get_settings", [1, 0, 0]),
+                ("playback_planning_snapshot", [0, 1, 0])
+            ],
+            "the task reports its own window"
+        );
+        // The pattern the helper replaces: nobody counts this read.
+        tokio::spawn(async {
+            record_http_store_operation(AUTHORITY, "get_file", Duration::ZERO);
+        })
+        .await
+        .expect("the bare task");
+    })
+    .await;
+    assert_eq!(owner_request.snapshot(), [1, 1, 0]);
+    assert_eq!(
+        owner_request.method_snapshot(),
+        vec![
+            ("get_settings", [1, 0, 0]),
+            ("playback_planning_snapshot", [0, 1, 0])
+        ],
+        "the bare spawn's `get_file` is absent, which is why the owner start does not use one"
+    );
+    assert_eq!(unrelated_request.snapshot(), [0, 0, 0]);
+    // Outside any request there is nothing to count into, and nothing breaks.
+    spawn_in_http_store_scope(|_| async {
+        record_http_store_operation(AUTHORITY, "get_file", Duration::ZERO);
+    })
+    .await
+    .expect("an unscoped start");
+}

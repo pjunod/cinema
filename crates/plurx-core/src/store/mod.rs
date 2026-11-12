@@ -6359,6 +6359,22 @@ pub fn scope_http_store_operations<T>(
     HTTP_STORE_OPERATION_COUNTS.scope(counts, Box::pin(future))
 }
 
+/// Spawn a detached task that counts its Store operations into the request
+/// that spawned it. A task-local scope is not inherited by `tokio::spawn`, so
+/// a bare spawn makes every operation inside it count nowhere, and an absent
+/// operation looks like a saved one. `make` gets the request's counts (a fresh
+/// set outside any request) so the task can report its own window with
+/// [`HttpStoreOperationCounts::method_snapshot_since`].
+pub fn spawn_in_http_store_scope<F, Fut>(make: F) -> tokio::task::JoinHandle<Fut::Output>
+where
+    F: FnOnce(HttpStoreOperationCounts) -> Fut,
+    Fut: std::future::Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    let counts = current_http_store_operations().unwrap_or_default();
+    tokio::spawn(scope_http_store_operations(counts.clone(), make(counts)))
+}
+
 pub(super) fn record_http_store_operation(
     class_index: usize,
     method: &'static str,
@@ -7005,7 +7021,7 @@ impl CatalogueReader {
         // is not a new transaction spanning these independent aggregates.
         #[cfg(feature = "hiqlite-store")]
         if let Some(result) = self
-            .bounded(|store| async move { store.local_media_shape().await })
+            .bounded(|store| async move { store.local_media_shape("media_shape").await })
             .await
         {
             return Ok(result);

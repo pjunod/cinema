@@ -212,11 +212,13 @@ pub(crate) async fn start(
     let start_state = state.clone();
     // A spawned task does not inherit the request's Store-operation scope, so
     // without this the owner's own planning, settings, probe and file reads
-    // were attributed to nothing. Carry the request's counts in and report
-    // this start's own window by Store method (D3a, section 7.1-2).
-    let owner_counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
-    let start_task = tokio::spawn(plurx_core::store::scope_http_store_operations(
-        owner_counts.clone(),
+    // were attributed to nothing. `spawn_in_http_store_scope` carries the
+    // request's counts in, and this start reports its own window by Store
+    // method (D3a, section 7.1-2). The confirmation watcher below, the
+    // activation task and the abort settlement outlive their request on
+    // purpose and stay unscoped: the watcher makes one route read after the
+    // response, and neither of the others is a start.
+    let start_task = plurx_core::store::spawn_in_http_store_scope(|owner_counts| {
         async move {
             let _restart_admission = restart_admission;
             let owner_before = owner_counts.snapshot();
@@ -407,8 +409,8 @@ pub(crate) async fn start(
                 // releases the replacement gate after an unconfirmed outcome.
             });
             Ok::<(RemoteStartResponse, bool), String>((response, created))
-        },
-    ));
+        }
+    });
     let (response, created) = start_task
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
