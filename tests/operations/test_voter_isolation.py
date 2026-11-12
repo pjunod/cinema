@@ -402,14 +402,40 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
         self.assertEqual(re.findall(r'(?m)^      SHARD_COUNT: "(\d+)"$', shards), ["2"])
         self.assertEqual(re.findall(r"(?m)^        shard_index: \[(.+)\]$", shards), ["0, 1"])
 
-    def test_release_rust_invocations_use_one_job_without_profile_changes(self):
+    def test_release_rust_invocations_keep_their_profile_and_leave_parallelism_to_the_builder(self):
+        # The Dockerfile's build stage is what `make docker-up` compiles on a
+        # node. A hard-coded CARGO_BUILD_JOBS=1 there (2026-11-09) bounded no
+        # CI job and made every node build ~3x slower. Parallelism is the
+        # builder's: unset, cargo uses every CPU; a bounded host passes
+        # --build-arg CARGO_BUILD_JOBS=N.
         dockerfile = (ROOT / "Dockerfile").read_text()
-        stages = dockerfile
-        builds = [line.strip() for line in stages.splitlines() if "cargo build " in line]
+        build_stage = dockerfile.split(" AS build\n", 1)[1].split("\nFROM ", 1)[0]
+        builds = [line.strip() for line in build_stage.splitlines() if "cargo build " in line]
         self.assertEqual(len(builds), 2)
-        self.assertTrue(all(line.startswith("&& CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=") for line in builds))
+        self.assertTrue(all(line.startswith("&& CARGO_TARGET_DIR=") for line in builds))
         self.assertTrue(all(" --locked --release " in line for line in builds))
-        self.assertNotIn("CARGO_PROFILE_", stages)
+        self.assertNotIn("CARGO_PROFILE_", dockerfile)
+        code = [line for line in build_stage.splitlines() if not line.lstrip().startswith("#")]
+        self.assertFalse([line for line in code if re.search(r"CARGO_BUILD_JOBS=\S", line)])
+        self.assertFalse([line for line in code if re.match(r"ENV\b.*CARGO_BUILD_JOBS", line)])
+        self.assertIn("ARG CARGO_BUILD_JOBS", code)
+        self.assertLess(code.index("ARG CARGO_BUILD_JOBS"),
+                        next(i for i, line in enumerate(code) if "cargo build " in line))
+        # So no voter-isolation bound rides on it: every CI build of a target
+        # that copies from the build stage replaces that stage with a context.
+        dependent = {"runtime", "default-runtime"}
+        checked = 0
+        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            steps = re.split(r"(?m)^\s+- (?:name|uses):", workflow.read_text())
+            for step in steps:
+                if not re.search(r"(?m)^\s+file: (?:release-source/)?Dockerfile\s*$", step):
+                    continue
+                target = re.search(r"(?m)^\s+target: (\S+)\s*$", step)
+                if target and target.group(1) in dependent:
+                    checked += 1
+                    with self.subTest(workflow=workflow.name, target=target.group(1)):
+                        self.assertRegex(step, r"(?m)^\s+build=\S")
+        self.assertGreater(checked, 0)
 
 class ForgejoRoleRoutingTests(unittest.TestCase):
     def test_exact_role_only_and_incus_selectors_are_local_including_matrix(self):
