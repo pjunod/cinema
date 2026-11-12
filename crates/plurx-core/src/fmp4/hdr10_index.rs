@@ -447,6 +447,11 @@ impl Hdr10OutputMetadata {
         min_1e4_nits: u32,
         light: Option<[u16; 2]>,
     ) -> Result<Self, Fmp4Error> {
+        // PQ ends at 10000 cd/m²: a larger level is a malformed record, which
+        // is refused whole rather than clamped or dropped field by field.
+        if light.is_some_and(|light| light.iter().any(|level| *level > 10_000)) {
+            return malformed("invalid processed HDR10 mastering or content-light values");
+        }
         Self::declare(
             primaries_rgbw,
             max_1e4_nits,
@@ -797,6 +802,12 @@ mod tests {
         for (max, min) in [(0, 0), (100_000_001, 1), (10_000, 10_000)] {
             assert!(Hdr10OutputMetadata::from_source(P3, max, min, None).is_err());
         }
+        for light in [[10_001, 0], [450, 10_001], [0, 10_001]] {
+            assert!(Hdr10OutputMetadata::from_source(P3, 10_000_000, 1, Some(light)).is_err());
+        }
+        assert!(
+            Hdr10OutputMetadata::from_source(P3, 10_000_000, 1, Some([10_000, 10_000])).is_ok()
+        );
         // A targeted declaration may state a MaxCLL above its mastering peak.
         assert!(Hdr10OutputMetadata::new(P3, 400, 1, 407).is_ok());
         assert!(Hdr10OutputMetadata::new(P3, 400, 1, 10_001).is_err());

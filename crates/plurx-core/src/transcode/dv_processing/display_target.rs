@@ -469,14 +469,32 @@ impl DvMasterMetadata {
         metadata.output_metadata()?;
         Ok(metadata)
     }
+    /// What the re-exported picture declares. The mastering display is the
+    /// source's own. Its content light levels describe the source's samples;
+    /// this render writes new 10-bit codes, which can round a component up, so
+    /// each stated level is raised by that one export step (and no further
+    /// than PQ's 10000). The identity above keeps the levels as stated.
     pub fn output_metadata(self) -> Result<crate::fmp4::Hdr10OutputMetadata, DvContractError> {
+        let invalid = || DvContractError::Invalid("source HDR10 metadata cannot be represented");
+        // Validate the declaration as stated before deriving anything from it.
         crate::fmp4::Hdr10OutputMetadata::from_source(
             self.primaries_rgbw,
             self.max_1e4_nits,
             self.min_1e4_nits,
             self.light,
         )
-        .map_err(|_| DvContractError::Invalid("source HDR10 metadata cannot be represented"))
+        .map_err(|_| invalid())?;
+        let bound = |level: u16| match level {
+            0 => 0,
+            level => export_max_cll(f64::from(level)).min(10_000),
+        };
+        crate::fmp4::Hdr10OutputMetadata::from_source(
+            self.primaries_rgbw,
+            self.max_1e4_nits,
+            self.min_1e4_nits,
+            self.light.map(|light| light.map(bound)),
+        )
+        .map_err(|_| invalid())
     }
 }
 
@@ -1103,7 +1121,12 @@ mod tests {
                         m.primaries_rgbw,
                         m.max_1e4_nits,
                         m.min_1e4_nits,
-                        m.light,
+                        m.light.map(|light| {
+                            light.map(|level| match level {
+                                0 => 0,
+                                level => display_target_max_cll(level.into()),
+                            })
+                        }),
                     )
                     .expect("same declaration")
                 }
@@ -1111,6 +1134,54 @@ mod tests {
         }
         assert!(DvMasterMetadata::new(p3, 0, 0, None).is_err());
         assert!(DvMasterMetadata::new([0; 8], 10_000_000, 1, None).is_err());
+    }
+
+    /// A master-grade render re-exports the picture, so its stated light
+    /// levels must be valid and must still bound the re-exported samples.
+    #[test]
+    fn master_grade_light_levels_are_valid_and_bound_the_re_export() {
+        let p3 = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
+        let from_source = crate::fmp4::Hdr10OutputMetadata::from_source;
+        // Beyond PQ's range the record is malformed and declares nothing.
+        for light in [[10_001, 0], [450, 10_001], [u16::MAX, u16::MAX]] {
+            assert!(DvMasterMetadata::new(p3, 10_000_000, 1, Some(light)).is_err());
+        }
+        for (stated, declared) in [
+            ([400, 0], [407, 0]),
+            ([1000, 400], [1015, 407]),
+            ([10_000, 10_000], [10_000, 10_000]),
+        ] {
+            let metadata = DvMasterMetadata::new(p3, 10_000_000, 1, Some(stated)).expect("stated");
+            // The identity is the source's statement; the declaration covers
+            // the export's rounding step, exactly as a targeted render's does.
+            assert_eq!(metadata.light, Some(stated));
+            assert_eq!(
+                metadata.output_metadata().expect("declared"),
+                from_source(p3, 10_000_000, 1, Some(declared)).expect("bounded")
+            );
+            for (level, bounded) in stated.into_iter().zip(declared) {
+                assert!(bounded >= level);
+                assert_eq!(
+                    bounded,
+                    display_target_max_cll(level.into()).max(level).min(10_000)
+                        * u16::from(level != 0)
+                );
+                // A flat field at the stated level decodes at or below the declaration.
+                if level != 0 {
+                    let code = pq_code_f64(f64::from(level));
+                    let peak = export_round_trip([code; 3]).into_iter().fold(0.0, f64::max);
+                    assert!(pq_eotf_f64(peak) <= f64::from(bounded), "{level} {bounded}");
+                }
+            }
+        }
+        // Mastering alone still declares no light level.
+        assert_eq!(
+            DvMasterMetadata::new(p3, 10_000_000, 1, None)
+                .expect("mastering")
+                .output_metadata()
+                .expect("declared"),
+            from_source(p3, 10_000_000, 1, None).expect("mastering only")
+        );
     }
 
     /// Limited-range 10-bit BT.2020 NCL codes of a PQ-coded colour, rounded to
