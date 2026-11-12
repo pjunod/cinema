@@ -149,6 +149,11 @@ segment_decode_render --dump-composed SOURCE VIDEO_INDEX FIRST LAST
   drained one frame each in turn. The source is read whole, as `scan_title`
   reads it, within four times its length plus 64 MiB, and at most 10⁶
   frames.
+- **Media checks:** `diagnostics/fel_quality/compare_composed.py` (exact
+  against the frozen tools) and `controls/test_refit_title_edits.py`, which
+  edits a real title's RPUs with dovi_tool (an L5 change inside a scene, a
+  scene cut on a reordered frame, an invalid RPU mid-title) and checks scene
+  boundaries, lattice counts and the mid-title refusal.
   The playback window path is unchanged: the modes are dispatched before its
   arguments are parsed, and a window rendered before and after the change is
   byte-identical.
