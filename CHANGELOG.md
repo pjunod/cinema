@@ -10,11 +10,16 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Job retention no longer deletes a settled job whose source custody is still
+  charged. That job is the custody's only exact source binding, and a dead
+  owner's custody could not be released once it was gone. The job is kept
+  until the custody is released, then expires as usual (SQLite v129; a
+  shape-verified hiqlite extension).
 - CM v2.9 display mapping restores no detail where the tone curve sits on its
   top clip, as the licensed reference does. Pixels brighter than the shot's
   clip point kept a detail term the reference drops (up to 33 dE ITP on
-  synthetic specks above the clip); frames with no pixel above the clip render exactly as
-  before.
+  synthetic specks above the clip); frames with no pixel above the clip
+  render exactly as before.
 - The server image builds its Dolby Vision helper bundle from the same source
   tree as the server it ships with. The bundle had been taken from a separately
   published image, so helper changes never reached an image, and a server built

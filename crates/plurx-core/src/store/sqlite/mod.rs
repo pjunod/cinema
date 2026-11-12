@@ -1343,6 +1343,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::analysis_coordination::SCHEMA,
     // v128: canonical fragment publication never reserves original media.
     super::subtitle_managed_schema::PUBLISH_MIGRATION,
+    // v129: retention keeps a job that still owns charged source custody.
+    super::custody_retention::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1831,7 +1833,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    fn migrate(conn: &Connection) -> Result<(), StoreError> {
+    pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let target = SQLITE_SCHEMA_VERSION;
         if current > target {

@@ -122,15 +122,40 @@ path.
   carry up to half a code of rounding. A repeat render is bit-identical.
 - iOS and tvOS share the AVFoundation pipeline but were not measured.
 
-**Android: not yet observed.** The Google TV Streamer's video plane is black
-to screencap and screenrecord, and its monitor is HDR10-only. The Pixels have
-no Dolby Vision display support. The Lenovo TB322FC has a Dolby Vision
-decoder, and screencap sees its video. The same patch clips are ready for it.
+**Android, Lenovo TB322FC with Google Photos: the mapping is ignored.**
+Photos plays the clips through `c2.dolby.decoder.hevc` (Dolby Vision Mobile
+3.1, GPU processing, RGB output), and `adb screencap` sees the processed
+picture.
+- **The RPUs are read.** With L1 max/avg overridden to 4095/3600 (the
+  writer's diagnostic `l1` plan field), the same frames drop from a mean of
+  76.5 to 48.0 on 8-bit red. An L1 max of 2081 changes almost nothing (max 3
+  levels). The decoder logs profile 8.1. Its one `parseRPU failed`
+  (`VesDmx Failed for pts : 0`) appears for the production author's 8.1
+  output too.
+- **The mapping changes nothing.**
+  - Luma ×0.5 gives a screenshot byte-identical to the identity RPU's.
+  - Patch clip A (F+ curves) gives screenshots byte-identical to C (identity
+    RPU), in two repeats.
+  - The patches vary Cb and Cr by up to ±72 codes, so this covers the chroma
+    MMR as well as luma. B differs from A on 30 of 48 patches (by up to 10
+    levels), so the test can see a change of that size.
+  - A +0.15 Cr constant showed no visible tint. That capture landed on a
+    different frame, so it was judged by eye.
+- **Scope.** This holds for one device, one app and one decoder build, with
+  8.1 RPUs converted from P7 by the same `dolby_vision` crate that production
+  uses. It rules out pre-composer capture, because L1 changes show. It does
+  not tell a deliberate 8.1 composer bypass from a silent rejection of
+  non-identity curves. For those clients, F+ looks exactly like F.
+- The Google TV Streamer still can't be observed: its video plane is black to
+  screencap and its monitor is HDR10-only. The Pixels have no Dolby Vision
+  display support.
 
 ## What it changes
 
-- F+ is a strict improvement over today's F at no encode cost. It should
-  replace identity curves in the 8.1 conversion for P7 FEL titles.
+- F+ is a strict improvement over today's F at no encode cost where the
+  decoder applies the 8.1 mapping (measured on macOS), and identical to F
+  where it doesn't (measured on the Lenovo TB322FC). It should replace identity
+  curves in the 8.1 conversion for P7 FEL titles.
 - It is not a replacement for re-encoding where frame detail matters. The
   per-title rule needs both arms: serve F+ by default, and re-encode only
   where a trial beats F+ by enough to pay for the encode.
