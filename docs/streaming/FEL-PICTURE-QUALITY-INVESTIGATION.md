@@ -616,7 +616,8 @@ never edited. Refused attempts are kept under each root's `logs/`.
 1. **Build F+ as the default FEL serve** (needs Paul's go). Per title, fit
    the safe curves from BL+EL once per scene and store them. The existing
    8.1 conversion then writes them into each RPU instead of identity curves.
-   macOS applies them; Android awaits the Lenovo tablet patch check.
+   macOS applies them. The Lenovo tablet's Dolby mobile decoder ignores the
+   mapping, so F+ looks the same as F there.
 2. **Re-encode only where it beats F+.** A short trial, scored against F+
    rather than F, decides it. On Michael the encodes lose pooled but win
    frame 0.
