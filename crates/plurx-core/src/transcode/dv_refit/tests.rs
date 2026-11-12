@@ -510,3 +510,143 @@ fn malformed_statistics_are_refused() {
     assert!(RefitStats::from_parts(ysum.clone(), ycnt.clone(), inconsistent, xty.clone()).is_err());
     assert!(RefitStats::from_parts(ysum, ycnt, xtx, xty).is_ok());
 }
+
+/// One scene exactly as `segment_decode_render --refit-stats` printed it for
+/// the Michael5400 window: frames 0–47 of its source, `--area 0 0 32 32`
+/// (the offline region of interest; the RPU's L5 says 42 rows top and
+/// bottom), stride-8 fit lattice at phase 0 and held-out lattice at phase 4.
+fn helper_scene() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../tests/fixtures/dv-refit/helper-scene-michael5400.json"
+    ))
+    .expect("helper scene JSON")
+}
+
+#[test]
+fn a_helper_scene_deserialises_and_solves_to_the_offline_fit() {
+    let scene = helper_scene();
+    assert_eq!(scene["kind"], "refit_scene");
+    assert_eq!(
+        (scene["first_frame"].as_i64(), scene["frames"].as_i64()),
+        (Some(0), Some(48))
+    );
+    assert_eq!(scene["time_base"], "1/1000");
+    let fit: RefitStats = serde_json::from_value(scene["fit"].clone()).expect("fit stats");
+    let held_out: RefitStats =
+        serde_json::from_value(scene["held_out"].clone()).expect("held-out stats");
+    // 480 columns × 262 rows of the 3840 × [32, 2128) area, 48 frames, on
+    // both lattices.
+    assert_eq!(fit.samples(), 48.0 * 480.0 * 262.0);
+    assert_eq!(held_out.samples(), 48.0 * 480.0 * 262.0);
+    // The same samples the offline script fitted: its per-code luma sums and
+    // counts are integers and agree exactly; the normal equations agree to
+    // summation order.
+    let offline = fixture("michael5400");
+    assert_eq!(fit.ycnt, floats(&offline["ycnt"]));
+    assert_eq!(fit.ysum, floats(&offline["ysum"]));
+    for (a, b) in fit
+        .xtx
+        .iter()
+        .zip(floats(&offline["xtx"]))
+        .chain(fit.xty.iter().zip(floats(&offline["xty"])))
+    {
+        assert!((a - b).abs() <= 1e-11 * b.abs().max(1.0), "{a} vs {b}");
+    }
+    let curves = fit.solve().expect("fit");
+    let want: Vec<f64> = floats(&offline["fp_safe"]["poly"])
+        .into_iter()
+        .chain(floats(&offline["fp_safe"]["mmr"]))
+        .collect();
+    let got: Vec<f64> = curves
+        .luma
+        .iter()
+        .flatten()
+        .chain(curves.mmr.iter().flatten())
+        .copied()
+        .collect();
+    assert_eq!(got.len(), want.len());
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (g - w).abs() <= 2.0 / FIT_QUANT,
+            "coefficient {i}: {g} vs {w}"
+        );
+    }
+    // The held-out lattice scores the fit: it beats identity there too.
+    let verdict = held_out_verdict(&curves, &held_out).expect("served on held-out samples");
+    assert!(verdict.gain > 0.5, "{verdict:?}");
+}
+
+#[test]
+fn a_malformed_helper_scene_is_refused() {
+    let scene = helper_scene();
+    let mut short = scene["fit"].clone();
+    short["ysq"].as_array_mut().expect("ysq").pop();
+    assert!(serde_json::from_value::<RefitStats>(short).is_err());
+    let mut negative = scene["fit"].clone();
+    negative["csq"][0] = serde_json::json!(-1.0);
+    assert!(serde_json::from_value::<RefitStats>(negative).is_err());
+    let mut uncounted = scene["fit"].clone();
+    uncounted["xtx"][0] = serde_json::json!(1.0);
+    assert!(serde_json::from_value::<RefitStats>(uncounted).is_err());
+    let mut missing = scene["fit"].clone();
+    missing
+        .as_object_mut()
+        .expect("object")
+        .remove("second_moments");
+    assert!(serde_json::from_value::<RefitStats>(missing).is_err());
+    // What a helper prints round-trips (serde_json's default float parser
+    // may land one ulp away).
+    let fit: RefitStats = serde_json::from_value(scene["fit"].clone()).expect("fit");
+    let again: RefitStats =
+        serde_json::from_str(&serde_json::to_string(&fit).expect("serialise")).expect("parse");
+    assert_eq!(
+        (fit.ycnt.clone(), fit.ysum.clone()),
+        (again.ycnt.clone(), again.ysum.clone())
+    );
+    assert!(again.second_moments);
+    for (a, b) in [
+        (&fit.xtx, &again.xtx),
+        (&fit.xty, &again.xty),
+        (&fit.ysq, &again.ysq),
+    ] {
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert!((x - y).abs() <= 1e-15 * x.abs(), "{x} vs {y}");
+        }
+    }
+}
+
+/// A nonidentity Profile 7 mapping (eight luma pieces, a third-order MMR per
+/// chroma component; `tools/dv_processing/controls/p7_mapping_fixture.h`)
+/// composed by the helper's `refit_compose.h` with a zero residual, replayed
+/// through [`ComposerCurves::reshape`]: two implementations of the mapped
+/// base layer agree code for code. `test_refit_compose` regenerates the file
+/// and `tools/dv_processing/test_metadata.py` requires it unchanged.
+#[test]
+fn the_helper_maps_a_nonidentity_p7_base_layer_as_reshape_does() {
+    let v: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/dv-refit/composer-p7-mapping.json"
+    ))
+    .expect("vectors");
+    let luma = floats(&v["luma"]);
+    let chroma = floats(&v["chroma"]);
+    let mut curves = ComposerCurves {
+        luma: [[0.0; 3]; LUMA_PIECES],
+        chroma: [[0.0; MMR_TERMS]; 2],
+    };
+    for (p, piece) in curves.luma.iter_mut().enumerate() {
+        piece.copy_from_slice(&luma[3 * p..3 * p + 3]);
+    }
+    for (ch, terms) in curves.chroma.iter_mut().enumerate() {
+        terms.copy_from_slice(&chroma[MMR_TERMS * ch..MMR_TERMS * (ch + 1)]);
+    }
+    let samples = v["samples"].as_array().expect("samples");
+    assert_eq!(samples.len(), 3 * 1024 + 9 * 9 * 9);
+    let mut moved = 0;
+    for sample in samples {
+        let s: Vec<u16> = floats(sample).into_iter().map(|x| x as u16).collect();
+        let base = [s[0], s[1], s[2]];
+        assert_eq!(curves.reshape(base), [s[3], s[4], s[5]], "base {base:?}");
+        moved += usize::from([s[3], s[4], s[5]] != base.map(|c| 4 * c));
+    }
+    assert!(moved > samples.len() / 2, "the mapping is not identity");
+}

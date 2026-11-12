@@ -70,7 +70,13 @@ const MMR_DEGREE: [i32; MMR_TERMS] = [
 ];
 
 /// Sufficient statistics of one scene's samples.
+///
+/// The serde layout is what `segment_decode_render --refit-stats` prints for
+/// each scene's `fit` and `held_out` (`tools/dv_processing/refit_compose.h`).
+/// Deserialising checks it the way [`RefitStats::from_parts`] does, and also
+/// the second moments, so a malformed helper line is refused, not solved.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RefitStatsParts")]
 pub struct RefitStats {
     /// Per 10-bit luma code: sum of composed 12-bit luma, and sample count.
     ysum: Vec<f64>,
@@ -85,6 +91,40 @@ pub struct RefitStats {
     ysq: Vec<f64>,
     csq: Vec<f64>,
     second_moments: bool,
+}
+
+/// [`RefitStats`] as serialised, before its checks.
+#[derive(Deserialize)]
+struct RefitStatsParts {
+    ysum: Vec<f64>,
+    ycnt: Vec<f64>,
+    xtx: Vec<f64>,
+    xty: Vec<f64>,
+    ysq: Vec<f64>,
+    csq: Vec<f64>,
+    second_moments: bool,
+}
+
+impl TryFrom<RefitStatsParts> for RefitStats {
+    type Error = RefitError;
+
+    fn try_from(parts: RefitStatsParts) -> Result<Self, RefitError> {
+        let mut stats = Self::from_parts(parts.ysum, parts.ycnt, parts.xtx, parts.xty)?;
+        if parts.ysq.len() != CODES
+            || parts.csq.len() != 2
+            || parts
+                .ysq
+                .iter()
+                .chain(&parts.csq)
+                .any(|v| !v.is_finite() || *v < 0.0)
+        {
+            return Err(RefitError::Shape);
+        }
+        stats.ysq = parts.ysq;
+        stats.csq = parts.csq;
+        stats.second_moments = parts.second_moments;
+        Ok(stats)
+    }
 }
 
 impl Default for RefitStats {
