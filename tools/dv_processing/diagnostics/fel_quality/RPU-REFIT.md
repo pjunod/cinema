@@ -130,7 +130,9 @@ processing, RGB output), and `adb screencap` sees the processed picture.
   48.0 on 8-bit red.
 - The mapping curves change nothing. Luma ×0.5 is pixel-identical to the
   identity RPU. Patch clip A is pixel-identical to C on all 48 patches, in
-  two repeats, while B differs. A +0.15 Cr constant shows no tint.
+  two repeats, while B differs on several patches (by up to 10 levels).
+  A +0.15 Cr constant shows no visible tint; that capture landed on a
+  different frame, so it was compared by eye, not by pixel.
 - So on this decoder, F+ looks exactly like F: no gain and no harm. The
   production author's own 8.1 output logs the same single parse failure at
   pts 0 (the codec config buffer), so that failure is not specific to F+.

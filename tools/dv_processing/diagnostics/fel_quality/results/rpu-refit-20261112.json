@@ -1994,7 +1994,7 @@
   "device": "Lenovo TB322FC (Qualcomm Adreno 830; display reports Dolby Vision); Google Photos player; decoder c2.dolby.decoder.hevc (Dolby Vision Mobile_3.1.0, GPU processing IMPL_TARGET_OTT_OPENGL, RGB output); adb screencap 2.5 s into playback",
   "rpu_parsed": "yes: the decoder logs profile 8.1; its only parseRPU failure is at pts 0 (codec config buffer), the same for the production author's 8.1 output",
   "dm_metadata_applied": "yes: the same frames with L1 max/avg overridden to 4095/3600 drop the picture mean from (76.5, 61.3, 56.5) to (48.0, 37.4, 33.9) 8-bit RGB",
-  "mapping_applied": "no: luma x0.5 is pixel-identical to the identity RPU (max difference 0); flat-patch A (F+ RPU) is pixel-identical to C (identity RPU) on all 48 patches in two repeats while B (pre-mapped pixels) differs; a +0.15 Cr constant shows no tint",
+  "mapping_applied": "no: luma x0.5 is pixel-identical to the identity RPU (max difference 0); flat-patch A (F+ RPU) is pixel-identical to C (identity RPU) on all 48 patches in two repeats while B (pre-mapped pixels) differs on several patches by up to 10 8-bit levels; a +0.15 Cr constant shows no visible tint (that capture landed on a different frame, so it was judged by eye, not by pixel)",
   "conclusion": "This Dolby mobile decoder ignores the 8.1 composer mapping (luma polynomial and chroma MMR) and applies the DM metadata, so F+ shows exactly what F shows on it: no gain, no harm.",
   "not_observed": "Google TV Streamer (video plane black to screencap; HDR10-only monitor); the Pixels have no Dolby Vision display support."
  }
