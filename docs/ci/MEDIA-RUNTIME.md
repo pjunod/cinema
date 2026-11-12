@@ -66,6 +66,27 @@ public repository before updating source. Publish publicly first, then commit
 the source update. A missing base fails at image resolution; application builds
 never fall back to rebuilding it.
 
+## Renderer sources travel with the pin
+
+The DV helper bundle is built from `tools/dv_processing` when the runtime is
+published, and plurxd refuses a bundle built from any other renderer sources
+(`DV backend unavailable: unsupported DV build identity`). Processed Dolby
+Vision is then off on every node that deploys the build. That happened on
+2026-11-11, when a renderer change merged without a republish.
+
+The pin therefore records the bundle's `source_sha256` beside the digest
+(`ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256` in `Dockerfile`). Three checks hold
+it in place:
+
+- `tests/operations/test_media_runtime.py` fails any change whose
+  `tools/dv_processing` inputs differ from the recorded identity, so a renderer
+  change must arrive with a republished runtime and a new pin.
+- The application build fails if the pinned image's bundle differs from the
+  record.
+- The publish workflow reads the identity from both platform images, requires
+  them to agree, and prints it in the receipt. `scripts/media-runtime pin`
+  requires it as `--dv-source-sha256`.
+
 ## Qualification and rollback stay explicit
 
 The `media-runtime` maintenance target preserves the incumbent ordinary runtime.

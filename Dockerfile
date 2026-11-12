@@ -104,6 +104,14 @@ FROM runtime-assets AS runtime
 ARG PLURX_BUILD_SHA=""
 ARG PLURX_MEDIA_RUNTIME_DIGEST="sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67"
 ENV PLURX_MEDIA_RUNTIME_DIGEST=${PLURX_MEDIA_RUNTIME_DIGEST}
+# The pinned runtime's Dolby Vision helpers must come from the renderer sources
+# plurxd is compiled with: plurxd refuses any other bundle, and processed Dolby
+# Vision is then off on every node. Record that identity beside the pin and fail
+# the build here rather than in production. tests/operations/test_media_runtime.py
+# holds the recorded value to this tree; docs/ci/MEDIA-RUNTIME.md says how to
+# republish and re-pin when renderer sources change.
+ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="cfb13f96842608c154a041852ea692fa560d2b0f8fe4d7915a7b55a409314c49"
+RUN python3 -c 'import json, sys; built = json.load(open("/usr/lib/plurx/dv-processing/build-identity.json"))["source_sha256"]; sys.exit(None if built == sys.argv[1] else "pinned media runtime DV helpers were built from renderer sources " + built + ", not " + sys.argv[1] + ": republish the media runtime and re-pin (docs/ci/MEDIA-RUNTIME.md)")' "$PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256"
 # The fleet rollout inspects this label on the pulled image ID before it trusts
 # checkout-owned deployment policy. Redeclare the build arg in this final stage:
 # Docker build args are stage-scoped, and a label inherited only by the build

@@ -162,8 +162,13 @@ jobs:
               fi
             '
           fi
+          # The application pin records which renderer sources this bundle was
+          # built from; plurxd refuses a bundle from any other sources.
+          dv_source=$(docker run --rm --entrypoint python3 "$image" -c 'import json; print(json.load(open("/usr/lib/plurx/dv-processing/build-identity.json"))["source_sha256"])')
+          [[ "$dv_source" =~ ^[0-9a-f]{64}$ ]]
           mkdir -p media-digests
           printf '%s\n' "$RUNTIME_DIGEST" > 'media-digests/${{ matrix.arch }}.digest'
+          printf '%s\n' "$dv_source" > 'media-digests/${{ matrix.arch }}.dv-source'
       - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: media-digest-${{ matrix.arch }}
@@ -203,15 +208,18 @@ jobs:
           arm64=$(cat media-digests/arm64.digest)
           [[ "$amd64" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          dv_source=$(cat media-digests/amd64.dv-source)
+          [[ "$dv_source" =~ ^[0-9a-f]{64}$ ]]
+          test "$(cat media-digests/arm64.dv-source)" = "$dv_source"
           tag="$RUNTIME_IMAGE:source-$GITHUB_SHA"
           docker manifest create --insecure --amend "$tag" "$RUNTIME_IMAGE@$amd64" "$RUNTIME_IMAGE@$arm64"
           digest=$(docker manifest push --insecure --purge "$tag" | tail -1)
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           mkdir -p media-candidate
-          printf 'Source-Revision: %s\nMedia-Runtime: %s@%s\nAudited-amd64: %s\namd64: %s\narm64: %s\n' \
-            "$GITHUB_SHA" "$RUNTIME_IMAGE" "$digest" "$AUDITED_AMD64" "$amd64" "$arm64" > media-candidate/receipt.txt
+          printf 'Source-Revision: %s\nMedia-Runtime: %s@%s\nAudited-amd64: %s\namd64: %s\narm64: %s\nDV-Source-SHA256: %s\n' \
+            "$GITHUB_SHA" "$RUNTIME_IMAGE" "$digest" "$AUDITED_AMD64" "$amd64" "$arm64" "$dv_source" > media-candidate/receipt.txt
           printf '\nNext: run the public media-runtime copy workflow for this exact source index.\n' >> media-candidate/receipt.txt
-          printf 'After anonymous public verification, run: scripts/media-runtime pin ghcr.io/pjunod/cinema-media-runtime@%s\n' "$digest" >> media-candidate/receipt.txt
+          printf 'After anonymous public verification, run: scripts/media-runtime pin ghcr.io/pjunod/cinema-media-runtime@%s --dv-source-sha256 %s\n' "$digest" "$dv_source" >> media-candidate/receipt.txt
           printf 'Do not commit a Dockerfile pin that is available only in the private registry.\n' >> media-candidate/receipt.txt
       - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
