@@ -100,6 +100,25 @@ test("an unreachable Curator reads so, and a title no longer offloaded reloads t
   assert.equal(w.ctx.rendered, 1, "a 409 not_offloaded reloads the item");
 });
 
+test("on_disk re-reads the item once and renders only when it is no longer offloaded", async () => {
+  let offloaded = true, itemReads = 0;
+  const w = watchContext(async path => {
+    if (/offload-status/.test(path)) return {state: "on_disk"};
+    itemReads++; return {item: {offloaded}};
+  });
+  w.dom.present = true;
+  vm.runInContext("watchOffload(7)", w.ctx);
+  const timersBefore = w.timers.length;
+  await w.timers[w.timers.length - 1]();
+  assert.equal(w.ctx.rendered, undefined, "still offloaded: no render");
+  assert.equal(w.line.textContent, "Back on disk, waiting for the library to pick it up");
+  assert.equal(itemReads, 1);
+  assert.equal(w.timers.length, timersBefore, "no restarted watch or zero-delay timer");
+  offloaded = false;
+  await w.timers[w.timers.length - 1]();
+  assert.equal(w.ctx.rendered, 1, "library caught up: render once");
+});
+
 test("every item layout offers Get it back and the status line", () => {
   const fs = require("node:fs");
   for (const f of ["theater", "catalog"]) {

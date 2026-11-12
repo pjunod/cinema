@@ -117,7 +117,17 @@ function watchOffload(id){
     try{
       const a=await api(`/items/${id}/offload-status`);
       if(OFFWATCH!==watch) return;
-      if(a.state==="on_disk"){ stopOffloadWatch(); render(); return; }
+      if(a.state==="on_disk"){
+        // Curator has it back, but the page re-renders only once cinema's own
+        // item stops reporting it offloaded; until then keep the slow poll
+        // rather than restarting the watch from a render.
+        let d=null;
+        try{ d=await api(`/items/${id}`); }catch(e){ d=null; }
+        if(OFFWATCH!==watch) return;
+        if(d&&d.item&&!d.item.offloaded){ stopOffloadWatch(); render(); return; }
+        line.textContent="Back on disk, waiting for the library to pick it up";
+        return;
+      }
       line.textContent="Offloaded · "+offloadLine(a);
     }catch(e){
       if(OFFWATCH!==watch) return;
