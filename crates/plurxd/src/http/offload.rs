@@ -293,7 +293,10 @@ async fn ask_curator(
     // A state this build does not know is reported as what Curator said and
     // never read as success.
     let message = if KNOWN_STATES.contains(&state_name.as_str()) {
-        match (state_name.as_str(), answer.message.filter(|m| !m.trim().is_empty())) {
+        match (
+            state_name.as_str(),
+            answer.message.filter(|m| !m.trim().is_empty()),
+        ) {
             ("offloaded", Some(curator)) => curator,
             _ => message_for(&state_name).to_owned(),
         }
