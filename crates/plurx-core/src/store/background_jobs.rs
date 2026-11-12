@@ -2351,6 +2351,13 @@ pub trait BackgroundJobStore: Send + Sync {
         claim: &super::analysis_coordination::AnalysisCoordinationClaim,
         now_ms: i64,
     ) -> Result<bool, StoreError>;
+    /// The code a head was quarantined with at this exact epoch and blob.
+    async fn copy_index_v3_quarantine_code(
+        &self,
+        source_key: &str,
+        head_epoch: i64,
+        blob_sha256: &str,
+    ) -> Result<Option<String>, StoreError>;
     async fn ensure_copy_index_v3_head(
         &self,
         catalog_namespace: &str,
@@ -3189,6 +3196,14 @@ impl<T: QueueSql> BackgroundJobStore for T {
         now_ms: i64,
     ) -> Result<bool, StoreError> {
         super::analysis_coordination::retire_claim(self, claim, now_ms).await
+    }
+    async fn copy_index_v3_quarantine_code(
+        &self,
+        source_key: &str,
+        head_epoch: i64,
+        blob_sha256: &str,
+    ) -> Result<Option<String>, StoreError> {
+        super::copy_index_v3::quarantine_code(self, source_key, head_epoch, blob_sha256).await
     }
     async fn ensure_copy_index_v3_head(
         &self,

@@ -155,14 +155,112 @@ struct ObservedRows<'a> {
     promotion: &'a PromotionInputs,
 }
 
-/// The authority an observation arrived under. Only Shared Source ranges
-/// produce observations today; local playback will add its own typed demand
-/// variant, and a Source observation can never mint a Local principal.
+/// The authority an observation or a demand arrived under. A Source
+/// observation carries its grant-scoped assignment; a local one carries only
+/// the fact that a local user's own playback asked. Neither can be made from
+/// the other: no Source observation mints a Local authority, and a Local
+/// authority holds no grant, assignment or Source interest.
 pub(crate) enum CopyObservationAuthority {
     Source {
-        assignment: SourceDispatchAssignment,
+        assignment: Box<SourceDispatchAssignment>,
         authority: AnalysisSourceInterestAuthority,
     },
+    Local(LocalCopyAuthority),
+}
+
+/// A local user's own playback of this node's file. Only
+/// [`LocalCopyAuthority::of`] makes one, and it refuses a Sharing principal,
+/// so shared playback can never present itself as local demand. It is
+/// attribution and admission to the worker's inbox, nothing more: it grants
+/// no source read, which every Analysis phase still takes from the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalCopyAuthority {
+    user_id: i64,
+    playback_id: String,
+}
+impl LocalCopyAuthority {
+    pub(crate) fn of(viewer: &crate::state::PlaybackViewerDemand) -> Result<Self, &'static str> {
+        viewer.require_local_authority()?;
+        match &viewer.principal {
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id } => Ok(Self {
+                user_id: *user_id,
+                playback_id: viewer.playback_id.clone(),
+            }),
+            plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. } => {
+                Err("sharing playback demand requires typed source authority")
+            }
+        }
+    }
+    pub(crate) fn user_id(&self) -> i64 {
+        self.user_id
+    }
+    pub(crate) fn playback_id(&self) -> &str {
+        &self.playback_id
+    }
+    /// The id of the Analysis request this demand creates, which is how the
+    /// build is attributed wherever requests are listed: it names the local
+    /// user and, when it fits the 64-byte bound and is plain enough to sit
+    /// in a URL path, the playback that asked. `analysis_requests.trigger`
+    /// is constrained by the schema to three values, so the attribution
+    /// lives in the one free-form field every listing already shows.
+    pub(crate) fn request_id(&self) -> String {
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let plain = !self.playback_id.is_empty()
+            && self
+                .playback_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+        let full = format!(
+            "{LOCAL_PLAYBACK_REQUEST_PREFIX}u{}.{}.{}",
+            self.user_id,
+            self.playback_id,
+            &unique[..4]
+        );
+        if plain && full.len() <= 64 {
+            return full;
+        }
+        let short = format!("{LOCAL_PLAYBACK_REQUEST_PREFIX}u{}.{unique}", self.user_id);
+        if short.len() <= 64 {
+            short
+        } else {
+            unique
+        }
+    }
+}
+
+/// What the id of an Analysis request raised by local playback starts with.
+pub(crate) const LOCAL_PLAYBACK_REQUEST_PREFIX: &str = "local-play.";
+
+/// A demand for the copy index of one exact source that carries no rows: the
+/// playback that raised it is served by another path and observed nothing.
+/// The Analysis worker builds the index with its own generations of the copy
+/// engine once the source domain is idle, exactly as it fills a gap.
+pub(crate) struct CopyIndexDemand {
+    pub(crate) file: Arc<plurx_core::domain::MediaFile>,
+    pub(crate) catalog_namespace: String,
+    pub(crate) source: AnalysisCoordinationSource,
+    /// The copy recipe of the playback that asked; the fill repeats it.
+    pub(crate) recipe: CopyRecipe,
+    pub(crate) authority: CopyObservationAuthority,
+}
+impl CopyIndexDemand {
+    /// A local viewer's demand for the index of the file it is playing on
+    /// this node. Refused for anything but a local user's own playback.
+    pub(crate) fn local(
+        viewer: &crate::state::PlaybackViewerDemand,
+        file: Arc<plurx_core::domain::MediaFile>,
+        catalog_namespace: String,
+        source: AnalysisCoordinationSource,
+        recipe: CopyRecipe,
+    ) -> Result<Self, &'static str> {
+        Ok(Self {
+            file,
+            catalog_namespace,
+            source,
+            recipe,
+            authority: CopyObservationAuthority::Local(LocalCopyAuthority::of(viewer)?),
+        })
+    }
 }
 
 pub(crate) struct CompletedCopyRange {
@@ -214,6 +312,7 @@ pub(crate) struct CopyIndexDefect {
 /// Everything the Analysis worker's inbox carries.
 pub(crate) enum CopyAnalysisMessage {
     Range(Box<CompletedCopyRange>),
+    Demand(Box<CopyIndexDemand>),
     Defect(CopyIndexDefect),
 }
 
@@ -232,6 +331,10 @@ pub(crate) struct CopyAnalysisRegistry {
     created_ms: i64,
     /// Set once this process has retired what its predecessor stranded.
     stranded_retired: tokio::sync::OnceCell<()>,
+    /// Source keys a demand was already sent for and whose work has not
+    /// settled. A start checks it before the inbox, so a title started
+    /// again and again sends one message, not one per start.
+    asked: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 impl Default for CopyAnalysisRegistry {
     fn default() -> Self {
@@ -242,6 +345,7 @@ impl Default for CopyAnalysisRegistry {
             pending: Default::default(),
             created_ms: crate::state::clock_ms(),
             stranded_retired: tokio::sync::OnceCell::new(),
+            asked: Default::default(),
         }
     }
 }
@@ -251,6 +355,32 @@ impl CopyAnalysisRegistry {
     /// checkpoint's message on its own next lease or production event.
     pub(crate) fn notify(&self, message: CompletedCopyRange) -> bool {
         self.send(CopyAnalysisMessage::Range(Box::new(message)))
+    }
+    /// Hand the worker a row-less demand for one source's index, unless one
+    /// was already sent and its work has not settled. A full inbox refuses,
+    /// and the next start of the same title asks again.
+    pub(crate) fn notify_demand(&self, demand: CopyIndexDemand) -> bool {
+        let Ok(key) =
+            plurx_core::store::copy_index_v3_source_key(&demand.catalog_namespace, &demand.source)
+        else {
+            return false;
+        };
+        let mut asked = self
+            .asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if asked.contains(&key) {
+            return false;
+        }
+        let sent = self.send(CopyAnalysisMessage::Demand(Box::new(demand)));
+        if sent {
+            asked.insert(key);
+        }
+        sent
+    }
+    /// The already-asked keys, for the worker to clear as sources settle.
+    pub(crate) fn asked(&self) -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
+        Arc::clone(&self.asked)
     }
     /// Hand the worker one defect a reader found. A full inbox refuses, and
     /// the next start that meets the same head reports it again.
@@ -500,9 +630,15 @@ impl CopyObservationSet {
         {
             return Err(CopyObservationError::Binding);
         }
-        let CopyObservationAuthority::Source { assignment, .. } = &message.authority;
-        if assignment.owner_node_id() != self.source.origin_node_id {
-            return Err(CopyObservationError::Binding);
+        match &message.authority {
+            CopyObservationAuthority::Source { assignment, .. } => {
+                if assignment.owner_node_id() != self.source.origin_node_id {
+                    return Err(CopyObservationError::Binding);
+                }
+            }
+            // A local range has no assignment to bind; its source, checked
+            // below, names this node as the origin of the object it read.
+            CopyObservationAuthority::Local(_) => {}
         }
         if message.source != self.observed_source
             || message.catalog_namespace != self.catalog_namespace
@@ -524,6 +660,40 @@ impl CopyObservationSet {
             row_inspections: &checkpoint.row_inspections,
             promotion: &checkpoint.promotion,
         })
+    }
+
+    /// The set of a source nothing has observed yet, from the first rows an
+    /// Analysis-owned generation read of it: they establish the init
+    /// contract, clock origin and promotion every later observation must
+    /// share. `source` is the source as playback observes it, under its own
+    /// generation, so later playback ranges still fold in; when the phase
+    /// ran for a quarantined head's repair generation the set adopts that,
+    /// exactly as a set of playback rows does.
+    pub(crate) fn from_analysis(
+        catalog_namespace: &str,
+        source: &AnalysisCoordinationSource,
+        phase: &AnalysisPhysicalPhase,
+        observed: &AnalysisCopyRows,
+    ) -> Result<Self, CopyObservationError> {
+        let timescale = observed
+            .init
+            .video()
+            .ok_or(CopyObservationError::Init)?
+            .timescale;
+        let mut value = Self::empty(
+            catalog_namespace,
+            source,
+            &observed.init,
+            timescale,
+            observed.source_origin,
+            observed.canonical_title_start,
+            &observed.promotion,
+        )?;
+        if phase.source.requested_generation != source.requested_generation {
+            value.adopt_generation(&phase.source.requested_generation);
+        }
+        value.observe_analysis(phase, observed)?;
+        Ok(value)
     }
 
     /// Rows from an Analysis-owned generation. The phase must be this exact

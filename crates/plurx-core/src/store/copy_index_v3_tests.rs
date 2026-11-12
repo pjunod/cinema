@@ -962,22 +962,35 @@ async fn a_previous_processs_queued_coordinators_are_retired_and_stay_coordinabl
     assert_eq!(attempts, 3, "the borrowed claim charged nothing");
 }
 
-/// A head quarantined on a doubt (no holder, a contradicting observation, a
-/// sealed-init mismatch) may publish the same bytes again: an identical
-/// reseal means the bytes were right. Every other code bans its blob, as
-/// `a_quarantined_head_adopts_a_new_variant_but_never_the_quarantined_blob` shows.
+/// A head quarantined on a doubt (no holder, a contradicting observation)
+/// may publish the same bytes again: an identical reseal means the bytes
+/// were right. A sealed-init mismatch bans its blob, because a reseal
+/// repeats the seal's own promotion and disproves nothing about a served
+/// init; so does every other code. The recorded code is readable.
 #[tokio::test]
 async fn a_quarantine_on_a_doubt_lets_the_same_bytes_publish_again() {
     for code in [
         super::COPY_INDEX_V3_NO_HOLDER_CODE,
         super::COPY_INDEX_V3_CONTRADICTION_CODE,
-        super::COPY_INDEX_V3_SEALED_INIT_CODE,
     ] {
-        republish_after(code).await;
+        assert!(
+            matches!(
+                republish_after(code).await,
+                JobPublishOutcome::Published { .. }
+            ),
+            "{code} is a doubt"
+        );
     }
+    assert!(
+        matches!(
+            republish_after(super::COPY_INDEX_V3_SEALED_INIT_CODE).await,
+            JobPublishOutcome::ArtifactConflict
+        ),
+        "a sealed-init mismatch bans the bytes it quarantined"
+    );
 }
 
-async fn republish_after(code: &str) {
+async fn republish_after(code: &str) -> JobPublishOutcome {
     let mut fixture = fixture(true).await;
     let lost = artifact('a', '1');
     published(&fixture, &lost).await;
@@ -1006,23 +1019,40 @@ async fn republish_after(code: &str) {
         .publish_copy_index_v3(publish(&fixture, &token, &lost, NOW + 12))
         .await
         .expect("re-publication");
-    assert!(
-        matches!(outcome, JobPublishOutcome::Published { .. }),
-        "{code}: {outcome:?}"
-    );
-    let head = fixture
-        .store
-        .copy_index_v3_head(&key)
-        .await
-        .expect("head")
-        .expect("head");
-    assert_eq!(head.state, CopyIndexV3HeadState::Healthy);
-    assert_eq!(head.head_epoch, epoch + 1);
-    assert_eq!(head.blob_sha256.as_deref(), Some(lost.blob_sha256.as_str()));
     assert_eq!(
-        head.published_generation.as_deref(),
-        Some(fixture.source.requested_generation.as_str())
+        fixture
+            .store
+            .copy_index_v3_quarantine_code(&key, epoch, &lost.blob_sha256)
+            .await
+            .expect("ledger")
+            .as_deref(),
+        Some(code)
     );
+    assert_eq!(
+        fixture
+            .store
+            .copy_index_v3_quarantine_code(&key, epoch + 1, &lost.blob_sha256)
+            .await
+            .expect("ledger"),
+        None,
+        "another epoch has its own record"
+    );
+    if matches!(outcome, JobPublishOutcome::Published { .. }) {
+        let head = fixture
+            .store
+            .copy_index_v3_head(&key)
+            .await
+            .expect("head")
+            .expect("head");
+        assert_eq!(head.state, CopyIndexV3HeadState::Healthy);
+        assert_eq!(head.head_epoch, epoch + 1);
+        assert_eq!(head.blob_sha256.as_deref(), Some(lost.blob_sha256.as_str()));
+        assert_eq!(
+            head.published_generation.as_deref(),
+            Some(fixture.source.requested_generation.as_str())
+        );
+    }
+    outcome
 }
 
 /// Eviction's store half: every holder row of one node for one blob goes,

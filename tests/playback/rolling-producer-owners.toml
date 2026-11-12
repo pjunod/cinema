@@ -5756,6 +5756,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the pass that folds it; the stranded-coordinator retirement runs once at
 # the head of a process's first pass; the v3 eviction owner is called by the
 # playback-cache budget.
+# Local playback demand (item 6, first step) adds no task, timer or process: a
+# local start's demand is one more message in the copy-analysis inbox, and the
+# build it leads to is the existing source unit and its Analysis phases.
 expected_occurrences = 2202
 
 

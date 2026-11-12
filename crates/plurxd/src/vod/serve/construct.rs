@@ -594,11 +594,13 @@ impl VodServe {
         &self,
         file: &MediaFile,
         video: CopyVideoOptions,
-    ) -> Option<crate::copy_index_v3::ResolvedCopyIndex> {
+    ) -> Option<crate::copy_index_v3::Resolution> {
         let node_id = self.shared.cluster_node_id.as_deref()?;
         // A recipe planned from a shared index is fenced on the engine at
         // every generation, exactly as a v2 one is. With a changed engine it
         // could not produce, so the node-local index keeps the title playing.
+        // Nothing is returned, so no index is asked for either: a changed
+        // engine could not build one.
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
             return None;
         }
@@ -627,11 +629,48 @@ impl VodServe {
             }
             .await;
         match resolved {
-            Ok(resolved) => resolved,
+            Ok(resolved) => Some(resolved),
             Err(reason) => {
                 tracing::debug!(target: "plurxd::vodserve", file_id = file.id, %reason, "v3 copy index unavailable");
                 None
             }
+        }
+    }
+
+    /// Ask the Analysis worker for the v3 copy index of the file a local
+    /// viewer is starting, when planning found none. `own` is the source the
+    /// lookup just derived, so nothing is read here: the authority is
+    /// checked, and one inbox message is sent unless one already was. The
+    /// start itself is served by the existing index order and waits on
+    /// nothing. The worker builds the index with its own generations of the
+    /// copy engine once the source is idle, and a later start of the title
+    /// plans from it. A Sharing principal has no local authority and asks
+    /// for nothing.
+    pub(super) fn demand_copy_index(
+        &self,
+        file: &MediaFile,
+        own: plurx_core::store::analysis_coordination::AnalysisCoordinationSource,
+        recipe: crate::copy_analysis::CopyRecipe,
+        viewer: &crate::state::PlaybackViewerDemand,
+    ) {
+        if let Err(reason) = viewer.require_local_authority() {
+            tracing::debug!(target: "plurxd::vodserve", file_id = file.id, reason, "no copy index demand");
+            return;
+        }
+        let (Some(registry), Some(namespace)) = (
+            self.shared.copy_analysis.get(),
+            self.shared.catalog_namespace.get(),
+        ) else {
+            return;
+        };
+        if let Ok(demand) = crate::copy_analysis::CopyIndexDemand::local(
+            viewer,
+            Arc::new(file.clone()),
+            namespace.clone(),
+            own,
+            recipe,
+        ) {
+            registry.notify_demand(demand);
         }
     }
 
