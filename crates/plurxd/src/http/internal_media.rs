@@ -194,6 +194,128 @@ pub(crate) async fn fragment_index(
     }
 }
 
+/// Serve the variant a readable v3 copy-index head points at, when this node
+/// holds it. The same peer authentication, global and per-peer read permits
+/// and size bound as the v2 read above; the descriptor streamed is the one
+/// verified against the variant row. A quarantined, superseded or unknown
+/// variant is a plain 404. Only "this node lacks these bytes" is answered
+/// with [`crate::copy_index_v3::ABSENT_BODY`], which lets the asking peer
+/// retire this node's row. This route opens no source.
+pub(crate) async fn copy_index_v3(
+    State(state): State<AppState>,
+    AxumPath((source_key, blob_sha256)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    let path = crate::copy_index_v3::peer_path(&source_key, &blob_sha256);
+    let peer_id = authorize(&state, &headers, "GET", &path, &[]).await?;
+    if crate::copy_index_v3::peer_route_key(&path).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let read_permit = std::sync::Arc::clone(&FRAGMENT_INDEX_READS)
+        .try_acquire_owned()
+        .map_err(|_| {
+            tracing::warn!(blob_sha256, "throttling concurrent peer copy-index reads");
+            StatusCode::TOO_MANY_REQUESTS
+        })?;
+    let peer_reads = FRAGMENT_INDEX_PEER_READS
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .entry(peer_id.clone())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone();
+    let peer_permit = peer_reads.try_acquire_owned().map_err(|_| {
+        tracing::warn!(
+            blob_sha256,
+            peer_id,
+            "throttling one peer's copy-index reads"
+        );
+        StatusCode::TOO_MANY_REQUESTS
+    })?;
+    // One primary-key read: the head, its variant row, and whether this node
+    // is a recorded holder.
+    let variant = state
+        .store
+        .copy_index_v3_variant(&source_key, &state.node_id)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let artifact = variant
+        .readable()
+        .filter(|artifact| artifact.blob_sha256 == blob_sha256)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let root = crate::copy_analysis::v3_root(&state.runtime_cache_dir);
+    let blob_path = crate::copy_analysis::v3_blob_path(&root, &artifact.blob_sha256)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let opened = crate::fragment_index_cluster::open_verified_blob_at(
+        &blob_path,
+        artifact.bytes,
+        &artifact.blob_sha256,
+    )
+    .await;
+    match opened {
+        Ok(Some(file)) => {
+            let stream = FragmentIndexStream {
+                inner: tokio_util::io::ReaderStream::with_capacity(file, MEDIA_BODY_READ_BUFFER),
+                _global_permit: read_permit,
+                _peer_permit: peer_permit,
+                subtitle_bytes: false,
+            };
+            let mut response = Body::from_stream(stream).into_response();
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                "private, no-store".parse().expect("static cache control"),
+            );
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                "application/octet-stream"
+                    .parse()
+                    .expect("static content type"),
+            );
+            response.headers_mut().insert(
+                header::CONTENT_LENGTH,
+                artifact
+                    .bytes
+                    .to_string()
+                    .parse()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            );
+            Ok(response)
+        }
+        Ok(None) => {
+            if variant.held {
+                // Best-effort: the asking peer retires this row as well, on
+                // the positive answer below.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ForgetMissingInternalIndex,
+                    crate::store_result::Discard::BestEffort,
+                    state
+                        .store
+                        .forget_copy_index_v3_location(
+                            &artifact.contract_key,
+                            &artifact.blob_sha256,
+                            &state.node_id,
+                        )
+                        .await,
+                );
+            }
+            Ok((
+                StatusCode::NOT_FOUND,
+                private_no_store_headers(),
+                crate::copy_index_v3::ABSENT_BODY,
+            )
+                .into_response())
+        }
+        Err(error) => {
+            // An open or read failure says nothing certain about the bytes,
+            // so nothing is deleted and no row is retired here. This node's
+            // own planning removes a blob it has read in full and found
+            // different.
+            tracing::warn!(blob_sha256, %error, "copy-index blob could not be verified for a peer");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
+}
+
 const SUBTITLE_SOURCE_PATH_PREFIX: &str = "/internal/media/subtitle-source/";
 
 /// Serve only a representation named by this node's manifest. The source

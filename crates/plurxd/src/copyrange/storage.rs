@@ -43,6 +43,9 @@ struct StoredInspection {
     packets: u64,
     slices: u64,
     configuration_sha256: String,
+    hdr10_mastering: Option<String>,
+    hdr10_light: Option<[u16; 2]>,
+    hdr10_conflict: bool,
 }
 impl From<&CopyRowInspection> for StoredInspection {
     fn from(value: &CopyRowInspection) -> Self {
@@ -52,6 +55,9 @@ impl From<&CopyRowInspection> for StoredInspection {
             packets: value.packets,
             slices: value.slices,
             configuration_sha256: value.configuration_sha256.clone(),
+            hdr10_mastering: value.hdr10_mastering.clone(),
+            hdr10_light: value.hdr10_light,
+            hdr10_conflict: value.hdr10_conflict,
         }
     }
 }
@@ -584,6 +590,9 @@ impl CopyRangeFiles {
                         packets: value.packets,
                         slices: value.slices,
                         configuration_sha256: value.configuration_sha256.clone(),
+                        hdr10_mastering: value.hdr10_mastering.clone(),
+                        hdr10_light: value.hdr10_light,
+                        hdr10_conflict: value.hdr10_conflict,
                     })
                     .collect::<Vec<_>>(),
             ),

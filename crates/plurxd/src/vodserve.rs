@@ -1212,6 +1212,9 @@ struct Shared {
     cluster_node_id: Option<String>,
     cluster_index_root: Option<PathBuf>,
     cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    /// The cluster's catalogue identity (`instance.id`), read once: it never
+    /// changes, and v3 copy-index source keys are derived from it per start.
+    catalog_namespace: tokio::sync::OnceCell<String>,
     sessions: Mutex<HashMap<String, Session>>,
     /// Bounded by in-flight VOD request admission and cleaned by exact RAII.
     /// This closes lease loss against a slow resurrection before attachment.

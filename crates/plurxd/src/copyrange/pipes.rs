@@ -1,13 +1,58 @@
 //! One owned FFmpeg input, AV stdout, canonical MP4 and source packet clock.
 //! Every pipe task is bounded and joined before the registered writer ack.
+//! The generation's owner is typed: Source playback or an Analysis phase.
 use crate::{
     prodrun::{ProducerRegistration, ProducerSlot, ProducerWriters},
     source_generation::{SourceGenerationDispatch, SourceRenditionOwners},
     source_input::SourceInput,
     transcode::source_actor::SourceGenerationAuthority,
 };
+use plurx_core::store::analysis_coordination::AnalysisPhysicalPhase;
 use std::{path::Path, sync::Arc};
 use tokio::io::{AsyncRead, AsyncReadExt};
+
+/// Who owns one copy generation's physical work. The recipe, pipes, parsers
+/// and reap are the same code for both; only admission and custody differ.
+pub(crate) enum CopyGenerationOwner<'a> {
+    /// Shared Source playback: the rendition's retained admission permit, its
+    /// exact generation dispatch and a current media-serving authority.
+    Source {
+        owners: &'a SourceRenditionOwners,
+        dispatch: SourceGenerationDispatch,
+        authority: SourceGenerationAuthority,
+    },
+    /// An exact Analysis physical phase whose custody is already active. Its
+    /// Input reads under that phase's byte budget. It holds no admission
+    /// permit and no Source grant, and nothing it produces may be served.
+    Analysis { phase: &'a AnalysisPhysicalPhase },
+}
+impl CopyGenerationOwner<'_> {
+    /// Refusals that need no child. The Input is the caller's to close.
+    fn validate_before_spawn(&self, input: &SourceInput) -> Result<(), String> {
+        match self {
+            Self::Source { authority, .. } => authority.validate_before_spawn(),
+            Self::Analysis { phase } => {
+                // A foreground Input carries a viewer's custody and observer;
+                // an Analysis phase may only read under its own budget.
+                if input.foreground_observer().is_some()
+                    || !matches!(
+                        &phase.custody.owner,
+                        plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Analysis {
+                            request_id,
+                            node_id,
+                            fence,
+                        } if request_id == &phase.claim.request_id
+                            && node_id == &phase.claim.node_id
+                            && *fence == phase.claim.fence
+                    )
+                {
+                    return Err("copy_analysis_owner_invalid".into());
+                }
+                Ok(())
+            }
+        }
+    }
+}
 
 const PIPE_CHUNK: usize = 32 * 1024;
 const PIPE_CHANNEL: usize = 8;
@@ -153,15 +198,12 @@ impl RunningCopyGeneration {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_source_generation(
     input: SourceInput,
     source_path: &Path,
     args: &[String],
     runtime_cache: &Path,
-    owners: &SourceRenditionOwners,
-    dispatch: SourceGenerationDispatch,
-    authority: SourceGenerationAuthority,
+    owner: CopyGenerationOwner<'_>,
     slot: Arc<ProducerSlot>,
 ) -> Result<RunningCopyGeneration, String> {
     // Pair creation is fallible before any child exists. Retain and explicitly
@@ -174,7 +216,7 @@ pub(crate) async fn spawn_source_generation(
             return Err(error);
         }
     };
-    if let Err(error) = authority.validate_before_spawn() {
+    if let Err(error) = owner.validate_before_spawn(&input) {
         let _ = input.close_and_wait().await;
         return Err(error);
     }
@@ -189,12 +231,21 @@ pub(crate) async fn spawn_source_generation(
     }
     let descriptors = crate::producer_spawn::Descriptors::from_files(None, None, None, false)
         .with_copy_measurements(&canonical_write, &clock_write);
-    let permit = match owners.retained_initial_permit() {
-        Some(permit) => permit,
-        None => {
-            let _ = input.close_and_wait().await;
-            return Err("copy_source_admission_missing".into());
-        }
+    let (permit, work): (Option<Box<dyn Send>>, _) = match &owner {
+        CopyGenerationOwner::Source { owners, .. } => match owners.retained_initial_permit() {
+            Some(permit) => (
+                Some(Box::new(permit)),
+                crate::process_control::ChildWork::realtime("Source observed copy"),
+            ),
+            None => {
+                let _ = input.close_and_wait().await;
+                return Err("copy_source_admission_missing".into());
+            }
+        },
+        CopyGenerationOwner::Analysis { .. } => (
+            None,
+            crate::process_control::ChildWork::background("Analysis observed copy"),
+        ),
     };
     let spawned = crate::producer_spawn::spawn(
         Path::new(&crate::ffmpeg::ffmpeg_bin()),
@@ -204,7 +255,7 @@ pub(crate) async fn spawn_source_generation(
             progress: crate::producer_spawn::Progress::None,
             descriptors,
             env: &[],
-            work: crate::process_control::ChildWork::realtime("Source observed copy"),
+            work,
         },
     );
     let spawned = match spawned {
@@ -221,12 +272,16 @@ pub(crate) async fn spawn_source_generation(
             spawned.child,
             spawned.child_job,
             0,
-            Some(Box::new(permit)),
+            permit,
             Some(input),
         )
         .await;
-    owners.registered(&dispatch, &registration);
-    drop(dispatch);
+    if let CopyGenerationOwner::Source {
+        owners, dispatch, ..
+    } = owner
+    {
+        owners.registered(&dispatch, &registration);
+    }
     let (sender, receiver) = tokio::sync::mpsc::channel(PIPE_CHANNEL);
     let tasks = vec![
         reader(spawned.stdout, CopyPipeKind::Av, sender.clone()),

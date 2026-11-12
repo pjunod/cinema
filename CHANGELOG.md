@@ -14,6 +14,10 @@ bump may break compatibility and a **patch** bump never does.
   tree as the server it ships with. The bundle had been taken from a separately
   published image, so helper changes never reached an image, and a server built
   after them would have refused the older bundle and turned DV processing off.
+- A dead owner's source custody can be released by the host census even
+  after retention has deleted the owner's job row. The census then also proves
+  the owner's whole process tree gone: the daemon's PID namespace holds nothing
+  older than the owner, and nothing outside it touches the counted storage.
 - On Android TV, switching a playing title to its Dolby Vision-enhanced
   version no longer freezes the picture and falls back. The prepared second
   player no longer uses tunneled playback, so it can't take the television's

@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "ae31eb1c91dacc2f38f0020785e885db60b4276709ecee2fa60fbb901fdf14d0"
+        "sha256": "5278a91e3262fcf7592e0355e981b8ec6d48cf260f3c1c0fc9b3bc0ab949f9fe"
       },
       {
         "table": "31 authority implementation",
@@ -255,19 +255,19 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "0c85f37f730dde2fd455836c72a20f8d22b96cbc7524b7e8e8bbc9fdb919af1c"
+        "sha256": "d3d1543b48b0119bf68db6a95546183fa880e2f69dddc04ff3a3ee0541bd099c"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "0c85f37f730dde2fd455836c72a20f8d22b96cbc7524b7e8e8bbc9fdb919af1c"
+        "sha256": "d3d1543b48b0119bf68db6a95546183fa880e2f69dddc04ff3a3ee0541bd099c"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "2326f7b27a06048ea68944dcfaa9ee1fc010a05639363fa9e6e0f72c382ade44"
+        "sha256": "66e66866ec9b371a60c6f783627af589b0e16de598338aa92721a4ccfc1a76bf"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",

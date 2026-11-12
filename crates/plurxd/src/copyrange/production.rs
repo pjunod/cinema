@@ -22,6 +22,27 @@ struct ReadBank {
     high_ms: u64,
     held: bool,
 }
+/// A generation that ended before its seek landing was verified read only its
+/// bounded bootstrap allowance: report the unverified landing, never a later
+/// symptom of that ceiling. Refusals that name their own cause keep it.
+pub(super) fn landing_failure(
+    seek_bootstrap: &crate::source_input::SourceSeekBootstrap,
+    error: String,
+) -> String {
+    if !seek_bootstrap.is_verified()
+        && !matches!(
+            error.as_str(),
+            "copy_target_exceeded"
+                | "copy_init_contract_changed"
+                | "copy_clock_unknown"
+                | "copy_range_cancelled"
+        )
+    {
+        "copy_sync_unverified".to_owned()
+    } else {
+        error
+    }
+}
 pub(crate) struct CopyRangeProduction {
     pub(crate) files: AsyncMutex<CopyRangeFiles>,
     pub(crate) changed: Notify,
@@ -291,21 +312,7 @@ impl CopyRangeProduction {
             self.changed.notify_waiters();
             Ok::<(),String>(())
         }.await;
-        let observed = observed.map_err(|error| {
-            if !self.seek_bootstrap.is_verified()
-                && !matches!(
-                    error.as_str(),
-                    "copy_target_exceeded"
-                        | "copy_init_contract_changed"
-                        | "copy_clock_unknown"
-                        | "copy_range_cancelled"
-                )
-            {
-                "copy_sync_unverified".to_owned()
-            } else {
-                error
-            }
-        });
+        let observed = observed.map_err(|error| landing_failure(&self.seek_bootstrap, error));
         if observed.is_err() {
             self.publisher.retire();
         }

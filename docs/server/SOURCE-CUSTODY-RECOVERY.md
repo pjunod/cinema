@@ -189,6 +189,41 @@ mtime therefore refuses. Superblocks are found by the file's NFS handle
 plus the daemon's own stat.
 
 It then uses the ordinary typed settlement and clears only its own witness.
+
+**When the owner's job row is gone.** Retention can delete a settled job while
+its custody is still charged. That row is the custody's only exact source
+binding, so the census alone cannot release it. The helper, running in the
+host's PID namespace, records an `owner_teardown` view in each pass:
+
+- the PID namespace of the `plurxd run` that is PID 1 of its namespace;
+- processes in that namespace that started at or before the owner's lease
+  expiry;
+- any other `plurxd run` on the host;
+- the following, counted only for processes outside that namespace:
+  - anything held (a descriptor, cwd, root, executable or mapping) on media
+    storage. Media storage means every network or FUSE superblock in any mount
+    namespace on the host, the census's superblock, and any `--library-root`
+    on local disk.
+  - FFmpeg tools or plurx helpers. An idle survivor between opens holds
+    nothing, so it is caught here instead.
+  - processes that cannot be read. These are never skipped.
+
+The helper reads zombie leaders through their live tasks. It names every
+holder on stderr so a refusal can be acted on.
+
+The daemon accepts the view only when all of these hold:
+
+- it is PID 1 of that namespace;
+- both passes were taken after this daemon started;
+- every count is zero in both passes;
+- the scanned set covers every network or FUSE superblock in its own mount
+  table and the superblock of every library root it serves;
+- the owner's recorded source inode, if any, is the census inode.
+
+The owner died before this daemon started, so its survivors are outside this
+namespace. None of them is reading any media file, whichever file the owner
+read. A hung network mount can stall the helper's scan; interrupting it
+publishes nothing.
 The operator removes the proof file after release. The model never repairs a
 nonce, rewrites a witness or treats lease expiry as stop evidence. A future
 unmediated launch still poisons live witnesses; reducing those launches

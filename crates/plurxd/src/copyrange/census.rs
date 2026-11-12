@@ -1,12 +1,7 @@
 //! One-packet head census from the same copy recipe and triple-output engine.
 //! Its artificial fragment supplies promotion/clocks, never coverage rows.
-use super::pipes::{spawn_source_generation, CopyPipeEvent, CopyPipeKind};
-use crate::{
-    prodrun::ProducerSlot,
-    source_generation::{SourceGenerationDispatch, SourceRenditionOwners},
-    source_input::SourceInput,
-    transcode::source_actor::SourceGenerationAuthority,
-};
+use super::pipes::{spawn_source_generation, CopyGenerationOwner, CopyPipeEvent, CopyPipeKind};
+use crate::{prodrun::ProducerSlot, source_input::SourceInput};
 use plurx_core::{
     domain::MediaFile,
     fmp4::{Fragment, FragmentReader, Init, Unit},
@@ -235,18 +230,26 @@ fn one_clock(bytes: &[u8]) -> Result<SourcePacketObservation, String> {
     Ok(packet)
 }
 
+/// A Source start is bounded by its viewer's startup deadline. An Analysis
+/// phase has none: its budget may be paused by foreground pressure for any
+/// length of time, and only its lease-loss token ends it.
+async fn expired(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
+        None => std::future::pending().await,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_source_census(
     input: SourceInput,
     object: String,
     file: &MediaFile,
     video: CopyVideoOptions,
-    owners: &SourceRenditionOwners,
-    dispatch: SourceGenerationDispatch,
-    authority: SourceGenerationAuthority,
+    owner: CopyGenerationOwner<'_>,
     slot: Arc<ProducerSlot>,
     runtime_cache: &Path,
-    deadline: Instant,
+    deadline: Option<Instant>,
     stop: &CancellationToken,
 ) -> Result<CopyClockCensus, String> {
     if let Err(error) = input.seal_read_ceiling(MAX_CENSUS_SOURCE_BYTES) {
@@ -269,17 +272,8 @@ pub(crate) async fn run_source_census(
         }
     }
     let mut format = super::census_format::InputFormatStart::new(input.url());
-    let mut running = spawn_source_generation(
-        input,
-        &file.path,
-        &args,
-        runtime_cache,
-        owners,
-        dispatch,
-        authority,
-        slot,
-    )
-    .await?;
+    let mut running =
+        spawn_source_generation(input, &file.path, &args, runtime_cache, owner, slot).await?;
     let mut av = Vec::new();
     let mut canonical = Vec::new();
     let mut clock = Vec::new();
@@ -316,14 +310,14 @@ pub(crate) async fn run_source_census(
             }
         };
         tokio::pin!(observed);
-        tokio::select! {biased;()=stop.cancelled()=>Err("copy_range_cancelled".to_owned()),()=tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))=>Err("copy_head_deadline".to_owned()),result=&mut observed=>result}
+        tokio::select! {biased;()=stop.cancelled()=>Err("copy_range_cancelled".to_owned()),()=expired(deadline)=>Err("copy_head_deadline".to_owned()),result=&mut observed=>result}
     };
     if result.is_ok() {
         let _ = running
             .slot
             .request_registered_completion(&running.registration)
             .await;
-        let status = tokio::select! {biased;()=stop.cancelled()=>{result=Err("copy_range_cancelled".into());None},()=tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))=>{result=Err("copy_head_deadline".into());None},status=running.registration.wait_child_exit()=>Some(status)};
+        let status = tokio::select! {biased;()=stop.cancelled()=>{result=Err("copy_range_cancelled".into());None},()=expired(deadline)=>{result=Err("copy_head_deadline".into());None},status=running.registration.wait_child_exit()=>Some(status)};
         if status.is_some_and(|status| !status.success()) {
             result = Err("copy_head_child_failed".into());
         }

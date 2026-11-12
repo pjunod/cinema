@@ -25,6 +25,7 @@ mod cachekeep;
 mod channel_subjects;
 mod clock_offset;
 mod copy_analysis;
+mod copy_index_v3;
 mod copy_normalization;
 mod copyrange;
 mod copyseg;
