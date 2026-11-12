@@ -3934,7 +3934,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # route_view_tests.rs hold a lookup mid-read (cancel, publication race,
 # proof loss); each is joined or aborted by its test.
 # Merged main into E1c: 1142 base, +2 main, +3 E1c.
-expected_occurrences = 1147
+# D3a: -1 (1147 -> 1146), the owner start's `tokio::spawn` becomes
+# `spawn_in_http_store_scope`, which carries the request's Store-operation
+# counts into the same awaited task (counted under process-capable-launch-method).
+expected_occurrences = 1146
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -7006,7 +7009,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # not a process.
 # PR1527: +1 (923 -> 924), the synchronous `.output()` of the test-only
 # bundle-installer --identity child above; it waits for and reaps the child.
-expected_occurrences = 924
+# D3a: +1 (924 -> 925), `spawn_in_http_store_scope(`, the owner start's one
+# spawn (the line above); it is the task `ims.rs::start` already awaited, not a
+# process, and joins before the handler returns.
+expected_occurrences = 925
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
