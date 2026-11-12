@@ -74,8 +74,31 @@ pass:
 3. The seal folds per-row HDR10 SEI facts (`Hdr10IndexMetadata::merge`) into
    the whole-title metadata the legacy index computes.
 
-Next: an end-to-end gap-fill test on a real fixture, then items 4–6. The
-adversarial review comes before the effort gate and the effort → main PR.
+A claude-fable-5-2 adversarial review found four majors and six minors, all
+addressed:
+
+- The seal publishes the init contract that its own promotion serves
+  (`served_init_contract_sha256`), not the head-frozen one.
+- An unreadable HDR10 SEI marks the row `hdr10_conflict` instead of ending the
+  viewer's copy. The set then refuses to seal, and the legacy pass owns the
+  title.
+- Each ready source runs as its own unit. A fill that waits on a paused budget
+  no longer holds the other sources, and the inbox drains on every wake.
+- An incomplete set checks `foreground_source_pressure`, which is read-only,
+  before it enqueues or claims anything.
+- Failures that recur on every repeat (row limit, unknown clock, unverified or
+  late landing, a changed init) discard instead of retrying. The quarantine
+  check and the cross-row mastering conflict are now found before any read.
+- Fresh fill rows refresh the source's eviction age.
+
+Decision (Paul away): the generation domain stays v1. Bumping it would leave
+existing heads desiring the old generation forever. Instead, item 4's consumer
+must refuse a v3 blob whose promotion lacks `indexed_hdr10_metadata`, which
+item 5 then quarantines and rebuilds.
+
+Still open: an end-to-end gap-fill test on a real fixture. Coordination
+request rows of sources never observed again after a restart stay `queued`
+(one per file, as before this batch); retiring them belongs with item 5.
 
 ## After the first A1/B1 merge — remaining build order
 
@@ -116,15 +139,14 @@ is the idle test), run one Analysis-owned generation through the adapter:
 The full-source attestation phase reads every byte. Fold the whole-title
 HDR10 maximum scan into that same read (item 3).
 
-### 3. Whole-title HDR10 metadata in the attestation read
+### 3. Whole-title HDR10 metadata from row facts
 
-A sealed observation index carries the bounded head census's promotion. The
-legacy local index promises `indexed_hdr10_metadata` with the scanned
-`hdr10_sei` (`fragindex.rs`, the `--plurx-hdr10-index` argv revision).
-Compute the same maximum over the attestation phase's bytes, record it with
-the receipt, and seal it into the promotion. Until then, never bridge a v3
-index into `put_fragment_index`: HDR10 titles would get different init
-metadata than the legacy key claims.
+The legacy local index promises `indexed_hdr10_metadata` with the scanned
+`hdr10_sei` (`fragindex.rs`, the `--plurx-hdr10-index` argv revision). Each
+observed row records its own HDR10 SEI facts. The seal folds them, in any
+order, into that same maximum, and publishes the init contract of the
+promotion it seals. A v3 index from before this fold lacks the flag; never
+bridge one into `put_fragment_index`.
 
 ### 4. v3 consumer and peer hydration
 
@@ -134,6 +156,8 @@ metadata than the legacy key claims.
 - The hydrating node records its own verified location.
 - Decode with `decode_cluster_fragment_index_blob_v3` against the head's
   source and output identity.
+- Refuse a blob whose promotion lacks `indexed_hdr10_metadata` (sealed before
+  item 3); item 5 quarantines it.
 
 ### 5. Discrepancy quarantine
 

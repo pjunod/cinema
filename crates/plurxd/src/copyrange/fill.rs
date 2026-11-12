@@ -46,6 +46,32 @@ pub(crate) enum CopyGapFillError {
     Failed(String),
     /// The source no longer produces what the held observations bind.
     Contradicted(String),
+    /// This gap can never be filled by repeating the same generation: the
+    /// answer is a property of the file, not of this attempt.
+    Refused(String),
+}
+
+/// Causes that recur on every repeat of the same generation, so a retry only
+/// spends another phase. Anything else (an I/O error, a lost reader, a
+/// cancelled phase) is this attempt's and is retried.
+fn failure(reason: String) -> CopyGapFillError {
+    match reason.as_str() {
+        // More rows than one index blob can hold.
+        "copy_range_row_limit"
+        // The container exposes no format start to place a seek against.
+        | "copy_clock_unknown"
+        // The seek landed beyond the bootstrap allowance (sparse cues), or
+        // landed after the gap's first missing row.
+        | "copy_sync_unverified"
+        | "copy_fill_landed_late"
+        // The muxer wrote a second init: the decoder contract changed.
+        | "copy_init_contract_changed" => CopyGapFillError::Refused(reason),
+        // The held object changed after the phase resolved it.
+        "source changed after cluster index resolution" => {
+            CopyGapFillError::Contradicted(reason)
+        }
+        _ => CopyGapFillError::Failed(reason),
+    }
 }
 
 enum FillEnd {
@@ -130,9 +156,10 @@ where
 {
     use CopyGapFillError::{Contradicted, Failed};
     let file = fill.file;
+    let failed = failure;
     let video = fill.recipe.video;
     let census = run_source_census(
-        open().await.map_err(Failed)?,
+        open().await.map_err(failed)?,
         fill.phase.source.object_version.clone(),
         file,
         video,
@@ -143,9 +170,9 @@ where
         fill.stop,
     )
     .await
-    .map_err(Failed)?;
+    .map_err(failed)?;
     if census.format_start.is_none() {
-        return Err(Failed("copy_clock_unknown".into()));
+        return Err(failed("copy_clock_unknown".into()));
     }
     let contract = Arc::new(
         CopyNormalizationContract::from_head(
@@ -181,7 +208,7 @@ where
         .map_err(|error| Failed(error.into()))?;
     // The census Input and its readers are joined. A seeked start may read
     // only the bounded bootstrap allowance until its landing is verified.
-    let input = open().await.map_err(Failed)?;
+    let input = open().await.map_err(failed)?;
     let seek_bootstrap = match input.seal_seek_bootstrap_limit(super::SOURCE_SEEK_BOOTSTRAP_BYTES) {
         Ok(handle) => handle,
         Err(error) => {
@@ -251,7 +278,7 @@ where
     let settled = running
         .settle(matches!(observed, Ok(FillEnd::Eof(_))))
         .await;
-    let end = observed.map_err(Failed)?;
+    let end = observed.map_err(failed)?;
     let receipt = settled.map_err(Failed)?;
     let (eof, inspection) = match end {
         FillEnd::Eof(inspection) => {
@@ -269,11 +296,16 @@ where
         ..
     } = batch;
     let init = init.ok_or_else(|| Failed("copy_init_missing".into()))?;
-    let begins_title = rows
+    let first = rows
         .first()
         .ok_or_else(|| Failed("copy_fill_empty".into()))?
-        .dts
-        == fill.canonical_title_start;
+        .dts;
+    // The generation must cover the gap's first missing row itself; a later
+    // landing would leave it open and repeat identically on every retry.
+    if first > fill.gap.start.unwrap_or(fill.canonical_title_start) {
+        return Err(failed("copy_fill_landed_late".into()));
+    }
+    let begins_title = first == fill.canonical_title_start;
     Ok(AnalysisCopyRows {
         init,
         source_origin: census.first_dts,

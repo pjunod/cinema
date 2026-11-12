@@ -32,6 +32,11 @@ use tokio_util::sync::CancellationToken;
 /// the least recently observed source is the one forgotten.
 const MAX_PENDING_SOURCES: usize = 64;
 
+/// Committed ranges of one working source held until its unit returns. A later
+/// commit of the same range supersedes its earlier one; past this many ranges
+/// the oldest is dropped, and its durable manifest remains the record.
+const MAX_DEFERRED_RANGES: usize = 8;
+
 pub(crate) struct PendingSource {
     file: Arc<plurx_core::domain::MediaFile>,
     set: CopyObservationSet,
@@ -49,6 +54,8 @@ pub(crate) struct PendingSource {
 #[derive(Default)]
 pub(crate) struct PendingSources {
     sources: HashMap<String, PendingSource>,
+    /// Sources a unit is working now, with the ranges committed meanwhile.
+    working: HashMap<String, Vec<CompletedCopyRange>>,
 }
 
 impl PendingSources {
@@ -61,6 +68,14 @@ impl PendingSources {
         ) else {
             return;
         };
+        if let Some(deferred) = self.working.get_mut(&key) {
+            deferred.retain(|held| held.range_id != message.range_id);
+            if deferred.len() >= MAX_DEFERRED_RANGES {
+                deferred.remove(0);
+            }
+            deferred.push(message);
+            return;
+        }
         let super::CopyObservationAuthority::Source { authority, .. } = &message.authority;
         let interest = authority.clone();
         if let Some(pending) = self.sources.get_mut(&key) {
@@ -81,7 +96,7 @@ impl PendingSources {
         }
         match CopyObservationSet::new(&message) {
             Ok(set) => {
-                if self.sources.len() >= MAX_PENDING_SOURCES {
+                if self.sources.len() + self.working.len() >= MAX_PENDING_SOURCES {
                     if let Some(oldest) = self
                         .sources
                         .iter()
@@ -112,9 +127,10 @@ impl PendingSources {
         }
     }
 
-    /// Sets that may be attempted now. An incomplete set is attempted too:
-    /// its gaps are filled when the store admits a physical phase for it.
-    fn ready(&self, now: Instant) -> Vec<String> {
+    /// Hand every set that may be attempted now to its own unit. An
+    /// incomplete set is attempted too: its gaps are filled when the store
+    /// admits a physical phase for it.
+    fn start_ready(&mut self, now: Instant) -> Vec<(String, PendingSource)> {
         let mut keys = self
             .sources
             .iter()
@@ -125,7 +141,34 @@ impl PendingSources {
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         keys.sort();
-        keys
+        keys.into_iter()
+            .filter_map(|key| {
+                let source = self.sources.remove(&key)?;
+                self.working.insert(key.clone(), Vec::new());
+                Some((key, source))
+            })
+            .collect()
+    }
+
+    /// A unit returned its source. A set that may still seal waits for a later
+    /// wake; then every range committed while it worked folds in.
+    fn settle(
+        &mut self,
+        key: String,
+        source: Option<PendingSource>,
+        attempt: &Attempt,
+        retry: Duration,
+    ) {
+        let deferred = self.working.remove(&key).unwrap_or_default();
+        if let Some(mut source) =
+            source.filter(|_| matches!(attempt, Attempt::Busy | Attempt::Retry(_)))
+        {
+            source.retry_after = Some(Instant::now() + retry);
+            self.sources.insert(key, source);
+        }
+        for message in deferred {
+            self.observe(message);
+        }
     }
 }
 
@@ -154,51 +197,58 @@ enum Attempt {
     Discard(String),
 }
 
-/// One dispatcher pass. Single-flight is the registry's: a pass already
-/// running leaves new notifications in the bounded inbox for itself.
+/// One dispatcher pass: fold the inbox, then give each ready source its own
+/// unit. A unit's gap fill can wait on a paused byte budget for as long as a
+/// viewer needs the disk; it holds only its own source, so every other source
+/// keeps folding, sealing and publishing, and the inbox drains on every wake.
+/// A source has at most one unit; its unit is its single flight.
 pub(crate) async fn work_copy_observations(
     registry: &super::CopyAnalysisRegistry,
-    context: &CopyAnalysisContext,
-) -> bool {
-    let Some(mut pending) = registry.begin_pass() else {
-        return false;
-    };
-    for message in registry.take_pending() {
-        pending.observe(message);
-    }
-    let mut progressed = false;
-    for key in pending.ready(Instant::now()) {
-        let Some(source) = pending.sources.get_mut(&key) else {
-            continue;
-        };
-        let attempt = publish_source(context, &key, source).await;
-        match attempt {
-            Attempt::Done => {
-                progressed = true;
-                pending.sources.remove(&key);
-            }
-            Attempt::Busy => {
-                if let Some(source) = pending.sources.get_mut(&key) {
-                    source.retry_after = Some(
-                        Instant::now() + Duration::from_millis(context.retry_ms.max(1_000) as u64),
-                    );
-                }
-            }
-            Attempt::Retry(reason) => {
-                tracing::warn!(%reason, "copy index publication will retry");
-                if let Some(source) = pending.sources.get_mut(&key) {
-                    source.retry_after = Some(
-                        Instant::now() + Duration::from_millis(context.retry_ms.max(1_000) as u64),
-                    );
-                }
-            }
-            Attempt::Discard(reason) => {
-                tracing::warn!(%reason, "copy observations cannot seal this source");
-                pending.sources.remove(&key);
-            }
+    context: Arc<CopyAnalysisContext>,
+) {
+    let pending = registry.pending();
+    let units = {
+        let mut sources = pending.lock().await;
+        for message in registry.take_pending() {
+            sources.observe(message);
         }
+        sources.start_ready(Instant::now())
+    };
+    let retry = Duration::from_millis(context.retry_ms.max(1_000) as u64);
+    for (key, mut source) in units {
+        let pending = Arc::clone(&pending);
+        let context = Arc::clone(&context);
+        let unit_key = key.clone();
+        let unit = tokio::spawn(async move {
+            let attempt = publish_source(&context, &unit_key, &mut source).await;
+            (source, attempt)
+        });
+        tokio::spawn(async move {
+            // A unit that panicked still returns its key, so the source is
+            // never left marked as working with nothing working it.
+            let returned = unit.await;
+            let mut sources = pending.lock().await;
+            match returned {
+                Ok((source, attempt)) => {
+                    match &attempt {
+                        Attempt::Done | Attempt::Busy => {}
+                        Attempt::Retry(reason) => {
+                            tracing::warn!(%reason, "copy index publication will retry");
+                        }
+                        Attempt::Discard(reason) => {
+                            tracing::warn!(%reason, "copy observations cannot seal this source");
+                        }
+                    }
+                    sources.settle(key, Some(source), &attempt, retry);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "copy analysis unit ended abnormally");
+                    let attempt = Attempt::Discard("unit ended abnormally".into());
+                    sources.settle(key, None, &attempt, retry);
+                }
+            }
+        });
     }
-    progressed
 }
 
 async fn publish_source(
@@ -218,8 +268,27 @@ async fn publish_source(
         {
             return Attempt::Done;
         }
+        // A quarantine moved this source to its repair generation; these
+        // observations belong to the old one. Known before any read.
+        Ok(Some(head)) if head.desired_generation != source.requested_generation => {
+            return Attempt::Discard("head desires another generation".into());
+        }
         Ok(_) => {}
         Err(error) => return Attempt::Retry(error.to_string()),
+    }
+    // An incomplete set needs a physical phase, which the store admits only
+    // while the source domain is idle. While a viewer holds it, a read-only
+    // look answers without enqueueing, claiming or charging anything.
+    if !pending.set.is_complete() {
+        match context
+            .store
+            .foreground_source_pressure(source.file_id, crate::state::clock_ms())
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => return Attempt::Busy,
+            Err(error) => return Attempt::Retry(error.to_string()),
+        }
     }
     let request = match coordination_request(context, &pending.file, &source).await {
         Ok(Some(request)) => request,
@@ -372,13 +441,18 @@ async fn fill_gaps(
         active.finish(&context.store).await;
         let rows = filled.map_err(|error| match error {
             CopyGapFillError::Failed(reason) => Attempt::Retry(reason),
-            CopyGapFillError::Contradicted(reason) => Attempt::Discard(reason),
+            CopyGapFillError::Contradicted(reason) | CopyGapFillError::Refused(reason) => {
+                Attempt::Discard(reason)
+            }
         })?;
         let observed = rows.rows.len();
         pending
             .set
             .observe_analysis(&phase, &rows)
             .map_err(|error| Attempt::Discard(format!("analysis rows: {error:?}")))?;
+        // Fresh rows make this the most recently observed source, never the
+        // first one forgotten.
+        pending.observed = Instant::now();
         if pending.set.first_gap() == Some(gap) {
             return Err(Attempt::Retry("copy gap fill left its gap open".into()));
         }
@@ -538,7 +612,10 @@ async fn publish_claimed(
     if lost.is_cancelled() {
         return Err(Attempt::Busy);
     }
-    let index = pending
+    let super::SealedCopyIndex {
+        index,
+        init_contract_sha256: init_contract,
+    } = pending
         .set
         .seal(&verified)
         .map_err(|error| Attempt::Discard(format!("{error:?}")))?;
@@ -546,10 +623,9 @@ async fn publish_claimed(
     let engine = FragmentIndexEngineProvenance {
         engine_sha256: crate::ffmpeg::fragment_index_engine_digest().await,
         pipeline_sha256: hex::encode(Sha256::digest(
-            format!("plurx/copy-analysis/pipeline/v1\0{}", source.video_identity).as_bytes(),
+            format!("plurx/copy-analysis/pipeline/v2\0{}", source.video_identity).as_bytes(),
         )),
     };
-    let init_contract = pending.set.init_contract_sha256().to_owned();
     let blob = plurx_core::store::encode_cluster_fragment_index_blob_v3(
         &index,
         &source_sha256,

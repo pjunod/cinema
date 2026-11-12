@@ -3881,8 +3881,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # runs, reader tests) joined or aborted before the test returns.
 # A1/B1 batch (#1495), +6 owned spawns:
 # - The fragments loop spawns one copy-observation pass only when this node may
-#   execute fragment_index_publish. The registry admits one pass at a time, and
-#   the pass ends when its coalesced pending sources drain.
+#   execute fragment_index_publish. The pass folds the inbox under the pending
+#   lock and returns; it does not wait on any source.
 # - The claimed Analysis lease heartbeat ends on its stop token (any publish
 #   outcome) or on a lost lease, which it records.
 # - The copy pipe reader returns its JoinHandle to the pipe set that joins it;
@@ -3893,7 +3893,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 #   actor's stop token.
 # - source_resource's spawn_blocking reads the opened held file's metadata and
 #   is awaited inline.
-expected_occurrences = 1142
+# #1520 review fix, +2: the pass gives each ready source one unit task (a
+# source in `working` has exactly one), bounded by MAX_PENDING_SOURCES, which
+# ends when publish_source returns. Its supervisor task awaits that unit's
+# JoinHandle and always returns the key, a panic included, then ends.
+expected_occurrences = 1144
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes

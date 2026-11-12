@@ -35,9 +35,15 @@ pub(crate) struct CopyRowInspection {
     /// fragment (hex mastering-display payload, content-light maxima).
     pub(crate) hdr10_mastering: Option<String>,
     pub(crate) hdr10_light: Option<[u16; 2]>,
+    /// The fragment's HDR10 SEI could not be read as one consistent set of
+    /// facts. Playback is unaffected; the legacy index pass owns such a title.
+    pub(crate) hdr10_conflict: bool,
 }
 impl CopyRowInspection {
     fn hdr10(&self) -> Result<plurx_core::fmp4::Hdr10IndexMetadata, CopyObservationError> {
+        if self.hdr10_conflict {
+            return Err(CopyObservationError::Hdr10);
+        }
         let mastering = self
             .hdr10_mastering
             .as_deref()
@@ -171,8 +177,9 @@ pub(crate) type CopyAnalysisInbox = tokio::sync::mpsc::Sender<CompletedCopyRange
 pub(crate) struct CopyAnalysisRegistry {
     sender: CopyAnalysisInbox,
     receiver: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<CompletedCopyRange>>,
-    /// Coalesced per-source observations. Holding this lock is the pass.
-    pending: tokio::sync::Mutex<work::PendingSources>,
+    /// Coalesced per-source observations. A pass holds this lock only to fold
+    /// the inbox and hand ready sources to their own units.
+    pending: Arc<tokio::sync::Mutex<work::PendingSources>>,
 }
 impl Default for CopyAnalysisRegistry {
     fn default() -> Self {
@@ -195,20 +202,18 @@ impl CopyAnalysisRegistry {
         }
         sent
     }
-    /// At most one pass at a time; a concurrent wake finds it held.
-    pub(crate) fn begin_pass(&self) -> Option<tokio::sync::MutexGuard<'_, work::PendingSources>> {
-        self.pending.try_lock().ok()
+    /// The per-source state every pass and unit shares.
+    pub(crate) fn pending(&self) -> Arc<tokio::sync::Mutex<work::PendingSources>> {
+        Arc::clone(&self.pending)
     }
+    /// Everything the inbox holds now (at most its two slots).
     pub(crate) fn take_pending(&self) -> Vec<CompletedCopyRange> {
         let Ok(mut receiver) = self.receiver.try_lock() else {
             return Vec::new();
         };
         let mut messages = Vec::with_capacity(2);
-        for _ in 0..2 {
-            match receiver.try_recv() {
-                Ok(message) => messages.push(message),
-                Err(_) => break,
-            }
+        while let Ok(message) = receiver.try_recv() {
+            messages.push(message);
         }
         messages
     }
@@ -252,6 +257,8 @@ pub(crate) enum CopyObservationError {
     Incomplete,
     Attestation,
     Overflow,
+    /// HDR10 facts that cannot fold into one whole-title answer.
+    Hdr10,
 }
 
 /// Metadata-only accumulation. Overlap equality and complete begin/EOF/gap-free
@@ -266,6 +273,9 @@ pub(crate) struct CopyObservationSet {
     promotion: PromotionInputs,
     rows: plurx_core::segplan::ranges::SparseIndexRows,
     inspections: std::collections::BTreeMap<u64, CopyRowInspection>,
+    /// The order-free fold of every held row's HDR10 facts, so a conflict
+    /// discards the set when it arrives rather than after every gap read.
+    hdr10: plurx_core::fmp4::Hdr10IndexMetadata,
     hevc: bool,
 }
 impl CopyObservationSet {
@@ -331,6 +341,7 @@ impl CopyObservationSet {
             promotion: message.checkpoint.promotion.clone(),
             rows,
             inspections: Default::default(),
+            hdr10: Default::default(),
             hevc,
         };
         value.observe(message)?;
@@ -417,6 +428,7 @@ impl CopyObservationSet {
         if init_contract != self.init_contract_sha256 {
             return Err(CopyObservationError::Init);
         }
+        let mut hdr10 = self.hdr10.clone();
         if self.hevc {
             if observed.row_inspections.len() != observed.rows.len() {
                 return Err(CopyObservationError::Inspection);
@@ -432,7 +444,6 @@ impl CopyObservationSet {
                     || inspection.packets == 0
                     || inspection.slices < inspection.packets
                     || !valid_copy_digest(&inspection.configuration_sha256)
-                    || inspection.hdr10().is_err()
                     || graph.is_some_and(|digest| digest != inspection.configuration_sha256)
                     || self
                         .inspections
@@ -443,6 +454,12 @@ impl CopyObservationSet {
                     })
                 {
                     return Err(CopyObservationError::Inspection);
+                }
+                // A held row already agreed byte for byte and is in the fold.
+                if !self.inspections.contains_key(&row.dts) {
+                    hdr10
+                        .merge(&inspection.hdr10()?)
+                        .map_err(|_| CopyObservationError::Hdr10)?;
                 }
             }
             if let Some(range) = observed.inspection {
@@ -477,6 +494,7 @@ impl CopyObservationSet {
                 .entry(inspection.dts)
                 .or_insert_with(|| inspection.clone());
         }
+        self.hdr10 = hdr10;
         Ok(())
     }
 
@@ -486,7 +504,7 @@ impl CopyObservationSet {
     pub(crate) fn seal(
         &self,
         attestation: &physical::VerifiedFullSource,
-    ) -> Result<plurx_core::segplan::FragmentIndex, CopyObservationError> {
+    ) -> Result<SealedCopyIndex, CopyObservationError> {
         if !self.rows.is_complete() {
             return Err(CopyObservationError::Incomplete);
         }
@@ -507,10 +525,6 @@ impl CopyObservationSet {
             identity,
         );
         index.promotion = self.promotion.clone();
-        // The whole-title HDR10 maximum the legacy index pass computes, from
-        // every row's own facts. Overlapping observations agreed row by row,
-        // and the fold is order-free, so this equals one sequential scan.
-        let mut hdr10 = plurx_core::fmp4::Hdr10IndexMetadata::default();
         if self.hevc {
             let mut slices = 0u64;
             for row in self.rows.rows() {
@@ -524,9 +538,6 @@ impl CopyObservationSet {
                 slices = slices
                     .checked_add(inspection.slices)
                     .ok_or(CopyObservationError::Overflow)?;
-                hdr10
-                    .merge(&inspection.hdr10()?)
-                    .map_err(|_| CopyObservationError::Inspection)?;
             }
             index.promotion.hevc_configuration = Some(plurx_core::hevc_configuration::Proof {
                 revision: plurx_core::hevc_configuration::REVISION,
@@ -538,11 +549,28 @@ impl CopyObservationSet {
                 refusal: None,
             });
         }
-        index.promotion.hdr10_sei = hdr10.promotion_nals();
+        // The whole-title HDR10 maximum the legacy index pass computes, from
+        // every row's own facts. Overlapping observations agreed row by row,
+        // and the fold is order-free, so this equals one sequential scan.
+        index.promotion.hdr10_sei = self.hdr10.promotion_nals();
         index.promotion.indexed_hdr10_metadata = true;
         index.parameter_sets_constant = true;
-        Ok(index)
+        // The contract this index promises is the init its own promotion
+        // serves, not the head-frozen init the observing copies served.
+        let init_contract_sha256 =
+            crate::copy_normalization::served_init_contract_sha256(&self.init, &index.promotion)
+                .map_err(|_| CopyObservationError::Hdr10)?;
+        Ok(SealedCopyIndex {
+            index,
+            init_contract_sha256,
+        })
     }
+}
+
+/// A sealed index and the init contract its stored promotion serves.
+pub(crate) struct SealedCopyIndex {
+    pub(crate) index: plurx_core::segplan::FragmentIndex,
+    pub(crate) init_contract_sha256: String,
 }
 fn valid_copy_digest(value: &str) -> bool {
     value.len() == 64

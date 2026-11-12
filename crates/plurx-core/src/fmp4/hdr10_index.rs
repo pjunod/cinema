@@ -1156,7 +1156,7 @@ mod tests {
             panic!("init");
         };
         let mut early = muxer.clone();
-        let mut late = muxer;
+        let mut late = muxer.clone();
         promote_hdr10_static_metadata_from(&mut early, &[light(230, 197)])
             .expect("valid HDR fixture");
         promote_hdr10_static_metadata_from(&mut late, &[light(283, 200)])
@@ -1181,6 +1181,11 @@ mod tests {
         let same = early.bytes.clone();
         promote_from(&mut early, &inputs).expect("valid HDR fixture");
         assert_eq!(early.bytes, same, "canonical promotion is idempotent");
+        // A copy seal promotes the head-frozen init it observed; the legacy
+        // index promotes the raw muxer init. Both must serve the same bytes.
+        let mut raw = muxer;
+        promote_from(&mut raw, &inputs).expect("valid HDR fixture");
+        assert_eq!(raw.bytes, same, "the raw muxer init promotes identically");
         let location = locate_hvcc(&early.bytes)
             .expect("valid HDR fixture")
             .expect("valid HDR fixture");
