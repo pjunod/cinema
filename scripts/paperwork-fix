@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Apply the paperwork fixes whose correct output is derivable.
+
+`scripts/paperwork` checks the bookkeeping rules; this applies the ones a
+machine can satisfy exactly, so they stop costing a red lane:
+
+  release counters   Apple: `make apple-build-bump` (validation.apple_build);
+                     Android: versionCode and the README status line, above
+                     the merge target's
+  infra names        `scripts/scrub-infra-names --write`, Markdown only
+  docs index rows    a row for every unlisted docs/<area>/*.md, from the
+                     document's own title and **Status:** header
+
+Everything else paperwork checks is an author decision (a Regression-Test:
+line, a functionality point, a doc split) and is left to the author, with the
+fix printed by paperwork.
+
+    scripts/paperwork-fix                  # fix the working tree; never commits
+    scripts/paperwork-fix --ci ...         # the fast lane: commit the fix and push it
+
+In --ci mode the commit is refused unless every changed file is bookkeeping:
+Markdown, or a release file whose changed lines differ only in numbers. No
+file is added or deleted. A head commit that is already a paperwork fix is
+never fixed again, so a fix that does not converge fails instead of looping.
+docs/ci/PAPERWORK.md is the reference.
+"""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+TRAILER = "Paperwork-Fix:"
+ANDROID_GRADLE = "clients/android/app/build.gradle.kts"
+ANDROID_README = "clients/android/README.md"
+STATUS_WORDS = ("live", "open", "built", "done")
+
+
+def git(*args: str, check: bool = True) -> str:
+    return subprocess.run(["git", *args], cwd=ROOT, check=check, capture_output=True, text=True).stdout
+
+
+def read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def write(path: str, text: str) -> None:
+    (ROOT / path).write_text(text, encoding="utf-8")
+
+
+# --- release counters --------------------------------------------------------
+
+def counter_errors(base: str, merge_target: str) -> tuple[str, ...]:
+    from validation import mobile_versions
+
+    return mobile_versions.check_repository(mode="changed-from", base=base, merge_target=merge_target)
+
+
+def fix_apple(merge_target: str) -> list[str]:
+    from validation import apple_build
+
+    _, changed = apple_build.bump(ROOT, merge_target=merge_target)
+    return list(changed)
+
+
+def fix_android(merge_target: str) -> list[str]:
+    target = git("show", f"{merge_target}:{ANDROID_GRADLE}")
+    want = int(re.search(r"^\s*versionCode\s*=\s*(\d+)\s*$", target, re.M).group(1)) + 1
+    gradle = read(ANDROID_GRADLE)
+    current = int(re.search(r"^\s*versionCode\s*=\s*(\d+)\s*$", gradle, re.M).group(1))
+    if current >= want:
+        return []
+    write(ANDROID_GRADLE, re.sub(r"(?m)^(\s*versionCode\s*=\s*)\d+(\s*)$", rf"\g<1>{want}\g<2>", gradle, count=1))
+    readme = read(ANDROID_README)
+    fixed, count = re.subn(r"(?m)^(> Status:.*?build `)[1-9]\d*(`)", rf"\g<1>{want}\g<2>", readme, count=1)
+    if count == 1:
+        write(ANDROID_README, fixed)
+    return [ANDROID_GRADLE, ANDROID_README]
+
+
+def fix_counters(base: str, merge_target: str) -> list[str]:
+    errors = counter_errors(base, merge_target)
+    changed: list[str] = []
+    if any(error.startswith("Apple release inputs changed") for error in errors):
+        changed += fix_apple(merge_target)
+    if any(error.startswith("Android release inputs changed") for error in errors):
+        changed += fix_android(merge_target)
+    return changed
+
+
+# --- infra names ---------------------------------------------------------------
+
+def fix_infra_names() -> list[str]:
+    check = subprocess.run([sys.executable, "scripts/scrub-infra-names", "--check"], cwd=ROOT,
+                           capture_output=True, text=True)
+    if check.returncode == 0:
+        return []
+    before = set(dirty_paths())
+    subprocess.run([sys.executable, "scripts/scrub-infra-names", "--write"], cwd=ROOT,
+                   capture_output=True, text=True)
+    changed = [path for path in dirty_paths() if path not in before]
+    kept = []
+    for path in changed:
+        if path.endswith(".md"):
+            kept.append(path)
+        else:
+            # Code and configuration are never rewritten automatically: a host
+            # name there may be load-bearing. Paperwork keeps reporting it.
+            git("checkout", "--", path)
+    return kept
+
+
+# --- docs index rows ---------------------------------------------------------
+
+def unlisted_docs() -> list[str]:
+    sys.path.insert(0, str(ROOT / "tests" / "operations"))
+    import test_docs_index as docs_index  # noqa: PLC0415
+
+    root_index = docs_index.INDEX.read_text(encoding="utf-8")
+    folders = {p.parent.name: p.read_text(encoding="utf-8") for p in docs_index.folder_indexes()}
+    missing = []
+    for path in git("ls-files", "docs").splitlines():
+        if not path.endswith(".md"):
+            continue
+        relative = path[len("docs/"):]
+        if relative == "README.md" or any(relative.startswith(f"{d}/") for d in docs_index.UNLISTED_DIRS):
+            continue
+        if not docs_index.is_listed(relative, root_index, folders):
+            missing.append(path)
+    return missing
+
+
+def index_row(path: str, columns: int) -> str:
+    text = read(path)
+    name = Path(path).name
+    title = next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), name)
+    title = title.replace("|", "\\|")
+    status = re.search(r"\*\*Status:\*\*\s*\**\s*([A-Za-z]+)", text)
+    word = status.group(1).lower() if status else ""
+    cells = [f"[{name}]({name})", title, word if word in STATUS_WORDS else "open"]
+    return "| " + " | ".join(cells[:columns]) + " |"
+
+
+def fix_docs_index() -> list[str]:
+    changed = []
+    for path in unlisted_docs():
+        parts = Path(path).parts
+        if len(parts) != 3:
+            continue  # a root document or a nested one: its index is an author decision
+        index = f"docs/{parts[1]}/README.md"
+        if not (ROOT / index).is_file():
+            continue
+        lines = read(index).splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            if re.match(r"^\|\s*-{3,}", line) and i > 0 and lines[i - 1].startswith("|"):
+                columns = lines[i - 1].count("|") - 1
+                lines.insert(i + 1, index_row(path, columns) + "\n")
+                write(index, "".join(lines))
+                changed.append(index)
+                break
+    return changed
+
+
+# --- the bookkeeping-only guard --------------------------------------------------
+
+def dirty_paths() -> list[str]:
+    return [line for line in git("diff", "--name-only").splitlines() if line]
+
+
+def numbers_only(old: str, new: str) -> bool:
+    digits = re.compile(r"\d+")
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old.splitlines(), new.splitlines()).get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "replace" or (i2 - i1) != (j2 - j1):
+            return False
+        for a, b in zip(old.splitlines()[i1:i2], new.splitlines()[j1:j2]):
+            if digits.sub("#", a) != digits.sub("#", b):
+                return False
+    return True
+
+
+def non_bookkeeping(paths: list[str]) -> list[str]:
+    """The changed paths a paperwork commit may not carry."""
+    refused = []
+    status = git("status", "--porcelain=1", "--untracked-files=all")
+    if any(not line.startswith(" M") for line in status.splitlines() if line):
+        refused.append("(a file was added, deleted or staged; only edits to tracked files are allowed)")
+    for path in paths:
+        if path.endswith(".md"):
+            continue
+        old = git("show", f"HEAD:{path}")
+        if not numbers_only(old, read(path)):
+            refused.append(path)
+    return refused
+
+
+# --- entry points ------------------------------------------------------------
+
+def apply(base: str, merge_target: str) -> list[str]:
+    changed = fix_counters(base, merge_target) + fix_infra_names() + fix_docs_index()
+    return sorted(set(changed))
+
+
+def head_is_fix() -> bool:
+    return any(line.startswith(TRAILER) for line in git("log", "-1", "--format=%B").splitlines())
+
+
+def ci(args: argparse.Namespace) -> int:
+    head = git("rev-parse", "HEAD").strip()
+    if head != args.head_sha:
+        print(f"paperwork-fix: checkout {head} is not the pull request head {args.head_sha}; not fixing")
+        return 1
+    if head_is_fix():
+        print("paperwork-fix: the head is already a paperwork fix commit; not fixing it again")
+        return 1
+    if git("status", "--porcelain=1").strip():
+        print("paperwork-fix: the checkout is not clean; not fixing")
+        return 1
+    changed = apply(args.base, args.merge_target)
+    if not changed:
+        print("paperwork-fix: nothing derivable to fix")
+        return 1
+    refused = non_bookkeeping(changed)
+    if refused:
+        print("paperwork-fix: refusing to commit non-bookkeeping changes: " + ", ".join(refused))
+        return 1
+    git("add", "--", *changed)
+    message = (
+        "chore(paperwork): apply derivable bookkeeping fixes\n\n"
+        "scripts/paperwork-fix, run by the fast lane's paperwork job:\n"
+        + "".join(f"- {path}\n" for path in changed)
+        + f"\n{TRAILER} {args.run_url}\n"
+    )
+    subprocess.run(
+        ["git", "-c", "user.name=plurx paperwork", "-c", "user.email=paperwork@noreply.invalid",
+         "commit", "-q", "-m", message], cwd=ROOT, check=True)
+    print("paperwork-fix: committed " + git("rev-parse", "--short", "HEAD").strip() + " touching " + ", ".join(changed))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--base", help="branch point (default: merge base with --merge-target)")
+    parser.add_argument("--merge-target", default="origin/main")
+    parser.add_argument("--ci", action="store_true", help="commit the fix (fast lane only)")
+    parser.add_argument("--head-sha", help="--ci: the pull request head the checkout must be")
+    parser.add_argument("--run-url", default="", help="--ci: recorded in the commit trailer")
+    args = parser.parse_args(argv)
+    if args.base is None:
+        args.base = git("merge-base", "HEAD", args.merge_target).strip()
+    if args.ci:
+        if not args.head_sha:
+            parser.error("--ci needs --head-sha")
+        return ci(args)
+    changed = apply(args.base, args.merge_target)
+    if not changed:
+        print("paperwork-fix: nothing derivable to fix")
+        return 0
+    print("paperwork-fix: fixed, review and commit:")
+    for path in changed:
+        print(f"  {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -66,29 +66,21 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The lane's gate, unchanged, against the image just published: proves the
-  # image on the real pool before a lane is pointed at it, and warms the same
-  # runner-local Cargo cache the lane uses.
+  # image on the lane's own pool and limits before a lane is pointed at it,
+  # and warms the same runner-local Cargo cache the lane uses.
   probe:
     name: fast Rust gate on the published image
     needs: publish
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [ci-nonvoter-compile-amd64]
     container:
       image: ${{ needs.publish.outputs.image }}
-      options: --memory 19g --memory-swap 19g --cpus 6 --pids-limit 4096
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 60
     steps:
-      - name: Print the container's cgroup (diagnostic)
-        shell: sh
-        run: |
-          cat /proc/self/cgroup
-          for f in cgroup.controllers memory.max memory.swap.max cpu.max cpu.weight pids.max cpuset.cpus.effective; do
-            printf '%s=%s\n' "$f" "$(cat /sys/fs/cgroup/$f 2>&1)"
-          done
-          grep -E 'MemTotal|SwapTotal' /proc/meminfo; nproc
-      - name: Verify effective container resource bounds
+      - name: Verify effective nonvoter resource bounds
         shell: sh
         run: |
           set -eu
@@ -106,7 +98,7 @@ jobs:
           case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="$cgroup_mount$relative"
-          for limit in memory.max=21474836480 'cpu.max=600000 100000' pids.max=4096; do
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
             name=${limit%%=*}
             expected=${limit#*=}
             actual="$(cat "$cgroup_root/$name")"
@@ -115,18 +107,6 @@ jobs:
               exit 1
             fi
           done
-          # No swap: either the container may not swap, or the host has none.
-          # Some runner hosts' Docker leaves memory.swap.max at the memory
-          # limit despite --memory-swap; on a swapless host that is moot.
-          swap_max="$(cat "$cgroup_root/memory.swap.max")"
-          host_swap_kb="$(sed -n 's/^SwapTotal: *\([0-9][0-9]*\) kB$/\1/p' /proc/meminfo)"
-          if [ "$swap_max" != 0 ] && [ "$host_swap_kb" != 0 ]; then
-            printf '%s\n' "Unexpected effective memory.swap.max: $swap_max with ${host_swap_kb:-unknown} kB of host swap (required 0)" >&2
-            exit 1
-          fi
-          printf 'bounds ok: memory.max=%s cpu.max=%s pids.max=%s swap.max=%s host swap=%s kB cpus=%s\n' \
-            "$(cat "$cgroup_root/memory.max")" "$(cat "$cgroup_root/cpu.max")" "$(cat "$cgroup_root/pids.max")" \
-            "$swap_max" "$host_swap_kb" "$(cat "$cgroup_root/cpuset.cpus.effective" 2>/dev/null || echo unknown)"
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
