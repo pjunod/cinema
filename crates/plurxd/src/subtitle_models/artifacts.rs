@@ -318,13 +318,8 @@ mod local {
         if variants.is_empty() {
             return Ok(None);
         }
-        if ![
-            "linux-x86_64",
-            "linux-amd64",
-            "macos-x86_64",
-            "macos-universal",
-        ]
-        .contains(&platform)
+        // Only x86_64 Linux carries an x86_64 CPU variant; macOS is arm64 only.
+        if !["linux-x86_64", "linux-amd64"].contains(&platform)
         {
             return Err("packaged_engine_variants_unqualified".into());
         }
@@ -408,10 +403,9 @@ mod local {
                 }
             }
             let qualified_platform = match (std::env::consts::OS, std::env::consts::ARCH) {
-                ("macos", "aarch64") => ["macos-arm64", "macos-universal"],
-                ("macos", "x86_64") => ["macos-x86_64", "macos-universal"],
-                ("linux", "aarch64") => ["linux-aarch64", "linux-arm64"],
-                ("linux", "x86_64") => ["linux-x86_64", "linux-amd64"],
+                ("macos", "aarch64") => &["macos-arm64"][..],
+                ("linux", "aarch64") => &["linux-aarch64", "linux-arm64"][..],
+                ("linux", "x86_64") => &["linux-x86_64", "linux-amd64"][..],
                 _ => return Err("managed_engine_platform_unqualified".into()),
             };
             if !manifest["platform"]
@@ -1387,14 +1381,10 @@ mod local {
                 engine_cpu_variant(&manifest, &pin, "linux-x86_64", true).expect("optimized"),
                 Some(&manifest["cpu_variants"]["x86_64-avx2"])
             );
-            let mut universal = manifest.clone();
-            universal["cpu_variants"]["x86_64-avx2"]["runtime_dependencies"] =
-                serde_json::json!(["/usr/lib/libSystem.B.dylib"]);
-            assert!(
-                engine_cpu_variant(&universal, &pin, "macos-universal", false)
-                    .expect("universal ARM")
-                    .is_none()
-            );
+            // macOS is arm64 only, so no macOS package may carry an x86_64 variant.
+            for platform in ["macos-arm64", "macos-universal", "macos-x86_64"] {
+                assert!(engine_cpu_variant(&manifest, &pin, platform, false).is_err());
+            }
             assert!(engine_cpu_variant(&manifest, &pin, "linux-aarch64", true).is_err());
             assert!(
                 engine_cpu_variant(&serde_json::json!({}), &pin, "linux-x86_64", true)
@@ -1447,12 +1437,7 @@ mod local {
             let mut manifest = pin.clone();
             manifest["binary_bytes"] = baseline_bytes.len().into();
             manifest["binary_sha256"] = format!("{:x}", Sha256::digest(baseline_bytes)).into();
-            manifest["platform"] = if cfg!(target_os = "macos") {
-                "macos-x86_64"
-            } else {
-                "linux-x86_64"
-            }
-            .into();
+            manifest["platform"] = "linux-x86_64".into();
             engine_companions(&root, &mut manifest);
             let mut fact = variant_fact(&pin, variant_bytes);
             fact["runtime_dependencies"] = manifest["runtime_dependencies"].clone();
@@ -1523,7 +1508,6 @@ mod local {
             manifest["binary_sha256"] = format!("{:x}", Sha256::digest(bytes)).into();
             manifest["platform"] = match (std::env::consts::OS, std::env::consts::ARCH) {
                 ("macos", "aarch64") => "macos-arm64",
-                ("macos", "x86_64") => "macos-x86_64",
                 ("linux", "aarch64") => "linux-aarch64",
                 ("linux", "x86_64") => "linux-x86_64",
                 _ => panic!("test requires qualified host"),

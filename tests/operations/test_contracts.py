@@ -33,7 +33,8 @@ GITHUB_ONLY_WORKFLOWS = frozenset({
     ".github/workflows/desktop-qualification.yml",
 })
 GITHUB_HOSTED_RUNNERS = frozenset(
-    {"ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "macos-15-intel", "windows-2022"}
+    # No Intel macOS runner: macOS releases are Apple Silicon only.
+    {"ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "windows-2022"}
 )
 
 
@@ -2562,14 +2563,14 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("desktop-macos-test", effort)
         self.assertNotIn("swift test", effort)
 
-    def test_native_macos_tray_checks_build_both_architectures_and_run_swift_tests(self):
+    def test_native_macos_tray_checks_build_arm64_only_and_run_swift_tests(self):
         makefile = read("Makefile")
         build = makefile.split("\ndesktop-macos-build:", 1)[1].split("\ndesktop-macos-test:", 1)[0]
         test = makefile.split("\ndesktop-macos-test:", 1)[1].split("\ndesktop-macos-check:", 1)[0]
-        self.assertIn("for arch in arm64 x86_64", build)
+        self.assertNotIn("x86_64", build)
         self.assertIn("clients/server-tray/macos/build --configuration release", build)
-        self.assertIn('--arch "$$arch"', build)
-        self.assertIn('--scratch "$(CURDIR)/target/desktop-macos/scratch/$$arch"', build)
+        self.assertIn("--arch arm64", build)
+        self.assertIn('--scratch "$(CURDIR)/target/desktop-macos/scratch/arm64"', build)
         self.assertNotIn("swift test", build)
         self.assertIn("swift test --package-path clients/server-tray/macos", test)
         self.assertNotIn("--arch", test, "tests execute only on the actual runner architecture")
@@ -5132,7 +5133,7 @@ assert.equal(context.ACT_TIMER, null);
         for asset in (
             "plurxd_${VERSION}-1_amd64.deb", "plurxd_${VERSION}-1_arm64.deb",
             "plurxd-${VERSION}-1.x86_64.rpm", "plurxd-${VERSION}-1.aarch64.rpm",
-            "plurxd-${VERSION}-macos-universal.tar.gz",
+            "plurxd-${VERSION}-macos-arm64.tar.gz",
             "plurxd-${VERSION}-windows-x86_64.zip",
         ):
             self.assertIn(asset, workflow)

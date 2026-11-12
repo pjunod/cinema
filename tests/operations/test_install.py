@@ -41,7 +41,7 @@ def mac_ffmpeg_pin() -> tuple[str, dict[str, str]]:
     macOS video path pins -- the single source the installer must agree with."""
     text = MAC_FFMPEG_PIN.read_text(encoding="utf-8")
     tag = re.search(r'^TAG = "v([^"]+)"', text, re.M).group(1)
-    sums = dict(re.findall(r'"(arm64|x86_64)": \("mac(?:arm)?64", "([0-9a-f]{64})"\)', text))
+    sums = dict(re.findall(r'"(arm64)": \("macarm64", "([0-9a-f]{64})"\)', text))
     return tag, sums
 
 
@@ -486,7 +486,7 @@ class InstallerCase(unittest.TestCase):
         # the browser-download quarantine Gatekeeper would otherwise enforce.
         self.host.stub("launchctl", "")
         self.host.stub("xattr", "")
-        archive = self.tmp / "plurxd-0.0.0-macos-universal"
+        archive = self.tmp / "plurxd-0.0.0-macos-arm64"
         archive.mkdir()
         shutil.copy2(INSTALL, archive / "install")
         shutil.copy2(ROOT / "deploy/verify-subtitle-engine", archive / "verify-subtitle-engine")
@@ -655,7 +655,9 @@ class InstallerCase(unittest.TestCase):
         script = INSTALL.read_text(encoding="utf-8")
         self.assertIn(f"jellyfin_ffmpeg_version={MAC_FFMPEG_VERSION}\n", script)
         self.assertIn(f"jellyfin_ffmpeg_sha256_arm64={MAC_FFMPEG_SHA256['arm64']}\n", script)
-        self.assertIn(f"jellyfin_ffmpeg_sha256_x86_64={MAC_FFMPEG_SHA256['x86_64']}\n", script)
+        self.assertEqual(set(MAC_FFMPEG_SHA256), {"arm64"}, "macOS is Apple Silicon only")
+        self.assertNotIn("jellyfin_ffmpeg_sha256_x86_64", script)
+        self.assertNotIn("mac64", script.replace("macarm64", ""))
 
     def test_macos_upgrade_keeps_the_operators_plist(self):
         self.host.stub("launchctl", "")
