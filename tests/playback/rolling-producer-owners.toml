@@ -5784,7 +5784,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 #   behind; elapsing is the failure the test exists to catch.
 # The ride itself adds no timer: it has no deadline, grace or poll of its
 # own, and is joined on the pass's existing reap.
-expected_occurrences = 2204
+# 2204 -> 2205 with the local range owner (item 6, plan step 4): one
+# `#[cfg(test)]`-only `tokio::time::timeout` in `copyrange/storage_tests.rs`
+# bounding a local owner's real head census and primary child. An elapsed
+# bound cancels the range's stop token, awaits the run's own settlement (the
+# generation's `settle` joins its child, pipe tasks, Input and reap) and then
+# fails the test; it settles nothing itself. The local owner adds no task,
+# timer or process to the daemon: `CopyGenerationOwner::Local` is one more
+# owner of the one existing spawn, holding its session rendition's dispatch
+# and admission until the registered reap, and no production path constructs
+# it yet.
+expected_occurrences = 2205
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

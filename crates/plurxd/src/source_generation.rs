@@ -443,6 +443,12 @@ pub(crate) struct SourceGenerationDispatch {
     assigned_namespace: bool,
 }
 impl SourceGenerationDispatch {
+    /// Whether this dispatch was captured from a rendition a Source viewer's
+    /// assignment is attached to. A local playback's rendition never is, and
+    /// its dispatch needs no Source authority.
+    pub(crate) fn is_source_assigned(&self) -> bool {
+        self.assigned_namespace
+    }
     /// Only the first private growing range uses preparing authority. The
     /// association barrier still spans the actual child and all output drains.
     pub(crate) async fn authorize_preparing_before_spawn(
