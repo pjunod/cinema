@@ -256,5 +256,17 @@
     ],
     "private_root": "$FEL_ROI_ROOT/coding-loss",
     "status": "Michael fixtures: A00P, Zfn1 (as executed; the declared map Zfn1d scores within 0.001) pass; stacks NP1/P1 pass the Michael bar but fail the stack protocol's held-out rule. Held-out Beekeeper: no recipe beats F at 130 Mb/s, nor P0/P1 at <=158 Mb/s in all four models. Decoded planes deleted after scoring; mp4s, recipes, maps and qualifications retained."
+  },
+  "rpu_refit": {
+    "protocol": "protocol-rpu-refit-20261112.json",
+    "tools": [
+      "rpu_refit_eval.py",
+      "rpu_refit_write/",
+      "inject_rpu.py",
+      "dv_display_check.swift"
+    ],
+    "portable_results": "results/rpu-refit-20261112.json",
+    "private_root": "$FEL_ROI_ROOT/rpu-refit",
+    "status": "Re-fitted 8.1 curves on the untouched BL remove 55-59% (Michael) and 34% (Beekeeper) of F's pooled error with no encode, beat F in all 48 frames on all three fixtures and all four models, and beat every re-encode tested. Real RPUs round-trip exactly. macOS applies the luma polynomial and chroma MMR in its display path; Android not observed."
   }
 }

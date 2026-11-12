@@ -1,6 +1,6 @@
 # Shadow loss — encoder diagnosis and offline fix tests
 
-**Status:** open — iso-rate recipe NP1/P1 beats F on both Michael windows; held-out Beekeeper still loses at ≤160 Mb/s · **Date:** 2026-11-12
+**Status:** open — re-fitted 8.1 RPU curves beat F and every encode on all three windows with no encode; encode recipes NP1/P1 beat F on Michael only · **Date:** 2026-11-12
 
 Companion to the [DV processing ledger](DV_HDR_PROCESSING_STATUS.md).
 This is the canonical offline picture-quality investigation record for P02.
@@ -579,19 +579,14 @@ above. There is no crossover in all four models at or below 160 Mb/s.
 
 ## Where this leaves the investigation
 
-- On scenes where the EL is worth more than the coding loss (both Michael
-  windows), NP1 or P1 beats F by a wide margin, at the same rate, with the
-  shadows fixed. Neither meets its own stack protocol, which also requires
-  the held-out scene; they are the recipe for titles a per-title decision
-  admits (NP1, or P1 if Paul accepts psy-off).
-- On scenes where it is not (Beekeeper), no encoder setting tested at
-  130 Mb/s beats dropping the EL. Those titles should be served as F. This
-  is the same per-title verdict the GPU served-route gate already makes.
-- A per-frame map cannot be passed as FFmpeg CLI arguments, which is how
-  plurx builds encodes (`crates/plurx-core/src/transcode/encoder.rs`). The
-  fit is an encoder-policy component that attaches the map inside the
-  filter chain, gated like `roi_encode.c` (all-zero map ≡ baseline). Nothing
-  like that is built, deployed or changed here.
+- **Re-fitting the 8.1 RPU curves beats every encode with no encode at all**
+  ([RPU-REFIT.md](../../tools/dv_processing/diagnostics/fel_quality/RPU-REFIT.md)). Michael pooled error goes from
+  3.20 to 1.45; held-out Beekeeper goes from 1.46 to 0.96. That becomes the
+  baseline any re-encode must beat.
+- The NP1/P1 encode recipes pass the Michael bar but fail the stack's
+  held-out rule. On Beekeeper no encode beats F at ≤160 Mb/s.
+- A per-frame QP map cannot be passed as FFmpeg CLI arguments, and nothing
+  here is built, deployed or changed.
 
 ## Resuming
 
@@ -616,20 +611,13 @@ never edited. Refused attempts are kept under each root's `logs/`.
 
 ### Next steps
 
-1. **Paul's rulings.** psy-off (P1 vs NP1) and whether to build the
-   production path below.
-2. **Product path, if approved.** An encoder-policy component that attaches
-   the Zfn1 map inside plurx's FFmpeg filter chain (it needs the BL planes as
-   a second input), gated by the same all-zero-map byte-identity test. It
-   needs its own branch, plan and review.
-3. **Per-title decision.** Re-encode only when the EL is worth more than the
-   coding loss. F's error needs no encode: well above the coding loss
-   (Michael ≈3.2) re-encode; near it (Beekeeper ≈1.5) serve F. A short trial
-   encode settles the band in between. The GPU served-route gate already
-   makes this call at serve time; a predictor only moves it ahead of the
-   encode, and should use the gate's metric so the two cannot disagree.
-4. **More held-out titles** before trusting the thresholds; these are three
-   windows from two films.
+1. **Build the RPU re-fit as the default FEL serve** (needs Paul's go). Per
+   title, fit the curves from BL+EL once per scene and store them. The
+   existing 8.1 conversion then writes them into each RPU instead of
+   identity curves. Verify on an Android client with HDMI capture.
+2. **Re-encode only where it beats the re-fit.** A short trial, scored
+   against the re-fit rather than F, decides it; none did on these windows.
+3. **More held-out titles** before trusting either result broadly.
 
 ### Validation limits
 
