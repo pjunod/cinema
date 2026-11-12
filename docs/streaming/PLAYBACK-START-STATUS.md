@@ -102,30 +102,38 @@ with item 5.
 
 ## Current batch — A1/B1 v3 consumer and peer hydration (item 4)
 
-Owner: Claude (claude-opus-5-5), same session. The item-4 code was written by
-a claude-fable-5-2 agent on local branch `item4`. Item 4 below is built;
-clippy and fmt are clean. No unit test has been run: the tests run once in CI.
+Owner: Claude (claude-opus-5-5), same session. The item-4 code and its review
+fixes were written by a claude-fable-5-2 agent on local branch `item4`. Item 4
+below is built; clippy and fmt are clean. No unit test has been run: the
+tests run once in CI.
 
 - `crates/plurxd/src/copy_index_v3.rs` is the consumer; the publisher's
   `install_blob`, `v3_root` and `v3_blob_path` are shared with it.
-- The served init is checked two ways. The consumer recomputes the planning
-  digest with the artifact row's `init_contract_sha256`, and a test shows
-  `InitIdentity::establish` over an index's promotion serves the contract
-  `served_init_contract_sha256` seals.
-- The owed end-to-end test is
-  `copy_analysis/gap_fill_tests.rs`: three real ffmpeg generations through
-  `fill_copy_gap` (whole title, a head retired early, the seeked fill of its
-  gap) must merge into the whole-title rows. Its phase is a well-formed value
-  no store admitted, and its Inputs use the test byte budget.
+- The owed end-to-end test is `copy_analysis/gap_fill_tests.rs`. Three real
+  fills through `fill_copy_gap` (whole title, a head retired early, the
+  seeked fill of its gap; seven ffmpeg children with their censuses) must
+  merge into the whole-title rows. Its phase is a well-formed value no store
+  admitted, its Inputs use the test byte budget, and its head is an Analysis
+  generation, not a `CompletedCopyRange`.
 
-Decisions (Paul away): cross-origin use needs this node's own full-source
-receipt, per the build contract's "matching full content attestation". A
-local blob hit writes nothing on the start path; only a hydration records a
-location. The rendition key of a v3-planned copy is the contract key, so a
-title replanned from v3 does not reuse segments cut from another index.
+A claude-fable-5-2 adversarial review found six majors and six minors, all
+addressed: the serve-time init contract, the engine check, the start-path
+reads, holder rows that were never restored, the pinned corrupt blob, the
+gap-fill test's orphaned children and name, and the store guards. What each
+became is in item 4 below.
 
-Still open: fleet acceptance of all three items below, and item 5's
-quarantine of a refused or contradicted head.
+Decisions (Paul away):
+
+- Cross-origin use needs this node's own full-source receipt, per the build
+  contract's "matching full content attestation".
+- A serve-time init mismatch cannot fall back inside the running generation,
+  whose plan is already the v3 one. It fails that generation with its own
+  cause and the next plan falls back.
+- No eviction owner was added for the v3 root: evicting a publisher's only
+  copy turns a healthy head into a rebuild, which is item 5's to route.
+
+Still open: fleet acceptance of all three items below, item 5's quarantine of
+a refused or contradicted head, and the limits listed under item 4.
 
 ## After the first A1/B1 merge — remaining build order
 
@@ -178,32 +186,63 @@ bridge one into `put_fragment_index`.
 ### 4. v3 consumer and peer hydration — built
 
 - VOD planning (local and Source renditions) asks
-  `copy_index_v3::resolve` first. It reads the file's healthy heads once and
-  takes this node's exact source key: this node as origin, its own
-  `inspect_source` object version. Without a usable head the v2 cluster and
-  node-local order is unchanged.
-- Another origin's healthy head for the same catalogue file, video identity
-  and contract is used only when this node's own full-source receipt (a
-  regime-1 attestation or a full v2 receipt, as the publication accepts) names
-  the variant's source digest. An opaque foreign object version proves nothing.
+  `copy_index_v3::resolve` first, unless the fragment-index engine changed,
+  in which case it keeps the node-local order as v2 does. Without a usable
+  head the v2 cluster and node-local order is unchanged.
+- The start path costs one primary-key read: `copy_index_v3_variant` returns
+  this node's own head (this node as origin, its own `inspect_source` object
+  version), the variant row it points at and whether this node is a listed
+  holder. The catalogue namespace is cached in VOD shared state.
+- Only on a miss, and only when this node holds its own full-source receipt
+  (a full v2 receipt or a regime-1 attestation, as the publication accepts),
+  the per-file listing runs. Another origin's head is used only when that
+  receipt names the variant's source digest, and never when this node's own
+  head is quarantined for the same blob.
 - The blob is read from this node's v3 root, or hydrated from a holder in
   `copy_index_v3_locations` over
-  `GET /internal/media/copy-index-v3/{contract_key}/{blob_sha256}` (the v2
-  route's peer auth, read permits, size bound and learner-matrix entry). It is
-  verified by size and SHA-256, installed with the publisher's staged write
-  and disk budget, and only then does the node record its own location.
-- Store: `copy_index_v3_healthy_heads`, `copy_index_v3_artifact`,
-  `copy_index_v3_locations`, `put_copy_index_v3_location` (written only for
-  the exact variant a healthy head points at) and
-  `forget_copy_index_v3_location`, one implementation for both backends. No
-  schema change: the guard is in the statement, because the installed v127
-  objects are shape-checked at startup.
+  `GET /internal/media/copy-index-v3/{source_key}/{blob_sha256}` (the v2
+  route's peer auth, read permits, size bound and learner-matrix entry). The
+  route serves only a readable head's variant. It is verified by size and
+  SHA-256 and installed with the publisher's staged write and disk budget.
+- Holders: a hydration records this node best-effort, and so does a verified
+  local hit the head read showed as unlisted, so the common start writes
+  nothing. A peer's row is retired only on the route's own positive 404
+  (`copy-index-v3-variant-absent`); a node without the route, a refusal or a
+  damaged transfer retires nothing. A corrupt local blob (read in full, wrong
+  digest or size) is removed after the read pin is dropped; a stat or read
+  error deletes and retires nothing.
 - Decode is `decode_cluster_fragment_index_blob_v3` against the artifact row's
   source and output identity, and the planning digest is recomputed with the
   row's init contract. A blob without `indexed_hdr10_metadata` is refused and
   planning falls back; item 5 quarantines it.
-- A usable head is healthy and published for the generation it still desires,
-  so a head repaired after a quarantine is usable too.
+- Serve time: the recipe carries the sealed init contract. Each generation
+  computes `served_init_contract_sha256(muxer init, index.promotion)` as soon
+  as its muxer init exists, before any identity or init is written. A
+  mismatch fails that generation as `SealedInit` (`rendition_init_changed`)
+  and marks the contract unserved for this process, so the reopened session
+  plans from its next index.
+- A readable head is healthy and published for the generation it still
+  desires, so a head repaired after a quarantine is readable too.
+
+Known limits, for the items that follow:
+
+- `copy_index_v3_heads` has no `(catalog_namespace, file_id)` index, so the
+  per-file listing scans. It belongs in the next schema version; this batch
+  adds no migration and reaches the listing only behind the receipt check.
+- The v3 root has no eviction owner. Its blobs are charged to the playback
+  cache budget but nothing registered evicts them (the v2 root has
+  `FragmentCacheOwner`), so no eviction path forgets a v3 location today. An
+  owner added later must forget this node's row when it removes a blob.
+- A healthy head none of whose holders can supply the bytes falls back to the
+  next index, as a miss does. Item 5 routes it to rebuild.
+- A rendition planned from v3 is keyed by the contract key, for Source
+  renditions as well. A session re-prepared after a v3 publication therefore
+  gets a new rendition and re-cuts its segments once. The retained-manifest
+  check compares the delivery recipe (`LogicalOutput`), not the index or
+  plan, so it does not cover a plan change on resurrection; the same holds
+  for the existing node-local to v2 switch. Equal rows give an equal plan.
+  Binding a resurrected session to its original plan needs the plan's digest
+  on the durable route and is not built.
 
 ### 5. Discrepancy quarantine
 
