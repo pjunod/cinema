@@ -3601,6 +3601,14 @@ pub trait MediaStore: Send + Sync + 'static {
     ) -> Result<Vec<MediaFile>, StoreError>;
     /// All known file paths in a library (for vanished-file detection).
     async fn library_file_paths(&self, library_id: i64) -> Result<Vec<(i64, PathBuf)>, StoreError>;
+    /// The known files at `folder` or anywhere below it, matched by whole
+    /// path component (`/m/Dune` does not match `/m/Dune (2021)/x.mkv`), so a
+    /// folder removal reads only its own subtree instead of the library.
+    async fn library_file_paths_under(
+        &self,
+        library_id: i64,
+        folder: &std::path::Path,
+    ) -> Result<Vec<(i64, PathBuf)>, StoreError>;
     /// Establish the stable identity of the mounted roots for this library,
     /// or compare a later scanner's observation with cluster truth.
     /// `configured_paths` is the path set the scan walked; when the library

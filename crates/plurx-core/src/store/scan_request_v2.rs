@@ -21,6 +21,22 @@
 //! claims such a request fails to decode its sidecar (`ExpectedFile` refuses
 //! unknown fields) and leaves the job to a node that understands it, instead
 //! of walking the request's common parent as a plain targeted scan.
+//!
+//! **What an older node does with such a row** (verified in
+//! `process_library_requests`): it reads the sidecar with
+//! `scan_request_v2(id)?`, the decode fails, and that error ends the whole
+//! library turn. The job settles as a charged `Retry` (`library_execution_failed`,
+//! 5 s / 30 s / 2 min / 10 min backoff) and the request stays pending, so a
+//! node that understands the row can still claim and finish it. It is not a
+//! terminal failure of the request until the job's attempt limit is spent, and
+//! it does not hold the library fence between attempts. Because every pending
+//! targeted request of a library shares one job, a row an older node cannot read
+//! would also delay its neighbours; so probe-only requests (removed paths, or an
+//! explicit `probe_only`) are admitted as their own job,
+//! `library:targeted-probe:{library}`, and share a job only with each other.
+//! An older node's status `GET` of such a row fails to decode and answers `500`;
+//! that, too, ends when every cinema node is upgraded. Deploy order: all cinema
+//! nodes first, Curator second (INTEGRATION §1.10).
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
@@ -79,25 +95,88 @@ pub enum PlacedReport {
     /// Not on disk when the scan looked.
     Missing { path: String },
     /// A removed path: absent on disk, plurx had it, and its file record is
-    /// gone. `item_removed` says whether that left the item with no files,
-    /// so it went too.
+    /// gone. `item_id` is the item of the first file removed; `item_ids` every
+    /// distinct item whose files were removed (a folder can span several).
+    /// `item_removed` says whether that left every one of them with no files,
+    /// so they went too.
     Gone {
         path: String,
         item_id: i64,
+        #[serde(default)]
+        item_ids: Vec<i64>,
         item_removed: bool,
     },
     /// A removed path that is absent and that plurx never had.
     Unknown { path: String },
-    /// A removed path that still exists; nothing was removed.
-    Present { path: String },
-    /// A removed path that is absent, but whose record plurx kept, and why —
-    /// the library's root identity is not established or does not match, or
-    /// a Dolby Vision conversion still holds the file.
+    /// A removed path that still exists; nothing was removed. `reason` says
+    /// which kind of "still there" it is.
+    Present {
+        path: String,
+        #[serde(default)]
+        reason: PresentReason,
+    },
+    /// A removed path that is absent, but whose record plurx kept. `code` is
+    /// the machine reason, `retryable` whether sending the same removal again
+    /// later can succeed without anyone changing anything, and `reason` the
+    /// words for an operator.
     Retained {
         path: String,
         item_id: i64,
+        code: RetainedCode,
+        retryable: bool,
         reason: String,
     },
+}
+
+/// Why a removed path counts as present.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresentReason {
+    /// The path exists.
+    #[default]
+    Exists,
+    /// A symlink stands in the chain; plurx never follows it to decide
+    /// absence, so it removes nothing.
+    SymlinkInChain,
+    /// The path exists only because the filesystem folds case: the folder
+    /// lists the name with different capitals (a case-only rename). Nothing is
+    /// removed; the entry that is there is the one that was moved.
+    CaseVariant,
+    /// It was absent at the first look and present again just before removal.
+    ReappearedBeforeRemoval,
+}
+
+/// Why plurx kept the record of an absent removed path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetainedCode {
+    /// No root identity is recorded for the library yet; any full scan
+    /// establishes it. Retryable.
+    RootIdentityUnset,
+    /// This node's library roots are not the recorded ones. An operator
+    /// matter; not retryable.
+    RootIdentityMismatch,
+    /// This node could not compute its root identity. Retryable.
+    RootIdentityUnavailable,
+    /// More files than the deletion bound allow in one request. Send fewer;
+    /// not retryable as sent.
+    PruneBound,
+    /// The record is still there after the removal ran, which the removal's
+    /// one known exclusion — a Dolby Vision conversion holding the file —
+    /// explains but plurx did not verify. Retryable once the conversion ends.
+    RecordKept,
+    /// An expected file of the same request was not placed, so nothing was
+    /// removed: the old copy stays until the new one is indexed. Retryable
+    /// (send a new attempt).
+    ExpectedNotPlaced,
+    /// The chain could not be re-read just before removal. Retryable.
+    ChainUnreadable,
+}
+
+impl RetainedCode {
+    pub const fn retryable(self) -> bool {
+        !matches!(self, Self::RootIdentityMismatch | Self::PruneBound)
+    }
 }
 
 impl PlacedReport {
@@ -108,7 +187,7 @@ impl PlacedReport {
             | Self::Missing { path }
             | Self::Gone { path, .. }
             | Self::Unknown { path }
-            | Self::Present { path }
+            | Self::Present { path, .. }
             | Self::Retained { path, .. } => path,
         }
     }
@@ -121,6 +200,15 @@ impl PlacedReport {
 enum StoredPath {
     Expected(ExpectedFile),
     Removed(RemovedPath),
+    ProbeOnly(ProbeOnlyMarker),
+}
+
+/// The explicit `probe_only` flag, stored as an entry an older binary's
+/// `ExpectedFile` refuses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProbeOnlyMarker {
+    probe_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,16 +217,20 @@ struct RemovedPath {
     removed_path: String,
 }
 
-fn stored_paths(expected: &[ExpectedFile], removed: &[String]) -> Vec<StoredPath> {
-    expected
+fn stored_paths(seed: &ScanRequestV2Seed) -> Vec<StoredPath> {
+    seed.expected_files
         .iter()
         .cloned()
         .map(StoredPath::Expected)
-        .chain(removed.iter().map(|path| {
+        .chain(seed.removed_paths.iter().map(|path| {
             StoredPath::Removed(RemovedPath {
                 removed_path: path.clone(),
             })
         }))
+        .chain(
+            seed.probe_only
+                .then_some(StoredPath::ProbeOnly(ProbeOnlyMarker { probe_only: true })),
+        )
         .collect()
 }
 
@@ -157,18 +249,32 @@ pub struct ScanRequestV2Seed {
     /// its expected and removed paths and walks nothing else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed_paths: Vec<String>,
+    /// Explicit probe-only: record exactly the expected files and walk
+    /// nothing, never sharing a pass with a request that did not ask for it.
+    /// A request with removed paths is probe-only whatever this says.
+    #[serde(default)]
+    pub probe_only: bool,
 }
 
 impl ScanRequestV2Seed {
+    /// Whether the request is probe-only, asked for or implied.
+    pub fn is_probe_only(&self) -> bool {
+        self.probe_only || !self.removed_paths.is_empty()
+    }
+
     /// The `scan_request_v2` object of the enqueue command. Its
     /// `expected_files` is what the admission trigger stores verbatim, so
     /// removed paths are folded into it here.
     pub(super) fn admission_value(&self) -> Result<serde_json::Value, StoreError> {
+        let self_with_flag = Self {
+            probe_only: self.is_probe_only(),
+            ..self.clone()
+        };
         Ok(serde_json::json!({
             "key_id": self.key_id,
             "key_hash": self.key_hash,
             "request_key": self.request_key,
-            "expected_files": stored_paths(&self.expected_files, &self.removed_paths),
+            "expected_files": stored_paths(&self_with_flag),
         }))
     }
 
@@ -212,9 +318,7 @@ impl ScanRequestV2Seed {
         {
             return invalid("removed_paths need a path of at most 4096 non-control bytes");
         }
-        if encode(&stored_paths(&self.expected_files, &self.removed_paths))?.len()
-            > MAX_EXPECTED_JSON_BYTES
-        {
+        if encode(&stored_paths(self))?.len() > MAX_EXPECTED_JSON_BYTES {
             return invalid("expected_files and removed_paths exceed 16 KiB together");
         }
         Ok(())
@@ -232,6 +336,10 @@ pub struct ScanRequestV2 {
     /// See [`ScanRequestV2Seed::removed_paths`].
     #[serde(default)]
     pub removed_paths: Vec<String>,
+    /// See [`ScanRequestV2Seed::probe_only`]; true too when removed paths are
+    /// named.
+    #[serde(default)]
+    pub probe_only: bool,
     /// `full_scan:<library>` · `root_unreadable:<path>` · `queue_position:<n>`,
     /// or empty when nothing is in the way. The contract also names
     /// `heavy_lane:<holder>`; a targeted job takes no background source
@@ -293,12 +401,15 @@ struct StoredRow {
 impl From<StoredRow> for ScanRequestV2 {
     fn from(row: StoredRow) -> Self {
         let (mut expected_files, mut removed_paths) = (Vec::new(), Vec::new());
+        let mut probe_only = false;
         for entry in row.expected_files {
             match entry {
                 StoredPath::Expected(file) => expected_files.push(file),
                 StoredPath::Removed(removed) => removed_paths.push(removed.removed_path),
+                StoredPath::ProbeOnly(marker) => probe_only |= marker.probe_only,
             }
         }
+        probe_only |= !removed_paths.is_empty();
         Self {
             request_id: row.request_id,
             key_id: row.key_id,
@@ -306,6 +417,7 @@ impl From<StoredRow> for ScanRequestV2 {
             request_key: row.request_key,
             expected_files,
             removed_paths,
+            probe_only,
             waiting_on: row.waiting_on,
             files: row.files,
             created_at_ms: row.created_at_ms,
@@ -530,6 +642,7 @@ mod tests {
                 mtime_ns: 1_794_076_138_123_456_789,
             }],
             removed_paths: Vec::new(),
+            probe_only: false,
         }
     }
 
@@ -544,11 +657,12 @@ mod tests {
         moved.validate().expect("valid");
         let value = moved.admission_value().expect("admission");
         let stored = value["expected_files"].as_array().expect("array");
-        assert_eq!(stored.len(), 2);
+        assert_eq!(stored.len(), 3, "expected, removed path, probe-only marker");
         assert_eq!(
             stored[1],
             serde_json::json!({"removed_path": "/tv/Old/Show.S01E01.mkv"})
         );
+        assert_eq!(stored[2], serde_json::json!({"probe_only": true}));
         assert!(value.get("removed_paths").is_none());
         assert!(
             serde_json::from_value::<Vec<ExpectedFile>>(value["expected_files"].clone()).is_err(),
@@ -562,24 +676,81 @@ mod tests {
         assert!(
             matches!(&decoded[1], StoredPath::Removed(r) if r.removed_path == "/tv/Old/Show.S01E01.mkv")
         );
+        assert!(matches!(&decoded[2], StoredPath::ProbeOnly(_)));
 
         let wire = |report: PlacedReport| serde_json::to_value(report).expect("wire");
         assert_eq!(
             wire(PlacedReport::Gone {
                 path: "/a".into(),
                 item_id: 4,
+                item_ids: vec![4, 5],
                 item_removed: true
             }),
-            serde_json::json!({"state": "gone", "path": "/a", "item_id": 4, "item_removed": true})
+            serde_json::json!({"state": "gone", "path": "/a", "item_id": 4, "item_ids": [4, 5],
+                "item_removed": true})
         );
         assert_eq!(
             wire(PlacedReport::Unknown { path: "/a".into() }),
             serde_json::json!({"state": "unknown", "path": "/a"})
         );
         assert_eq!(
-            wire(PlacedReport::Present { path: "/a".into() }),
-            serde_json::json!({"state": "present", "path": "/a"})
+            wire(PlacedReport::Present {
+                path: "/a".into(),
+                reason: PresentReason::SymlinkInChain
+            }),
+            serde_json::json!({"state": "present", "path": "/a", "reason": "symlink_in_chain"})
         );
+        // A report written before `reason` existed still decodes.
+        assert_eq!(
+            serde_json::from_value::<PlacedReport>(
+                serde_json::json!({"state": "present", "path": "/a"})
+            )
+            .expect("old present"),
+            PlacedReport::Present {
+                path: "/a".into(),
+                reason: PresentReason::Exists
+            }
+        );
+        let retained = PlacedReport::Retained {
+            path: "/a".into(),
+            item_id: 9,
+            code: RetainedCode::RootIdentityUnset,
+            retryable: RetainedCode::RootIdentityUnset.retryable(),
+            reason: "no root identity".into(),
+        };
+        assert_eq!(
+            wire(retained.clone()),
+            serde_json::json!({"state": "retained", "path": "/a", "item_id": 9,
+                "code": "root_identity_unset", "retryable": true, "reason": "no root identity"})
+        );
+        assert_eq!(
+            serde_json::from_value::<PlacedReport>(wire(retained.clone())).expect("round trip"),
+            retained
+        );
+        assert!(!RetainedCode::RootIdentityMismatch.retryable());
+        assert!(!RetainedCode::PruneBound.retryable());
+        for code in [
+            RetainedCode::RootIdentityUnavailable,
+            RetainedCode::RecordKept,
+            RetainedCode::ExpectedNotPlaced,
+            RetainedCode::ChainUnreadable,
+        ] {
+            assert!(code.retryable(), "{code:?}");
+        }
+
+        // The explicit flag is stored as a marker an older decoder refuses,
+        // and reads back; removed paths imply it.
+        let mut flagged = seed(3, "op/2/abc/1");
+        flagged.probe_only = true;
+        let value = flagged.admission_value().expect("admission");
+        assert_eq!(
+            value["expected_files"][1],
+            serde_json::json!({"probe_only": true})
+        );
+        assert!(
+            serde_json::from_value::<Vec<ExpectedFile>>(value["expected_files"].clone()).is_err()
+        );
+        assert!(moved.is_probe_only() && flagged.is_probe_only() && !seed(3, "k").is_probe_only());
 
         let mut too_many = seed(3, "k");
         too_many.removed_paths = (0..=MAX_REMOVED_PATHS)

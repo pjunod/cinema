@@ -5711,11 +5711,27 @@ impl JobManager {
         // Removed paths are looked at first: a chain that cannot be read
         // fails the whole request as `path_unreadable` before anything is
         // placed or removed, and an absent path is never mistaken for one.
-        let removed =
-            library_work::probe_removed_paths(&library, &req.path, targeted.removed).await?;
+        // A probe-only group is scoped again here: its folder may have gone
+        // since admission, and every path it names lies under the nearest
+        // folder that still exists.
+        let scope = if targeted.probe_only {
+            let (libraries, path) = (vec![library.clone()], req.path.clone());
+            tokio::task::spawn_blocking(move || {
+                plurx_core::scan::containment::nearest_existing(&libraries, &path)
+            })
+            .await
+            .map_err(|error| {
+                TargetError::Store(StoreError::Task(format!(
+                    "path scoping task failed: {error}"
+                )))
+            })?
+        } else {
+            req.path.clone()
+        };
+        let removed = library_work::probe_removed_paths(&library, &scope, targeted.removed).await?;
         // Files the caller says it just placed are probed whatever their
         // size and whole-second mtime say (contract v2 §5.1).
-        let force_probe = library_work::canonical_expected(expected, &library, &req.path).await;
+        let force_probe = library_work::canonical_expected(expected, &library, &scope).await;
         let canonical: HashSet<PathBuf> = force_probe
             .values()
             .filter_map(|path| match path {
@@ -5726,7 +5742,7 @@ impl JobManager {
         let (mut out, detail) = scan::scan_path_targeted(
             publisher,
             &library,
-            &req.path,
+            &scope,
             &scan::TargetedOptions {
                 only: targeted
                     .probe_only
@@ -5738,8 +5754,21 @@ impl JobManager {
         let mut files = library_work::placed_reports(expected, &force_probe, &out, &detail).await;
         // After placement: the new copy is indexed before the old one goes,
         // so the title never reads as missing in between.
+        let expected_not_placed = files.iter().any(|file| {
+            !matches!(
+                file,
+                plurx_core::store::scan_request_v2::PlacedReport::Placed { .. }
+            )
+        });
         files.extend(
-            library_work::remove_paths(publisher, &library, removed, &mut out.report).await?,
+            library_work::remove_paths(
+                publisher,
+                &library,
+                removed,
+                expected_not_placed,
+                &mut out.report,
+            )
+            .await?,
         );
         self.note_fresh_index_files(out.items.iter().map(|placed| placed.file_id).collect());
         for request in requests {

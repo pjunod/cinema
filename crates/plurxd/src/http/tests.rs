@@ -22409,13 +22409,14 @@ async fn removed_paths_report_gone_unknown_and_present_and_delete_an_item_left_w
     assert_eq!(files[0]["path"], new_dune.display().to_string());
     assert_eq!(
         files[1],
-        json!({"state": "gone", "path": old_dune, "item_id": dune_item, "item_removed": true}),
+        json!({"state": "gone", "path": old_dune, "item_id": dune_item, "item_ids": [dune_item],
+            "item_removed": true}),
         "{body}"
     );
     assert_eq!(
         files[2],
         json!({"state": "gone", "path": ran.parent().expect("folder"), "item_id": ran_item,
-            "item_removed": true}),
+            "item_ids": [ran_item], "item_removed": true}),
         "a removed folder takes what was catalogued below it: {body}"
     );
     assert_eq!(
@@ -22425,7 +22426,7 @@ async fn removed_paths_report_gone_unknown_and_present_and_delete_an_item_left_w
     );
     assert_eq!(
         files[4],
-        json!({"state": "present", "path": heat}),
+        json!({"state": "present", "path": heat, "reason": "exists"}),
         "{body}"
     );
     assert_eq!(body["report"]["removed_files"], 2, "{body}");
@@ -22511,7 +22512,11 @@ async fn a_removed_path_whose_folder_is_gone_is_not_path_unreadable_and_an_unmou
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["features"], json!(["removed_paths"]), "{body}");
+    assert_eq!(
+        body["features"],
+        json!(["removed_paths", "probe_only"]),
+        "{body}"
+    );
 
     let (status, body) = call(
         &app,
@@ -22562,6 +22567,95 @@ async fn a_removed_path_whose_folder_is_gone_is_not_path_unreadable_and_an_unmou
             .expect("item")
             .is_some(),
         "an unmounted share never reads as everything gone"
+    );
+}
+
+/// The explicit `probe_only` flag: a request that sends it records exactly
+/// its expected files and walks nothing, even at a library root, while a
+/// same-path request that did not send it still gets its walk — they never
+/// share a pass, so neither flips the other's mode. Neither is a full scan.
+#[tokio::test]
+async fn probe_only_requests_never_walk_and_never_share_a_pass_with_a_walking_request() {
+    let (app, state) = test_app_with_state();
+    let _worker = scan_worker(&state);
+    let admin = setup_admin(&app).await;
+    let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let root = dir.path().canonicalize().expect("canonical").join("movies");
+    media(&root, "Heat (1995)", "Heat.1995.mkv");
+    indexed_movies(&app, &state, &admin, &root).await;
+    let since_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("fits");
+    let dune = media(&root, "Dune (2021)", "Dune.2021.mkv");
+    let brazil = media(&root, "Brazil (1985)", "Brazil.1985.mkv");
+    let mtime_ns = i64::try_from(
+        std::fs::metadata(&dune)
+            .expect("stat")
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_nanos(),
+    )
+    .expect("fits");
+    let probe = post(
+        "/api/v1/scan",
+        Some(&key),
+        json!({
+            "path": root, "wait_ms": 15_000, "probe_only": true,
+            "request_key": "op/52/a/1",
+            "expected_files": [{ "path": dune, "bytes": 1, "mtime_ns": mtime_ns }],
+        }),
+    );
+    let walk = post(
+        "/api/v1/scan",
+        Some(&key),
+        json!({ "path": root, "wait_ms": 15_000, "request_key": "op/52/b/1" }),
+    );
+    let ((probe_status, probe_body), (walk_status, walk_body)) =
+        tokio::join!(call(&app, probe), call(&app, walk));
+    assert_eq!(probe_status, StatusCode::OK, "{probe_body}");
+    assert_eq!(walk_status, StatusCode::OK, "{walk_body}");
+    assert_eq!(probe_body["files"][0]["state"], "placed", "{probe_body}");
+    // The walking request found Brazil; the probe-only one did not need to,
+    // and its own pass never looked.
+    assert!(
+        state
+            .store
+            .get_file_by_path(&brazil.to_string_lossy())
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the request that sent no `probe_only` walked the root"
+    );
+    assert_eq!(full_scan_requests(&state, since_ms).await, 0);
+
+    // Alone, the probe-only request leaves an unseen sibling alone.
+    let ran = media(&root, "Ran (1985)", "Ran.1985.mkv");
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({ "path": root, "wait_ms": 15_000, "probe_only": true,
+                "request_key": "op/52/c/1" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        state
+            .store
+            .get_file_by_path(&ran.to_string_lossy())
+            .await
+            .expect("lookup")
+            .is_none(),
+        "probe-only at a library root indexes no sibling"
     );
 }
 

@@ -79,6 +79,11 @@ pub struct ScanRequestBody {
     /// `present` or `retained`.
     #[serde(default)]
     pub removed_paths: Option<Vec<String>>,
+    /// Record exactly `expected_files` and walk nothing, even at a library
+    /// root, and never share a pass with a request that did not ask for it.
+    /// Default `false`; a request with `removed_paths` is always probe-only.
+    #[serde(default)]
+    pub probe_only: Option<bool>,
     /// Connection test (contract v2 §5.3): with this set and `path` absent,
     /// answer which of these library roots plurx can see. Each must be a
     /// configured root or lie under one; anything else is listed under
@@ -191,14 +196,15 @@ pub async fn scan(
             "every `removed_paths[]` entry must be absolute and under `path`".to_owned(),
         ));
     }
-    let probe_only = !removed_paths.is_empty();
     let seed = ScanRequestV2Seed {
         key_id: key.0.id,
         key_hash: key.0.key_hash.clone(),
         request_key,
         expected_files,
         removed_paths,
+        probe_only: body.probe_only.unwrap_or(false),
     };
+    let probe_only = seed.is_probe_only();
     seed.validate()
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     let wait = Duration::from_millis(body.wait_ms.unwrap_or(0).min(MAX_WAIT_MS));
@@ -237,7 +243,7 @@ pub async fn scan(
             // as its common parent: scope it to the nearest folder that still
             // exists, which every path it names lies under too.
             let path = if probe_only {
-                nearest_existing(&libraries, &path)
+                containment::nearest_existing(&libraries, &path)
             } else {
                 path
             };
@@ -406,32 +412,7 @@ async fn answer(
 
 /// Optional contract features this build implements, advertised on the
 /// connection-test answer.
-pub const FEATURES: &[&str] = &["removed_paths"];
-
-/// `path`, or — when it does not exist — its nearest ancestor that does,
-/// never above the configured root it lies under. Only absence (`ENOENT`,
-/// `ENOTDIR`) climbs; any other error stops here, so classification reports
-/// it. Blocking.
-fn nearest_existing(libraries: &[plurx_core::domain::Library], path: &std::path::Path) -> PathBuf {
-    let mut at = containment::lexical(path);
-    let Some((_, root)) = containment::lexical_root(libraries, &at) else {
-        return at;
-    };
-    while at != root {
-        match std::fs::symlink_metadata(&at) {
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                at.pop();
-            }
-            _ => break,
-        }
-    }
-    at
-}
+pub const FEATURES: &[&str] = &["removed_paths", "probe_only"];
 
 /// The most paths one connection test may name.
 pub const MAX_PROBE_PATHS: usize = 64;
