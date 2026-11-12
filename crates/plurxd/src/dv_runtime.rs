@@ -2497,6 +2497,33 @@ mod helper_decoder_tests {
 }
 
 #[cfg(test)]
+mod pinned_runtime_renderer_sources {
+    /// plurxd refuses a DV helper bundle built from other renderer sources,
+    /// and the bundle ships in the separately published media runtime. The
+    /// application Dockerfile records the pinned bundle's `source_sha256`; this
+    /// daemon's own identity must equal it, or every node that deploys the
+    /// build declines processed Dolby Vision (2026-11-11, after #1481).
+    /// Republish the media runtime and re-pin: docs/ci/MEDIA-RUNTIME.md.
+    #[test]
+    fn this_daemon_accepts_the_pinned_media_runtimes_dv_helpers() {
+        let recorded: Vec<&str> = include_str!("../../../Dockerfile")
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256=\"")
+                    .and_then(|rest| rest.strip_suffix('"'))
+            })
+            .collect();
+        assert_eq!(recorded.len(), 1, "one pinned DV source identity");
+        assert_eq!(
+            super::renderer_source_identity(),
+            recorded[0],
+            "tools/dv_processing differs from the pinned media runtime's DV helpers: \
+             republish the media runtime and re-pin (docs/ci/MEDIA-RUNTIME.md)"
+        );
+    }
+}
+
+#[cfg(test)]
 mod private_window_outcome_tests {
     use super::encoder_diagnostic_tail;
 
