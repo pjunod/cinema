@@ -55,6 +55,10 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
 # FFmpeg, libplacebo and libdovi built from pinned sources, with the compiler
 # and headers the helpers need. `scripts/media-runtime pin-dv-dependencies`
 # writes this digest and the dependency input identity below together.
+# The line below identifies the dependency stage of Dockerfile.media-runtime
+# (its base, Debian snapshot and package list included) that this image was
+# published from. A contract fails when that recipe changes without a pin.
+# dv-dependency-recipe-sha256: a96a1717d7c66025e783e12e1e8c384d954d77a3fe4bdbb6352f93d8ff04bb4c
 FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:9130f0ce818833dea3361c93b50eaa4d25ceef3f0275593a2ab57877a389a050 AS dv-processing-dependencies
 
 # These stages sit before runtime-assets so release packaging keeps them

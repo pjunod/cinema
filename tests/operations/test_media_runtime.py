@@ -36,6 +36,26 @@ def bundle_manifest():
     return module
 
 
+AMD64 = "sha256:" + "a" * 64
+ARM64 = "sha256:" + "b" * 64
+RECIPE = "c" * 64
+
+
+def dv_source(inputs, recipe="9" * 64):
+    return SOURCE + (
+        f"# dv-dependency-recipe-sha256: {recipe}\n"
+        f"FROM ${{PLURX_MEDIA_RUNTIME_REPOSITORY}}@{OLD} AS dv-processing-dependencies\n"
+        f'ARG PLURX_DV_DEPENDENCY_INPUTS="{inputs}"\n'
+    )
+
+
+def platform_index(amd64=AMD64, arm64=ARM64):
+    return json.dumps({"manifests": [
+        {"platform": {"os": "linux", "architecture": "amd64"}, "digest": amd64},
+        {"platform": {"os": "linux", "architecture": "arm64"}, "digest": arm64},
+    ]})
+
+
 def index(*architectures):
     return json.dumps({"manifests": [
         {"platform": {"os": "linux", "architecture": arch}}
@@ -217,27 +237,29 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertIn("scripts/media-runtime pin-dv-dependencies ghcr.io/pjunod/cinema-media-runtime@%s", workflow)
 
     def test_dv_dependency_pin_updates_only_its_digest_and_input_identity(self):
-        inputs = "sha256:" + "3" * 64
-        source = SOURCE + (
-            f"FROM ${{PLURX_MEDIA_RUNTIME_REPOSITORY}}@{OLD} AS dv-processing-dependencies\n"
-            f'ARG PLURX_DV_DEPENDENCY_INPUTS="{inputs}"\n'
-        )
+        source = dv_source("sha256:" + "3" * 64)
+        repository = "registry.example:5000/noirr/plurx-media-runtime"
         with tempfile.TemporaryDirectory() as directory:
             dockerfile = Path(directory) / "Dockerfile"
             dockerfile.write_text(source)
-            image = "registry.example:5000/noirr/plurx-media-runtime@" + NEW
+            image = repository + "@" + NEW
             with (
-                patch.object(media_runtime, "run", return_value=index("amd64", "arm64")),
+                patch.object(media_runtime, "run", return_value=platform_index()),
                 patch.object(media_runtime, "verify_public_image") as public,
                 patch.object(media_runtime, "dv_dependency_inputs", return_value="sha256:" + "4" * 64) as tree,
+                patch.object(media_runtime, "dv_dependency_recipe", return_value=RECIPE) as recipe,
                 patch.object(media_runtime, "image_dependency_inputs", return_value="sha256:" + "4" * 64) as recorded,
             ):
                 media_runtime.pin_image(image, dockerfile, dv_dependencies=True)
             public.assert_called_once_with(NEW)
             tree.assert_called_once_with(dockerfile.resolve().parent)
+            recipe.assert_called_once_with(dockerfile.resolve().parent)
+            # Each platform is read from its own manifest, never from the index.
             self.assertEqual([call.args for call in recorded.call_args_list],
-                             [(image, ("linux", "amd64")), (image, ("linux", "arm64"))])
+                             [(repository + "@" + AMD64, ("linux", "amd64")),
+                              (repository + "@" + ARM64, ("linux", "arm64"))])
             self.assertEqual(dockerfile.read_text(), SOURCE + (
+                f"# dv-dependency-recipe-sha256: {RECIPE}\n"
                 f"FROM ${{PLURX_MEDIA_RUNTIME_REPOSITORY}}@{NEW} AS dv-processing-dependencies\n"
                 f'ARG PLURX_DV_DEPENDENCY_INPUTS="sha256:{"4" * 64}"\n'
             ))
@@ -247,32 +269,48 @@ class MediaRuntimeTests(unittest.TestCase):
                 media_runtime.pin_image(image, dockerfile)
             self.assertEqual(dockerfile.read_text(), source.replace(OLD, NEW, 1).replace(
                 f'DIGEST="{OLD}"', f'DIGEST="{NEW}"'))
+            # An index that cannot tell its platforms apart is refused unread.
+            for broken in (platform_index(arm64=AMD64), platform_index(amd64=NEW), index("amd64", "arm64")):
+                dockerfile.write_text(source)
+                with (
+                    patch.object(media_runtime, "run", return_value=broken),
+                    patch.object(media_runtime, "verify_public_image"),
+                    patch.object(media_runtime, "dv_dependency_inputs", return_value="sha256:" + "4" * 64),
+                    patch.object(media_runtime, "image_dependency_inputs") as recorded,
+                    self.assertRaisesRegex(ValueError, "media image index names"),
+                ):
+                    media_runtime.pin_image(image, dockerfile, dv_dependencies=True)
+                recorded.assert_not_called()
+                self.assertEqual(dockerfile.read_text(), source)
 
     def test_dv_dependency_pin_reads_each_platform_images_own_input_record(self):
-        """A mocked docker: arm64 was built from other inputs than the tree."""
-        inputs = "sha256:" + "3" * 64
-        source = SOURCE + (
-            f"FROM ${{PLURX_MEDIA_RUNTIME_REPOSITORY}}@{OLD} AS dv-processing-dependencies\n"
-            f'ARG PLURX_DV_DEPENDENCY_INPUTS="{inputs}"\n'
-        )
-        image = "registry.example:5000/noirr/plurx-media-runtime@" + NEW
-        records = {"linux/amd64": b"tree inputs\n", "linux/arm64": b"tree inputs\n"}
+        """A mocked docker that, like a real one holding one platform, answers
+        an index reference with whichever image it has: only per-manifest
+        references reach the right record."""
+        repository = "registry.example:5000/noirr/plurx-media-runtime"
+        source = dv_source("sha256:" + "3" * 64)
+        image = repository + "@" + NEW
+        local = {repository + "@" + AMD64: ("linux/amd64", "a1" * 32, b"tree inputs\n"),
+                 repository + "@" + ARM64: ("linux/arm64", "b2" * 32, b"tree inputs\n")}
+        # Asked for the index, this daemon serves its amd64 image both times.
+        local[image] = local[repository + "@" + AMD64]
         tree = "sha256:" + hashlib.sha256(b"tree inputs\n").hexdigest()
         commands = []
 
         def docker(command, *, capture=False):
             commands.append(command)
             if command[:3] == ["docker", "manifest", "inspect"]:
-                return index("amd64", "arm64")
+                return platform_index()
             if command[:2] == ["docker", "create"]:
-                self.assertEqual(command[2], "--platform")
-                self.assertEqual(command[4:], [image, "true"])
-                return {"linux/amd64": "a" * 64, "linux/arm64": "b" * 64}[command[3]] + "\n"
+                self.assertEqual((command[2], command[5:]), ("--platform", ["true"]))
+                return local[command[4]][1] + "\n"
+            if command[:3] == ["docker", "image", "inspect"]:
+                return local[command[-1]][0] + "\n"
             if command[:2] == ["docker", "cp"]:
                 container, path = command[2].split(":", 1)
                 self.assertEqual(path, "/opt/dv-dependencies/build-inputs.sha256")
                 Path(command[3]).write_bytes(
-                    records["linux/amd64" if container == "a" * 64 else "linux/arm64"])
+                    next(record for _, held, record in local.values() if held == container))
                 return ""
             raise AssertionError(command)
 
@@ -284,38 +322,47 @@ class MediaRuntimeTests(unittest.TestCase):
                 patch.object(media_runtime.subprocess, "run") as removed,
                 patch.object(media_runtime, "verify_public_image"),
                 patch.object(media_runtime, "dv_dependency_inputs", return_value=tree),
+                patch.object(media_runtime, "dv_dependency_recipe", return_value=RECIPE),
             ):
                 media_runtime.pin_image(image, dockerfile, dv_dependencies=True)
                 self.assertIn(NEW + " AS dv-processing-dependencies", dockerfile.read_text())
                 self.assertIn(f'ARG PLURX_DV_DEPENDENCY_INPUTS="{tree}"', dockerfile.read_text())
+                self.assertIn("# dv-dependency-recipe-sha256: " + RECIPE + "\n", dockerfile.read_text())
+                created = [command[3:5] for command in commands if command[:2] == ["docker", "create"]]
+                self.assertEqual(created, [["linux/amd64", repository + "@" + AMD64],
+                                           ["linux/arm64", repository + "@" + ARM64]])
                 # Both containers were created without being started, and removed.
                 self.assertEqual([call.args[0] for call in removed.call_args_list],
-                                 [["docker", "rm", "--force", "a" * 64], ["docker", "rm", "--force", "b" * 64]])
+                                 [["docker", "rm", "--force", "a1" * 32], ["docker", "rm", "--force", "b2" * 32]])
                 self.assertFalse(any(command[1] in ("run", "start") for command in commands))
+                # arm64 built from other inputs: read from its own manifest, so
+                # the amd64 record this daemon would serve for the index cannot hide it.
                 dockerfile.write_text(source)
-                records["linux/arm64"] = b"other inputs\n"
+                local[repository + "@" + ARM64] = ("linux/arm64", "b2" * 32, b"other inputs\n")
                 removed.reset_mock()
                 with self.assertRaisesRegex(ValueError, "linux/arm64 DV dependency image was built from other inputs"):
                     media_runtime.pin_image(image, dockerfile, dv_dependencies=True)
                 self.assertEqual(dockerfile.read_text(), source)
                 self.assertEqual(removed.call_count, 2)
+                # A manifest that is not the platform it is listed as is refused.
+                local[repository + "@" + ARM64] = ("linux/amd64", "b2" * 32, b"tree inputs\n")
+                with self.assertRaisesRegex(ValueError, "is linux/amd64, not linux/arm64"):
+                    media_runtime.pin_image(image, dockerfile, dv_dependencies=True)
+                self.assertEqual(dockerfile.read_text(), source)
 
     def test_pin_refuses_a_value_the_published_bundle_does_not_carry(self):
         # The established regression ID. The runtime no longer carries a
         # bundle; what a pin can still misstate is which inputs the published
         # dependency image was built from, and the image itself is the witness.
         tree = "sha256:" + "4" * 64
-        source = SOURCE + (
-            f"FROM ${{PLURX_MEDIA_RUNTIME_REPOSITORY}}@{OLD} AS dv-processing-dependencies\n"
-            f'ARG PLURX_DV_DEPENDENCY_INPUTS="{tree}"\n'
-        )
+        source = dv_source(tree)
         with tempfile.TemporaryDirectory() as directory:
             dockerfile = Path(directory) / "Dockerfile"
             image = "registry.example/noirr/plurx-media-runtime@" + NEW
             for published in ("sha256:" + "5" * 64, "sha256:" + hashlib.sha256(b"").hexdigest()):
                 dockerfile.write_text(source)
                 with self.subTest(published=published), \
-                        patch.object(media_runtime, "run", return_value=index("amd64", "arm64")), \
+                        patch.object(media_runtime, "run", return_value=platform_index()), \
                         patch.object(media_runtime, "verify_public_image"), \
                         patch.object(media_runtime, "dv_dependency_inputs", return_value=tree), \
                         patch.object(media_runtime, "image_dependency_inputs", return_value=published):

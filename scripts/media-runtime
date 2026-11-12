@@ -28,6 +28,8 @@ DV_PIN = re.compile(
 )
 DV_INPUTS_ARG = re.compile(r'(?m)^ARG PLURX_DV_DEPENDENCY_INPUTS="(sha256:[0-9a-f]{64})"$')
 UNPUBLISHED = "sha256:" + "0" * 64
+DV_RECIPE = re.compile(r"(?m)^# dv-dependency-recipe-sha256: [0-9a-f]{64}$")
+DV_DEPENDENCY_RECIPE_FILES = ("rust-toolchain.toml", "scripts/configure-debian-snapshot")
 DV_DEPENDENCY_INPUTS = (
     ("tools/dv_processing", ("build-dependencies.sh", "build-requirements.txt", "fetch_renderer_sources.py", "*.patch")),
     ("tools/dv_quality/backends", ("parsed-rpu/fetch_parser.py", "parsed-rpu/resolved-Cargo.lock")),
@@ -99,6 +101,31 @@ def verify_public_image(digest: str) -> None:
                          + PUBLIC_REPOSITORY + "@" + digest) from error
 
 
+def dv_dependency_recipe(root: Path = ROOT) -> str:
+    """Identity of the recipe the dependency image is built by.
+
+    The dependency stage of Dockerfile.media-runtime as written (its base
+    digest, Debian snapshot and package list are in that text) and the two
+    files the stage takes from the tree besides the recorded inputs.
+    """
+    source = (root / "Dockerfile.media-runtime").read_text(encoding="utf-8")
+    start = re.search(r"(?m)^FROM \S+ AS dv-processing-dependencies$", source)
+    if start is None or len(re.findall(r"(?m)^FROM \S+ AS dv-processing-dependencies$", source)) != 1:
+        raise ValueError("Dockerfile.media-runtime must define one dv-processing-dependencies stage")
+    following = re.search(r"(?m)^FROM ", source[start.end():])
+    stage = source[start.start():start.end() + following.start()] if following else source[start.start():]
+    # The comment block above the next stage belongs to that stage.
+    lines = stage.splitlines()
+    while lines and (not lines[-1].strip() or lines[-1].lstrip().startswith("#")):
+        lines.pop()
+    identity = hashlib.sha256()
+    for name, content in (("Dockerfile.media-runtime#dv-processing-dependencies", "\n".join(lines).encode()),
+                          *((name, (root / name).read_bytes())
+                            for name in DV_DEPENDENCY_RECIPE_FILES)):
+        identity.update(name.encode() + b"\0" + hashlib.sha256(content).digest())
+    return identity.hexdigest()
+
+
 def dv_dependency_inputs(root: Path = ROOT) -> str:
     """Identity of the files that define the published DV build dependencies.
 
@@ -124,14 +151,21 @@ DV_DEPENDENCY_RECORD = "/opt/dv-dependencies/build-inputs.sha256"
 def image_dependency_inputs(image: str, platform: tuple[str, str]) -> str:
     """Identity of the dependency inputs one platform image recorded when built.
 
-    The record is copied out of a created, never started container, so the
-    other architecture needs no emulation.
+    `image` is that platform's own manifest, by digest, never the index: a
+    daemon asked for an index may hand back the image it already holds, and
+    the same record would then be read twice. The record is copied out of a
+    created, never started container, so the other architecture needs no
+    emulation; the created image must report the platform asked for.
     """
     container = run(["docker", "create", "--platform", "/".join(platform), image, "true"],
                     capture=True).strip()
     if not re.fullmatch(r"[0-9a-f]{12,64}", container):
         raise ValueError("docker create returned no container id")
     try:
+        actual = run(["docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image],
+                     capture=True).strip()
+        if actual != "/".join(platform):
+            raise ValueError(f"{image} is {actual or 'unknown'}, not {'/'.join(platform)}")
         with tempfile.TemporaryDirectory(prefix="dv-dependency-record-") as directory:
             record = Path(directory) / "build-inputs.sha256"
             run(["docker", "cp", f"{container}:{DV_DEPENDENCY_RECORD}", str(record)])
@@ -150,8 +184,10 @@ def pin_image(image: str, dockerfile: Path, *, insecure: bool = False,
         raise ValueError("image must be REGISTRY/REPOSITORY@sha256:<64 lowercase hex>")
     source = dockerfile.read_text()
     if dv_dependencies:
-        if len(DV_PIN.findall(source)) != 1 or len(DV_INPUTS_ARG.findall(source)) != 1:
-            raise ValueError("Dockerfile must contain exactly one DV build dependency pin and input identity")
+        if (len(DV_PIN.findall(source)) != 1 or len(DV_INPUTS_ARG.findall(source)) != 1
+                or len(DV_RECIPE.findall(source)) != 1):
+            raise ValueError("Dockerfile must contain exactly one DV build dependency pin, "
+                             "input identity and recipe identity")
     else:
         if len(PIN.findall(source)) != 1:
             raise ValueError("Dockerfile must contain exactly one immutable media runtime pin")
@@ -163,26 +199,40 @@ def pin_image(image: str, dockerfile: Path, *, insecure: bool = False,
         inspect.append("--insecure")
     manifest = json.loads(run([*inspect, image], capture=True))
     platforms = {
-        (entry.get("platform", {}).get("os"), entry.get("platform", {}).get("architecture"))
+        (entry.get("platform", {}).get("os"), entry.get("platform", {}).get("architecture")): entry
         for entry in manifest.get("manifests", [])
     }
     if not REQUIRED_PLATFORMS.issubset(platforms):
         raise ValueError("media image index must contain both linux/amd64 and linux/arm64")
-    digest = image.rsplit("@", 1)[1]
+    repository, digest = image.rsplit("@", 1)
     verify_public_image(digest)
     if dv_dependencies:
         # Each platform image must have been built from this tree's dependency
         # inputs. Read what the image itself recorded: a pin that only
         # restated the tree would turn every later build red instead.
         inputs = dv_dependency_inputs(dockerfile.resolve().parent)
+        children = {}
         for platform in sorted(REQUIRED_PLATFORMS):
-            recorded = image_dependency_inputs(image, platform)
+            child = platforms[platform].get("digest", "")
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", child) or child == digest:
+                raise ValueError("media image index names no distinct manifest for " + "/".join(platform))
+            children[platform] = child
+        if len(set(children.values())) != len(children):
+            raise ValueError("media image index names one manifest for both platforms")
+        for platform in sorted(REQUIRED_PLATFORMS):
+            recorded = image_dependency_inputs(f"{repository}@{children[platform]}", platform)
             if recorded != inputs:
                 raise ValueError(
                     f"{'/'.join(platform)} DV dependency image was built from other inputs "
                     f"({recorded}) than this tree ({inputs}); publish from this revision")
         updated = DV_PIN.sub(lambda match: match[1] + digest + match[3], source)
         updated = DV_INPUTS_ARG.sub(f'ARG PLURX_DV_DEPENDENCY_INPUTS="{inputs}"', updated)
+        # The image's own record covers the fetched sources and the recipe
+        # script, not the stage that ran them. Record that stage beside the
+        # pin: it is the recipe this image was published from, and a contract
+        # fails when it changes without a new publication.
+        updated = DV_RECIPE.sub(
+            "# dv-dependency-recipe-sha256: " + dv_dependency_recipe(dockerfile.resolve().parent), updated)
     else:
         updated = PIN.sub(lambda match: match[1] + digest + match[3], source)
         updated = DIGEST_ARG.sub(f'ARG PLURX_MEDIA_RUNTIME_DIGEST="{digest}"', updated)

@@ -207,6 +207,46 @@ class DvHelperOwnershipTests(unittest.TestCase):
                                      check=True, capture_output=True).stdout
             self.assertEqual("sha256:" + hashlib.sha256(printed).hexdigest(), recorded[0])
 
+    def test_dependency_recipe_has_not_changed_since_the_pinned_publication(self):
+        source = DOCKERFILE.read_text(encoding="utf-8")
+        recorded = re.findall(r"(?m)^# dv-dependency-recipe-sha256: ([0-9a-f]{64})$", source)
+        self.assertEqual(len(recorded), 1)
+        # Directly above the pin it describes.
+        self.assertRegex(source, r"(?m)^# dv-dependency-recipe-sha256: [0-9a-f]{64}\n"
+                                 r"FROM \S+ AS dv-processing-dependencies$")
+        self.assertEqual(
+            recorded[0], media_runtime.dv_dependency_recipe(),
+            "the dependency stage of Dockerfile.media-runtime, rust-toolchain.toml or "
+            "scripts/configure-debian-snapshot changed: publish new DV build dependencies and run "
+            "scripts/media-runtime pin-dv-dependencies (docs/ci/MEDIA-RUNTIME.md)")
+        # The identity moves with each part of the recipe and with nothing else.
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("Dockerfile.media-runtime", *media_runtime.DV_DEPENDENCY_RECIPE_FILES):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_bytes((ROOT / name).read_bytes())
+            self.assertEqual(media_runtime.dv_dependency_recipe(root), recorded[0])
+            media = (root / "Dockerfile.media-runtime").read_text(encoding="utf-8")
+            for old, new in (("ARG DEBIAN_SNAPSHOT=20260928T000000Z\nARG TARGETARCH\nARG PLURX_DV_BUILD_JOBS",
+                              "ARG DEBIAN_SNAPSHOT=20261001T000000Z\nARG TARGETARCH\nARG PLURX_DV_BUILD_JOBS"),
+                             ("libvulkan-dev glslang-dev", "libvulkan-dev libfoo-dev glslang-dev"),
+                             ("AS dv-processing-dependencies\n", "AS dv-processing-dependencies\nARG EXTRA=1\n")):
+                self.assertEqual(media.count(old), 1, old)
+                (root / "Dockerfile.media-runtime").write_text(media.replace(old, new), encoding="utf-8")
+                self.assertNotEqual(media_runtime.dv_dependency_recipe(root), recorded[0], old)
+            # A later stage, or the comment introducing it, is not this recipe.
+            (root / "Dockerfile.media-runtime").write_text(
+                media.replace("# Source-built portable recognizer.", "# Source-built recognizer, reworded."),
+                encoding="utf-8")
+            self.assertEqual(media_runtime.dv_dependency_recipe(root), recorded[0])
+            (root / "Dockerfile.media-runtime").write_text(media, encoding="utf-8")
+            for name in media_runtime.DV_DEPENDENCY_RECIPE_FILES:
+                original = (root / name).read_bytes()
+                (root / name).write_bytes(original + b"\n")
+                self.assertNotEqual(media_runtime.dv_dependency_recipe(root), recorded[0], name)
+                (root / name).write_bytes(original)
+
     def test_dependency_pin_names_a_published_image(self):
         pins = media_runtime.DV_PIN.findall(DOCKERFILE.read_text(encoding="utf-8"))
         self.assertEqual(len(pins), 1)
