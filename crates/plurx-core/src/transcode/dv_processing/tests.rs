@@ -2113,10 +2113,11 @@ fn completed_general_fel_factory_and_receipt_keep_conditional_operations() {
         assert!(make(destination, &keys[..2], &rpus).is_err());
         assert!(make(destination, &keys, &rpus[..2]).is_err());
     }
-    assert!(
-        dv_author_profile81_window(&encoded, (64, 64), 24000, 48048, 1001, &rpus, 1).is_err(),
-        "P8.1 authoring remains narrow"
-    );
+    // P8.1 authoring removes the already-applied mapping over the same
+    // reconstructed master, so real piecewise/MMR reshaping is admitted.
+    let authored = dv_author_profile81_window(&encoded, (64, 64), 24000, 48048, 1001, &rpus, 1)
+        .expect("P8.1 authors over the qualified general FEL reconstruction");
+    assert!(!authored.is_empty());
 }
 
 /// A reconstructed Profile 8.1 report travels only with a Dolby Vision

@@ -74,7 +74,9 @@ increasing host resident allocations.
 
 Heavy host-mode jobs and AMD package and release builds use the
 repository-only `gha-lab1-plurx-heavy-01` worker with `ci-nonvoter-heavy-amd64`
-(it also carries the compile pool below). The same
+(it also carries the compile pool below). Since 2026-11-11 the heavy lane
+also has `gha-lab1-plurx-heavy-02` (same VM and slice, no Store label) and
+`gha-lab2-plurx-heavy-01` (lab2 guest, ~10 GiB: gates and proofs only). The same
 capacity-one worker and the existing `lab2` Store worker advertise
 `ci-nonvoter-store`; the Store fan-out has two physical nonvoter carriers.
 The older `lab1` organization registration stays under maintenance labels,

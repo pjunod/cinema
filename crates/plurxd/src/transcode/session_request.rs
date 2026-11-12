@@ -501,6 +501,10 @@ impl SessionRecoveryIdentity {
 /// Never emitted inside the strict legacy request envelope.
 #[derive(Debug, Clone)]
 pub struct CandidateExecutionContext {
+    /// A same-play qualification continuation may consume only this exact
+    /// receipt; it cannot enqueue a different recipe while refreshing plans.
+    /// Process-private and never restored from durable or client wire data.
+    pub(crate) required_fel_qualification: Option<super::PendingFelQualification>,
     /// Accepted descriptive query before delivery-route resolution. This
     /// contains no executable, principal, admission or source descriptor.
     pub(crate) catalog_query: Option<crate::media_pool::QualityCatalogRequest>,

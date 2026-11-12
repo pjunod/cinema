@@ -17,6 +17,24 @@ class PlaybackEnhancementTest {
     )
 
     @Test
+    fun aSkippedUpgradeExplainsOnlyCurrentInactiveEnhancements() {
+        val generation = "current-generation"
+        val ordinary = PlaybackEnhancement(listOf(EnhancementBadge.DYN), listOf(
+            EnhancementDetail(EnhancementBadge.FEL, false, "FEL: not used for this play"),
+            EnhancementDetail(EnhancementBadge.RPU, false, "RPU: converted reshaping is pass-through"),
+            EnhancementDetail(EnhancementBadge.DYN, true, "DYN: carried to the display")))
+        val skip = ProcessingSkip(generation, "the title is being measured")
+        val shown = ordinary.explainingSkip(skip, generation)
+        assertEquals(ordinary.active, shown.active)
+        assertEquals("FEL: not used for this play — the title is being measured", shown.details[0].text)
+        assertEquals(ordinary.details[1], shown.details[1])
+        assertEquals(ordinary, ordinary.explainingSkip(skip, "replacement"))
+        assertEquals(ordinary, ordinary.explainingSkip(null, generation))
+        assertEquals(ordinary, ordinary.explainingSkip(ProcessingSkip(generation, "bad\nreason"), generation))
+        assertNull(ProcessingSkip.fromJson(json.parseToJsonElement("""{"generation":"current","reason":42}""")))
+    }
+
+    @Test
     fun theCreateResponseCarriesTheServerEnhancement() {
         val hls = start(
             ""","enhancement":{"active":["FEL","RPU","DYN"],"details":[

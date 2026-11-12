@@ -205,7 +205,7 @@ class KnownRedContractTest(unittest.TestCase):
         additional_fixture_reasons[
             "crates/plurxd/src/vodencode_manager_tests.rs::transcode::tests::"
             "actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_seek"
-        ] = "requires an actual HDR source, reviewed helper bundle and proved VAAPI device"
+        ] = "requires actual HDR source, deployed renderer, real GPU and measured FEL receipt for Profile81"
         # DV Profile 5 completeness uses private, bounded FFmpeg captures;
         # keep these operator-run checks distinct from known-red tests.
         for identity in (
@@ -238,6 +238,12 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/fragindex/tests.rs::fragindex::tests::dv_title_companion::"
             "physical_the_index_pass_reads_the_standalone_title_aggregate"
         ] = "physical: a processing bundle (PLURX_DV_PROCESSING_DIR), a Dolby Vision title and its standalone aggregate"
+        # Vendor FEL qualification (#1491) measures one real P7 FEL title with
+        # the actual AMD, Intel or NVIDIA encoder of the host it runs on.
+        additional_fixture_reasons[
+            "crates/plurxd/src/source_probe/fel_qualification.rs::source_probe::fel_qualification::tests::"
+            "actual_vendor_fel_qualification_measures_and_stores_its_own_recipe"
+        ] = "requires an actual P7 FEL source, deployed renderer and actual GPU/driver"
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -245,11 +251,11 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 15)
+        self.assertEqual(len(additional_fixtures), 16)
         # HDR/DV and the explicit Mac graph check are operator-run fixtures.
         # Explicitly registered CGNAT fixtures are excluded from this unchanged
         # unadmitted-identity bound; they are not known-red exemptions.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 39)
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 40)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())
