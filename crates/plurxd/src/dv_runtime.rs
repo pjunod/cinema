@@ -3295,9 +3295,22 @@ mod title_scanner_identity_tests {
         }
         let create = include_str!("transcode/manager/create.rs");
         assert!(create.contains("self.fel_identity(&tools.backend_digest())"));
-        assert!(create.contains(
-            "planning.probe_json.as_deref(),\n            &tools.title_scanner_digest(),"
-        ));
+        // FEL qualification is now a recipe request that carries no title
+        // demand, so the creator has no scanner-keyed call left. The backend
+        // key may still appear there only as the FEL identity it measures.
+        assert_eq!(
+            create.matches("backend_digest()").count(),
+            create
+                .matches("fel_identity(&tools.backend_digest())")
+                .count()
+                + create
+                    .matches("fel_identity_for_encoder(&tools.backend_digest(), ")
+                    .count()
+        );
+        assert!(!create.contains("dv_title_demand"));
+        // The index build is the remaining title-demand writer outside the probe.
+        assert!(include_str!("fragindex.rs")
+            .contains("scanner_digest: self.tools.title_scanner_digest(),"));
     }
 }
 
