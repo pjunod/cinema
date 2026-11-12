@@ -191,20 +191,6 @@ class MediaRuntimeTests(unittest.TestCase):
                         media_runtime.pin_image(image, dockerfile, NEW_DV)
                 self.assertEqual(dockerfile.read_text(), SOURCE)
 
-    def test_pinned_runtime_carries_this_trees_renderer_sources(self):
-        # plurxd refuses a DV helper bundle built from any other renderer
-        # sources, which turns processed Dolby Vision off on every node that
-        # deploys the build (2026-11-11: #1481 changed the renderer without a
-        # re-pin). A renderer change must come with a republished runtime and a
-        # pin naming its bundle; docs/ci/MEDIA-RUNTIME.md.
-        recorded = re.findall(r'(?m)^ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="([0-9a-f]{64})"$',
-                              (ROOT / "Dockerfile").read_text())
-        self.assertEqual(len(recorded), 1)
-        tree = bundle_manifest().source_identity(ROOT / "tools/dv_processing")
-        self.assertEqual(recorded[0], tree,
-                         "tools/dv_processing differs from the pinned media runtime's DV helpers: "
-                         "republish the media runtime and re-pin (docs/ci/MEDIA-RUNTIME.md)")
-
     def test_bundle_builder_and_plurxd_digest_the_same_renderer_inputs(self):
         inputs = bundle_manifest().INPUTS
         runtime = (ROOT / "crates/plurxd/src/dv_runtime.rs").read_text()

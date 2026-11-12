@@ -78,9 +78,11 @@ The pin therefore records the bundle's `source_sha256` beside the digest
 (`ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256` in `Dockerfile`). Three checks hold
 it in place:
 
-- `tests/operations/test_media_runtime.py` fails any change whose
-  `tools/dv_processing` inputs differ from the recorded identity, so a renderer
-  change must arrive with a republished runtime and a new pin.
+- `tests/operations/test_media_runtime_dv_identity.py` (recomputing plurxd's
+  own input list) and the plurxd unit test
+  `this_daemon_accepts_the_pinned_media_runtimes_dv_helpers` fail any change
+  whose `tools/dv_processing` inputs differ from the recorded identity, so a
+  renderer change must arrive with a republished runtime and a new pin.
 - The application build fails if the pinned image's bundle differs from the
   record.
 - The publish workflow reads the identity from both platform images, requires
