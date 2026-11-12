@@ -498,9 +498,15 @@ function toggleAnalysisCoverage(){
 function measureAnalysisCoverage(){
   return followAnalysisCoverage(()=>api("/analysis/coverage",{method:"POST",body:{}}));
 }
+// A copy-index build a local viewer's playback asked for. The stored trigger
+// is constrained to three values, so the request id carries the attribution:
+// local-play.u<user>.<playback>.<suffix>.
+function analysisLocalPlayback(row){
+  return typeof row.request_id==="string"&&row.request_id.startsWith("local-play.");
+}
 function analysisDiagnosticText(row,names){
   const diagnostic=row.index_diagnostic||{};
-  const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator"):"Background";
+  const trigger=analysisLocalPlayback(row)?"Local playback":row.request_id?(row.force_rebuild?"Operator rebuild":"Operator"):"Background";
   return [
     `Title: ${row.title||`File ${row.file_id}`}`,
     `File: ${row.file_id}`,
@@ -644,7 +650,7 @@ function paintAnalysis(snapshot){
     const actionLabel={retry:"Retry",rebuild:"Rebuild",analyze_current:"Analyze current file"}[action]||"";
     const title=row.item_id?`<a data-analysis-focus="item:${esc(key)}" href="#/item/${row.item_id}">${esc(row.title||`File ${row.file_id}`)}</a>`:esc(row.title||`File ${row.file_id}`);
     const priorityLabel=({normal:"Normal",forced:"Forced",foreground:"Foreground"})[row.priority]||row.priority||"Normal";
-    const triggerLabel=({admin:"Admin",background:"Background",foreground:"Foreground"})[row.trigger]||row.trigger||"Background";
+    const triggerLabel=analysisLocalPlayback(row)?"Local playback":({admin:"Admin",background:"Background",foreground:"Foreground"})[row.trigger]||row.trigger||"Background";
     const details=[
       ["File",row.file_id],["Request",row.request_id],["Worker job",row.job_id],
       ["Target node",analysisNodeDetail(nodeNames,row.target_node_id)],

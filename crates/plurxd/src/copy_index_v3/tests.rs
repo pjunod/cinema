@@ -244,6 +244,7 @@ impl Fixture {
         )
         .await
         .expect("resolution")
+        .index
     }
 
     /// Every defect the reader has reported since the last call.

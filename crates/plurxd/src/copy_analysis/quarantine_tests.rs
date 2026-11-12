@@ -22,8 +22,8 @@
 //!   generation runs in `gap_fill_tests`; the two are not run joined, and no
 //!   VOD start emits the demand here.
 use super::work::{
-    coordination_request, publish_source, quarantine_defect, reconcile_demand, reconcile_with_head,
-    Attempt, Coordination, CopyIndexCacheOwner, HeadDecision, PendingSources,
+    coordination_request, forget_settled, publish_source, quarantine_defect, reconcile_demand,
+    reconcile_with_head, Attempt, Coordination, CopyIndexCacheOwner, HeadDecision, PendingSources,
 };
 use super::*;
 use crate::playback_cache::{CacheCandidate, CacheOwner};
@@ -734,9 +734,14 @@ fn media_file() -> plurx_core::domain::MediaFile {
 /// A local viewer's row-less demand for the fixture's source, with
 /// `origin` as the node that holds the object.
 fn local_demand(origin: &str) -> CopyAnalysisMessage {
+    CopyAnalysisMessage::Demand(Box::new(demand_for(origin, 100)))
+}
+
+fn demand_for(origin: &str, file_id: i64) -> CopyIndexDemand {
     let mut source = source();
     source.origin_node_id = origin.into();
-    let demand = CopyIndexDemand::local(
+    source.file_id = file_id;
+    CopyIndexDemand::local(
         &local_viewer(7),
         Arc::new(media_file()),
         NAMESPACE.into(),
@@ -748,9 +753,10 @@ fn local_demand(origin: &str) -> CopyAnalysisMessage {
             audio_delivery: None,
         },
     )
-    .expect("a local user's own playback");
-    CopyAnalysisMessage::Demand(Box::new(demand))
+    .expect("a local user's own playback")
 }
+
+const NO_WAIT: std::time::Duration = std::time::Duration::ZERO;
 
 /// The local authority exists only for a local user's own playback: a
 /// Sharing principal, whatever its grant, cannot be turned into one, so a
@@ -759,6 +765,21 @@ fn local_demand(origin: &str) -> CopyAnalysisMessage {
 fn a_local_copy_authority_is_never_made_from_a_sharing_principal() {
     let local = LocalCopyAuthority::of(&local_viewer(7)).expect("local playback");
     assert_eq!((local.user_id(), local.playback_id()), (7, "playback-1"));
+    // The request a local demand runs under names who asked.
+    let id = local.request_id();
+    assert!(
+        id.starts_with("local-play.u7.playback-1.") && id.len() <= 64,
+        "{id}"
+    );
+    let mut unsafe_viewer = local_viewer(7);
+    unsafe_viewer.playback_id = "a/b".into();
+    let id = LocalCopyAuthority::of(&unsafe_viewer)
+        .expect("local playback")
+        .request_id();
+    assert!(
+        id.starts_with("local-play.u7.") && !id.contains('/') && id.len() <= 64,
+        "a playback id that cannot sit in a URL path is left out: {id}"
+    );
     assert!(LocalCopyAuthority::of(&local_viewer(0)).is_err(), "no user");
 
     let shared = crate::state::PlaybackViewerDemand {
@@ -801,11 +822,22 @@ async fn a_local_demand_is_held_once_and_is_done_when_its_head_is_healthy() {
     fixture.publish(&artifact);
 
     let mut pending = PendingSources::default();
-    pending.fold(local_demand(NODE));
-    pending.fold(local_demand(NODE));
+    pending.fold(local_demand(NODE), NO_WAIT);
+    pending.fold(local_demand(NODE), NO_WAIT);
     let mut units = pending.start_ready(std::time::Instant::now());
     assert_eq!(units.len(), 1, "one source, however often it is asked for");
-    pending.fold(local_demand(NODE));
+
+    // A demand waits out the retry interval before its first attempt, so
+    // it never runs against the start that raised it.
+    let mut waiting = PendingSources::default();
+    let wait = std::time::Duration::from_secs(60);
+    waiting.fold(local_demand(NODE), wait);
+    assert!(waiting.start_ready(std::time::Instant::now()).is_empty());
+    assert_eq!(
+        waiting.start_ready(std::time::Instant::now() + wait).len(),
+        1
+    );
+    pending.fold(local_demand(NODE), NO_WAIT);
     assert!(
         pending.start_ready(std::time::Instant::now()).is_empty(),
         "a source being worked is not held a second time"
@@ -827,7 +859,7 @@ async fn a_local_demand_is_held_once_and_is_done_when_its_head_is_healthy() {
     );
 
     let mut elsewhere = PendingSources::default();
-    elsewhere.fold(local_demand("node-two"));
+    elsewhere.fold(local_demand("node-two"), NO_WAIT);
     let (key, mut source) = elsewhere
         .start_ready(std::time::Instant::now())
         .pop()
@@ -896,12 +928,25 @@ async fn a_demand_adopts_a_quarantined_heads_repair_generation() {
 async fn an_ended_generation_is_told_apart_from_a_busy_one() {
     let fixture = store_fixture().await;
     let source = source();
-    let Coordination::Queued(request) = coordination_request(&fixture.context, &source)
-        .await
-        .expect("coordination")
+    let asked = LocalCopyAuthority::of(&local_viewer(7))
+        .expect("local playback")
+        .request_id();
+    let coordinate = || async {
+        coordination_request(&fixture.context, &source, uuid::Uuid::new_v4().to_string())
+            .await
+            .expect("coordination")
+    };
+    let Coordination::Queued(request) =
+        coordination_request(&fixture.context, &source, asked.clone())
+            .await
+            .expect("coordination")
     else {
         panic!("a fresh generation is queued");
     };
+    assert_eq!(
+        request.request_id, asked,
+        "the request is persisted under the id that names who asked"
+    );
     let now = crate::state::clock_ms();
     fixture
         .context
@@ -917,12 +962,7 @@ async fn an_ended_generation_is_told_apart_from_a_busy_one() {
         .await
         .expect("claim")
         .expect("metadata claim");
-    assert!(matches!(
-        coordination_request(&fixture.context, &source)
-            .await
-            .expect("coordination"),
-        Coordination::Busy
-    ));
+    assert!(matches!(coordinate().await, Coordination::Busy));
     fixture
         .sql()
         .execute(
@@ -930,10 +970,118 @@ async fn an_ended_generation_is_told_apart_from_a_busy_one() {
             [&request.request_id],
         )
         .expect("the attempt limit ended it");
-    assert!(matches!(
-        coordination_request(&fixture.context, &source)
-            .await
-            .expect("coordination"),
-        Coordination::Ended
-    ));
+    assert!(matches!(coordinate().await, Coordination::Ended));
+
+    // Retired as stranded, the generation is free again: enqueue replaces
+    // the request. (The same row returned under the active-request ceiling
+    // is busy, never ended; the ceiling is not constructed here.)
+    fixture
+        .sql()
+        .execute(
+            "UPDATE analysis_requests SET state='cancelled',last_error_code='coordination_stranded' WHERE request_id=?1",
+            [&request.request_id],
+        )
+        .expect("stranded");
+    let Coordination::Queued(replacement) = coordinate().await else {
+        panic!("a stranded generation is coordinated again");
+    };
+    assert_ne!(replacement.request_id, request.request_id);
+}
+
+/// A sealed-init mismatch bans its blob, so the engine that built the
+/// variant does not rebuild it: it would seal the same bytes. Another
+/// engine seals other bytes and adopts the repair generation.
+#[tokio::test]
+async fn a_demand_does_not_rebuild_its_own_engines_sealed_init_mismatch() {
+    let init = muxer_init();
+    for (own_engine, expected) in [
+        (
+            true,
+            HeadDecision::Discard("this engine cannot rebuild its own sealed-init mismatch"),
+        ),
+        (false, HeadDecision::Proceed { contradicted: None }),
+    ] {
+        let fixture = store_fixture().await;
+        let engine = if own_engine {
+            crate::ffmpeg::fragment_index_engine_digest().await
+        } else {
+            hex64('e')
+        };
+        let (artifact, _) = variant(&sealed(&init, rows(4, 4_500), 12, true), &engine);
+        let successor = copy_index_v3_rebuild_generation(&fixture.key, &artifact.blob_sha256, 1)
+            .expect("repair");
+        fixture.publish(&artifact);
+        let db = fixture.sql();
+        db.execute(
+            "UPDATE copy_index_v3_heads SET state='quarantined',desired_generation=?1 WHERE source_key=?2",
+            rusqlite::params![successor, fixture.key],
+        )
+        .expect("quarantined head");
+        db.execute(
+            "INSERT INTO copy_index_v3_quarantines(source_key,head_epoch,bad_blob_sha256,successor_generation,code,created_at_ms) VALUES(?1,1,?2,?3,?4,?5)",
+            rusqlite::params![
+                fixture.key,
+                artifact.blob_sha256,
+                successor,
+                plurx_core::store::COPY_INDEX_V3_SEALED_INIT_CODE,
+                NOW
+            ],
+        )
+        .expect("ledger");
+        let mut asked = source();
+        assert_eq!(
+            reconcile_demand(&fixture.context, &fixture.key, &mut asked).await,
+            Ok(expected),
+            "own engine: {own_engine}"
+        );
+        assert_eq!(asked.requested_generation == successor, !own_engine);
+    }
+}
+
+/// A title asks once: a second demand for a source already sent is refused
+/// before the inbox, and it may ask again once nothing holds its source. A
+/// full table of demands gives up its oldest demand for a new one.
+#[cfg(unix)]
+#[test]
+fn a_source_is_asked_for_once_until_its_work_settles() {
+    let registry = CopyAnalysisRegistry::default();
+    assert!(registry.notify_demand(demand_for(NODE, 100)));
+    assert!(
+        !registry.notify_demand(demand_for(NODE, 100)),
+        "already asked"
+    );
+    assert!(
+        registry.notify_demand(demand_for(NODE, 101)),
+        "another source"
+    );
+    assert_eq!(registry.take_pending().len(), 2);
+
+    // Nothing holds either source: both may ask again.
+    forget_settled(&registry.asked(), &PendingSources::default());
+    assert!(registry.notify_demand(demand_for(NODE, 100)));
+
+    let mut pending = PendingSources::default();
+    let key = |file_id: i64| {
+        let demand = demand_for(NODE, file_id);
+        copy_index_v3_source_key(&demand.catalog_namespace, &demand.source).expect("key")
+    };
+    for file_id in 1..=64 {
+        pending.fold(
+            CopyAnalysisMessage::Demand(Box::new(demand_for(NODE, file_id))),
+            NO_WAIT,
+        );
+    }
+    assert!(pending.holds(&key(1)) && pending.holds(&key(64)));
+    pending.fold(
+        CopyAnalysisMessage::Demand(Box::new(demand_for(NODE, 65))),
+        NO_WAIT,
+    );
+    assert!(pending.holds(&key(65)));
+    assert_eq!(
+        (1..=65)
+            .filter(|file_id| pending.holds(&key(*file_id)))
+            .count(),
+        64,
+        "one demand left to make room"
+    );
 }

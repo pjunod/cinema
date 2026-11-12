@@ -689,22 +689,26 @@ impl VodServe {
         let cluster_cache_enabled = prepared.encoding.is_none() && settings.index_cluster_cache;
         // A published v3 copy index is preferred over the v2 cluster artifact
         // and the node-local index; without one the order below is unchanged.
-        let copy_index = if prepared.encoding.is_none() {
-            self.try_copy_index_v3(file, video).await
-        } else {
-            None
+        let (copy_index, own_source) = match prepared.encoding {
+            None => match self.try_copy_index_v3(file, video).await {
+                Some(found) => (found.index, Some(found.own)),
+                None => (None, None),
+            },
+            Some(_) => (None, None),
         };
         // A local viewer's copy start without a v3 index asks the Analysis
-        // worker to build one. This start is unchanged: it plans from the
+        // worker to build one, whether or not a legacy or v2 index serves
+        // this start: v3 is the index every node shares, and playing a title
+        // is what migrates it. This start is unchanged: it plans from the
         // index order below and waits on nothing the demand sets off.
-        if let (None, None, Some(viewer)) = (&copy_index, &prepared.encoding, viewer) {
+        if let (None, Some(own), Some(viewer)) = (&copy_index, own_source, viewer) {
             let recipe = crate::copy_analysis::CopyRecipe {
                 video,
                 audio_index: req.audio_index,
                 transcode_audio: aac,
                 audio_delivery: req.audio_delivery.clone(),
             };
-            self.demand_copy_index(file, recipe, viewer).await;
+            self.demand_copy_index(file, own, recipe, viewer);
         }
         let copy_index_init_contract = copy_index
             .as_ref()
@@ -2697,7 +2701,9 @@ impl VodServe {
         // The origin's published v3 copy index serves a Source rendition too:
         // reading it queues nothing and joins no local viewer interest.
         let copy_index = if prepared.encoding.is_none() {
-            self.try_copy_index_v3(file, video).await
+            self.try_copy_index_v3(file, video)
+                .await
+                .and_then(|found| found.index)
         } else {
             None
         };

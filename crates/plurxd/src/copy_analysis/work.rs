@@ -53,7 +53,11 @@ enum Held {
     /// the same.
     Demand {
         catalog_namespace: String,
-        source: AnalysisCoordinationSource,
+        /// The source as playback observes it, under its own generation.
+        observed: Box<AnalysisCoordinationSource>,
+        /// The source the build runs for: `observed`, or the same source
+        /// under a quarantined head's repair generation.
+        source: Box<AnalysisCoordinationSource>,
     },
 }
 
@@ -67,6 +71,9 @@ pub(crate) struct PendingSource {
     /// None for a source only local playback asked for: a local authority
     /// has no Source interest to join.
     interest: Option<plurx_core::store::analysis_coordination::AnalysisSourceInterestAuthority>,
+    /// The local playback that asked for this source, when one did. It
+    /// names the Analysis request the build runs under.
+    asked_by: Option<super::LocalCopyAuthority>,
     observed: Instant,
     /// Not before this instant: a busy source domain or a contended claim
     /// waits for the next dispatch wake after it, never a private timer.
@@ -109,8 +116,9 @@ impl PendingSource {
             Held::Rows(set) => return set.observe_analysis(phase, rows),
             Held::Demand {
                 catalog_namespace,
-                source,
-            } => CopyObservationSet::from_analysis(catalog_namespace, source, phase, rows)?,
+                observed,
+                ..
+            } => CopyObservationSet::from_analysis(catalog_namespace, observed, phase, rows)?,
         };
         self.held = Held::Rows(Box::new(established));
         Ok(())
@@ -139,10 +147,10 @@ pub(crate) struct PendingSources {
 impl PendingSources {
     /// Fold one inbox message: a committed range into its source's set, a
     /// reader's defect into the next pass's quarantine work.
-    pub(crate) fn fold(&mut self, message: CopyAnalysisMessage) {
+    pub(crate) fn fold(&mut self, message: CopyAnalysisMessage, retry: Duration) {
         match message {
             CopyAnalysisMessage::Range(range) => self.observe(*range),
-            CopyAnalysisMessage::Demand(demand) => self.demand(*demand),
+            CopyAnalysisMessage::Demand(demand) => self.demand(*demand, retry),
             CopyAnalysisMessage::Defect(defect) => {
                 if self.defects.len() < MAX_PENDING_DEFECTS
                     || self.defects.contains_key(&defect.source_key)
@@ -155,7 +163,9 @@ impl PendingSources {
 
     /// Hold a row-less demand for its source. A source already held or being
     /// worked needs nothing more: its set is on its way to the same index.
-    fn demand(&mut self, demand: CopyIndexDemand) {
+    /// The demand's first attempt is not before `retry` from now, on a later
+    /// dispatch wake, so it never runs against the start that raised it.
+    fn demand(&mut self, demand: CopyIndexDemand, retry: Duration) {
         // Only the copy engine can turn a demand into rows, and it is built
         // for unix alone; elsewhere a demand could never be met.
         if !cfg!(unix) {
@@ -169,7 +179,26 @@ impl PendingSources {
         if self.working.contains_key(&key) || self.sources.contains_key(&key) {
             return;
         }
-        if let CopyObservationAuthority::Local(local) = &demand.authority {
+        // A demand costs nothing to ask again; rows cost a playback. So a
+        // demand makes room only among other demands, and is refused when
+        // every held source has rows.
+        if self.sources.len() + self.working.len() >= MAX_PENDING_SOURCES {
+            let Some(oldest) = self
+                .sources
+                .iter()
+                .filter(|(_, pending)| matches!(pending.held, Held::Demand { .. }))
+                .min_by_key(|(_, pending)| pending.observed)
+                .map(|(key, _)| key.clone())
+            else {
+                return;
+            };
+            self.sources.remove(&oldest);
+        }
+        let asked_by = match &demand.authority {
+            CopyObservationAuthority::Local(local) => Some(local.clone()),
+            CopyObservationAuthority::Source { .. } => None,
+        };
+        if let Some(local) = &asked_by {
             // Attribution of the background build this starts.
             tracing::info!(
                 file_id = demand.source.file_id,
@@ -178,21 +207,28 @@ impl PendingSources {
                 "local playback asked for its source's copy index"
             );
         }
-        self.make_room();
+        let now = Instant::now();
         self.sources.insert(
             key,
             PendingSource {
                 file: demand.file,
                 interest: source_interest(&demand.authority),
+                asked_by,
                 held: Held::Demand {
                     catalog_namespace: demand.catalog_namespace,
-                    source: demand.source,
+                    observed: Box::new(demand.source.clone()),
+                    source: Box::new(demand.source),
                 },
                 recipe: demand.recipe,
-                observed: Instant::now(),
-                retry_after: None,
+                observed: now,
+                retry_after: Some(now + retry),
             },
         );
+    }
+
+    /// Whether this source is held or being worked.
+    pub(super) fn holds(&self, key: &str) -> bool {
+        self.sources.contains_key(key) || self.working.contains_key(key)
     }
 
     /// Forget the least recently observed source when the bound is reached.
@@ -270,6 +306,7 @@ impl PendingSources {
                         held: Held::Rows(Box::new(set)),
                         recipe: message.recipe,
                         interest,
+                        asked_by: None,
                         observed: Instant::now(),
                         retry_after: None,
                     },
@@ -353,6 +390,10 @@ pub(super) enum Attempt {
     Retry(String),
     /// The observations can never seal this source as they are.
     Discard(String),
+    /// This generation's coordinator already ended; nothing will claim it
+    /// again, so the source is dropped. Expected for a title asked for again
+    /// after its build failed, and not worth a warning each time.
+    Ended,
 }
 
 /// One dispatcher pass: fold the inbox, then give each ready source its own
@@ -389,18 +430,22 @@ pub(crate) async fn work_copy_observations(
             }
         })
         .await;
+    let retry = Duration::from_millis(context.retry_ms.max(1_000) as u64);
+    let asked = registry.asked();
     let pending = registry.pending();
     let (units, defects) = {
         let mut sources = pending.lock().await;
         for message in registry.take_pending() {
-            sources.fold(message);
+            sources.fold(message, retry);
         }
-        (sources.start_ready(Instant::now()), sources.take_defects())
+        let ready = (sources.start_ready(Instant::now()), sources.take_defects());
+        forget_settled(&asked, &sources);
+        ready
     };
-    let retry = Duration::from_millis(context.retry_ms.max(1_000) as u64);
     for (key, mut source) in units {
         let pending = Arc::clone(&pending);
         let context = Arc::clone(&context);
+        let asked = Arc::clone(&asked);
         let unit_key = key.clone();
         let unit = tokio::spawn(async move {
             let attempt = publish_source(&context, &unit_key, &mut source).await;
@@ -415,6 +460,9 @@ pub(crate) async fn work_copy_observations(
                 Ok((source, attempt)) => {
                     match &attempt {
                         Attempt::Done | Attempt::Busy => {}
+                        Attempt::Ended => {
+                            tracing::debug!("copy index generation already ended; source dropped");
+                        }
                         Attempt::Retry(reason) => {
                             tracing::warn!(%reason, "copy index publication will retry");
                         }
@@ -430,6 +478,7 @@ pub(crate) async fn work_copy_observations(
                     sources.settle(key, None, &attempt, retry);
                 }
             }
+            forget_settled(&asked, &sources);
         });
     }
     // Reader-reported defects are a few store writes each. This pass does
@@ -457,6 +506,17 @@ pub(crate) async fn work_copy_observations(
             ),
         }
     }
+}
+
+/// Let a title ask again once nothing holds or works its source.
+pub(super) fn forget_settled(
+    asked: &std::sync::Mutex<std::collections::HashSet<String>>,
+    sources: &PendingSources,
+) {
+    asked
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|key| sources.holds(key));
 }
 
 pub(super) async fn publish_source(
@@ -496,14 +556,17 @@ pub(super) async fn publish_source(
             Err(error) => return Attempt::Retry(error.to_string()),
         }
     }
-    let request = match coordination_request(context, &source).await {
+    // A build local playback asked for runs under a request that says so.
+    let request_id = pending.asked_by.as_ref().map_or_else(
+        || uuid::Uuid::new_v4().to_string(),
+        super::LocalCopyAuthority::request_id,
+    );
+    let request = match coordination_request(context, &source, request_id).await {
         Ok(Coordination::Queued(request)) => *request,
         Ok(Coordination::Busy) => return Attempt::Busy,
         // Nothing will ever claim this generation again, so holding the
         // source would only repeat this answer on every pass.
-        Ok(Coordination::Ended) => {
-            return Attempt::Discard("this generation's coordinator has ended".into())
-        }
+        Ok(Coordination::Ended) => return Attempt::Ended,
         Err(reason) => return Attempt::Retry(reason),
     };
     // Record the Source demand on the coordinator. A route that has since
@@ -703,6 +766,30 @@ async fn head_decision(
     if head.state == CopyIndexV3HeadState::Quarantined
         && successor.as_deref() == Some(head.desired_generation.as_str())
     {
+        // A sealed-init mismatch bans its blob, and this engine, being the
+        // one that built it, would seal the same bytes again: the rebuild
+        // would read the whole title only to be refused. The head stays
+        // quarantined and readers keep their next index. Another engine
+        // seals other bytes, and every other quarantine either leaves its
+        // blob publishable or cannot be resealed identically.
+        if let (Some(blob), Some(artifact)) = (head.blob_sha256.as_deref(), &variant.artifact) {
+            let code = context
+                .store
+                .copy_index_v3_quarantine_code(key, head.head_epoch, blob)
+                .await
+                .map_err(|error| error.to_string())?;
+            if code.as_deref() == Some(plurx_core::store::COPY_INDEX_V3_SEALED_INIT_CODE)
+                && crate::ffmpeg::fragment_index_engine_digest().await
+                    == artifact.producer_engine_sha256
+            {
+                return Ok((
+                    HeadDecision::Discard(
+                        "this engine cannot rebuild its own sealed-init mismatch",
+                    ),
+                    None,
+                ));
+            }
+        }
         let adopt =
             (head.desired_generation != generation).then(|| head.desired_generation.clone());
         return Ok((HeadDecision::Proceed { contradicted: None }, adopt));
@@ -865,7 +952,9 @@ pub(super) async fn quarantine_defect(
         contract_version: head.contract_version,
         requested_generation: successor,
     };
-    let Coordination::Queued(request) = coordination_request(context, &source).await? else {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let Coordination::Queued(request) = coordination_request(context, &source, request_id).await?
+    else {
         return Ok(false);
     };
     let now = crate::state::clock_ms();
@@ -909,7 +998,7 @@ pub(super) async fn quarantine_defect(
         Ok(()) => Ok(true),
         Err(Attempt::Busy) => Ok(false),
         Err(Attempt::Retry(reason) | Attempt::Discard(reason)) => Err(reason),
-        Err(Attempt::Done) => Ok(false),
+        Err(Attempt::Done | Attempt::Ended) => Ok(false),
     }
 }
 
@@ -942,6 +1031,13 @@ async fn fill_gaps(
         };
         if lost.is_cancelled() {
             return Err(Attempt::Busy);
+        }
+        // Rows cut by an engine that changed under this process would be
+        // published under the retired engine's digest.
+        if !crate::ffmpeg::fragment_index_engine_is_current().await {
+            return Err(Attempt::Discard(
+                "the fragment-index engine changed; restart is required".into(),
+            ));
         }
         if crate::fragindex::identity_for(&pending.file, pending.recipe.video).argv_fingerprint
             != source.video_identity
@@ -1061,13 +1157,23 @@ pub(super) enum Coordination {
 pub(super) async fn coordination_request(
     context: &CopyAnalysisContext,
     source: &AnalysisCoordinationSource,
+    request_id: String,
 ) -> Result<Coordination, String> {
-    let ended = |state: &str| matches!(state, "failed" | "cancelled" | "ready");
+    // A request retired as stranded does not use up its generation: enqueue
+    // replaces it. When it is returned all the same, the replacement was
+    // refused only by the active-request ceiling, which passes; that is
+    // busy, on either backend, never ended.
+    let ended = |request: &AnalysisRequest| {
+        matches!(request.state.as_str(), "failed" | "cancelled" | "ready")
+            && !(request.state == "cancelled"
+                && request.last_error_code
+                    == plurx_core::store::analysis_coordination::STRANDED_CODE)
+    };
     let now = crate::state::clock_ms();
     let request = context
         .store
         .enqueue_analysis_request(&NewAnalysisRequest {
-            request_id: uuid::Uuid::new_v4().to_string(),
+            request_id,
             file_id: source.file_id,
             source_size: source.source_size,
             source_mtime: source.source_mtime,
@@ -1093,7 +1199,7 @@ pub(super) async fn coordination_request(
         .await
         .map_err(|error| error.to_string())?;
     let Some(role) = role else {
-        return Ok(if ended(&request.state) {
+        return Ok(if ended(&request) {
             Coordination::Ended
         } else {
             Coordination::Busy
@@ -1108,7 +1214,7 @@ pub(super) async fn coordination_request(
         .map_err(|error| error.to_string())?;
     Ok(match current {
         Some(request) if request.state == "queued" => Coordination::Queued(Box::new(request)),
-        Some(request) if ended(&request.state) => Coordination::Ended,
+        Some(request) if ended(&request) => Coordination::Ended,
         _ => Coordination::Busy,
     })
 }

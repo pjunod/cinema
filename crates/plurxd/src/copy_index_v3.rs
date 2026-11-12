@@ -52,6 +52,15 @@ pub(crate) struct ResolvedCopyIndex {
     pub(crate) init_contract_sha256: String,
 }
 
+/// What one resolution found, with this node's own source as it derived it:
+/// its current object under the catalogue's identity. A caller that then
+/// asks for the index to be built names exactly the source the next
+/// resolution will look up, without a second stat.
+pub(crate) struct Resolution {
+    pub(crate) index: Option<ResolvedCopyIndex>,
+    pub(crate) own: plurx_core::store::analysis_coordination::AnalysisCoordinationSource,
+}
+
 /// Contracts whose sealed init this process's engine does not produce. The
 /// engine is fixed for the life of the process, so a refusal found by one
 /// generation holds for every later plan: planning then uses its next index
@@ -162,7 +171,7 @@ pub(crate) async fn resolve(
     file: &MediaFile,
     video: CopyVideoOptions,
     defects: Option<&CopyAnalysisRegistry>,
-) -> Result<Option<ResolvedCopyIndex>, String> {
+) -> Result<Resolution, String> {
     // This node's current object: a stat checked against the scanner's facts.
     let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
     let identity = crate::fragindex::identity_for(file, video);
@@ -194,7 +203,10 @@ pub(crate) async fn resolve(
         .map_err(|error| format!("reading the copy index head: {error}"))?;
     if let Some(variant) = &own_variant {
         if let Some(resolved) = consumer.plan_from(variant).await? {
-            return Ok(Some(resolved));
+            return Ok(Resolution {
+                index: Some(resolved),
+                own,
+            });
         }
     }
     // Another origin's opaque object version proves nothing here. Its index
@@ -202,7 +214,7 @@ pub(crate) async fn resolve(
     // receipt names the same content, so without one there is nothing to
     // list.
     let Some(attested) = consumer.attested_source_sha256().await? else {
-        return Ok(None);
+        return Ok(Resolution { index: None, own });
     };
     // A blob this node's own head was quarantined for is never adopted back
     // through another origin's pointer.
@@ -235,10 +247,13 @@ pub(crate) async fn resolve(
             continue;
         }
         if let Some(resolved) = consumer.plan_from(&variant).await? {
-            return Ok(Some(resolved));
+            return Ok(Resolution {
+                index: Some(resolved),
+                own,
+            });
         }
     }
-    Ok(None)
+    Ok(Resolution { index: None, own })
 }
 
 impl Consumer<'_> {

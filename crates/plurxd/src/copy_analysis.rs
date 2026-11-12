@@ -197,7 +197,39 @@ impl LocalCopyAuthority {
     pub(crate) fn playback_id(&self) -> &str {
         &self.playback_id
     }
+    /// The id of the Analysis request this demand creates, which is how the
+    /// build is attributed wherever requests are listed: it names the local
+    /// user and, when it fits the 64-byte bound and is plain enough to sit
+    /// in a URL path, the playback that asked. `analysis_requests.trigger`
+    /// is constrained by the schema to three values, so the attribution
+    /// lives in the one free-form field every listing already shows.
+    pub(crate) fn request_id(&self) -> String {
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let plain = !self.playback_id.is_empty()
+            && self
+                .playback_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+        let full = format!(
+            "{LOCAL_PLAYBACK_REQUEST_PREFIX}u{}.{}.{}",
+            self.user_id,
+            self.playback_id,
+            &unique[..4]
+        );
+        if plain && full.len() <= 64 {
+            return full;
+        }
+        let short = format!("{LOCAL_PLAYBACK_REQUEST_PREFIX}u{}.{unique}", self.user_id);
+        if short.len() <= 64 {
+            short
+        } else {
+            unique
+        }
+    }
 }
+
+/// What the id of an Analysis request raised by local playback starts with.
+pub(crate) const LOCAL_PLAYBACK_REQUEST_PREFIX: &str = "local-play.";
 
 /// A demand for the copy index of one exact source that carries no rows: the
 /// playback that raised it is served by another path and observed nothing.
@@ -299,6 +331,10 @@ pub(crate) struct CopyAnalysisRegistry {
     created_ms: i64,
     /// Set once this process has retired what its predecessor stranded.
     stranded_retired: tokio::sync::OnceCell<()>,
+    /// Source keys a demand was already sent for and whose work has not
+    /// settled. A start checks it before the inbox, so a title started
+    /// again and again sends one message, not one per start.
+    asked: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 impl Default for CopyAnalysisRegistry {
     fn default() -> Self {
@@ -309,6 +345,7 @@ impl Default for CopyAnalysisRegistry {
             pending: Default::default(),
             created_ms: crate::state::clock_ms(),
             stranded_retired: tokio::sync::OnceCell::new(),
+            asked: Default::default(),
         }
     }
 }
@@ -319,10 +356,31 @@ impl CopyAnalysisRegistry {
     pub(crate) fn notify(&self, message: CompletedCopyRange) -> bool {
         self.send(CopyAnalysisMessage::Range(Box::new(message)))
     }
-    /// Hand the worker a row-less demand for one source's index. A full
-    /// inbox refuses, and the next start of the same title asks again.
+    /// Hand the worker a row-less demand for one source's index, unless one
+    /// was already sent and its work has not settled. A full inbox refuses,
+    /// and the next start of the same title asks again.
     pub(crate) fn notify_demand(&self, demand: CopyIndexDemand) -> bool {
-        self.send(CopyAnalysisMessage::Demand(Box::new(demand)))
+        let Ok(key) =
+            plurx_core::store::copy_index_v3_source_key(&demand.catalog_namespace, &demand.source)
+        else {
+            return false;
+        };
+        let mut asked = self
+            .asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if asked.contains(&key) {
+            return false;
+        }
+        let sent = self.send(CopyAnalysisMessage::Demand(Box::new(demand)));
+        if sent {
+            asked.insert(key);
+        }
+        sent
+    }
+    /// The already-asked keys, for the worker to clear as sources settle.
+    pub(crate) fn asked(&self) -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
+        Arc::clone(&self.asked)
     }
     /// Hand the worker one defect a reader found. A full inbox refuses, and
     /// the next start that meets the same head reports it again.
@@ -607,7 +665,10 @@ impl CopyObservationSet {
     /// The set of a source nothing has observed yet, from the first rows an
     /// Analysis-owned generation read of it: they establish the init
     /// contract, clock origin and promotion every later observation must
-    /// share.
+    /// share. `source` is the source as playback observes it, under its own
+    /// generation, so later playback ranges still fold in; when the phase
+    /// ran for a quarantined head's repair generation the set adopts that,
+    /// exactly as a set of playback rows does.
     pub(crate) fn from_analysis(
         catalog_namespace: &str,
         source: &AnalysisCoordinationSource,
@@ -628,6 +689,9 @@ impl CopyObservationSet {
             observed.canonical_title_start,
             &observed.promotion,
         )?;
+        if phase.source.requested_generation != source.requested_generation {
+            value.adopt_generation(&phase.source.requested_generation);
+        }
         value.observe_analysis(phase, observed)?;
         Ok(value)
     }
