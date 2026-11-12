@@ -254,12 +254,14 @@ pub(crate) struct CopyRangeFiles {
     av_init_sha256: String,
     origin: Option<i64>,
     rows: Vec<IndexRow>,
-    segments: Vec<StoredCopySegment>,
+    /// Visible to the range's owners' tests, which set a committed bank
+    /// that a 12-second fixture cannot produce.
+    pub(super) segments: Vec<StoredCopySegment>,
     row_inspections: Vec<StoredInspection>,
     inspection: Option<RangeInspection>,
     eof: bool,
     rendered: bool,
-    committed_segments: usize,
+    pub(super) committed_segments: usize,
     committed_eof: bool,
     current: Option<Arc<CopyRangeCheckpoint>>,
     old: Vec<OldManifest>,
@@ -401,22 +403,6 @@ impl CopyRangeFiles {
             .map_err(|_| "copy_observation_retirement_failed".to_owned())?;
         self.payload_retired = true;
         Ok(())
-    }
-    /// Say this much media is committed from `media_origin_ms`, for a test
-    /// that drives the read bank without a generation.
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn bank_for_test(&mut self, media_origin_ms: i64, seconds: f64) {
-        self.origin = Some(media_origin_ms);
-        self.segments = vec![StoredCopySegment {
-            index: 0,
-            name: fmp4_name(0),
-            bytes: 0,
-            sha256: String::new(),
-            seconds,
-            first_row: 0,
-            rows: 0,
-        }];
-        self.committed_segments = 1;
     }
     pub(crate) fn publisher(&self) -> CopyRangePublisher {
         self.publisher.clone()
