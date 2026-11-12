@@ -93,6 +93,8 @@ struct Fixture {
     file: MediaFile,
     video: CopyVideoOptions,
     object_version: String,
+    /// The Analysis worker's inbox, where the reader reports defects.
+    defects: CopyAnalysisRegistry,
 }
 
 fn media_file(path: PathBuf) -> MediaFile {
@@ -155,6 +157,7 @@ async fn fixture() -> Fixture {
         file,
         video: CopyVideoOptions::new(false, false),
         object_version,
+        defects: CopyAnalysisRegistry::default(),
     }
 }
 
@@ -237,9 +240,36 @@ impl Fixture {
             &self.cache,
             &self.file,
             self.video,
+            Some(&self.defects),
         )
         .await
         .expect("resolution")
+    }
+
+    /// Every defect the reader has reported since the last call.
+    fn reported(&self) -> Vec<CopyIndexDefect> {
+        self.defects
+            .take_pending()
+            .into_iter()
+            .filter_map(|message| match message {
+                crate::copy_analysis::CopyAnalysisMessage::Defect(defect) => Some(defect),
+                crate::copy_analysis::CopyAnalysisMessage::Range(_) => None,
+            })
+            .collect()
+    }
+
+    /// The source key of this node's own head.
+    fn own_key(&self) -> String {
+        let identity = crate::fragindex::identity_for(&self.file, self.video);
+        let source = crate::copy_analysis::source_for_copy(
+            &self.namespace,
+            &self.file,
+            &identity.argv_fingerprint,
+            &self.object_version,
+            NODE,
+        )
+        .expect("copy source");
+        copy_index_v3_source_key(&self.namespace, &source).expect("source key")
     }
 
     /// This node's own head, quarantined while still pointing at the variant.
@@ -565,4 +595,91 @@ fn the_peer_route_names_exactly_one_variant() {
     ] {
         assert_eq!(peer_route_key(&refused), None, "{refused}");
     }
+}
+
+/// The reader hands the Analysis worker a typed defect for exactly the head
+/// epoch and blob it met: no holder anywhere, or a verified blob sealed
+/// without the HDR10 fold. A holder that merely cannot be asked is not a
+/// defect, and a planned variant is remembered for a later sealed-init
+/// refusal. Covers the reader's reporting only; the worker's quarantine of a
+/// reported head runs against a real store in the copy-analysis tests.
+#[tokio::test]
+async fn the_reader_reports_a_holderless_head_and_an_unindexed_blob_as_typed_defects() {
+    let fixture = fixture().await;
+    let source_sha256 = hex64('5');
+    let (artifact, blob) = variant(
+        &fixture.namespace,
+        fixture.file.id,
+        &sealed_index(&source_sha256, false),
+        &source_sha256,
+    );
+    fixture.publish(NODE, &fixture.object_version, &artifact);
+    let defect = |kind| CopyIndexDefect {
+        source_key: fixture.own_key(),
+        head_epoch: 1,
+        blob_sha256: artifact.blob_sha256.clone(),
+        kind,
+    };
+
+    // Listed only for this node, whose bytes are gone: nobody holds them.
+    assert!(fixture.resolve().await.is_none());
+    assert_eq!(
+        fixture.reported(),
+        vec![defect(CopyIndexDefectKind::NoHolder)]
+    );
+    assert!(fixture.holders(&artifact).await.is_empty());
+
+    // Another listed holder that cannot be asked may still have the bytes.
+    rusqlite::Connection::open(&fixture.db)
+        .expect("seed")
+        .execute(
+            "INSERT INTO copy_index_v3_locations(contract_key,blob_sha256,node_id,bytes,verified_at_ms,last_seen_at_ms) VALUES(?1,?2,'node-two',?3,?4,?4)",
+            rusqlite::params![artifact.contract_key, artifact.blob_sha256, artifact.bytes, NOW],
+        )
+        .expect("another holder");
+    assert!(fixture.resolve().await.is_none());
+    assert!(fixture.reported().is_empty(), "unreachable is not absent");
+
+    // The verified bytes themselves lack the whole-title HDR10 fold.
+    fixture.install(&artifact, &blob).await;
+    assert!(lacks_indexed_hdr10(&blob, &artifact));
+    assert!(fixture.resolve().await.is_none());
+    assert_eq!(
+        fixture.reported(),
+        vec![defect(CopyIndexDefectKind::UnindexedHdr10)]
+    );
+    assert_eq!(
+        sealed_init_defect(&format!("copy-index-v3:{}", artifact.contract_key)),
+        None,
+        "a refused variant was never planned from"
+    );
+}
+
+/// A variant the reader planned from is remembered by its rendition key, so
+/// a generation that refuses the sealed init names the exact head epoch and
+/// blob. Whether that is a defect of the variant is the worker's decision.
+#[tokio::test]
+async fn a_planned_variant_names_its_head_for_a_sealed_init_refusal() {
+    let fixture = fixture().await;
+    let source_sha256 = hex64('6');
+    let (artifact, blob) = variant(
+        &fixture.namespace,
+        fixture.file.id,
+        &sealed_index(&source_sha256, true),
+        &source_sha256,
+    );
+    fixture.publish(NODE, &fixture.object_version, &artifact);
+    fixture.install(&artifact, &blob).await;
+    let resolved = fixture.resolve().await.expect("the published index");
+    assert!(fixture.reported().is_empty(), "a usable head has no defect");
+    assert!(!lacks_indexed_hdr10(&blob, &artifact));
+    assert_eq!(
+        sealed_init_defect(&resolved.rendition_cache_key),
+        Some(CopyIndexDefect {
+            source_key: fixture.own_key(),
+            head_epoch: 1,
+            blob_sha256: artifact.blob_sha256.clone(),
+            kind: CopyIndexDefectKind::SealedInit,
+        })
+    );
 }

@@ -6,10 +6,13 @@
 #[cfg(all(test, target_os = "linux"))]
 mod gap_fill_tests;
 mod physical;
+#[cfg(test)]
+mod quarantine_tests;
 mod work;
 
 pub(crate) use work::{
-    install_blob, v3_blob_path, v3_root, work_copy_observations, CopyAnalysisContext,
+    install_blob, register_playback_cache, v3_blob_path, v3_root, work_copy_observations,
+    CopyAnalysisContext,
 };
 
 use plurx_core::{
@@ -174,16 +177,61 @@ pub(crate) struct CompletedCopyRange {
     pub(crate) recipe: CopyRecipe,
 }
 
-pub(crate) type CopyAnalysisInbox = tokio::sync::mpsc::Sender<CompletedCopyRange>;
+/// What a reader found wrong with the variant a healthy head points at. Each
+/// is a fact about that exact head epoch and blob; the Analysis worker
+/// re-reads the head and quarantines it under its own claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CopyIndexDefectKind {
+    /// The verified blob was sealed without the whole-title HDR10 fold.
+    UnindexedHdr10,
+    /// No node holds the bytes: this node has none and every listed holder
+    /// answered that it has none either.
+    NoHolder,
+    /// A generation's promoted muxer init is not the init the seal published.
+    SealedInit,
+}
+impl CopyIndexDefectKind {
+    /// The quarantine ledger code of this defect.
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::UnindexedHdr10 => "copy_index_hdr10_unindexed",
+            Self::NoHolder => plurx_core::store::COPY_INDEX_V3_NO_HOLDER_CODE,
+            Self::SealedInit => plurx_core::store::COPY_INDEX_V3_SEALED_INIT_CODE,
+        }
+    }
+}
+
+/// A reader's typed demand to rebuild one head. It carries no authority: the
+/// store quarantines only the exact healthy head, epoch and blob it names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CopyIndexDefect {
+    pub(crate) source_key: String,
+    pub(crate) head_epoch: i64,
+    pub(crate) blob_sha256: String,
+    pub(crate) kind: CopyIndexDefectKind,
+}
+
+/// Everything the Analysis worker's inbox carries.
+pub(crate) enum CopyAnalysisMessage {
+    Range(Box<CompletedCopyRange>),
+    Defect(CopyIndexDefect),
+}
+
+pub(crate) type CopyAnalysisInbox = tokio::sync::mpsc::Sender<CopyAnalysisMessage>;
 
 /// The existing Analysis worker consumes these notifications. The channel is
 /// deliberately bounded; durable manifests retain observations across retries.
 pub(crate) struct CopyAnalysisRegistry {
     sender: CopyAnalysisInbox,
-    receiver: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<CompletedCopyRange>>,
+    receiver: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<CopyAnalysisMessage>>,
     /// Coalesced per-source observations. A pass holds this lock only to fold
     /// the inbox and hand ready sources to their own units.
     pending: Arc<tokio::sync::Mutex<work::PendingSources>>,
+    /// When this process's registry was made. A queued coordination request
+    /// older than this was left by a previous process.
+    created_ms: i64,
+    /// Set once this process has retired what its predecessor stranded.
+    stranded_retired: tokio::sync::OnceCell<()>,
 }
 impl Default for CopyAnalysisRegistry {
     fn default() -> Self {
@@ -192,6 +240,8 @@ impl Default for CopyAnalysisRegistry {
             sender,
             receiver: tokio::sync::Mutex::new(receiver),
             pending: Default::default(),
+            created_ms: crate::state::clock_ms(),
+            stranded_retired: tokio::sync::OnceCell::new(),
         }
     }
 }
@@ -200,18 +250,42 @@ impl CopyAnalysisRegistry {
     /// A full inbox refuses; the producer rebuilds the latest durable
     /// checkpoint's message on its own next lease or production event.
     pub(crate) fn notify(&self, message: CompletedCopyRange) -> bool {
+        self.send(CopyAnalysisMessage::Range(Box::new(message)))
+    }
+    /// Hand the worker one defect a reader found. A full inbox refuses, and
+    /// the next start that meets the same head reports it again.
+    pub(crate) fn notify_defect(&self, defect: CopyIndexDefect) -> bool {
+        self.send(CopyAnalysisMessage::Defect(defect))
+    }
+    fn send(&self, message: CopyAnalysisMessage) -> bool {
         let sent = self.sender.try_send(message).is_ok();
         if sent {
             crate::state::wake_fragment_analysis();
         }
         sent
     }
+    /// Run `retire` once per process, before its first pass works anything.
+    /// A failed attempt is made again by the next pass.
+    pub(crate) async fn retire_stranded_once<F, Fut>(&self, retire: F)
+    where
+        F: FnOnce(i64) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let created_ms = self.created_ms;
+        if let Err(error) = self
+            .stranded_retired
+            .get_or_try_init(|| retire(created_ms))
+            .await
+        {
+            tracing::warn!(%error, "stranded copy coordination requests were not retired");
+        }
+    }
     /// The per-source state every pass and unit shares.
     pub(crate) fn pending(&self) -> Arc<tokio::sync::Mutex<work::PendingSources>> {
         Arc::clone(&self.pending)
     }
     /// Everything the inbox holds now (at most its two slots).
-    pub(crate) fn take_pending(&self) -> Vec<CompletedCopyRange> {
+    pub(crate) fn take_pending(&self) -> Vec<CopyAnalysisMessage> {
         let Ok(mut receiver) = self.receiver.try_lock() else {
             return Vec::new();
         };
@@ -268,7 +342,11 @@ pub(crate) enum CopyObservationError {
 /// Metadata-only accumulation. Overlap equality and complete begin/EOF/gap-free
 /// coverage are enforced independently of media, reader and Source permissions.
 pub(crate) struct CopyObservationSet {
+    /// The source this set seals for. Its generation is the observations'
+    /// own until the set adopts a quarantined head's repair generation.
     source: AnalysisCoordinationSource,
+    /// The source every playback observation of this set is built with.
+    observed_source: AnalysisCoordinationSource,
     catalog_namespace: String,
     init: Arc<Init>,
     init_contract_sha256: String,
@@ -307,6 +385,49 @@ impl CopyObservationSet {
     }
     pub(crate) fn observed_rows(&self) -> usize {
         self.rows.rows().len()
+    }
+    /// Seal for `generation` instead: the head of this source was quarantined
+    /// and desires exactly this repair generation. The rows are facts about
+    /// the source object, which the generation does not name, so they stay;
+    /// later playback observations still arrive under their own generation
+    /// and still fold in.
+    pub(crate) fn adopt_generation(&mut self, generation: &str) {
+        self.source.requested_generation = generation.to_owned();
+    }
+    /// Why these observations contradict `published`, a decoded index of the
+    /// same source, or `None` when every observed row is in it unchanged.
+    /// Only the observed rows are judged: a set compared with a healthy head
+    /// holds the ranges just committed, never the whole title.
+    pub(crate) fn contradiction(
+        &self,
+        published: &plurx_core::segplan::FragmentIndex,
+    ) -> Option<String> {
+        if published.timescale != self.rows.timescale() {
+            return Some(format!(
+                "timescale {} was published, {} observed",
+                published.timescale,
+                self.rows.timescale()
+            ));
+        }
+        // An unordered table cannot be searched; it is not this check's to judge.
+        if !published
+            .rows
+            .windows(2)
+            .all(|pair| pair[0].dts < pair[1].dts)
+        {
+            return None;
+        }
+        for row in self.rows.rows() {
+            match published
+                .rows
+                .binary_search_by_key(&row.dts, |held| held.dts)
+            {
+                Ok(at) if &published.rows[at] == row => {}
+                Ok(_) => return Some(format!("the row at {} differs", row.dts)),
+                Err(_) => return Some(format!("no row was published at {}", row.dts)),
+            }
+        }
+        None
     }
     pub(crate) fn new(message: &CompletedCopyRange) -> Result<Self, CopyObservationError> {
         let mut value = Self::empty(
@@ -354,6 +475,7 @@ impl CopyObservationSet {
             .is_some_and(|track| track.codec == Some(plurx_core::fmp4::VideoCodec::Hevc));
         Ok(Self {
             source: source.clone(),
+            observed_source: source.clone(),
             catalog_namespace: catalog_namespace.to_owned(),
             init: Arc::clone(init),
             init_contract_sha256,
@@ -382,7 +504,7 @@ impl CopyObservationSet {
         if assignment.owner_node_id() != self.source.origin_node_id {
             return Err(CopyObservationError::Binding);
         }
-        if message.source != self.source
+        if message.source != self.observed_source
             || message.catalog_namespace != self.catalog_namespace
             || !checkpoint.first_frame_rendered
             || message.range_epoch == 0

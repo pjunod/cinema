@@ -1,6 +1,15 @@
 use super::*;
 
 impl VodServe {
+    /// Attach the Analysis worker's inbox for v3 copy-index defects. The
+    /// first attachment stands.
+    pub(crate) fn attach_copy_analysis(
+        &self,
+        registry: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
+    ) {
+        let _ = self.shared.copy_analysis.set(registry);
+    }
+
     pub(crate) fn set_source_identity(&self, identity: crate::source_custody::SourceIdentity) {
         *self.shared.source_identity.lock().expect("source identity") = Some(identity);
     }
@@ -457,6 +466,7 @@ impl VodServe {
                 cluster_index_root,
                 cluster_membership,
                 catalog_namespace: tokio::sync::OnceCell::new(),
+                copy_analysis: std::sync::OnceLock::new(),
                 sessions: Mutex::new(HashMap::new()),
                 passive_grants: passive_grant::Registry::default(),
                 preparing_sessions: StdMutex::new(HashMap::new()),
@@ -611,6 +621,7 @@ impl VodServe {
                     &self.shared.runtime_cache,
                     file,
                     video,
+                    self.shared.copy_analysis.get().map(Arc::as_ref),
                 )
                 .await
             }

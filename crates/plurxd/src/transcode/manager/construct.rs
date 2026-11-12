@@ -451,6 +451,15 @@ impl TranscodeManager {
         self
     }
 
+    /// Give VOD planning the Analysis worker's inbox for v3 copy-index
+    /// defects.
+    pub(crate) fn attach_copy_analysis(
+        &self,
+        registry: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
+    ) {
+        self.vod.attach_copy_analysis(registry);
+    }
+
     pub(crate) fn register_playback_cache(
         self: &Arc<Self>,
         budget: &Arc<crate::playback_cache::PlaybackCacheBudget>,

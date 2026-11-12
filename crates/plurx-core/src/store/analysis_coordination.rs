@@ -342,6 +342,68 @@ pub(super) async fn finish_phase<T: QueueSql>(
     Ok(false)
 }
 
+/// Why a queued coordinator nobody will claim was retired. Enqueue does not
+/// count a request retired with this code against its generation, so the
+/// source is free to be coordinated again the next time it is observed. The
+/// replacement inherits the retired request's attempt count, so retiring
+/// never resets the attempt limit.
+pub const STRANDED_CODE: &str = "coordination_stranded";
+
+/// Retire the queued coordination requests targeted at `node_id` that were
+/// created before `created_before_ms`. Only the copy-analysis worker of the
+/// target node joins such a request, and only for a source it holds
+/// observations of in memory, so the ones a restarted process finds were left
+/// by its predecessor and nothing would ever claim them. A request whose role
+/// still names a physical custody is left for the claimant that must settle
+/// it. The role of a retired request stays until the same source is next
+/// established, which releases it, or the request is pruned.
+pub(super) async fn retire_stranded<T: QueueSql>(
+    store: &T,
+    node_id: &str,
+    created_before_ms: i64,
+    now_ms: i64,
+) -> Result<u64, StoreError> {
+    if !identifier(node_id) || created_before_ms < 0 || now_ms < 0 {
+        return Err(invalid());
+    }
+    let body = encode(
+        &serde_json::json!({"node_id":node_id,"created_before_ms":created_before_ms,"now_ms":now_ms,"code":STRANDED_CODE,"pipeline":format!("{PIPELINE_PREFIX}%")}),
+    )?;
+    let rows = store.queue_sql("UPDATE analysis_requests SET state='cancelled',fence=fence+1,cancel_requested=1,last_error_code=json_extract($1,'$.code'),updated_at_ms=json_extract($1,'$.now_ms') WHERE state='queued' AND component='fragment_index' AND pipeline_version LIKE json_extract($1,'$.pipeline') AND target_node_id=json_extract($1,'$.node_id') AND created_at_ms<json_extract($1,'$.created_before_ms') AND NOT EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE role.request_id=analysis_requests.request_id AND role.active_custody_id IS NOT NULL) RETURNING 'true' AS result_json".into(), body, true, true).await?;
+    Ok(rows.len() as u64)
+}
+
+/// End a coordinator this claim borrowed only to write metadata (a reader's
+/// quarantine), as `cancelled` with [`STRANDED_CODE`] and without charging
+/// the attempt. The claimant holds no observations and will not rebuild; the
+/// node that does enqueues its own request for the same generation, which
+/// the stranded code leaves free. A claim holding a physical custody is not
+/// ended here.
+pub(super) async fn retire_claim<T: QueueSql>(
+    store: &T,
+    claim: &AnalysisCoordinationClaim,
+    now_ms: i64,
+) -> Result<bool, StoreError> {
+    if !claim.valid() || now_ms < 0 {
+        return Err(invalid());
+    }
+    let body = encode(
+        &serde_json::json!({"claim":claim,"now_ms":now_ms,"code":STRANDED_CODE,"pipeline":format!("{PIPELINE_PREFIX}%")}),
+    )?;
+    let owned = "request_id=json_extract($1,'$.claim.request_id') AND owner_node_id=json_extract($1,'$.claim.node_id') AND fence=json_extract($1,'$.claim.fence') AND state='running' AND pipeline_version LIKE json_extract($1,'$.pipeline') AND NOT EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE role.request_id=analysis_requests.request_id AND role.active_custody_id IS NOT NULL)";
+    let history = format!("UPDATE analysis_attempts SET phase='canceled',phase_updated_at_ms=json_extract($1,'$.now_ms'),terminal_code=json_extract($1,'$.code') WHERE request_id=json_extract($1,'$.claim.request_id') AND claim_epoch=json_extract($1,'$.claim.fence') AND EXISTS(SELECT 1 FROM analysis_requests WHERE {owned})");
+    let retire = format!("UPDATE analysis_requests SET state='cancelled',owner_node_id=NULL,lease_expires_ms=NULL,fence=fence+1,cancel_requested=1,attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END,last_error_code=json_extract($1,'$.code'),updated_at_ms=json_extract($1,'$.now_ms') WHERE {owned}");
+    let attempt = store
+        .queue_transaction(vec![(history, body.clone()), (retire, body.clone())])
+        .await;
+    let rows = store.queue_sql("SELECT 'true' AS result_json FROM analysis_requests WHERE request_id=json_extract($1,'$.claim.request_id') AND state='cancelled' AND fence=json_extract($1,'$.claim.fence')+1 AND last_error_code=json_extract($1,'$.code')".into(), body, false, true).await?;
+    if !rows.is_empty() {
+        return Ok(true);
+    }
+    attempt?;
+    Ok(false)
+}
+
 /// A current metadata-only Analysis claim for the exact source generation.
 /// This condition grants neither Source I/O nor public media authority.
 pub(super) fn metadata_owned_condition() -> String {

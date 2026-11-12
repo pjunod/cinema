@@ -97,8 +97,7 @@ must refuse a v3 blob whose promotion lacks `indexed_hdr10_metadata`, which
 item 5 then quarantines and rebuilds.
 
 Coordination request rows of sources never observed again after a restart
-stay `queued` (one per file, as before this batch); retiring them belongs
-with item 5.
+stayed `queued` (one per file); item 5 retires them.
 
 ## Effort batch — A1/B1 v3 consumer and peer hydration (#1525, merged into the effort)
 
@@ -132,8 +131,29 @@ Decisions (Paul away):
 - No eviction owner was added for the v3 root: evicting a publisher's only
   copy turns a healthy head into a rebuild, which is item 5's to route.
 
-Still open: fleet acceptance of all three items below, item 5's quarantine of
-a refused or contradicted head, and the limits listed under item 4.
+Still open: fleet acceptance of the items below and the limits listed under
+items 4 and 5.
+
+## Current batch — A1/B1 discrepancy quarantine (item 5)
+
+Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
+agent on local branch `item5`, not pushed. Item 5 below is built; clippy
+`-D warnings` and fmt are clean, the inventory and formal pins are green. No
+unit test has been run: the tests run once in CI. A claude-fable-5-2
+adversarial review found three majors and six minors, all addressed in item
+5 below.
+
+Decisions (Paul away), each stated under item 5:
+
+- A quarantined pointer is not readable. The plan said the old pointer stays
+  readable until the successor publishes; the store has never done that, and
+  a contradicted index must not keep serving.
+- A quarantine on a doubt (no holder, a contradicting observation, a
+  sealed-init mismatch) does not ban its blob. A set that still holds
+  contradicting rows cannot reseal the quarantined bytes, so an identical
+  reseal means the observation was the faulty side and the index was good.
+- A coordinator retired as stranded does not use up its generation, or a
+  restart would lock every half-observed source out for the 30-day prune.
 
 ## After the first A1/B1 merge — remaining build order
 
@@ -229,12 +249,9 @@ Known limits, for the items that follow:
 - `copy_index_v3_heads` has no `(catalog_namespace, file_id)` index, so the
   per-file listing scans. It belongs in the next schema version; this batch
   adds no migration and reaches the listing only behind the receipt check.
-- The v3 root has no eviction owner. Its blobs are charged to the playback
-  cache budget but nothing registered evicts them (the v2 root has
-  `FragmentCacheOwner`), so no eviction path forgets a v3 location today. An
-  owner added later must forget this node's row when it removes a blob.
-- A healthy head none of whose holders can supply the bytes falls back to the
-  next index, as a miss does. Item 5 routes it to rebuild.
+- A healthy head whose listed holders cannot be reached falls back to the
+  next index, as a miss does. Only a head with no holder at all is rebuilt
+  (item 5).
 - A rendition planned from v3 is keyed by the contract key, for Source
   renditions as well. A session re-prepared after a v3 publication therefore
   gets a new rendition and re-cuts its segments once. The retained-manifest
@@ -244,12 +261,74 @@ Known limits, for the items that follow:
   Binding a resurrected session to its original plan needs the plan's digest
   on the durable route and is not built.
 
-### 5. Discrepancy quarantine
+### 5. Discrepancy quarantine — built
 
-A consumer that finds a healthy head's bytes contradict a fresh observation
-calls `quarantine_copy_index_v3_head`. The deterministic successor
-generation re-enters items 1–2. The old pointer stays readable until the
-successor publishes.
+Only the Analysis worker quarantines, through
+`quarantine_copy_index_v3_head` under a coordination claim on the head's
+deterministic repair generation (`copy_index_v3_rebuild_generation`).
+
+- Contradiction. Before a healthy head is called done, `publish_source`
+  compares the set's fresh rows with the head's decoded variant from this
+  node's own v3 root (`reconcile_with_head`): every observed row must be in
+  the published table unchanged. Only when this node's engine digest is the
+  variant's producer engine; two ffmpeg builds may cut the same bytes
+  differently. A blob that is absent, unreadable or refused proves nothing.
+  A contradicted head is quarantined with `copy_observation_contradiction`
+  whether or not a viewer holds the source. Cost: one local blob read, hash
+  and decode per completed range of a title that already has a healthy
+  head.
+- Adoption. The set then seals for the repair generation, so items 1–2
+  rebuild it. A set that meets a quarantined head adopts its desire only
+  when that is exactly the repair generation of the blob and epoch the head
+  still records. Playback rows keep arriving under their own generation and
+  still fold in.
+- Reader defects. The VOD reader cannot claim. It hands the worker a typed
+  `CopyIndexDefect` (head epoch and blob) through a new variant of the
+  existing copy-analysis inbox; the pass that folds the inbox handles it.
+  - `copy_index_hdr10_unindexed`: the worker re-checks its own verified copy.
+  - `copy_index_no_holder`: this node has no copy and no other holder is
+    listed, or every listed one answered the route's positive 404. A node
+    the replicated removal fence ejected is not listed at all; an
+    unreachable member still counts. The worker re-reads the list first.
+  - `copy_index_sealed_init_mismatch`: only when this node's engine digest
+    is the variant's producer engine. Another engine's init says nothing
+    about the variant, so the generation's own refusal is all that happens.
+  A refusal with no computed contract to compare (the promotion failed)
+  fails the generation and reports nothing. The claim the worker borrowed
+  is ended as a stranded coordinator, uncharged; the origin's next
+  observation of the source enqueues its own request. Defects share the
+  two-slot inbox with committed ranges: a full inbox drops the report and
+  the next start that meets the head makes it again.
+- Eviction. `CopyIndexCacheOwner` registers the v3 root with the playback
+  cache budget as `FragmentCacheOwner` does for v2. Evicting a blob drops
+  this node's holder rows for those bytes under every contract. It refuses
+  the blob of a readable head this node is the last member holding, so
+  cache pressure cannot turn a healthy head into a rebuild loop. Coldness
+  is the file's access time, as for v2; neither owner touches it.
+- Stranded coordinators. The first copy-analysis pass of a process retires
+  this node's queued coordination requests created before the process made
+  its registry (`cancelled`, `coordination_stranded`), in one store
+  statement. A request whose role still names a physical custody is left
+  for the claimant that must settle it. The request that replaces a retired
+  one inherits its attempt count, so a restart never resets the attempt
+  limit.
+
+Known limits:
+
+- A quarantined head is unreadable everywhere until the origin next
+  observes the source: only the origin rebuilds, and only from observations
+  it holds in memory. Until then readers use their next index, as before.
+- A last-holder blob is never evicted, so the v3 root's floor is one blob
+  per head this node alone holds.
+- `forget_copy_index_v3_blob_holder` and `copy_index_v3_last_blob_holder`
+  read their tables by blob, which no index covers. Only eviction calls
+  them.
+- A sealed-init refusal names its head through a per-process map of the
+  last variant planned for each rendition key; a restart forgets it.
+- Not unit tested: `publish_source` end to end (its `PendingSource` needs a
+  Source authority only plurx-core's session store builds), the budget
+  calling the eviction owner, and the hiqlite backend of the new store
+  operations (generic statements) and of the enqueue changes.
 
 ### 6. Local playback observations
 
