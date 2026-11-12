@@ -390,6 +390,11 @@ async fn a_description_without_production_proof_still_reaches_the_trial() {
             causes: Vec::new(),
         },
     ));
+    assert!(
+        super::processed_upgrade::projected_processed_candidate(&fixture.state, &intent, &source)
+            .is_some(),
+        "the admission before the trial sees the description"
+    );
     let reached = std::sync::atomic::AtomicBool::new(false);
     let outcome = super::processed_upgrade::run_upgrade_with(
         &fixture.state,

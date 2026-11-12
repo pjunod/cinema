@@ -479,7 +479,7 @@ pub(in crate::http) async fn viewer_film_time_ms(
 /// of the ordinary catalog, on this node, at the height the trial renders.
 /// Its recipe digest and bitrate are what recovery and link evidence are kept
 /// under, so admission can refuse it before the trial spends the GPU.
-fn projected_processed_candidate(
+pub(in crate::http) fn projected_processed_candidate(
     state: &AppState,
     intent: &UpgradeIntent,
     source: &plurx_core::domain::MediaFile,
