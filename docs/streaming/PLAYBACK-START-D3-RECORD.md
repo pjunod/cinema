@@ -1,6 +1,6 @@
 # Playback start — D3 build records
 
-**Status:** open — what each D3 sub-lane built against [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) and where it departs from that contract. D3a recorded; D3t, D3b–D3e not built. Section numbers (§7.1, §9-1 …) refer to the contract.
+**Status:** open — what each D3 sub-lane built against [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) and where it departs from that contract. D3a and D3t recorded; D3b–D3e not built. Section numbers (§7.1, §9-1 …) refer to the contract.
 **Author:** Claude (claude-sonnet-5-5, session 01BCWL9xwmpSjitHqZMTRAht).
 
 ## 1. D3a build record (2026-11-12)
@@ -67,3 +67,39 @@ With the build on a voter and one ingress, drive §9's scenario and read, per no
 ## 5. Gates
 
 Run on the build host, none against CI: `cargo fmt --check`; clippy for `-p plurxd -p plurx-core --all-targets` with and without `plurx-core/hiqlite-contract-tests` (and the `cluster-integration-tests` tests); `cargo test -p plurx-core --features hiqlite-store --lib` for the census, placeholder census and the new method-split tests; `cargo test -p plurxd --bin plurxd` for the metric tests; `cargo test -p plurxd --features cluster-integration-tests --test cluster_activity create_` for the per-shape pin; `scripts/check-formal`; `scripts/history-audit`; `make validation-lint`; `scripts/paperwork`. Results are in the PR.
+
+## 6. D3t build record (2026-11-12)
+
+Built on `claude/ps-d3t` from `claude/ps-e1c-d3a`. §4.1 exactly: additive triggers that bind every planning key to `playback_input_generation`, on both stores, with a pinned key list. `PLAYBACK_INPUT_SCHEMA` is untouched and the cluster schema version does not move.
+
+**What was built.**
+
+- `store/playback_input_keys.sql` and `store/playback_input_keys.rs`: a marker table `playback_input_keys_schema(singleton, version=1)` and three triggers, `playback_input_keys_insert`, `playback_input_keys_update` (new or old key in the list) and `playback_input_keys_delete`, each running the same `UPDATE playback_input_generation SET generation = generation + 1` as the glob triggers. New names, so old binaries ignore them and they keep firing after a rollback.
+- Hiqlite: an extension installed beside source arbitration and analysis coordination, at bootstrap and on every `SchemaMigrationAction::Current` open (`install_playback_input_keys_schema`). `playback_input_keys_shape` compares every installed object's SQL with what SQLite itself stores for the canonical text (`schema_objects`), refuses a partial or mutated shape, and requires the committed marker. The install is one replicated transaction guarded by a raced-install check; settlement is by re-reading the shape. Both shape reads carry the method label `playback_input_keys_shape` and an `// authority:` reason; the consistent-read census row for `hiqlite.rs` rises 67 to 69.
+- SQLite: one `MIGRATIONS` entry, v129, the same SQL. (SQLite has no extension mechanism; its marker is `user_version` plus the marker table.)
+- Test, both stores: `store_contract::every_planning_key_write_moves_the_playback_input_generation` writes (insert, update, delete) every key in the list plus a glob key of each family and asserts the generation moves, and that a `jobs.*` key does not. Delete goes through a raw handle (`StrandedFieldOrder::delete_setting`) because the Store trait has no setting delete. Unit test `playback_input_keys::tests::every_bound_key_moves_the_generation_and_others_do_not` does the same on raw SQL, including rollback, renames into and out of the list, and idempotent install.
+- Pins: `the_extra_key_list_is_pinned` (the literal list, sorted, none inside a glob), `the_sql_names_exactly_the_pinned_keys` (four IN-lists, same list), and in `plurxd` (`transcode/manager/candidates.rs`) `every_planning_key_moves_the_playback_input_generation` (every `QUALITY_PLANNING_KEYS` entry is covered by a glob or the extension) and `every_key_the_create_chain_reads_moves_the_playback_input_generation` (the derived chain list below).
+
+**The key list** (`PLAYBACK_INPUT_EXTRA_KEYS`): `cache.max_gb`, `cluster.media_pool_enabled`, `cluster.session_takeover_enabled`, `vod.output_preparation`, `vod.rolling_retention`. These are the keys the create chain reads that fall outside `playback.*` and `transcode.*`; D3b's widening of `QUALITY_PLANNING_KEYS` adds only keys inside the globs or this list.
+
+**How it was derived.** From every `get_setting`, `get_settings`, `get_setting_pair`, `num_setting` and `keys::` read reachable from the contract's §6.1 chains and the D3a per-method table (`get_settings` 2, `get_setting` 1 or 4, `local_get_settings` 1):
+
+- `vod_settings` (`tc.rs:4661`): `playback.vod_presentation`, `.vod_working_set_bytes`, `.vod_block_budget_secs`, `.vod_materialize_budget_secs`, `.vod_blocked_get_cap`, `.sdr_master_codecs`, `.vod_index_cluster_cache`, `.hevc_unverified_copy`, `.vod_live_recovery` (all inside the glob), `cache.max_gb` and `vod.output_preparation` (outside);
+- `cluster_playlist_is_typeless` (`desc.rs:140`): `playback.hls_typeless_sliding` (glob) and `cluster.session_takeover_enabled` (outside);
+- `remote_placement_ready` (`mp.rs:1363`): `cluster.media_pool_enabled` (outside);
+- the rolling start (`start.rs:67-110`): `vod.rolling_retention` and `cache.max_gb` (outside), the readrate, burst and ahead limits (glob);
+- admission (`describe.rs:164-176`, `vodencode.rs` pairs): `transcode.max_hw_sessions`, `transcode.software_pool_threads` (glob);
+- the rest are already in `QUALITY_PLANNING_KEYS` (all glob keys).
+
+Read but not bound, with reasons: `playback.prepared_quality_handoff` (`preparation.rs`, runs after the answer), `library_channels.enabled` (`control.rs`, a control route), `playback.macos_*` and `playback.automatic_decoder_recovery` and `transcode`-artifact qualification (published at startup and refreshed by the settings owner, not read by a create). `live_tv.*` and `dvr.*` are not read by the create chain. A key a later lane makes the create read must be added to the SQL, the Rust list and both pins in one change, with a new marker version.
+
+## 7. D3t decisions
+
+1. **SQLite takes v129; the cluster takes no version.** The contract says no schema version bump, which binds the cluster (a bump makes old voters refuse to open). SQLite has only the `MIGRATIONS` ordinal, so v129 is the only way an existing SQLite database gains the triggers; the replicated store gets them by extension. A SQLite backup at v129 is refused by an older binary, as for every SQLite migration.
+2. **The list is five keys, not three.** The contract named the three outside-glob keys already in `QUALITY_PLANNING_KEYS` plus "what D3b widens it by". The two cluster switches are what D3b adds (typeless playlist, placement); they are bound now so D3b needs no second trigger change.
+3. **Deletes are tested through a raw handle.** The Store trait has no setting delete; the contract test adds a raw delete helper rather than a trait method that no production caller wants.
+4. **Co-author line.** Commits carry the session's `Claude Sonnet 5.5` attribution (the model that built them), not the `Claude Opus 5.5` line the E1 brief quotes.
+
+## 8. D3t gates
+
+On the build host, none against CI: `cargo fmt --check`; clippy `-D warnings` for `-p plurxd -p plurx-core --features plurx-core/hiqlite-store --tests` and with `plurx-core/hiqlite-contract-tests,plurxd/cluster-integration-tests`; the new tests and the planning-snapshot store-contract case on both backends; the consistent-read census and placeholder census; the `cluster_activity` per-shape pin (unmoved); `scripts/check-formal check-mapping` for the three packages (hiqlite.rs, sqlite/mod.rs and store_contract.rs rebound, reviewed in the commit message); `scripts/paperwork --merge-target origin/main`, `scripts/history-audit`, `scripts/validate lint`, `scripts/knowledge lint`, `scripts/scrub-infra-names --check`. Results are in the report to the coordinator.
