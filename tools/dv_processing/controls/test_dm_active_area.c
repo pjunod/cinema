@@ -116,6 +116,8 @@ static void test_l5_absent_and_zero_preserve_full_frame(void) {
 
 // FNV-1a 64 of every full-frame shader literal as it was before any active-area body existed for
 // its family (main c0a23481). A frame without a partial L5 compiles exactly these bytes.
+// The common header and the two CM v2.9 full-frame bodies were re-pinned once since, when the detail
+// input was held at the tone curve's top clip (c29din); the lattice and horizontal bodies are as then.
 static uint64_t fnv1a(const char *s) {
   uint64_t h=UINT64_C(0xcbf29ce484222325);
   for(;*s;s++){ h^=(unsigned char)*s; h*=UINT64_C(0x100000001b3); }
@@ -124,11 +126,11 @@ static uint64_t fnv1a(const char *s) {
 
 static void test_l5_cm29_absent_and_zero_preserve_full_frame(void) {
   const struct { const char *name,*text; size_t bytes; uint64_t hash; } pinned[]={
-    {"dv_dm_glsl_common",dv_dm_glsl_common,sizeof(dv_dm_glsl_common)-1,UINT64_C(0x995c4c58b3fdb052)},
-    {"dv_dm_body_point_cm29",dv_dm_body_point_cm29,sizeof(dv_dm_body_point_cm29)-1,UINT64_C(0x7bfd1b52f554394d)},
+    {"dv_dm_glsl_common",dv_dm_glsl_common,sizeof(dv_dm_glsl_common)-1,UINT64_C(0x5e81da51f2dc4c74)},
+    {"dv_dm_body_point_cm29",dv_dm_body_point_cm29,sizeof(dv_dm_body_point_cm29)-1,UINT64_C(0x91b13abfbd77aa08)},
     {"dv_dm_body_lattice",dv_dm_body_lattice,sizeof(dv_dm_body_lattice)-1,UINT64_C(0x03994d4550df62ee)},
     {"dv_dm_body_h",dv_dm_body_h,sizeof(dv_dm_body_h)-1,UINT64_C(0xf0a6ba996a6b0485)},
-    {"dv_dm_body_final_cm29",dv_dm_body_final_cm29,sizeof(dv_dm_body_final_cm29)-1,UINT64_C(0x634cb0da7594b1a5)},
+    {"dv_dm_body_final_cm29",dv_dm_body_final_cm29,sizeof(dv_dm_body_final_cm29)-1,UINT64_C(0x5ec91d4ca829f8ec)},
     {"dv_dm_body_final_cm4",dv_dm_body_final_cm4,sizeof(dv_dm_body_final_cm4)-1,UINT64_C(0xa8af44f878d1b639)},
     {"dv_dm_body_final_active_cm4",dv_dm_body_final_active_cm4,sizeof(dv_dm_body_final_active_cm4)-1,UINT64_C(0x9748865b596d93b4)},
     {"dv_dm_body_h_active",dv_dm_body_h_active,sizeof(dv_dm_body_h_active)-1,UINT64_C(0xe407f680f7c710a2)},
@@ -229,6 +231,45 @@ static void test_l5_cm29_crop_domain_excludes_adversarial_bars(void) {
   puts("test_l5_cm29_crop_domain_excludes_adversarial_bars: PASS");
 }
 
+// Smile w33 (CM v2.9, 1000-nit P3 master, 600-nit target, exact L2): gray fields at and above the
+// point where the tone curve reaches its top clip (PQ 0.693885), one darker speck each. The
+// expected values are the licensed cm_offline output for the same picture and metadata
+// (cm29-speck-sweep, 2026-11-12): on the clip the reference restores no detail, so each speck lands
+// on its pointwise value. Before the detail input was held at the clip point the CPU reference
+// gave 0.64841, 0.69446 and 0.65033 for the first three.
+static void test_cm29_detail_holds_at_the_top_clip(void) {
+  DoviExtMetadataBlockLevel1 l1 = {.min_pq=0, .avg_pq=1229, .max_pq=2841};
+  DoviExtMetadataBlockLevel6 l6 = {.max_display_mastering_luminance=1000, .min_display_mastering_luminance=1};
+  DoviExtMetadataBlockLevel2 l2 = {.target_max_pq=2851, .trim_slope=2071, .trim_offset=2048, .trim_power=1963,
+      .trim_chroma_weight=2048, .trim_saturation_gain=2048, .ms_weight=2048};
+  const DoviExtMetadataBlockLevel2 *list[1] = {&l2};
+  DoviVdrDmData dm = {0};
+  dm.dm_data.level1=&l1; dm.dm_data.level6=&l6;
+  dm.dm_data.level2.list=(__typeof__(dm.dm_data.level2.list))list; dm.dm_data.level2.len=1;
+  dv_dm_frame f;
+  assert(dv_dm_prepare(&dm,600,.005,DM_P3D65,1000,true,true,&f)==NULL);
+  assert(f.algo==29 && f.weight>-1 && f.c29.tr.cw==0 && !strcmp(f.trim,"l2-exact"));
+  assert(fabs(f.c29.xtop-0.693885345)<1e-7 && f.u[10][3]==(float)f.c29.xtop);
+  enum { W=33, H=17 };
+  static const struct { float field, speck; double licensed; } cases[] = {
+    {0.72f, 0.67f, 0.67243}, {0.72f, 0.718f, 0.69630}, {0.76f, 0.71f, 0.69630}, {0.90f, 0.85f, 0.69630},
+    {0.69f, 0.64f, 0.64243},   // below the clip: detail as before
+  };
+  float in[W*H*4], out[W*H*4];
+  for(size_t k=0;k<sizeof(cases)/sizeof(cases[0]);k++) {
+    for(int i=0;i<W*H;i++){ in[4*i]=in[4*i+1]=in[4*i+2]=cases[k].field; in[4*i+3]=1; }
+    const int c=(H/2)*W+W/2; in[4*c]=in[4*c+1]=in[4*c+2]=cases[k].speck;
+    assert(dv_dm_cpu_render(&f,in,W,H,out));
+    for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-cases[k].licensed)>6e-5) {
+      fprintf(stderr,"top clip: field %.3f speck %.3f channel %d: %.6f, licensed %.5f\n",cases[k].field,cases[k].speck,ch,out[4*c+ch],cases[k].licensed); abort(); }
+  }
+  // a curve that never reaches its clip inside [0,1] leaves the detail input alone
+  dm_cm29_state s=f.c29; s.TM=2.0; s.tr.lift=s.tr.gain=s.tr.gamma=0;
+  const double top=dm_cm29_tc(&s,1.0); assert(top<s.TM);
+  dm_cm29_pix p={.I=0.95,.C=0.1}; s.xtop=1.0; assert(dm_cm29_detail_in(&s,&p,0)==0.95);
+  puts("test_cm29_detail_holds_at_the_top_clip: PASS");
+}
+
 int main(int argc,char **argv) {
   if(argc>2)return 2;
   bool matched=argc==1;
@@ -239,6 +280,7 @@ int main(int argc,char **argv) {
   RUN(test_l5_cm29_owned_offsets_and_rectangles);
   RUN(test_l5_cm29_absent_and_zero_preserve_full_frame);
   RUN(test_l5_cm29_crop_domain_excludes_adversarial_bars);
+  RUN(test_cm29_detail_holds_at_the_top_clip);
 #undef RUN
   if(!matched)return 2;
   puts("test_dm_active_area: PASS");

@@ -158,6 +158,25 @@ def cm29_dark_colour():
 dark = cm29_dark_colour()
 for tgt in ("600 0 1 4000", "1000 0.005 1 4000", "1000 0 0 4000", "100 0.005 2 4000"):
     ok &= run('cm29_dark_colour_' + tgt.split()[0] + '_f' + tgt.split()[1] + '_p' + tgt.split()[2], cm29 + 'target ' + tgt + '\n', dark, W, H, tgt.split()[2] == '0')
+# CM v2.9 detail at the top clip (cm29_top_clip): fields from below to above the intensity where the
+# tone curve reaches its top value (L1 max 3728 = PQ 0.910), with gray and coloured specks darker and
+# brighter than the field on a 16x8 grid. The detail input is held at the clip point, so the shader's
+# uniform and both detail planes (cm29: live chroma weight) run against the CPU reference there.
+def cm29_top_clip():
+    img = np.zeros((H, W, 3)); rng = np.random.default_rng(29)
+    fields = np.linspace(0.84, 1.0, 8)
+    for b, v in enumerate(fields):
+        r0, r1 = b * H // len(fields), (b + 1) * H // len(fields)
+        img[r0:r1] = v
+        ys, xs = np.meshgrid(np.arange(r0 + 4, r1 - 4, 8), np.arange(8, W - 8, 16), indexing='ij')
+        n = ys.size
+        speck = np.clip(v + rng.uniform(-0.2, 0.06, (n, 1)) + rng.uniform(-0.05, 0.05, (n, 3)) * (rng.uniform(0, 1, (n, 1)) < 0.5), 0, 1)
+        img[ys.ravel(), xs.ravel()] = speck
+    return img
+clip = cm29_top_clip()
+for fam, meta in (('cm29', cm29), ('cm29b', cm29b)):
+    for tgt in ("600 0 1 4000", "1000 0.005 1 4000"):
+        ok &= run(fam + '_top_clip_' + tgt.split()[0] + '_p' + tgt.split()[2], meta + 'target ' + tgt + '\n', clip, W, H)
 # a black frame (L1 0,0,0) maps instead of refusing
 black = 'l1 0 0 0\nl6 50 4000\n'
 ok &= run('cm29_black_1000_p1', black + 'target 1000 0 1 4000\n', np.zeros((H, W, 3)), W, H)

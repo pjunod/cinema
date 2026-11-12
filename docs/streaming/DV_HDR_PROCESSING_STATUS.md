@@ -37,6 +37,16 @@ filter too. It had blended bars into two boundary rows: on four native frames,
 up to 27,652 pixels and 4.32 dE ITP worse than P8 (CPU reference with the
 fix: 1,658 to 3). Bars map pointwise; no partial L5, no change.
 
+**CM v2.9 detail at the top clip (2026-11-12):** where the mapped intensity
+sits on the tone curve's top clip, `cm_offline` restores no detail; the model
+restored it from the unclipped source. The detail input is now held at the
+clip point (`dm_cm29_detail_in`, shader `c29din`), top only: the same hold at
+the bottom of the curve moved 258 Godfather II pixels away from the reference.
+Synthetic fields above the clip: pixels over 0.05 dE ITP 12,443 to 0 (0.72 and
+0.76 PQ), 6,180 to 0 (0.69). Smile w33 and Godfather II w28 have no pixel
+above their clip points and render byte-identically. The chroma-weighted plane
+follows by construction and is not measured.
+
 **CM4 transfer precision (2026-11-11):** CM4 point and final passes now use
 the normative ST 2084 helpers (candidate C: precise split-float PQ OETF/EOTF,
 analytical black, exact 10000-nit white); CM v2.9, lattice and horizontal

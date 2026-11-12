@@ -68,6 +68,9 @@ class ActiveAreaCControl(unittest.TestCase):
     def test_l5_cm29_crop_domain_excludes_adversarial_bars(self):
         self.run_case("test_l5_cm29_crop_domain_excludes_adversarial_bars")
 
+    def test_cm29_detail_holds_at_the_top_clip(self):
+        self.run_case("test_cm29_detail_holds_at_the_top_clip")
+
 
 if __name__ == "__main__":
     unittest.main()
