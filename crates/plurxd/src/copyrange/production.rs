@@ -93,6 +93,35 @@ impl CopyRangeProduction {
         });
         production
     }
+    /// A production with no generation behind it, for driving the read bank
+    /// against a bank the test sets. Nothing produces and nothing settles.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn banked_for_test(
+        files: CopyRangeFiles,
+        observer: crate::source_custody::SourceObserver,
+        watermarks: (u64, u64),
+        seek_bootstrap: crate::source_input::SourceSeekBootstrap,
+    ) -> Arc<Self> {
+        let publisher = files.publisher();
+        Arc::new(Self {
+            files: AsyncMutex::new(files),
+            changed: Notify::new(),
+            publisher,
+            stop: CancellationToken::new(),
+            outcome: Mutex::new(None),
+            seek_bootstrap,
+            wanted_ms: 0,
+            bank: AsyncMutex::new(ReadBank {
+                observer,
+                anchor_ms: 0,
+                snapshot: None,
+                observed_at: Instant::now(),
+                low_ms: watermarks.0,
+                high_ms: watermarks.1,
+                held: false,
+            }),
+        })
+    }
     pub(crate) async fn observe_demand(
         &self,
         demand: crate::playback_control::PlaybackDemandSnapshot,

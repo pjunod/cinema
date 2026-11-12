@@ -5795,7 +5795,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # owner of the one existing spawn, holding its session rendition's dispatch
 # and admission until the registered reap, and no production path constructs
 # it yet.
-expected_occurrences = 2206
+# 2206 -> 2207 with a local range's input admission (item 6, plan step 5):
+# one `#[cfg(test)]`-only `tokio::time::timeout` in
+# `copyrange/local_tests.rs`, the single bound every wait of those tests
+# runs under (a range's start, its end, its settlement and a closed Input's
+# custody release). It settles nothing: when a range's end elapses the test
+# retires the range and awaits its settlement under the same bound.
+# `LocalCopyRange` adds no task, timer or process to the daemon: it has no
+# lease, loop or clock of its own, its child is the one existing copy spawn
+# under a Local owner, and no production path starts one yet. Boot reaping
+# of its manifests is one synchronous directory clear at startup.
+expected_occurrences = 2207
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

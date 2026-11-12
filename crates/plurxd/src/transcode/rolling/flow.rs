@@ -278,7 +278,7 @@ pub(super) fn rolling_initial_runway_ms(rate: f64) -> i64 {
 
 /// Physical bank for source sharing. This is producer budget only: the
 /// publication clock's advertised endpoints and steady reserve are unchanged.
-pub(super) fn rolling_source_watermarks(rate: f64) -> (u64, u64) {
+pub(crate) fn rolling_source_watermarks(rate: f64) -> (u64, u64) {
     let low = rolling_initial_runway_ms(rate).max(1) as u64;
     let high =
         low.saturating_add((rolling_publication_batch_ms(rate).max(1) as u64).saturating_mul(2));

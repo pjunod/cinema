@@ -402,6 +402,22 @@ impl CopyRangeFiles {
         self.payload_retired = true;
         Ok(())
     }
+    /// Say this much media is committed from `media_origin_ms`, for a test
+    /// that drives the read bank without a generation.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn bank_for_test(&mut self, media_origin_ms: i64, seconds: f64) {
+        self.origin = Some(media_origin_ms);
+        self.segments = vec![StoredCopySegment {
+            index: 0,
+            name: fmp4_name(0),
+            bytes: 0,
+            sha256: String::new(),
+            seconds,
+            first_row: 0,
+            rows: 0,
+        }];
+        self.committed_segments = 1;
+    }
     pub(crate) fn publisher(&self) -> CopyRangePublisher {
         self.publisher.clone()
     }
