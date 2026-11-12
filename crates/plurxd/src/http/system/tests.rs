@@ -498,6 +498,9 @@ fn the_roster_reader_has_exactly_these_callers() {
     assert_eq!(
         found,
         vec![
+            // Activity → Starts (playback start G1): admin-only, `AdminUser`
+            // is extracted before the body runs, so `true` is that proof.
+            ("activity_starts.rs".to_owned(), "true".to_owned()),
             // Admin-only route: `AdminUser` was extracted before the body
             // ran, so `true` is that proof handed on.
             ("analysis.rs".to_owned(), "true".to_owned()),
