@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 use std::fs;
 
 fn split(v: f64, denom: u64) -> (i64, u64) {
+    // Integer parts outside [-64, 63] are refused: fixed-point decoders are not expected to carry them.
+    assert!(v.is_finite() && v >= -64.0 && v < 63.0, "coefficient {v} outside the writable range [-64, 63)");
     let scale = (1u64 << denom) as f64;
     let mut int = v.floor() as i64;
     let mut frac = ((v - int as f64) * scale).round() as u64;

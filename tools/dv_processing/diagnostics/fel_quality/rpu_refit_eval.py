@@ -137,6 +137,46 @@ class Fit:
             q = 2.0 ** 23; poly = np.round(poly * q) / q; mmr = np.round(mmr * q) / q
         return {'lut': lut, 'poly': poly, 'mmr': mmr}
 
+    def solve_safe(self):
+        """amendment_3: monotone luma target continued by identity slope, count+floor weighted pieces; ridge MMR toward identity."""
+        cnt = self.ycnt; pop = np.flatnonzero(cnt > 0); m = self.ysum[pop] / cnt[pop]
+        # Pool-adjacent-violators: count-weighted non-decreasing fit of the conditional mean over populated codes.
+        blocks = []
+        for v, wt in zip(m, cnt[pop]):
+            blocks.append([v * wt, wt, 1])
+            while len(blocks) > 1 and blocks[-2][0] / blocks[-2][1] > blocks[-1][0] / blocks[-1][1]:
+                b = blocks.pop(); blocks[-1][0] += b[0]; blocks[-1][1] += b[1]; blocks[-1][2] += b[2]
+        iso = np.concatenate([np.full(n, sv / sw) for sv, sw, n in blocks])
+        codes = np.arange(1024); target = np.interp(codes, pop, iso)
+        lo, hi = pop[0], pop[-1]
+        target[:lo] = 4 * codes[:lo] + (iso[0] - 4 * lo); target[hi + 1:] = 4 * codes[hi + 1:] + (iso[-1] - 4 * hi)
+        target = np.clip(target, 0, 4095)
+        floor = 0.01 * cnt[pop].mean(); poly = []
+        for p_ in range(8):
+            xsel = codes[128 * p_:128 * (p_ + 1)]; wts = cnt[xsel] + floor
+            xn = xsel / 1023; A = np.stack([np.ones_like(xn), xn, xn * xn], -1) * np.sqrt(wts)[:, None]
+            poly.append(np.linalg.lstsq(A, target[xsel] / 4095 * np.sqrt(wts), rcond=None)[0])
+        poly = np.array(poly)
+        ident = np.zeros((22, 2)); ident[2, 0] = ident[3, 1] = 4 * 1023 / 4095  # Cb <- u, Cr <- v
+        lam = 1e-5 * cnt.sum()
+        mmr = np.linalg.solve(self.xtx + lam * np.eye(22), self.xty + lam * ident)
+        q = 2.0 ** 23
+        return {'lut': target, 'poly': np.round(poly * q) / q, 'mmr': np.round(mmr * q) / q, 'target': target}
+
+
+def diagnostics(fit):
+    """Worst departure from identity over every luma code and a 17^3 (y,u,v) grid; monotonicity; largest coefficient."""
+    codes = np.arange(1024); cf = fit['poly'][np.minimum(codes // 128, 7)]; xn = codes / 1023
+    yl = (cf[:, 0] + cf[:, 1] * xn + cf[:, 2] * xn * xn) * 4095
+    g = np.linspace(0, 1023, 17).round().astype(np.int64)
+    grid = np.stack(np.meshgrid(g, g, g, indexing='ij'), -1).reshape(-1, 3)
+    co = mmr_basis(grid) @ fit['mmr'] * 4095
+    return {'luma_max_abs_minus_identity_codes12': float(np.abs(yl - 4 * codes).max()),
+            'luma_monotone': bool(np.all(np.diff(yl) >= -1e-6)),
+            'luma_max_jump_at_pivots_codes12': float(max(abs(yl[128 * k] - yl[128 * k - 1]) for k in range(1, 8))),
+            'chroma_max_abs_minus_identity_codes12_on_grid': float(np.abs(co - 4 * grid[:, 1:]).max()),
+            'max_abs_coefficient': float(max(np.abs(fit['poly']).max(), np.abs(fit['mmr']).max()))}
+
 
 def apply(fit, kind, base, ycs=None):
     yb = base[..., 0]
@@ -153,20 +193,26 @@ def apply(fit, kind, base, ycs=None):
 
 # Fit on the phase-0 stride-8 lattice of all 48 frames (window) and per frame (oracle).
 fxs, fys = lattice((0,))
-win = Fit(); wcs = Fit(); per = []
+win = Fit(); wcs = Fit(); per = []; halves = [Fit(), Fit()]
 for f in range(48):
     pf = Fit()
     for base, centered, ycs in chunks(f, fxs, fys):
-        win.add(base, centered); pf.add(base, centered); wcs.add(base, centered, ycs)
+        win.add(base, centered); pf.add(base, centered); wcs.add(base, centered, ycs); halves[f // 24].add(base, centered)
     per.append(pf.solve())
-fits = {'Fp_lut': (win.solve(), 'lut'), 'Fp_poly': (win.solve(quantize=True), 'poly'), 'Fp_cs': (wcs.solve(), 'lut')}
+fits = {'Fp_lut': (win.solve(), 'lut'), 'Fp_poly': (win.solve(quantize=True), 'poly'), 'Fp_cs': (wcs.solve(), 'lut'),
+        'Fp_safe': (win.solve_safe(), 'poly')}
+oos = {'Fp_poly_oos': [halves[1].solve(quantize=True), halves[0].solve(quantize=True)],  # frames 0-23 use the 24-47 fit and vice versa
+       'Fp_safe_oos': [halves[1].solve_safe(), halves[0].solve_safe()]}
+fit_diag = {k: diagnostics(v[0]) for k, v in fits.items() if k in ('Fp_poly', 'Fp_safe')}
+fit_diag.update({f'{k}_half{i}': diagnostics(v[i]) for k, v in oos.items() for i in (0, 1)})
 print(json.dumps({'fitted': True, 'samples': int(win.ycnt.sum())}), flush=True)
 
 # Composer domain (amendment_2): x = code / 1024 in, s * 4096 out; the fit used code/1023 in, value/4095 out.
 K, RS = 4095 / 4096, 1024 / 1023
 DEG = [0] + [g * p for p in (1, 2, 3) for g in (1, 1, 1, 2, 2, 2, 3)]
 if a.write_plan:
-    pf = fits['Fp_poly'][0]
+    pf = fits['Fp_safe'][0]  # amendment_3: only the safe fit is written
+    assert all(abs(v) < 63 for v in pf['poly'].ravel()) and all(abs(v) < 63 for v in pf['mmr'].ravel()), 'coefficient outside the writable range'
     luma = [[K * c[0], K * c[1] * RS, K * c[2] * RS * RS] for c in pf['poly'].tolist()]
     chroma = []
     for ch in range(2):
@@ -208,7 +254,7 @@ if a.stride == 1:
 else:
     xs, ys = lattice((0, 1))
 frames = list(range(48)) if a.frames == 'all' else [int(x) for x in a.frames.split(',')]
-ARMS = ['F', 'Fp_lut', 'Fp_poly', 'Fp_frame', 'Fp_cs'] + (['Fp_rpu'] if rb else [])
+ARMS = ['F', 'Fp_lut', 'Fp_poly', 'Fp_frame', 'Fp_cs', 'Fp_safe', 'Fp_poly_oos', 'Fp_safe_oos'] + (['Fp_rpu'] if rb else [])
 
 
 def score(model, f):
@@ -217,7 +263,9 @@ def score(model, f):
         R = fm.model_rgb(model, base, centered, matrix, offsets, lms)
         lums.append((10000 * fm.eotf(R.astype(np.float64) / 65535) @ fm.Y_WEIGHTS).ravel())
         arm_d = {'F': None, 'Fp_lut': apply(fits['Fp_lut'][0], 'lut', base), 'Fp_poly': apply(fits['Fp_poly'][0], 'poly', base),
-                 'Fp_frame': apply(per[f], 'lut', base), 'Fp_cs': apply(fits['Fp_cs'][0], 'lut', base, ycs)}
+                 'Fp_frame': apply(per[f], 'lut', base), 'Fp_cs': apply(fits['Fp_cs'][0], 'lut', base, ycs),
+                 'Fp_safe': apply(fits['Fp_safe'][0], 'poly', base),
+                 'Fp_poly_oos': apply(oos['Fp_poly_oos'][f // 24], 'poly', base), 'Fp_safe_oos': apply(oos['Fp_safe_oos'][f // 24], 'poly', base)}
         if rb:
             arm_d['Fp_rpu'] = apply_rpu(base)
         for k, d in arm_d.items():
@@ -248,7 +296,8 @@ for model in fm.MODEL_IDS:
     s = {}
     for arm in ARMS:
         pooled = sum(results[f][model][arm]['full']['mean'] for f in frames) / len(frames)
-        s[arm] = {'pooled_full_mean': pooled}
+        s[arm] = {'pooled_full_mean': pooled, 'worst_frame_p99': max(results[f][model][arm]['full']['p99'] for f in frames),
+                  'worst_frame_max': max(results[f][model][arm]['full']['max'] for f in frames)}
         if arm != 'F':
             s[arm]['frames_full_mean_below_F'] = sum(results[f][model][arm]['full']['mean'] < results[f][model]['F']['full']['mean'] for f in frames)
             s[arm]['frames_dark_p99_below_F'] = sum(results[f][model][arm]['bands'].get(dark, {}).get('p99', 0) < results[f][model]['F']['bands'].get(dark, {}).get('p99', 0) for f in frames)
@@ -258,7 +307,9 @@ report = {'scope': 'RPU re-fit ceiling (protocol-rpu-refit-20261112.json); froze
           'script_sha256': sha(Path(__file__).resolve()), 'frozen_tools': {Path(s['path']).name: s['sha256'] for s in manifest['sources']},
           'inputs': {k: sha(p) for k, p in (('bl', a.bl), ('el', a.el), ('metadata_jsonl', a.metadata_jsonl), ('bands', a.bands_json))},
           'roi': a.roi, 'stride': a.stride, 'frames': frames, 'fit_samples': int(win.ycnt.sum()),
-          'fit': {'Fp_poly_luma_pieces_normalised': fits['Fp_poly'][0]['poly'].tolist(), 'Fp_poly_chroma_mmr_normalised': fits['Fp_poly'][0]['mmr'].tolist()},
+          'fit_diagnostics': fit_diag,
+          'fit': {'Fp_safe_luma_pieces_normalised': fits['Fp_safe'][0]['poly'].tolist(), 'Fp_safe_chroma_mmr_normalised': fits['Fp_safe'][0]['mmr'].tolist(),
+                  'Fp_poly_luma_pieces_normalised': fits['Fp_poly'][0]['poly'].tolist(), 'Fp_poly_chroma_mmr_normalised': fits['Fp_poly'][0]['mmr'].tolist()},
           'summary': summary, 'results': {str(f): results[f] for f in frames}}
 a.output.write_text(json.dumps(report, indent=1) + '\n')
 print(json.dumps({m: {k: round(v['pooled_full_mean'], 4) for k, v in s.items()} for m, s in summary.items()}))
