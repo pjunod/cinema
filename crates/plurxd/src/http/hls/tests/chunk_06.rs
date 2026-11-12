@@ -4541,6 +4541,7 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
         .request;
     request.kind = crate::transcode::SessionKind::Transcode { height: 720 };
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
+            required_fel_qualification: None,
         catalog_query: None,
         display_target: None,
         display_target_note: None,
@@ -4982,6 +4983,7 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
         .expect("recipe")
         .request;
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
+            required_fel_qualification: None,
         catalog_query: None,
         display_target: None,
         display_target_note: None,

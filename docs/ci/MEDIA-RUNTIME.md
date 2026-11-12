@@ -97,6 +97,11 @@ smoke checks before promoting a dependency update.
 
 The first ordinary base is pinned to index digest
 `sha256:17b3bf9f0d3ed5dd167540a3c805e30a7624fbd93dad250e9e866799ecb22cae`.
+On 2026-11-11 the pin moved to `sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67`,
+rebuilt from main `c0a234817`: its DV helper bundle carries the source identity
+that main's plurxd expects (the previous pin carried a Nov 7 `dv_dm.h`, so plurxd
+refused it and declined processed upgrades). Building the bundle from the
+application tree instead of the runtime follows separately.
 Both native platform builds succeeded. Media executable version checks passed;
 the amd64 helper loaders returned their expected usage errors. A cold
 `runtime-assets` application build with an empty source context resolved the

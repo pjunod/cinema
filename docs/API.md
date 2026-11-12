@@ -2251,6 +2251,17 @@ The owner relays this optional report in a bounded private response header
 peers. The ingress validates the incarnation and HDR10 selection before public
 projection; a missing or stale header omits the report.
 
+An accepted public response may also include
+`processing_skip: {generation, reason}` when the optional processed-DV upgrade
+kept the ordinary stream. `reason` is at most 512 Unicode characters and
+contains no control characters. It distinguishes unsupported hardware,
+waiting title/recipe qualification, quality refusal and preparation/admission
+failure. It does not establish that any processing was applied. The owner
+relays it through a private header bounded to 4096 bytes; ingress validates
+the generation before projection. Clients clear an omitted or stale report,
+retain the original enhancement facts and active badges, and explain only
+inactive enhancements for their current generation.
+
 The request reports what the client is doing — `demand` (`active` · `hold` ·
 `end`), `position_ms`, `buffered_from_ms` (absent means *no contiguity
 evidence*, not a hole), `buffered_through_ms`, `playback_rate`,

@@ -167,7 +167,7 @@ impl Proof {
     }
 }
 
-fn open_at(parent: &File, name: &CStr, directory: bool) -> io::Result<File> {
+pub(super) fn open_at(parent: &File, name: &CStr, directory: bool) -> io::Result<File> {
     let flags = libc::O_RDONLY
         | libc::O_NOFOLLOW
         | libc::O_NONBLOCK
@@ -182,7 +182,7 @@ fn open_at(parent: &File, name: &CStr, directory: bool) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn administrator_owned(file: &File, directory: bool) -> io::Result<bool> {
+pub(super) fn administrator_owned(file: &File, directory: bool) -> io::Result<bool> {
     let m = file.metadata()?;
     Ok(m.uid() == 0
         && m.mode() & 0o022 == 0
@@ -198,6 +198,14 @@ fn read_host_proof() -> io::Result<Proof> {
     // Resolve the complete fixed path through pinned descriptors. An absent
     // optional mount does not change the ordinary worker recovery path.
     std::fs::symlink_metadata("/run/plurx-physical-stop/legacy-dv-title-v1.json")?;
+    let parent = admin_directory(&[])?;
+    let bytes = read_admin_file(&parent, c"legacy-dv-title-v1.json")?;
+    serde_json::from_slice(&bytes).map_err(io::Error::other)
+}
+
+/// The root-controlled `/run/plurx-physical-stop` directory (plus `nested`
+/// children), opened through pinned descriptors, for an unprivileged worker.
+pub(super) fn admin_directory(nested: &[&CStr]) -> io::Result<File> {
     // Linux reports effective/permitted capabilities per thread. Even a
     // nonroot worker with CAP_CHOWN or CAP_DAC_OVERRIDE could forge a proof.
     let status = std::fs::read_to_string("/proc/thread-self/status")?;
@@ -216,7 +224,10 @@ fn read_host_proof() -> io::Result<Proof> {
     }
     let root = File::open("/")?;
     let mut parent = root;
-    for name in [c"run", c"plurx-physical-stop"] {
+    for name in [c"run", c"plurx-physical-stop"]
+        .into_iter()
+        .chain(nested.iter().copied())
+    {
         if !administrator_owned(&parent, true)? {
             return Err(io::Error::other("untrusted host physical-stop ancestor"));
         }
@@ -225,7 +236,12 @@ fn read_host_proof() -> io::Result<Proof> {
     if !administrator_owned(&parent, true)? {
         return Err(io::Error::other("untrusted host physical-stop directory"));
     }
-    let file = open_at(&parent, c"legacy-dv-title-v1.json", false)?;
+    Ok(parent)
+}
+
+/// One bounded administrator-owned regular file inside `parent`.
+pub(super) fn read_admin_file(parent: &File, name: &CStr) -> io::Result<Vec<u8>> {
+    let file = open_at(parent, name, false)?;
     if !administrator_owned(&file, false)? {
         return Err(io::Error::other("untrusted host physical-stop proof file"));
     }
@@ -234,7 +250,7 @@ fn read_host_proof() -> io::Result<Proof> {
     if bytes.len() as u64 > MAX_PROOF {
         return Err(io::Error::other("host physical-stop proof exceeds bound"));
     }
-    serde_json::from_slice(&bytes).map_err(io::Error::other)
+    Ok(bytes)
 }
 
 pub(super) async fn replay(

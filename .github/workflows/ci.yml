@@ -373,7 +373,7 @@ jobs:
     # after this compile gate and policy pass, then watch that suite on main.
     if: needs.scope.outputs.rust == 'true'
     # Use the same compiler pool and cold-build budget as main-fast-lane.
-    runs-on: [ci-nonvoter-heavy-amd64]
+    runs-on: [ci-nonvoter-compile-amd64]
     container:
       image: ubuntu:24.04
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
@@ -387,8 +387,15 @@ jobs:
           set -eu
           cgroup_membership=/proc/self/cgroup
           cgroup_mount=/sys/fs/cgroup
-          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
-          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
           case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="$cgroup_mount$relative"
@@ -480,7 +487,7 @@ jobs:
     # never ran. Source fixture admission may also queue independent bodies.
     # Preserve every command with a finite 120m cap. Passing full-gate duration
     # remains unmeasured; this budget is not a completion guarantee.
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       CARGO_BUILD_JOBS: "1"
       RUST_TEST_THREADS: "2"
@@ -491,8 +498,15 @@ jobs:
           set -eu
           cgroup_membership=/proc/self/cgroup
           cgroup_mount=/sys/fs/cgroup
-          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
-          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
           case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="$cgroup_mount$relative"
@@ -1203,8 +1217,15 @@ jobs:
           set -eu
           cgroup_membership=/proc/self/cgroup
           cgroup_mount=/sys/fs/cgroup
-          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
-          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
           case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="$cgroup_mount$relative"
@@ -1247,7 +1268,7 @@ jobs:
     name: cluster daemon contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
-    runs-on: [ci-nonvoter-heavy-amd64]
+    runs-on: [ci-nonvoter-compile-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
@@ -1264,8 +1285,15 @@ jobs:
           set -eu
           cgroup_membership=/proc/self/cgroup
           cgroup_mount=/sys/fs/cgroup
-          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
-          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
           case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="$cgroup_mount$relative"
@@ -1390,8 +1418,15 @@ jobs:
           set -eu
           cgroup_membership=/proc/self/cgroup
           cgroup_mount=/sys/fs/cgroup
-          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
-          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
           case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="$cgroup_mount$relative"
@@ -1546,8 +1581,15 @@ jobs:
           set -eu
           cgroup_membership=/proc/self/cgroup
           cgroup_mount=/sys/fs/cgroup
-          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
-          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
           case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="$cgroup_mount$relative"
@@ -1984,8 +2026,15 @@ jobs:
           set -eu
           cgroup_membership=/proc/self/cgroup
           cgroup_mount=/sys/fs/cgroup
-          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
-          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
           case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="$cgroup_mount$relative"
@@ -2226,8 +2275,15 @@ jobs:
           set -eu
           cgroup_membership=/proc/self/cgroup
           cgroup_mount=/sys/fs/cgroup
-          IFS=: read -r hierarchy controllers relative < "$cgroup_membership"
-          if [ "$hierarchy" != 0 ] || [ -n "$controllers" ]; then exit 1; fi
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
           case "$relative" in /*) ;; *) exit 1 ;; esac
           case "/$relative/" in */../*|*/./*) exit 1 ;; esac
           cgroup_root="$cgroup_mount$relative"

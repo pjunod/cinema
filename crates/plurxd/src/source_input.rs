@@ -220,6 +220,7 @@ struct InputState {
     // Drop the original capability before its exact ledger guard.
     source: std::sync::Mutex<Option<crate::fragment_index_cluster::SourceFence>>,
     custody: std::sync::Mutex<Option<SourceCustody>>,
+    _background_holder: Option<crate::background_jobs::SourceHolder>,
     observer: Option<SourceObserver>,
     purpose_budget: Option<Arc<dyn SourceInputByteBudget>>,
     background_budget: Option<Arc<dyn SourceInputByteBudget>>,
@@ -344,6 +345,7 @@ impl SourceInput {
         }
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
+            _background_holder: None,
             custody: std::sync::Mutex::new(Some(custody)),
             observer: Some(observer),
             purpose_budget,
@@ -410,6 +412,7 @@ impl SourceInput {
         observer.mediate_reads();
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
+            _background_holder: None,
             custody: std::sync::Mutex::new(Some(custody)),
             observer: Some(observer),
             purpose_budget: None,
@@ -446,11 +449,52 @@ impl SourceInput {
         let (input, file, _) = tests::input(bytes, SOURCE_HTTP_CHUNK, None).await;
         (input, file)
     }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn completion_read_fixture(
+        file: &Arc<std::fs::File>,
+        owner: &Arc<crate::background_jobs::SourceReadBudget>,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<()>,
+        Arc<tests::ReadGate>,
+    ) {
+        let source = crate::fragment_index_cluster::SourceFence::clone_current_held(file)
+            .expect("fixture source");
+        let holder = owner.source_holder().expect("registered physical source");
+        let (reached, parked) = tokio::sync::oneshot::channel();
+        let gate = Arc::new(tests::ReadGate::new(reached));
+        let len = file.metadata().expect("source metadata").len();
+        let state = Arc::new(InputState {
+            source: std::sync::Mutex::new(Some(source)),
+            custody: std::sync::Mutex::new(None),
+            _background_holder: holder,
+            observer: None,
+            purpose_budget: None,
+            background_budget: Some(Arc::new(tests::UnlimitedBudget::default())),
+            pause: None,
+            budget: tokio::sync::Mutex::new(ByteBudget::default()),
+            close: tokio_util::sync::CancellationToken::new(),
+            read_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            len,
+            mime: "application/octet-stream",
+            window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+            source_bytes: std::sync::atomic::AtomicU64::new(0),
+            cache_hits: std::sync::atomic::AtomicU64::new(0),
+            cached_bytes: std::sync::atomic::AtomicUsize::new(0),
+            read_gate: Some(Arc::clone(&gate)),
+        });
+        (
+            Self::launch(state).await.expect("real input bridge"),
+            parked,
+            gate,
+        )
+    }
     pub(crate) async fn open_background_held(
         source: crate::fragment_index_cluster::SourceFence,
         mime: &'static str,
         budget: Arc<crate::background_jobs::SourceReadBudget>,
     ) -> Result<Self, String> {
+        let holder = budget.source_holder()?;
         if !source.unchanged() {
             return Err("held source changed before input bridge".into());
         }
@@ -461,6 +505,7 @@ impl SourceInput {
             .len();
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
+            _background_holder: holder,
             custody: std::sync::Mutex::new(None),
             observer: None,
             purpose_budget: None,

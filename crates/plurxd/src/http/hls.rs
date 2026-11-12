@@ -150,7 +150,7 @@ pub(in crate::http) use preparation::*;
 // split: end hls-preparation
 
 #[path = "hls/processed_upgrade.rs"]
-pub(in crate::http) mod processed_upgrade;
+pub(crate) mod processed_upgrade;
 
 // split: begin hls-status
 #[path = "hls/status.rs"]
