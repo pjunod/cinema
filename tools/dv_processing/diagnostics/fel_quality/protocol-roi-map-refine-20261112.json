@@ -1,0 +1,13 @@
+{"schema":1,"id":"protocol-roi-map-refine-20261112","status":"Fixed before any output; harness rebuilt and re-gated (none, zero byte-identical) first.",
+ "baseline":"protocol-roi-zeromean-qpm6-20261111.json arm_Z6 (identical_to protocol-roi-zeromean-20261111.json; dark block < 1.0 nit; zero-mean)",
+ "dark_offset":"-6 QP (qoffset -6/63)",
+ "arms":{"Zx":"Z6, but 16x16 blocks with max(Y')-min(Y') <= 1 code are excluded from selection and from c",
+  "Zr":"Zx, offset(L) = -6 QP for L <= 0.3 nit, linear in PQ code value to 0 QP at 3 nit; balance +sum(|offset|)/count(unselected), capped at 6",
+  "Zf":"Zx, offset = -6*clamp(1 - log2(d/d0)/2, 0, 1) on dark blocks; d = RMS over block of weighted (input - BL) codes, weights Y 0.82, Cb 1.12, Cr 1.70; d0 = that frame's dark-set median"},
+ "harness_modes":{"Zx":{"mode":"lumazx","threshold_nits":1.0,"qp_offset":-6},
+  "Zr":{"mode":"lumazr","threshold_nits":3.0,"qp_offset":-6},
+  "Zf":{"mode":"lumazf","threshold_nits":1.0,"qp_offset":-6}},
+ "harness_notes":"roi_encode.c lumazx/lumazr/lumazf. Ramp floor 0.3 nit is a source constant (RAMP_LOW_NITS). Zf's RMS is per luma pixel: each chroma sample's weighted error counts for its four pixels. Zf's BL planes are the canonical layer-capture bl.yuv, bound by sha256 in each recipe. Unselected = non-flat blocks outside the selection; flat blocks still sit under the full-frame balancing region, where they code at no cost.",
+ "map_inputs":"encoder input and, for Zf only, the canonical BL planes; no R, no decoded candidate, no scoring model",
+ "rate_rule":"as protocol-aq-psy-20261112.json","readouts":"as protocol-aq-psy-20261112.json plus map statistics per frame",
+ "accept":"as protocol-aq-psy-20261112.json and michael5400 ModelB frames-beating-F >= 46"}

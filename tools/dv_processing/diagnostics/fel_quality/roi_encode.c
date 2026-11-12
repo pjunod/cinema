@@ -15,12 +15,24 @@
  *   luma  - per grid block, mean of the encoder's own input Y' (10-bit
  *           limited) -> nits via the ST 2084 EOTF; blocks below the declared
  *           threshold get the declared QP offset. Source-derived only.
+ *   lumazx - lumazm, but flat blocks (max Y' - min Y' <= 1 code) leave the
+ *           selection and the fraction c (protocol-roi-map-refine, arm Zx).
+ *   lumazr - lumazx with a ramp: QP_OFFSET at or below 0.3 nit, linear in
+ *           PQ code value to 0 at THRESH_NITS (arm Zr).
+ *   lumazf - lumazx, offset QP_OFFSET*clamp(1 - log2(d/d0)/2, 0, 1) on dark
+ *           blocks; d = per-pixel RMS of weighted (input - BL) codes, weights
+ *           Y 0.82 / Cb 1.12 / Cr 1.70, chroma counted for each of its four
+ *           pixels; d0 = the frame's dark-set median (arm Zf). The BL planes
+ *           arrive as the option roi_bl=PATH (raw yuv420p10le, one frame per
+ *           picture), which is removed before the encoder sees the options.
+ *   For lumazx/zr/zf the balancing offset is min(|QP_OFFSET|, sum|offset| /
+ *   unselected non-flat blocks): zero mean over non-flat blocks.
  *
  * Grid follows libx265.c: 8 when qg-size is 8, otherwise 16.
  * No playback, packaging or deployment change.
  *
  * Usage: roi_encode IN.nut OUT.mp4 MAP.json MODE GRID THRESH_NITS QP_OFFSET
- *        FRAMES NUM DEN TB_DEN MOVFLAGS TAG [key=value ...]
+ *        FRAMES NUM DEN TB_DEN MOVFLAGS TAG [roi_bl=PATH] [key=value ...]
  */
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -50,6 +62,20 @@ static double pq_eotf_nits(double e) {
     return 10000.0 * pow(n / (c2 - c3 * p), 1 / m1);
 }
 
+static double pq_inverse(double nits) {
+    const double m1 = 2610.0 / 16384, m2 = 2523.0 / 4096 * 128, c1 = 3424.0 / 4096, c2 = 2413.0 / 4096 * 32,
+                 c3 = 2392.0 / 4096 * 32;
+    double y = pow(nits / 10000.0, m1);
+    return pow((c1 + c2 * y) / (1 + c3 * y), m2);
+}
+
+static int cmp_double(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
+#define RAMP_LOW_NITS 0.3
+
 static int write_packets(AVCodecContext *enc, AVFormatContext *oc, AVStream *st, int *count) {
     AVPacket *pkt = av_packet_alloc();
     int ret;
@@ -75,8 +101,10 @@ int main(int argc, char **argv) {
         tbden = atoi(argv[11]);
     const char *movflags = argv[12], *tag = argv[13];
     int m_none = !strcmp(mode, "none"), m_zero = !strcmp(mode, "zero"), m_zm = !strcmp(mode, "lumazm"),
-        m_luma = !strcmp(mode, "luma") || m_zm;
-    if (!(m_none || m_zero || m_luma) || (grid != 8 && grid != 16) || strlen(tag) != 4) die("bad arguments", 0);
+        m_luma = !strcmp(mode, "luma") || m_zm, m_zx = !strcmp(mode, "lumazx"), m_zr = !strcmp(mode, "lumazr"),
+        m_zf = !strcmp(mode, "lumazf"), m_ref = m_zx || m_zr || m_zf;
+    if (!(m_none || m_zero || m_luma || m_ref) || (grid != 8 && grid != 16) || strlen(tag) != 4) die("bad arguments", 0);
+    if (m_zr && !(thresh > RAMP_LOW_NITS)) die("ramp needs THRESH_NITS above the 0.3-nit floor", 0);
 
     /* CLI ran with -loglevel verbose; libx265.c forwards the av_log level to x265's log-level,
        which x265 records in its info SEI. */
@@ -114,13 +142,21 @@ int main(int argc, char **argv) {
     /* As ffmpeg_mux_init.c: a global-header muxer (mp4) makes the encoder emit extradata. */
     if (oc->oformat->flags & AVFMT_GLOBALHEADER) enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     AVDictionary *opts = NULL;
+    const char *blpath = NULL;
     for (int i = 14; i < argc; i++) {
+        if (!strncmp(argv[i], "roi_bl=", 7)) {
+            blpath = argv[i] + 7;
+            continue;
+        }
         char *eq = strchr(argv[i], '=');
         if (!eq) die("option without =", 0);
         *eq = 0;
         av_dict_set(&opts, argv[i], eq + 1, 0);
         *eq = '=';
     }
+    if (m_zf != (blpath != NULL)) die("roi_bl is required by lumazf and refused otherwise", 0);
+    FILE *blf = blpath ? fopen(blpath, "rb") : NULL;
+    if (blpath && !blf) die("open roi_bl", 0);
     if ((ret = avcodec_open2(enc, ec, &opts)) < 0) die("open encoder", ret);
     if (av_dict_count(opts)) {
         const AVDictionaryEntry *e = NULL;
@@ -140,8 +176,9 @@ int main(int argc, char **argv) {
     FILE *mj = fopen(mapjson, "wx");
     if (!mj) die("map json exists or cannot be created", 0);
     fprintf(mj, "{\"mode\":\"%s\",\"grid\":%d,\"threshold_nits\":%.9g,\"qp_offset\":%d,\"qp_range\":63,"
-                "\"luminance\":\"block mean of encoder-input Y' (10-bit limited, (Y-64)/876) -> ST2084 EOTF nits\",\"frames\":[",
-            mode, grid, thresh, qpoff);
+                "\"luminance\":\"block mean of encoder-input Y' (10-bit limited, (Y-64)/876) -> ST2084 EOTF nits\",%s\"frames\":[",
+            mode, grid, thresh, qpoff,
+            m_zr ? "\"ramp_low_nits\":0.3,\"flat\":\"max-min Y' <= 1 code\"," : m_ref ? "\"flat\":\"max-min Y' <= 1 code\"," : "");
 
     AVPacket *ipkt = av_packet_alloc();
     AVFrame *fr = av_frame_alloc();
@@ -221,8 +258,118 @@ int main(int argc, char **argv) {
             }
             free(sel);
         }
-        fprintf(mj, "%s{\"frame\":%d,\"selected_blocks\":%d,\"blocks\":%d,\"positive_qp_offset\":%.6f}", n ? "," : "", n,
-                selected, bw * bh, positive);
+        int flat = 0;
+        double negsum = 0;
+        if (m_ref) {
+            size_t nb = (size_t)bw * bh;
+            double *off = calloc(nb, sizeof(double)), *dv = calloc(nb, sizeof(double)), *dd = calloc(nb, sizeof(double));
+            unsigned char *cls = calloc(nb, 1); /* 0 unselected non-flat, 1 selected, 2 flat */
+            uint16_t *blbuf = NULL;
+            int W = fr->width, H = fr->height;
+            if (m_zf) {
+                size_t fbsz = (size_t)W * H * 3 / 2;
+                blbuf = malloc(fbsz * 2);
+                if (fseeko(blf, (off_t)n * fbsz * 2, SEEK_SET) || fread(blbuf, 2, fbsz, blf) != fbsz) die("read roi_bl frame", 0);
+            }
+            double elo = pq_inverse(RAMP_LOW_NITS), ehi = pq_inverse(thresh);
+            int ndark = 0;
+            for (int by = 0; by < bh; by++)
+                for (int bx = 0; bx < bw; bx++) {
+                    double sum = 0, sq = 0;
+                    int cnt = 0, mn = 1 << 16, mx = -1;
+                    for (int y = by * grid; y < (by + 1) * grid && y < H; y++) {
+                        const uint16_t *row = (const uint16_t *)(fr->data[0] + (size_t)y * fr->linesize[0]);
+                        for (int x = bx * grid; x < (bx + 1) * grid && x < W; x++) {
+                            int v = row[x];
+                            sum += v, cnt++;
+                            if (v < mn) mn = v;
+                            if (v > mx) mx = v;
+                            if (m_zf) {
+                                double dy = 0.82 * (v - (int)blbuf[(size_t)y * W + x]);
+                                size_t ci = (size_t)(y / 2) * (W / 2) + x / 2;
+                                const uint16_t *cb = (const uint16_t *)(fr->data[1] + (size_t)(y / 2) * fr->linesize[1]);
+                                const uint16_t *cr = (const uint16_t *)(fr->data[2] + (size_t)(y / 2) * fr->linesize[2]);
+                                double du = 1.12 * (cb[x / 2] - (int)blbuf[(size_t)W * H + ci]);
+                                double dw = 1.70 * (cr[x / 2] - (int)blbuf[(size_t)W * H * 5 / 4 + ci]);
+                                sq += dy * dy + du * du + dw * dw;
+                            }
+                        }
+                    }
+                    size_t b = (size_t)by * bw + bx;
+                    if (mx - mn <= 1) {
+                        cls[b] = 2, flat++;
+                        continue;
+                    }
+                    double e = (sum / cnt - 64.0) / 876.0, nits = pq_eotf_nits(e);
+                    if (m_zr) {
+                        if (nits < thresh) {
+                            double t = (ehi - e) / (ehi - elo);
+                            if (t > 1) t = 1;
+                            if (t < 0) t = 0;
+                            off[b] = qpoff * t, cls[b] = 1;
+                        }
+                    } else if (nits < thresh) {
+                        off[b] = qpoff, cls[b] = 1;
+                        if (m_zf) dv[b] = sqrt(sq / cnt), dd[ndark++] = dv[b];
+                    }
+                }
+            if (m_zf && ndark) {
+                qsort(dd, ndark, sizeof(double), cmp_double);
+                double d0 = ndark % 2 ? dd[ndark / 2] : 0.5 * (dd[ndark / 2 - 1] + dd[ndark / 2]);
+                for (size_t b = 0; b < nb; b++)
+                    if (cls[b] == 1) {
+                        double t = (dv[b] <= 0 || d0 <= 0) ? 1 : 1 - log2(dv[b] / d0) / 2;
+                        if (t > 1) t = 1;
+                        if (t < 0) t = 0;
+                        off[b] = qpoff * t;
+                    }
+            }
+            int unsel = 0;
+            for (size_t b = 0; b < nb; b++) {
+                if (cls[b] == 1) selected++, negsum += fabs(off[b]);
+                if (cls[b] == 0) unsel++;
+            }
+            double pos = unsel ? negsum / unsel : 0;
+            if (pos > fabs((double)qpoff)) pos = fabs((double)qpoff);
+            positive = pos;
+            /* Runs of horizontally adjacent selected blocks with the same offset, in micro-QP. */
+            long *mq = calloc(nb, sizeof(long));
+            for (size_t b = 0; b < nb; b++) mq[b] = lround(off[b] * 1e6);
+            int runs = 0;
+            for (int by = 0; by < bh; by++)
+                for (int bx = 0; bx < bw; bx++) {
+                    size_t b = (size_t)by * bw + bx;
+                    if (cls[b] == 1 && mq[b] && !(bx && cls[b - 1] == 1 && mq[b - 1] == mq[b])) runs++;
+                }
+            int extra = pos > 0 ? 1 : 0;
+            if (runs + extra) {
+                AVFrameSideData *sd = av_frame_new_side_data(fr, AV_FRAME_DATA_REGIONS_OF_INTEREST,
+                                                             (size_t)(runs + extra) * sizeof(AVRegionOfInterest));
+                AVRegionOfInterest *r = (AVRegionOfInterest *)sd->data;
+                int k = 0;
+                for (int by = 0; by < bh; by++)
+                    for (int bx = 0; bx < bw; bx++) {
+                        size_t b = (size_t)by * bw + bx;
+                        if (cls[b] != 1 || !mq[b] || (bx && cls[b - 1] == 1 && mq[b - 1] == mq[b])) continue;
+                        int ex = bx;
+                        while (ex + 1 < bw && cls[b + ex + 1 - bx] == 1 && mq[b + ex + 1 - bx] == mq[b]) ex++;
+                        AVRational q = mq[b] == (long)qpoff * 1000000 ? (AVRational){qpoff, 63} : (AVRational){(int)mq[b], 63000000};
+                        r[k++] = (AVRegionOfInterest){.self_size = sizeof *r, .top = by * grid, .bottom = (by + 1) * grid,
+                                                      .left = bx * grid, .right = (ex + 1) * grid, .qoffset = q};
+                    }
+                if (k != runs) die("run count mismatch", 0);
+                if (extra)
+                    r[k++] = (AVRegionOfInterest){.self_size = sizeof *r, .top = 0, .bottom = H, .left = 0, .right = W,
+                                                  .qoffset = (AVRational){(int)lround(pos * 1e6), 63000000}};
+            }
+            free(off), free(dv), free(dd), free(cls), free(mq), free(blbuf);
+        }
+        if (m_ref)
+            fprintf(mj, "%s{\"frame\":%d,\"selected_blocks\":%d,\"flat_blocks\":%d,\"blocks\":%d,\"mean_selected_qp_offset\":%.6f,\"positive_qp_offset\":%.6f}",
+                    n ? "," : "", n, selected, flat, bw * bh, selected ? -negsum / selected : 0.0, positive);
+        else
+            fprintf(mj, "%s{\"frame\":%d,\"selected_blocks\":%d,\"blocks\":%d,\"positive_qp_offset\":%.6f}", n ? "," : "", n,
+                    selected, bw * bh, positive);
         if ((ret = avcodec_send_frame(enc, fr)) < 0) die("send frame", ret);
         av_frame_unref(fr);
         if ((ret = write_packets(enc, oc, st, &outcount)) < 0) die("receive packet", ret);
@@ -233,6 +380,7 @@ int main(int argc, char **argv) {
     if ((ret = av_write_trailer(oc)) < 0) die("trailer", ret);
     fprintf(mj, "],\"encoded_frames\":%d,\"packets\":%d}\n", n, outcount);
     fclose(mj);
+    if (blf) fclose(blf);
     avio_closep(&oc->pb);
     fprintf(stderr, "roi_encode: %d frames, %d packets\n", n, outcount);
     return outcount == frames ? 0 : 3;

@@ -88,7 +88,7 @@ p.add_argument('--baseline-mp4', required=True, type=Path)
 p.add_argument('--harness', required=True, type=Path)
 p.add_argument('--output-root', required=True, type=Path)
 p.add_argument('--prefix', required=True)
-p.add_argument('--mode', choices=['none', 'zero', 'luma', 'lumazm'], required=True)
+p.add_argument('--mode', choices=['none', 'zero', 'luma', 'lumazm', 'lumazx', 'lumazr', 'lumazf'], required=True)
 p.add_argument('--grid', type=int, default=16)
 p.add_argument('--threshold-nits', type=float, default=0.0)
 p.add_argument('--qp-offset', type=int, default=0)
@@ -99,6 +99,8 @@ p.add_argument('--override', action='append', default=[],
 p.add_argument('--timeout', type=int, default=1800, help='encode timeout in seconds')
 p.add_argument('--source', type=Path, help='encode this input instead of the baseline source (e.g. a plane-domain export)')
 p.add_argument('--source-sha256', help='required with --source')
+p.add_argument('--bl-planes', type=Path, help='lumazf: canonical BL planes (raw yuv420p10le), bound by hash')
+p.add_argument('--bl-sha256', help='required with --bl-planes')
 p.add_argument('--gate-receipt', type=Path, action='append', default=[],
                help='luma modes: passing none/zero gate recipe(s) produced by this same harness binary')
 a = p.parse_args()
@@ -126,7 +128,17 @@ if a.source:
     src = a.source.resolve()
 num, den = pos['rate']
 assert pos['frames'] == 48
-if a.mode in ('luma', 'lumazm'):
+REFINED = ('lumazx', 'lumazr', 'lumazf')
+assert (a.mode == 'lumazf') == bool(a.bl_planes), 'BL planes are required by lumazf and refused otherwise'
+if a.bl_planes:
+    assert a.bl_sha256 and sha(a.bl_planes) == a.bl_sha256, 'BL planes hash mismatch'
+if a.mode in REFINED:
+    # A refined map must be declared, with these exact arguments, by the committed protocol's harness_modes.
+    assert a.protocol, 'refined map needs a committed protocol'
+    hm = json.loads(a.protocol.read_text()).get('harness_modes', {})
+    assert any(v == {'mode': a.mode, 'threshold_nits': a.threshold_nits, 'qp_offset': a.qp_offset} for v in hm.values()), \
+        'refused: mode/threshold/offset not declared in the protocol harness_modes'
+if a.mode in ('luma', 'lumazm') + REFINED:
     assert a.protocol and a.threshold_nits > 0 and a.qp_offset != 0, 'luma map needs a committed protocol and nonzero settings'
     own = text = a.protocol.read_text()
     # A protocol may declare itself identical to an earlier one in the same directory; include those.
@@ -135,8 +147,9 @@ if a.mode in ('luma', 'lumazm'):
             text += (a.protocol.parent / ref).read_text()
     # The arguments must be the ones the committed protocol declares.
     assert f'{a.qp_offset}/63' in own, 'qp offset not declared by this protocol itself'
-    assert f'< {a.threshold_nits} nit' in text, 'threshold not declared by the protocol'
-    assert (a.mode == 'lumazm') == ('zero-mean' in text or 'zero frame mean' in text), 'zero-mean mode does not match the protocol'
+    if a.mode not in REFINED:
+        assert f'< {a.threshold_nits} nit' in text, 'threshold not declared by the protocol'
+    assert (a.mode != 'luma') == ('zero-mean' in text or 'zero frame mean' in text), 'zero-mean mode does not match the protocol'
     assert a.gate_receipt, 'refused: luma modes need a passing gate receipt from this harness binary'
     modes = set()
     for g in a.gate_receipt:
@@ -153,7 +166,7 @@ dst = Path(f'{stem}-hdr.mp4'); mapj = Path(f'{stem}-map.json'); log = Path(f'{st
 for f in [dst, mapj, log, Path(f'{stem}-recipe.json')]:
     assert not f.exists(), f'refused: {f} exists'
 argv = [str(a.harness), str(src), str(dst), str(mapj), a.mode, str(a.grid), repr(a.threshold_nits), str(a.qp_offset),
-        str(pos['frames']), str(num), str(den), str(pos['tb_den']), pos['movflags'], pos['tag']] + [f'{k}={v}' for k, v in opts.items()]
+        str(pos['frames']), str(num), str(den), str(pos['tb_den']), pos['movflags'], pos['tag']] + ([f'roi_bl={a.bl_planes.resolve()}'] if a.bl_planes else []) + [f'{k}={v}' for k, v in opts.items()]
 t = time.monotonic()
 with log.open('xb') as f:
     r = subprocess.run(['nice', '-n', '15', *argv], stdout=f, stderr=subprocess.STDOUT, timeout=a.timeout)
@@ -164,6 +177,7 @@ record = {'variant': 'hdr-off-chroma9', 'fixture': a.prefix.split('-')[0], 'mode
           'baseline_mp4_sha256': base['sha256'], 'harness': {'path': str(a.harness), 'sha256': sha(a.harness),
                       'source': {'path': str(a.harness_source), 'sha256': sha(a.harness_source)} if a.harness_source else None},
           'gate_receipts': [{'path': str(g), 'sha256': sha(g)} for g in a.gate_receipt],
+          'bl_planes': {'path': str(a.bl_planes), 'sha256': a.bl_sha256} if a.bl_planes else None,
           'driver': {'path': str(Path(__file__).resolve()), 'sha256': sha(Path(__file__).resolve())},
           'protocol': {'path': str(a.protocol), 'sha256': sha(a.protocol)} if a.protocol else None,
           'encoder_dictionary': opts, 'overrides': overrides, 'argv': argv, 'exit_code': r.returncode, 'elapsed_seconds': time.monotonic() - t,
