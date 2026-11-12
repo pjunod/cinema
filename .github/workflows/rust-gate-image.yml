@@ -34,7 +34,10 @@ jobs:
         run: |
           set -euo pipefail
           input="$(sha256sum Dockerfile.rust-gate | cut -d' ' -f1)"
-          tag="$REGISTRY/noirr/plurx-rust-gate:input-${input:0:16}"
+          # One tag per publication: a pinned digest must never lose the
+          # only tag that keeps it from registry cleanup when a later
+          # publication (another host's build is not byte-identical) lands.
+          tag="$REGISTRY/noirr/plurx-rust-gate:input-${input:0:16}-run$GITHUB_RUN_ID"
           # A job-local Docker config: the registry login never lands in the
           # runner user's ~/.docker on a shared host.
           export DOCKER_CONFIG="$RUNNER_TEMP/rust-gate-docker-$GITHUB_RUN_ID"
@@ -71,12 +74,20 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     container:
       image: ${{ needs.publish.outputs.image }}
-      options: --memory 20g --memory-swap 20g --cpus 6 --pids-limit 4096
+      options: --memory 19g --memory-swap 19g --cpus 6 --pids-limit 4096
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 60
     steps:
+      - name: Print the container's cgroup (diagnostic)
+        shell: sh
+        run: |
+          cat /proc/self/cgroup
+          for f in cgroup.controllers memory.max memory.swap.max cpu.max cpu.weight pids.max cpuset.cpus.effective; do
+            printf '%s=%s\n' "$f" "$(cat /sys/fs/cgroup/$f 2>&1)"
+          done
+          grep -E 'MemTotal|SwapTotal' /proc/meminfo; nproc
       - name: Verify effective container resource bounds
         shell: sh
         run: |
