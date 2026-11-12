@@ -234,10 +234,19 @@ impl SourceInputRangeReader {
         Ok(bytes.len())
     }
 }
+/// The foreground custody an Input reads under. An owned one is this
+/// Input's alone and is released when the Input closes. A lent one belongs
+/// to an owner that opens several Inputs one after the other under the same
+/// custody: this Input keeps it alive until its own reads end, and closing
+/// it neither marks the custody's cleanup nor releases it.
+enum InputCustody {
+    Owned(Box<SourceCustody>),
+    Lent(Arc<SourceCustody>),
+}
 struct InputState {
     // Drop the original capability before its exact ledger guard.
     source: std::sync::Mutex<Option<crate::fragment_index_cluster::SourceFence>>,
-    custody: std::sync::Mutex<Option<SourceCustody>>,
+    custody: std::sync::Mutex<Option<InputCustody>>,
     _background_holder: Option<crate::background_jobs::SourceHolder>,
     observer: Option<SourceObserver>,
     purpose_budget: Option<Arc<dyn SourceInputByteBudget>>,
@@ -369,7 +378,7 @@ impl SourceInput {
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
             _background_holder: None,
-            custody: std::sync::Mutex::new(Some(custody)),
+            custody: std::sync::Mutex::new(Some(InputCustody::Owned(Box::new(custody)))),
             observer: Some(observer),
             purpose_budget,
             background_budget: None,
@@ -433,7 +442,74 @@ impl SourceInput {
             .object_version(source.object_version())
             .register(attempt)
             .await?;
-        let observer = custody.observer();
+        Self::open_held_with_custody(source, mime, len, InputCustody::Owned(Box::new(custody)))
+            .await
+    }
+    /// Open a foreground Input under a custody its owner registered and keeps,
+    /// for an owner that reads one held object through several Inputs one
+    /// after the other and is charged for one read. Closing this Input joins
+    /// its reads and keeps the custody; the owner hands it on or releases it.
+    pub(crate) async fn open_foreground_lent(
+        custody: &Arc<SourceCustody>,
+        source: crate::fragment_index_cluster::SourceFence,
+        path: &std::path::Path,
+    ) -> Result<Self, String> {
+        let len = Self::custody_holds(custody, &source)?;
+        Self::open_held_with_custody(
+            source,
+            crate::http::stream::file_content_type(path),
+            len,
+            InputCustody::Lent(Arc::clone(custody)),
+        )
+        .await
+    }
+    /// Open a foreground Input that takes over a custody its owner
+    /// registered, so the owner's last Input releases it as any Input does.
+    pub(crate) async fn open_foreground_with_custody(
+        custody: SourceCustody,
+        source: crate::fragment_index_cluster::SourceFence,
+        path: &std::path::Path,
+    ) -> Result<Self, String> {
+        let len = Self::custody_holds(&custody, &source)?;
+        Self::open_held_with_custody(
+            source,
+            crate::http::stream::file_content_type(path),
+            len,
+            InputCustody::Owned(Box::new(custody)),
+        )
+        .await
+    }
+    /// A custody covers only the object it was registered for, and only
+    /// while it still has the source domain's authority.
+    fn custody_holds(
+        custody: &SourceCustody,
+        source: &crate::fragment_index_cluster::SourceFence,
+    ) -> Result<u64, String> {
+        use sha2::{Digest, Sha256};
+        if custody.token().owner.source_generation
+            != hex::encode(Sha256::digest(source.object_version().as_bytes()))
+        {
+            return Err("source custody covers another object".into());
+        }
+        if !custody.observer().has_authority() {
+            return Err("source authority lost".into());
+        }
+        source
+            .handle
+            .metadata()
+            .map(|metadata| metadata.len())
+            .map_err(|error| error.to_string())
+    }
+    async fn open_held_with_custody(
+        source: crate::fragment_index_cluster::SourceFence,
+        mime: &'static str,
+        len: u64,
+        custody: InputCustody,
+    ) -> Result<Self, String> {
+        let observer = match &custody {
+            InputCustody::Owned(custody) => custody.observer(),
+            InputCustody::Lent(custody) => custody.observer(),
+        };
         observer.mediate_reads();
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
@@ -712,7 +788,12 @@ impl SourceInput {
     /// background caller returns its job/resource claim.
     pub(crate) async fn close_and_wait(self) -> std::io::Result<()> {
         self.close.cancel();
-        if let Some(observer) = &self.state.observer {
+        // A lent custody outlives this Input: its owner decides its cleanup.
+        let owned = matches!(
+            *self.state.custody.lock().expect("source custody"),
+            Some(InputCustody::Owned(_))
+        );
+        if let Some(observer) = self.state.observer.as_ref().filter(|_| owned) {
             observer.mark_cleanup_pending();
         }
         let server = { self.server.lock().expect("source input server").take() };
@@ -737,8 +818,12 @@ impl SourceInput {
     }
     pub(crate) fn cleanup_pending(self) {
         self.close.cancel();
-        if let Some(custody) = self.state.custody.lock().expect("source custody").take() {
-            custody.cleanup_pending();
+        match self.state.custody.lock().expect("source custody").take() {
+            Some(InputCustody::Owned(custody)) => (*custody).cleanup_pending(),
+            // Reads that cannot be joined are no cleanup proof for the
+            // owner's custody either.
+            Some(InputCustody::Lent(custody)) => custody.observer().mark_cleanup_pending(),
+            None => {}
         }
     }
 }
