@@ -687,7 +687,16 @@ impl VodServe {
             None => crate::fragindex::identity_for(file, video),
         };
         let cluster_cache_enabled = prepared.encoding.is_none() && settings.index_cluster_cache;
-        let cluster_index = if prepared.encoding.is_some() {
+        // A published v3 copy index is preferred over the v2 cluster artifact
+        // and the node-local index; without one the order below is unchanged.
+        let copy_index = if prepared.encoding.is_none() {
+            self.try_copy_index_v3(file, video).await
+        } else {
+            None
+        };
+        let cluster_index = if let Some(found) = copy_index {
+            Ok(Some(found))
+        } else if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
             self.try_cluster_fragment_index(file, video, viewer).await
@@ -2665,7 +2674,16 @@ impl VodServe {
                         "1" | "true" | "yes" | "on"
                     )
                 });
-        let cluster_index = if prepared.encoding.is_some() || source_binding.is_some() {
+        // The origin's published v3 copy index serves a Source rendition too:
+        // reading it queues nothing and joins no local viewer interest.
+        let copy_index = if prepared.encoding.is_none() {
+            self.try_copy_index_v3(file, video).await
+        } else {
+            None
+        };
+        let cluster_index = if let Some(found) = copy_index {
+            Ok(Some(found))
+        } else if prepared.encoding.is_some() || source_binding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
             self.try_cluster_fragment_index(file, video, fences.viewer.as_ref())

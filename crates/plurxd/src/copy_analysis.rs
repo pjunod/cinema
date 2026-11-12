@@ -6,7 +6,9 @@
 mod physical;
 mod work;
 
-pub(crate) use work::{work_copy_observations, CopyAnalysisContext};
+pub(crate) use work::{
+    install_blob, v3_blob_path, v3_root, work_copy_observations, CopyAnalysisContext,
+};
 
 use plurx_core::{
     fmp4::{Init, PromotionInputs},

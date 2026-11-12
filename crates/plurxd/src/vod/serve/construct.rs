@@ -572,6 +572,42 @@ impl VodServe {
         Ok(present)
     }
 
+    /// The published v3 copy index for this node's current source object,
+    /// when one is usable: the exact head this node published, or another
+    /// origin's head whose content this node has itself attested. It reads
+    /// metadata and one verified blob (hydrated from a listed holder when
+    /// absent here); it queues nothing and joins no viewer interest, so a
+    /// miss or a refusal leaves the existing index order untouched.
+    pub(super) async fn try_copy_index_v3(
+        &self,
+        file: &MediaFile,
+        video: CopyVideoOptions,
+    ) -> Option<(FragmentIndex, String, String)> {
+        let node_id = self.shared.cluster_node_id.as_deref()?;
+        match crate::copy_index_v3::resolve(
+            self.shared.store.as_ref(),
+            self.shared.cluster_membership.as_ref(),
+            node_id,
+            &self.shared.runtime_cache,
+            file,
+            video,
+        )
+        .await
+        {
+            Ok(resolved) => resolved.map(|resolved| {
+                (
+                    resolved.index,
+                    resolved.object_version,
+                    resolved.rendition_cache_key,
+                )
+            }),
+            Err(reason) => {
+                tracing::debug!(target: "plurxd::vodserve", file_id = file.id, %reason, "v3 copy index unavailable");
+                None
+            }
+        }
+    }
+
     pub(super) async fn try_cluster_fragment_index(
         &self,
         file: &MediaFile,

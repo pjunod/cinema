@@ -837,7 +837,7 @@ pub(crate) fn v3_blob_path(root: &Path, blob_sha256: &str) -> Option<PathBuf> {
 
 /// Install under the node's disk budget with the same staged-write and rename
 /// discipline as v2 blobs. An existing identical blob is accepted as is.
-async fn install_blob(
+pub(crate) async fn install_blob(
     root: &Path,
     contract_key: &str,
     blob_sha256: &str,
