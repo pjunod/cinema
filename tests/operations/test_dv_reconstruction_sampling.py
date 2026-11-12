@@ -84,6 +84,34 @@ class DvReconstructionSamplingTests(unittest.TestCase):
             self.assertIn('"reconstruction-target-unsupported: linearly sampled renderable UNORM16 RGBA"',
                           created)
 
+    def test_host_copied_base_planes_are_accepted_as_p010(self):
+        base = (TOOLS / "base_dv_renderer.h").read_text()
+        staging = base[base.index("static void base_restage_software_planes("):]
+        staging = staging[:staging.index("\n}\n")]
+        p010 = staging[staging.index("if (input->format == AV_PIX_FMT_P010LE) {"):]
+        p010 = p010[:p010.index("\n  }\n") + 5]
+        # Already code << 6 in two planes: checked, never rewritten.
+        self.assertIn("source->num_planes == 2", p010)
+        self.assertIn("source->repr.bits.bit_shift == 6", p010)
+        self.assertIn("PL_FMT_CAP_LINEAR", p010)
+        self.assertIn("return;", p010)
+        self.assertNotIn("pl_tex_upload", p010)
+        self.assertNotIn("dv_shift_10bit_plane", p010)
+        # Planar low-aligned input is still the only layout restaged.
+        planar = staging[staging.index(p010) + len(p010):]
+        self.assertIn("input->format == AV_PIX_FMT_YUV420P10LE && source->num_planes == 3", planar)
+        self.assertIn("source->repr.bits.bit_shift == 0", planar)
+        self.assertIn("source->repr.bits.bit_shift = 6;", planar)
+        # The host copy reaches staging: both copies precede the one call.
+        render = base[base.index("static void base_gpu_render("):]
+        self.assertEqual(render.count("input = host = dv_host_frame(frame);"), 2)
+        self.assertLess(render.rindex("input = host = dv_host_frame(frame);"),
+                        render.index("base_restage_software_planes(gpu, input, &source);"))
+        control = (TOOLS / "controls/test_base_host_copy.c").read_text()
+        self.assertIn("dv_hw_host_copy = true;", control)
+        self.assertIn("stage(AV_PIX_FMT_P010LE, 2, true);", control)
+        self.assertIn("base_restage_software_planes(gpu, frame, &source);", control)
+
     def test_targeted_refusals_name_their_cause(self):
         target = (TOOLS / "display_target.h").read_text()
         render = target[target.index("static inline pl_tex dv_target_render("):]

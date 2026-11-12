@@ -125,11 +125,27 @@ static void base_gpu_init(int width, int height) {
 // libplacebo uploads software yuv420p10 as code/65535 in UNORM16 (bits
 // 16/10/0), where a bilinear tap between adjacent codes is not representable
 // exactly. Restage each plane as code << 6 (bits 16/10/6), the contract the
-// FEL path and the native player use. Mapped GPU surfaces already hold it.
+// FEL path and the native player use. Mapped GPU surfaces already hold it,
+// and so does their host copy: a decoded surface the Vulkan device cannot
+// import is transferred as P010, which is code << 6 in two planes. Those
+// planes are left exactly as uploaded; only planar low-aligned input is
+// restaged.
 static void base_restage_software_planes(pl_gpu gpu, const AVFrame *input,
                                          struct pl_frame *source) {
   if (input->format == AV_PIX_FMT_VAAPI)
     return;
+  if (input->format == AV_PIX_FMT_P010LE) {
+    require(source->num_planes == 2 && source->repr.bits.sample_depth == 16 &&
+                source->repr.bits.color_depth == 10 && source->repr.bits.bit_shift == 6,
+            "host-copied base planes are high-aligned 10-bit in UNORM16");
+    for (int p = 0; p < 2; p++) {
+      pl_tex tex = source->planes[p].texture;
+      require(tex && tex->params.format->type == PL_FMT_UNORM &&
+                  (tex->params.format->caps & PL_FMT_CAP_LINEAR),
+              "linearly sampled UNORM16 host-copied base plane");
+    }
+    return;
+  }
   require(input->format == AV_PIX_FMT_YUV420P10LE && source->num_planes == 3 &&
               source->repr.bits.sample_depth == 16 && source->repr.bits.color_depth == 10 &&
               source->repr.bits.bit_shift == 0,
