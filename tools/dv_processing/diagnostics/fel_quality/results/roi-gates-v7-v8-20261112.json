@@ -1,0 +1,75 @@
+{
+ "scope": "harness rebuilds v7 (map refinement) and v8 (map family): byte-identity gates against the CLI baseline, and v7 replay of Z6",
+ "builds": {
+  "roi_encode-v7": {
+   "binary_sha256": "a82a1b9139762a45e94737a2971bbd6d4b5af4477726cb0de1a922069bc0e40a",
+   "source_sha256": "686492486e72e71c4e4a0bf4f2737ebc9546907be65423915fbde2305e86516a",
+   "source_commit": "7b614de37",
+   "build": "clang -O2 roi_encode.c -o roi_encode-v7 -I<ffmpeg>/include -L<ffmpeg>/lib -lavformat -lavcodec -lavutil -lm (rebuilt twice, identical)"
+  },
+  "roi_encode-v8": {
+   "binary_sha256": "424fcc02f049fac01ae96c5813decb839b199126a32983c14920189591752e01",
+   "source_sha256": "346592421977b337a4197f4aed7a5b8b46593f234a2cb79a469a6cf65a936445",
+   "source_commit": "0c07d46c0",
+   "build": "as v7, output basename roi_encode-v8"
+  }
+ },
+ "gates": {
+  "michael5400-gate7-none": {
+   "mode": "none",
+   "harness_sha256": "a82a1b9139762a45e94737a2971bbd6d4b5af4477726cb0de1a922069bc0e40a",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael5400-gate7-zero": {
+   "mode": "zero",
+   "harness_sha256": "a82a1b9139762a45e94737a2971bbd6d4b5af4477726cb0de1a922069bc0e40a",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael5400-gate8-none": {
+   "mode": "none",
+   "harness_sha256": "424fcc02f049fac01ae96c5813decb839b199126a32983c14920189591752e01",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael5400-gate8-zero": {
+   "mode": "zero",
+   "harness_sha256": "424fcc02f049fac01ae96c5813decb839b199126a32983c14920189591752e01",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael5400-Z6v7-replay": {
+   "mode": "lumazm",
+   "harness_sha256": "a82a1b9139762a45e94737a2971bbd6d4b5af4477726cb0de1a922069bc0e40a",
+   "equivalence_gate": null,
+   "elementary_stream": {
+    "candidate_sha256": "163694f38493548ed9c99a87592acd37540712c49a7410792fcac72bb7dc80e8",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": false
+   },
+   "unused_encoder_options_equal": true,
+   "equals_v6_Z6_L1_elementary": true
+  }
+ }
+}

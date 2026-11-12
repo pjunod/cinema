@@ -509,58 +509,70 @@ rate alone buys far less of the shadow tail.
 and [all-48](../../tools/dv_processing/diagnostics/fel_quality/results/lattice-michael5400-qpm6-20261111.json)
 results.
 
+## Cutting the coding loss (Fable 5.2's plan, iso-rate)
+
+Fable 5.2 designed and reviewed the arms. Each protocol was fixed before
+output, and every arm was landed by secant on `b` alone (`land_rate.py`) at
+an authored 128.5–130 Mb/s. Accept: pooled all-48 mean at least 0.02 below
+landed Z6 in all four models on both Michael fixtures, shadow-p99 frames
+beating F held, strict bar passing. Numbers are the ModelB pooled mean minus
+Z6 (Michael5400 / Michael1800); model A tracks within 0.001 except where noted.
+[Readout](../../tools/dv_processing/diagnostics/fel_quality/results/coding-loss-20261112.json).
+
+| Arm | Δ mean | Result |
+|---|---:|---|
+| Zfn1: FEL-benefit map (−6 where the EL changes the block least, 0.5-octave span) | −0.035 / −0.052 | **accept** |
+| A00P: AQ off + psy-RD/RDOQ off | −0.024 / −0.055 | **accept** (psy: Paul's call) |
+| **NP1 = Zfn1 + chroma −9/−12 + AQ off** | **−0.051 / −0.073** | **accept**; Michael5400 48/48 frames beat F |
+| **P1 = NP1 with psy off** | **−0.068 / −0.103** | **accept** |
+| −4 / −3 QP map | −0.061 / −0.075, −0.081 / −0.097 | reject: loses 2 / 5 shadow frames (dose is Paul's choice) |
+| veryslow; chroma −12/−12; −9/−12 | −0.021 / −0.014; −0.020 / −0.015; −0.018 / −0.014 | reject (near misses) |
+| psy-rd 0; psy-rdoq 0; both; AQ 0; AQ 0.5 | −0.017 / −0.039 at best | reject |
+| flat-block exclusion; FEL map with it; 0.3–3 nit ramp | −0.018, −0.026, −0.011 (M5400) | reject: lose 4–5 shadow frames |
+| oracle plane-domain export, then Z6 | −0.055 / −0.025; model A +0.013 / +0.048 | reject |
+| B-frames (bf 4, landed) | −0.007 (M5400) | reject; no author change ([probe](../../tools/dv_processing/diagnostics/fel_quality/results/bframe-probe-20261112.json)) |
+
+- **Flat dark blocks are not free.** Moving them to the positive balance
+  loses shadow frames, because F is almost exact there.
+- **psy-off is a metric-alignment gain.** psy terms keep energy that a
+  pixelwise metric scores as error. A report-only grain proxy (high-pass luma
+  energy, 1–100 nit; [grain](../../tools/dv_processing/diagnostics/fel_quality/results/grain-20261112.json))
+  on Michael5400: base 0.915, Z6 0.845, Zfn1 0.880, NP1 0.877, P1 0.862.
+  NP1 keeps more texture than Z6; psy-off costs about 1.5 points of it.
+- **The export lever is model-dependent**: it helps models B–D and hurts A.
+- Harness v7/v8 passed the byte-identity gates and v7 reproduced Z6 bit for
+  bit ([receipts](../../tools/dv_processing/diagnostics/fel_quality/results/roi-gates-v7-v8-20261112.json)).
+
+## Held-out Beekeeper: the encode still loses to F
+
+[Protocol](../../tools/dv_processing/diagnostics/fel_quality/protocol-heldout-beekeeper-20261111.json)
+fixed before outputs; capture bound per frame (48/48); scorer validated by
+exact reproduction of the retained Michael5400 Z6 result. At iso-rate,
+pooled whole-picture mean (ModelB): F 1.465, base 1.562, Z6 1.786, Zfn1
+1.612, NP1 1.608, P1 1.587. The stacks recover most of Z6's cost, but no
+recipe beats F, and the lighter maps fix fewer shadow frames than Z6 (Z6 38,
+NP1 22, P1 24 of 48). Here F's error, the EL's worth, is about 1.5 against
+about 3.2 on Michael. At 130 Mb/s the coding loss exceeds what the EL adds,
+so the confirmation stack fails on the held-out scene.
+
 ## Where this leaves the investigation
 
-The investigation now has a candidate that meets the fixed bar, with a
-stated mechanism. It is not a qualified production fix:
-
-- It covers two calibration windows only, which were also used to design
-  it. A held-out scene is the next requirement.
-- Michael5400 still has two sampled frames marginally worse than F in the
-  shadow tail.
-- The choice of dose is a trade between shadow and bright-content error,
-  and it is the owner's call.
-- A per-frame source-derived quantOffsets map cannot be expressed through
-  ordinary FFmpeg CLI arguments. plurx builds its encodes as CLI argument
-  lists (`crates/plurx-core/src/transcode/encoder.rs`). The fit with that
-  design is an encoder-policy component that attaches ROI side data inside
-  the existing filter chain. One example is a small filter in plurx's
-  shipped FFmpeg that computes the zero-mean dark-block map from each
-  frame. That keeps it a coding policy, not a watchdog or a separate
-  process. Nothing like that is built or deployed here, and no runtime,
-  playback or packaging change is made.
+- On scenes where the EL is worth more than the coding loss (both Michael
+  windows), NP1 or P1 beats F by a wide margin, at the same rate, with the
+  shadows fixed. Adopt NP1 unless Paul accepts psy-off, then P1.
+- On scenes where it is not (Beekeeper), no encoder setting tested at
+  130 Mb/s beats dropping the EL. Those titles should be served as F. This
+  is the same per-title verdict the GPU served-route gate already makes.
+- A per-frame map cannot be passed as FFmpeg CLI arguments, which is how
+  plurx builds encodes (`crates/plurx-core/src/transcode/encoder.rs`). The
+  fit is an encoder-policy component that attaches the map inside the
+  filter chain, gated like `roi_encode.c` (all-zero map ≡ baseline). Nothing
+  like that is built, deployed or changed here.
 
 ## Resuming
 
-This replaces the 2026-10-28 GPT→Claude handoff. Its boundaries still hold:
-offline diagnostics only, with no deployment, live playback, player or
-packaging change, and packaging as a separate workstream.
-
-### Where it stands
-
-- **Cause, as far as these tests separate it.** x265 leaves dark blocks
-  under-allocated in both luma and chroma. The evidence:
-  - Component swaps isolate the loss to coding in those blocks.
-  - A source-derived dark-block QP reduction removes the tail.
-  - More reduction fixes more frames (all-48 Michael5400 frames beating F:
-    17 → 38 → 46), though not frame by frame.
-  - The earlier rate rung shows that extra bits alone buy far less.
-
-  AQ2's texture-only rule and the global chroma offset are the candidate
-  mechanisms; a QP map cannot separate them, and no arm is iso-rate.
-- **Candidate.** Encode with a zero-mean per-frame quantOffsets map built
-  from the encoder's own input. Each 16×16 block whose mean Y' decodes
-  below 1 nit gets −3 or −6 QP, and every other block gets the balancing
-  positive offset. Both doses pass the fixed selected-frame bar (16/16
-  rows) and the 130 Mb/s screen. At −6 QP, Michael5400 beats F in 46/48
-  sampled frames and Michael1800 in 48/48.
-- **Dose decision.** Paul chose −6 QP on 2026-11-11. It fixes the most
-  shadow frames, and its bright-content cost stays well inside the FEL
-  benefit.
-- **Not done.**
-  - A held-out scene. Both windows were used for the design.
-  - Two marginal Michael5400 frames (5 and 6).
-  - Any production implementation.
+Boundaries: offline diagnostics only, with no deployment, live playback,
+player or packaging change.
 
 ### Evidence and tools
 

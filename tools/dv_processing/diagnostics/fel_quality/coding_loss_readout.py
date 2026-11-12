@@ -6,6 +6,7 @@ pooled all-48 full mean per model, frames beating F per model, and the protocols
   strict bar rows all pass (screen included), pooled full mean <= its landed control (Z6; base for Qbase) - 0.02 in all four models on
   every fixture, and shadow-p99 frames-beating-F >= the control in every model.
 Arms scored in several runs must agree exactly (same decoded candidate, same frozen scorer).
+A fixture whose name does not start with "michael" is a held-out scene and gets the stack's held-out rule instead.
 Usage: coding_loss_readout.py OUT.json FIXTURE=SCOREDIR=LANDINGDIR [...]
 """
 from pathlib import Path
@@ -48,9 +49,12 @@ for spec in specs:
 # Each arm is judged against its protocol's control: Qbase (plane-domain export, no map) against base, the rest against Z6.
 CONTROL = {'Qbase': 'base'}
 verdict = {}
+HELDOUT = {fx for fx in rec['fixtures'] if not fx.startswith('michael')}
 for arm in sorted(set().union(*[v['arms'] for v in rec['fixtures'].values()]) - {'F', 'Z6', 'base'}):
     per = {}
     for fx, v in rec['fixtures'].items():
+        if fx in HELDOUT:
+            continue
         a = v['arms'].get(arm)
         if not a or 'lattice' not in a or 'fullres' not in a:
             per[fx] = 'not scored'; continue
@@ -60,6 +64,21 @@ for arm in sorted(set().union(*[v['arms'] for v in rec['fixtures'].values()]) - 
         per[fx] = {'bar_all_pass': bar[0] == bar[1], 'pooled_mean_minus_control': dm, 'shadow_wins_minus_control': wins,
                    'pass': bar[0] == bar[1] and all(x <= -0.02 for x in dm.values()) and all(x >= 0 for x in wins.values())}
     verdict[arm] = {'control': CONTROL.get(arm, 'Z6'), 'per_fixture': per, 'accept': all(isinstance(p, dict) and p['pass'] for p in per.values())}
+# Held-out scene (protocol-stack-20261112.json): pooled mean below F in all four models, frames 0 and 24 below F,
+# shadow-p99 frames beating F at least the landed Z6's.
+for fx in HELDOUT:
+    v = rec['fixtures'][fx]['arms']; F, Z = v['F'], v['Z6']; hv = {}
+    for arm, a in v.items():
+        if arm == 'F' or 'lattice' not in a or 'fullres' not in a:
+            continue
+        pm = {m: a['lattice']['pooled_full_mean'][m] - F['lattice']['pooled_full_mean'][m] for m in 'ABCD'}
+        fm = {k: {m: a['fullres']['frames'][k][m]['full_mean'] - F['fullres']['frames'][k][m]['full_mean'] for m in 'ABCD'} for k in a['fullres']['frames']}
+        w = {m: a['lattice']['frames_beating_F'][m]['dark_p99_below_F'] - Z['lattice']['frames_beating_F'][m]['dark_p99_below_F'] for m in 'ABCD'}
+        hv[arm] = {'pooled_mean_minus_F': pm, 'frame_mean_minus_F': fm, 'shadow_wins_minus_Z6': w,
+                   'pass': all(x < 0 for x in pm.values()) and all(x < 0 for f in fm.values() for x in f.values()) and all(x >= 0 for x in w.values())}
+    rec.setdefault('heldout_verdicts', {})[fx] = hv
+    for arm, h in hv.items():
+        print(fx, arm, 'PASS' if h['pass'] else 'fail', {'dF_B': round(h['pooled_mean_minus_F']['B'], 4), 'wins_vs_Z6_B': h['shadow_wins_minus_Z6']['B']})
 rec['accept_rule'] = 'strict bar rows all pass; pooled full mean <= landed control (Z6; base for Qbase) - 0.02 in all four models on every fixture; shadow-p99 frames beating F >= the control in every model'
 rec['verdicts'] = verdict
 out.write_text(json.dumps(rec, indent=1) + '\n')

@@ -7,20 +7,22 @@ Prediction = encoded video-packet average + measured authoring overhead (default
 the Michael windows' authored-minus-encoded). The chosen encode must still pass the
 qualifier's actual authored-rate screen afterwards.
 
-Usage: land_rate.py --prefix P [--b0 115000] -- <encode_roi_control.py args without --prefix>
+A diagnostic rate rung (protocol-beekeeper-rung-20261112.json) passes --target T: band T +/- 0.75 Mb/s instead.
+Usage: land_rate.py --prefix P [--b0 115000] [--target T] -- <encode_roi_control.py args without --prefix>
 Writes <output-root>/corrected-encodes/P-landing.json; attempts are P-L1 .. P-L4.
 """
 from pathlib import Path
 import argparse, json, subprocess, sys
 
-LO, HI, TARGET = 128.5, 130.0, 129.25
 ap = argparse.ArgumentParser()
 ap.add_argument('--prefix', required=True)
 ap.add_argument('--b0', type=int, default=115000, help='first ABR target, kb/s')
 ap.add_argument('--overhead', type=float, default=0.03)
+ap.add_argument('--target', type=float, help='diagnostic rung: land at TARGET +/- 0.75 Mb/s (default band 128.5-130.0)')
 ap.add_argument('--driver', default=str(Path(__file__).with_name('encode_roi_control.py')))
 ap.add_argument('rest', nargs=argparse.REMAINDER)
 a = ap.parse_args()
+LO, HI, TARGET = (a.target - 0.75, a.target + 0.75, a.target) if a.target else (128.5, 130.0, 129.25)
 rest = a.rest[1:] if a.rest[:1] == ['--'] else a.rest
 root = Path(rest[rest.index('--output-root') + 1]).resolve()
 FFPROBE = '/opt/homebrew/bin/ffprobe'
@@ -53,7 +55,7 @@ for k in range(1, 5):
         nb = b + (TARGET - pred) / slope if slope > 0 else b * TARGET / pred
     b = int(round(nb))
 chosen = next((x['prefix'] for x in reversed(attempts) if x.get('in_band')), None)
-out = {'rule': 'secant on b only, <=4 encodes, predicted authored average in [128.5,130.0]', 'band': [LO, HI], 'target': TARGET,
+out = {'rule': f'secant on b only, <=4 encodes, predicted authored average in [{LO},{HI}]', 'band': [LO, HI], 'target': TARGET,
        'overhead_mbps': a.overhead, 'attempts': attempts, 'chosen': chosen, 'landed': chosen is not None}
 with (root / 'corrected-encodes' / f'{a.prefix}-landing.json').open('x') as f:
     f.write(json.dumps(out, indent=2) + '\n')

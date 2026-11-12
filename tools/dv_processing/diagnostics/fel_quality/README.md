@@ -26,7 +26,9 @@ locations. Media, decoded frames and binaries stay outside Git.
 | `heldout_eval.py` | Frozen four-model scoring with observer metadata for fixtures that have no retained parsed metadata; full resolution or lattice; validated by exact reproduction of a retained result. |
 | `land_rate.py` | Lands an arm in the 128.5–130.0 Mb/s authored band by changing only the ABR target (secant, at most 4 encodes); the iso-rate rule for every coding arm. |
 | `make_export_oracle.py` | X0: oracle 10-bit 4:2:0 exports from the composition (rounded, truncated, swaps) and signed PRE−oracle plane statistics. |
-| `roi_encode.c` | In-process libavcodec/libx265 encode carrying a per-frame quantOffsets map as ROI side data; options pass verbatim as one dictionary. |
+| `roi_encode.c` | In-process libavcodec/libx265 encode carrying a per-frame quantOffsets map as ROI side data; options pass verbatim as one dictionary. Modes `lumazm` (zero-mean dark map) and the refinements `lumazx`/`lumazr`/`lumazf`/`lumazfn`/`lumazfs` (flat exclusion, ramp, FEL-benefit weighting from the BL planes). |
+| `coding_loss_readout.py` | Portable per-arm readout of the iso-rate coding-loss arms and the protocols' accept rules, including the held-out stack rule. |
+| `grain_ratio.py` | Report-only grain proxy: high-pass luma energy of the decode over the encoder input on 1–100 nit blocks. |
 | `encode_roi_control.py` | Translates a retained CLI recipe into the ROI harness, runs the byte-identity gates and the predeclared source-luma map arm. |
 | `encode_spatial_control.py` | Fixed qg-size8 spatial-allocation control at the retained single-pass115/125 budget. |
 | `encode_two_pass_control.py` | Two-pass allocation control with fresh 48-record statistics and identical requested coding settings across passes. |
