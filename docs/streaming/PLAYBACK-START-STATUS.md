@@ -139,7 +139,10 @@ items 4 and 5.
 Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
 agent on local branch `item6`, stacked on `item5`, not pushed. The first
 step of item 6 below is built; clippy `-D warnings` and fmt are clean, the
-inventory and formal pins are green. No unit test has been run.
+inventory and formal pins are green. No unit test has been run. A
+claude-fable-5-2 adversarial review found four majors and six minors, all
+addressed below except the persisted trigger value, which the schema
+forbids without a migration (item 6, Attribution).
 
 Decision (Paul away): the full unification is not one safe PR. Moving local
 rolling copy and indexed-VOD copy onto the growing engine replaces the local
@@ -162,10 +165,12 @@ Decisions (Paul away), each stated under item 5:
 - A quarantined pointer is not readable. The plan said the old pointer stays
   readable until the successor publishes; the store has never done that, and
   a contradicted index must not keep serving.
-- A quarantine on a doubt (no holder, a contradicting observation, a
-  sealed-init mismatch) does not ban its blob. A set that still holds
-  contradicting rows cannot reseal the quarantined bytes, so an identical
-  reseal means the observation was the faulty side and the index was good.
+- A quarantine on a doubt (no holder, a contradicting observation) does not
+  ban its blob. A set that still holds contradicting rows cannot reseal the
+  quarantined bytes, so an identical reseal means the observation was the
+  faulty side and the index was good. A sealed-init mismatch does ban its
+  blob: a reseal repeats the seal's own promotion, so identical bytes
+  disprove nothing about the init a generation served.
 - A coordinator retired as stranded does not use up its generation, or a
   restart would lock every half-observed source out for the 30-day prune.
 
@@ -307,6 +312,10 @@ deterministic repair generation (`copy_index_v3_rebuild_generation`).
   - `copy_index_sealed_init_mismatch`: only when this node's engine digest
     is the variant's producer engine. Another engine's init says nothing
     about the variant, so the generation's own refusal is all that happens.
+    The blob is banned and the producer engine does not rebuild it (it
+    would seal the same bytes): the head stays quarantined and readers
+    keep the v2 or node-local index, which still plays. A node with
+    another engine may rebuild it.
   A refusal with no computed contract to compare (the promotion failed)
   fails the generation and reports nothing. The claim the worker borrowed
   is ended as a stranded coordinator, uncharged; the origin's next
@@ -355,29 +364,54 @@ background. The local serving paths are not migrated.
   never reuses a Source grant. It holds no assignment and no Source
   interest, and grants no read.
 - A local viewer's copy start that finds no v3 index sends a row-less
-  `CopyIndexDemand` through the copy-analysis inbox (one stat and one
-  message; the start plans from the existing index order and waits on
-  nothing). It is keyed exactly as the reader looks its own head up.
-- The worker holds the demand as a source without rows. When the source
-  domain is idle it claims the coordinator and runs the copy engine itself:
-  the first Analysis generation is given no contract to check, reads the
-  whole title and establishes the set (`CopyObservationSet::from_analysis`),
-  then attestation, seal and publication are items 1-2 unchanged. A later
-  start of the title, on any node, plans from the published index.
+  `CopyIndexDemand` through the copy-analysis inbox, whether or not a
+  legacy or v2 index serves that start: v3 is the index every node shares,
+  and playing a title is what migrates it. The start plans from the
+  existing index order and waits on nothing. The demand names the source
+  the lookup itself derived (no second stat), the authority is checked
+  first, a changed fragment-index engine asks for nothing, and a source
+  already asked for is refused before the inbox until its work settles.
+- The worker holds the demand as a source without rows, and never before
+  one retry interval has passed, so its first attempt is a later dispatch
+  wake and cannot run against the start that raised it. A demand makes
+  room only among other demands; it never evicts a set that holds rows.
+- When the source domain is idle the worker claims the coordinator and runs
+  the copy engine itself: the first Analysis generation is given no
+  contract to check, reads the whole title and establishes the set
+  (`CopyObservationSet::from_analysis`), then attestation, seal and
+  publication are items 1-2 unchanged. The set keeps the source as
+  playback observes it, so later playback ranges still fold in. No fill
+  runs on an engine that changed under the process.
 - A demand that meets a quarantined head adopts its repair generation, so
-  a local play of the title now starts the rebuild item 5 left waiting for
-  a Source observation.
+  a local play of the title starts the rebuild item 5 left waiting for a
+  Source observation. The one exception is a sealed-init mismatch on this
+  node's own engine, which is not rebuilt.
 - A generation whose coordination request already ended (`failed`,
-  `cancelled`, `ready`) is dropped instead of being asked about on every
-  pass. This also applies to Source sets.
+  `cancelled`, `ready`) is dropped, logged at debug, instead of being asked
+  about on every pass. A request retired as `coordination_stranded` is
+  never counted as ended. This also applies to Source sets.
 
-Cost: the first local copy start of a title without a v3 index leads to one
-background whole-file read by the copy engine and, where no full-source
-receipt exists, one whole-file hash. Both are Analysis physical phases of a
-`fragment_index` request for that file (visible and cancellable where every
-Analysis request is), admitted only while the source domain is idle and
-paused under foreground pressure. The worker logs the user and playback
-that asked.
+Attribution. The request a demand creates has the id
+`local-play.u<user>.<playback>.<suffix>` (the playback is left out when it
+does not fit 64 bytes or cannot sit in a URL path). `analysis_requests.
+trigger` is constrained by the schema to `admin`, `background` and
+`playback`, and `playback` means a waiting viewer to the claim and turn
+logic, so a fourth value needs a table-rebuild migration on both backends
+that this batch does not make; the stored trigger stays `background`. The
+id shows wherever requests are listed: `GET /api/v1/analysis/jobs` and
+`/api/v1/analysis/jobs/{id}` (`request_id`/`job_id`), and the Analysis page,
+whose row details show it as Request and whose Trigger reads "Local
+playback" for it, in the row and in Copy details. The row's Cancel button
+stops the build. The worker also logs the user and playback at info.
+
+Cost: one extra whole-file read per title and copy identity. The first
+local copy start of a file under a given copy-video identity (plain copy,
+Dolby Vision preserved, Dolby Vision converted are distinct identities)
+without a v3 index leads to one background read of the whole file by the
+copy engine, on top of the legacy node-local index pass's own read, and
+where no full-source receipt exists one whole-file hash. Both are Analysis
+physical phases, admitted only while the source domain is idle and paused
+under foreground pressure.
 
 Remaining for item 6, not started:
 
@@ -401,9 +435,14 @@ Remaining for item 6, not started:
 - A demand is in memory only: a restart forgets it and the next local start
   of the title asks again. It is dropped on non-unix builds, which have no
   copy engine.
-- Not unit tested: the VOD start emitting the demand, and the worker's
-  build of a demanded source end to end (the unseeded first generation runs
-  in `gap_fill_tests`; the claim and phases around it are items 1-2's).
+- The persisted trigger is not `local_playback` (see Attribution). Doing
+  that is one migration: rebuild `analysis_requests` with the wider CHECK
+  on SQLite and hiqlite, and add the value to both `valid_request`s.
+- Not unit tested: the VOD start emitting the demand, the Analysis page's
+  label, the ceiling case of a stranded request, a demand refused because
+  every held source has rows, and the worker's build of a demanded source
+  end to end (the unseeded first generation runs in `gap_fill_tests`; the
+  claim and phases around it are items 1-2's).
 
 ### Acceptance for the next merge
 
