@@ -830,9 +830,9 @@ internal data class PreparedReplacementRequirement(
  * [isTelevision] is the axis M5.5's only observed hard failure sat on: both
  * phones passed dual prime 20/20, and the tunneled Google TV failed it 0/3
  * with two successor-prime timeouts and an `ERROR_CODE_AUDIO_TRACK_WRITE_FAILED`.
- * [tunnelingEnabled] is the suspected cause rather than a measured one: the
- * re-run that would name it (same-codec dual prime with tunneling forced off)
- * has not been taken.
+ * [tunnelingEnabled] is the successor's own tunneling: a tunneled successor
+ * was measured to invalidate the incumbent's hardware A/V sync audio on that
+ * Google TV, so successors are built untunneled.
  */
 internal fun preparedReplacementRequirements(
     isTelevision: Boolean,
@@ -857,13 +857,12 @@ internal fun preparedReplacementRequirements(
         label = "Tunneled decoding off",
         met = !tunnelingEnabled,
         detail = if (tunnelingEnabled) {
-            "Tunneling was on for the failure. Two identical tunneled pipelines " +
-                "appear to contend where two different codecs get distinct " +
-                "decoder instances. Suspected, not measured: the re-run that " +
-                "would settle it has not been taken."
+            "A tunneled successor claims the hardware A/V sync the incumbent " +
+                "holds. On the Google TV Streamer that invalidated the " +
+                "incumbent's audio and stalled it before the switch."
         } else {
-            "Not requested on this device, so two pipelines get distinct " +
-                "decoder instances."
+            "By construction: a successor primes and serves untunneled, so " +
+                "it never takes the incumbent's hardware A/V sync."
         },
     ),
     PreparedReplacementRequirement(

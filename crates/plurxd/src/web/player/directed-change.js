@@ -1249,6 +1249,9 @@ function attachSession(v, t, info, wantSec){
   startPlaybackControl(v,t,info.control||null);
   t.effectiveProcessing=effectiveHdrProcessing(info.effective_processing,
     t.controlReporter?.bootstrap?.generation,info.delivered_dynamic_range);
+  // A new session has no skipped upgrade yet. Without this, the first control
+  // exchange saw undefined -> null as a change and repainted the panel.
+  t.processingSkip=null;
   if(t===PLAYER) renderPlayerInfo();
   markPlaybackControlSeekExecuted(t,wantSec||0);
   return into + (t.offset||0);

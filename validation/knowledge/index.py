@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import hmac
 import json
@@ -94,6 +95,25 @@ def _cache_key(root, cache, *, create):
     attacker who can steal/replace the key. A signature is never receipt auth.
     """
     path = cache / _KEY_NAME
+    # Publication links a fully written temporary into place and then
+    # unlinks the temporary. That unlink changes the shared inode's ctime,
+    # so a reader overlapping a sibling creator's cleanup would see "cache
+    # file changed". Readers share and creators exclusively hold a lock on
+    # the cache directory, so no read ever overlaps publication.
+    try:
+        guard = _directory(root, cache)
+    except FileNotFoundError:
+        if not create:
+            return None
+        raise
+    try:
+        fcntl.flock(guard, fcntl.LOCK_EX if create else fcntl.LOCK_SH)
+        return _locked_cache_key(root, cache, path, create=create)
+    finally:
+        os.close(guard)
+
+
+def _locked_cache_key(root, cache, path, *, create):
     try:
         raw, info = _read_owned(root, path, 32)
     except FileNotFoundError:

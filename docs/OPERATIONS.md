@@ -3423,7 +3423,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_DOVI_TOOL` | — | `dovi_tool` | `dovi_tool` binary for permanent Profile 7 → 8.1 conversion; probed at boot and required only when that feature is enabled |
 | `PLURX_MKVMERGE` | — | `mkvmerge` | MKVToolNix muxer for the verified Profile 8.1 replacement; version 68 or newer is required |
 | `PLURX_HWACCEL` | — | `auto` | Preferred encoder: `auto` · `qsv` · `vaapi` · `nvenc` · `videotoolbox` |
-| `PLURX_VAAPI_DEVICE` | — | `/dev/dri/renderD128` | VA-API render node |
+| `PLURX_VAAPI_DEVICE` | — | first VA-API-driver render node (i915, xe, amdgpu, radeon), else `/dev/dri/renderD128` | VA-API render node; skips NVIDIA nodes |
 | `PLURX_TONEMAP` | — | zscale | The **CPU** tone-map operator: `zscale` · `libplacebo` · `off` (no tone-map — plays HDR washed, but a useful test/escape hatch). Which *pipeline* runs — GPU or CPU — is probed at boot, not configured; this only chooses the operator when the CPU chain is the one running |
 | `PLURX_HWDECODE` | — | on | Set `off` to force software decode (still hardware-encodes) — for a GPU that decodes a stream to garbage, e.g. some Dolby Vision |
 | `PLURX_GDM_PORT` | — | `32414` | Host UDP port for GDM discovery (move if Plex owns 32414) |

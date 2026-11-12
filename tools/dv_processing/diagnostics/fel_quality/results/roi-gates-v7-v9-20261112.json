@@ -1,0 +1,175 @@
+{
+ "scope": "harness rebuilds v7 (map refinement), v8 (map family) and v9 (review fix): byte-identity gates against each fixture CLI baseline, and replays proving an older arm is reproduced bit for bit",
+ "builds": {
+  "roi_encode-v7": {
+   "binary_sha256": "a82a1b9139762a45e94737a2971bbd6d4b5af4477726cb0de1a922069bc0e40a",
+   "source_sha256": "686492486e72e71c4e4a0bf4f2737ebc9546907be65423915fbde2305e86516a",
+   "source_commit": "7b614de37",
+   "build": "clang -O2 roi_encode.c -o roi_encode-v7 -I<ffmpeg>/include -L<ffmpeg>/lib -lavformat -lavcodec -lavutil -lm"
+  },
+  "roi_encode-v8": {
+   "binary_sha256": "424fcc02f049fac01ae96c5813decb839b199126a32983c14920189591752e01",
+   "source_sha256": "346592421977b337a4197f4aed7a5b8b46593f234a2cb79a469a6cf65a936445",
+   "source_commit": "0c07d46c0",
+   "build": "clang -O2 roi_encode.c -o roi_encode-v8 -I<ffmpeg>/include -L<ffmpeg>/lib -lavformat -lavcodec -lavutil -lm"
+  },
+  "roi_encode-v9": {
+   "binary_sha256": "34d2175db5c4524ed218e5c9acce4f112ccb7ef113da415d55d4ff72711034db",
+   "source_sha256": "569c56ae3bda8e4d8c1308512f9edfbcacc8decc43e38557e45087118471e601",
+   "source_commit": "34d2175db+",
+   "build": "clang -O2 roi_encode.c -o roi_encode-v9 -I<ffmpeg>/include -L<ffmpeg>/lib -lavformat -lavcodec -lavutil -lm"
+  }
+ },
+ "gates": {
+  "michael5400-gate7-none": {
+   "mode": "none",
+   "harness_sha256": "a82a1b9139762a45e94737a2971bbd6d4b5af4477726cb0de1a922069bc0e40a",
+   "baseline_mp4_sha256": "a3a7f8ed5e9993f832539e802fe78da8de281273f65a040d2c8a753035f46b97",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael5400-gate7-zero": {
+   "mode": "zero",
+   "harness_sha256": "a82a1b9139762a45e94737a2971bbd6d4b5af4477726cb0de1a922069bc0e40a",
+   "baseline_mp4_sha256": "a3a7f8ed5e9993f832539e802fe78da8de281273f65a040d2c8a753035f46b97",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael5400-gate8-none": {
+   "mode": "none",
+   "harness_sha256": "424fcc02f049fac01ae96c5813decb839b199126a32983c14920189591752e01",
+   "baseline_mp4_sha256": "a3a7f8ed5e9993f832539e802fe78da8de281273f65a040d2c8a753035f46b97",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael5400-gate8-zero": {
+   "mode": "zero",
+   "harness_sha256": "424fcc02f049fac01ae96c5813decb839b199126a32983c14920189591752e01",
+   "baseline_mp4_sha256": "a3a7f8ed5e9993f832539e802fe78da8de281273f65a040d2c8a753035f46b97",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael5400-gate9-none": {
+   "mode": "none",
+   "harness_sha256": "34d2175db5c4524ed218e5c9acce4f112ccb7ef113da415d55d4ff72711034db",
+   "baseline_mp4_sha256": "a3a7f8ed5e9993f832539e802fe78da8de281273f65a040d2c8a753035f46b97",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael5400-gate9-zero": {
+   "mode": "zero",
+   "harness_sha256": "34d2175db5c4524ed218e5c9acce4f112ccb7ef113da415d55d4ff72711034db",
+   "baseline_mp4_sha256": "a3a7f8ed5e9993f832539e802fe78da8de281273f65a040d2c8a753035f46b97",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael1800-gate9-none": {
+   "mode": "none",
+   "harness_sha256": "34d2175db5c4524ed218e5c9acce4f112ccb7ef113da415d55d4ff72711034db",
+   "baseline_mp4_sha256": "02497eb06aab6de3d1151480ff56e50143bf1d4635cc96f7bedc819039ee6b1d",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "3c4a523f7bea0d1cc0298aba278ae54d32ab8fa3a0117eda1d7eda6059057db0",
+    "baseline_sha256": "3c4a523f7bea0d1cc0298aba278ae54d32ab8fa3a0117eda1d7eda6059057db0",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael1800-gate9-zero": {
+   "mode": "zero",
+   "harness_sha256": "34d2175db5c4524ed218e5c9acce4f112ccb7ef113da415d55d4ff72711034db",
+   "baseline_mp4_sha256": "02497eb06aab6de3d1151480ff56e50143bf1d4635cc96f7bedc819039ee6b1d",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "3c4a523f7bea0d1cc0298aba278ae54d32ab8fa3a0117eda1d7eda6059057db0",
+    "baseline_sha256": "3c4a523f7bea0d1cc0298aba278ae54d32ab8fa3a0117eda1d7eda6059057db0",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "beekeeper1800-gate9-none": {
+   "mode": "none",
+   "harness_sha256": "34d2175db5c4524ed218e5c9acce4f112ccb7ef113da415d55d4ff72711034db",
+   "baseline_mp4_sha256": "1fea509ec9375ae6183b11ba23891f61085ea529e8fdad66d43a71dd7aecfd82",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "5a3075f49097c5377f14e59c0edf3522ed210dc3969e9521b8629d7bfe82baa8",
+    "baseline_sha256": "5a3075f49097c5377f14e59c0edf3522ed210dc3969e9521b8629d7bfe82baa8",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "beekeeper1800-gate9-zero": {
+   "mode": "zero",
+   "harness_sha256": "34d2175db5c4524ed218e5c9acce4f112ccb7ef113da415d55d4ff72711034db",
+   "baseline_mp4_sha256": "1fea509ec9375ae6183b11ba23891f61085ea529e8fdad66d43a71dd7aecfd82",
+   "equivalence_gate": "pass",
+   "elementary_stream": {
+    "candidate_sha256": "5a3075f49097c5377f14e59c0edf3522ed210dc3969e9521b8629d7bfe82baa8",
+    "baseline_sha256": "5a3075f49097c5377f14e59c0edf3522ed210dc3969e9521b8629d7bfe82baa8",
+    "identical_to_baseline": true
+   },
+   "unused_encoder_options_equal": true
+  },
+  "michael5400-Z6v7-replay": {
+   "mode": "lumazm",
+   "harness_sha256": "a82a1b9139762a45e94737a2971bbd6d4b5af4477726cb0de1a922069bc0e40a",
+   "baseline_mp4_sha256": "a3a7f8ed5e9993f832539e802fe78da8de281273f65a040d2c8a753035f46b97",
+   "equivalence_gate": null,
+   "elementary_stream": {
+    "candidate_sha256": "163694f38493548ed9c99a87592acd37540712c49a7410792fcac72bb7dc80e8",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": false
+   },
+   "unused_encoder_options_equal": true,
+   "equals": {
+    "v6 michael5400-Z6-L1": true
+   }
+  },
+  "michael5400-Zfn1x-replay": {
+   "mode": "lumazfsp",
+   "harness_sha256": "34d2175db5c4524ed218e5c9acce4f112ccb7ef113da415d55d4ff72711034db",
+   "baseline_mp4_sha256": "a3a7f8ed5e9993f832539e802fe78da8de281273f65a040d2c8a753035f46b97",
+   "equivalence_gate": null,
+   "elementary_stream": {
+    "candidate_sha256": "06a0bbcea4e9f0af8baaf9e5bd41faac379b3fdcc287cb49b39321e248406942",
+    "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+    "identical_to_baseline": false
+   },
+   "unused_encoder_options_equal": true,
+   "equals": {
+    "v8 michael5400-Zfn1-L2 (lumazfs as executed)": true
+   }
+  }
+ }
+}

@@ -18,14 +18,18 @@ from pathlib import Path
 import argparse, hashlib, json, re, subprocess, time
 
 FFMPEG = '/opt/homebrew/bin/ffmpeg'
-VF = ('setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,'
-      'format=yuv420p10le,settb=expr=1/24000,setpts=N*1001')
+CADENCES = {(24000, 1001), (24, 1)}  # the retained fixtures' native cadences
+
+
+def vf_for(num, den):
+    return ('setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,'
+            f'format=yuv420p10le,settb=expr=1/{num},setpts=N*{den}')
 DICT = {'-preset': 'preset', '-profile:v': 'profile', '-x265-params': 'x265-params', '-b:v': 'b', '-maxrate': 'maxrate',
         '-bufsize': 'bufsize', '-bf': 'bf', '-flags': 'flags', '-g': 'g', '-keyint_min': 'keyint_min',
         '-sc_threshold': 'sc_threshold', '-color_primaries': 'color_primaries', '-color_trc': 'color_trc',
         '-colorspace': 'colorspace', '-color_range': 'color_range', '-threads:v': 'threads'}
 FIXED = {'-nostdin': None, '-hide_banner': None, '-loglevel': 'verbose', '-filter_threads': '1', '-threads': '1',
-         '-map': '0:v:0', '-an': None, '-sn': None, '-vf': VF, '-c:v': 'libx265', '-fps_mode': 'passthrough',
+         '-map': '0:v:0', '-an': None, '-sn': None, '-c:v': 'libx265', '-fps_mode': 'passthrough',
          '-force_key_frames': 'expr:eq(mod(n,48),0)', '-f': 'mp4'}
 
 
@@ -51,6 +55,8 @@ def translate(argv):
             opts[DICT[t]] = a[i + 1]; i += 2
         elif t == '-r':
             num, den = a[i + 1].split('/'); pos['rate'] = (int(num), int(den)); i += 2
+        elif t == '-vf':
+            pos['vf'] = a[i + 1]; i += 2
         elif t == '-i':
             pos['input'] = a[i + 1]; i += 2
         elif t == '-enc_time_base':
@@ -63,7 +69,8 @@ def translate(argv):
             pos['tag'] = a[i + 1]; i += 2
         else:
             raise SystemExit(f'refused: untranslated baseline argv token {t!r}')
-    assert set(pos) == {'rate', 'input', 'tb_den', 'frames', 'movflags', 'tag'}, pos
+    assert set(pos) == {'rate', 'input', 'tb_den', 'frames', 'movflags', 'tag', 'vf'}, pos
+    assert pos['rate'] in CADENCES and pos['vf'] == vf_for(*pos['rate']) and pos['tb_den'] == pos['rate'][0], ('cadence/filter', pos)
     return opts, pos, out
 
 
@@ -81,12 +88,20 @@ p.add_argument('--baseline-mp4', required=True, type=Path)
 p.add_argument('--harness', required=True, type=Path)
 p.add_argument('--output-root', required=True, type=Path)
 p.add_argument('--prefix', required=True)
-p.add_argument('--mode', choices=['none', 'zero', 'luma', 'lumazm'], required=True)
+p.add_argument('--mode', choices=['none', 'zero', 'luma', 'lumazm', 'lumazx', 'lumazr', 'lumazf', 'lumazfn', 'lumazfs', 'lumazfsp'], required=True)
+p.add_argument('--arm', help='refined modes: the protocol arm (harness_modes key) this encode is')
 p.add_argument('--grid', type=int, default=16)
 p.add_argument('--threshold-nits', type=float, default=0.0)
 p.add_argument('--qp-offset', type=int, default=0)
 p.add_argument('--protocol', type=Path)
 p.add_argument('--harness-source', type=Path, help='roi_encode.c the harness binary was built from (bound by hash)')
+p.add_argument('--override', action='append', default=[],
+               help='KEY=VALUE replaces an encoder dictionary entry; KEY+=VALUE appends ":VALUE" (x265-params)')
+p.add_argument('--timeout', type=int, default=1800, help='encode timeout in seconds')
+p.add_argument('--source', type=Path, help='encode this input instead of the baseline source (e.g. a plane-domain export)')
+p.add_argument('--source-sha256', help='required with --source')
+p.add_argument('--bl-planes', type=Path, help='lumazf: canonical BL planes (raw yuv420p10le), bound by hash')
+p.add_argument('--bl-sha256', help='required with --bl-planes')
 p.add_argument('--gate-receipt', type=Path, action='append', default=[],
                help='luma modes: passing none/zero gate recipe(s) produced by this same harness binary')
 a = p.parse_args()
@@ -94,12 +109,37 @@ a = p.parse_args()
 base = json.loads(a.baseline_recipe.read_text())
 assert base['status'] == 'encoded' and sha(a.baseline_mp4) == base['sha256']
 opts, pos, _ = translate(base['argv'])
+overrides = []
+for o in a.override:
+    k, v = o.split('=', 1)
+    if k.endswith('+'):
+        assert k[:-1] in opts, f'cannot append to missing option {k[:-1]}'
+        opts[k[:-1]] = opts[k[:-1]] + ':' + v
+    else:
+        opts[k] = v
+    overrides.append(o)
+# A gate is a none/zero run on the unmodified baseline options; with overrides it is an ordinary encode.
+is_gate = a.mode in ('none', 'zero') and not overrides and not a.source
 src = Path(pos['input'])
 if not src.exists():
     src = a.baseline_input_root / src.name
 assert sha(src) == base['source_sha256'], 'source hash mismatch'
-assert pos['rate'] == (24000, 1001) and pos['tb_den'] == 24000 and pos['frames'] == 48
-if a.mode in ('luma', 'lumazm'):
+if a.source:
+    assert a.source_sha256 and sha(a.source) == a.source_sha256, 'source override hash mismatch'
+    src = a.source.resolve()
+num, den = pos['rate']
+assert pos['frames'] == 48
+REFINED = ('lumazx', 'lumazr', 'lumazf', 'lumazfn', 'lumazfs', 'lumazfsp')
+assert (a.mode in ('lumazf', 'lumazfn', 'lumazfs', 'lumazfsp')) == bool(a.bl_planes), 'BL planes are required by the lumazf family and refused otherwise'
+if a.bl_planes:
+    assert a.bl_sha256 and sha(a.bl_planes) == a.bl_sha256, 'BL planes hash mismatch'
+if a.mode in REFINED:
+    # A refined map must be declared, with these exact arguments, by the committed protocol's harness_modes.
+    assert a.protocol, 'refined map needs a committed protocol'
+    hm = json.loads(a.protocol.read_text()).get('harness_modes', {})
+    assert a.arm and hm.get(a.arm) == {'mode': a.mode, 'threshold_nits': a.threshold_nits, 'qp_offset': a.qp_offset}, \
+        'refused: --arm must name a harness_modes entry declaring exactly this mode, threshold and offset'
+if a.mode in ('luma', 'lumazm') + REFINED:
     assert a.protocol and a.threshold_nits > 0 and a.qp_offset != 0, 'luma map needs a committed protocol and nonzero settings'
     own = text = a.protocol.read_text()
     # A protocol may declare itself identical to an earlier one in the same directory; include those.
@@ -107,14 +147,16 @@ if a.mode in ('luma', 'lumazm'):
         if (a.protocol.parent / ref).exists():
             text += (a.protocol.parent / ref).read_text()
     # The arguments must be the ones the committed protocol declares.
-    assert f'{a.qp_offset}/63' in own, 'qp offset not declared by this protocol itself'
-    assert f'< {a.threshold_nits} nit' in text, 'threshold not declared by the protocol'
-    assert (a.mode == 'lumazm') == ('zero-mean' in text or 'zero frame mean' in text), 'zero-mean mode does not match the protocol'
+    assert re.search(rf'(?<![\w+-]){a.qp_offset}/63', own), 'qp offset not declared by this protocol itself'
+    if a.mode not in REFINED:
+        assert f'< {a.threshold_nits} nit' in text, 'threshold not declared by the protocol'
+    assert (a.mode != 'luma') == ('zero-mean' in text or 'zero frame mean' in text), 'zero-mean mode does not match the protocol'
     assert a.gate_receipt, 'refused: luma modes need a passing gate receipt from this harness binary'
     modes = set()
     for g in a.gate_receipt:
         gr = json.loads(g.read_text())
         assert gr.get('equivalence_gate') == 'pass' and gr['harness']['sha256'] == sha(a.harness), f'refused: {g} is not a passing gate for this binary'
+        assert gr['baseline_mp4_sha256'] == base['sha256'], f'refused: {g} gates another fixture\'s baseline'
         modes.add(gr['mode'])
     assert modes >= {'none', 'zero'}, 'refused: need both the none and the zero gate for this binary'
 grid = 8 if ':qg-size=8' in opts['x265-params'] else 16
@@ -126,32 +168,33 @@ dst = Path(f'{stem}-hdr.mp4'); mapj = Path(f'{stem}-map.json'); log = Path(f'{st
 for f in [dst, mapj, log, Path(f'{stem}-recipe.json')]:
     assert not f.exists(), f'refused: {f} exists'
 argv = [str(a.harness), str(src), str(dst), str(mapj), a.mode, str(a.grid), repr(a.threshold_nits), str(a.qp_offset),
-        str(pos['frames']), '24000', '1001', str(pos['tb_den']), pos['movflags'], pos['tag']] + [f'{k}={v}' for k, v in opts.items()]
+        str(pos['frames']), str(num), str(den), str(pos['tb_den']), pos['movflags'], pos['tag']] + ([f'roi_bl={a.bl_planes.resolve()}'] if a.bl_planes else []) + [f'{k}={v}' for k, v in opts.items()]
 t = time.monotonic()
 with log.open('xb') as f:
-    r = subprocess.run(['nice', '-n', '15', *argv], stdout=f, stderr=subprocess.STDOUT, timeout=1800)
+    r = subprocess.run(['nice', '-n', '15', *argv], stdout=f, stderr=subprocess.STDOUT, timeout=a.timeout)
 record = {'variant': 'hdr-off-chroma9', 'fixture': a.prefix.split('-')[0], 'mode': a.mode, 'grid': a.grid,
           'threshold_nits': a.threshold_nits, 'qp_offset': a.qp_offset, 'qg_size': 8 if grid == 8 else 32,
-          'cadence': '24000/1001', 'source': str(src), 'source_sha256': base['source_sha256'],
+          'cadence': f'{num}/{den}', 'source': str(src), 'source_sha256': sha(src), 'baseline_source_sha256': base['source_sha256'],
           'baseline_recipe': {'path': str(a.baseline_recipe), 'sha256': sha(a.baseline_recipe)},
           'baseline_mp4_sha256': base['sha256'], 'harness': {'path': str(a.harness), 'sha256': sha(a.harness),
                       'source': {'path': str(a.harness_source), 'sha256': sha(a.harness_source)} if a.harness_source else None},
           'gate_receipts': [{'path': str(g), 'sha256': sha(g)} for g in a.gate_receipt],
+          'bl_planes': {'path': str(a.bl_planes), 'sha256': a.bl_sha256} if a.bl_planes else None,
           'driver': {'path': str(Path(__file__).resolve()), 'sha256': sha(Path(__file__).resolve())},
           'protocol': {'path': str(a.protocol), 'sha256': sha(a.protocol)} if a.protocol else None,
-          'encoder_dictionary': opts, 'argv': argv, 'exit_code': r.returncode, 'elapsed_seconds': time.monotonic() - t,
+          'encoder_dictionary': opts, 'overrides': overrides, 'argv': argv, 'exit_code': r.returncode, 'elapsed_seconds': time.monotonic() - t,
           'scope': 'offline encoder control; no playback/deployment/packaging change'}
 cli_unused = sorted(set(re.findall(r'Codec AVOption (\S+) \(', Path(str(a.baseline_recipe).replace('-recipe.json', '-encode.log')).read_text())))
 harness_unused = sorted(set(re.findall(r'roi_encode: unused option ([^=\s]+)=', log.read_text())))
 record['unused_encoder_options'] = {'cli_baseline': cli_unused, 'harness': harness_unused, 'equal': cli_unused == harness_unused}
 record['status'] = 'encoded' if r.returncode == 0 and cli_unused == harness_unused else 'encode_failed'
 if record['status'] == 'encoded':
-    record.update(bytes=dst.stat().st_size, sha256=sha(dst), average_mbps=dst.stat().st_size * 8 / (48 * 1001 / 24000) / 1e6,
+    record.update(bytes=dst.stat().st_size, sha256=sha(dst), average_mbps=dst.stat().st_size * 8 / (48 * den / num) / 1e6,
                   map=json.loads(mapj.read_text()), map_sha256=sha(mapj))
     eb = annexb(dst, Path(f'{stem}-annexb.hevc'))
     bb_path = Path(f'{stem}-baseline-annexb.hevc'); bb = annexb(a.baseline_mp4, bb_path)
     record['elementary_stream'] = {'candidate_sha256': eb, 'baseline_sha256': bb, 'identical_to_baseline': eb == bb}
-    if a.mode in ('none', 'zero'):
+    if is_gate:
         record['equivalence_gate'] = 'pass' if eb == bb else 'FAIL'
         if eb != bb:
             record['status'] = 'gate_failed'  # an invalid harness, never an encoded candidate

@@ -8494,3 +8494,20 @@ test('permission retry preserves startup and pending destinations but resumes es
   assert.ok(media.events.includes('authorized-play'));
  }
 });
+
+test("a session opens with no skipped upgrade, so its first exchange does not repaint the panel",()=>{
+  // The control exchange repaints Playback Info when the processing skip
+  // changes. A session that left it undefined saw undefined -> null on its
+  // first exchange and repainted (it moved the quality control's label in the
+  // UI structure golden). Session open sets it beside effectiveProcessing.
+  const source=fs.readFileSync(path.join(__dirname,
+    "../../crates/plurxd/src/web/player/directed-change.js"),"utf8");
+  const open=source.indexOf("t.effectiveProcessing=effectiveHdrProcessing(info.effective_processing");
+  assert.ok(open>=0,"session open still records the effective processing report");
+  const paint=source.indexOf("renderPlayerInfo()",open);
+  const skip=source.indexOf("t.processingSkip=null",open);
+  assert.ok(skip>open&&skip<paint,"session open clears the processing skip before its first paint");
+  const exchange=source.indexOf("const skip=processingSkipFromWire(response?.processing_skip");
+  assert.ok(exchange>=0);
+  assert.match(source.slice(exchange,exchange+400),/JSON\.stringify\(p\.processingSkip\)!==JSON\.stringify\(skip\)/);
+});

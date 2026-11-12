@@ -158,6 +158,12 @@ runs:
           runner_name="$(hostname -s)-$(basename -- "$(dirname -- "$RUNNER_TOOL_CACHE")")"
         fi
         runner_name=$(printf '%s' "$runner_name" | tr -c 'A-Za-z0-9_.-' '-')
+        # A job container runs as root and a host-executor job as the runner
+        # user, and both see the same RUNNER_TOOL_CACHE. Sharing one root let
+        # root-owned lane directories refuse every later host job on the same
+        # runner (`touch .last-used: Permission denied`). Key the root by the
+        # executing uid so each executor owns, writes and prunes only its own.
+        runner_name="${runner_name}-uid$(id -u)"
         toolchain=$(rustc -Vv | sed -n 's/^release: //p')
         [[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
           echo "::error::Cannot derive the pinned Rust toolchain"

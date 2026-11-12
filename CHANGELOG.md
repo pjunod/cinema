@@ -10,6 +10,16 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- On Android TV, switching a playing title to its Dolby Vision-enhanced
+  version no longer freezes the picture and falls back. The prepared second
+  player no longer uses tunneled playback, so it can't take the television's
+  hardware audio/video sync from the player on screen.
+- On a laptop with NVIDIA beside Intel or AMD integrated graphics, VA-API now
+  uses the integrated GPU's render node instead of the NVIDIA one, which has
+  no VA-API driver. Dolby Vision processing there decodes on the GPU again
+  instead of in software, so reconstructed Profile 8.1 keeps up with playback.
+  Its Dolby Vision implementation identity names the new node, so that node
+  qualifies once after the upgrade. `PLURX_VAAPI_DEVICE` still overrides.
 - Dolby Vision on Safari, web and mobile no longer stops at dynamic metadata
   when the server's GPU can do better: AMD, Intel and NVIDIA reconstruction is
   qualified with each vendor's actual production encoder, and a recipe that
