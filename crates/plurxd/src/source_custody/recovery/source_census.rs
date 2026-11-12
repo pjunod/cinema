@@ -100,6 +100,33 @@ struct Pass {
     silly_renames: u32,
     /// Tasks (outside the helper's own ancestry) naming the source in argv.
     path_references: u32,
+    /// Present when the helper could observe the live daemon's PID namespace.
+    #[serde(default)]
+    owner_teardown: Option<Teardown>,
+}
+
+/// The host's view of the dead owner's process tree, used only when the
+/// owner's job row is gone and with it the exact source binding.
+///
+/// The live daemon is PID 1 of its PID namespace. Every process in that
+/// namespace started after the owner's lease ended, so none of them is the
+/// owner or a survivor of it. When the owner's own namespace init exited, the
+/// kernel killed every process in that namespace. A survivor could therefore
+/// only live in another namespace, and none outside the daemon's has any file,
+/// working directory, root, executable or mapping on a counted superblock.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+struct Teardown {
+    /// Inode of the observed daemon's `/proc/<pid>/ns/pid`.
+    pid_namespace: u64,
+    /// The observed daemon is PID 1 inside that namespace.
+    daemon_is_namespace_init: bool,
+    /// Processes in that namespace that started at or before the owner's
+    /// lease expiry.
+    preexisting: u32,
+    /// Open descriptors, cwd, root, exe or mappings on any counted superblock
+    /// held by processes outside that namespace (the helper excluded).
+    foreign_storage_holders: u32,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -140,6 +167,21 @@ impl Proof {
                 .iter()
                 .map(|sb| sb.device)
                 .eq(second.superblocks.iter().map(|sb| sb.device))
+    }
+    /// Both passes observed this daemon's own PID namespace with no process
+    /// older than the owner's death in it and no foreign storage holder.
+    fn owner_teardown_verified(&self, context: &Context<'_>) -> bool {
+        let Some(namespace) = context.namespace_init else {
+            return false;
+        };
+        self.passes.iter().all(|pass| {
+            pass.owner_teardown.as_ref().is_some_and(|teardown| {
+                teardown.pid_namespace == namespace
+                    && teardown.daemon_is_namespace_init
+                    && teardown.preexisting == 0
+                    && teardown.foreign_storage_holders == 0
+            })
+        })
     }
     fn census_devices(&self) -> impl Iterator<Item = u64> + '_ {
         self.passes[0].superblocks.iter().map(|sb| sb.device)
@@ -310,6 +352,7 @@ pub(super) async fn replay(
                 kernel: &kernel,
                 process_started_ms: started,
                 now_ms: crate::state::clock_ms(),
+                namespace_init: namespace_init(),
             },
             &proof,
         )
@@ -327,6 +370,17 @@ pub(super) struct Context<'a> {
     pub(super) kernel: &'a str,
     pub(super) process_started_ms: i64,
     pub(super) now_ms: i64,
+    /// This daemon's PID namespace inode when it is that namespace's init.
+    pub(super) namespace_init: Option<u64>,
+}
+
+/// This process's PID namespace inode, when it is PID 1 of that namespace.
+fn namespace_init() -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    (std::process::id() == 1)
+        .then(|| std::fs::metadata("/proc/self/ns/pid").ok())
+        .flatten()
+        .map(|metadata| metadata.ino())
 }
 
 pub(super) async fn apply(
@@ -412,8 +466,24 @@ pub(super) async fn apply(
         let job = store
             .background_job(&original.job_id)
             .await
-            .map_err(|e| e.to_string())?
-            .ok_or("census job unavailable for source binding")?;
+            .map_err(|e| e.to_string())?;
+        let Some(job) = job else {
+            // The owner's job row is gone, and with it the exact source
+            // binding. Release needs the owner's whole process tree proved
+            // gone instead.
+            if !proof.owner_teardown_verified(context) {
+                return Err("census job unavailable for source binding".into());
+            }
+            // The owner's own record of the inode it opened still binds.
+            if witness.source.is_some_and(|(device, inode)| {
+                inode != proof.source.inode
+                    || !proof.census_devices().any(|counted| counted == device)
+            }) {
+                return Err("census source is not the inode the owner opened".into());
+            }
+            settle_released(store, token, &witness).await?;
+            return finish(legacy, witnesses, &witness, anchor, token, proof);
+        };
         if job.id != original.job_id
             || job.token.as_ref().is_some_and(|live| {
                 proof.owner.matches(live) && live.lease_expires_ms >= proof.passes[0].at_ms
@@ -453,16 +523,36 @@ pub(super) async fn apply(
         {
             return Err("census source differs from the job's exact source".into());
         }
-        settle_records(store, std::slice::from_ref(&witness.record)).await?;
-        if store
-            .resolve_background_source_custody(token.clone())
-            .await
-            .map_err(|e| e.to_string())?
-            .is_some()
-        {
-            return Err("census settlement awaits exact release acknowledgement".into());
-        }
+        settle_released(store, token, &witness).await?;
     }
+    finish(legacy, witnesses, &witness, anchor, token, proof)
+}
+
+async fn settle_released(
+    store: &Arc<dyn Store>,
+    token: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+    witness: &reader::CensusWitness,
+) -> Result<(), String> {
+    settle_records(store, std::slice::from_ref(&witness.record)).await?;
+    if store
+        .resolve_background_source_custody(token.clone())
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        return Err("census settlement awaits exact release acknowledgement".into());
+    }
+    Ok(())
+}
+
+fn finish(
+    legacy: &Path,
+    witnesses: &Path,
+    witness: &reader::CensusWitness,
+    anchor: std::fs::File,
+    token: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+    proof: &Proof,
+) -> Result<(), String> {
     clear_at(legacy, &witness.record)?;
     reader::complete_at(witnesses, &witness.record)?;
     drop(anchor);

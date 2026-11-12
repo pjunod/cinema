@@ -141,6 +141,14 @@ impl Dead {
         .expect("proof shape")
     }
     async fn apply(&self, proof: &Proof, process_started_ms: i64) -> Result<(), String> {
+        self.apply_in(proof, process_started_ms, None).await
+    }
+    async fn apply_in(
+        &self,
+        proof: &Proof,
+        process_started_ms: i64,
+        namespace_init: Option<u64>,
+    ) -> Result<(), String> {
         apply(
             &self.store,
             &self.witnesses,
@@ -150,10 +158,31 @@ impl Dead {
                 kernel: KERNEL,
                 process_started_ms,
                 now_ms: self.lease + 5_000,
+                namespace_init,
             },
             proof,
         )
         .await
+    }
+    /// Retention removed the owner's job row while its custody stayed charged.
+    fn forget_job(&self) {
+        let connection = rusqlite::Connection::open(&self.database).expect("fixture connection");
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF")
+            .expect("fixture pragma");
+        for table in ["background_job_attempts", "background_jobs"] {
+            let column = if table == "background_jobs" {
+                "id"
+            } else {
+                "job_id"
+            };
+            connection
+                .execute(
+                    &format!("DELETE FROM {table} WHERE {column}=?1"),
+                    [&self.job().job_id],
+                )
+                .expect("forget job");
+        }
     }
 }
 
@@ -246,4 +275,90 @@ async fn dead_owner_source_census_releases_only_exact_quiescent_custody() {
     dead.apply(&quiescent, started)
         .await
         .expect("idempotent replay");
+}
+
+#[tokio::test]
+async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone() {
+    const NAMESPACE: u64 = 4_026_532_885;
+    let dead = dead_owner().await;
+    let started = dead.lease + 500;
+    dead.forget_job();
+    let refused = |result: Result<(), String>, reason: &str| {
+        let error = result.expect_err(reason);
+        assert!(error.contains(reason), "expected {reason:?}, got {error:?}");
+    };
+    let with = |namespace: u64, init: bool, preexisting: u32, foreign: u32| {
+        let mut proof = dead.proof(0);
+        for pass in &mut proof.passes {
+            pass.owner_teardown = Some(Teardown {
+                pid_namespace: namespace,
+                daemon_is_namespace_init: init,
+                preexisting,
+                foreign_storage_holders: foreign,
+            });
+        }
+        proof
+    };
+    // Without the job, the exact source binding is gone: a census alone refuses.
+    refused(
+        dead.apply_in(&dead.proof(0), started, Some(NAMESPACE))
+            .await,
+        "census job unavailable",
+    );
+    // A daemon that is not its namespace's init cannot rely on teardown.
+    refused(
+        dead.apply_in(&with(NAMESPACE, true, 0, 0), started, None)
+            .await,
+        "census job unavailable",
+    );
+    // The helper must have observed this daemon's own namespace.
+    refused(
+        dead.apply_in(&with(NAMESPACE + 1, true, 0, 0), started, Some(NAMESPACE))
+            .await,
+        "census job unavailable",
+    );
+    refused(
+        dead.apply_in(&with(NAMESPACE, false, 0, 0), started, Some(NAMESPACE))
+            .await,
+        "census job unavailable",
+    );
+    // A process older than the owner's death, or a foreign storage holder, refuses.
+    refused(
+        dead.apply_in(&with(NAMESPACE, true, 1, 0), started, Some(NAMESPACE))
+            .await,
+        "census job unavailable",
+    );
+    refused(
+        dead.apply_in(&with(NAMESPACE, true, 0, 1), started, Some(NAMESPACE))
+            .await,
+        "census job unavailable",
+    );
+    // One pass without teardown evidence refuses.
+    let mut partial = with(NAMESPACE, true, 0, 0);
+    partial.passes[1].owner_teardown = None;
+    refused(
+        dead.apply_in(&partial, started, Some(NAMESPACE)).await,
+        "census job unavailable",
+    );
+    // The owner's own record of the inode it opened still binds.
+    let sidecar = dead
+        .witnesses
+        .join(format!("background-{}.source", dead.token.custody_id));
+    private(
+        &sidecar,
+        format!("{} {}", dead.source.dev(), dead.source.ino() + 1).as_bytes(),
+    );
+    refused(
+        dead.apply_in(&with(NAMESPACE, true, 0, 0), started, Some(NAMESPACE))
+            .await,
+        "not the inode the owner opened",
+    );
+    std::fs::remove_file(&sidecar).expect("remove sidecar");
+    assert_eq!(dead.held(), 1, "every refusal keeps the custody");
+
+    dead.apply_in(&with(NAMESPACE, true, 0, 0), started, Some(NAMESPACE))
+        .await
+        .expect("a proved teardown releases");
+    assert_eq!(dead.held(), 0);
+    assert!(!dead.anchor.exists(), "the worker clears its own witness");
 }
