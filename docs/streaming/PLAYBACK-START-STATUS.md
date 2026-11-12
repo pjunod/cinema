@@ -413,7 +413,13 @@ where no full-source receipt exists one whole-file hash. Both are Analysis
 physical phases, admitted only while the source domain is idle and paused
 under foreground pressure.
 
-Remaining for item 6, not started:
+The rest of item 6 has a build plan any agent can work:
+[LOCAL-COPY-ENGINE-BUILD.md](LOCAL-COPY-ENGINE-BUILD.md), eight ordered
+steps with an Execution log. Its step 1, durable demand, is built on
+`item6b` (not pushed): a demand makes its coordination request on its first
+attempt and a restarted worker takes up the queued ones it can rebuild.
+
+Remaining for item 6, not started (plan steps 2-8):
 
 - Local rolling copy and indexed-VOD copy still run their own producers
   (`copy_pipe_args` to the rolling segmenter, and plan-verified VOD
@@ -432,9 +438,11 @@ Remaining for item 6, not started:
   produces one. When the engine runs for local playback, the range's
   `CompletedCopyRange` carries `CopyObservationAuthority::Local` and the
   row-less demand becomes redundant for that start.
-- A demand is in memory only: a restart forgets it and the next local start
-  of the title asks again. It is dropped on non-unix builds, which have no
-  copy engine.
+- A demand that has not yet made its first attempt (one retry interval
+  after the start) is in memory only; a restart inside that window forgets
+  it and the next local start asks again. A recovered demand fills with no
+  audio companion, the request not recording the playback's audio choice.
+  Demands are dropped on non-unix builds, which have no copy engine.
 - The persisted trigger is not `local_playback` (see Attribution). Doing
   that is one migration: rebuild `analysis_requests` with the wider CHECK
   on SQLite and hiqlite, and add the value to both `valid_request`s.

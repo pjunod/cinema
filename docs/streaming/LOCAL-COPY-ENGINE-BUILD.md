@@ -1,6 +1,6 @@
 # Local copy on the one engine — build plan for the rest of item 6
 
-**Status:** open — step 1 claimed, steps 2–8 not started ·
+**Status:** open — step 1 built on `item6b`, steps 2–8 not started ·
 **Executes:** item 6 of [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md)
 under the [A1/B1 build contract](PLAYBACK-START-A1-B1-BUILD.md) ·
 **Written:** 2026-11-12 against `item6` @ `92c0e28`
@@ -61,7 +61,7 @@ The growing engine is bound to the Source worker at four points:
 
 ## 3. Steps
 
-### Step 1 — Durable demand
+### Step 1 — Durable demand (built)
 
 A demand survives a restart.
 
@@ -232,4 +232,4 @@ session id or URL.
 
 | Date | Step | Model | Session | Branch / PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-11-12 | 1 Durable demand | claude-fable-5-2 | https://claude.ai/code/session_01BCWL9ypnQEiQUyRaZtMhh3 | `item6b` | Claimed |
+| 2026-11-12 | 1 Durable demand | claude-fable-5-2 | https://claude.ai/code/session_01BCWL9ypnQEiQUyRaZtMhh3 | `item6b` | Built: clippy `-D warnings` and fmt clean, inventory and pins green; no unit test run. Not covered by a test: the first pass calling the recovery, and the request being made before the source is idle |
