@@ -1,6 +1,7 @@
 # FEL RPU re-fit (F+) — build plan
 
-**Status:** plan; PR 1 (the arithmetic) in review · **Written:** 2026-11-12 ·
+**Status:** in progress — milestones 1 (the arithmetic) and 3 (the job and
+store) are in main or review; 2 and 4–7 are open · **Written:** 2026-11-12 ·
 **Owner:** Claude · **Decision:** Paul approved building F+ and per-title
 re-encode trials against it, 2026-11-12
 
@@ -173,6 +174,40 @@ stoppable from the background-jobs page, because it decodes a whole title
 on the CPU (Paul's rule: hardware use has to be visible and stoppable from
 inside the product). Request identity hashes the file, the probe revision,
 the helper identity and `dv_refit::FIT_VERSION`.
+
+As built (milestone 3, `source_probe/refit_work.rs`,
+`store/dv_refit_jobs.{rs,sql}`, `transcode/dv_refit_title.rs`):
+- **FEL, not MEL.** No catalogue fact separates them: the title scan's
+  aggregate does not record the EL type. Demand takes a Profile 7 title with
+  an EL and a published complete title aggregate only when its probe
+  document holds a FEL fact for the current source (a FEL recipe request, a
+  recipe verdict or a legacy verdict). Only the FEL route writes those, and it
+  plans only for a source whose RPUs parse as FEL. A helper refusal (nonzero
+  exit, one stderr line) is stored as a `refused` title, so a title the
+  helper will not fit is not decoded again until its identity changes.
+- **Probe revision** is the title scan's demand generation
+  (`dv_title_jobs_demand.revision`): it moves with a fresh probe, a source
+  change and a scanner rebind, which also drop the aggregate the fit read.
+- **Storage.** `background_dv_refit_titles` (one row per file) and
+  `background_dv_refit_scenes`. A scene's two statistics sets are about
+  42 KB of JSON (the recorded Michael5400 run), so a feature film of ~1,500
+  scenes stores ~65 MB (an open question for review: see the milestone 3
+  PR); one replicated write
+  may not exceed the 16 MiB WAL entry. The attempt stages its scenes in
+  pages of at most 4 MiB under its token, and publication adopts exactly
+  those scenes, replaces the older fit and settles the job in one
+  transaction. A trigger on the job deletes an attempt's staged scenes when
+  it stops running or changes claim, so a cancel leaves no partial rows.
+- **Parsing.** The job reads the helper's lines through `dv_refit`'s typed
+  `RefitScene`/`RefitSummary` and `check_refit_run`, requires the run to
+  start at frame 0, and stores each scene's `first_pts` and `end_pts`; it
+  does not pool (the helper does). Output that breaks the contract fails the
+  job with nothing stored; it is not retried, since the same bits through
+  the same helper print the same thing.
+- **Title verdict.** Held-out squared error is pooled over the scenes,
+  counting identity for a refused scene; the gain is 1 − served/identity,
+  and under 5% the title serves identity. A degenerate summary is identity
+  for the whole title.
 
 ### 3.4 Solving and guard rails
 

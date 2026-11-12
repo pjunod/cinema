@@ -8,6 +8,17 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
+  FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3). It runs the Dolby Vision
+  helper's `--refit-stats` mode over the whole title on the title lane, shows
+  as "Dolby Vision F+ curve fit" in Activity, yields to media probes, and can
+  be cancelled and retried from the background-jobs page. Each scene's curves
+  or refusal, both statistics sets and the title's verdict, gain and curve
+  digest are stored per source (SQLite v130; a shape-verified hiqlite
+  extension). Nothing serves the curves yet.
+
 ### Fixed
 
 - Job retention no longer deletes a settled job whose source custody is still
