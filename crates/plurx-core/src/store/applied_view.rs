@@ -1716,7 +1716,12 @@ mod tests {
         // provisioning at store construction, before the applied view
         // exists; anything else goes through TimedClient.
         for (path, text) in production_sources(&root, "store") {
-            if path.starts_with("store/sqlite/") || !path.ends_with(".rs") {
+            // The consistent-read census is a test-only source scanner:
+            // the client calls in it are the patterns it searches for.
+            if path.starts_with("store/sqlite/")
+                || !path.ends_with(".rs")
+                || path == "store/consistent_read_census.rs"
+            {
                 continue;
             }
             let mut at = 0;
