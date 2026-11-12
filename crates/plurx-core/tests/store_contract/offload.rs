@@ -40,12 +40,33 @@ async fn an_offloaded_item_survives_prunes_is_found_by_ids_and_clears_when_a_fil
             .expect("tmdb");
 
         // Marked, then pruned: only the unmarked fileless leaf goes.
-        assert_eq!(store.mark_items_offloaded(&[kept], 100).await.expect("mark"), 1, "{backend}");
-        assert_eq!(store.prune_empty_items(library.id).await.expect("prune"), 1, "{backend}");
-        assert!(store.get_item(kept).await.expect("get").is_some(), "{backend}");
-        assert!(store.get_item(plain).await.expect("get").is_none(), "{backend}");
         assert_eq!(
-            store.offloaded_leaf_counts(&[kept]).await.expect("counts").get(&kept),
+            store
+                .mark_items_offloaded(&[kept], 100)
+                .await
+                .expect("mark"),
+            1,
+            "{backend}"
+        );
+        assert_eq!(
+            store.prune_empty_items(library.id).await.expect("prune"),
+            1,
+            "{backend}"
+        );
+        assert!(
+            store.get_item(kept).await.expect("get").is_some(),
+            "{backend}"
+        );
+        assert!(
+            store.get_item(plain).await.expect("get").is_none(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .offloaded_leaf_counts(&[kept])
+                .await
+                .expect("counts")
+                .get(&kept),
             Some(&1),
             "{backend}"
         );

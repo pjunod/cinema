@@ -96,7 +96,10 @@ mod tests {
             "sqlite/publication.rs",
             "identity repair retires a duplicate item after moving its files to the survivor",
         ),
-        ("sharing_catalogue_source.rs", "removes one named shared-catalogue item"),
+        (
+            "sharing_catalogue_source.rs",
+            "removes one named shared-catalogue item",
+        ),
         ("hiqlite.rs", "wipes the catalogue for a restore"),
         ("hiqlite_catalog.rs", "full-text-index triggers"),
         ("tests.rs", "test fixtures"),
@@ -121,14 +124,21 @@ mod tests {
         rust_files(&root, &mut files);
         let mut offenders = Vec::new();
         for file in files {
-            let rel = file.strip_prefix(&root).expect("under the source root").to_string_lossy().replace('\\', "/");
-            if INTENTIONAL.iter().any(|(name, _)| rel.ends_with(name)) || rel == "store/offload.rs" {
+            let rel = file
+                .strip_prefix(&root)
+                .expect("under the source root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if INTENTIONAL.iter().any(|(name, _)| rel.ends_with(name)) || rel == "store/offload.rs"
+            {
                 continue;
             }
             let text = std::fs::read_to_string(&file).expect("readable source");
             for (at, _) in text.match_indices("DELETE FROM items WHERE") {
                 let window = window(&text, at, 700);
-                let end = window[1..].find("DELETE FROM").map_or(window.len(), |i| i + 1);
+                let end = window[1..]
+                    .find("DELETE FROM")
+                    .map_or(window.len(), |i| i + 1);
                 let statement = &window[..end];
                 // Only the statements that decide by "no files"; seasons,
                 // shows and folders are kept alive by their offloaded child.
@@ -150,6 +160,9 @@ mod tests {
                 }
             }
         }
-        assert!(offenders.is_empty(), "prunes that can delete offloaded items: {offenders:#?}");
+        assert!(
+            offenders.is_empty(),
+            "prunes that can delete offloaded items: {offenders:#?}"
+        );
     }
 }

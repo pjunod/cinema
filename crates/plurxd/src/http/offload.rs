@@ -190,14 +190,16 @@ async fn ids_for(state: &AppState, item: &Item) -> Result<Ids, ApiError> {
 /// Get it back to mean anything.
 async fn require_offloaded(state: &AppState, item: &Item) -> Result<(), ApiError> {
     let offloaded = match item.kind {
-        ItemKind::Show | ItemKind::Season => state
-            .store
-            .offloaded_leaf_counts(&[item.id])
-            .await?
-            .get(&item.id)
-            .copied()
-            .unwrap_or(0)
-            > 0,
+        ItemKind::Show | ItemKind::Season => {
+            state
+                .store
+                .offloaded_leaf_counts(&[item.id])
+                .await?
+                .get(&item.id)
+                .copied()
+                .unwrap_or(0)
+                > 0
+        }
         _ => item.offloaded_at.is_some(),
     };
     if offloaded {

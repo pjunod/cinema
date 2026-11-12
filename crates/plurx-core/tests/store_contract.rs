@@ -39,12 +39,12 @@ mod jellyfin_login;
 mod jellyfin_play;
 #[path = "store_contract/library_schedule.rs"]
 mod library_schedule;
+#[path = "store_contract/offload.rs"]
+mod offload;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
 mod remote;
-#[path = "store_contract/offload.rs"]
-mod offload;
 #[path = "store_contract/scan_request_v2.rs"]
 mod scan_request_v2;
 #[cfg(feature = "hiqlite-contract-tests")]
