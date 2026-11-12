@@ -4,7 +4,7 @@
 #[cfg(unix)]
 mod census;
 #[cfg(unix)]
-pub(crate) use census::{run_source_census, CopyClockCensus};
+pub(crate) use census::{head_origin, run_source_census, CopyClockCensus};
 #[cfg(unix)]
 mod pipes;
 #[cfg(unix)]
@@ -12,7 +12,10 @@ pub(crate) use pipes::{spawn_source_generation, CopyGenerationOwner, RunningCopy
 #[cfg(unix)]
 mod observed;
 #[cfg(unix)]
-pub(crate) use observed::{CopyMuxEvent, ObservedCopyMux, ObservedCopySegment};
+pub(crate) use observed::{
+    copy_cut_policy, inspect_canonical_row, CopyMuxEvent, ObservedCopyMux, ObservedCopySegment,
+    COPY_TARGET_SECONDS, MAX_HELD, MAX_PACKETS,
+};
 #[cfg(unix)]
 mod census_format;
 #[cfg(unix)]

@@ -1996,6 +1996,13 @@ pub struct AnalysisProgress {
     /// background slot for several rows, and this is what says so.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub shared_read_identities: usize,
+    /// Whether this pass is also observing the file's copy index from the
+    /// same read, and the rows it has observed so far. Absent for a pass that
+    /// is not, and from a peer that predates the fields.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub copy_index_riding: bool,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub copy_index_rows: usize,
     pub started_at_ms: i64,
     pub updated_at_ms: i64,
     pub elapsed_ms: i64,
@@ -2084,6 +2091,8 @@ impl AnalysisProgress {
             text_tracks: 0,
             pgs_bytes_written: 0,
             shared_read_identities: 0,
+            copy_index_riding: false,
+            copy_index_rows: 0,
             started_at_ms: 1,
             updated_at_ms: 1,
             elapsed_ms: 1,
@@ -5393,6 +5402,8 @@ impl JobManager {
                 text_tracks: 0,
                 pgs_bytes_written: 0,
                 shared_read_identities: 0,
+                copy_index_riding: false,
+                copy_index_rows: 0,
                 started_at_ms: now,
                 updated_at_ms: now,
                 elapsed_ms: 0,
@@ -5481,7 +5492,32 @@ impl JobManager {
                 progress.pgs_tracks,
                 progress.pgs_bytes_written,
             );
+            jobs.update_analysis_copy_ride(
+                &job_id,
+                &target_node_id,
+                progress.copy_index_riding,
+                progress.copy_index_rows,
+            );
         })
+    }
+
+    /// Record on a running index pass's progress row that it is also
+    /// observing the file's copy index, and how many rows it has so far.
+    fn update_analysis_copy_ride(
+        &self,
+        job_id: &str,
+        target_node_id: &str,
+        riding: bool,
+        rows: usize,
+    ) {
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) {
+            value.copy_index_riding = riding;
+            value.copy_index_rows = rows;
+        }
     }
 
     /// Record what a running index pass's PGS ride-along is doing on its
@@ -8681,6 +8717,64 @@ impl JobManager {
         }
     }
 
+    /// Hand the Analysis worker the whole-title copy rows an index pass
+    /// observed of its lead identity, after the caller's freshness checks and
+    /// while the pass's claim is still held. The claim and the custody it
+    /// holds are the rows' authority; the worker takes the coordination claim
+    /// itself, seals and publishes. Anything missing drops the rows: a demand
+    /// or a later pass builds the same index.
+    async fn settle_copy_ride(
+        &self,
+        file: &MediaFile,
+        attested: &crate::fragment_index_cluster::AttestedSource,
+        fence: &crate::background_jobs::JobFence,
+        node_id: &str,
+        pending: crate::copy_analysis::PendingCopyRide,
+    ) {
+        let dropped = |reason: &str| {
+            tracing::info!(
+                file_id = file.id,
+                reason,
+                "the index pass's copy index observation was not handed over"
+            );
+        };
+        let Some(custody) = crate::copy_analysis::IndexPassCustody::held_by(fence).await else {
+            return dropped("the pass no longer holds its claim");
+        };
+        // Rows cut by an engine that changed under this process would be
+        // published under the retired engine's digest.
+        if !crate::ffmpeg::fragment_index_engine_is_current().await {
+            return dropped("the fragment-index engine changed; restart is required");
+        }
+        let namespace = match self.store.instance_id().await {
+            Ok(namespace) => namespace,
+            Err(_) => return dropped("the catalogue namespace could not be read"),
+        };
+        let identity = crate::fragindex::identity_for(file, pending.video);
+        let Ok(source) = crate::copy_analysis::source_for_copy(
+            &namespace,
+            file,
+            &identity.argv_fingerprint,
+            crate::fragment_index_cluster::local_object_version(
+                &attested.observation.object_version,
+            ),
+            node_id,
+        ) else {
+            return dropped("the copy source could not be derived");
+        };
+        let observation = crate::copy_analysis::PassCopyObservation {
+            file: Arc::new(file.clone()),
+            catalog_namespace: namespace,
+            source,
+            custody,
+            recipe: crate::copy_analysis::CopyRecipe::playback_default(file, pending.video),
+            rows: pending.rows,
+        };
+        if !self.copy_analysis.notify_pass(observation) {
+            dropped("the Analysis worker's inbox is full");
+        }
+    }
+
     /// A pass has examined `file_id`: it no longer goes ahead of the backlog.
     fn settle_index_priority(&self, transcode: &TranscodeManager, file_id: i64) {
         transcode.settle_local_index_demand(file_id);
@@ -9083,10 +9177,12 @@ impl JobManager {
                 }
             }
             for ((_, identity, _), build) in missing.iter().zip(builds) {
+                // This pass holds no claim, so it asked for no copy ride.
                 let crate::fragindex::IndexBuild {
                     outcome,
                     ride_along: harvest,
                     dv_title,
+                    copy_ride: _,
                     source_unchanged,
                 } = build;
                 let refusal = match outcome {
@@ -11889,6 +11985,17 @@ impl JobManager {
         )
         .await;
         let cancel = lost.child_token();
+        // The pass also observes its lead identity's copy index when it can
+        // name the read (this claim and the source custody it holds) and
+        // this node runs the Analysis worker the rows are handed to.
+        let copy_ride = cfg!(unix)
+            && self
+                .job_authority
+                .may_execute_job(plurx_core::store::background_jobs::JobKind::FragmentIndexPublish)
+                .await
+            && crate::copy_analysis::IndexPassCustody::held_by(&fence)
+                .await
+                .is_some();
         // The lead's last attempt on this node, if it ran out of budget, says
         // how long this node needs for this file (`index_file_budget`).
         let previous = match self
@@ -11928,6 +12035,7 @@ impl JobManager {
                         index_file_budget(file.duration_ms, file.size, previous.as_ref()),
                         report_progress,
                         ride_along.as_ref(),
+                        copy_ride,
                         &cancel,
                     )
                     .await,
@@ -12017,6 +12125,10 @@ impl JobManager {
         }
         if let Some(pending) = builds.iter_mut().find_map(|build| build.dv_title.take()) {
             self.settle_dv_title(&file, pending).await;
+        }
+        if let Some(pending) = builds.iter_mut().find_map(|build| build.copy_ride.take()) {
+            self.settle_copy_ride(&file, &attested, &fence, &node_id, pending)
+                .await;
         }
         let mut builds = builds.into_iter();
         let Some(lead) = builds.next() else {

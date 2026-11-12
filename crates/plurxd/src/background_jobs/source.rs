@@ -16,6 +16,23 @@ use tokio_util::sync::CancellationToken;
 mod completion;
 pub(crate) use completion::{Holder as SourceHolder, Operation as SourceOperation, RawRetirement};
 
+impl super::JobFence {
+    /// The live claim and the source custody it holds, for a holder that
+    /// must name the read it is making. None once the claim is lost or past
+    /// its lease, and for a claim that holds no source custody.
+    pub(crate) async fn held_source_claim(
+        &self,
+    ) -> Option<(
+        plurx_core::store::background_jobs::JobKind,
+        plurx_core::store::background_jobs::JobToken,
+        plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+    )> {
+        let custody = self.0.source_custody.clone()?;
+        let token = self.snapshot().await?;
+        Some((self.0.kind, token, custody))
+    }
+}
+
 struct Spent {
     bytes: u64,
     retain_until_ms: i64,

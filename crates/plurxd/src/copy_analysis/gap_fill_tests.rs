@@ -5,6 +5,10 @@
 //! generated HEVC fixture title. Three fills and the test's own contract
 //! census make seven ffmpeg children.
 //!
+//! The content-analysis pass's copy ride is held to the same engine here: on
+//! the HEVC and the H.264 fixture, one whole-title fill and one riding pass
+//! (the production probe and pass child) must seal the same blob.
+//!
 //! What is not real:
 //! - The physical phase is an exact, well-formed `AnalysisPhysicalPhase`
 //!   value that no store admitted, and each Input is the loopback bridge over
@@ -337,5 +341,158 @@ async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(
         Err(CopyObservationError::Coverage)
     ));
     assert_eq!(set.rows.rows(), whole.rows.as_slice());
+    Ok(())
+}
+
+/// Seal a complete set and encode the blob its publication stores, with a
+/// full-source receipt of the kind the content-analysis pass records.
+fn sealed_blob(set: &CopyObservationSet, source: &AnalysisCoordinationSource) -> Vec<u8> {
+    let digest = "5".repeat(64);
+    let receipt = physical::VerifiedFullSource::LegacyFull(
+        plurx_core::store::FragmentIndexSourceObservation {
+            node_id: source.origin_node_id.clone(),
+            file_id: source.file_id,
+            object_version: crate::fragment_index_cluster::full_copy_object_version(
+                &source.object_version,
+            ),
+            source_size: source.source_size,
+            source_mtime: source.source_mtime,
+            source_sha256: digest.clone(),
+            observed_at_ms: 1,
+        },
+    );
+    let sealed = set.seal(&receipt).expect("a complete, attested set seals");
+    plurx_core::store::encode_cluster_fragment_index_blob_v3(
+        &sealed.index,
+        &digest,
+        &sealed.init_contract_sha256,
+        &plurx_core::store::FragmentIndexEngineProvenance {
+            engine_sha256: "e".repeat(64),
+            pipeline_sha256: "b".repeat(64),
+        },
+    )
+    .expect("v3 blob")
+}
+
+/// Step 3's acceptance: a title the content-analysis pass indexes yields,
+/// from that one read, the rows and the blob the engine's own whole-title
+/// fill seals for the same file and recipe. Row for row, inspection for
+/// inspection, the same init contract and the same source origin, although
+/// the pass runs without `-copyts` and the fixtures' audio leads their video.
+#[tokio::test]
+async fn the_content_analysis_ride_seals_the_blob_a_whole_title_fill_seals() {
+    plurx_core::testfixtures::require_ffmpeg();
+    for kind in ["clean-cra", "h264"] {
+        let stop = CancellationToken::new();
+        let run = ride_equals_the_whole_title_fill(kind, stop.clone());
+        tokio::pin!(run);
+        match tokio::time::timeout(Duration::from_secs(240), &mut run).await {
+            Ok(result) => result.unwrap_or_else(|error| panic!("{kind}: {error}")),
+            Err(_) => {
+                stop.cancel();
+                let settled = run.await;
+                panic!("{kind}: not finished in 240 s; cancelled, settled with {settled:?}");
+            }
+        }
+    }
+}
+
+async fn ride_equals_the_whole_title_fill(
+    kind: &str,
+    stop: CancellationToken,
+) -> Result<(), String> {
+    let file = crate::fragindex::copy_ride_tests::fixture_file(kind);
+    let bytes = Arc::new(std::fs::read(&file.path).expect("fixture bytes"));
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let cache = crate::test_tempdir().expect("runtime cache");
+    let recipe = CopyRecipe::playback_default(&file, CopyVideoOptions::new(false, false));
+    let video_identity = crate::fragindex::identity_for(&file, recipe.video).argv_fingerprint;
+    let object_version = crate::fragment_index_cluster::inspect_source(&file)
+        .await
+        .expect("fixture object version");
+    let source = source_for_copy(NAMESPACE, &file, &video_identity, &object_version, NODE)
+        .expect("copy source");
+    let claim = AnalysisCoordinationClaim {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        node_id: NODE.into(),
+        fence: 1,
+    };
+    let phase = AnalysisPhysicalPhase {
+        custody: BackgroundSourceCustodyToken {
+            custody_id: uuid::Uuid::new_v4().to_string(),
+            owner: claim.physical_owner(),
+        },
+        claim,
+        source: source.clone(),
+        phase_sequence: 1,
+    };
+
+    // The engine: one whole-title generation of a source nothing observed.
+    let whole = fill_copy_gap(
+        CopyGapFill {
+            file: &file,
+            recipe: &recipe,
+            phase: &phase,
+            init_contract_sha256: None,
+            canonical_title_start: 0,
+            timescale: 0,
+            gap: RangeGap {
+                start: None,
+                end: None,
+            },
+            max_rows: plurx_core::store::MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES / 28,
+            runtime_cache: cache.path(),
+            stop: &stop,
+        },
+        opener(&bytes, &held),
+    )
+    .await
+    .map_err(failed("whole-title generation"))?;
+    let filled = CopyObservationSet::from_analysis(NAMESPACE, &source, &phase, &whole)
+        .expect("the set a first generation establishes");
+    assert!(filled.is_complete());
+
+    // The pass: the production probe, one child, the ride on its lead output.
+    let riding = crate::fragindex::copy_ride_tests::pass(&file, cache.path(), true).await;
+    let ride = riding
+        .copy_ride
+        .ok_or_else(|| format!("the pass kept no copy rows: {:?}", riding.outcome))?;
+    assert_eq!(ride.rows.rows, whole.rows, "{kind}: row for row");
+    assert_eq!(ride.rows.row_inspections, whole.row_inspections);
+    assert_eq!(ride.rows.inspection, whole.inspection);
+    assert_eq!(
+        ride.rows.source_origin, whole.source_origin,
+        "{kind}: the source's own origin, recovered without -copyts"
+    );
+    assert_eq!(ride.rows.promotion, whole.promotion);
+    assert_eq!(ride.rows.init.bytes, whole.init.bytes, "{kind}: one init");
+    let observation = PassCopyObservation {
+        file: Arc::new(file.clone()),
+        catalog_namespace: NAMESPACE.into(),
+        source: source.clone(),
+        custody: IndexPassCustody::for_test(NODE),
+        recipe: recipe.clone(),
+        rows: ride.rows,
+    };
+    let ridden = CopyObservationSet::from_pass(&observation).expect("the set a pass establishes");
+    assert!(ridden.is_complete());
+    assert_eq!(ridden.rows.rows(), filled.rows.rows());
+    assert_eq!(ridden.inspections, filled.inspections);
+    assert_eq!(ridden.init_contract_sha256(), filled.init_contract_sha256());
+    assert_eq!(
+        sealed_blob(&ridden, &source),
+        sealed_blob(&filled, &source),
+        "{kind}: the blob a ride seals is the blob a fill seals"
+    );
+
+    // The two fold into one another: the pass's rows over the fill's set,
+    // and the fill's rows over the pass's.
+    let mut both = filled;
+    both.observe_pass(&observation)
+        .expect("an identical whole-title observation");
+    let mut other = ridden;
+    other
+        .observe_analysis(&phase, &whole)
+        .expect("an identical whole-title generation");
     Ok(())
 }

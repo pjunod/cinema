@@ -1360,3 +1360,164 @@ async fn a_demand_makes_its_request_before_its_source_is_idle() {
     pending.settle_for_test(key, source, &Attempt::Discard("dropped".into()));
     assert_eq!(pending.take_dropped(), vec![made[0].0.clone()]);
 }
+
+/// The whole-title rows a content-analysis pass hands over for the fixture's
+/// source: `origin` holds the object, `custody_node` ran the pass.
+fn pass_observation(
+    origin: &str,
+    custody_node: &str,
+    init: &Arc<Init>,
+    rows: Vec<IndexRow>,
+    eof: bool,
+) -> CopyAnalysisMessage {
+    let timescale = init.video().expect("video track").timescale;
+    let mut source = source();
+    source.origin_node_id = origin.into();
+    let file = media_file();
+    let recipe = CopyRecipe::playback_default(
+        &file,
+        plurx_core::transcode::CopyVideoOptions::new(false, false),
+    );
+    CopyAnalysisMessage::Pass(Box::new(PassCopyObservation {
+        file: Arc::new(file),
+        catalog_namespace: NAMESPACE.into(),
+        source,
+        custody: IndexPassCustody::for_test(custody_node),
+        recipe,
+        rows: AnalysisCopyRows {
+            init: Arc::clone(init),
+            source_origin: SourceTimestamp {
+                dts: 0,
+                time_base_num: 1,
+                time_base_den: timescale,
+            },
+            canonical_title_start: 0,
+            boundaries: RangeBoundaries {
+                begins_title: true,
+                eof,
+            },
+            inspection: Some(plurx_core::hevc_configuration::RangeInspection {
+                packets: 2 * rows.len() as u64,
+                slices: 3 * rows.len() as u64,
+                configuration_sha256: hex64('d'),
+            }),
+            row_inspections: inspections(&rows),
+            promotion: PromotionInputs::default(),
+            rows,
+        },
+    }))
+}
+
+/// The content-analysis pass is a third observation source. Its whole-title
+/// rows establish a complete set under the pass's own custody, turn a
+/// row-less demand into rows, and are dropped, leaving what is held, when
+/// the custody is another node's, the read was not the whole title, or the
+/// rows disagree with rows already held. Pure: no store, no source read.
+#[test]
+fn a_pass_observation_folds_as_a_third_source_under_the_pass_custody() {
+    let init = muxer_init();
+    let all = rows(4, 4_500);
+    let now = std::time::Instant::now;
+
+    let mut pending = PendingSources::default();
+    pending.fold(
+        pass_observation(NODE, NODE, &init, all.clone(), true),
+        NO_WAIT,
+    );
+    let (key, held) = pending.start_ready(now()).pop().expect("the unit");
+    assert_eq!(
+        key,
+        copy_index_v3_source_key(NAMESPACE, &source()).expect("source key")
+    );
+    assert_eq!(held.held_rows(), (all.clone(), true), "the whole title");
+
+    // Custody of a node that is not the source's origin, and a read that
+    // stopped before the end of the title, are not this source's index.
+    for refused in [
+        pass_observation(NODE, "node-two", &init, all.clone(), true),
+        pass_observation(NODE, NODE, &init, all.clone(), false),
+    ] {
+        let mut pending = PendingSources::default();
+        pending.fold(refused, NO_WAIT);
+        assert!(pending.start_ready(now()).is_empty());
+    }
+
+    // A demand waiting out its first interval has its rows at once.
+    let mut asked = PendingSources::default();
+    asked.fold(local_demand(NODE), std::time::Duration::from_secs(60));
+    assert!(asked.start_ready(now()).is_empty());
+    asked.fold(
+        pass_observation(NODE, NODE, &init, all.clone(), true),
+        NO_WAIT,
+    );
+    let (_, held) = asked
+        .start_ready(now())
+        .pop()
+        .expect("whole now: nothing left to wait for");
+    assert_eq!(held.held_rows(), (all.clone(), true));
+
+    // Rows that disagree with what is held are dropped; the set stands.
+    let mut other = all.clone();
+    other[1].bytes += 1;
+    let mut first = PendingSources::default();
+    first.fold(
+        pass_observation(NODE, NODE, &init, all.clone(), true),
+        NO_WAIT,
+    );
+    first.fold(pass_observation(NODE, NODE, &init, other, true), NO_WAIT);
+    let (_, held) = first.start_ready(now()).pop().expect("the unit");
+    assert_eq!(held.held_rows(), (all, true));
+}
+
+/// A pass's rows only ever add an index. Against a healthy head of this
+/// same engine they are done when they agree, and when they disagree the
+/// source is discarded with the head untouched: no request, no claim, no
+/// quarantine. A real store and blob; no source is read.
+#[tokio::test]
+async fn ridden_rows_never_quarantine_a_healthy_head() {
+    let fixture = store_fixture().await;
+    let init = muxer_init();
+    let all = rows(4, 4_500);
+    let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+    let (artifact, blob) = variant(&sealed(&init, all.clone(), 12, true), &engine);
+    fixture.publish(&artifact);
+    fixture.install(&artifact, &blob).await;
+
+    let mut agreeing = PendingSources::default();
+    agreeing.fold(
+        pass_observation(NODE, NODE, &init, all.clone(), true),
+        NO_WAIT,
+    );
+    let (key, mut held) = agreeing
+        .start_ready(std::time::Instant::now())
+        .pop()
+        .expect("the unit");
+    assert!(matches!(
+        publish_source(&fixture.context, &key, &mut held).await,
+        Attempt::Done
+    ));
+
+    let mut other = all;
+    other[1].bytes += 1;
+    let mut differing = PendingSources::default();
+    differing.fold(pass_observation(NODE, NODE, &init, other, true), NO_WAIT);
+    let (key, mut held) = differing
+        .start_ready(std::time::Instant::now())
+        .pop()
+        .expect("the unit");
+    assert!(matches!(
+        publish_source(&fixture.context, &key, &mut held).await,
+        Attempt::Discard(_)
+    ));
+    assert_eq!(fixture.head().await.state, CopyIndexV3HeadState::Healthy);
+    assert_eq!(fixture.quarantine_code(), None);
+    assert_eq!(
+        fixture
+            .sql()
+            .query_row("SELECT count(*) FROM analysis_requests", [], |row| row
+                .get::<_, i64>(0))
+            .expect("requests"),
+        0,
+        "a ride that disagrees costs a read and writes nothing"
+    );
+}

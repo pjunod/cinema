@@ -263,8 +263,12 @@ function analysisRideAlong(row){
     return `<div class="analysis-sub">Reading ${esc(row.title||`File ${row.file_id}`)} on ${esc(row.node_id||"this node")} for ${parts.join(" + ")||"subtitle"} tracks · ${amount} · <a href="#/settings/cluster/subclustercard">cluster subtitle sources setting</a></div>`;
   }
   const tracks=Number(row.pgs_tracks||0);
-  if(!tracks) return "";
-  return `<div class="analysis-sub">Also keeping ${tracks} PGS track${tracks===1?"":"s"} · ${fmtBytes(row.pgs_bytes_written)||"0 B"} written · <a href="#/settings/maintenance/subsrccard" title="Turning stored subtitle tracks off lets this pass finish its index and discards the tracks it kept">stored subtitle tracks setting</a></div>`;
+  const pgs=tracks?`<div class="analysis-sub">Also keeping ${tracks} PGS track${tracks===1?"":"s"} · ${fmtBytes(row.pgs_bytes_written)||"0 B"} written · <a href="#/settings/maintenance/subsrccard" title="Turning stored subtitle tracks off lets this pass finish its index and discards the tracks it kept">stored subtitle tracks setting</a></div>`:"";
+  // The same read is also observing the title's copy index: no second pass
+  // over the file, and cancelling this job stops it with the pass.
+  const copyRows=Number(row.copy_index_rows||0);
+  const copy=row.copy_index_riding?`<div class="analysis-sub">Also observing this title's copy index from the same read · ${copyRows} row${copyRows===1?"":"s"}</div>`:"";
+  return pgs+copy;
 }
 // A shared read builds several copy identities of one file from one pass over
 // its source, in one background slot. Every identity has its own row; this

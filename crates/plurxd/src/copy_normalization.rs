@@ -87,6 +87,20 @@ impl CopyNormalizationContract {
         })
     }
 
+    /// The canonical half alone, for an observer that reads only the
+    /// video-only output: the same init check and the same per-fragment
+    /// normalization [`Self::begin`] gives the canonical pipe of a pair.
+    pub(crate) fn begin_canonical(
+        &self,
+        canonical_init: Init,
+    ) -> Result<CanonicalNormalizer, CopyNormalizationError> {
+        Ok(CanonicalNormalizer {
+            canonical: self.pipe(canonical_init)?,
+            raw_parameters: self.raw_parameters.clone(),
+            failed: false,
+        })
+    }
+
     fn pipe(&self, raw_init: Init) -> Result<PipeNormalizer, CopyNormalizationError> {
         let mut served_init = raw_init.clone();
         normalize_init(&mut served_init, &self.promotion)?;
@@ -161,6 +175,30 @@ impl CopyNormalizers {
         }
         let result = normalize_fragment(&mut self.canonical, canonical, &self.raw_parameters)
             .and_then(|()| normalize_fragment(&mut self.av, av, &self.raw_parameters));
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+}
+/// [`CopyNormalizers`] without the AV companion. Errors latch, as a pair's do.
+pub(crate) struct CanonicalNormalizer {
+    canonical: PipeNormalizer,
+    raw_parameters: PromotionInputs,
+    failed: bool,
+}
+impl CanonicalNormalizer {
+    pub(crate) fn canonical_init(&self) -> &Init {
+        &self.canonical.served_init
+    }
+    pub(crate) fn normalize(
+        &mut self,
+        canonical: &mut Fragment,
+    ) -> Result<(), CopyNormalizationError> {
+        if self.failed {
+            return Err(CopyNormalizationError::Failed);
+        }
+        let result = normalize_fragment(&mut self.canonical, canonical, &self.raw_parameters);
         if result.is_err() {
             self.failed = true;
         }

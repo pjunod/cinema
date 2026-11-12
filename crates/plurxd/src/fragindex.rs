@@ -71,7 +71,19 @@ pub(crate) struct PassProgress {
     /// Bytes the ride-along has written into its stage so far, measured at
     /// most once a second.
     pub(crate) pgs_bytes_written: u64,
+    /// Whether this pass is also observing the file's copy index.
+    pub(crate) copy_index_riding: bool,
+    /// Copy-index rows that ride has observed so far.
+    pub(crate) copy_index_rows: usize,
 }
+
+/// What the header trace hands a copy ride-along: every packet it closes,
+/// in order, then the end of the range once stderr has been read through.
+pub(crate) enum TraceEvent {
+    Packet(plurx_core::hevc_configuration::PacketInspection),
+    End(Result<plurx_core::hevc_configuration::RangeInspection, String>),
+}
+type TraceSink = Box<dyn FnMut(TraceEvent) + Send>;
 
 /// How often a running pass re-measures its ride-along stage for progress.
 const RIDE_ALONG_MEASURE_EVERY: Duration = Duration::from_secs(1);
@@ -1358,6 +1370,32 @@ struct IndexPass {
     /// Its argv is already at the end of `args`; the plan rides with the pass
     /// so the verdict and the stage's removal belong to the same owner.
     ride_along: Option<RideAlongPlan>,
+    /// The copy-index ride of the lead output. Its clock output is not in
+    /// `args`: the runner adds it only once the clock's pipe exists
+    /// ([`IndexPass::riding_args`]), so a ride that cannot start leaves the
+    /// pass's argv exactly as it was.
+    #[cfg(unix)]
+    copy_ride: Option<crate::copy_ride_along::CopyRidePlan>,
+}
+
+#[cfg(unix)]
+impl IndexPass {
+    /// `args` with the copy ride's packet-clock output after the last index
+    /// output and before the subtitle ride-along's, which stays last.
+    ///
+    /// Like the subtitle ride-along, it is appended after `pipe:1` and never
+    /// inside `copy_index_pipe_args*`, so no cluster cache key changes.
+    fn riding_args(
+        &self,
+        file: &MediaFile,
+        ride: &crate::copy_ride_along::CopyRidePlan,
+    ) -> Vec<String> {
+        let subtitles = self.ride_along.as_ref().map_or(0, |plan| plan.args().len());
+        let at = self.args.len().saturating_sub(subtitles);
+        let mut args = self.args.clone();
+        args.splice(at..at, ride.args(file));
+        args
+    }
 }
 
 /// The content-analysis pass also yields the title's Dolby Vision aggregate.
@@ -1629,6 +1667,8 @@ fn shared_index_pass(
         outputs,
         expectation,
         ride_along,
+        #[cfg(unix)]
+        copy_ride: None,
     }
 }
 
@@ -1680,6 +1720,10 @@ pub(crate) struct IndexBuild {
     /// The Dolby Vision title aggregate the pass's companion scan read, on
     /// the pass's first built output.
     pub(crate) dv_title: Option<PendingDvTitle>,
+    /// The whole-title copy-index rows the pass observed of its lead output,
+    /// on that output's build and only when it built. The caller hands them
+    /// to the Analysis worker after its own freshness checks.
+    pub(crate) copy_ride: Option<crate::copy_analysis::PendingCopyRide>,
     /// Whether the held source was still the object the pass read when the
     /// pass ended, as far as this function could tell: [`build_riding`]
     /// reads its fence; the attested paths leave it to their caller, who
@@ -1693,6 +1737,7 @@ impl IndexBuild {
             outcome,
             ride_along: None,
             dv_title: None,
+            copy_ride: None,
             source_unchanged: true,
         }
     }
@@ -1703,6 +1748,10 @@ impl IndexBuild {
 struct ProbedSource {
     expectation: VideoCompletionExpectation,
     subtitle_tracks: Vec<crate::subtitle_ride_along::ProbedTrack>,
+    /// The container and video clocks, for a copy-index ride to place its
+    /// packet clock on the source's.
+    #[cfg(unix)]
+    copy_clock: Option<crate::copy_ride_along::ProbedCopyClock>,
 }
 
 async fn probe_completion_expectation(
@@ -1783,6 +1832,8 @@ async fn probe_completion_expectation_inner(
     // The ride-along's ordinals come from this document — the probe of the
     // very descriptor the pass reads — and never from scan-time facts.
     let subtitle_tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);
+    #[cfg(unix)]
+    let copy_clock = crate::copy_ride_along::ProbedCopyClock::from_probe(&raw);
     let expectation = match completion_expectation_from_probe(&raw, source_object_version) {
         Ok(expectation) => Ok(expectation),
         Err(CompletionExpectationError::Unsupported(reason)) => {
@@ -1825,6 +1876,8 @@ async fn probe_completion_expectation_inner(
     Ok(ProbedSource {
         expectation,
         subtitle_tracks,
+        #[cfg(unix)]
+        copy_clock,
     })
 }
 
@@ -2307,6 +2360,11 @@ where
 /// reported and the file's PGS tracks kept when `ride_along` allows. The
 /// worker publishes the harvest only after its own `source_still_matches` and
 /// `still_current` checks.
+///
+/// `copy_ride` also observes the lead identity's whole copy index from the
+/// same read ([`crate::copy_ride_along`]). The worker asks for it because it
+/// holds the claim and custody those rows are handed over under; a pass with
+/// neither does not ride.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_shared_from_attested_file_with_progress<F>(
     file: &MediaFile,
@@ -2317,23 +2375,45 @@ pub(crate) async fn build_shared_from_attested_file_with_progress<F>(
     budget: Duration,
     progress: F,
     ride_along: Option<&RideAlongGate>,
+    copy_ride: bool,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Vec<IndexBuild>
 where
     F: Fn(&PassProgress) + Send + Sync + 'static,
 {
-    build_shared_attested(
-        file,
-        source,
-        source_object_version,
-        videos,
-        runtime_cache,
-        budget,
-        Some(Arc::new(progress)),
-        ride_along,
-        Some(cancel),
-    )
-    .await
+    #[cfg(unix)]
+    {
+        build_attested_pass(
+            file,
+            source,
+            source_object_version,
+            videos,
+            runtime_cache,
+            budget,
+            Some(Arc::new(progress)),
+            ride_along,
+            Some(cancel),
+            copy_ride,
+        )
+        .await
+    }
+    #[cfg(not(unix))]
+    {
+        // The copy engine, and so its ride, is built for unix alone.
+        let _ = copy_ride;
+        build_shared_attested(
+            file,
+            source,
+            source_object_version,
+            videos,
+            runtime_cache,
+            budget,
+            Some(Arc::new(progress)),
+            ride_along,
+            Some(cancel),
+        )
+        .await
+    }
 }
 
 /// One identity from one read of the held source: [`build_attested_pass`]
@@ -2361,6 +2441,7 @@ async fn build_attested(
             progress,
             ride_along,
             cancel,
+            false,
         )
         .await,
     )
@@ -2409,6 +2490,7 @@ pub(crate) async fn build_shared_attested(
         progress,
         ride_along,
         cancel,
+        false,
     )
     .await
 }
@@ -2442,6 +2524,7 @@ pub(crate) async fn build_shared_attested(
                 progress.clone(),
                 ride_along.filter(|_| at == 0),
                 cancel,
+                false,
             )
             .await,
         );
@@ -2464,7 +2547,10 @@ async fn build_attested_pass(
     progress: Option<SharedIndexProgress>,
     ride_along: Option<&RideAlongGate>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
+    copy_ride: bool,
 ) -> Vec<IndexBuild> {
+    #[cfg(not(unix))]
+    let _ = copy_ride;
     let refuse_all = |outcome: IndexOutcome| {
         videos
             .iter()
@@ -2555,7 +2641,20 @@ async fn build_attested_pass(
             .as_ref()
             .map_or(input, |bridge| bridge.url().to_owned());
         let output_count = outputs.len();
-        let pass = shared_index_pass(file, outputs, Some(&input), probed.expectation, plan);
+        // The ride observes the pass's lead output, whichever identity that is.
+        #[cfg(unix)]
+        let copy_plan = match (copy_ride, outputs.first()) {
+            (true, Some(lead)) => {
+                crate::copy_ride_along::CopyRidePlan::for_pass(file, lead.video, probed.copy_clock)
+            }
+            _ => None,
+        };
+        #[allow(unused_mut)]
+        let mut pass = shared_index_pass(file, outputs, Some(&input), probed.expectation, plan);
+        #[cfg(unix)]
+        {
+            pass.copy_ride = copy_plan;
+        }
         #[cfg(unix)]
         let (source_fd, source_handoff) = {
             use std::os::fd::AsRawFd;
@@ -2695,6 +2794,38 @@ async fn build_with_args_owned(
     cancel: Option<&tokio_util::sync::CancellationToken>,
     source_owned: Option<&SourceIndexExecution<'_>>,
 ) -> Vec<IndexBuild> {
+    // The copy ride's clock pipe comes first: a ride that cannot have one
+    // does not ride, and the argv stays the pass's own. A Source-owned pass
+    // never rides.
+    #[cfg(unix)]
+    let mut pass = pass;
+    #[cfg(unix)]
+    let copy_ride = match pass.copy_ride.take().filter(|_| source_owned.is_none()) {
+        Some(plan) => match crate::copy_ride_along::clock_pipe() {
+            Ok((reader, writer)) => {
+                pass.args = pass.riding_args(file, &plan);
+                Some((plan, reader, writer))
+            }
+            Err(error) => {
+                tracing::info!(
+                    file_id = file.id,
+                    %error,
+                    "no pipe for the index pass's copy clock; the pass does not ride"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    #[cfg(unix)]
+    let IndexPass {
+        args,
+        outputs,
+        expectation,
+        ride_along,
+        copy_ride: _,
+    } = pass;
+    #[cfg(not(unix))]
     let IndexPass {
         args,
         outputs,
@@ -2780,6 +2911,7 @@ async fn build_with_args_owned(
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
+        // The source, up to three siblings, and the copy ride's clock.
         let mut inherited =
             crate::ffmpeg::output_pipe::InheritedFds::<{ MAX_PASS_OUTPUTS + 1 }>::default();
         if let Some(source_fd) = source_fd {
@@ -2787,6 +2919,9 @@ async fn build_with_args_owned(
         }
         for (at, (_, writer)) in sibling_pipes.iter().enumerate() {
             inherited.push(writer.as_raw_fd(), 4 + at as SourceFd);
+        }
+        if let Some((_, _, writer)) = &copy_ride {
+            inherited.push(writer.as_raw_fd(), crate::copy_ride_along::CLOCK_FD);
         }
         if !inherited.is_empty() {
             // SAFETY: `inherit` makes only async-signal-safe calls (`fcntl`,
@@ -2899,6 +3034,14 @@ async fn build_with_args_owned(
         }
     };
     let source_pause_pid = source_pause_guard.as_ref().and_then(|_| child.id());
+    // The child holds its own copy of the clock's writer now. From here the
+    // ride's reader drains that descriptor to the end of the file, whatever
+    // becomes of the pass or of the ride.
+    #[cfg(unix)]
+    let copy_ride = copy_ride.map(|(plan, reader, writer)| {
+        drop(writer);
+        crate::copy_ride_along::CopyRide::start(plan, file, reader)
+    });
     // The child holds its own copies now. Ours must close, or a sibling's
     // reader would wait forever for the EOF our copy keeps from it.
     #[cfg(unix)]
@@ -2948,11 +3091,22 @@ async fn build_with_args_owned(
     // diagnostic tail and, when the pass rides along, the full-stream scan
     // for per-slave failures.
     let stderr_scan = ride_along.as_ref().map(RideAlongPlan::stderr_scan);
+    #[cfg(unix)]
+    let trace_sink: Option<TraceSink> = copy_ride.as_ref().map(|ride| {
+        let tap = ride.tap();
+        Box::new(move |event: TraceEvent| match event {
+            TraceEvent::Packet(packet) => tap.packet(packet),
+            TraceEvent::End(end) => tap.trace_end(end),
+        }) as TraceSink
+    });
+    #[cfg(not(unix))]
+    let trace_sink: Option<TraceSink> = None;
     let stderr_task = child.stderr.take().map(|stderr| {
         tokio::spawn(read_stderr_tail(
             stderr,
             stderr_scan,
             matches!(file.video_codec.as_deref(), Some("hevc" | "h265")),
+            trace_sink,
         ))
     });
     let observed = Arc::new(std::sync::Mutex::new((0_u64, 0_i64, 0_usize)));
@@ -2965,6 +3119,8 @@ async fn build_with_args_owned(
         .as_ref()
         .map(|plan| (plan.tracks().len(), plan.stage().to_owned()));
     let measured = std::sync::Mutex::new((None::<Instant>, 0_u64));
+    #[cfg(unix)]
+    let copy_meter = copy_ride.as_ref().map(|ride| ride.meter());
     let record_progress = move |bytes: u64, media_ms: i64, rows: usize| {
         if let Ok(mut current) = observed_for_progress.lock() {
             *current = (bytes, media_ms, rows);
@@ -2988,12 +3144,20 @@ async fn build_with_args_owned(
                 }
                 None => (0, 0),
             };
+            #[cfg(unix)]
+            let (copy_index_riding, copy_index_rows) = copy_meter
+                .as_ref()
+                .map_or((false, 0), |meter| (true, meter.rows()));
+            #[cfg(not(unix))]
+            let (copy_index_riding, copy_index_rows) = (false, 0);
             progress(&PassProgress {
                 bytes_read: bytes,
                 media_ms,
                 fragments: rows,
                 pgs_tracks,
                 pgs_bytes_written,
+                copy_index_riding,
+                copy_index_rows,
             });
         }
     };
@@ -3009,6 +3173,13 @@ async fn build_with_args_owned(
     let shared = identities.len() > 1;
     let mut dolby_vision = outputs.into_iter().map(|output| output.dolby_vision);
     let mut streams: Vec<OutputRead<'_>> = Vec::with_capacity(identities.len());
+    // The lead's reader also hands what it reads to the copy ride, which
+    // takes a copy and never delays the read.
+    #[cfg(unix)]
+    let stdout: Box<dyn AsyncRead + Unpin + Send> = match &copy_ride {
+        Some(ride) => Box::new(crate::copy_ride_along::RideTee::new(stdout, ride.tap())),
+        None => Box::new(stdout),
+    };
     streams.push(Box::pin(index_output(
         stdout,
         identities[0].clone(),
@@ -3253,6 +3424,19 @@ async fn build_with_args_owned(
             );
         }
     }
+    // The copy ride is joined here, with the child reaped and every output
+    // read. Its rows are kept only when the lead output built: the same
+    // stream, read through to the same end.
+    #[cfg(unix)]
+    let mut copy_rows = match copy_ride {
+        Some(ride) => {
+            ride.finish(matches!(outcomes.first(), Some(IndexOutcome::Built(_))))
+                .await
+        }
+        None => None,
+    };
+    #[cfg(not(unix))]
+    let mut copy_rows: Option<crate::copy_analysis::PendingCopyRide> = None;
     // The child has been reaped (a `Built` outcome means it exited 0 within
     // the grace), so no slave can still be flushing; the verdict itself is
     // the caller's, outside this future. The tracks belong to the pass, and
@@ -3281,6 +3465,7 @@ async fn build_with_args_owned(
                 None
             },
             dv_title: None,
+            copy_ride: if at == 0 { copy_rows.take() } else { None },
             source_unchanged: true,
         })
         .collect()
@@ -3406,6 +3591,7 @@ async fn read_stderr_tail(
     mut input: impl AsyncRead + Unpin,
     mut scan: Option<StderrScan>,
     hevc: bool,
+    mut sink: Option<TraceSink>,
 ) -> (
     Vec<String>,
     Option<StderrScan>,
@@ -3426,7 +3612,13 @@ async fn read_stderr_tail(
             }
             Ok(read) => {
                 if let Some(trace) = trace.as_mut() {
-                    trace.feed(&chunk[..read]);
+                    match sink.as_mut() {
+                        // The same parse, also naming each packet it closes.
+                        Some(sink) => trace.feed_with_packets(&chunk[..read], |packet| {
+                            sink(TraceEvent::Packet(packet))
+                        }),
+                        None => trace.feed(&chunk[..read]),
+                    }
                 }
                 if let Some(scan) = scan.as_mut() {
                     scan.feed(&chunk[..read]);
@@ -3453,6 +3645,22 @@ async fn read_stderr_tail(
         scan.finish();
         scan
     });
+    if let Some(mut sink) = sink {
+        // A copy of the trace is closed as a range for the ride; the trace
+        // itself goes back to the pass, which finishes it as its proof.
+        let end = match trace.as_ref().filter(|_| complete) {
+            Some(trace) => {
+                let mut last = None;
+                let end = trace.clone().finish_range(|packet| last = Some(packet));
+                if let Some(packet) = last {
+                    sink(TraceEvent::Packet(packet));
+                }
+                end
+            }
+            None => Err("the header trace did not reach the end of stderr".to_owned()),
+        };
+        sink(TraceEvent::End(end));
+    }
     (lines, scan, trace.filter(|_| complete))
 }
 
@@ -3466,6 +3674,11 @@ fn hex(bytes: impl AsRef<[u8]>) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// The copy-index ride: the same index with and without it, rows equal to
+/// the engine's, and a ride that fails or stalls costing the pass nothing.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) mod copy_ride_tests;
 
 #[cfg(test)]
 mod equality_tests;

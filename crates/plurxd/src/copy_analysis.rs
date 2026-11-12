@@ -108,6 +108,24 @@ impl CopyRecipe {
             "pipe:7",
         )
     }
+    /// Playback's default audio beside `video`: the first track copied when
+    /// the copy pipe can carry its codec, encoded when it cannot. Never a
+    /// bare copy the muxer may refuse. It is the recipe of a build no
+    /// playback's own choice is known for.
+    pub(crate) fn playback_default(
+        file: &plurx_core::domain::MediaFile,
+        video: plurx_core::transcode::CopyVideoOptions,
+    ) -> Self {
+        let transcode_audio = file.audio_streams.first().is_some_and(|audio| {
+            !plurx_core::playback::audio::copy_pipe_admits_audio(&audio.codec)
+        });
+        Self {
+            video,
+            audio_index: None,
+            transcode_audio,
+            audio_delivery: None,
+        }
+    }
     /// The planner reserves conservative audio headroom; actual AV bytes and
     /// repaired presentation span are still checked by the kernel.
     pub(crate) fn tracks(
@@ -140,6 +158,102 @@ pub(crate) struct AnalysisCopyRows {
     pub(crate) inspection: Option<RangeInspection>,
     pub(crate) row_inspections: Vec<CopyRowInspection>,
     pub(crate) promotion: PromotionInputs,
+}
+
+/// The read a content-analysis pass made: the `fragment_index` build claim it
+/// held and the source custody that claim holds. [`IndexPassCustody::held_by`]
+/// is its only constructor outside tests, and it answers only for a claim
+/// that is live when asked, so nothing but a running pass can name one. It is
+/// the pass's authority for its own read and nothing else: it claims no
+/// coordinator, reserves no reader and grants no publication. The Analysis
+/// worker takes the coordination claim itself before it seals.
+#[derive(Clone, Debug)]
+pub(crate) struct IndexPassCustody {
+    token: plurx_core::store::background_jobs::JobToken,
+    custody: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+}
+impl IndexPassCustody {
+    /// The claim and custody `fence` holds now. None when the claim is lost
+    /// or past its lease, is not a fragment-index build, or holds no source
+    /// custody of its own.
+    pub(crate) async fn held_by(fence: &crate::background_jobs::JobFence) -> Option<Self> {
+        let (kind, token, custody) = fence.held_source_claim().await?;
+        let value = Self { token, custody };
+        (kind == plurx_core::store::background_jobs::JobKind::FragmentIndexBuild && value.valid())
+            .then_some(value)
+    }
+    /// The custody is this exact claim's: the same job, node, claim and
+    /// fence. A renewed lease or revision does not change the owner.
+    fn valid(&self) -> bool {
+        use plurx_core::store::background_jobs_resources::BackgroundSourceOwner;
+        self.token.validate().is_ok()
+            && uuid::Uuid::parse_str(&self.custody.custody_id).is_ok()
+            && matches!(
+                &self.custody.owner,
+                BackgroundSourceOwner::Job { token }
+                    if token.job_id == self.token.job_id
+                        && token.node_id == self.token.node_id
+                        && token.claim_id == self.token.claim_id
+                        && token.fence == self.token.fence
+            )
+    }
+    pub(crate) fn node_id(&self) -> &str {
+        &self.token.node_id
+    }
+    pub(crate) fn job_id(&self) -> &str {
+        &self.token.job_id
+    }
+    /// A well-formed custody of `node_id` that no store issued.
+    #[cfg(test)]
+    pub(crate) fn for_test(node_id: &str) -> Self {
+        let token = plurx_core::store::background_jobs::JobToken {
+            job_id: uuid::Uuid::new_v4().to_string(),
+            node_id: node_id.to_owned(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            fence: 1,
+            revision: 1,
+            lease_expires_ms: i64::MAX,
+        };
+        Self {
+            custody: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken {
+                custody_id: uuid::Uuid::new_v4().to_string(),
+                owner: plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job {
+                    token: token.clone(),
+                },
+            },
+            token,
+        }
+    }
+}
+
+/// The whole-title rows a content-analysis pass observed beside its own
+/// index, not yet handed to the Analysis worker. The pass's caller sends them
+/// after its own freshness checks, under the claim it still holds.
+pub(crate) struct PendingCopyRide {
+    /// The copy identity of the pass's lead output, which the rows are of.
+    pub(crate) video: plurx_core::transcode::CopyVideoOptions,
+    pub(crate) rows: AnalysisCopyRows,
+}
+impl std::fmt::Debug for PendingCopyRide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingCopyRide")
+            .field("rows", &self.rows.rows.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// One whole-title observation from the content-analysis pass: every
+/// canonical row of the lead identity, read once, under `custody`.
+pub(crate) struct PassCopyObservation {
+    pub(crate) file: Arc<plurx_core::domain::MediaFile>,
+    pub(crate) catalog_namespace: String,
+    /// The source as playback observes it, under its own generation.
+    pub(crate) source: AnalysisCoordinationSource,
+    pub(crate) custody: IndexPassCustody,
+    /// A recipe with the pass's video identity, should a later fill need one.
+    pub(crate) recipe: CopyRecipe,
+    pub(crate) rows: AnalysisCopyRows,
 }
 
 /// One batch of observed rows, whichever owner produced it.
@@ -361,6 +475,8 @@ pub(crate) enum CopyAnalysisMessage {
     Range(Box<CompletedCopyRange>),
     Demand(Box<CopyIndexDemand>),
     Defect(CopyIndexDefect),
+    /// A whole-title observation the content-analysis pass made on its ride.
+    Pass(Box<PassCopyObservation>),
 }
 
 pub(crate) type CopyAnalysisInbox = tokio::sync::mpsc::Sender<CopyAnalysisMessage>;
@@ -424,6 +540,12 @@ impl CopyAnalysisRegistry {
             asked.insert(key);
         }
         sent
+    }
+    /// Hand the worker the whole-title rows a content-analysis pass observed.
+    /// A full inbox refuses, and nothing is lost but this read's rows: a
+    /// demand or a later pass builds the same index.
+    pub(crate) fn notify_pass(&self, observation: PassCopyObservation) -> bool {
+        self.send(CopyAnalysisMessage::Pass(Box::new(observation)))
     }
     /// The already-asked keys, for the worker to clear as sources settle.
     pub(crate) fn asked(&self) -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
@@ -769,6 +891,72 @@ impl CopyObservationSet {
             inspection: observed.inspection.as_ref(),
             row_inspections: &observed.row_inspections,
             promotion: &observed.promotion,
+        })
+    }
+
+    /// The set of a source nothing has observed yet, from the whole-title
+    /// rows of a content-analysis pass. They establish the init contract,
+    /// clock origin and promotion exactly as an Analysis generation's first
+    /// rows do.
+    pub(crate) fn from_pass(
+        observation: &PassCopyObservation,
+    ) -> Result<Self, CopyObservationError> {
+        let timescale = observation
+            .rows
+            .init
+            .video()
+            .ok_or(CopyObservationError::Init)?
+            .timescale;
+        let mut value = Self::empty(
+            &observation.catalog_namespace,
+            &observation.source,
+            &observation.rows.init,
+            timescale,
+            observation.rows.source_origin,
+            observation.rows.canonical_title_start,
+            &observation.rows.promotion,
+        )?;
+        value.observe_pass(observation)?;
+        Ok(value)
+    }
+
+    /// Rows from a content-analysis pass. The pass's custody stands where an
+    /// Analysis fill's phase does: it must be the origin node's, for this
+    /// exact file and source as playback observes it. The rows then pass the
+    /// same init, inspection and overlap-equality checks as any other
+    /// observation's, and must be the whole title.
+    pub(crate) fn observe_pass(
+        &mut self,
+        observation: &PassCopyObservation,
+    ) -> Result<(), CopyObservationError> {
+        let rows = &observation.rows;
+        if observation.file.id != self.source.file_id
+            || observation.file.size != self.source.source_size
+            || observation.file.mtime != self.source.source_mtime
+            || observation.source != self.observed_source
+            || observation.catalog_namespace != self.catalog_namespace
+            || !observation.custody.valid()
+            || observation.custody.node_id() != self.source.origin_node_id
+            || !rows.boundaries.begins_title
+            || !rows.boundaries.eof
+        {
+            return Err(CopyObservationError::Binding);
+        }
+        let timescale = rows
+            .init
+            .video()
+            .ok_or(CopyObservationError::Init)?
+            .timescale;
+        self.merge(ObservedRows {
+            init: &rows.init,
+            timescale,
+            source_origin: rows.source_origin,
+            canonical_title_start: rows.canonical_title_start,
+            rows: &rows.rows,
+            boundaries: rows.boundaries,
+            inspection: rows.inspection.as_ref(),
+            row_inspections: &rows.row_inspections,
+            promotion: &rows.promotion,
         })
     }
 
