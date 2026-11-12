@@ -212,7 +212,7 @@ Runbook, with the owner-move procedure: [OPERATIONS.md](OPERATIONS.md).
 | `PLURX_CONFIG` | — | Explicit config path |
 | `PLURX_FFMPEG` / `PLURX_FFPROBE` | `ffmpeg` / `ffprobe` | Media tools (use jellyfin-ffmpeg) |
 | `PLURX_HWACCEL` | `auto` | `auto` · `qsv` · `vaapi` · `nvenc` · `videotoolbox` |
-| `PLURX_VAAPI_DEVICE` | `/dev/dri/renderD128` | VA-API render node |
+| `PLURX_VAAPI_DEVICE` | first VA-API-capable render node, else `/dev/dri/renderD128` | VA-API render node |
 | `PLURX_TONEMAP` | auto | HDR→SDR filter override |
 | `PLURX_GDM_PORT` | `32414` | GDM host port |
 | `PLURX_TRAKT_BASE` | `https://api.trakt.tv` | Trakt API base (tests/mocks) |
