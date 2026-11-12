@@ -1,6 +1,6 @@
 # Shadow loss — encoder diagnosis and offline fix tests
 
-**Status:** open — re-fitted 8.1 RPU curves beat F and every encode on all three windows with no encode; encode recipes NP1/P1 beat F on Michael only · **Date:** 2026-11-12
+**Status:** open — re-fitted 8.1 RPU curves (F+) beat F everywhere and the best encode pooled, with no encode; encodes still win Michael frame 0; NP1/P1 beat F on Michael only · **Date:** 2026-11-12
 
 Companion to the [DV processing ledger](DV_HDR_PROCESSING_STATUS.md).
 This is the canonical offline picture-quality investigation record for P02.
@@ -579,10 +579,12 @@ above. There is no crossover in all four models at or below 160 Mb/s.
 
 ## Where this leaves the investigation
 
-- **Re-fitting the 8.1 RPU curves beats every encode with no encode at all**
-  ([RPU-REFIT.md](../../tools/dv_processing/diagnostics/fel_quality/RPU-REFIT.md)). Michael pooled error goes from
-  3.20 to 1.45; held-out Beekeeper goes from 1.46 to 0.96. That becomes the
-  baseline any re-encode must beat.
+- **Re-fitting the 8.1 RPU curves with no encode (F+) beats F everywhere**
+  ([RPU-REFIT.md](../../tools/dv_processing/diagnostics/fel_quality/RPU-REFIT.md)). Pooled error falls from
+  3.20 to 1.46 (Michael5400), 3.19 to 1.34 (Michael1800) and 1.46 to 0.96
+  (Beekeeper), in all 48 frames. It also beats the best encode pooled, by 0.14
+  and 0.03 on Michael. The best encodes still win Michael frame 0 and several
+  shadow tails, so F+ replaces F, not re-encoding.
 - The NP1/P1 encode recipes pass the Michael bar but fail the stack's
   held-out rule. On Beekeeper no encode beats F at ≤160 Mb/s.
 - A per-frame QP map cannot be passed as FFmpeg CLI arguments, and nothing
@@ -611,12 +613,13 @@ never edited. Refused attempts are kept under each root's `logs/`.
 
 ### Next steps
 
-1. **Build the RPU re-fit as the default FEL serve** (needs Paul's go). Per
-   title, fit the curves from BL+EL once per scene and store them. The
-   existing 8.1 conversion then writes them into each RPU instead of
-   identity curves. Verify on an Android client with HDMI capture.
-2. **Re-encode only where it beats the re-fit.** A short trial, scored
-   against the re-fit rather than F, decides it; none did on these windows.
+1. **Build F+ as the default FEL serve** (needs Paul's go). Per title, fit
+   the safe curves from BL+EL once per scene and store them. The existing
+   8.1 conversion then writes them into each RPU instead of identity curves.
+   macOS applies them; Android awaits the Lenovo tablet patch check.
+2. **Re-encode only where it beats F+.** A short trial, scored against F+
+   rather than F, decides it. On Michael the encodes lose pooled but win
+   frame 0.
 3. **More held-out titles** before trusting either result broadly.
 
 ### Validation limits
