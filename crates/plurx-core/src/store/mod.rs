@@ -20,7 +20,7 @@ mod copy_index_v3;
 pub use copy_index_v3::{
     copy_index_v3_publish_payload, copy_index_v3_rebuild_generation, copy_index_v3_source_key,
     CopyIndexSourceAttestation, CopyIndexV3Artifact, CopyIndexV3Head, CopyIndexV3HeadState,
-    CopyIndexV3Location, CopyIndexV3Quarantine, CopyIndexV3Variant,
+    CopyIndexV3Location, CopyIndexV3Quarantine, CopyIndexV3Variant, COPY_INDEX_V3_NO_HOLDER_CODE,
 };
 pub mod sharing;
 pub use sharing::SharingStore;

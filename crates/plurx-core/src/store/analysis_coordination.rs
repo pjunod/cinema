@@ -342,6 +342,35 @@ pub(super) async fn finish_phase<T: QueueSql>(
     Ok(false)
 }
 
+/// Why a queued coordinator nobody will claim was retired. Enqueue does not
+/// count a request retired with this code against its generation, so the
+/// source is free to be coordinated again the next time it is observed.
+pub const STRANDED_CODE: &str = "coordination_stranded";
+
+/// Retire the queued coordination requests targeted at `node_id` that were
+/// created before `created_before_ms`. Only the copy-analysis worker of the
+/// target node joins such a request, and only for a source it holds
+/// observations of in memory, so the ones a restarted process finds were left
+/// by its predecessor and nothing would ever claim them. A request whose role
+/// still names a physical custody is left for the claimant that must settle
+/// it. The role of a retired request stays until the same source is next
+/// established, which releases it, or the request is pruned.
+pub(super) async fn retire_stranded<T: QueueSql>(
+    store: &T,
+    node_id: &str,
+    created_before_ms: i64,
+    now_ms: i64,
+) -> Result<u64, StoreError> {
+    if !identifier(node_id) || created_before_ms < 0 || now_ms < 0 {
+        return Err(invalid());
+    }
+    let body = encode(
+        &serde_json::json!({"node_id":node_id,"created_before_ms":created_before_ms,"now_ms":now_ms,"code":STRANDED_CODE,"pipeline":format!("{PIPELINE_PREFIX}%")}),
+    )?;
+    let rows = store.queue_sql("UPDATE analysis_requests SET state='cancelled',fence=fence+1,cancel_requested=1,last_error_code=json_extract($1,'$.code'),updated_at_ms=json_extract($1,'$.now_ms') WHERE state='queued' AND component='fragment_index' AND pipeline_version LIKE json_extract($1,'$.pipeline') AND target_node_id=json_extract($1,'$.node_id') AND created_at_ms<json_extract($1,'$.created_before_ms') AND NOT EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE role.request_id=analysis_requests.request_id AND role.active_custody_id IS NOT NULL) RETURNING 'true' AS result_json".into(), body, true, true).await?;
+    Ok(rows.len() as u64)
+}
+
 /// A current metadata-only Analysis claim for the exact source generation.
 /// This condition grants neither Source I/O nor public media authority.
 pub(super) fn metadata_owned_condition() -> String {

@@ -2077,7 +2077,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4
                       AND component = $5 AND pipeline_version = $6
                       AND video_identity = $7
-                      AND requested_generation = $8 AND target_node_id = $12)
+                      AND requested_generation = $8 AND target_node_id = $12
+                      -- A coordinator retired as stranded was never worked;
+                      -- it does not use up its generation.
+                      AND NOT (state = 'cancelled'
+                        AND last_error_code = 'coordination_stranded'))
                 ))
              ON CONFLICT DO NOTHING"
                     ),

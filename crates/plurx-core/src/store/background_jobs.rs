@@ -2322,6 +2322,21 @@ pub trait BackgroundJobStore: Send + Sync {
         blob_sha256: &str,
         node_id: &str,
     ) -> Result<bool, StoreError>;
+    /// Drop every holder row of `node_id` for one blob after its local file
+    /// was evicted; returns how many rows went.
+    async fn forget_copy_index_v3_blob_holder(
+        &self,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<u64, StoreError>;
+    /// Retire the queued coordination requests targeted at `node_id` that a
+    /// previous process left behind (created before `created_before_ms`).
+    async fn retire_stranded_analysis_coordination(
+        &self,
+        node_id: &str,
+        created_before_ms: i64,
+        now_ms: i64,
+    ) -> Result<u64, StoreError>;
     async fn ensure_copy_index_v3_head(
         &self,
         catalog_namespace: &str,
@@ -3130,6 +3145,22 @@ impl<T: QueueSql> BackgroundJobStore for T {
         node_id: &str,
     ) -> Result<bool, StoreError> {
         super::copy_index_v3::forget_location(self, contract_key, blob_sha256, node_id).await
+    }
+    async fn forget_copy_index_v3_blob_holder(
+        &self,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<u64, StoreError> {
+        super::copy_index_v3::forget_blob_holder(self, blob_sha256, node_id).await
+    }
+    async fn retire_stranded_analysis_coordination(
+        &self,
+        node_id: &str,
+        created_before_ms: i64,
+        now_ms: i64,
+    ) -> Result<u64, StoreError> {
+        super::analysis_coordination::retire_stranded(self, node_id, created_before_ms, now_ms)
+            .await
     }
     async fn ensure_copy_index_v3_head(
         &self,
