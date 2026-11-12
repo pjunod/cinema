@@ -37,6 +37,8 @@ use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
 pub use super::background_jobs_publication::{
     JobPublishOutcome, PublishTranscodeJob, TranscodeJobOutput,
 };
+pub use super::copy_index_v3::PublishCopyIndexV3;
+pub use super::copy_index_v3::QuarantineCopyIndexV3Head;
 use crate::error::StoreError;
 
 /// First SQLite schema containing this queue; stable across later migrations.
@@ -789,6 +791,8 @@ pub enum JobKind {
     CopyOutputPrepare,
     EncodedOutputPrepare,
     FragmentIndexBuild,
+    /// Canonical publication consumes verified bytes, never original media.
+    FragmentIndexPublish,
     ArtifactHydrate,
     SubtitleExtract,
     SubtitleTranscribe,
@@ -818,6 +822,7 @@ impl JobKind {
             | Self::CopyOutputPrepare
             | Self::EncodedOutputPrepare
             | Self::FragmentIndexBuild
+            | Self::FragmentIndexPublish
             | Self::ArtifactHydrate
             | Self::SubtitleTranscribe
             | Self::SubtitleTranscribeManaged
@@ -1008,6 +1013,29 @@ pub enum JobPayload {
         cache_key: String,
         pipeline_digest: String,
     },
+    /// Engine provenance never participates in contract identity or dedupe.
+    FragmentIndexPublish {
+        publication_version: u32,
+        source_key: String,
+        catalog_namespace: String,
+        init_contract_sha256: String,
+        expected_head_epoch: i64,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        origin_node_id: String,
+        object_version: String,
+        coordinator_request_id: String,
+        coordinator_fence: i64,
+        requested_generation: String,
+        contract_version: u32,
+        output_contract_sha256: String,
+        source_sha256: String,
+        blob_sha256: String,
+        bytes: i64,
+        cache_key: String,
+        producer_engine_sha256: String,
+    },
     ArtifactHydrate {
         artifact_key: String,
         target_node_id: String,
@@ -1193,6 +1221,7 @@ impl JobPayload {
             Self::CopyOutputPrepare { .. } => JobKind::CopyOutputPrepare,
             Self::TranscodePrepare { .. } => JobKind::TranscodePrepare,
             Self::FragmentIndexBuild { .. } => JobKind::FragmentIndexBuild,
+            Self::FragmentIndexPublish { .. } => JobKind::FragmentIndexPublish,
             Self::ArtifactHydrate { .. } => JobKind::ArtifactHydrate,
             Self::SubtitleExtract { .. } => JobKind::SubtitleExtract,
             Self::SubtitleTranscribe { .. } => JobKind::SubtitleTranscribe,
@@ -1215,6 +1244,7 @@ impl JobPayload {
 
     pub fn target_node_id(&self) -> Option<&str> {
         match self {
+            Self::FragmentIndexPublish { origin_node_id, .. } => Some(origin_node_id),
             Self::EncodedOutputPrepare { intent, .. } => Some(&intent.target_node_id),
             Self::CopyOutputPrepare { intent, .. } => Some(&intent.target_node_id),
             Self::ArtifactHydrate { target_node_id, .. }
@@ -1337,6 +1367,55 @@ impl JobPayload {
                     && digest(source_sha256)
                     && digest(cache_key)
                     && digest(pipeline_digest)
+            }
+            Self::FragmentIndexPublish {
+                publication_version,
+                source_key,
+                catalog_namespace,
+                init_contract_sha256,
+                expected_head_epoch,
+                file_id,
+                source_size,
+                origin_node_id,
+                object_version,
+                coordinator_request_id,
+                coordinator_fence,
+                requested_generation,
+                contract_version,
+                output_contract_sha256,
+                source_sha256,
+                blob_sha256,
+                bytes,
+                cache_key,
+                producer_engine_sha256,
+                ..
+            } => {
+                *publication_version == 3
+                    && digest(source_key)
+                    && !catalog_namespace.trim().is_empty()
+                    && catalog_namespace.len() <= 256
+                    && digest(init_contract_sha256)
+                    && *expected_head_epoch >= 0
+                    && *file_id > 0
+                    && *source_size >= 0
+                    && identifier(origin_node_id)
+                    && !object_version.is_empty()
+                    && object_version.len() <= 4096
+                    && super::fragment_index_cluster::analysis_request_id_is_valid(
+                        coordinator_request_id,
+                    )
+                    && *coordinator_fence > 0
+                    && !requested_generation.is_empty()
+                    && requested_generation.len() <= 128
+                    && *contract_version == super::fragment_index_cluster::FRAGMENT_INDEX_CONTRACT
+                    && digest(output_contract_sha256)
+                    && digest(source_sha256)
+                    && digest(blob_sha256)
+                    && digest(cache_key)
+                    && digest(producer_engine_sha256)
+                    && (1..=super::fragment_index_cluster::MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES
+                        as i64)
+                        .contains(bytes)
             }
             Self::SubtitleExtract {
                 file_id,
@@ -1602,6 +1681,83 @@ pub enum JobState {
     Succeeded,
     Failed,
     Cancelled,
+}
+
+#[cfg(test)]
+mod fragment_publish_payload_tests {
+    use super::*;
+
+    fn fixture() -> serde_json::Value {
+        serde_json::json!({
+            "kind":"fragment_index_publish", "publication_version":3,
+            "source_key":"1".repeat(64),"catalog_namespace":"catalogue",
+            "init_contract_sha256":"2".repeat(64),"expected_head_epoch":0,
+            "file_id":1,"source_size":100,"source_mtime":-1,
+            "origin_node_id":"source-one","object_version":"held-object:one",
+            "coordinator_request_id":"opaque / request\u{0000}é","coordinator_fence":7,
+            "requested_generation":"generation-one",
+            "contract_version":super::super::fragment_index_cluster::FRAGMENT_INDEX_CONTRACT,
+            "output_contract_sha256":"a".repeat(64),"source_sha256":"b".repeat(64),
+            "blob_sha256":"c".repeat(64),"bytes":super::super::fragment_index_cluster::MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+            "cache_key":"d".repeat(64),"producer_engine_sha256":"e".repeat(64),
+        })
+    }
+
+    #[test]
+    fn publisher_payload_is_closed_bounded_and_pinned_to_its_observation_owner() {
+        let value = fixture();
+        let payload: JobPayload =
+            serde_json::from_value(value.clone()).expect("typed publisher payload");
+        payload
+            .validate()
+            .expect("bounded metadata-only publication");
+        assert_eq!(payload.kind(), JobKind::FragmentIndexPublish);
+        assert_eq!(payload.target_node_id(), Some("source-one"));
+        assert!(payload.kind().permits_artifact_execution());
+        let mut unknown = value;
+        unknown["source_path"] = "/not-a-payload-capability".into();
+        assert!(serde_json::from_value::<JobPayload>(unknown).is_err());
+        let mut legacy_id = fixture();
+        legacy_id["coordinator_request_id"] = "x".repeat(128).into();
+        serde_json::from_value::<JobPayload>(legacy_id)
+            .expect("legacy repair ID")
+            .validate()
+            .expect("persisted opaque analysis ID contract");
+        for (field, invalid) in [
+            ("publication_version", serde_json::json!(2)),
+            ("contract_version", serde_json::json!(0)),
+            ("file_id", serde_json::json!(0)),
+            ("source_size", serde_json::json!(-1)),
+            ("origin_node_id", serde_json::json!("node / invalid")),
+            ("object_version", serde_json::json!("x".repeat(4097))),
+            ("coordinator_request_id", serde_json::json!("")),
+            ("coordinator_request_id", serde_json::json!("é".repeat(65))),
+            ("coordinator_fence", serde_json::json!(0)),
+            ("requested_generation", serde_json::json!("x".repeat(129))),
+            ("output_contract_sha256", serde_json::json!("a".repeat(63))),
+            ("source_sha256", serde_json::json!("")),
+            ("blob_sha256", serde_json::json!("g".repeat(64))),
+            ("cache_key", serde_json::json!("D".repeat(64))),
+            ("producer_engine_sha256", serde_json::json!("e".repeat(65))),
+            ("bytes", serde_json::json!(0)),
+            (
+                "bytes",
+                serde_json::json!(
+                    super::super::fragment_index_cluster::MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES + 1
+                ),
+            ),
+        ] {
+            let mut bad = fixture();
+            bad[field] = invalid;
+            assert!(
+                serde_json::from_value::<JobPayload>(bad)
+                    .expect("known payload shape")
+                    .validate()
+                    .is_err(),
+                "field {field}"
+            );
+        }
+    }
 }
 
 /// Ownership revision deliberately excludes scheduling and waiter edits.
@@ -2130,6 +2286,69 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         interest: AnalysisViewerInterest,
     ) -> Result<bool, StoreError>;
+    async fn copy_index_v3_head(
+        &self,
+        source_key: &str,
+    ) -> Result<Option<super::copy_index_v3::CopyIndexV3Head>, StoreError>;
+    async fn ensure_copy_index_v3_head(
+        &self,
+        catalog_namespace: &str,
+        source: super::analysis_coordination::AnalysisCoordinationSource,
+        claim: super::analysis_coordination::AnalysisCoordinationClaim,
+        now_ms: i64,
+    ) -> Result<Option<super::copy_index_v3::CopyIndexV3Head>, StoreError>;
+    async fn quarantine_copy_index_v3_head(
+        &self,
+        request: QuarantineCopyIndexV3Head,
+    ) -> Result<bool, StoreError>;
+    async fn record_copy_index_source_attestation(
+        &self,
+        phase: super::analysis_coordination::AnalysisPhysicalPhase,
+        attestation: super::copy_index_v3::CopyIndexSourceAttestation,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn copy_index_source_attestation(
+        &self,
+        origin_node_id: &str,
+        file_id: i64,
+        object_version: &str,
+    ) -> Result<Option<super::copy_index_v3::CopyIndexSourceAttestation>, StoreError>;
+    async fn establish_analysis_coordination(
+        &self,
+        request_id: &str,
+        source: super::analysis_coordination::AnalysisCoordinationSource,
+        now_ms: i64,
+    ) -> Result<Option<super::analysis_coordination::AnalysisCoordination>, StoreError>;
+    async fn analysis_coordination(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<super::analysis_coordination::AnalysisCoordination>, StoreError>;
+    async fn claim_analysis_coordination(
+        &self,
+        request_id: &str,
+        source: super::analysis_coordination::AnalysisCoordinationSource,
+        node_id: &str,
+        expected_fence: i64,
+        now_ms: i64,
+        expires_ms: i64,
+    ) -> Result<Option<super::analysis_coordination::AnalysisCoordinationClaim>, StoreError>;
+    async fn begin_analysis_source_phase(
+        &self,
+        claim: super::analysis_coordination::AnalysisCoordinationClaim,
+        source: super::analysis_coordination::AnalysisCoordinationSource,
+        expected_sequence: i64,
+        custody_id: String,
+        now_ms: i64,
+    ) -> Result<Option<super::analysis_coordination::AnalysisPhysicalPhase>, StoreError>;
+    async fn finish_analysis_source_phase(
+        &self,
+        phase: super::analysis_coordination::AnalysisPhysicalPhase,
+    ) -> Result<bool, StoreError>;
+    async fn analysis_source_phase_current(
+        &self,
+        phase: &super::analysis_coordination::AnalysisPhysicalPhase,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     async fn join_artifact_viewer(
         &self,
         interest: ArtifactViewerInterest,
@@ -2506,6 +2725,11 @@ pub trait BackgroundJobStore: Send + Sync {
         owner: super::background_jobs_resources::BackgroundSourceOwner,
         now_ms: i64,
     ) -> Result<super::background_jobs_resources::BackgroundSourceRegistration, StoreError>;
+    async fn claim_analysis_source_phase_service(
+        &self,
+        phase: &super::analysis_coordination::AnalysisPhysicalPhase,
+        now_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::BackgroundSourceServiceGrant>, StoreError>;
     async fn claim_background_source_service(
         &self,
         owner: super::background_jobs_resources::BackgroundSourceOwner,
@@ -2614,6 +2838,10 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn publish_fragment_job(
         &self,
         request: PublishFragmentJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    async fn publish_copy_index_v3(
+        &self,
+        request: PublishCopyIndexV3,
     ) -> Result<JobPublishOutcome, StoreError>;
 }
 
@@ -2828,6 +3056,109 @@ impl<T: QueueSql> BackgroundJobStore for T {
             )
             .await?;
         Ok(!rows.is_empty())
+    }
+    async fn copy_index_v3_head(
+        &self,
+        source_key: &str,
+    ) -> Result<Option<super::copy_index_v3::CopyIndexV3Head>, StoreError> {
+        super::copy_index_v3::read_head(self, source_key).await
+    }
+    async fn ensure_copy_index_v3_head(
+        &self,
+        catalog_namespace: &str,
+        source: super::analysis_coordination::AnalysisCoordinationSource,
+        claim: super::analysis_coordination::AnalysisCoordinationClaim,
+        now_ms: i64,
+    ) -> Result<Option<super::copy_index_v3::CopyIndexV3Head>, StoreError> {
+        super::copy_index_v3::ensure_head(self, catalog_namespace, source, claim, now_ms).await
+    }
+    async fn quarantine_copy_index_v3_head(
+        &self,
+        request: QuarantineCopyIndexV3Head,
+    ) -> Result<bool, StoreError> {
+        super::copy_index_v3::quarantine_head(self, request).await
+    }
+    async fn record_copy_index_source_attestation(
+        &self,
+        phase: super::analysis_coordination::AnalysisPhysicalPhase,
+        attestation: super::copy_index_v3::CopyIndexSourceAttestation,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::copy_index_v3::record_attestation(self, phase, attestation, now_ms).await
+    }
+    async fn copy_index_source_attestation(
+        &self,
+        origin_node_id: &str,
+        file_id: i64,
+        object_version: &str,
+    ) -> Result<Option<super::copy_index_v3::CopyIndexSourceAttestation>, StoreError> {
+        super::copy_index_v3::source_attestation(self, origin_node_id, file_id, object_version)
+            .await
+    }
+    async fn establish_analysis_coordination(
+        &self,
+        request_id: &str,
+        source: super::analysis_coordination::AnalysisCoordinationSource,
+        now_ms: i64,
+    ) -> Result<Option<super::analysis_coordination::AnalysisCoordination>, StoreError> {
+        super::analysis_coordination::establish(self, request_id, source, now_ms).await
+    }
+    async fn analysis_coordination(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<super::analysis_coordination::AnalysisCoordination>, StoreError> {
+        super::analysis_coordination::observe(self, request_id).await
+    }
+    async fn claim_analysis_coordination(
+        &self,
+        request_id: &str,
+        source: super::analysis_coordination::AnalysisCoordinationSource,
+        node_id: &str,
+        expected_fence: i64,
+        now_ms: i64,
+        expires_ms: i64,
+    ) -> Result<Option<super::analysis_coordination::AnalysisCoordinationClaim>, StoreError> {
+        super::analysis_coordination::claim(
+            self,
+            request_id,
+            source,
+            node_id,
+            expected_fence,
+            now_ms,
+            expires_ms,
+        )
+        .await
+    }
+    async fn begin_analysis_source_phase(
+        &self,
+        claim: super::analysis_coordination::AnalysisCoordinationClaim,
+        source: super::analysis_coordination::AnalysisCoordinationSource,
+        expected_sequence: i64,
+        custody_id: String,
+        now_ms: i64,
+    ) -> Result<Option<super::analysis_coordination::AnalysisPhysicalPhase>, StoreError> {
+        super::analysis_coordination::begin_phase(
+            self,
+            claim,
+            source,
+            expected_sequence,
+            custody_id,
+            now_ms,
+        )
+        .await
+    }
+    async fn finish_analysis_source_phase(
+        &self,
+        phase: super::analysis_coordination::AnalysisPhysicalPhase,
+    ) -> Result<bool, StoreError> {
+        super::analysis_coordination::finish_phase(self, phase).await
+    }
+    async fn analysis_source_phase_current(
+        &self,
+        phase: &super::analysis_coordination::AnalysisPhysicalPhase,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::analysis_coordination::phase_current(self, phase, now_ms).await
     }
     async fn join_artifact_viewer(
         &self,
@@ -3448,6 +3779,13 @@ LIMIT 1
             return Err(invalid("background staging inventory exceeds active bound"));
         }
         rows.iter().map(|row| decode(row)).collect()
+    }
+
+    async fn publish_copy_index_v3(
+        &self,
+        request: PublishCopyIndexV3,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::copy_index_v3::publish(self, request).await
     }
 
     async fn publish_fragment_job(
@@ -4560,6 +4898,14 @@ LIMIT 1
         now_ms: i64,
     ) -> Result<super::background_jobs_resources::BackgroundSourceRegistration, StoreError> {
         super::background_jobs_resources::register_background_typed(self, owner, now_ms).await
+    }
+    async fn claim_analysis_source_phase_service(
+        &self,
+        phase: &super::analysis_coordination::AnalysisPhysicalPhase,
+        now_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::BackgroundSourceServiceGrant>, StoreError>
+    {
+        super::background_jobs_resources::claim_analysis_phase_service(self, phase, now_ms).await
     }
     async fn claim_background_source_service(
         &self,

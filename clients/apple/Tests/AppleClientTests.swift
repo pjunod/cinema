@@ -8258,7 +8258,8 @@ final class AppleClientTests: XCTestCase {
                     XCTAssertTrue(document.video.allSatisfy { $0.present == expectedPresent })
                     XCTAssertEqual(document.display.hdr, displayHDR)
                     XCTAssertEqual(document.dvTransport, "hls")
-                    XCTAssertEqual(document.transports, ["progressive", "hls"])
+                    XCTAssertEqual(document.transports, ["progressive", "hls", SharedPlaybackTimeline.capability])
+                    XCTAssertFalse(document.transports.contains { $0.hasPrefix("plurx-internal-relay-") })
                     XCTAssertEqual(document.progressiveHevcSampleEntries, hevc ? ["hvc1"] : nil)
                     XCTAssertEqual(document.learnedLimits, [])
 
@@ -9125,7 +9126,7 @@ final class AppleClientTests: XCTestCase {
         """#.utf8))
         XCTAssertEqual(
             PlayerController.sessionMediaOriginMs(invalid, requestedStartMs: 10_500),
-            0
+            -1
         )
     }
 

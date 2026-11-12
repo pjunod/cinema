@@ -191,6 +191,11 @@ async function handleEnded(fileId){
   // total===0 means no runtime is known for this file (nothing probed, and a
   // growing stream's own duration is not a substitute). There is nothing
   // better to judge by, so `ended` stands.
+  if(!(total>0)&&p.rangePresentation){
+    // Ending an unknown-length range proves neither watched nor autoplay-next.
+    await reportProgress(fileId,false);
+    return;
+  }
   if(!(total>0) || pos>=total-ENDED_SLACK_SEC){
     await reportProgress(fileId,true);
     if(!current()) return;

@@ -21,17 +21,19 @@ class SharedPreparedHandoffTest {
     /** An incumbent whose film clock runs in real time while playing, and a parked successor. */
     private class Renderer(private val log: MutableList<String>) : SharedRenderer {
         private var base = 0L; private var since = System.nanoTime(); var active = false
+        var durationMs = 900_000L
+        var successorDescriptor: tv.plurx.app.data.HlsStart? = null
         var successorAt: Long? = null; var switched = false; var successorReady = true; var frame: Long? = 1_800_000_000_000
         fun position() = if (active) base + (System.nanoTime() - since) / 1_000_000 else base
         private fun moveTo(value: Long) { base = value; since = System.nanoTime() }
-        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) { log += "attach hls $url @$positionMs"; moveTo(positionMs); active = playWhenReady }
+        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean, start: tv.plurx.app.data.HlsStart) { log += "attach hls $url @$positionMs"; moveTo(positionMs); active = playWhenReady }
         override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) { log += "attach direct $url" }
         override fun seekTo(positionMs: Long) { log += "seek $positionMs"; moveTo(positionMs) }
         override fun setPlaying(playing: Boolean) { moveTo(position()); active = playing }
-        override fun snapshot() = SharedRendererSnapshot(position(), position() + 30_000, 900_000, active, RenderState.RENDERING,
+        override fun snapshot() = SharedRendererSnapshot(position(), position() + 30_000, durationMs, active, RenderState.RENDERING,
             framePresented = active && frame != null)
         override fun release() { log += "release" }
-        override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean) { log += "prepare successor $url"; successorAt = positionMs }
+        override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean, start: tv.plurx.app.data.HlsStart) { log += "prepare successor $url"; successorAt = positionMs; successorDescriptor = start }
         override fun successorSnapshot() = successorAt?.let { at ->
             // A parked successor holds still on its rendezvous with runway through it.
             SharedSuccessorSnapshot(successorReady, if (switched) position() else at, at + 10_000, seekLanded = true, failed = false,
@@ -45,7 +47,7 @@ class SharedPreparedHandoffTest {
     }
 
     private val actionId = "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1"
-    private fun offer(f: SharedFixture, body: JsonObject, preparation: String = "offered") = buildJsonObject {
+    private fun offer(f: SharedFixture, body: JsonObject, preparation: String = "offered", originMs: Long = 0) = buildJsonObject {
         val session = f.session(9)
         put("protocol", "plurx-playback-control-v1"); put("generation", body.getValue("generation")); put("control_epoch", body.getValue("control_epoch"))
         put("accepted_sequence", body.getValue("sequence"))
@@ -53,7 +55,7 @@ class SharedPreparedHandoffTest {
             put("type", "prepare"); put("action_id", actionId); put("session_id", session); put("playlist_url", "/api/v1/hls/$session/index.m3u8")
             put("control", buildJsonObject { put("protocol", "plurx-playback-control-v1"); put("url", "/api/v1/hls/$session/control"); put("generation", f.generation(9))
                 put("control_epoch", 1); put("next_exchange_ms", 5_000); put("lease_timeout_ms", 300_000) })
-            put("media_origin_ms", 0)
+            put("media_origin_ms", originMs)
             put("effective_selection", buildJsonObject { put("quality_auto", false); put("height", 720); put("audio_offset_ms", 0); put("codec", "server_selected") })
         })
         put("delivery", buildJsonObject { put("preparation", preparation) })
@@ -67,6 +69,35 @@ class SharedPreparedHandoffTest {
     private suspend fun until(what: String, condition: () -> Boolean) {
         withTimeout(15_000) { while (!condition()) delay(20) }
         assertTrue(what, condition())
+    }
+
+    @Test fun boundedSuccessorKeepsItsOwnOriginThroughThePreparedHandoff(): Unit = runBlocking {
+        val f = SharedFixture("208"); f.login()
+        f.startReply = { index, _ ->
+            val wire = Json.parseToJsonElement(f.hlsReply(index)).jsonObject
+            JsonObject(wire + ("duration_ms" to JsonPrimitive(7_200_000))).toString()
+        }
+        val renderer = Renderer(f.log)
+        renderer.durationMs = 7_200_000
+        val owner = owner(this, f, renderer)
+        owner.start(f.plan(f.context(), resumeMs = 5_400_000))
+        f.decisionWire = { f.decision("transcode") }
+        f.control = { _, body ->
+            when {
+                ack(body) == null && body.getValue("sequence").jsonPrimitive.long == 1L -> 200 to f.accepted(body, "staging")
+                ack(body)?.get("state")?.jsonPrimitive?.content == "committed" -> 200 to f.accepted(body, "none")
+                else -> 200 to offer(f, body, originMs = 5_398_000)
+            }
+        }
+        owner.change(manual720)
+        until("bounded successor settles") { owner.currentSession?.sessionId == f.session(9) }
+        val descriptor = requireNotNull(renderer.successorDescriptor)
+        assertEquals(5_398_000L, descriptor.media_origin_ms)
+        assertFalse(descriptor.vod)
+        assertEquals(2_000L, successorAttachPositionMs(sharedMediaOriginMs(descriptor), 5_400_000))
+        assertEquals(5_400_000L, successorFilmPositionMs(sharedMediaOriginMs(descriptor), 2_000))
+        assertEquals(1, f.starts)
+        owner.stop()
     }
 
     @Test fun offeredSuccessorPrimesCommitsOnThePredecessorAndMovesControlAndProgress(): Unit = runBlocking {

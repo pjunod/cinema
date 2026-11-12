@@ -190,8 +190,9 @@ class PreparedPayloadValidationTest {
     }
 
     @Test
-    fun `a negative or absurd media origin is refused`() {
-        assertFalse(prepare(mediaOriginMs = -1).preparedPayloadIsValid)
+    fun `a signed origin is accepted but an absurd media origin is refused`() {
+        assertTrue(prepare(mediaOriginMs = -83).preparedPayloadIsValid)
+        assertFalse(prepare(mediaOriginMs = -PlaybackControl.MAX_MEDIA_MILLIS - 1).preparedPayloadIsValid)
         assertFalse(
             prepare(mediaOriginMs = PlaybackControl.MAX_MEDIA_MILLIS + 1).preparedPayloadIsValid,
         )
@@ -911,7 +912,7 @@ class CommittedMediaOriginTest {
             ActionAcknowledgement(
                 ACTION_ID,
                 AcknowledgementState.COMMITTED,
-                committedMediaOriginMs = -1,
+                committedMediaOriginMs = -PlaybackControl.MAX_MEDIA_MILLIS - 1,
                 firstFrameUnixMs = 1,
             ).isValid,
         )

@@ -14,7 +14,7 @@ function pbTotalSec(){ const v=document.getElementById("video");
   // none: pbTick draws an indeterminate bar and seekTo refuses fraction seeks.
   if(PLAYER&&PLAYER.method&&PLAYER.method!=='direct_play') return 0;
   return (v&&isFinite(v.duration)&&v.duration>0)?((PLAYER&&PLAYER.offset)||0)+v.duration:0; }
-function pbPosSec(){ const v=document.getElementById("video"); if(PLAYER?.mediaAttachment?.nativePositionPending)return ((PLAYER.bookOffset||0)/1000)+(PLAYER.controlPositionHintSec||0); return ((PLAYER&&PLAYER.bookOffset)||0)/1000+((PLAYER&&PLAYER.offset)||0)+((v&&v.currentTime)||0); }
+function pbPosSec(){ const v=document.getElementById("video"); if(PLAYER?.mediaAttachment?.nativePositionPending)return ((PLAYER.bookOffset||0)/1000)+(PLAYER.controlPositionHintSec||0); return Math.max(0,((PLAYER&&PLAYER.bookOffset)||0)/1000+((PLAYER&&PLAYER.offset)||0)+((v&&v.currentTime)||0)); }
 // A stream-changing command issued while a seek is still landing belongs at
 // the seek destination, not at the predecessor element's last observed clock.
 // The committed target is the playback intent; currentTime is only evidence

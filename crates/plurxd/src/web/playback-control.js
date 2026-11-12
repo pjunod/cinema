@@ -124,7 +124,7 @@
       && typeof action.action_id === "string" && ACTION_ID_RE.test(action.action_id)
       && typeof action.session_id === "string" && action.session_id !== ""
       && preparedPlaylistUrl(action.session_id, action.playlist_url) !== null
-      && boundedInteger(action.media_origin_ms, 0, MAX_MEDIA_MS)
+      && boundedInteger(action.media_origin_ms, -MAX_MEDIA_MS, MAX_MEDIA_MS)
       && (action.control == null || (validBootstrap(action.control)
         && action.control.url === `/api/v1/hls/${action.session_id}/control`))
       && validEffectiveSelection(action.effective_selection);
@@ -155,7 +155,7 @@
       && (value.first_frame_unix_ms == null
         || (Number.isSafeInteger(value.first_frame_unix_ms) && value.first_frame_unix_ms > 0))
       && (value.committed_media_origin_ms == null
-        || boundedInteger(value.committed_media_origin_ms, 0, MAX_MEDIA_MS))
+        || boundedInteger(value.committed_media_origin_ms, -MAX_MEDIA_MS, MAX_MEDIA_MS))
       && (value.state !== "buffer_ready" || value.buffered_through_ms != null)
       && (value.state !== "committed" || value.first_frame_unix_ms != null)
       && (value.state !== "committed" || value.committed_media_origin_ms != null)

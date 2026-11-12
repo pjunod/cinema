@@ -186,6 +186,7 @@ impl Drop for SourcePauseBinding {
 pub(crate) struct SourceReadBudget {
     store: Arc<dyn Store>,
     owner: BackgroundSourceOwner,
+    analysis_phase: Option<plurx_core::store::analysis_coordination::AnalysisPhysicalPhase>,
     grant: tokio::sync::Mutex<Option<BackgroundSourceServiceGrant>>,
     cancel: CancellationToken,
     runtime: tokio::runtime::Handle,
@@ -201,9 +202,28 @@ impl SourceReadBudget {
         owner: BackgroundSourceOwner,
         cancel: CancellationToken,
     ) -> Arc<Self> {
+        Self::new_scoped(store, owner, cancel, None)
+    }
+    /// The supervisor cancels this phase budget after its children join and
+    /// before settling its exact receipt. The next physical phase gets a new
+    /// budget, UUID and sequence; owner-only construction cannot obtain service.
+    pub(crate) fn from_analysis_phase(
+        store: Arc<dyn Store>,
+        phase: plurx_core::store::analysis_coordination::AnalysisPhysicalPhase,
+        cancel: CancellationToken,
+    ) -> Arc<Self> {
+        Self::new_scoped(store, phase.custody.owner.clone(), cancel, Some(phase))
+    }
+    fn new_scoped(
+        store: Arc<dyn Store>,
+        owner: BackgroundSourceOwner,
+        cancel: CancellationToken,
+        analysis_phase: Option<plurx_core::store::analysis_coordination::AnalysisPhysicalPhase>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store,
             owner,
+            analysis_phase,
             grant: tokio::sync::Mutex::new(None),
             cancel,
             runtime: tokio::runtime::Handle::current(),
@@ -299,6 +319,13 @@ impl SourceReadBudget {
     }
     #[cfg(target_os = "linux")]
     pub(crate) async fn source_may_continue(&self) -> Result<bool, String> {
+        if let Some(phase) = &self.analysis_phase {
+            return self
+                .store
+                .analysis_source_phase_current(phase, crate::state::clock_ms())
+                .await
+                .map_err(|error| format!("source phase observation: {error}"));
+        }
         self.store
             .background_source_may_continue(self.owner.clone(), crate::state::clock_ms())
             .await
@@ -397,6 +424,24 @@ impl SourceReadBudget {
         }
     }
 
+    async fn claim_service(
+        &self,
+        now_ms: i64,
+    ) -> Result<Option<BackgroundSourceServiceGrant>, plurx_core::error::StoreError> {
+        match &self.analysis_phase {
+            Some(phase) => {
+                self.store
+                    .claim_analysis_source_phase_service(phase, now_ms)
+                    .await
+            }
+            None => {
+                self.store
+                    .claim_background_source_service(self.owner.clone(), now_ms)
+                    .await
+            }
+        }
+    }
+
     pub(crate) fn cancellation(&self) -> CancellationToken {
         self.cancel.clone()
     }
@@ -448,7 +493,7 @@ impl SourceReadBudget {
                 *cached = tokio::select! {
                     ()=cancel.cancelled()=>return Err("source read cancelled".into()),
                     ()=self.cancel.cancelled()=>return Err("source owner cancelled".into()),
-                    granted=self.store.claim_background_source_service(self.owner.clone(),now)=>granted.map_err(|error|format!("source byte grant: {error}"))?,
+                    granted=self.claim_service(now)=>granted.map_err(|error|format!("source byte grant: {error}"))?,
                 };
                 if let Some(grant) = cached.as_ref() {
                     if let Some(count) = reserve(grant, max, crate::state::clock_ms())? {

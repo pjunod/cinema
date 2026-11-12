@@ -1,7 +1,7 @@
 # Playback start — continuation and merge ledger
 
-**Status:** open · **Owner:** Codex, session
-`01a1c166-b5b2-7033-bd74-77816ba09733` · **Updated:** 2026-11-09.
+**Status:** open · **Owner:** Claude (claude-opus-5-5), session
+`session_01BCWL9ypnQEiQUyRaZtMhh3`, resumed from Codex on 2026-11-11 · **Updated:** 2026-11-11.
 
 Companion to the [implementation plan](PLAYBACK-START-PLAN.md) and
 [Phase 1 build contract](PLAYBACK-START-BUILD.md). Phase 1 merged in
@@ -40,33 +40,115 @@ and native prepared-switch/TTFF measurements remain open.
 
 ## Current batch — A1/B1
 
-Codex owns `codex/playback-start-phase2`; no pull request is open yet.
-GPT 6.1 Sol extracted the canonical video-only fragment row observation
-for reuse by the growing engine; integration and identity design are in
-progress. No growing-engine behavior or qualification is claimed yet.
-Server/web development and web testing proceed independently of mobile
-publication. The deployed Phase 1 web build can be tested now.
+Claude owns `effort/playback-start-phase2` (resumed from Codex 2026-11-11; the
+handed-over staged and unstaged layers are preserved verbatim as two
+checkpoint commits). Current main is merged in. The
+[A1/B1 implementation contract](PLAYBACK-START-A1-B1-BUILD.md) remains the
+design authority.
 
-The queue stall is traced to an identifier-contract mismatch. Analysis
-requests accept opaque identifiers, including 64-character generation
-digests. Both stores retain the normal 64-byte creation limit and the
-legacy repair path's 128-byte limit. Shared validators now preserve both
-limits while custody accepts every admitted identity. The old
-`background_owner_key` incorrectly required a UUID for analysis custody.
-Registration rejects a legitimate request before creating custody;
-`settle_unstarted_analysis_source` retries the deterministic rejection while
-the independent heartbeat retains its lease and maintenance source-I/O
-reservation. The measured request is `fragment_index`; its ID matches the captured
-registration rejection and its stored requested generation. The earlier
-subtitle-source classification was unsupported and is corrected. The old
-attempt later expired around a container restart and is queued again with
-no owner; this is not deployment or acceptance of the repair. The final repair matches custody
-validation to every admission path and exercises registration/settlement
-with real generated and opaque legacy IDs;
-retain the exact owner/fence checks and ambiguous-write recovery protocol.
-The fix is being qualified in PR #1478; fleet acceptance remains open.
-The learner currently has a separate active `transcode_prepare` custody
-owner, which must be preserved.
+Built on the branch, compiled and lint-clean (plurx-core lib, plurxd bin,
+clippy `-D warnings`, rustc 1.97.1):
+
+- Source growing engine for authenticated bounded shared playback, canonical
+  range observations, normalization and the companion verifier (Codex).
+- Copy-range consumer: the Analysis dispatcher coalesces committed ranges per
+  exact source; a fully covered title is claimed under the existing Analysis
+  lease and heartbeat, attested in one fenced full-source phase, sealed,
+  installed as a content-addressed v3 blob and published through a claimed
+  `fragment_index_publish` job.
+- v3 publication: one guarded transaction and trigger adopts a pending or
+  quarantined head at the next epoch (a healthy same-contract head keeps its
+  first variant), records only the publisher's verified location, readies the
+  Analysis and settles job and waiters, and rolls back on a pointer mismatch.
+  Real-SQLite regressions in `copy_index_v3_tests.rs`.
+
+Not yet built, planned [below](#after-the-first-a1b1-merge--remaining-build-order): background
+gap filling through the common engine (an index publishes today only when
+playback itself covered the whole title), a v3 consumer and peer hydration,
+discrepancy quarantine, and local-playback observations. A sealed observation index must not be bridged into the legacy
+local index store: its head-census promotion lacks the whole-title HDR10
+metadata the legacy key promises. Daemon test compilation exceeds the 8 GiB
+voter cap, so it runs on the nonvoter effort compile gate. No unit suite has
+run for this batch; the fast lane runs once after the final review.
+
+## After the first A1/B1 merge — remaining build order
+
+The first merge publishes a v3 index only when playback itself observed the
+whole title. These items remain, in build order; each extends an existing
+owner and adds no gate, timer or watchdog.
+
+### 1. Common spawn adapter
+
+`copyrange::spawn_source_generation` and `run_source_census` take
+`SourceRenditionOwners`, a `SourceGenerationDispatch` and a
+`SourceGenerationAuthority`. Give both a typed owner instead:
+
+- `Source { owners, dispatch, authority }`: today's arguments, unchanged.
+- `Analysis { phase }`: an exact `AnalysisPhysicalPhase` whose custody is
+  already active, with `SourceInput::open_background_held` reading under
+  `SourceReadBudget::from_analysis_phase`. No admission permit, no Source
+  grant and no media-serving authority.
+
+The ffmpeg recipe, `ObservedCopyMux`, normalizer and companion verifier stay
+the same code on both paths. AV output is discarded only after the companion
+verifies it. Every pipe task and the reap join before the phase finishes.
+
+### 2. Background gap filling
+
+When a pending source set (`copy_analysis::work::PendingSources`) is
+incomplete and `begin_analysis_source_phase` admits it (its capacity clause
+is the idle test), run one Analysis-owned generation through the adapter:
+
+- From title start when `begin` is missing; otherwise from the first gap.
+- Feed its rows into the same `CopyObservationSet`, so overlap equality with
+  playback rows is checked, not assumed.
+- Stop at the next observed row or EOF. Foreground pressure pauses the budget
+  through the existing pause controller.
+- A seeked start uses the verified seek-bootstrap landing, never a long
+  sequential fallback.
+
+The full-source attestation phase reads every byte. Fold the whole-title
+HDR10 maximum scan into that same read (item 3).
+
+### 3. Whole-title HDR10 metadata in the attestation read
+
+A sealed observation index carries the bounded head census's promotion. The
+legacy local index promises `indexed_hdr10_metadata` with the scanned
+`hdr10_sei` (`fragindex.rs`, the `--plurx-hdr10-index` argv revision).
+Compute the same maximum over the attestation phase's bytes, record it with
+the receipt, and seal it into the promotion. Until then, never bridge a v3
+index into `put_fragment_index`: HDR10 titles would get different init
+metadata than the legacy key claims.
+
+### 4. v3 consumer and peer hydration
+
+- VOD planning reads `copy_index_v3_head` for the exact source key.
+- A healthy head's blob is read from `copy_index_v3_locations`, or hydrated
+  from a listed holder and verified by digest before use.
+- The hydrating node records its own verified location.
+- Decode with `decode_cluster_fragment_index_blob_v3` against the head's
+  source and output identity.
+
+### 5. Discrepancy quarantine
+
+A consumer that finds a healthy head's bytes contradict a fresh observation
+calls `quarantine_copy_index_v3_head`. The deterministic successor
+generation re-enters items 1–2. The old pointer stays readable until the
+successor publishes.
+
+### 6. Local playback observations
+
+Local rolling copy and indexed-VOD copy become the same growing engine.
+`CopyObservationAuthority` gains a typed local demand variant that never
+reuses a Source grant.
+
+### Acceptance for the next merge
+
+- A partially played shared title publishes after background filling, with
+  no playback interruption on any node.
+- An HDR10 and a DV title's v3 index serves the same init as their legacy
+  index.
+- A second node plays the title through hydration.
 
 ## Native admission — A1-N, PR #1476
 
@@ -146,3 +228,4 @@ follow-ups in the history below remain open.
 | 2026-11-09 | continuation | Codex / 01a1c166-b5b2-7033-bd74-77816ba09733 | Phase 1 merge ledger reconciled against main `8ab61a779`. Media1 reports that build; queue still degraded (3,840 eligible, 0 ready in 24 h), so merged implementation is not fleet acceptance. Signing publisher is offline; its last attempted export reported no account and no distribution identity/private key. |
 | 2026-11-09 | S4, S12 | Codex; GPT 6.1 Sol for S12 | Root-cause follow-ups from [shared-library RCA](SHARED-LIBRARY-PLAYBACK-RCA.md): index muxer timestamp correction and route-eligible Source locate directory implemented; review and validation pending. No feature gates. |
 | 2026-11-09 | process | Paul; executed by Codex | Current direction supersedes the original per-lane/design review schedule: batch normal commits into a reviewable PR, adversarial review when ready to merge, fix findings, then one final-candidate validation run with only failed checks repeated. Keep all task storage on the external agent drive. |
+| 2026-11-11 | A1/B1 | claude-opus-5-5 / session_01BCWL9ypnQEiQUyRaZtMhh3 | Resumed from Codex; layers checkpointed, main merged, compile/clippy clean; copy-range consumer and v3 publication trigger built with real-store regressions. |

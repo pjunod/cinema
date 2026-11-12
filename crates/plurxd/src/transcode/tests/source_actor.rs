@@ -672,7 +672,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     };
     if mode != 49 {
         prepared
-            .bind_source_invocation(&binding)
+            .bind_source_invocation(&binding, crate::http::hls::SourceCopyPresentation::FullVod)
             .expect("bind actual fresh fixture invocation before factory admission");
     }
     let assignment = store
@@ -762,7 +762,10 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
             panic!("second claim");
         };
         second_prepared
-            .bind_source_invocation(&second_binding)
+            .bind_source_invocation(
+                &second_binding,
+                crate::http::hls::SourceCopyPresentation::FullVod,
+            )
             .expect("bind actual second invocation");
         let second_assignment = store
             .assign_source_dispatch(&second_binding, &master, &fresh_members)
