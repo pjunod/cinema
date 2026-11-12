@@ -217,7 +217,24 @@ def storage_devices(census_devices, extra_roots):
                 major, minor = map(int, row["dev"].split(":"))
                 devices.add(os.makedev(major, minor))
     for root in extra_roots:
+        root = os.path.realpath(root)
         devices.add(os.stat(root).st_dev)
+        # Every mount beneath a local library root, in any mount namespace.
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                rows = mountinfo(entry)
+            except OSError:
+                continue
+            for row in rows:
+                if row["point"] == root or row["point"].startswith(root.rstrip("/") + "/"):
+                    major, minor = map(int, row["dev"].split(":"))
+                    devices.add(os.makedev(major, minor))
+                    require(row["fstype"] != "btrfs",
+                            "btrfs subvolumes carry their own device numbers; not supported")
+        require(owning_mount(Path(root))["fstype"] != "btrfs",
+                "btrfs subvolumes carry their own device numbers; not supported")
     return devices, unreadable
 
 

@@ -161,7 +161,7 @@ impl Dead {
                 process_started_ms,
                 now_ms: self.lease + 5_000,
                 namespace_init,
-                storage_devices: namespace_init.map(|_| vec![STORAGE]),
+                storage_devices: namespace_init.map(|_| vec![STORAGE, self.source.dev()]),
             },
             proof,
         )
@@ -385,6 +385,25 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
     }
     refused(
         dead.apply_in(&narrow, started, Some(NAMESPACE)).await,
+        "census job unavailable",
+    );
+    // A census of a file outside every storage this daemon serves refuses.
+    refused(
+        apply(
+            &dead.store,
+            &dead.witnesses,
+            &dead.legacy,
+            &dead.job().node_id,
+            &Context {
+                kernel: KERNEL,
+                process_started_ms: started,
+                now_ms: dead.lease + 5_000,
+                namespace_init: Some(NAMESPACE),
+                storage_devices: Some(vec![STORAGE]),
+            },
+            &with(NAMESPACE, true, 0, 0),
+        )
+        .await,
         "census job unavailable",
     );
     // A census older than this daemon observed some other daemon.

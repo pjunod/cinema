@@ -203,6 +203,11 @@ impl Proof {
                             .iter()
                             .chain(pass.superblocks.iter().map(|sb| &sb.device))
                             .all(|device| teardown.storage_devices.contains(device))
+                        // The census file lives on storage this daemon serves.
+                        && pass
+                            .superblocks
+                            .iter()
+                            .any(|sb| storage.contains(&sb.device))
                 })
         })
     }
@@ -363,22 +368,13 @@ pub(super) async fn replay(
     let kernel = reader::kernel_instance().ok_or("source census kernel identity unavailable")?;
     // Library roots on local disk must also have been scanned; an unreadable
     // root leaves the teardown path unavailable rather than narrower.
-    let storage = match (storage_devices(), store.list_libraries().await) {
-        (Some(mut devices), Ok(libraries)) => libraries
+    let storage = store.list_libraries().await.ok().and_then(|libraries| {
+        let roots: Vec<_> = libraries
             .iter()
-            .flat_map(|library| &library.paths)
-            .try_for_each(|root| {
-                use std::os::unix::fs::MetadataExt;
-                devices.push(std::fs::metadata(root).ok()?.dev());
-                Some(())
-            })
-            .map(|()| {
-                devices.sort_unstable();
-                devices.dedup();
-                devices
-            }),
-        _ => None,
-    };
+            .flat_map(|library| library.paths.iter().cloned())
+            .collect();
+        storage_devices(&roots)
+    });
     let started = crate::source_custody::process_started_ms()
         .or_else(process_started_ms)
         .ok_or("daemon process start time unavailable")?;
@@ -419,20 +415,81 @@ pub(super) struct Context<'a> {
     pub(super) storage_devices: Option<Vec<u64>>,
 }
 
-/// The superblocks of every network or FUSE filesystem in this process's
-/// mount namespace, from `/proc/self/mountinfo`.
-fn storage_devices() -> Option<Vec<u64>> {
-    const NETWORK: [&str; 7] = ["nfs", "nfs4", "cifs", "smb3", "9p", "ceph", "glusterfs"];
+/// `(mount point, device, fstype)` for every mount in this process's mount
+/// namespace, from `/proc/self/mountinfo`.
+fn mounts() -> Option<Vec<(std::path::PathBuf, u64, String)>> {
     let table = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    let mut devices = Vec::new();
-    for line in table.lines() {
-        let (left, right) = line.split_once(" - ")?;
-        let device = left.split_whitespace().nth(2)?;
-        let fstype = right.split_whitespace().next()?;
-        if NETWORK.contains(&fstype) || fstype.starts_with("fuse") {
-            let (major, minor) = device.split_once(':')?;
-            devices.push(libc::makedev(major.parse().ok()?, minor.parse().ok()?));
+    let unescape = |raw: &str| {
+        use std::os::unix::ffi::OsStringExt;
+        // mountinfo escapes space, tab, newline and backslash as \ooo.
+        let bytes = raw.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            let octal = (bytes[at] == b'\\' && at + 4 <= bytes.len())
+                .then(|| std::str::from_utf8(&bytes[at + 1..at + 4]).ok())
+                .flatten()
+                .and_then(|digits| u8::from_str_radix(digits, 8).ok());
+            match octal {
+                Some(value) => {
+                    out.push(value);
+                    at += 4;
+                }
+                None => {
+                    out.push(bytes[at]);
+                    at += 1;
+                }
+            }
         }
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(out))
+    };
+    table
+        .lines()
+        .map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let mut fields = left.split_whitespace();
+            let device = fields.nth(2)?;
+            let point = fields.nth(1)?;
+            let (major, minor) = device.split_once(':')?;
+            Some((
+                unescape(point),
+                libc::makedev(major.parse().ok()?, minor.parse().ok()?),
+                right.split_whitespace().next()?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// Media storage this daemon reads: every network or FUSE superblock in its
+/// mount namespace, and for each library root, the superblock it is on and
+/// every mount beneath it. A root on btrfs (whose subvolumes carry their own
+/// device numbers) or one that cannot be read leaves this unavailable, so
+/// the teardown path refuses rather than scanning less than it serves.
+fn storage_devices(roots: &[std::path::PathBuf]) -> Option<Vec<u64>> {
+    const NETWORK: [&str; 7] = ["nfs", "nfs4", "cifs", "smb3", "9p", "ceph", "glusterfs"];
+    let table = mounts()?;
+    let mut devices: Vec<u64> = table
+        .iter()
+        .filter(|(_, _, fstype)| NETWORK.contains(&fstype.as_str()) || fstype.starts_with("fuse"))
+        .map(|(_, device, _)| *device)
+        .collect();
+    for root in roots {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::fs::canonicalize(root).ok()?;
+        devices.push(std::fs::metadata(&root).ok()?.dev());
+        let (_, _, fstype) = table
+            .iter()
+            .filter(|(point, _, _)| root.starts_with(point))
+            .max_by_key(|(point, _, _)| point.as_os_str().len())?;
+        if fstype == "btrfs" {
+            return None;
+        }
+        devices.extend(
+            table
+                .iter()
+                .filter(|(point, _, _)| point.starts_with(&root))
+                .map(|(_, device, _)| *device),
+        );
     }
     devices.sort_unstable();
     devices.dedup();
