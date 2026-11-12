@@ -807,3 +807,502 @@ async fn a_quarantined_variant_is_unreadable_and_gains_no_new_holder() {
         "an unreadable head's variant gains no holder"
     );
 }
+
+/// A queued coordination request for another generation of the fixture's
+/// source, established through the real coordinator and never claimed.
+async fn queued(store: &SqliteStore, generation: char, target: &str, created: i64) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    queued_as(store, &id, generation, target, created).await
+}
+
+/// [`queued`] under a chosen request id.
+async fn queued_as(
+    store: &SqliteStore,
+    id: &str,
+    generation: char,
+    target: &str,
+    created: i64,
+) -> String {
+    let mut source = source();
+    source.requested_generation = generation.to_string().repeat(64);
+    let request = store
+        .enqueue_analysis_request(&NewAnalysisRequest {
+            request_id: id.to_owned(),
+            file_id: 100,
+            source_size: 4096,
+            source_mtime: 77,
+            component: "fragment_index".into(),
+            pipeline_version: source.pipeline_marker(),
+            video_identity: source.video_marker(),
+            requested_generation: source.requested_generation.clone(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: target.into(),
+            not_before_ms: created,
+            created_at_ms: created,
+        })
+        .await
+        .expect("coordination request");
+    store
+        .establish_analysis_coordination(&request.request_id, source, created + 1)
+        .await
+        .expect("establish")
+        .expect("role");
+    request.request_id
+}
+
+/// Covers the SQLite backend of the stranded-coordinator retirement: only
+/// this node's queued coordination requests created before the boot mark are
+/// cancelled, with their own code, and the retired request's source and
+/// generation can be coordinated again (the enqueue exemption and the role
+/// release) by a request that inherits the retired one's attempts. A queued request whose role still names a physical custody is
+/// left alone by the statement; that case is not constructed here.
+#[tokio::test]
+async fn a_previous_processs_queued_coordinators_are_retired_and_stay_coordinable() {
+    let fixture = fixture(true).await;
+    let boot = NOW + 200;
+    let stranded = queued(&fixture.store, 'd', NODE, NOW + 100).await;
+    let this_process = queued(&fixture.store, 'e', NODE, NOW + 300).await;
+    let elsewhere = queued(&fixture.store, 'f', "other-node", NOW + 100).await;
+    sql(&fixture)
+        .execute(
+            "UPDATE analysis_requests SET attempts=2 WHERE request_id=?1",
+            [&stranded],
+        )
+        .expect("two charged attempts before the restart");
+    let retire = || async {
+        fixture
+            .store
+            .retire_stranded_analysis_coordination(NODE, boot, NOW + 400, &[])
+            .await
+            .expect("retire")
+    };
+    assert_eq!(retire().await, 1);
+    assert_eq!(retire().await, 0, "retiring is idempotent");
+    let db = sql(&fixture);
+    let row = |id: &str| {
+        db.query_row(
+            "SELECT state,COALESCE(last_error_code,''),cancel_requested FROM analysis_requests WHERE request_id=?1",
+            [id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .expect("request")
+    };
+    assert_eq!(
+        row(&stranded),
+        (
+            "cancelled".into(),
+            super::analysis_coordination::STRANDED_CODE.into(),
+            1
+        )
+    );
+    assert_eq!(
+        row(&this_process).0,
+        "queued",
+        "created after the boot mark"
+    );
+    assert_eq!(row(&elsewhere).0, "queued", "another node's work");
+    assert_eq!(
+        row(&fixture.claim.request_id).0,
+        "running",
+        "a claimed coordinator is never retired"
+    );
+    assert!(fixture
+        .store
+        .retire_stranded_analysis_coordination("bad node", boot, NOW, &[])
+        .await
+        .is_err());
+
+    // The same source and generation is coordinated afresh: a new request
+    // owns the role and is claimed.
+    let mut again = source();
+    again.requested_generation = "d".repeat(64);
+    let claim = coordinate(&fixture.store, &again, NOW + 500).await;
+    assert_ne!(claim.request_id, stranded);
+    let attempts: i64 = db
+        .query_row(
+            "SELECT attempts FROM analysis_requests WHERE request_id=?1",
+            [&claim.request_id],
+            |row| row.get(0),
+        )
+        .expect("replacement");
+    assert_eq!(
+        attempts, 3,
+        "the retired request's two attempts and this claim: the limit is not reset"
+    );
+
+    // A claim borrowed for one metadata write is ended the same way, with
+    // its own attempt taken back, and leaves its generation free again.
+    assert!(fixture
+        .store
+        .retire_analysis_coordination_claim(&claim, NOW + 600)
+        .await
+        .expect("end the claim"));
+    assert_eq!(
+        row(&claim.request_id),
+        (
+            "cancelled".into(),
+            super::analysis_coordination::STRANDED_CODE.into(),
+            1
+        )
+    );
+    let mut stale = claim.clone();
+    stale.fence += 5;
+    assert!(
+        !fixture
+            .store
+            .retire_analysis_coordination_claim(&stale, NOW + 601)
+            .await
+            .expect("another fence"),
+        "only the exact claim ends its request"
+    );
+    let next = coordinate(&fixture.store, &again, NOW + 700).await;
+    let attempts: i64 = db
+        .query_row(
+            "SELECT attempts FROM analysis_requests WHERE request_id=?1",
+            [&next.request_id],
+            |row| row.get(0),
+        )
+        .expect("next replacement");
+    assert_eq!(attempts, 3, "the borrowed claim charged nothing");
+}
+
+/// A head quarantined on a doubt (no holder, a contradicting observation)
+/// may publish the same bytes again: an identical reseal means the bytes
+/// were right. A sealed-init mismatch bans its blob, because a reseal
+/// repeats the seal's own promotion and disproves nothing about a served
+/// init; so does every other code. The recorded code is readable.
+#[tokio::test]
+async fn a_quarantine_on_a_doubt_lets_the_same_bytes_publish_again() {
+    for code in [
+        super::COPY_INDEX_V3_NO_HOLDER_CODE,
+        super::COPY_INDEX_V3_CONTRADICTION_CODE,
+    ] {
+        assert!(
+            matches!(
+                republish_after(code).await,
+                JobPublishOutcome::Published { .. }
+            ),
+            "{code} is a doubt"
+        );
+    }
+    assert!(
+        matches!(
+            republish_after(super::COPY_INDEX_V3_SEALED_INIT_CODE).await,
+            JobPublishOutcome::ArtifactConflict
+        ),
+        "a sealed-init mismatch bans the bytes it quarantined"
+    );
+}
+
+async fn republish_after(code: &str) -> JobPublishOutcome {
+    let mut fixture = fixture(true).await;
+    let lost = artifact('a', '1');
+    published(&fixture, &lost).await;
+    let key = super::copy_index_v3_source_key(NAMESPACE, &fixture.source).expect("key");
+    let epoch = fixture.head_epoch + 1;
+    fixture.source.requested_generation =
+        super::copy_index_v3_rebuild_generation(&key, &lost.blob_sha256, epoch).expect("successor");
+    fixture.claim = coordinate(&fixture.store, &fixture.source, NOW + 10).await;
+    assert!(fixture
+        .store
+        .quarantine_copy_index_v3_head(super::background_jobs::QuarantineCopyIndexV3Head {
+            catalog_namespace: NAMESPACE.into(),
+            source: fixture.source.clone(),
+            claim: fixture.claim.clone(),
+            expected_epoch: epoch,
+            bad_blob_sha256: lost.blob_sha256.clone(),
+            code: code.into(),
+            now_ms: NOW + 11,
+        })
+        .await
+        .expect("quarantine"));
+    fixture.head_epoch = epoch;
+    let token = publisher(&fixture, &lost).await;
+    let outcome = fixture
+        .store
+        .publish_copy_index_v3(publish(&fixture, &token, &lost, NOW + 12))
+        .await
+        .expect("re-publication");
+    assert_eq!(
+        fixture
+            .store
+            .copy_index_v3_quarantine_code(&key, epoch, &lost.blob_sha256)
+            .await
+            .expect("ledger")
+            .as_deref(),
+        Some(code)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .copy_index_v3_quarantine_code(&key, epoch + 1, &lost.blob_sha256)
+            .await
+            .expect("ledger"),
+        None,
+        "another epoch has its own record"
+    );
+    if matches!(outcome, JobPublishOutcome::Published { .. }) {
+        let head = fixture
+            .store
+            .copy_index_v3_head(&key)
+            .await
+            .expect("head")
+            .expect("head");
+        assert_eq!(head.state, CopyIndexV3HeadState::Healthy);
+        assert_eq!(head.head_epoch, epoch + 1);
+        assert_eq!(head.blob_sha256.as_deref(), Some(lost.blob_sha256.as_str()));
+        assert_eq!(
+            head.published_generation.as_deref(),
+            Some(fixture.source.requested_generation.as_str())
+        );
+    }
+    outcome
+}
+
+/// Eviction's store half: every holder row of one node for one blob goes,
+/// under every contract that names those bytes, and nobody else's.
+#[tokio::test]
+async fn forgetting_a_blob_holder_drops_that_nodes_rows_under_every_contract() {
+    let fixture = fixture(true).await;
+    let artifact = artifact('a', '1');
+    published(&fixture, &artifact).await;
+    let db = sql(&fixture);
+    let hold = |contract: &str, node: &str| {
+        db.execute(
+            "INSERT INTO copy_index_v3_locations(contract_key,blob_sha256,node_id,bytes,verified_at_ms,last_seen_at_ms) VALUES(?1,?2,?3,4096,?4,?4)",
+            rusqlite::params![contract, artifact.blob_sha256, node, NOW],
+        )
+        .expect("holder row");
+    };
+    hold(&artifact.contract_key, "node-two");
+    hold(&"9".repeat(64), NODE);
+    assert_eq!(
+        fixture
+            .store
+            .forget_copy_index_v3_blob_holder(&artifact.blob_sha256, NODE)
+            .await
+            .expect("forget"),
+        2
+    );
+    assert_eq!(
+        fixture
+            .store
+            .forget_copy_index_v3_blob_holder(&artifact.blob_sha256, NODE)
+            .await
+            .expect("forget again"),
+        0
+    );
+    let left: Vec<String> = db
+        .prepare("SELECT node_id FROM copy_index_v3_locations")
+        .expect("statement")
+        .query_map([], |row| row.get(0))
+        .expect("rows")
+        .collect::<Result<_, _>>()
+        .expect("holders");
+    assert_eq!(left, vec!["node-two".to_owned()]);
+    assert!(fixture
+        .store
+        .forget_copy_index_v3_blob_holder("not-a-digest", NODE)
+        .await
+        .is_err());
+}
+
+/// A node is the last holder of a readable head's bytes when it is listed
+/// and no other member is. A node the removal fence ejected is neither
+/// listed to consumers nor counted.
+#[tokio::test]
+async fn the_last_member_holding_a_readable_heads_bytes_is_known_and_removed_nodes_hold_nothing() {
+    let fixture = fixture(true).await;
+    let artifact = artifact('a', '1');
+    let last = |node: &'static str| {
+        let (store, blob) = (&fixture.store, artifact.blob_sha256.clone());
+        async move {
+            store
+                .copy_index_v3_last_blob_holder(&blob, node)
+                .await
+                .expect("last holder")
+        }
+    };
+    assert!(!last(NODE).await, "a pending head has no readable bytes");
+    published(&fixture, &artifact).await;
+    assert!(last(NODE).await, "the publisher alone");
+    assert!(
+        !last(HYDRATOR).await,
+        "an unlisted node holds nothing to keep"
+    );
+
+    let key = super::copy_index_v3_source_key(NAMESPACE, &fixture.source).expect("key");
+    assert!(fixture
+        .store
+        .put_copy_index_v3_location(&key, location(&artifact, HYDRATOR, NOW + 2))
+        .await
+        .expect("second holder"));
+    assert!(!last(NODE).await && !last(HYDRATOR).await);
+
+    let db = sql(&fixture);
+    db.execute(
+        "INSERT INTO settings(key,value) VALUES(?1,'1')",
+        [format!("internal.cluster_job_owner_removed.{HYDRATOR}")],
+    )
+    .expect("removal fence");
+    assert!(last(NODE).await, "the removed node no longer counts");
+    let listed = fixture
+        .store
+        .copy_index_v3_locations(&artifact.contract_key, &artifact.blob_sha256)
+        .await
+        .expect("holders");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|location| location.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![NODE],
+        "a removed node is not offered as a holder"
+    );
+}
+
+/// Covers the SQLite backend of durable demand: the coordination requests a
+/// previous process left under one id prefix are listed (queued for this
+/// node or running under it, not another node's, a later one or another
+/// id), the ones taken up are kept by the stranded retirement, and a
+/// dropped one is retired by id.
+#[tokio::test]
+async fn a_restarted_worker_lists_what_its_predecessor_left_and_keeps_what_it_takes_up() {
+    let fixture = fixture(true).await;
+    let boot = NOW + 200;
+    let asked = queued_as(
+        &fixture.store,
+        "local-play.u7.playback-1.ab12",
+        'd',
+        NODE,
+        NOW + 100,
+    )
+    .await;
+    queued(&fixture.store, 'e', NODE, NOW + 100).await;
+    queued_as(
+        &fixture.store,
+        "local-play.u7.playback-2.cd34",
+        'f',
+        "other-node",
+        NOW + 100,
+    )
+    .await;
+    queued_as(
+        &fixture.store,
+        "local-play.u7.playback-3.ef56",
+        '9',
+        NODE,
+        NOW + 300,
+    )
+    .await;
+    let listed = fixture
+        .store
+        .predecessor_analysis_coordination_with_prefix(NODE, boot, "local-play.")
+        .await
+        .expect("listing");
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].request_id, asked);
+    let mut expected = source();
+    expected.requested_generation = "d".repeat(64);
+    assert_eq!(listed[0].source, expected);
+
+    // A claim the dead predecessor held is listed too: nothing holds it.
+    let held = queued_as(
+        &fixture.store,
+        "local-play.u7.playback-9.aa00",
+        '8',
+        NODE,
+        NOW + 100,
+    )
+    .await;
+    let mut claimed = source();
+    claimed.requested_generation = "8".repeat(64);
+    fixture
+        .store
+        .claim_analysis_coordination(&held, claimed, NODE, 0, NOW + 150, NOW + 600_000)
+        .await
+        .expect("claim")
+        .expect("the predecessor's claim");
+    let mut both = fixture
+        .store
+        .predecessor_analysis_coordination_with_prefix(NODE, boot, "local-play.")
+        .await
+        .expect("listing")
+        .into_iter()
+        .map(|row| row.request_id)
+        .collect::<Vec<_>>();
+    both.sort();
+    let mut expected_ids = vec![asked.clone(), held.clone()];
+    expected_ids.sort();
+    assert_eq!(
+        both, expected_ids,
+        "queued for the node, or running under it"
+    );
+    let db = sql(&fixture);
+
+    // Taken up, it is kept by the stranded retirement; the rest go.
+    assert_eq!(
+        fixture
+            .store
+            .retire_stranded_analysis_coordination(
+                NODE,
+                boot,
+                NOW + 400,
+                std::slice::from_ref(&asked)
+            )
+            .await
+            .expect("retire"),
+        1,
+        "the other queued coordinator of this node"
+    );
+    let state: String = db
+        .query_row(
+            "SELECT state FROM analysis_requests WHERE request_id=?1",
+            [&asked],
+            |row| row.get(0),
+        )
+        .expect("kept request");
+    assert_eq!(state, "queued");
+
+    // Dropped by its worker, it is retired by id; only a queued one is.
+    assert!(fixture
+        .store
+        .retire_queued_analysis_coordination(&asked, NOW + 500)
+        .await
+        .expect("retire by id"));
+    assert!(!fixture
+        .store
+        .retire_queued_analysis_coordination(&asked, NOW + 501)
+        .await
+        .expect("retire by id again"));
+    fixture
+        .store
+        .retire_stranded_analysis_coordination(NODE, boot, NOW + 600, &[])
+        .await
+        .expect("retire");
+    let left = fixture
+        .store
+        .predecessor_analysis_coordination_with_prefix(NODE, boot, "local-play.")
+        .await
+        .expect("listing");
+    assert_eq!(
+        left.iter()
+            .map(|row| row.request_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![held.as_str()],
+        "the claimed one is never retired as queued"
+    );
+    assert!(fixture
+        .store
+        .predecessor_analysis_coordination_with_prefix(NODE, boot, "")
+        .await
+        .is_err());
+}

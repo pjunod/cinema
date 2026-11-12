@@ -418,6 +418,14 @@ other side.
    and RSS spreading with `ethtool -c` and `-l`. Acceptance: `missed` stops
    rising during playback, and no read-confirm timeouts over 24 h of normal
    load.
+   **Built 2026-11-12** in the private host baseline. Each physical uplink
+   port is raised to its pre-set maximum once, and a `.link` file persists it
+   (`RxBufferSize=max`, applied when the device appears, before link-up). The
+   audit then fails until every uplink reads its maximum. A read-only audit
+   that day found four of the six hosts at 256 of 4,096. The media1 port had
+   been set to 4,096 by hand and would have reverted on reboot. One node's NIC
+   tops out at 256 in hardware. Applying it is the owner's deploy step;
+   acceptance above still applies.
 2. **Make the next one attributable (code, small):** the vendored
    `raft_client` timeout path (`vendor/hiqlite/src/network/raft_client.rs:1399`)
    warns with the target, request kind, entry count and payload bytes. The
@@ -514,11 +522,11 @@ so every grid render refetches every poster across the tailnet.
 | §3 S1–S12 | A1 (design review with B1; then Opus build) | adds ~L to A1's XL | A1 design review |
 | §4 NULL principal (both sites) | standalone PR | S | — |
 | §6 membership from committed state | standalone PR | M | — |
-| §7 step 1, media1 RX ring | owner: host role in the deployment playbooks | ops | — |
-| §7 step 2, RPC attribution | standalone PR | S | — |
+| §7 step 1, media1 RX ring | built in the host baseline 2026-11-12; owner applies | ops | owner apply |
+| §7 step 2, RPC attribution | done: timeouts name node, kind, entries and bytes | S | — |
 | §8 locate filter and typed 429s | standalone PR (S12 reuses it) | S | — |
 | §9 shared art | standalone PR | S–M | — |
-| §5 lab3 custody | owner: helper, playbook bind, lab3 redeploy | ops | — |
+| §5 lab3 custody | resolved: `background_source_recovery_pending` 0 on every node, 2026-11-12 | ops | — |
 
 The standalone PRs touch disjoint files, so they can stack into one
 fast-lane run. The PLAYBACK-START-PLAN A1 row links §3.

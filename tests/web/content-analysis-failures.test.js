@@ -50,6 +50,7 @@ test("copied diagnostics expose retry and selected-video evidence without interp
      ${shippedFunction("analysisErrors")}
      ${shippedFunction("analysisAttemptHistory")}
      ${shippedFunction("analysisNodeDetail")}
+     ${shippedFunction("analysisLocalPlayback")}
      ${shippedFunction("analysisDiagnosticText")}
      return analysisDiagnosticText;`,
   )();

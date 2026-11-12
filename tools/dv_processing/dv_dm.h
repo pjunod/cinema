@@ -128,7 +128,7 @@ static inline void dv_dm_pack_cm29(dv_dm_frame *f, const dm_cm29_state *s) {
   dv_dm_put(f->u[3], s->tr.sg, f->weight, s->tg.floor_pq, s->tg.prim == DM_BT709);
   dv_dm_rows(f->u + 4, s->rgb2lms);
   dv_dm_rows(f->u + 7, s->lms2rgb);
-  dv_dm_put(f->u[10], s->grid_origin, s->native_black, s->native_span, 0);
+  dv_dm_put(f->u[10], s->grid_origin, s->native_black, s->native_span, s->xtop);
   dv_dm_put(f->u[19], s->decode_black, s->decode_span, 0, 0);
   dv_dm_rows(f->u + 11, s->to_t);
   dv_dm_rows(f->u + 14, s->from_t);
@@ -299,12 +299,14 @@ static inline bool dv_dm_cpu_render(const dv_dm_frame *f, const float *in, int w
   for (size_t i = 0; ok && i < n; i++) {
     double rgb[3] = {in[4 * i], in[4 * i + 1], in[4 * i + 2]};
     if (f->algo == 4) { double ic[3]; dm_rgbpq_to_ictcp(rgb, ic); a[i] = ic[0]; dm_cm4_pixel(&f->c4, rgb, o3 + 3 * i); b[i] = o3[3 * i]; }
-    else { dm_cm29_pixel_pre(&f->c29, rgb, &px[i]); a[i] = px[i].I; b[i] = px[i].Ib; c[i] = px[i].Io; }
+    else { dm_cm29_pixel_pre(&f->c29, rgb, &px[i]); a[i] = dm_cm29_detail_in(&f->c29, &px[i], 0); b[i] = px[i].Ib; c[i] = px[i].Io; }
   }
   if (ok && f->weight > -1) {
     ok = dm_detail(a, b, w, h, f->weight, e);
     if (ok) memcpy(b, e, n * sizeof(double));
-    if (ok && f->algo == 29 && f->c29.tr.cw != 0) { ok = dm_detail(a, c, w, h, f->weight, e); if (ok) memcpy(c, e, n * sizeof(double)); }
+    if (ok && f->algo == 29 && f->c29.tr.cw != 0) {
+      for (size_t i = 0; i < n; i++) a[i] = dm_cm29_detail_in(&f->c29, &px[i], 1);
+      ok = dm_detail(a, c, w, h, f->weight, e); if (ok) memcpy(c, e, n * sizeof(double)); }
     else if (ok && f->algo == 29) memcpy(c, b, n * sizeof(double));
   }
   for (size_t i = 0; ok && i < n; i++) {
@@ -424,6 +426,9 @@ enum { DV_DM_LATTICE_X = 66 };
   "vec3 ipt(vec3 rgb){ vec3 lms=max(mrow(u[4],u[5],u[6],pq_eotf3(rgb)),vec3(0.0)); return pq_oetf3(lms)*IPT_T; }\n" \
   "vec2 c29point(vec3 p, out float I){ I=p.x; float C=length(p.yz); float Ib=c29sop(c29curve(I));\n" \
   " float Io=u[17].y>0.5 ? c29sop(c29curve(I+0.5*u[2].w*C)) : Ib; return vec2(Ib,Io); }\n" \
+  "// Source intensity as the detail stage reads it (x: base plane, y: chroma-weighted plane): held where\n" \
+  "// that plane's tone-curve argument reaches the top clip (u[10].w), so clipped highlights gain no detail.\n" \
+  "vec2 c29din(vec3 p){ return min(vec2(p.x),vec2(u[10].w,u[10].w-0.5*u[2].w*length(p.yz))); }\n" \
   "vec3 c29vertex(vec3 q){\n" \
   " if(q.x<=u[10].x) return vec3(0.0);\n" \
   " vec3 lmsp=clamp(q*IPTI_T,0.0,1.0);\n" \
@@ -700,7 +705,7 @@ static const char dv_dm_body_point_cm4[] =   // pass 1: D (x: base/intensity)
   "vec3 ic=ictcp(rgb); vec3 o=c4point_ic(ic); color=vec4(ic.x-o.x,0.0,0.0,1.0);\n";
 static const char dv_dm_body_point_cm29[] =  // pass 1: D (x: base/intensity, y: chroma-weighted)
   "vec3 rgb=texelFetch(master,ivec2(gl_FragCoord.xy),0).rgb;\n"
-  "vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); color=vec4(I-b.x,I-b.y,0.0,1.0);\n";
+  "vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); vec2 d=c29din(p); color=vec4(d.x-b.x,d.y-b.y,0.0,1.0);\n";
 static const char dv_dm_body_lattice[] = // CM2.9 pass 0: the frame's output lattice
   "ivec2 q=ivec2(gl_FragCoord.xy); int X=int(DV_DM_LATTICE_X), R=int(u[18].z);\n"
   "vec3 idx=vec3(float(q.x%X),float(q.x/X-R),float(q.y-R));\n"
@@ -748,9 +753,9 @@ static const char dv_dm_body_final_cm29[] =  // pass 3: vertical, detail, finish
   "if(wgt>-1.0){ int h=textureSize(hpass,0).y;\n"
   " for(int j=-2;j<=2;j++){ int y=clamp(q.y-j,0,h-1); vec4 t=texelFetch(hpass,ivec2(q.x,y),0); float g=GY[j+2], dg=-float(j)*g;\n"
   "  B1+=g*t.x; dx1+=g*t.y; dy1+=dg*t.x; B2+=g*t.z; dx2+=g*t.w; dy2+=dg*t.z; } }\n"
-  " vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); float Ib=b.x, Io=b.y;\n"
-  " if(wgt>-1.0){ float r1=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); Ib=Ib+r1*((I-b.x)-B1);\n"
-  "  if(u[17].y>0.5){ float r2=clamp(1.0+wgt-4.0*(4.0*abs(dx2)+abs(dy2)),0.0,1.0); Io=Io+r2*((I-b.y)-B2); } else Io=Ib; }\n"
+  " vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); vec2 d=c29din(p); float Ib=b.x, Io=b.y;\n"
+  " if(wgt>-1.0){ float r1=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); Ib=Ib+r1*((d.x-b.x)-B1);\n"
+  "  if(u[17].y>0.5){ float r2=clamp(1.0+wgt-4.0*(4.0*abs(dx2)+abs(dy2)),0.0,1.0); Io=Io+r2*((d.y-b.y)-B2); } else Io=Ib; }\n"
   " vec3 res=c29finish(lpass,p,Ib,Io); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
   ;
 
@@ -761,13 +766,13 @@ static struct { pl_dispatch dispatch; pl_tex dtex, htex, ltex, out; } dv_dm_gpu;
 static const char dv_dm_body_final_active_cm29[] =  // pass 3: vertical, detail, finish
   "ivec2 q=ivec2(gl_FragCoord.xy); vec3 rgb=texelFetch(master,q,0).rgb; float wgt=u[18].y;\n"
   "ivec4 a=ivec4(u[20]);\n"
-  "vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); float Ib=b.x, Io=b.y;\n"
+  "vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); vec2 d=c29din(p); float Ib=b.x, Io=b.y;\n"
   "if(wgt>-1.0 && q.x>=a.x && q.y>=a.y && q.x<a.z && q.y<a.w){\n"
   " float B1=0.0,dx1=0.0,dy1=0.0,B2=0.0,dx2=0.0,dy2=0.0;\n"
   " for(int j=-2;j<=2;j++){ int y=clamp(q.y-j,a.y,a.w-1); vec4 t=texelFetch(hpass,ivec2(q.x,y),0); float g=GY[j+2], dg=-float(j)*g;\n"
   "  B1+=g*t.x; dx1+=g*t.y; dy1+=dg*t.x; B2+=g*t.z; dx2+=g*t.w; dy2+=dg*t.z; }\n"
-  " float r1=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); Ib=Ib+r1*((I-b.x)-B1);\n"
-  " if(u[17].y>0.5){ float r2=clamp(1.0+wgt-4.0*(4.0*abs(dx2)+abs(dy2)),0.0,1.0); Io=Io+r2*((I-b.y)-B2); } else Io=Ib; }\n"
+  " float r1=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); Ib=Ib+r1*((d.x-b.x)-B1);\n"
+  " if(u[17].y>0.5){ float r2=clamp(1.0+wgt-4.0*(4.0*abs(dx2)+abs(dy2)),0.0,1.0); Io=Io+r2*((d.y-b.y)-B2); } else Io=Ib; }\n"
   "vec3 res=c29finish(lpass,p,Ib,Io); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
   ;
 

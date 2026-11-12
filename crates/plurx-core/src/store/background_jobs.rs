@@ -2324,6 +2324,57 @@ pub trait BackgroundJobStore: Send + Sync {
         blob_sha256: &str,
         node_id: &str,
     ) -> Result<bool, StoreError>;
+    /// Drop every holder row of `node_id` for one blob after its local file
+    /// was evicted; returns how many rows went.
+    async fn forget_copy_index_v3_blob_holder(
+        &self,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<u64, StoreError>;
+    /// Retire the queued coordination requests targeted at `node_id` that a
+    /// previous process left behind (created before `created_before_ms`).
+    async fn retire_stranded_analysis_coordination(
+        &self,
+        node_id: &str,
+        created_before_ms: i64,
+        now_ms: i64,
+        keep: &[String],
+    ) -> Result<u64, StoreError>;
+    /// Retire one queued coordination request by id, as a stranded one.
+    async fn retire_queued_analysis_coordination(
+        &self,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    /// Whether `node_id` is the last listed holder of a readable head's
+    /// variant with these bytes.
+    async fn copy_index_v3_last_blob_holder(
+        &self,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<bool, StoreError>;
+    /// End a coordination claim borrowed only for a metadata write, as a
+    /// stranded coordinator: cancelled, uncharged, its generation left free.
+    async fn retire_analysis_coordination_claim(
+        &self,
+        claim: &super::analysis_coordination::AnalysisCoordinationClaim,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    /// The code a head was quarantined with at this exact epoch and blob.
+    async fn copy_index_v3_quarantine_code(
+        &self,
+        source_key: &str,
+        head_epoch: i64,
+        blob_sha256: &str,
+    ) -> Result<Option<String>, StoreError>;
+    /// The coordination requests a previous process of this node left under
+    /// ids beginning with `id_prefix`: queued for it, or running under it.
+    async fn predecessor_analysis_coordination_with_prefix(
+        &self,
+        node_id: &str,
+        created_before_ms: i64,
+        id_prefix: &str,
+    ) -> Result<Vec<super::analysis_coordination::AnalysisCoordination>, StoreError>;
     async fn ensure_copy_index_v3_head(
         &self,
         catalog_namespace: &str,
@@ -3132,6 +3183,72 @@ impl<T: QueueSql> BackgroundJobStore for T {
         node_id: &str,
     ) -> Result<bool, StoreError> {
         super::copy_index_v3::forget_location(self, contract_key, blob_sha256, node_id).await
+    }
+    async fn forget_copy_index_v3_blob_holder(
+        &self,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<u64, StoreError> {
+        super::copy_index_v3::forget_blob_holder(self, blob_sha256, node_id).await
+    }
+    async fn retire_stranded_analysis_coordination(
+        &self,
+        node_id: &str,
+        created_before_ms: i64,
+        now_ms: i64,
+        keep: &[String],
+    ) -> Result<u64, StoreError> {
+        super::analysis_coordination::retire_stranded(
+            self,
+            node_id,
+            created_before_ms,
+            now_ms,
+            keep,
+        )
+        .await
+    }
+    async fn retire_queued_analysis_coordination(
+        &self,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::analysis_coordination::retire_queued(self, request_id, now_ms).await
+    }
+    async fn copy_index_v3_last_blob_holder(
+        &self,
+        blob_sha256: &str,
+        node_id: &str,
+    ) -> Result<bool, StoreError> {
+        super::copy_index_v3::last_blob_holder(self, blob_sha256, node_id).await
+    }
+    async fn retire_analysis_coordination_claim(
+        &self,
+        claim: &super::analysis_coordination::AnalysisCoordinationClaim,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::analysis_coordination::retire_claim(self, claim, now_ms).await
+    }
+    async fn copy_index_v3_quarantine_code(
+        &self,
+        source_key: &str,
+        head_epoch: i64,
+        blob_sha256: &str,
+    ) -> Result<Option<String>, StoreError> {
+        super::copy_index_v3::quarantine_code(self, source_key, head_epoch, blob_sha256).await
+    }
+    async fn predecessor_analysis_coordination_with_prefix(
+        &self,
+        node_id: &str,
+        created_before_ms: i64,
+        id_prefix: &str,
+    ) -> Result<Vec<super::analysis_coordination::AnalysisCoordination>, StoreError> {
+        super::analysis_coordination::predecessor_with_prefix(
+            self,
+            node_id,
+            created_before_ms,
+            id_prefix,
+        )
+        .await
     }
     async fn ensure_copy_index_v3_head(
         &self,
