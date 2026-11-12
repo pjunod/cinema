@@ -25,6 +25,9 @@ struct LibraryView: View {
     @StateObject private var state = LibraryGridCoordinator()
     @State private var sort: LibrarySort = .title
     @State private var filter: WatchFilter = .all
+    /// Which titles to list: on disk (default), offloaded, or everything.
+    /// Remembered on this device.
+    @AppStorage("plurx.libraryPresence") private var presenceRaw = LibraryPresence.disk.rawValue
     @State private var query = ""
     @AppStorage("plurx.libraryPresentation") private var presentation = "rows"
     @State private var expandedGroup: String?
@@ -72,7 +75,8 @@ struct LibraryView: View {
         #endif
     }
 
-    private var loadKey: String { "\(collection.id):\(sort.rawValue)" }
+    private var presence: LibraryPresence { LibraryPresence(rawValue: presenceRaw) ?? .disk }
+    private var loadKey: String { "\(collection.id):\(sort.rawValue):\(presence.rawValue)" }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -358,7 +362,7 @@ struct LibraryView: View {
     }
 
     private var remoteScope: String { "library:" + collection.id }
-    private var remoteKeys: [String] { ["library:view", "library:sort", "library:filter", "library:jump", "library:search"] + (rows ? state.groups.flatMap { ["group:\($0.id)"] + $0.items.map { "item:\($0.id)" } } : visibleItems.map { "item:\($0.id)" }) }
+    private var remoteKeys: [String] { ["library:view", "library:sort", "library:filter", "library:files", "library:jump", "library:search"] + (rows ? state.groups.flatMap { ["group:\($0.id)"] + $0.items.map { "item:\($0.id)" } } : visibleItems.map { "item:\($0.id)" }) }
     private func updateRemoteOrder() {
         remoteNavigation.setOrder(scope: remoteScope, keys: remoteKeys, columns: rows ? 1 : gridColumns)
     }
@@ -372,11 +376,11 @@ struct LibraryView: View {
     /// TV toolbar. Each control names its current value.
     private var tvToolbar: some View {
         HStack(spacing: 16) {
-            ForEach(["view", "sort", "filter"], id: \.self) { menu in
+            ForEach(["view", "sort", "filter", "files"], id: \.self) { menu in
                 Button { openChoices(menu) } label: {
                     HStack(spacing: 10) {
                         Text(menu.capitalized)
-                        Text(menu == "view" ? presentation.capitalized : menu == "sort" ? sort.label : filter.label)
+                        Text(menu == "view" ? presentation.capitalized : menu == "sort" ? sort.label : menu == "files" ? presence.label : filter.label)
                             .foregroundStyle(Palette.muted).lineLimit(1)
                     }
                 }
@@ -430,6 +434,9 @@ struct LibraryView: View {
         case "sort": return sorts.map { option in
             RemoteChoice(id: option.rawValue, label: option.label, selected: sort == option) { sort = option }
         }
+        case "files": return LibraryPresence.allCases.map { option in
+            RemoteChoice(id: option.rawValue, label: option.label, selected: presence == option) { presenceRaw = option.rawValue }
+        }
         default: return WatchFilter.allCases.map { option in
             RemoteChoice(id: option.rawValue, label: option.label, selected: filter == option) { filter = option }
         }
@@ -445,6 +452,8 @@ struct LibraryView: View {
                 .remoteControl("library:sort", label: "Sort") { openChoices("sort") }
             Button("Filter") { openChoices("filter") }
                 .remoteControl("library:filter", label: "Filter") { openChoices("filter") }
+            Button("Files") { openChoices("files") }
+                .remoteControl("library:files", label: "Files") { openChoices("files") }
         }
     }
     #endif
@@ -453,9 +462,10 @@ struct LibraryView: View {
     private func load() async {
         let apiModel = model
         let selectedCollection = collection
+        let selectedPresence = presence
         state.configure(
-            fetch: { id, sort, offset in try await apiModel.libraryPage(id, sort: sort, offset: offset) },
-            legacy: { sort, publish in try await apiModel.libraryItems(selectedCollection, sort: sort, publish: publish) }
+            fetch: { id, sort, offset in try await apiModel.libraryPage(id, sort: sort, offset: offset, presence: selectedPresence) },
+            legacy: { sort, publish in try await apiModel.libraryItems(selectedCollection, sort: sort, presence: selectedPresence, publish: publish) }
         )
         await state.load(libraryIds: collection.libraries.map(\.id), sort: sort)
     }

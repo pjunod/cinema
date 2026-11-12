@@ -102,6 +102,17 @@ struct PosterCard: View {
 
                 cardBadges
 
+                if item.hasOffloadedLeaves {
+                    Text(item.isOffloaded ? "Offloaded" : "\(item.rollup?.offloaded ?? 0) offloaded")
+                        .font(.system(.caption2, design: .rounded).weight(.bold))
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Palette.surfaceHi))
+                        .foregroundColor(Palette.muted)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .accessibilityLabel("Offloaded")
+                }
+
                 let fraction = progressFraction(item.watch, runtimeMs: item.runtimeMs)
                 if fraction > 0, fraction < 0.98 {
                     GeometryReader { geometry in
@@ -118,6 +129,8 @@ struct PosterCard: View {
                 }
             }
             .aspectRatio(2 / 3, contentMode: .fit)
+            // Offloaded: the files are gone, the title stays — dimmed, not hidden.
+            .opacity(item.isOffloaded ? 0.5 : 1)
 
             Text(item.title)
                 #if os(tvOS)
