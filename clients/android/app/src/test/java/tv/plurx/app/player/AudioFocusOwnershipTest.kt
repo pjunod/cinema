@@ -18,6 +18,26 @@ class AudioFocusOwnershipTest {
         }
     }
 
+    @Test
+    fun onlyTheFinitePlayerTunnelsSoASuccessorNeverTakesTheIncumbentsAvSync() {
+        // Measured on the Google TV Streamer (2026-11-12): a parked tunneled
+        // successor's audio output made the MS12 HAL invalidate the
+        // incumbent's HW_AV_SYNC E-AC-3 stream; the incumbent stalled with
+        // 12.8 s buffered and the overlap bound abandoned the switch.
+        assertFalse(requestsTunneling(PlayerRole.Successor, television = true))
+        assertTrue(requestsTunneling(PlayerRole.Finite, television = true))
+        for (role in PlayerRole.entries) {
+            assertFalse(requestsTunneling(role, television = false), "$role on a phone")
+            if (role != PlayerRole.Finite) assertFalse(requestsTunneling(role, television = true), "$role on a television")
+        }
+        assertTrue(
+            source("PlurxPlayerBuilder.kt").contains(
+                ".setTunnelingEnabled(requestsTunneling(role, isTelevision(this@PlurxPlayerBuilder.context)))",
+            ),
+            "the builder asks requestsTunneling and nothing else",
+        )
+    }
+
     private fun source(name: String): String = listOf(
         File("app/src/main/java/tv/plurx/app/player/$name"),
         File("src/main/java/tv/plurx/app/player/$name"),

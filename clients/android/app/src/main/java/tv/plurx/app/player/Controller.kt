@@ -6541,19 +6541,15 @@ fun buildPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean = false):
  * the moment it commits, and it must be visibly a different construction so
  * that neither one can quietly acquire the other's properties.
  *
- * **Tunneling inherits the incumbent's setting**, which on a television means
- * the successor is tunneled too. That is deliberate and it is the *lossy*
- * choice: M5.5's only hard failure was same-codec dual prime on a tunneled
- * Google TV — two identical tunneled pipelines appear to contend where two
- * different codecs get distinct decoder instances — so this reproduces that
- * failure rather than dodging it. The alternative, building the successor with
- * tunneling forced off, would probably make that device pass, but the pipeline
- * that primed would not be the pipeline that serves after the switch, and a
- * measurement that cannot fail is the same class of error as M5.5's rejected
- * first instrument set. The failure path here is `failed` plus the fallback
- * ladder, which is a bounded cost; a successful prime that proves nothing is
- * not. Revisit with evidence if the tunneling-off re-run is ever taken
- * (`docs/playback-control/PLAYBACK-CONTROL-STATUS.md:1240-1243`).
+ * **The successor is never tunneled** ([requestsTunneling]). It used to
+ * inherit the incumbent's tunneling so that the primed pipeline would be the
+ * one that serves, with tunneling suspected but not measured as the cause of
+ * M5.5's Google TV dual-prime failure. The measurement is now in: on the Google
+ * TV Streamer the parked tunneled successor's audio output made the MS12 HAL
+ * invalidate the incumbent's HW_AV_SYNC stream, the incumbent stalled with
+ * runway in hand, and the overlap bound abandoned the switch. An untunneled
+ * successor is still the pipeline that serves after its commit, so the
+ * measurement stays honest.
  */
 @UnstableApi
 fun buildSuccessorPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean = false): BuiltPlayer {
