@@ -305,81 +305,133 @@ outside tests until steps 5 and 6. One behaviour change for shared
 playback, under P5 below.
 
 - **Owner surfaces:** `copyrange/storage.rs`, `copyrange/pipes.rs`,
-  `source_generation.rs`; one recipe derivation in `vod/generation.rs`
-  (`node_copy_video_pipeline`) used by `growing.rs` and both rendition
-  paths of `vod/serve/create.rs`. `copyrange/census.rs` needed no change:
-  it passes its owner through.
+  `source_generation.rs`, `copy_analysis.rs` (`LocalPlaybackOwner`); one
+  copy pipeline derivation in `vod/generation.rs`
+  (`node_copy_video_pipeline`) used by `growing.rs`, both rendition paths
+  of `vod/serve/create.rs` and the planning hint in `http/stream.rs`.
+  `copyrange/census.rs` needed no change: it passes its owner through.
 - **P1, range storage:** `CopyRangeFiles::create` takes a `CopyRangeOwner`:
   `Source(Box<SourceDispatchAssignment>)` or `Local { session, viewer:
-  LocalCopyAuthority }`. The payload directory and the manifest binding
+  LocalPlaybackOwner }`. The payload directory and the manifest binding
   come from the owner: `source-copy-ranges/<incarnation>/<range>` as
-  before, `local-copy-ranges/<session>/<range>` for local. A local owner
-  needs a session that is one plain directory name and a viewer that names
-  a user; anything else makes no range and no directory.
+  before, `local-copy-ranges/<session>/<range>` for local. The session
+  must be one plain directory name.
+  - **Who can own a range:** `LocalPlaybackOwner` has one constructor,
+    `of(&PlaybackViewerDemand)`, which refuses a Sharing principal and a
+    playback with no id. A `LocalCopyAuthority` read back from a durable
+    request, or the unattributed one, has no way to become an owner.
 - **P2, generation ownership:** `CopyGenerationOwner` gains `Local`: the
   session rendition's dispatch ledger (`SourceRenditionOwners`, with no
   Source assignment attached, as a local VOD rendition already uses it),
-  one dispatch, the viewer, and the worker claim of the session's
-  admission when it holds one. The generation runs in the slot it is
-  spawned with. The dispatch is held until the registration is recorded
-  and the permit goes to the slot with the child and the Input, released
-  only after the registered reap, as for Source. A dispatch of a
-  Source-assigned rendition, or a viewer that names no user, is refused
-  before any child.
+  one dispatch, the `LocalPlaybackOwner`, and the worker claim of the
+  session's admission when it holds one. The generation runs in the slot
+  it is spawned with. The permit goes to the slot with the child and the
+  Input and is released only after the registered reap, as for Source.
+  - **Never on a Source rendition:** a local generation is refused before
+    any child when a Source viewer is attached to the ledger, and again at
+    registration, where `SourceRenditionOwners::registered_local` decides
+    under the ledger lock. It does not trust what the dispatch saw when it
+    was captured: an assignment attached in between refuses the
+    registration, and the spawn retires and reaps the child it had just
+    attached before returning the refusal.
   - **Admission permit, as found:** a local copy rendition holds no
     admission permit today (`vod/generation.rs` asserts one only for
     encoded and `source-` renditions), so the owner carries an optional
     one. Whether a local range takes copy admission is step 5's to decide
     with its Input admission.
-- **P5, one derivation:** the growing Source range and a Source rendition
-  no longer answer "no" for the node's Dolby Vision strip filter; with a
-  local rendition they ask `node_copy_video_pipeline`, which asks
-  `has_dovi_rpu()` (measured once at boot, so no child starts on a start).
-  The Source rendition is included because it reads the copy index by the
-  same key the range publishes under: changing the range alone would have
-  left Source unable to find its own index.
-  - **What changes, and where:** only a Dolby Vision HEVC copy served
-    stripped (not preserved, not converted) on a node whose FFmpeg has
-    `dovi_rpu`, and only for shared playback. Its bitstream filter gains
-    `dovi_rpu=strip=1`, exactly what local playback of the same file runs
-    on that node, so its argv fingerprint changes and with it the v3
-    source key, the Source rendition key and the v1 index identity. On a
-    node without the filter, and for every other copy, nothing changes.
-  - **Cost on deploy, for those titles on those nodes:** a head a Source
-    range published under the old key is no longer found by Source and is
-    not deleted; the title's index is the one local playback or the
-    Analysis worker published, if any, and otherwise the next Source
-    range's observations rebuild it. Cached Source renditions of those
-    titles are keyed anew and not reused.
-  - **Not changed:** Source planning in `http/stream.rs` still derives its
-    `vod_indexed` hint without the filter. It reads only the node-local v1
-    index and decides nothing about the copy index or the rendition; for
-    the titles above it can under-report an index a local pass built.
+- **P5, one derivation:** `node_copy_video_pipeline` is the one place a
+  playback start's copy pipeline is derived. It takes the recipe, the
+  node's capability and the caller's kind of start, and reads the probe
+  itself.
+  - **Capability:** the transcode manager's injected `dv_strippable()`
+    (`state.system.dovi_rpu`, the boot measurement), which the manager
+    hands to its VOD server and hands again when it replaces that server.
+    No start asks FFmpeg, and shared playback no longer answers "no" for
+    the node.
+  - **Probe evidence:** always the one stored record, `files.probe_json`.
+    A local copy start records the file's HEVC parameter-set census first
+    when the revision has none. Shared playback and every planning read
+    take the record as it stands, with the census when one exists, and
+    never measure one: that would start a child the start does not own and
+    change the revision a grant was witnessed against. An encoded Source
+    rendition reads no probe, as before.
+  - **What is unified:** for one file, recipe, node and stored probe, the
+    growing Source range, a Source rendition, a local rendition and the
+    `vod_indexed` hint derive one argv fingerprint, one fragment-index
+    identity and one copy-index source key.
+  - **What is not:** a Source start of an HEVC file whose census nobody
+    has recorded derives without it. If a later local start records a
+    census that says the in-band parameter sets vary, that file's key
+    changes once, for both paths. Callers outside playback starts (the
+    Analysis worker's recovered demand, the index passes, the browse and
+    activity views) still pass `ffmpeg::has_dovi_rpu()`, the same boot
+    measurement read from its global.
+  - **What changes, and where:** a Dolby Vision HEVC copy served stripped
+    (not preserved, not converted) over a share, on a node whose FFmpeg
+    has `dovi_rpu`. Its bitstream filter gains `dovi_rpu=strip=1`, exactly
+    what local playback of the same file runs on that node, so its argv
+    fingerprint changes and with it the v3 source key, the Source
+    rendition key and the v1 index identity. Also: the Source range used
+    to treat a stored probe over 1 MiB as absent; it now reads it as every
+    other path does. On a node without the filter, and for every other
+    copy, nothing changes.
+  - **Cost on deploy, for those titles on those nodes:**
+    - A head a Source range published under the old key is no longer
+      found by Source and is not deleted. The title's index is the one
+      local playback or the Analysis worker published, if any; otherwise
+      the next Source range's observations rebuild it.
+    - Cached Source renditions of those titles are keyed anew and not
+      reused.
+    - A Source rendition may now find a v1 index a local pass built under
+      the with-filter identity, and serve indexed VOD where it took the
+      growing range before.
+    - A fleet whose nodes disagree on `dovi_rpu` (a rolling FFmpeg
+      upgrade) has two identities for a stripped Dolby Vision copy, one
+      per kind of node, so a node does not adopt the other kind's head for
+      such a title until the fleet agrees again. Local playback already
+      had this; shared playback now has it too.
 - **Manifests:** no binary reads a checkpoint manifest back (observations
   reach the Analysis worker in memory), so compatibility is held by
-  construction and pinned by a test. A Source owner's manifest is the
-  previous binary's, byte for byte: its three binding fields in place and
-  none added. A local manifest carries `owner: "local"`, the session and
-  the viewer, and no Source binding; a manifest without `owner` is a
+  construction and pinned by a golden file. A Source owner's manifest is
+  the previous binary's, byte for byte: its three binding fields in place
+  and none added. A local manifest carries `owner: "local"`, the session
+  and the viewer, and no Source binding; a manifest without `owner` is a
   Source owner's. Local manifests are written under
   `copy-ranges/local-observations/<range>`, beside the Source
   `copy-ranges/observations`, so a binary that knows only Source manifests
   never opens one.
+  - **The golden file** is `copyrange/source_manifest_4b125e6.json`: a
+    populated Source manifest as `4b125e6` writes it. It was derived by
+    hand from that commit's manifest declaration, not emitted by running
+    that binary, and a test holds it to that declaration's own writer.
 - **Acceptance:** Source playback and gap fill behave as before except as
   P5 says; a local owner can create, commit and retire a range in a test;
-  one source key per file and recipe on a node.
-- **Tests (written):** a Source manifest equal to the previous binary's
-  bytes and read in both directions, a local manifest and its directories,
-  a Source owner's directories, the refused local owners, and a local
-  owner's census and primary generation creating, committing and retiring
-  a range on the real engine (`copyrange/storage_tests.rs`); one source
-  key for a stripped Dolby Vision copy whoever plays it, with the Source
-  range and both rendition paths held to the one derivation
-  (`vod/tests/chunk_01.rs`); the producer-ownership inventory updated.
-- **Not covered by a test:** a Source owner's `create` and the refusal of
-  a Source-assigned dispatch, because a `SourceDispatchAssignment` is made
-  only by a Source session; the existing Source suites cover the first.
-  The engine test's Input is the loopback bridge, not a foreground Input.
+  one source key per file, recipe, node and stored probe.
+- **Tests (written):**
+  - `transcode/tests/source_actor.rs`: on a real Source session, the
+    Source rendition through its whole preparation, the local rendition
+    through its whole recipe preparation and the range's derivation give
+    one pipeline and one `copy_index_v3_source_key`, with the capability
+    injected true and false; the same run holds a Source range owner's
+    manifest to the golden file through its real binding and refuses a
+    local generation on a Source rendition. A second test gives a stripped
+    Dolby Vision file one key per capability across the three paths, two
+    keys across capabilities, and the same through a replaced VOD server.
+  - `copyrange/storage_tests.rs`: the golden file read strictly and
+    additively, a local manifest and its directories, the refused local
+    sessions, who can be a range owner, and a local owner's census and
+    primary generation creating, committing and retiring a range on the
+    real engine.
+  - `source_generation.rs`: a local registration only on its own
+    unassigned ledger, and refused once a Source viewer attaches after the
+    dispatch was captured.
+  - The producer-ownership inventory updated.
+- **Not covered by a test:** the growing Source range's whole preparation
+  (the test drives its derivation call, not `prepare_source_growing`); the
+  retire-and-reap of a local child refused at registration, which needs an
+  assignment attached between spawn and registration; a census recorded by
+  a local start changing a Source key. The engine test's Input is the
+  loopback bridge, not a foreground Input.
 
 ### Step 5 — Local input admission, liveness, control and reaping (P3, P6, P7, P8)
 
@@ -508,4 +560,4 @@ session id or URL. **Tests** says whether the step's tests have been run.
 |---|---|---|---|---|---|---|
 | 2026-11-12 | 1 Durable demand | claude-fable-5-2 | https://claude.ai/code/session_01BCWL9ypnQEiQUyRaZtMhh3 | `item6b` | Built, with its review fixes; clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
 | 2026-11-12 | 3 Copy index rides the content-analysis pass | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step3` (local, on `item6b`) | Built, with its review fixes (2 majors, 9 minors): the ride consumes the lead reader's parsed fragments in place, `ridden` is pass-only, custody is bound to file and object. Clippy `-D warnings` and fmt clean, inventory and pins green. Post-deploy UHD/DV qualification open | Written, not yet run: the fast lane is their one run |
-| 2026-11-12 | 4 A local owner at P1, P2 and P5 | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step4` (local, on `step3`) | Built: `CopyRangeOwner` and `CopyGenerationOwner::Local`, constructed only by tests; one copy pipeline derivation for the Source range, Source renditions and local renditions, which re-keys stripped Dolby Vision Source copies on nodes with the strip filter. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
+| 2026-11-12 | 4 A local owner at P1, P2 and P5 | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step4` (local, on `step3`) | Built, with its review fixes (2 majors, 8 minors): `CopyRangeOwner` and `CopyGenerationOwner::Local`, constructed only by tests and only from a live named playback; one copy pipeline derivation (capability and probe evidence) for the Source range, Source and local renditions and the planning hint, which re-keys stripped Dolby Vision Source copies on nodes with the strip filter. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
