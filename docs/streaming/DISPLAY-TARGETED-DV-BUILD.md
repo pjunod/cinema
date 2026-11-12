@@ -238,7 +238,10 @@ segments). This works with every encoder. The other options are ruled out:
   Some TVs gamut-compress a BT.2020 mastering declaration.
 - **Mastering luminance:** max = bucket; min = the title's mastering
   minimum.
-- **MaxCLL:** min(bucket, scanned title L1 max).
+- **MaxCLL:** min(bucket, scanned title L1 max), plus the largest step the
+  10-bit limited-range export can round one component up by (407 for a
+  400-nit bucket, 1015 for 1000), since 2026-11-12. The mapper clips every
+  component to the bucket; the declaration describes the decoded picture.
 - **MaxFALL:** 0 (unknown). A PQ average is not FALL, and inventing one is
   worse than declaring none.
 
@@ -484,7 +487,7 @@ a per-window target/master mix.
 | Core unit | bucket mapping, including elision; caps parsing of `max_nits`/`peak_source` | mapping is total, rounds down, refuses junk |
 | Core unit | `playback_enhancement` with `display_target` | DYN active only with a target, and the text names the nits |
 | Daemon unit | two buckets give two `semantic_digest`s (via `DvExportPolicy`); elision gives the master digest | rendition identity |
-| Daemon unit | MDCV/CLL writer: both SEI types and the `mdcv`/`clli` boxes carry the expected values (source primaries, MaxCLL = min(bucket, title max), MaxFALL 0) | metadata reaches both client paths |
+| Daemon unit | MDCV/CLL writer: both SEI types and the `mdcv`/`clli` boxes carry the expected values (source primaries, MaxCLL = min(bucket, title max) plus the export rounding step, MaxFALL 0) | metadata reaches both client paths |
 | Daemon unit | `prepare_processed_hdr10` declines are named (no peak, elided, L1 missing) | Paul's "every decline is named" |
 | Helper control | `test_dv_dm` (phase 2; replaced phase 1's `compare_display_target.py`): every bucket stays ≤ PQ(target) + 1 code with a monotonic grey axis. **Identical pixels with two different L1 sets must give different outputs.** Trims change the output at their target and vanish at the mastering peak; golden values pin the model | the mapping is driven by per-shot L1 and trims (a static curve fails) |
 | Helper control | `run_dm_parity.py`: GPU shader against the double-precision reference | the shader computes the equations |

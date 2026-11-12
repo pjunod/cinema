@@ -21,10 +21,10 @@ class DvBundleManifestTests(unittest.TestCase):
             (self.bundle / folder).mkdir(parents=True)
         for name in ("segment_decode_render", "mux_rgb", "author_p81", "scan_title"):
             (self.bundle / "bin" / name).write_bytes(b"packaging-only synthetic artifact")
-        (self.bundle / "lib/libplacebo.so.374").write_bytes(b"packaging-only library")
+        (self.bundle / "lib/libplacebo.so.387").write_bytes(b"packaging-only library")
         (self.bundle / "sources/libdovi.a").write_bytes(b"packaging-only parser")
         (self.bundle / "sources/abi.json").write_text(json.dumps(
-            {"libplacebo": 374, "avcodec": 63, "avformat": 63, "avutil": 61}))
+            {"libplacebo": 387, "avcodec": 63, "avformat": 63, "avutil": 61}))
         self.source = ROOT / "tools/dv_processing"
         with contextlib.redirect_stdout(io.StringIO()):
             PACKAGING["build"](self.source, self.bundle)
@@ -35,7 +35,7 @@ class DvBundleManifestTests(unittest.TestCase):
 
     def test_installed_renderer_and_library_hash_tampering_is_refused(self):
         self.verify()
-        for relative in ("bin/segment_decode_render", "bin/scan_title", "lib/libplacebo.so.374"):
+        for relative in ("bin/segment_decode_render", "bin/scan_title", "lib/libplacebo.so.387"):
             artifact = self.bundle / relative
             original = artifact.read_bytes()
             artifact.write_bytes(original + b"tampered")

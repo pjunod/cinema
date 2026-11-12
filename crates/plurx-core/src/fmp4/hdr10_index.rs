@@ -4,13 +4,65 @@ use super::*;
 /// Binds both local and shared indexes to the full-sample metadata scan.
 pub const HDR10_INDEX_METADATA_REVISION: u8 = 1;
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Hdr10IndexMetadata {
     mastering: Option<Vec<u8>>,
     light: Option<[u16; 2]>,
 }
 
+/// One title's content-light maximum. Zero means unspecified, not a measured
+/// zero, so a partly unknown film cannot claim a known maximum.
+fn combine_light(old: Option<[u16; 2]>, next: [u16; 2]) -> [u16; 2] {
+    match old {
+        None => next,
+        Some(old) => std::array::from_fn(|i| {
+            if old[i] == 0 || next[i] == 0 {
+                0
+            } else {
+                old[i].max(next[i])
+            }
+        }),
+    }
+}
+
 impl Hdr10IndexMetadata {
+    /// The facts a previously observed span recorded: the 24-byte mastering
+    /// display payload and the content-light maxima, each absent when that
+    /// span carried no such SEI.
+    pub fn from_parts(
+        mastering: Option<Vec<u8>>,
+        light: Option<[u16; 2]>,
+    ) -> Result<Self, Fmp4Error> {
+        if mastering
+            .as_ref()
+            .is_some_and(|payload| payload.len() != 24)
+        {
+            return malformed("mastering-display metadata is not 24 bytes");
+        }
+        Ok(Self { mastering, light })
+    }
+    pub fn mastering(&self) -> Option<&[u8]> {
+        self.mastering.as_deref()
+    }
+    pub fn light(&self) -> Option<[u16; 2]> {
+        self.light
+    }
+    /// Fold another span's facts into this title's. The result does not depend
+    /// on the order or on overlap, so separately observed spans of one title
+    /// reach the same answer as one sequential scan of every sample.
+    pub fn merge(&mut self, other: &Self) -> Result<(), Fmp4Error> {
+        if let Some(payload) = &other.mastering {
+            if self.mastering.as_ref().is_some_and(|v| v != payload) {
+                return malformed("mastering-display metadata changes within the title");
+            }
+            self.mastering = Some(payload.clone());
+        }
+        if let Some(next) = other.light {
+            self.light = Some(combine_light(self.light, next));
+        }
+        Ok(())
+    }
+
     /// Inspect every sample, including non-random-access pictures. Samples are
     /// never rewritten; their per-sequence SEIs remain authoritative in-band.
     pub fn observe_fragment(&mut self, fragment: &Fragment, init: &Init) -> Result<(), Fmp4Error> {
@@ -69,18 +121,7 @@ impl Hdr10IndexMetadata {
                         u16::from_be_bytes([bytes[0], bytes[1]]),
                         u16::from_be_bytes([bytes[2], bytes[3]]),
                     ];
-                    self.light = Some(match self.light {
-                        None => next,
-                        Some(old) => std::array::from_fn(|i| {
-                            // Zero means unspecified, not a measured zero. A
-                            // partly unknown film cannot claim a known maximum.
-                            if old[i] == 0 || next[i] == 0 {
-                                0
-                            } else {
-                                old[i].max(next[i])
-                            }
-                        }),
-                    });
+                    self.light = Some(combine_light(self.light, next));
                 }
                 _ => {}
             }
@@ -413,25 +454,67 @@ pub fn strip_sdr_hdr_fragment(fragment: &mut Fragment, init: &Init) -> Result<()
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hdr10OutputMetadata {
     mastering: [u8; 24],
-    light: [u16; 2],
+    light: Option<[u16; 2]>,
 }
 
 impl Hdr10OutputMetadata {
+    /// A display-targeted render: the mastering peak is the target in whole
+    /// nits. MaxCLL describes the decoded picture, which the 10-bit export may
+    /// leave a rounding step above that peak, so it is not capped by it.
     pub fn new(
         primaries_rgbw: [u16; 8],
         max_nits: u32,
         min_1e4_nits: u32,
         max_cll: u16,
     ) -> Result<Self, Fmp4Error> {
+        if max_nits == 0 || max_nits > 10_000 || max_cll > 10_000 {
+            return malformed("invalid processed HDR10 mastering or content-light values");
+        }
+        // L1 avg_pq is not frame-average light. Zero explicitly means unknown.
+        Self::declare(
+            primaries_rgbw,
+            max_nits * 10_000,
+            min_1e4_nits,
+            Some([max_cll, 0]),
+        )
+    }
+
+    /// A master-grade render re-declares the source's own static metadata:
+    /// mastering luminance in 1/10000 cd/m², and its content light levels when
+    /// it states them. An absent or zero MaxCLL stays absent; none is inferred.
+    pub fn from_source(
+        primaries_rgbw: [u16; 8],
+        max_1e4_nits: u32,
+        min_1e4_nits: u32,
+        light: Option<[u16; 2]>,
+    ) -> Result<Self, Fmp4Error> {
+        // PQ ends at 10000 cd/m²: a larger level is a malformed record, which
+        // is refused whole rather than clamped or dropped field by field.
+        if light.is_some_and(|light| light.iter().any(|level| *level > 10_000)) {
+            return malformed("invalid processed HDR10 mastering or content-light values");
+        }
+        Self::declare(
+            primaries_rgbw,
+            max_1e4_nits,
+            min_1e4_nits,
+            light.filter(|light| light[0] != 0),
+        )
+    }
+
+    fn declare(
+        primaries_rgbw: [u16; 8],
+        max_1e4_nits: u32,
+        min_1e4_nits: u32,
+        light: Option<[u16; 2]>,
+    ) -> Result<Self, Fmp4Error> {
         if primaries_rgbw.chunks_exact(2).any(|xy| {
             xy[0] > 50_000
                 || xy[1] == 0
                 || xy[1] > 50_000
                 || u32::from(xy[0]) + u32::from(xy[1]) > 50_000
-        }) || max_nits == 0
-            || max_nits > 10_000
-            || u64::from(min_1e4_nits) >= u64::from(max_nits) * 10_000
-            || u32::from(max_cll) > max_nits
+        }) || max_1e4_nits == 0
+            || max_1e4_nits > 100_000_000
+            || min_1e4_nits >= max_1e4_nits
         {
             return malformed("invalid processed HDR10 mastering or content-light values");
         }
@@ -440,19 +523,18 @@ impl Hdr10OutputMetadata {
         for index in [2, 3, 4, 5, 0, 1, 6, 7] {
             mastering.extend_from_slice(&primaries_rgbw[index].to_be_bytes());
         }
-        mastering.extend_from_slice(&(max_nits * 10_000).to_be_bytes());
+        mastering.extend_from_slice(&max_1e4_nits.to_be_bytes());
         mastering.extend_from_slice(&min_1e4_nits.to_be_bytes());
         Ok(Self {
             mastering: mastering.try_into().expect("fixed ST 2086 payload"),
-            // L1 avg_pq is not frame-average light. Zero explicitly means unknown.
-            light: [max_cll, 0],
+            light,
         })
     }
 
     fn metadata(self) -> Hdr10IndexMetadata {
         Hdr10IndexMetadata {
             mastering: Some(self.mastering.to_vec()),
-            light: Some(self.light),
+            light: self.light,
         }
     }
 
@@ -517,13 +599,10 @@ impl Hdr10OutputMetadata {
                 // Use the picture's layer and temporal ID, changing only NAL type.
                 let header = [(nal[0] & 0x81) | (39 << 1), nal[1]];
                 let metadata = self.metadata();
-                let messages = vec![
-                    (137, metadata.mastering.expect("processed mastering")),
-                    (
-                        144,
-                        self.light.into_iter().flat_map(u16::to_be_bytes).collect(),
-                    ),
-                ];
+                let mut messages = vec![(137, metadata.mastering.expect("processed mastering"))];
+                if let Some(light) = self.light {
+                    messages.push((144, light.into_iter().flat_map(u16::to_be_bytes).collect()));
+                }
                 append_framed_nal(&mut result, &encode_sei(&header, &messages), length_size)?;
             }
             if matches!(kind, Some(39 | 40)) {
@@ -594,6 +673,34 @@ fn resize_box(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn merging_spans_matches_one_scan_in_any_order_and_with_overlap() {
+        let mastering = vec![7u8; 24];
+        let a = Hdr10IndexMetadata::from_parts(Some(mastering.clone()), Some([1000, 400]))
+            .expect("span a");
+        let b = Hdr10IndexMetadata::from_parts(None, Some([800, 600])).expect("span b");
+        let unknown = Hdr10IndexMetadata::from_parts(None, Some([0, 500])).expect("span c");
+        let mut forward = Hdr10IndexMetadata::default();
+        for span in [&a, &b, &a] {
+            forward.merge(span).expect("forward");
+        }
+        let mut backward = Hdr10IndexMetadata::default();
+        for span in [&b, &a] {
+            backward.merge(span).expect("backward");
+        }
+        assert_eq!(forward, backward);
+        assert_eq!(forward.light(), Some([1000, 600]));
+        assert_eq!(forward.mastering(), Some(mastering.as_slice()));
+        forward.merge(&unknown).expect("unspecified light");
+        assert_eq!(forward.light(), Some([0, 600]));
+        let other = Hdr10IndexMetadata::from_parts(Some(vec![8u8; 24]), None).expect("other");
+        assert!(
+            forward.merge(&other).is_err(),
+            "a title has one mastering display"
+        );
+        assert!(Hdr10IndexMetadata::from_parts(Some(vec![0u8; 3]), None).is_err());
+    }
+
     use super::*;
 
     const P3: [u16; 8] = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
@@ -709,6 +816,72 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn source_declarations_author_mastering_without_inventing_content_light() {
+        use crate::transcode::dv_processing::dv_author_hdr10_window;
+        let source = crate::testfixtures::pipe("closed-gop");
+        let children = |bytes: &[u8]| {
+            let mut reader = FragmentReader::new();
+            reader.push(bytes);
+            let Some(Unit::Init(init)) = reader.next_unit().expect("init") else {
+                panic!("init");
+            };
+            let location = locate_hvcc(&init.bytes).expect("config").expect("HEVC");
+            let entry = location.ancestors[1];
+            let range = entry.start + entry.header_len + 78..location.sample_entry_end;
+            [b"mdcv", b"clli"].map(|kind| {
+                find_children(&init.bytes, range.clone(), kind)
+                    .expect("boxes")
+                    .into_iter()
+                    .map(|(at, header)| {
+                        init.bytes[at.start + header.header_len..at.start + header.size].to_vec()
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        // A 1000-nit P3 master with a 0.0001-nit floor and no stated MaxCLL.
+        let silent = Hdr10OutputMetadata::from_source(P3, 10_000_000, 1, Some([0, 120]))
+            .expect("mastering only");
+        assert_eq!(
+            silent,
+            Hdr10OutputMetadata::from_source(P3, 10_000_000, 1, None).expect("same declaration")
+        );
+        let output = dv_author_hdr10_window(&source, silent).expect("mastering authored");
+        let [mdcv, clli] = children(&output);
+        assert_eq!(mdcv, [silent.mastering.to_vec()]);
+        assert_eq!(&mdcv[0][16..], [0x00, 0x98, 0x96, 0x80, 0, 0, 0, 1]);
+        assert!(clli.is_empty(), "no content light level is invented");
+        let sample = {
+            let picture = vec![19 << 1, 1, 0x80];
+            let mut framed = Vec::new();
+            append_framed_nal(&mut framed, &picture, 4).expect("framed");
+            silent.write_sample(&framed, 4).expect("IRAP")
+        };
+        let messages: Vec<_> = length_prefixed_nals(&sample, 4)
+            .iter()
+            .filter(|nal| hevc_nal_type(nal) == Some(39))
+            .flat_map(|nal| sei_messages(nal).expect("SEI"))
+            .collect();
+        assert_eq!(messages, [(137, silent.mastering.to_vec())]);
+        // Stated levels are carried verbatim, including above the mastering peak.
+        let stated = Hdr10OutputMetadata::from_source(P3, 10_000_000, 1, Some([1187, 320]))
+            .expect("stated light");
+        let [_, clli] = children(&dv_author_hdr10_window(&source, stated).expect("authored"));
+        assert_eq!(clli, [vec![0x04, 0xa3, 0x01, 0x40]]);
+        for (max, min) in [(0, 0), (100_000_001, 1), (10_000, 10_000)] {
+            assert!(Hdr10OutputMetadata::from_source(P3, max, min, None).is_err());
+        }
+        for light in [[10_001, 0], [450, 10_001], [0, 10_001]] {
+            assert!(Hdr10OutputMetadata::from_source(P3, 10_000_000, 1, Some(light)).is_err());
+        }
+        assert!(
+            Hdr10OutputMetadata::from_source(P3, 10_000_000, 1, Some([10_000, 10_000])).is_ok()
+        );
+        // A targeted declaration may state a MaxCLL above its mastering peak.
+        assert!(Hdr10OutputMetadata::new(P3, 400, 1, 407).is_ok());
+        assert!(Hdr10OutputMetadata::new(P3, 400, 1, 10_001).is_err());
+    }
+
     #[test]
     fn processed_metadata_replaces_stale_sei_on_every_irap_and_preserves_other_nals() {
         let metadata = Hdr10OutputMetadata::new(P3, 1600, 17, 1600).expect("valid metadata");
@@ -849,7 +1022,9 @@ mod tests {
             .chain(16_000_000_u32.to_be_bytes())
             .chain(17_u32.to_be_bytes())
             .collect();
-        assert_eq!(values, [expected.clone(), vec![6, 64, 0, 0]]);
+        // MaxCLL 1624 (0x0658): the 1600-nit clip plus the export's rounding step.
+        let max_cll = 1624_u16;
+        assert_eq!(values, [expected.clone(), vec![6, 88, 0, 0]]);
         let record = &init.bytes[location.payload];
         let arrays = hvcc_nal_arrays(record).expect("hvcC arrays");
         assert!(arrays.0.contains(&39));
@@ -871,7 +1046,7 @@ mod tests {
             }
         }
         assert_eq!(configured.mastering, Some(expected.clone()));
-        assert_eq!(configured.light, Some([1600, 0]));
+        assert_eq!(configured.light, Some([max_cll, 0]));
         let video = init.video().expect("video");
         let mut iraps = 0;
         let mut audio = 0;
@@ -922,7 +1097,7 @@ mod tests {
                                     .observe_sample(bytes, video.nal_length_size)
                                     .expect("IRAP SEI");
                                 assert_eq!(found.mastering, Some(expected.clone()));
-                                assert_eq!(found.light, Some([1600, 0]));
+                                assert_eq!(found.light, Some([max_cll, 0]));
                             }
                         } else {
                             audio += 1;
@@ -995,7 +1170,7 @@ mod tests {
             .iter()
             .find(|row| row["side_data_type"] == "Content light level metadata")
             .expect("decoded CLL");
-        assert_eq!(light["max_content"], 1600);
+        assert_eq!(light["max_content"], max_cll);
         assert_eq!(light["max_average"], 0);
     }
 
@@ -1087,7 +1262,7 @@ mod tests {
             panic!("init");
         };
         let mut early = muxer.clone();
-        let mut late = muxer;
+        let mut late = muxer.clone();
         promote_hdr10_static_metadata_from(&mut early, &[light(230, 197)])
             .expect("valid HDR fixture");
         promote_hdr10_static_metadata_from(&mut late, &[light(283, 200)])
@@ -1112,6 +1287,11 @@ mod tests {
         let same = early.bytes.clone();
         promote_from(&mut early, &inputs).expect("valid HDR fixture");
         assert_eq!(early.bytes, same, "canonical promotion is idempotent");
+        // A copy seal promotes the head-frozen init it observed; the legacy
+        // index promotes the raw muxer init. Both must serve the same bytes.
+        let mut raw = muxer;
+        promote_from(&mut raw, &inputs).expect("valid HDR fixture");
+        assert_eq!(raw.bytes, same, "the raw muxer init promotes identically");
         let location = locate_hvcc(&early.bytes)
             .expect("valid HDR fixture")
             .expect("valid HDR fixture");

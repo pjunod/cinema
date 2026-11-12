@@ -135,3 +135,89 @@ PR #1284; merge requires green checks. No throughput benchmark or physical
 display acceptance is claimed. The display-management method stays v4:
 the double equations and creative mapping are unchanged, and measured
 real-case differences remain within the existing precision contract.
+
+## Reconstruction sampling — one master for the server and the player
+
+Built 2026-11-12, not deployed. The mapping above runs on a master the helper
+and the player each reconstruct; this section records why those masters
+differed and how they were made one.
+
+### What was wrong
+
+The server's Dolby Vision helper and the native player both reconstruct a
+BT.2020/PQ master from the base layer, the enhancement layer and the RPU, and
+then run the same display-management code on it. They did not reconstruct the
+same master:
+
+| | Server helper (before) | Native player |
+|---|---|---|
+| Renderer | libplacebo snapshot, API 374 | libplacebo 7.387 |
+| Plane sampling (BL chroma, EL luma and chroma) | nearest neighbour, with a 1/64-pixel tie bias | bilinear, each plane at its own siting |
+| Enhancement-layer dequantization | on the unrounded sample | on the resampled code, rounded to an integer |
+| 10-bit plane storage | code / 1023 in float | code << 6 in UNORM16 |
+| Reconstruction target | 32-bit float | UNORM16 |
+
+The display-management stage was faithful on both sides. Every licensed
+comparison of that stage had been made on the player's master, so the helper's
+output (HDR10-E, display-targeted HDR10-E, and the picture baked into Profile
+8.1) inherited a difference nobody had measured.
+
+### The contract now
+
+The helper builds the release the player builds
+([`fetch_renderer_sources.py`](../../tools/dv_processing/fetch_renderer_sources.py)
+pins the row in the player's
+[`upstream.lock`](../../clients/linux-player/packaging/upstream.lock)) and
+gives it the same inputs:
+
+- every BL and EL plane sampled bilinearly, no point policy and no tie bias;
+- software planes staged as code << 6 in UNORM16 (bits 16/10/6), which is also
+  what a mapped GPU-decoded surface holds;
+- reconstruction into a UNORM16 texture, which display management then reads.
+
+[`test_dv_reconstruction_sampling.py`](../../tests/operations/test_dv_reconstruction_sampling.py)
+fails if the two sides' renderer pins, plane scalers or plane storage drift
+apart again.
+
+### Proof
+
+Two real Profile 7 FEL frames, one per title (SourceB frame 16, a 4000-nit
+master; SourceA frame 16, a 1000-nit master). Helper on an Intel integrated
+GPU; player master and licensed references from the earlier NVIDIA captures.
+
+Server master against the player's master, 16-bit codes:
+
+| | Before | After |
+|---|---:|---:|
+| SourceB 16, largest difference | 3293 | 1 |
+| SourceB 16, components that differ | 96.3% | 6.4% |
+| SourceA 16, largest difference | not measured (ΔE 64.0) | 1 |
+| SourceA 16, components that differ | not measured | 4.8% |
+
+The remaining single codes are the two GPUs rounding the same shader
+differently; software decode and GPU decode give byte-identical output.
+
+Server output against the licensed reference rendered from the player's
+master (ΔE ITP, worse / equal / better per pixel):
+
+| | SourceB 16, 1000 nits | SourceA 16, 400 nits |
+|---|---|---|
+| Largest / mean ΔE, before | 31.17 / 0.755 | 62.77 / 1.402 |
+| Largest / mean ΔE, after | 0.041 / 0.0023 | 0.041 / 0.0023 |
+| FEL against the server's own unenhanced render, before | 30,510 / 0 / 7,941,330 | 1,538,707 / 0 / 4,636,013 |
+| FEL against the server's own unenhanced render, after | 6 / 3 / 7,971,831 | 190 / 73 / 6,174,457 |
+| Largest amount a "worse" pixel is worse by, after | 0.013 | 0.022 |
+
+Display management alone, against the licensed render of the server's own new
+master: largest ΔE 0.028 and 0.027.
+
+### Limits
+
+- Two frames, neither brighter than 450 nits. CM v2.9 titles and the SDR
+  bucket were not re-measured.
+- Which enhancement-layer resampler Dolby specifies is not established here.
+  What is established is that the two renderers now agree and that the
+  licensed qualification applies to both.
+- The published media runtime has to be rebuilt for the helper to change; the
+  processed-output cache keys change with it (helper, library and source
+  hashes are all part of the backend identity).

@@ -87,9 +87,111 @@ pub(super) async fn cached_full_source(
     Ok(None)
 }
 
-/// Returns None when the physical source domain is occupied. The coordinator
-/// retries through its existing work notifications; no lease expiry frees a
-/// reader and no independent poll/watchdog is installed here.
+/// One begun and activated physical phase with its byte budget. The owner
+/// reads only through `budget` and must call [`ActivePhase::finish`] after
+/// every reader and child it started has joined.
+pub(super) struct ActivePhase {
+    pub(super) phase: AnalysisPhysicalPhase,
+    pub(super) budget: Arc<crate::background_jobs::SourceReadBudget>,
+    pub(super) cancel: CancellationToken,
+}
+impl ActivePhase {
+    /// Returns None when the physical source domain is occupied: the store's
+    /// capacity clause is the idle test. The coordinator retries through its
+    /// existing work notifications; no lease expiry frees a reader and no
+    /// independent poll/watchdog is installed here.
+    pub(super) async fn begin(
+        store: &Arc<dyn Store>,
+        source: &AnalysisCoordinationSource,
+        claim: AnalysisCoordinationClaim,
+        request: &AnalysisRequest,
+        lost: &CancellationToken,
+    ) -> Result<Option<Self>, String> {
+        let role = store
+            .analysis_coordination(&claim.request_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("copy coordinator is absent")?;
+        if &role.source != source {
+            return Err("copy source generation differs".into());
+        }
+        if role.active_custody_id.is_some() {
+            return Ok(None);
+        }
+        // Retain the complete exact attempt before dispatch. An error is not a
+        // negative acknowledgement of this phase's atomic reservation.
+        let expected_sequence = role.phase_sequence;
+        if expected_sequence < 0 {
+            return Err("copy phase sequence is invalid".into());
+        }
+        let attempted_owner = claim.physical_owner();
+        let attempted = AnalysisPhysicalPhase {
+            claim,
+            source: source.clone(),
+            phase_sequence: expected_sequence
+                .checked_add(1)
+                .ok_or("copy phase sequence exhausted")?,
+            custody: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken {
+                custody_id: uuid::Uuid::new_v4().to_string(),
+                owner: attempted_owner,
+            },
+        };
+        let began_at_ms = crate::state::clock_ms();
+        let phase = match store
+            .begin_analysis_source_phase(
+                attempted.claim.clone(),
+                source.clone(),
+                expected_sequence,
+                attempted.custody.custody_id.clone(),
+                began_at_ms,
+            )
+            .await
+        {
+            Ok(Some(phase)) => phase,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                // No activation/Input was exposed. Resolve and retire only this
+                // UUID/sequence, retaining it across unavailable authoritative reads.
+                resolve_unstarted_phase(store, &attempted, request, began_at_ms).await;
+                return Err(error.to_string());
+            }
+        };
+        if let Err(error) =
+            crate::source_custody::activate_background_with_journal(store, phase.custody.clone())
+                .await
+        {
+            // This operation has not created a budget or exposed an Input. The
+            // activation helper resolves its own exact activation-id abort before
+            // returning Err; durable release still refuses an armed Input row.
+            crate::background_jobs::settle_no_reader_source_custody(store, phase.custody.clone())
+                .await;
+            finish_exact_phase(store, &phase).await;
+            return Err(error);
+        }
+        let cancel = lost.child_token();
+        let budget = crate::background_jobs::SourceReadBudget::from_analysis_phase(
+            Arc::clone(store),
+            phase.clone(),
+            cancel.clone(),
+        );
+        Ok(Some(Self {
+            phase,
+            budget,
+            cancel,
+        }))
+    }
+
+    /// Call only after every read, Input bridge and child of this phase joined.
+    pub(super) async fn finish(self, store: &Arc<dyn Store>) {
+        self.cancel.cancel();
+        self.budget.invalidate_grant();
+        crate::background_jobs::settle_joined_source_custody(store, self.phase.custody.clone())
+            .await;
+        finish_exact_phase(store, &self.phase).await;
+    }
+}
+
+/// Returns None when the physical source domain is occupied.
 pub(super) async fn attest_full_source(
     store: Arc<dyn Store>,
     file: Arc<plurx_core::domain::MediaFile>,
@@ -112,75 +214,13 @@ pub(super) async fn attest_full_source(
     if let Some(value) = cached_full_source(store.as_ref(), &source).await? {
         return Ok(Some(value));
     }
-    let role = store
-        .analysis_coordination(&claim.request_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("copy coordinator is absent")?;
-    if role.source != source {
-        return Err("copy source generation differs".into());
-    }
-    if role.active_custody_id.is_some() {
+    let Some(active) = ActivePhase::begin(&store, &source, claim, &request, &lost).await? else {
         return Ok(None);
-    }
-    // Retain the complete exact attempt before dispatch. An error is not a
-    // negative acknowledgement of this phase's atomic reservation.
-    let expected_sequence = role.phase_sequence;
-    if expected_sequence < 0 {
-        return Err("copy phase sequence is invalid".into());
-    }
-    let attempted_owner = claim.physical_owner();
-    let attempted = AnalysisPhysicalPhase {
-        claim,
-        source: source.clone(),
-        phase_sequence: expected_sequence
-            .checked_add(1)
-            .ok_or("copy phase sequence exhausted")?,
-        custody: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken {
-            custody_id: uuid::Uuid::new_v4().to_string(),
-            owner: attempted_owner,
-        },
     };
-    let began_at_ms = crate::state::clock_ms();
-    let phase = match store
-        .begin_analysis_source_phase(
-            attempted.claim.clone(),
-            source.clone(),
-            expected_sequence,
-            attempted.custody.custody_id.clone(),
-            began_at_ms,
-        )
-        .await
-    {
-        Ok(Some(phase)) => phase,
-        Ok(None) => return Ok(None),
-        Err(error) => {
-            // No activation/Input was exposed. Resolve and retire only this
-            // UUID/sequence, retaining it across unavailable authoritative reads.
-            resolve_unstarted_phase(&store, &attempted, &request, began_at_ms).await;
-            return Err(error.to_string());
-        }
-    };
-    if let Err(error) =
-        crate::source_custody::activate_background_with_journal(&store, phase.custody.clone()).await
-    {
-        // This operation has not created a budget or exposed an Input. The
-        // activation helper resolves its own exact activation-id abort before
-        // returning Err; durable release still refuses an armed Input row.
-        crate::background_jobs::settle_no_reader_source_custody(&store, phase.custody.clone())
-            .await;
-        finish_exact_phase(&store, &phase).await;
-        return Err(error);
-    }
-    let cancel = lost.child_token();
-    let budget = crate::background_jobs::SourceReadBudget::from_analysis_phase(
-        Arc::clone(&store),
-        phase.clone(),
-        cancel.clone(),
-    );
+    let phase = &active.phase;
     // This await is cooperative, not a select that drops an in-flight file read.
     // Cancellation stops the next allowance; every already-issued read joins.
-    let result = crate::background_jobs::budgeted(Arc::clone(&budget), async {
+    let result = crate::background_jobs::budgeted(Arc::clone(&active.budget), async {
         let attested = crate::fragment_index_cluster::attest_coordination_source_full_persistent(
             &source.origin_node_id,
             &file,
@@ -231,10 +271,7 @@ pub(super) async fn attest_full_source(
         Ok(VerifiedFullSource::Phase(receipt))
     })
     .await;
-    cancel.cancel();
-    budget.invalidate_grant();
-    crate::background_jobs::settle_joined_source_custody(&store, phase.custody.clone()).await;
-    finish_exact_phase(&store, &phase).await;
+    active.finish(&store).await;
     result.map(Some)
 }
 

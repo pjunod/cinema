@@ -15,6 +15,10 @@ bump may break compatibility and a **patch** bump never does.
   owner's custody could not be released once it was gone. The job is kept
   until the custody is released, then expires as usual (SQLite v129; a
   shape-verified hiqlite extension).
+- The server image builds its Dolby Vision helper bundle from the same source
+  tree as the server it ships with. The bundle had been taken from a separately
+  published image, so helper changes never reached an image, and a server built
+  after them would have refused the older bundle and turned DV processing off.
 - A dead owner's source custody can be released by the host census even
   after retention has deleted the owner's job row. The census then also proves
   the owner's whole process tree gone: the daemon's PID namespace holds nothing
@@ -36,6 +40,23 @@ bump may break compatibility and a **patch** bump never does.
   reason an enhancement was skipped. Source custody left behind by a job whose
   owner died before its join can now be released from a host source-open
   census instead of holding the shared storage fence indefinitely (#1491).
+- The server's Dolby Vision helper reconstructs the same master as the native
+  player. It sampled every plane nearest-neighbour on an older libplacebo; it
+  now builds the player's release (7.387) and samples bilinearly from the same
+  10-bit plane storage, so HDR10-E, display-targeted output and the FEL to
+  Profile 8.1 picture start from the picture the player's mapping was
+  qualified on. On the two measured frames the server master is within one
+  16-bit code of the player's (it was up to 3293 codes away).
+- Master-grade HDR10-E declares the source's own mastering display; it carried
+  no static HDR10 metadata at all. It does not repeat the base layer's content
+  light levels, because the reconstructed picture can exceed them.
+- A display-targeted render's MaxCLL covers the rounding of its 10-bit export
+  (407 for a 400-nit target) instead of stating the target itself, which the
+  decoded picture could exceed.
+- CM v2.9 display mapping keeps its detail filter inside the L5 active picture,
+  as CM v4.0 does. Letterboxed CM v2.9 titles no longer blend the bars into the
+  first and last two picture rows; bars take the pointwise mapping. Titles
+  without L5, or with a zero or full-frame L5, render exactly as before.
 - CM4 display mapping evaluates the ST 2084 transfer functions in its point and
   final passes with precise split-float helpers and the normative black and
   white endpoints. On the measured Source16 frame no enhanced pixel is farther

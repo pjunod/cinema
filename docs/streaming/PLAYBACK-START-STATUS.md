@@ -1,7 +1,7 @@
 # Playback start — continuation and merge ledger
 
 **Status:** open · **Owner:** Claude (claude-opus-5-5), session
-`session_01BCWL9ypnQEiQUyRaZtMhh3`, resumed from Codex on 2026-11-11 · **Updated:** 2026-11-11.
+`session_01BCWL9ypnQEiQUyRaZtMhh3`, resumed from Codex on 2026-11-11 · **Updated:** 2026-11-12.
 
 Companion to the [implementation plan](PLAYBACK-START-PLAN.md) and
 [Phase 1 build contract](PLAYBACK-START-BUILD.md). Phase 1 merged in
@@ -38,38 +38,102 @@ with the signed-in Xcode account and Cloud Managed Apple Distribution;
 The standing publisher has not been migrated or requalified. Android 193
 and native prepared-switch/TTFF measurements remain open.
 
-## Current batch — A1/B1
+## Merged — A1/B1 first batch (#1495)
 
-Claude owns `effort/playback-start-phase2` (resumed from Codex 2026-11-11; the
-handed-over staged and unstaged layers are preserved verbatim as two
-checkpoint commits). Current main is merged in. The
-[A1/B1 implementation contract](PLAYBACK-START-A1-B1-BUILD.md) remains the
-design authority.
+#1495 merged as `41e23c193` on 2026-11-12. It carries:
 
-Built on the branch, compiled and lint-clean (plurx-core lib, plurxd bin,
-clippy `-D warnings`, rustc 1.97.1):
+- the Source growing copy engine for authenticated bounded shared playback;
+- canonical range observations, normalization and the companion verifier;
+- the copy-range consumer (coordination claim, fenced full-source
+  attestation, seal, content-addressed v3 blob, claimed
+  `fragment_index_publish` job);
+- the guarded v3 publication transaction.
 
-- Source growing engine for authenticated bounded shared playback, canonical
-  range observations, normalization and the companion verifier (Codex).
-- Copy-range consumer: the Analysis dispatcher coalesces committed ranges per
-  exact source; a fully covered title is claimed under the existing Analysis
-  lease and heartbeat, attested in one fenced full-source phase, sealed,
-  installed as a content-addressed v3 blob and published through a claimed
-  `fragment_index_publish` job.
-- v3 publication: one guarded transaction and trigger adopts a pending or
-  quarantined head at the next epoch (a healthy same-contract head keeps its
-  first variant), records only the publisher's verified location, readies the
-  Analysis and settles job and waiters, and rolls back on a pointer mismatch.
-  Real-SQLite regressions in `copy_index_v3_tests.rs`.
+The schema is SQLite v127 (coordination and v3 index) and v128
+(managed-resource v6), after #1469's v125/v126; Hiqlite chains managed
+v4→v5→v6. Older binaries refuse it, so the deploy needs the playbook's
+pre-upgrade backup. Clients: Apple 297, Android 198.
 
-Not yet built, planned [below](#after-the-first-a1b1-merge--remaining-build-order): background
-gap filling through the common engine (an index publishes today only when
-playback itself covered the whole title), a v3 consumer and peer hydration,
-discrepancy quarantine, and local-playback observations. A sealed observation index must not be bridged into the legacy
-local index store: its head-census promotion lacks the whole-title HDR10
-metadata the legacy key promises. Daemon test compilation exceeds the 8 GiB
-voter cap, so it runs on the nonvoter effort compile gate. No unit suite has
-run for this batch; the fast lane runs once after the final review.
+The fast lane passed paperwork, preflight, web and Android on the merged head.
+Its Rust and Apple jobs had failed on runner infrastructure on earlier heads,
+and Paul had it merged. Three plurx-core unit tests are red on main from
+before this batch (two `placeholder_census` tests and the source82 layout
+test).
+
+## Effort batch — A1/B1 gap filling (#1520, merged into the effort)
+
+Owner: Claude (claude-opus-5-5), same session. The gap-fill draft was written
+by a claude-fable-5-2 agent and finished by Opus. Items 1–3 below are built on
+`claude/a1b1-gap-fill`; clippy and fmt are clean, and the new focused tests
+pass:
+
+1. The copy spawn and head census take `CopyGenerationOwner::{Source,
+   Analysis}`.
+2. `copyrange::fill_copy_gap` fills each first gap from an Analysis-owned
+   generation into the same observation set.
+3. The seal folds per-row HDR10 SEI facts (`Hdr10IndexMetadata::merge`) into
+   the whole-title metadata the legacy index computes.
+
+A claude-fable-5-2 adversarial review found four majors and six minors, all
+addressed:
+
+- The seal publishes the init contract that its own promotion serves
+  (`served_init_contract_sha256`), not the head-frozen one.
+- An unreadable HDR10 SEI marks the row `hdr10_conflict` instead of ending the
+  viewer's copy. The set then refuses to seal, and the legacy pass owns the
+  title.
+- Each ready source runs as its own unit. A fill that waits on a paused budget
+  no longer holds the other sources, and the inbox drains on every wake.
+- An incomplete set checks `foreground_source_pressure`, which is read-only,
+  before it enqueues or claims anything.
+- Failures that recur on every repeat (row limit, unknown clock, unverified or
+  late landing, a changed init) discard instead of retrying. The quarantine
+  check and the cross-row mastering conflict are now found before any read.
+- Fresh fill rows refresh the source's eviction age.
+
+Decision (Paul away): the generation domain stays v1. Bumping it would leave
+existing heads desiring the old generation forever. Instead, item 4's consumer
+must refuse a v3 blob whose promotion lacks `indexed_hdr10_metadata`, which
+item 5 then quarantines and rebuilds.
+
+Coordination request rows of sources never observed again after a restart
+stay `queued` (one per file, as before this batch); retiring them belongs
+with item 5.
+
+## Effort batch — A1/B1 v3 consumer and peer hydration (#1525, merged into the effort)
+
+Owner: Claude (claude-opus-5-5), same session. The item-4 code and its review
+fixes were written by a claude-fable-5-2 agent on local branch `item4`. Item 4
+below is built; clippy and fmt are clean. No unit test has been run: the
+tests run once in CI.
+
+- `crates/plurxd/src/copy_index_v3.rs` is the consumer; the publisher's
+  `install_blob`, `v3_root` and `v3_blob_path` are shared with it.
+- The owed end-to-end test is `copy_analysis/gap_fill_tests.rs`. Three real
+  fills through `fill_copy_gap` (whole title, a head retired early, the
+  seeked fill of its gap; seven ffmpeg children with their censuses) must
+  merge into the whole-title rows. Its phase is a well-formed value no store
+  admitted, its Inputs use the test byte budget, and its head is an Analysis
+  generation, not a `CompletedCopyRange`.
+
+A claude-fable-5-2 adversarial review found six majors and six minors, all
+addressed: the serve-time init contract, the engine check, the start-path
+reads, holder rows that were never restored, the pinned corrupt blob, the
+gap-fill test's orphaned children and name, and the store guards. What each
+became is in item 4 below.
+
+Decisions (Paul away):
+
+- Cross-origin use needs this node's own full-source receipt, per the build
+  contract's "matching full content attestation".
+- A serve-time init mismatch cannot fall back inside the running generation,
+  whose plan is already the v3 one. It fails that generation with its own
+  cause and the next plan falls back.
+- No eviction owner was added for the v3 root: evicting a publisher's only
+  copy turns a healthy head into a rebuild, which is item 5's to route.
+
+Still open: fleet acceptance of all three items below, item 5's quarantine of
+a refused or contradicted head, and the limits listed under item 4.
 
 ## After the first A1/B1 merge — remaining build order
 
@@ -110,24 +174,75 @@ is the idle test), run one Analysis-owned generation through the adapter:
 The full-source attestation phase reads every byte. Fold the whole-title
 HDR10 maximum scan into that same read (item 3).
 
-### 3. Whole-title HDR10 metadata in the attestation read
+### 3. Whole-title HDR10 metadata from row facts
 
-A sealed observation index carries the bounded head census's promotion. The
-legacy local index promises `indexed_hdr10_metadata` with the scanned
-`hdr10_sei` (`fragindex.rs`, the `--plurx-hdr10-index` argv revision).
-Compute the same maximum over the attestation phase's bytes, record it with
-the receipt, and seal it into the promotion. Until then, never bridge a v3
-index into `put_fragment_index`: HDR10 titles would get different init
-metadata than the legacy key claims.
+The legacy local index promises `indexed_hdr10_metadata` with the scanned
+`hdr10_sei` (`fragindex.rs`, the `--plurx-hdr10-index` argv revision). Each
+observed row records its own HDR10 SEI facts. The seal folds them, in any
+order, into that same maximum, and publishes the init contract of the
+promotion it seals. A v3 index from before this fold lacks the flag; never
+bridge one into `put_fragment_index`.
 
-### 4. v3 consumer and peer hydration
+### 4. v3 consumer and peer hydration — built
 
-- VOD planning reads `copy_index_v3_head` for the exact source key.
-- A healthy head's blob is read from `copy_index_v3_locations`, or hydrated
-  from a listed holder and verified by digest before use.
-- The hydrating node records its own verified location.
-- Decode with `decode_cluster_fragment_index_blob_v3` against the head's
-  source and output identity.
+- VOD planning (local and Source renditions) asks
+  `copy_index_v3::resolve` first, unless the fragment-index engine changed,
+  in which case it keeps the node-local order as v2 does. Without a usable
+  head the v2 cluster and node-local order is unchanged.
+- The start path costs one primary-key read: `copy_index_v3_variant` returns
+  this node's own head (this node as origin, its own `inspect_source` object
+  version), the variant row it points at and whether this node is a listed
+  holder. The catalogue namespace is cached in VOD shared state.
+- Only on a miss, and only when this node holds its own full-source receipt
+  (a full v2 receipt or a regime-1 attestation, as the publication accepts),
+  the per-file listing runs. Another origin's head is used only when that
+  receipt names the variant's source digest, and never when this node's own
+  head is quarantined for the same blob.
+- The blob is read from this node's v3 root, or hydrated from a holder in
+  `copy_index_v3_locations` over
+  `GET /internal/media/copy-index-v3/{source_key}/{blob_sha256}` (the v2
+  route's peer auth, read permits, size bound and learner-matrix entry). The
+  route serves only a readable head's variant. It is verified by size and
+  SHA-256 and installed with the publisher's staged write and disk budget.
+- Holders: a hydration records this node best-effort, and so does a verified
+  local hit the head read showed as unlisted, so the common start writes
+  nothing. A peer's row is retired only on the route's own positive 404
+  (`copy-index-v3-variant-absent`); a node without the route, a refusal or a
+  damaged transfer retires nothing. A corrupt local blob (read in full, wrong
+  digest or size) is removed after the read pin is dropped; a stat or read
+  error deletes and retires nothing.
+- Decode is `decode_cluster_fragment_index_blob_v3` against the artifact row's
+  source and output identity, and the planning digest is recomputed with the
+  row's init contract. A blob without `indexed_hdr10_metadata` is refused and
+  planning falls back; item 5 quarantines it.
+- Serve time: the recipe carries the sealed init contract. Each generation
+  computes `served_init_contract_sha256(muxer init, index.promotion)` as soon
+  as its muxer init exists, before any identity or init is written. A
+  mismatch fails that generation as `SealedInit` (`rendition_init_changed`)
+  and marks the contract unserved for this process, so the reopened session
+  plans from its next index.
+- A readable head is healthy and published for the generation it still
+  desires, so a head repaired after a quarantine is readable too.
+
+Known limits, for the items that follow:
+
+- `copy_index_v3_heads` has no `(catalog_namespace, file_id)` index, so the
+  per-file listing scans. It belongs in the next schema version; this batch
+  adds no migration and reaches the listing only behind the receipt check.
+- The v3 root has no eviction owner. Its blobs are charged to the playback
+  cache budget but nothing registered evicts them (the v2 root has
+  `FragmentCacheOwner`), so no eviction path forgets a v3 location today. An
+  owner added later must forget this node's row when it removes a blob.
+- A healthy head none of whose holders can supply the bytes falls back to the
+  next index, as a miss does. Item 5 routes it to rebuild.
+- A rendition planned from v3 is keyed by the contract key, for Source
+  renditions as well. A session re-prepared after a v3 publication therefore
+  gets a new rendition and re-cuts its segments once. The retained-manifest
+  check compares the delivery recipe (`LogicalOutput`), not the index or
+  plan, so it does not cover a plan change on resurrection; the same holds
+  for the existing node-local to v2 switch. Equal rows give an equal plan.
+  Binding a resurrected session to its original plan needs the plan's digest
+  on the durable route and is not built.
 
 ### 5. Discrepancy quarantine
 
@@ -143,6 +258,11 @@ Local rolling copy and indexed-VOD copy become the same growing engine.
 reuses a Source grant.
 
 ### Acceptance for the next merge
+
+Items 1–4 reached the effort branch through #1520 (`f503c7c6a`) and #1525
+(`4a0da349e`), with main merged in at `22d2a981b`. The effort → main PR's
+fast lane is the one test run. The fleet checks below need Paul's deploy and
+are recorded after it.
 
 - A partially played shared title publishes after background filling, with
   no playback interruption on any node.

@@ -15,6 +15,7 @@ INPUTS = (
     'fel_renderer.h',
     'hevc-rasl-frame-thread.patch',
     'movie_source_io.h',
+    'mux_rgb.c',
     'nlq_clipping.h',
     'nut_timing.h',
     'rgb48.h',
@@ -41,12 +42,12 @@ def source_identity(source):
 
 def build(source, root):
     abi = json.loads((root / "sources/abi.json").read_text())
-    if abi.get("libplacebo") != 374 or any(abi.get(name, 0) <= 0 for name in ("avcodec", "avformat", "avutil")):
+    if abi.get("libplacebo") != 387 or any(abi.get(name, 0) <= 0 for name in ("avcodec", "avformat", "avutil")):
         raise ValueError("unsupported installed helper ABI")
     manifest = {"schema": 1, "graph": GRAPH, "abi": abi,
         "tools": {name: {"path": "bin/" + filename, "sha256": sha(root / "bin" / filename)}
                   for name, filename in (("renderer", "segment_decode_render"), ("muxer", "mux_rgb"), ("author", "author_p81"), ("scanner", "scan_title"))},
-        "libraries": [{"path": "lib/libplacebo.so.374", "sha256": sha(root / "lib/libplacebo.so.374")}],
+        "libraries": [{"path": "lib/libplacebo.so.387", "sha256": sha(root / "lib/libplacebo.so.387")}],
         "parser_sha256": sha(root / "sources/libdovi.a"),
         "source_sha256": source_identity(source),
         "environment": {"LD_LIBRARY_PATH": "lib"}}
@@ -59,7 +60,7 @@ def verify(source, root):
     assert set(manifest) == {"schema", "graph", "abi", "tools", "libraries", "parser_sha256", "source_sha256", "environment"}
     assert manifest["schema"] == 1 and manifest["graph"] == GRAPH
     assert manifest["abi"] == json.loads((root / "sources/abi.json").read_text())
-    assert manifest["abi"].get("libplacebo") == 374
+    assert manifest["abi"].get("libplacebo") == 387
     assert all(type(manifest["abi"].get(name)) is int and manifest["abi"][name] > 0
                for name in ("avcodec", "avformat", "avutil"))
     assert manifest["environment"] == {"LD_LIBRARY_PATH": "lib"}, "leave Vulkan device discovery untouched"

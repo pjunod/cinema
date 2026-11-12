@@ -110,7 +110,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 18] = [
+    let inputs: [(&str, &[u8]); 19] = [
         (
             "author_p81.c",
             include_bytes!("../../../tools/dv_processing/author_p81.c"),
@@ -152,6 +152,10 @@ fn renderer_source_identity() -> String {
             include_bytes!("../../../tools/dv_processing/movie_source_io.h"),
         ),
         (
+            "mux_rgb.c",
+            include_bytes!("../../../tools/dv_processing/mux_rgb.c"),
+        ),
+        (
             "nlq_clipping.h",
             include_bytes!("../../../tools/dv_processing/nlq_clipping.h"),
         ),
@@ -191,6 +195,25 @@ fn renderer_source_identity() -> String {
         identity.update(Sha256::digest(bytes));
     }
     hex::encode(identity.finalize())
+}
+/// The installed bundle's identity as this daemon accepts it, or why it does
+/// not. One validation path: the same capture the worker performs.
+pub(crate) async fn installed_helper_identity() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let tools = ToolSet::capture()
+            .await?
+            .ok_or_else(|| "no DV helper bundle is installed".to_string())?;
+        Ok(serde_json::json!({
+            "source_sha256": renderer_source_identity(),
+            "backend_digest": tools.backend_digest(),
+        })
+        .to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("DV helper bundles are a Linux runtime asset".into())
+    }
 }
 /// Decode on the GPU the renderer already draws on. The helper maps VA-API
 /// surfaces straight into its Vulkan renderer; a host copy of a decoded 4K
@@ -326,7 +349,7 @@ impl ToolSet {
             if manifest.schema != 1
                 || manifest.source_sha256 != renderer_source_identity()
                 || manifest.graph != "dv-native-master-or-closed-form-dm-v1"
-                || manifest.abi.get("libplacebo") != Some(&374)
+                || manifest.abi.get("libplacebo") != Some(&387)
                 || !["avcodec", "avformat", "avutil"]
                     .iter()
                     .all(|key| manifest.abi.get(*key).is_some_and(|major| *major > 0))
@@ -447,6 +470,7 @@ pub(crate) struct PrivateWindow {
     pub(crate) evidence: crate::dv_segment::SegmentEvidence,
     registration: crate::prodrun::ProducerRegistration,
     display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    master_metadata: Option<plurx_core::transcode::dv_processing::DvMasterMetadata>,
 }
 
 #[cfg(target_os = "linux")]
@@ -522,7 +546,18 @@ impl PrivateWindow {
                     )
                     .map_err(|error| error.to_string())?
                 }
-                None => self.encoded,
+                // A master-grade window re-declares the source's own static
+                // metadata; a source that states none stays undeclared.
+                None => match self.master_metadata {
+                    Some(metadata) => plurx_core::transcode::dv_processing::dv_author_hdr10_window(
+                        &self.encoded,
+                        metadata
+                            .output_metadata()
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?,
+                    None => self.encoded,
+                },
             },
             DvDestination::Profile81 => dv_author_profile81_window_with_envelope(
                 &self.encoded,
@@ -738,6 +773,10 @@ pub(crate) struct RuntimeRecipe {
         Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String>,
     /// Independent SDR floor parse; invalid/absent HDR coordinates are irrelevant.
     pub(crate) source_mastering_minimum: Result<Option<u32>, String>,
+    /// The selected held stream's own static HDR10 declarations, which a
+    /// master-grade HDR10 render carries; `None` when it states none.
+    pub(crate) source_master_metadata:
+        Option<plurx_core::transcode::dv_processing::DvMasterMetadata>,
     /// Lazy, source/probe/absolute-stream-bound metadata. Master and SDR paths
     /// with a title floor never invoke this separate frame projection.
     pub(crate) source_frame_probe: Option<Arc<crate::decode_facts::SourceFrameProbe>>,
@@ -1163,10 +1202,21 @@ impl RuntimeRecipe {
             // Both destinations leave the GPU as 10-bit YCbCr at the output
             // raster: the encoder only uploads it, it never converts colour.
             use plurx_core::transcode::dv_processing::DvExportPolicy;
-            let export_policy = display_target
-                .map_or(DvExportPolicy::PqBilinearYuv420p10V1 { raster }, |target| {
-                    DvExportPolicy::DisplayTargetYuv420p10V1 { raster, target }
-                });
+            let export_policy = display_target.map_or_else(
+                || {
+                    // Every processed master is a reconstruction: FEL adds
+                    // the enhancement layer, and base-RPU applies reshaping
+                    // this daemon cannot prove is the identity for the whole
+                    // title. The base layer's light levels are not carried.
+                    DvExportPolicy::for_master(
+                        raster,
+                        self.source_master_metadata
+                            .filter(|_| self.destination == DvDestination::Hdr10)
+                            .map(|metadata| metadata.for_processed(self.mode, false)),
+                    )
+                },
+                |target| DvExportPolicy::DisplayTargetYuv420p10V1 { raster, target },
+            );
             let export_raster = export_policy
                 .raster(self.native_bl)
                 .map_err(|e| e.to_string())?;
@@ -1195,6 +1245,7 @@ impl RuntimeRecipe {
                 decode: self.decode,
                 export_raster: Some(export_raster),
                 display_target: export_policy.display_target(),
+                master_metadata: export_policy.master_metadata(),
                 request: crate::dv_segment::SegmentRequest {
                     source_input: Some(source_input),
                     renderer: self.tools.renderer.clone(),
@@ -1451,6 +1502,7 @@ async fn run_private_window(
     request.request.cancel = cancel.clone();
     let deadline = request.renderer_deadline;
     let display_target = request.display_target;
+    let master_metadata = request.master_metadata;
     let mut producer = crate::dv_segment::spawn_streaming(request).await?;
     let source_settlement = producer.take_source_settlement();
     let result = async {
@@ -1481,6 +1533,7 @@ async fn run_private_window(
                 evidence,
                 registration,
                 display_target,
+                master_metadata,
             })),
             WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
         }
@@ -2498,28 +2551,44 @@ mod helper_decoder_tests {
 
 #[cfg(test)]
 mod pinned_runtime_renderer_sources {
-    /// plurxd refuses a DV helper bundle built from other renderer sources,
-    /// and the bundle ships in the separately published media runtime. The
-    /// application Dockerfile records the pinned bundle's `source_sha256`; this
-    /// daemon's own identity must equal it, or every node that deploys the
-    /// build declines processed Dolby Vision (2026-11-11, after #1481).
-    /// Republish the media runtime and re-pin: docs/ci/MEDIA-RUNTIME.md.
+    /// plurxd refuses a DV helper bundle built from other renderer sources
+    /// (2026-11-11, after #1481: processed Dolby Vision off on every node).
+    /// The bundle is now compiled by the application image's helper stage
+    /// from this tree, and stamped by `bundle-manifest.py`. This daemon's own
+    /// identity must equal the one that installer computes for the same
+    /// sources, or the image build stops at `plurxd dv-helper-identity`.
+    ///
+    /// The name is the regression's recorded one: when it was written the
+    /// bundle came from the pinned media runtime and the identity was a value
+    /// recorded beside that pin. Nothing is recorded any more; the installer
+    /// is asked.
     #[test]
     fn this_daemon_accepts_the_pinned_media_runtimes_dv_helpers() {
-        let recorded: Vec<&str> = include_str!("../../../Dockerfile")
-            .lines()
-            .filter_map(|line| {
-                line.strip_prefix("ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256=\"")
-                    .and_then(|rest| rest.strip_suffix('"'))
-            })
-            .collect();
-        assert_eq!(recorded.len(), 1, "one pinned DV source identity");
+        let sources =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/dv_processing");
+        let installer = std::process::Command::new("python3")
+            .arg(sources.join("bundle-manifest.py"))
+            .arg("--identity")
+            .arg(&sources)
+            .output()
+            .expect("run the bundle installer's identity");
+        assert!(
+            installer.status.success(),
+            "{}",
+            String::from_utf8_lossy(&installer.stderr)
+        );
         assert_eq!(
             super::renderer_source_identity(),
-            recorded[0],
-            "tools/dv_processing differs from the pinned media runtime's DV helpers: \
-             republish the media runtime and re-pin (docs/ci/MEDIA-RUNTIME.md)"
+            String::from_utf8_lossy(&installer.stdout).trim(),
+            "the daemon and tools/dv_processing/bundle-manifest.py digest different \
+             renderer sources: the helper stage would build a bundle this daemon refuses"
         );
+        // The application build is where that bundle comes from, and where
+        // the daemon is asked again about the installed bytes.
+        let recipe = include_str!("../../../Dockerfile");
+        assert!(recipe.contains("COPY tools/dv_processing /build-inputs/dv_processing"));
+        assert!(recipe.contains("RUN [\"plurxd\", \"dv-helper-identity\"]"));
+        assert!(!recipe.contains("PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256"));
     }
 }
 
@@ -3274,9 +3343,22 @@ mod title_scanner_identity_tests {
         }
         let create = include_str!("transcode/manager/create.rs");
         assert!(create.contains("self.fel_identity(&tools.backend_digest())"));
-        assert!(create.contains(
-            "planning.probe_json.as_deref(),\n            &tools.title_scanner_digest(),"
-        ));
+        // FEL qualification is now a recipe request that carries no title
+        // demand, so the creator has no scanner-keyed call left. The backend
+        // key may still appear there only as the FEL identity it measures.
+        assert_eq!(
+            create.matches("backend_digest()").count(),
+            create
+                .matches("fel_identity(&tools.backend_digest())")
+                .count()
+                + create
+                    .matches("fel_identity_for_encoder(&tools.backend_digest(), ")
+                    .count()
+        );
+        assert!(!create.contains("dv_title_demand"));
+        // The index build is the remaining title-demand writer outside the probe.
+        assert!(include_str!("fragindex.rs")
+            .contains("scanner_digest: self.tools.title_scanner_digest(),"));
     }
 }
 
@@ -3302,13 +3384,13 @@ mod bundle_capture_tests {
         ] {
             std::fs::write(root.join("bin").join(name), name).expect("stub helper");
         }
-        std::fs::write(root.join("lib/libplacebo.so.374"), b"fixture placebo")
+        std::fs::write(root.join("lib/libplacebo.so.387"), b"fixture placebo")
             .expect("write stub placebo library");
         std::fs::write(root.join("sources/libdovi.a"), b"fixture parser")
             .expect("write stub parser library");
         std::fs::write(
             root.join("sources/abi.json"),
-            br#"{"libplacebo":374,"avcodec":62,"avformat":62,"avutil":60}"#,
+            br#"{"libplacebo":387,"avcodec":62,"avformat":62,"avutil":60}"#,
         )
         .expect("write fixture ABI");
         let source = fixture.path().join("source");

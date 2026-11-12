@@ -25,6 +25,7 @@ mod cachekeep;
 mod channel_subjects;
 mod clock_offset;
 mod copy_analysis;
+mod copy_index_v3;
 mod copy_normalization;
 mod copyrange;
 mod copyseg;
@@ -436,6 +437,11 @@ enum Command {
     Healthcheck,
     /// Print the exact fragment-index engine identity used by this binary.
     MediaRuntimeIdentity,
+    /// Validate the installed Dolby Vision helper bundle exactly as the worker
+    /// does and print its identity; exit 1 when this binary would refuse it or
+    /// none is installed. The image build runs this, so an image cannot ship a
+    /// bundle its own daemon rejects.
+    DvHelperIdentity,
     /// Advertise a bridge-networked server on the host's Bonjour interfaces.
     /// This is intended for the discovery companion container; the HTTP server
     /// remains attached to its normal Docker networks.
@@ -689,6 +695,7 @@ async fn dispatch(
         Command::RefreshMetadata { .. } => {}
         Command::Healthcheck
         | Command::MediaRuntimeIdentity
+        | Command::DvHelperIdentity
         | Command::Advertise { .. }
         | Command::Cluster { .. }
         | Command::Restore { .. }
@@ -740,6 +747,16 @@ async fn dispatch(
                 "{}",
                 serde_json::to_string(&media_runtime_identity().await)?
             );
+            Ok(())
+        }
+        Command::DvHelperIdentity => {
+            match crate::vodencode::dv_runtime::installed_helper_identity().await {
+                Ok(identity) => println!("{identity}"),
+                Err(error) => {
+                    eprintln!("DV helper bundle refused: {error}");
+                    std::process::exit(1);
+                }
+            }
             Ok(())
         }
         Command::Advertise { server } => advertise(&server).await,

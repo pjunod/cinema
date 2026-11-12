@@ -77,7 +77,7 @@ the six-picture control establishes reorder association. Synthetic decoded
 source controls do not establish movie quality, sustained throughput, physical
 DV-client rendering, independent reference conformance, or serving readiness.
 
-The source-budget CLI and current ABI 374 helper validation are tracked in
+The source-budget CLI and its ABI 374 helper validation are tracked in
 [the source-budget ledger](../../docs/streaming/HDR-ENHANCEMENT-SOURCE-BUDGET.md).
 The historical controls above do not qualify that changed source.
 
