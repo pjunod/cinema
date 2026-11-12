@@ -19,7 +19,8 @@ for spec in specs:
     fx, sdir, ldir = spec.split('=')
     arms, sources = {}, []
     for kind in ('fullres', 'lattice'):
-        for f in sorted(Path(sdir).glob(f'{kind}-*.json')):
+        # unbound-* files score candidates that were never authored (B-frame probe, the unencoded export).
+        for f in sorted(Path(sdir).glob(f'{kind}-*.json')) + sorted(Path(sdir).glob(f'unbound-{kind}-*.json')):
             d = json.loads(f.read_text()); R = d['results']; fr = list(R)
             sources.append({'file': f.name, 'sha256': hashlib.sha256(f.read_bytes()).hexdigest()})
             for arm in R[fr[0]]['A']:
@@ -28,8 +29,8 @@ for spec in specs:
                     v = {'frames': {k: {m: {'full_mean': R[k][m][arm]['full']['mean'],
                                             'dark_below_0.1_mean': R[k][m][arm]['bands']['dark_below_0.1'].get('mean'),
                                             'dark_below_0.1_p99': R[k][m][arm]['bands']['dark_below_0.1'].get('p99')} for m in 'ABCD'} for k in fr}}
-                    if arm != 'F':
-                        rows = d['selected_frame_bar'][arm]['rows']
+                    rows = (d.get('selected_frame_bar') or {}).get(arm, {}).get('rows')
+                    if arm != 'F' and rows:
                         v['bar_rows_passing'] = [sum(all(r['bar'].values()) for r in rows), len(rows)]
                 else:
                     v = {'pooled_full_mean': {m: sum(R[k][m][arm]['full']['mean'] for k in fr) / len(fr) for m in 'ABCD'}, 'frames': len(fr)}
@@ -59,10 +60,12 @@ for arm in sorted(set().union(*[v['arms'] for v in rec['fixtures'].values()]) - 
         if not a or 'lattice' not in a or 'fullres' not in a:
             per[fx] = 'not scored'; continue
         c = v['arms'][CONTROL.get(arm, 'Z6')]
-        bar = a['fullres']['bar_rows_passing']; dm = {m: a['lattice']['pooled_full_mean'][m] - c['lattice']['pooled_full_mean'][m] for m in 'ABCD'}
+        bar = a['fullres'].get('bar_rows_passing', [0, 1]); dm = {m: a['lattice']['pooled_full_mean'][m] - c['lattice']['pooled_full_mean'][m] for m in 'ABCD'}
         wins = {m: a['lattice']['frames_beating_F'][m]['dark_p99_below_F'] - c['lattice']['frames_beating_F'][m]['dark_p99_below_F'] for m in 'ABCD'}
         per[fx] = {'bar_all_pass': bar[0] == bar[1], 'pooled_mean_minus_control': dm, 'shadow_wins_minus_control': wins,
                    'pass': bar[0] == bar[1] and all(x <= -0.02 for x in dm.values()) and all(x >= 0 for x in wins.values())}
+    if all(isinstance(p, str) for p in per.values()):
+        continue  # scored on held-out scenes only
     verdict[arm] = {'control': CONTROL.get(arm, 'Z6'), 'per_fixture': per, 'accept': all(isinstance(p, dict) and p['pass'] for p in per.values())}
 # Held-out scene (protocol-stack-20261112.json): pooled mean below F in all four models, frames 0 and 24 below F,
 # shadow-p99 frames beating F at least the landed Z6's.

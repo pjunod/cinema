@@ -223,7 +223,7 @@
     "protocol": "protocol-heldout-beekeeper-20261111.json",
     "scorer": "heldout_eval.py",
     "private_root": "$FEL_ROI_ROOT/heldout",
-    "status": "Capture bound per frame 48/48; scorer validated by exact reproduction of the retained Michael5400 Z6 result. At iso-rate no arm beats F on the whole picture (results/coding-loss-20261112.json heldout_verdicts)."
+    "status": "Capture bound per frame 48/48; scorer validated by exact reproduction of the retained Michael5400 Z6 result. At iso-rate no arm beats F on the whole picture (results/coding-loss-20261112.json heldout_verdicts). Diagnostic rate rung (129/145/158 Mb/s, not admissible): no crossover in all four models at <= 160 Mb/s; the unencoded export scores 0.762 vs F 1.465."
   },
   "coding_loss": {
     "plan": "Fable 5.2 ranked plan; protocols fixed before outputs",
@@ -237,7 +237,8 @@
       "protocol-bframe-probe-20261112.json",
       "protocol-psy-split-20261112.json",
       "protocol-map-family-20261112.json",
-      "protocol-stack-20261112.json"
+      "protocol-stack-20261112.json",
+      "protocol-beekeeper-rung-20261112.json"
     ],
     "tools": [
       "land_rate.py",

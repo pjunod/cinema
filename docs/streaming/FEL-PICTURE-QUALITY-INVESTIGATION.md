@@ -1,6 +1,6 @@
 # Shadow loss — encoder diagnosis and offline fix tests
 
-**Status:** open — cause identified; zero-mean quantOffsets candidate meets the fixed bar, held-out scene pending · **Date:** 2026-11-11
+**Status:** open — iso-rate recipe NP1/P1 beats F on both Michael windows; held-out Beekeeper still loses at ≤160 Mb/s · **Date:** 2026-11-12
 
 Companion to the [DV processing ledger](DV_HDR_PROCESSING_STATUS.md).
 This is the canonical offline picture-quality investigation record for P02.
@@ -553,7 +553,20 @@ pooled whole-picture mean (ModelB): F 1.465, base 1.562, Z6 1.786, Zfn1
 recipe beats F, and the lighter maps fix fewer shadow frames than Z6 (Z6 38,
 NP1 22, P1 24 of 48). Here F's error, the EL's worth, is about 1.5 against
 about 3.2 on Michael. At 130 Mb/s the coding loss exceeds what the EL adds,
-so the confirmation stack fails on the held-out scene.
+so the confirmation stack fails on the held-out scene. The unencoded export
+scores 0.762, so the loss is coding, not reconstruction.
+
+A diagnostic rate rung ([protocol](../../tools/dv_processing/diagnostics/fel_quality/protocol-beekeeper-rung-20261112.json),
+not admissible under the 130 screen; maxrate 160 Mb/s) locates the crossover.
+Pooled mean (ModelB / model A) against F 1.465 / 1.269:
+
+| Recipe | 129 | 145 | 158 Mb/s |
+|---|---:|---:|---:|
+| P0: no map, chroma −9/−12, AQ and psy off | 1.548 / 1.511 | 1.492 / 1.453 | **1.455** / 1.416 |
+| P1: Zfn1 map + the same | 1.587 / 1.549 | 1.525 / 1.486 | 1.482 / 1.443 |
+
+Only P0 at 158 Mb/s passes F, and only in models B–D; model A stays 0.15
+above. There is no crossover in all four models at or below 160 Mb/s.
 
 ## Where this leaves the investigation
 
@@ -592,20 +605,20 @@ never edited. Refused attempts are kept under each root's `logs/`.
 
 ### Next steps
 
-1. **Held-out scene.** Pick a FEL title not used so far. Capture it with the
-   frozen `capture_layers` binary and verify it with
-   `verify_layer_capture.py`. Then run the baseline CLI encode, the
-   `encode_roi_control.py` gates (`none`, `zero`), the arm at the chosen
-   dose (`lumazm`), `qualify_spatial_control.py --qg-size 32`,
-   `prepare_quality.py`/`run_quality.py` and `lattice_eval.py`. Commit a
-   protocol before any output, as every arm here did.
-2. **Product path, if approved.** plurx builds encodes as FFmpeg CLI
-   argument lists, and a per-frame map cannot be passed that way. The fit
-   is an encoder-policy component that attaches the same zero-mean ROI map
-   inside the filter chain, for example a small filter in plurx's shipped
-   FFmpeg. It must be gated by the same byte-identity test as
-   `roi_encode.c` (all-zero map ≡ baseline). It needs its own branch, plan
-   and review.
+1. **Paul's rulings.** psy-off (P1 vs NP1) and whether to build the
+   production path below.
+2. **Product path, if approved.** An encoder-policy component that attaches
+   the Zfn1 map inside plurx's FFmpeg filter chain (it needs the BL planes as
+   a second input), gated by the same all-zero-map byte-identity test. It
+   needs its own branch, plan and review.
+3. **Per-title decision.** Re-encode only when the EL is worth more than the
+   coding loss. F's error needs no encode: well above the coding loss
+   (Michael ≈3.2) re-encode; near it (Beekeeper ≈1.5) serve F. A short trial
+   encode settles the band in between. The GPU served-route gate already
+   makes this call at serve time; a predictor only moves it ahead of the
+   encode, and should use the gate's metric so the two cannot disagree.
+4. **More held-out titles** before trusting the thresholds; these are three
+   windows from two films.
 
 ### Validation limits
 
