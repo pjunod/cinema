@@ -1,12 +1,13 @@
 //! The Analysis consumer of committed copy-range observations.
 //!
 //! Playback and Source copies send [`CompletedCopyRange`] notifications after
-//! their durable commit. This worker coalesces them per exact source, and once
-//! the observed rows cover the whole title it runs the remaining metadata-owned
-//! steps under the existing Analysis lease: one fenced full-source attestation
-//! phase, seal, local blob installation, and the guarded v3 publication through
-//! a publisher job. No step here grants media serving or a Source grant; the
-//! only physical reads are the attestation phase's own exact custody.
+//! their durable commit. This worker coalesces them per exact source. Under the
+//! existing Analysis lease it first fills what playback left unobserved, one
+//! Analysis-owned copy generation per admitted physical phase, and once the
+//! rows cover the whole title it runs the remaining metadata-owned steps: one
+//! fenced full-source attestation phase, seal, local blob installation, and the
+//! guarded v3 publication through a publisher job. No step here grants media
+//! serving or a Source grant; every physical read is a phase's exact custody.
 use super::{physical, CompletedCopyRange, CopyObservationSet};
 use plurx_core::store::analysis_coordination::{
     AnalysisCoordinationClaim, AnalysisCoordinationSource,
@@ -31,9 +32,16 @@ use tokio_util::sync::CancellationToken;
 /// the least recently observed source is the one forgotten.
 const MAX_PENDING_SOURCES: usize = 64;
 
+/// Committed ranges of one working source held until its unit returns. A later
+/// commit of the same range supersedes its earlier one; past this many ranges
+/// the oldest is dropped, and its durable manifest remains the record.
+const MAX_DEFERRED_RANGES: usize = 8;
+
 pub(crate) struct PendingSource {
     file: Arc<plurx_core::domain::MediaFile>,
     set: CopyObservationSet,
+    /// The recipe of the most recent range; a gap fill repeats it.
+    recipe: super::CopyRecipe,
     /// The most recent Source authority this source was observed under. It
     /// joins the coordinator as metadata demand only, never as a read grant.
     interest: plurx_core::store::analysis_coordination::AnalysisSourceInterestAuthority,
@@ -46,6 +54,8 @@ pub(crate) struct PendingSource {
 #[derive(Default)]
 pub(crate) struct PendingSources {
     sources: HashMap<String, PendingSource>,
+    /// Sources a unit is working now, with the ranges committed meanwhile.
+    working: HashMap<String, Vec<CompletedCopyRange>>,
 }
 
 impl PendingSources {
@@ -58,6 +68,14 @@ impl PendingSources {
         ) else {
             return;
         };
+        if let Some(deferred) = self.working.get_mut(&key) {
+            deferred.retain(|held| held.range_id != message.range_id);
+            if deferred.len() >= MAX_DEFERRED_RANGES {
+                deferred.remove(0);
+            }
+            deferred.push(message);
+            return;
+        }
         let super::CopyObservationAuthority::Source { authority, .. } = &message.authority;
         let interest = authority.clone();
         if let Some(pending) = self.sources.get_mut(&key) {
@@ -72,12 +90,13 @@ impl PendingSources {
             } else {
                 pending.observed = Instant::now();
                 pending.interest = interest;
+                pending.recipe = message.recipe;
             }
             return;
         }
         match CopyObservationSet::new(&message) {
             Ok(set) => {
-                if self.sources.len() >= MAX_PENDING_SOURCES {
+                if self.sources.len() + self.working.len() >= MAX_PENDING_SOURCES {
                     if let Some(oldest) = self
                         .sources
                         .iter()
@@ -92,6 +111,7 @@ impl PendingSources {
                     PendingSource {
                         file: Arc::clone(&message.file),
                         set,
+                        recipe: message.recipe,
                         interest,
                         observed: Instant::now(),
                         retry_after: None,
@@ -107,18 +127,48 @@ impl PendingSources {
         }
     }
 
-    /// Complete sets that may be attempted now.
-    fn ready(&self, now: Instant) -> Vec<String> {
+    /// Hand every set that may be attempted now to its own unit. An
+    /// incomplete set is attempted too: its gaps are filled when the store
+    /// admits a physical phase for it.
+    fn start_ready(&mut self, now: Instant) -> Vec<(String, PendingSource)> {
         let mut keys = self
             .sources
             .iter()
             .filter(|(_, pending)| {
-                pending.set.is_complete() && pending.retry_after.is_none_or(|at| at <= now)
+                (cfg!(unix) || pending.set.is_complete())
+                    && pending.retry_after.is_none_or(|at| at <= now)
             })
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         keys.sort();
-        keys
+        keys.into_iter()
+            .filter_map(|key| {
+                let source = self.sources.remove(&key)?;
+                self.working.insert(key.clone(), Vec::new());
+                Some((key, source))
+            })
+            .collect()
+    }
+
+    /// A unit returned its source. A set that may still seal waits for a later
+    /// wake; then every range committed while it worked folds in.
+    fn settle(
+        &mut self,
+        key: String,
+        source: Option<PendingSource>,
+        attempt: &Attempt,
+        retry: Duration,
+    ) {
+        let deferred = self.working.remove(&key).unwrap_or_default();
+        if let Some(mut source) =
+            source.filter(|_| matches!(attempt, Attempt::Busy | Attempt::Retry(_)))
+        {
+            source.retry_after = Some(Instant::now() + retry);
+            self.sources.insert(key, source);
+        }
+        for message in deferred {
+            self.observe(message);
+        }
     }
 }
 
@@ -147,57 +197,64 @@ enum Attempt {
     Discard(String),
 }
 
-/// One dispatcher pass. Single-flight is the registry's: a pass already
-/// running leaves new notifications in the bounded inbox for itself.
+/// One dispatcher pass: fold the inbox, then give each ready source its own
+/// unit. A unit's gap fill can wait on a paused byte budget for as long as a
+/// viewer needs the disk; it holds only its own source, so every other source
+/// keeps folding, sealing and publishing, and the inbox drains on every wake.
+/// A source has at most one unit; its unit is its single flight.
 pub(crate) async fn work_copy_observations(
     registry: &super::CopyAnalysisRegistry,
-    context: &CopyAnalysisContext,
-) -> bool {
-    let Some(mut pending) = registry.begin_pass() else {
-        return false;
-    };
-    for message in registry.take_pending() {
-        pending.observe(message);
-    }
-    let mut progressed = false;
-    for key in pending.ready(Instant::now()) {
-        let Some(source) = pending.sources.get(&key) else {
-            continue;
-        };
-        let attempt = publish_source(context, &key, source).await;
-        match attempt {
-            Attempt::Done => {
-                progressed = true;
-                pending.sources.remove(&key);
-            }
-            Attempt::Busy => {
-                if let Some(source) = pending.sources.get_mut(&key) {
-                    source.retry_after = Some(
-                        Instant::now() + Duration::from_millis(context.retry_ms.max(1_000) as u64),
-                    );
-                }
-            }
-            Attempt::Retry(reason) => {
-                tracing::warn!(%reason, "copy index publication will retry");
-                if let Some(source) = pending.sources.get_mut(&key) {
-                    source.retry_after = Some(
-                        Instant::now() + Duration::from_millis(context.retry_ms.max(1_000) as u64),
-                    );
-                }
-            }
-            Attempt::Discard(reason) => {
-                tracing::warn!(%reason, "copy observations cannot seal this source");
-                pending.sources.remove(&key);
-            }
+    context: Arc<CopyAnalysisContext>,
+) {
+    let pending = registry.pending();
+    let units = {
+        let mut sources = pending.lock().await;
+        for message in registry.take_pending() {
+            sources.observe(message);
         }
+        sources.start_ready(Instant::now())
+    };
+    let retry = Duration::from_millis(context.retry_ms.max(1_000) as u64);
+    for (key, mut source) in units {
+        let pending = Arc::clone(&pending);
+        let context = Arc::clone(&context);
+        let unit_key = key.clone();
+        let unit = tokio::spawn(async move {
+            let attempt = publish_source(&context, &unit_key, &mut source).await;
+            (source, attempt)
+        });
+        tokio::spawn(async move {
+            // A unit that panicked still returns its key, so the source is
+            // never left marked as working with nothing working it.
+            let returned = unit.await;
+            let mut sources = pending.lock().await;
+            match returned {
+                Ok((source, attempt)) => {
+                    match &attempt {
+                        Attempt::Done | Attempt::Busy => {}
+                        Attempt::Retry(reason) => {
+                            tracing::warn!(%reason, "copy index publication will retry");
+                        }
+                        Attempt::Discard(reason) => {
+                            tracing::warn!(%reason, "copy observations cannot seal this source");
+                        }
+                    }
+                    sources.settle(key, Some(source), &attempt, retry);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "copy analysis unit ended abnormally");
+                    let attempt = Attempt::Discard("unit ended abnormally".into());
+                    sources.settle(key, None, &attempt, retry);
+                }
+            }
+        });
     }
-    progressed
 }
 
 async fn publish_source(
     context: &CopyAnalysisContext,
     key: &str,
-    pending: &PendingSource,
+    pending: &mut PendingSource,
 ) -> Attempt {
     let source = pending.set.source().clone();
     if source.origin_node_id != context.node_id {
@@ -211,8 +268,27 @@ async fn publish_source(
         {
             return Attempt::Done;
         }
+        // A quarantine moved this source to its repair generation; these
+        // observations belong to the old one. Known before any read.
+        Ok(Some(head)) if head.desired_generation != source.requested_generation => {
+            return Attempt::Discard("head desires another generation".into());
+        }
         Ok(_) => {}
         Err(error) => return Attempt::Retry(error.to_string()),
+    }
+    // An incomplete set needs a physical phase, which the store admits only
+    // while the source domain is idle. While a viewer holds it, a read-only
+    // look answers without enqueueing, claiming or charging anything.
+    if !pending.set.is_complete() {
+        match context
+            .store
+            .foreground_source_pressure(source.file_id, crate::state::clock_ms())
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => return Attempt::Busy,
+            Err(error) => return Attempt::Retry(error.to_string()),
+        }
     }
     let request = match coordination_request(context, &pending.file, &source).await {
         Ok(Some(request)) => request,
@@ -256,7 +332,10 @@ async fn publish_source(
     let stop = CancellationToken::new();
     let lost = CancellationToken::new();
     let heartbeat = heartbeat(context, &claimed, stop.clone(), lost.clone());
-    let outcome = publish_claimed(context, key, pending, &source, &claim, &claimed, &lost).await;
+    let outcome = match fill_gaps(context, pending, &source, &claim, &claimed, &lost).await {
+        Ok(()) => publish_claimed(context, key, pending, &source, &claim, &claimed, &lost).await,
+        Err(attempt) => Err(attempt),
+    };
     // Retire the heartbeat before the outcome write, as the legacy worker does.
     stop.cancel();
     let _ = heartbeat.await;
@@ -287,6 +366,122 @@ async fn publish_source(
             }
             attempt
         }
+    }
+}
+
+/// Fill every unobserved span of this source, earliest first. Each generation
+/// runs inside its own physical phase: the store's capacity clause admits one
+/// only while the source domain is idle, and foreground pressure pauses the
+/// phase's byte budget. The rows enter the same observation set as playback
+/// rows, so an overlap that differs discards the set instead of sealing it.
+#[cfg(unix)]
+async fn fill_gaps(
+    context: &CopyAnalysisContext,
+    pending: &mut PendingSource,
+    source: &AnalysisCoordinationSource,
+    claim: &AnalysisCoordinationClaim,
+    request: &AnalysisRequest,
+    lost: &CancellationToken,
+) -> Result<(), Attempt> {
+    use crate::copyrange::{fill_copy_gap, CopyGapFill, CopyGapFillError};
+    while let Some(gap) = pending.set.first_gap() {
+        if lost.is_cancelled() {
+            return Err(Attempt::Busy);
+        }
+        if crate::fragindex::identity_for(&pending.file, pending.recipe.video).argv_fingerprint
+            != source.video_identity
+        {
+            return Err(Attempt::Discard(
+                "copy recipe is not this source's video identity".into(),
+            ));
+        }
+        let active =
+            physical::ActivePhase::begin(&context.store, source, claim.clone(), request, lost)
+                .await
+                .map_err(Attempt::Retry)?
+                .ok_or(Attempt::Busy)?;
+        let filled = fill_copy_gap(
+            CopyGapFill {
+                file: &pending.file,
+                recipe: &pending.recipe,
+                phase: &active.phase,
+                init_contract_sha256: pending.set.init_contract_sha256(),
+                canonical_title_start: pending.set.canonical_title_start(),
+                timescale: pending.set.timescale(),
+                gap,
+                max_rows: plurx_core::store::MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES / 28,
+                runtime_cache: &context.cache_dir,
+                stop: &active.cancel,
+            },
+            || {
+                let file = Arc::clone(&pending.file);
+                let budget = Arc::clone(&active.budget);
+                let object_version = source.object_version.clone();
+                async move {
+                    // The scanner facts and the exact held object are checked
+                    // again for every Input this phase opens.
+                    let held = crate::fragment_index_cluster::open_source_fence(
+                        &file,
+                        Some(&object_version),
+                    )
+                    .await?;
+                    crate::source_input::SourceInput::open_background_held(
+                        held,
+                        crate::http::stream::file_content_type(&file.path),
+                        budget,
+                    )
+                    .await
+                }
+            },
+        )
+        .await;
+        let phase = active.phase.clone();
+        // The generation returned only after its children, pipe tasks and
+        // Inputs joined, so this phase's custody can settle as joined.
+        active.finish(&context.store).await;
+        let rows = filled.map_err(|error| match error {
+            CopyGapFillError::Failed(reason) => Attempt::Retry(reason),
+            CopyGapFillError::Contradicted(reason) | CopyGapFillError::Refused(reason) => {
+                Attempt::Discard(reason)
+            }
+        })?;
+        let observed = rows.rows.len();
+        pending
+            .set
+            .observe_analysis(&phase, &rows)
+            .map_err(|error| Attempt::Discard(format!("analysis rows: {error:?}")))?;
+        // Fresh rows make this the most recently observed source, never the
+        // first one forgotten.
+        pending.observed = Instant::now();
+        if pending.set.first_gap() == Some(gap) {
+            return Err(Attempt::Retry("copy gap fill left its gap open".into()));
+        }
+        tracing::info!(
+            file_id = source.file_id,
+            request_id = %phase.claim.request_id,
+            phase_sequence = phase.phase_sequence,
+            observed,
+            total = pending.set.observed_rows(),
+            "copy index gap filled by an Analysis generation"
+        );
+    }
+    Ok(())
+}
+
+/// The copy engine is not built here; only whole-title playback seals.
+#[cfg(not(unix))]
+async fn fill_gaps(
+    _context: &CopyAnalysisContext,
+    pending: &mut PendingSource,
+    _source: &AnalysisCoordinationSource,
+    _claim: &AnalysisCoordinationClaim,
+    _request: &AnalysisRequest,
+    _lost: &CancellationToken,
+) -> Result<(), Attempt> {
+    if pending.set.is_complete() {
+        Ok(())
+    } else {
+        Err(Attempt::Busy)
     }
 }
 
@@ -417,7 +612,10 @@ async fn publish_claimed(
     if lost.is_cancelled() {
         return Err(Attempt::Busy);
     }
-    let index = pending
+    let super::SealedCopyIndex {
+        index,
+        init_contract_sha256: init_contract,
+    } = pending
         .set
         .seal(&verified)
         .map_err(|error| Attempt::Discard(format!("{error:?}")))?;
@@ -425,10 +623,9 @@ async fn publish_claimed(
     let engine = FragmentIndexEngineProvenance {
         engine_sha256: crate::ffmpeg::fragment_index_engine_digest().await,
         pipeline_sha256: hex::encode(Sha256::digest(
-            format!("plurx/copy-analysis/pipeline/v1\0{}", source.video_identity).as_bytes(),
+            format!("plurx/copy-analysis/pipeline/v2\0{}", source.video_identity).as_bytes(),
         )),
     };
-    let init_contract = pending.set.init_contract_sha256().to_owned();
     let blob = plurx_core::store::encode_cluster_fragment_index_blob_v3(
         &index,
         &source_sha256,
