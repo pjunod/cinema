@@ -249,6 +249,7 @@ impl InvitationStore for HiqliteAuthStore {
         let reference = r.reference.encode()?;
         Ok(self
             .execute(
+                "confirm_invitation_transport",
                 CONFIRM,
                 params!(
                     r.phone_id,
@@ -412,7 +413,8 @@ impl InvitationStore for HiqliteAuthStore {
         } else {
             "UPDATE invitation_broker_revocations SET attempts=min(attempts+1,9007199254740991) WHERE id=$1"
         };
-        self.execute(query, params!(id)).await?;
+        self.execute("record_invitation_revocation", query, params!(id))
+            .await?;
         Ok(())
     }
     async fn attempt_invitation(&self, r: AdmitInvitation) -> Result<bool, StoreError> {
@@ -455,7 +457,8 @@ impl InvitationStore for HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         validate_invitation_ids(&[id], 1)?;
         let id = id.to_owned();
-        self.execute(FINISH, params!(id, outcome.as_str())).await?;
+        self.execute("finish_invitation", FINISH, params!(id, outcome.as_str()))
+            .await?;
         Ok(())
     }
 
@@ -494,7 +497,11 @@ impl InvitationStore for HiqliteAuthStore {
             return Err(StoreError::Identity("invalid phone rebind".into()));
         }
         Ok(self
-            .execute(REBIND, params!(digest, id, user, hash, expected))
+            .execute(
+                "rebind_invitation_phone",
+                REBIND,
+                params!(digest, id, user, hash, expected),
+            )
             .await?
             > 0)
     }
@@ -646,6 +653,7 @@ impl InvitationStore for HiqliteAuthStore {
         let p = n.phone;
         Ok(self
             .execute(
+                "create_invitation_phone",
                 CREATE_PHONE,
                 params!(
                     p.id,
@@ -725,6 +733,7 @@ impl InvitationStore for HiqliteAuthStore {
         }
         Ok(self
             .execute(
+                "set_invitation_availability",
                 AVAILABILITY,
                 params!(
                     i64::from(permission),
@@ -739,13 +748,15 @@ impl InvitationStore for HiqliteAuthStore {
             > 0)
     }
     async fn revoke_invitation_phone(&self, id: &str, user: i64) -> Result<(), StoreError> {
-        self.execute(DELETE_PHONE, params!(id, user)).await?;
+        self.execute("revoke_invitation_phone", DELETE_PHONE, params!(id, user))
+            .await?;
         Ok(())
     }
     async fn save_invitation_consent(&self, r: SaveInvitationConsent) -> Result<bool, StoreError> {
         r.validate()?;
         Ok(if let Some((gid, gh, transport)) = r.enable {
             self.execute(
+                "save_invitation_consent",
                 CONSENT_ENABLE,
                 params!(
                     r.id,
@@ -764,6 +775,7 @@ impl InvitationStore for HiqliteAuthStore {
                 > 0
         } else {
             self.execute(
+                "save_invitation_consent",
                 CONSENT_DISABLE,
                 params!(
                     r.phone_id,

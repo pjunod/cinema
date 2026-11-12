@@ -89,20 +89,27 @@ impl JellyfinLoginStore for HiqliteAuthStore {
         generation: &str,
     ) -> Result<bool, StoreError> {
         super::jellyfin_login::validate_generation(generation)?;
-        self.replace_jellyfin_login_inner(w, claim, Some(generation))
-            .await
+        self.replace_jellyfin_login_inner(
+            "replace_jellyfin_login_if_enabled",
+            w,
+            claim,
+            Some(generation),
+        )
+        .await
     }
     async fn replace_jellyfin_login(
         &self,
         w: JellyfinLoginWrite,
         claim: Option<&CacheAdminMutationClaim>,
     ) -> Result<bool, StoreError> {
-        self.replace_jellyfin_login_inner(w, claim, None).await
+        self.replace_jellyfin_login_inner("replace_jellyfin_login", w, claim, None)
+            .await
     }
 }
 impl HiqliteAuthStore {
     async fn replace_jellyfin_login_inner(
         &self,
+        method: &'static str,
         w: JellyfinLoginWrite,
         claim: Option<&CacheAdminMutationClaim>,
         generation: Option<&str>,
@@ -158,7 +165,7 @@ impl HiqliteAuthStore {
             };
             statements[0].1.push(generation.to_owned().into());
         }
-        let changed = self.credential_mutation(statements).await?;
+        let changed = self.credential_mutation(method, statements).await?;
         Ok(changed[0] > 0 && changed[2] > 0)
     }
 }

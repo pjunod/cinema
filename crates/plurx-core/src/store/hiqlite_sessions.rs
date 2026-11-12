@@ -384,7 +384,6 @@ impl From<&mut Row<'_>> for LayoutGuardRow {
     }
 }
 async fn session_layout(
-    method: &'static str,
     store: &HiqliteAuthStore,
     refresh: bool,
 ) -> Result<SessionLayout, StoreError> {
@@ -402,7 +401,7 @@ async fn session_layout(
         .client()
         // authority: read the committed layout before choosing authority predicates.
         .query_consistent_map::<LayoutVersionRow, _>(
-            method,
+            "session_layout",
             "SELECT schema_version AS version FROM cluster_meta WHERE singleton=1",
             params!(),
         )
@@ -439,7 +438,7 @@ async fn session_layout(
         .client()
         // authority: prove the committed session shape before decoding authoritative rows.
         .query_consistent_map::<LayoutGuardRow, _>(
-            method,
+            "session_layout",
             format!("SELECT CASE WHEN ({guard}) THEN 1 ELSE 0 END AS valid"),
             params!(),
         )
@@ -456,7 +455,7 @@ async fn session_layout(
                 .client()
                 // authority: recheck a concurrent layout transition before accepting its shape.
                 .query_consistent_map::<LayoutVersionRow, _>(
-                    method,
+                    "session_layout",
                     "SELECT schema_version AS version FROM cluster_meta WHERE singleton=1",
                     params!(),
                 )
@@ -471,7 +470,7 @@ async fn session_layout(
                     .client()
                     // authority: prove the installed shape after the marker advances.
                     .query_consistent_map::<LayoutGuardRow, _>(
-                        method,
+                        "session_layout",
                         format!("SELECT CASE WHEN ({guard}) THEN 1 ELSE 0 END AS valid"),
                         params!(),
                     )
@@ -649,7 +648,7 @@ impl SessionClient<'_> {
         S: Into<std::borrow::Cow<'static, str>>,
     {
         let template = sql.into();
-        let layout = session_layout(method, self.store, false).await?;
+        let layout = session_layout(self.store, false).await?;
         let result = self
             .store
             .client()
@@ -661,7 +660,7 @@ impl SessionClient<'_> {
             )
             .await;
         if layout == SessionLayout::Legacy
-            && session_layout(method, self.store, true).await? == SessionLayout::Principal
+            && session_layout(self.store, true).await? == SessionLayout::Principal
         {
             // Mapping errors and empty results are buffered too: legacy route
             // projection may have observed a Shared row after the migration.
@@ -725,12 +724,12 @@ impl SessionClient<'_> {
             .into_iter()
             .map(|(sql, bindings)| (sql.into(), bindings))
             .collect::<Vec<_>>();
-        let layout = session_layout(method, self.store, false).await?;
+        let layout = session_layout(self.store, false).await?;
         if let Some(result) = self.attempt(method, &templates, layout).await? {
             return Ok(result);
         }
         if layout != SessionLayout::Legacy
-            || session_layout(method, self.store, true).await? != SessionLayout::Principal
+            || session_layout(self.store, true).await? != SessionLayout::Principal
         {
             return Err(StoreError::Task(
                 "guarded session proposal refused its layout".into(),
@@ -768,7 +767,7 @@ impl SessionClient<'_> {
 }
 
 async fn route_projection(store: &HiqliteAuthStore) -> Result<&'static str, StoreError> {
-    match session_layout("route_projection", store, false).await? {
+    match session_layout(store, false).await? {
         SessionLayout::Legacy => Ok(LEGACY_ROUTE_COLS),
         SessionLayout::Principal => Ok(PRINCIPAL_ROUTE_COLS),
     }
@@ -1039,6 +1038,7 @@ const STAGED_COLS: &str = "playback_id, staged_incarnation_id,
 /// answer. `predecessor` is `None` because the retirement it reports belongs
 /// to the transaction that actually ran.
 async fn commit_replay(
+    method: &'static str,
     store: &HiqliteAuthStore,
     user_id: i64,
     playback_id: &str,
@@ -1049,7 +1049,7 @@ async fn commit_replay(
     let pointer = store
         .session_client()
         .query_consistent_map::<PointerRow, _>(
-            "commit_replay",
+            method,
             format!(
                 "SELECT current_incarnation_id FROM media_playback_pointers
               WHERE {} AND playback_id = $2",
@@ -1068,7 +1068,7 @@ async fn commit_replay(
         let stored = store
             .session_client()
             .query_consistent_map::<TerminalAckRow, _>(
-                "commit_replay",
+                method,
                 "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
                         client_instance_id, sequence, request_fingerprint, response_json,
                         expires_at_ms, updated_at_ms
@@ -1086,21 +1086,19 @@ async fn commit_replay(
     } else {
         None
     };
-    Ok(route_by(
-        "commit_replay",
-        store,
-        "incarnation_id",
-        staged_incarnation_id,
+    Ok(
+        route_by(method, store, "incarnation_id", staged_incarnation_id)
+            .await?
+            .filter(|route| {
+                route.principal
+                    == crate::playback_principal::PlaybackPrincipal::LocalUser { user_id }
+            })
+            .map(|route| crate::domain::MediaSessionPreparationCommit {
+                route,
+                predecessor: None,
+                control_receipt,
+            }),
     )
-    .await?
-    .filter(|route| {
-        route.principal == crate::playback_principal::PlaybackPrincipal::LocalUser { user_id }
-    })
-    .map(|route| crate::domain::MediaSessionPreparationCommit {
-        route,
-        predecessor: None,
-        control_receipt,
-    }))
 }
 
 /// Classify a replicated commit proposal whose pointer CAS did not emit a
@@ -1109,12 +1107,14 @@ async fn commit_replay(
 /// by an explicit abort; a takeover therefore retains the old owner's ledger,
 /// while an expired preparation or moved pointer cannot strand the slot.
 async fn classify_preparation_commit_cas_loss(
+    method: &'static str,
     store: &HiqliteAuthStore,
     user_id: i64,
     playback_id: &str,
     request: &MediaSessionPreparationCommitRequest,
 ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError> {
     if let Some(replay) = commit_replay(
+        method,
         store,
         user_id,
         playback_id,
@@ -1143,6 +1143,7 @@ async fn classify_preparation_commit_cas_loss(
 }
 
 async fn staged_row(
+    method: &'static str,
     store: &HiqliteAuthStore,
     principal: &crate::playback_principal::PlaybackPrincipal,
     playback_id: &str,
@@ -1159,7 +1160,7 @@ async fn staged_row(
     let result = store
         .session_client()
         // authority: current staged owner is required before publishing a preparation response.
-        .query_consistent_map::<StagedRow, _>("staged_row", sql, bindings)
+        .query_consistent_map::<StagedRow, _>(method, sql, bindings)
         .await?
         .into_iter()
         .next()
@@ -1185,24 +1186,28 @@ async fn staged_row(
 /// retained ownership, and a genuinely lost named row without trusting a
 /// caller-supplied timestamp.
 async fn classify_rejoin_after_attempt(
+    method: &'static str,
     store: &HiqliteAuthStore,
     staged_incarnation_id: &str,
     preparation: &crate::domain::MediaSessionPreparation,
 ) -> Result<Option<MediaSessionRoute>, StoreError> {
-    let staged = staged_row(store, &preparation.principal, &preparation.playback_id).await?;
+    let staged = staged_row(
+        method,
+        store,
+        &preparation.principal,
+        &preparation.playback_id,
+    )
+    .await?;
     if staged.as_ref().is_some_and(|staged| {
         staged.staged_incarnation_id == preparation.incarnation_id
             && staged.expected_predecessor_incarnation_id
                 == preparation.expected_predecessor_incarnation_id
     }) {
-        return Ok(route_by(
-            "classify_rejoin_after_attempt",
-            store,
-            "incarnation_id",
-            &preparation.incarnation_id,
-        )
-        .await?
-        .filter(|route| preparation_route_matches(route, preparation)));
+        return Ok(
+            route_by(method, store, "incarnation_id", &preparation.incarnation_id)
+                .await?
+                .filter(|route| preparation_route_matches(route, preparation)),
+        );
     }
     if staged
         .as_ref()
@@ -2199,6 +2204,7 @@ async fn request_row(
 }
 
 async fn claim_from_row(
+    method: &'static str,
     store: &HiqliteAuthStore,
     row: RequestState,
     fingerprint: &str,
@@ -2208,14 +2214,7 @@ async fn claim_from_row(
         return Ok(MediaSessionRequestClaim::Conflict);
     }
     if row.state == "resolved" {
-        if let Some(route) = route_by(
-            "claim_from_row",
-            store,
-            "incarnation_id",
-            &row.incarnation_id,
-        )
-        .await?
-        {
+        if let Some(route) = route_by(method, store, "incarnation_id", &row.incarnation_id).await? {
             if route.principal != row.principal {
                 return Ok(MediaSessionRequestClaim::Conflict);
             }
@@ -2234,6 +2233,7 @@ async fn claim_from_row(
 
 #[allow(clippy::too_many_arguments)]
 async fn claim_existing_or_reacquire(
+    method: &'static str,
     store: &HiqliteAuthStore,
     row: RequestState,
     user_id: i64,
@@ -2253,7 +2253,7 @@ async fn claim_existing_or_reacquire(
         let existing_user = ownership.existing_user(4);
         let reacquired = store
             .session_client()
-            .execute("claim_existing_or_reacquire",
+            .execute(method,
                 format!(
                     "UPDATE media_session_requests
                     SET state = 'starting', claim_expires_at_ms = $1,
@@ -2296,7 +2296,7 @@ async fn claim_existing_or_reacquire(
                 incarnation_id: incarnation_id.to_owned(),
             });
         }
-        return match request_row("claim_existing_or_reacquire", store, user_id, request_id).await? {
+        return match request_row(method, store, user_id, request_id).await? {
             Some(current)
                 if (current.state == "failed"
                     || (current.state == "starting" && current.claim_expires_at_ms <= now_ms))
@@ -2305,11 +2305,11 @@ async fn claim_existing_or_reacquire(
             {
                 Ok(MediaSessionRequestClaim::Overloaded)
             }
-            Some(current) => claim_from_row(store, current, fingerprint, playback_id).await,
+            Some(current) => claim_from_row(method, store, current, fingerprint, playback_id).await,
             None => Ok(MediaSessionRequestClaim::Overloaded),
         };
     }
-    claim_from_row(store, row, fingerprint, playback_id).await
+    claim_from_row(method, store, row, fingerprint, playback_id).await
 }
 
 async fn activate_with_authority(
@@ -2319,8 +2319,7 @@ async fn activate_with_authority(
     authority: Option<&crate::sharing_source_sessions::SourceSessionWriteAuthority>,
     receiver: Option<&crate::sharing_receiver_sessions::ReceiverSessionWriteAuthority>,
 ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
-    if authority.is_some() && session_layout(method, store, true).await? != SessionLayout::Principal
-    {
+    if authority.is_some() && session_layout(store, true).await? != SessionLayout::Principal {
         return Ok(None);
     }
     let local = LocalSessionSql::load(store).await?;
@@ -3028,6 +3027,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             request_row("claim_media_session_request", self, user_id, request_id).await?
         {
             return claim_existing_or_reacquire(
+                "claim_media_session_request",
                 self,
                 row,
                 user_id,
@@ -3096,6 +3096,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             request_row("claim_media_session_request", self, user_id, request_id).await?
         {
             return claim_existing_or_reacquire(
+                "claim_media_session_request",
                 self,
                 row,
                 user_id,
@@ -3291,8 +3292,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         // Replay by exact identity, before anything is attempted. The ledger's
         // primary key would otherwise turn an owner's retry into "you already
         // have one".
-        if let Some(existing) =
-            staged_row(self, &preparation.principal, &preparation.playback_id).await?
+        if let Some(existing) = staged_row(
+            "prepare_media_session",
+            self,
+            &preparation.principal,
+            &preparation.playback_id,
+        )
+        .await?
         {
             if preparation.quality_cancellation_key.is_some() && bindings.is_empty() {
                 return Ok(None);
@@ -3343,7 +3349,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         )
         .await?
         .filter(|route| preparation_route_matches(route, preparation));
-        let staged = staged_row(self, &preparation.principal, &preparation.playback_id).await?;
+        let staged = staged_row(
+            "prepare_media_session",
+            self,
+            &preparation.principal,
+            &preparation.playback_id,
+        )
+        .await?;
         let staged_is_ours = staged.map(|staged| staged.staged_incarnation_id).as_deref()
             == Some(preparation.incarnation_id.as_str());
         let Some(route) = route.filter(|_| staged_is_ours) else {
@@ -3597,7 +3609,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         // A read narrows proposals to either the named occupied slot or an
         // exact replay. Every mutation remains SQL-gated in the proposal, so
         // a commit racing this read makes the observable ledger CAS reject.
-        let existing = staged_row(self, &preparation.principal, &preparation.playback_id).await?;
+        let existing = staged_row(
+            "rejoin_media_session_preparation",
+            self,
+            &preparation.principal,
+            &preparation.playback_id,
+        )
+        .await?;
         let exact_replay = existing.as_ref().is_some_and(|staged| {
             staged.staged_incarnation_id == preparation.incarnation_id
                 && staged.expected_predecessor_incarnation_id
@@ -3765,8 +3783,13 @@ impl MediaSessionStore for HiqliteAuthStore {
                 let assertion_failed = message.contains("media_session_preparations.owner_key")
                     || message.contains("media_session_preparations.user_id");
                 if guarded_step_lost || assertion_failed {
-                    return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation)
-                        .await;
+                    return classify_rejoin_after_attempt(
+                        "rejoin_media_session_preparation",
+                        self,
+                        staged_incarnation_id,
+                        preparation,
+                    )
+                    .await;
                 }
                 return Err(database_error(error));
             }
@@ -3785,8 +3808,13 @@ impl MediaSessionStore for HiqliteAuthStore {
                         .to_string()
                         .contains("media_session_preparations.user_id")
                 {
-                    return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation)
-                        .await;
+                    return classify_rejoin_after_attempt(
+                        "rejoin_media_session_preparation",
+                        self,
+                        staged_incarnation_id,
+                        preparation,
+                    )
+                    .await;
                 }
                 return Err(database_error(error));
             }
@@ -3832,7 +3860,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         // An all-zero replay/loss and a successful proposal whose replacement
         // was already consumed are both settled by the same durable rule:
         // exact staged replay => Some, named retained => Err, neither => None.
-        classify_rejoin_after_attempt(self, staged_incarnation_id, preparation).await
+        classify_rejoin_after_attempt(
+            "rejoin_media_session_preparation",
+            self,
+            staged_incarnation_id,
+            preparation,
+        )
+        .await
     }
 
     async fn staged_media_session_for_playback(
@@ -3845,7 +3879,13 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid staged media-session lookup".to_owned(),
             ));
         }
-        staged_row(self, principal, playback_id).await
+        staged_row(
+            "staged_media_session_for_playback",
+            self,
+            principal,
+            playback_id,
+        )
+        .await
     }
 
     async fn commit_media_session_preparation(
@@ -3883,10 +3923,18 @@ impl MediaSessionStore for HiqliteAuthStore {
         let user_exists_3 = layout.existing_user(3);
         let now_ms = request.now_ms;
         let lease_expires_at_ms = request.lease_expires_at_ms;
-        let Some(staged) = staged_row(self, principal, playback_id).await? else {
+        let Some(staged) = staged_row(
+            "commit_media_session_preparation",
+            self,
+            principal,
+            playback_id,
+        )
+        .await?
+        else {
             // No ledger row. Either it was never staged, or an earlier commit
             // already consumed it — and the pointer is the discriminator.
             return commit_replay(
+                "commit_media_session_preparation",
                 self,
                 user_id,
                 playback_id,
@@ -3903,6 +3951,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             // response read as "you lost" on this backend and "here is your
             // route" on SQLite.
             return commit_replay(
+                "commit_media_session_preparation",
                 self,
                 user_id,
                 playback_id,
@@ -4182,6 +4231,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     .contains("StmtIndex(1) does not have observable row output")
                 {
                     return classify_preparation_commit_cas_loss(
+                        "commit_media_session_preparation",
                         self,
                         user_id,
                         playback_id,
@@ -4200,6 +4250,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     .contains("StmtIndex(1) does not have observable row output")
                 {
                     return classify_preparation_commit_cas_loss(
+                        "commit_media_session_preparation",
                         self,
                         user_id,
                         playback_id,
@@ -4223,7 +4274,14 @@ impl MediaSessionStore for HiqliteAuthStore {
             // output chain still made the proposal mutation-free; exact
             // durable replay wins, otherwise an owner-fenced abort releases a
             // genuinely rejected preparation.
-            return classify_preparation_commit_cas_loss(self, user_id, playback_id, request).await;
+            return classify_preparation_commit_cas_loss(
+                "commit_media_session_preparation",
+                self,
+                user_id,
+                playback_id,
+                request,
+            )
+            .await;
         }
         let pointer = self
             .session_client()
@@ -4340,9 +4398,14 @@ impl MediaSessionStore for HiqliteAuthStore {
         // The projection, not the row counts: an abort that finds the staged
         // row already ended and its ledger row already gone is an idempotent
         // replay and must read the same as the first one.
-        if staged_row(self, principal, playback_id)
-            .await?
-            .is_some_and(|staged| staged.staged_incarnation_id == request.staged_incarnation_id)
+        if staged_row(
+            "abort_media_session_preparation",
+            self,
+            principal,
+            playback_id,
+        )
+        .await?
+        .is_some_and(|staged| staged.staged_incarnation_id == request.staged_incarnation_id)
         {
             return Ok(None);
         }
@@ -6550,6 +6613,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .await
             .map_err(database_error)?;
         let Some(existing) = recovery_row(
+            "reserve_producer_recovery",
             self,
             &request.principal,
             &request.playback_id,
@@ -6638,9 +6702,15 @@ impl MediaSessionStore for HiqliteAuthStore {
             )
             .await
             .map_err(database_error)?;
-        Ok(recovery_row(self, principal, playback_id, recovery_epoch)
-            .await?
-            .filter(|row| row.state == state && row.failed_incarnation_id == failed_incarnation_id))
+        Ok(recovery_row(
+            "settle_producer_recovery",
+            self,
+            principal,
+            playback_id,
+            recovery_epoch,
+        )
+        .await?
+        .filter(|row| row.state == state && row.failed_incarnation_id == failed_incarnation_id))
     }
 
     async fn producer_recovery_for_epoch(
@@ -6659,7 +6729,14 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid recovery principal or epoch key".into(),
             ));
         }
-        recovery_row(self, principal, playback_id, recovery_epoch).await
+        recovery_row(
+            "producer_recovery_for_epoch",
+            self,
+            principal,
+            playback_id,
+            recovery_epoch,
+        )
+        .await
     }
 
     async fn validation_corrupt_recovery_restriction(
@@ -6744,6 +6821,7 @@ const RECOVERY_COLS: &str = "failed_incarnation_id, failed_producer_attempt, dec
     created_at_ms, updated_at_ms";
 
 async fn recovery_row(
+    method: &'static str,
     store: &HiqliteAuthStore,
     principal: &crate::playback_principal::PlaybackPrincipal,
     playback_id: &str,
@@ -6760,7 +6838,7 @@ async fn recovery_row(
     validate_sql(&sql)?;
     let Some(row) = store
         .session_client()
-        .query_consistent_map::<RecoveryRow, _>("recovery_row", sql, bindings)
+        .query_consistent_map::<RecoveryRow, _>(method, sql, bindings)
         .await?
         .into_iter()
         .next()
@@ -6822,9 +6900,7 @@ async fn renew_with_authority(
     if renewals.is_empty() {
         return Ok(Vec::new());
     }
-    if authority.is_some()
-        && session_layout("renew_with_authority", store, true).await? != SessionLayout::Principal
-    {
+    if authority.is_some() && session_layout(store, true).await? != SessionLayout::Principal {
         return Ok(Vec::new());
     }
     let layout = LocalSessionSql::load(store).await?;

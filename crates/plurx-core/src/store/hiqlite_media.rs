@@ -243,6 +243,7 @@ impl From<&mut Row<'_>> for ItemTitleRow {
 impl HiqliteAuthStore {
     pub(super) async fn current_series_hint_outcome(
         &self,
+        method: &'static str,
         library_id: i64,
         show_id: i64,
         tmdb_id: i64,
@@ -250,7 +251,7 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map::<SeriesHintRow, _>(
-                "current_series_hint_outcome",
+                method,
                 "SELECT tmdb_id FROM items
                  WHERE id = $1 AND library_id = $2 AND kind = 'show'",
                 params!(show_id, library_id),
@@ -878,6 +879,7 @@ async fn scalar(
 /// Whether library `library_id`'s configured paths are exactly the JSON set
 /// `configured_paths` — the consistent read behind `ConfigurationChanged`.
 pub(super) async fn library_paths_are(
+    method: &'static str,
     client: &TimedClient,
     library_id: i64,
     configured_paths: &str,
@@ -887,14 +889,7 @@ pub(super) async fn library_paths_are(
         super::library_paths_are_sql("$1", "$2")
     );
     validate_sql(&sql)?;
-    Ok(scalar_with(
-        "library_paths_are",
-        client,
-        sql,
-        params!(library_id, configured_paths),
-    )
-    .await?
-        != 0)
+    Ok(scalar_with(method, client, sql, params!(library_id, configured_paths)).await? != 0)
 }
 
 /// The replicated removal of a library's files `file_ids` (a JSON array),
@@ -1019,13 +1014,14 @@ pub(super) fn root_removal_statements(
 /// means the paths changed — or, if they did not, another operation holds
 /// the library's guard, which is an error like reconcile's.
 pub(super) async fn root_removal_outcome(
+    method: &'static str,
     client: &TimedClient,
     library_id: i64,
     configured_paths: &str,
     results: &[usize],
 ) -> Result<RootRemovalOutcome, StoreError> {
     if results.first().copied() != Some(1) {
-        if !library_paths_are(client, library_id, configured_paths).await? {
+        if !library_paths_are(method, client, library_id, configured_paths).await? {
             return Ok(RootRemovalOutcome::ConfigurationChanged);
         }
         return Err(StoreError::Database(
@@ -1242,7 +1238,8 @@ impl HiqliteAuthStore {
         library_id: Option<i64>,
         limit: i64,
     ) -> Result<Vec<RecentItem>, StoreError> {
-        self.recently_added_window(library_id, limit, true).await
+        self.recently_added_window("local_recently_added", library_id, limit, true)
+            .await
     }
 
     /// `recently_added` from a widening window of the newest rows (K-05
@@ -1252,6 +1249,7 @@ impl HiqliteAuthStore {
     /// the read is consistent (the Authority).
     async fn recently_added_window(
         &self,
+        method: &'static str,
         library_id: Option<i64>,
         limit: i64,
         local: bool,
@@ -1265,7 +1263,7 @@ impl HiqliteAuthStore {
             let rows = if local {
                 self.client()
                     .query_map::<RecentWindowRow, _>(
-                        "recently_added_window",
+                        method,
                         sql.clone(),
                         params!(library_id, window_offset, limit),
                     )
@@ -1273,7 +1271,7 @@ impl HiqliteAuthStore {
             } else {
                 self.client()
                     .query_consistent_map::<RecentWindowRow, _>(
-                        "recently_added_window",
+                        method,
                         sql.clone(),
                         params!(library_id, window_offset, limit),
                     )
@@ -1431,42 +1429,45 @@ impl HiqliteAuthStore {
             .and_then(|row| row.probe_json))
     }
 
-    pub(super) async fn local_media_shape(&self) -> Result<MediaShape, StoreError> {
+    pub(super) async fn local_media_shape(
+        &self,
+        method: &'static str,
+    ) -> Result<MediaShape, StoreError> {
         let probed = local_scalar(
-            "local_media_shape",
+            method,
             self.client(),
             "SELECT COUNT(*) AS value FROM files WHERE video_codec IS NOT NULL",
         )
         .await?;
         let unprobed = local_scalar(
-            "local_media_shape",
+            method,
             self.client(),
             "SELECT COUNT(*) AS value FROM files WHERE video_codec IS NULL",
         )
         .await?;
         let hdr = local_pairs(
-            "local_media_shape",
+            method,
             self.client(),
             "SELECT COALESCE(NULLIF(hdr,''),'sdr') AS label, COUNT(*) AS count \
              FROM files WHERE video_codec IS NOT NULL GROUP BY 1",
         )
         .await?;
         let hdr_4k = local_pairs(
-            "local_media_shape",
+            method,
             self.client(),
             "SELECT COALESCE(NULLIF(hdr,''),'sdr') AS label, COUNT(*) AS count \
              FROM files WHERE video_codec IS NOT NULL AND height >= 1600 GROUP BY 1",
         )
         .await?;
         let codecs = local_pairs(
-            "local_media_shape",
+            method,
             self.client(),
             "SELECT LOWER(video_codec) AS label, COUNT(*) AS count \
              FROM files WHERE video_codec IS NOT NULL GROUP BY 1",
         )
         .await?;
         let over_segmented_floor = local_scalar(
-            "local_media_shape",
+            method,
             self.client(),
             "SELECT COUNT(*) AS value FROM files WHERE bitrate >= 40000000",
         )
@@ -1474,7 +1475,7 @@ impl HiqliteAuthStore {
         let max_bitrate = self
             .client()
             .query_map::<OptionalScalarRow, _>(
-                "local_media_shape",
+                method,
                 "SELECT MAX(bitrate) AS value FROM files",
                 params!(),
             )
@@ -2402,7 +2403,8 @@ impl MediaStore for HiqliteAuthStore {
         library_id: Option<i64>,
         limit: i64,
     ) -> Result<Vec<RecentItem>, StoreError> {
-        self.recently_added_window(library_id, limit, false).await
+        self.recently_added_window("recently_added", library_id, limit, false)
+            .await
     }
 
     async fn search_items(&self, query: &str, limit: i64) -> Result<Vec<RecentItem>, StoreError> {
@@ -2470,7 +2472,7 @@ impl MediaStore for HiqliteAuthStore {
         if !rows.is_empty() {
             return Ok(SeriesHintOutcome::Applied);
         }
-        self.current_series_hint_outcome(library_id, show_id, tmdb_id)
+        self.current_series_hint_outcome("apply_series_tmdb_hint", library_id, show_id, tmdb_id)
             .await
     }
 
@@ -2494,6 +2496,7 @@ impl MediaStore for HiqliteAuthStore {
         };
         let now = self.now()?;
         self.execute(
+            "apply_metadata",
             "UPDATE items SET \
                  title = COALESCE($1, title), \
                  sort_title = COALESCE($2, sort_title), \
@@ -2563,7 +2566,7 @@ impl MediaStore for HiqliteAuthStore {
         };
         let now = self.now()?;
         let changed = self
-            .execute(
+            .execute("apply_metadata_if_artwork_repair_current", 
                 "UPDATE items SET \
                      title = COALESCE($1, title), \
                      sort_title = COALESCE($2, sort_title), \
@@ -2623,7 +2626,7 @@ impl MediaStore for HiqliteAuthStore {
         let sort_title = patch.title.as_deref().map(sort_title_for);
         let source = patch.source.as_str();
         let now = self.now()?;
-        self.execute(
+        self.execute("apply_book_metadata", 
             "UPDATE items SET \
                  title = CASE WHEN ($1 = 'curator' OR book_metadata_source IS NULL \
                                           OR book_metadata_source = 'epub') \
@@ -2703,6 +2706,7 @@ impl MediaStore for HiqliteAuthStore {
             });
         let changed = if let Some(fence) = repair_fence {
             self.execute(
+                "apply_book_metadata_if_current",
                 "UPDATE items SET \
                      title = COALESCE($1, title), \
                      sort_title = COALESCE($2, sort_title), \
@@ -2752,6 +2756,7 @@ impl MediaStore for HiqliteAuthStore {
             .await?
         } else {
             self.execute(
+                "apply_book_metadata_if_current",
                 base_sql,
                 params!(
                     patch.title.as_deref(),
@@ -3023,6 +3028,7 @@ impl MediaStore for HiqliteAuthStore {
     async fn set_nfo_seeded(&self, item_id: i64) -> Result<(), StoreError> {
         let now = self.now()?;
         self.execute(
+            "set_nfo_seeded",
             "UPDATE items SET nfo_seeded_at = $1 WHERE id = $2",
             params!(now, item_id),
         )
@@ -3372,6 +3378,7 @@ impl MediaStore for HiqliteAuthStore {
 
     async fn set_file_audio_offset(&self, file_id: i64, offset_ms: i64) -> Result<(), StoreError> {
         self.execute(
+            "set_file_audio_offset",
             "UPDATE files SET audio_offset_ms = $1 WHERE id = $2",
             params!(offset_ms, file_id),
         )
@@ -3875,6 +3882,7 @@ impl MediaStore for HiqliteAuthStore {
         chapters_json: &str,
     ) -> Result<(), StoreError> {
         self.execute(
+            "merge_file_probe_chapters",
             "UPDATE files SET probe_json = json_set(probe_json, '$.chapters', json($1)) \
              WHERE id = $2 AND probe_json IS NOT NULL",
             params!(chapters_json, file_id),
@@ -3992,7 +4000,14 @@ impl MediaStore for HiqliteAuthStore {
         if inserted == 1 {
             return Ok(RootFingerprintStatus::Established);
         }
-        if !library_paths_are(self.client(), library_id, &configured_paths).await? {
+        if !library_paths_are(
+            "ensure_library_root_fingerprint",
+            self.client(),
+            library_id,
+            &configured_paths,
+        )
+        .await?
+        {
             return Ok(RootFingerprintStatus::ConfigurationChanged);
         }
         let expected = self
@@ -4217,12 +4232,20 @@ impl MediaStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        root_removal_outcome(self.client(), library_id, &configured_paths, &results).await
+        root_removal_outcome(
+            "remove_files_outside_library_roots",
+            self.client(),
+            library_id,
+            &configured_paths,
+            &results,
+        )
+        .await
     }
 
     async fn reset_library_root_fingerprint(&self, library_id: i64) -> Result<bool, StoreError> {
         Ok(self
             .execute(
+                "reset_library_root_fingerprint",
                 "DELETE FROM library_roots WHERE library_id = $1",
                 params!(library_id),
             )
@@ -4426,7 +4449,7 @@ impl WatchStore for HiqliteAuthStore {
         user_id: i64,
         item_ids: &[i64],
     ) -> Result<Vec<(i64, WatchState)>, StoreError> {
-        self.read_watch_map(WatchRead::Authority, user_id, item_ids)
+        self.read_watch_map("watch_map", WatchRead::Authority, user_id, item_ids)
             .await
     }
 
@@ -4656,7 +4679,7 @@ impl WatchStore for HiqliteAuthStore {
     }
 
     async fn watch_rollup(&self, user_id: i64, item_id: i64) -> Result<WatchRollup, StoreError> {
-        self.read_watch_rollup(WatchRead::Authority, user_id, item_id)
+        self.read_watch_rollup("watch_rollup", WatchRead::Authority, user_id, item_id)
             .await
     }
 
@@ -4665,7 +4688,7 @@ impl WatchStore for HiqliteAuthStore {
         user_id: i64,
         ids: &[i64],
     ) -> Result<HashMap<i64, WatchRollup>, StoreError> {
-        self.read_watch_rollups(WatchRead::Authority, user_id, ids)
+        self.read_watch_rollups("watch_rollups", WatchRead::Authority, user_id, ids)
             .await
     }
 
@@ -4674,12 +4697,12 @@ impl WatchStore for HiqliteAuthStore {
         user_id: i64,
         limit: i64,
     ) -> Result<Vec<InProgressItem>, StoreError> {
-        self.read_continue_watching(WatchRead::Authority, user_id, limit)
+        self.read_continue_watching("continue_watching", WatchRead::Authority, user_id, limit)
             .await
     }
 
     async fn next_up(&self, user_id: i64, limit: i64) -> Result<Vec<RecentItem>, StoreError> {
-        self.read_next_up(WatchRead::Authority, user_id, limit)
+        self.read_next_up("next_up", WatchRead::Authority, user_id, limit)
             .await
     }
 
@@ -4689,12 +4712,18 @@ impl WatchStore for HiqliteAuthStore {
         item_ids: &[i64],
         container_ids: &[i64],
     ) -> Result<WatchSummary, StoreError> {
-        self.read_watch_summary(WatchRead::Authority, user_id, item_ids, container_ids)
-            .await
+        self.read_watch_summary(
+            "watch_summary",
+            WatchRead::Authority,
+            user_id,
+            item_ids,
+            container_ids,
+        )
+        .await
     }
 
     async fn progress_rails(&self, user_id: i64, limit: i64) -> Result<ProgressRails, StoreError> {
-        self.read_progress_rails(WatchRead::Authority, user_id, limit)
+        self.read_progress_rails("progress_rails", WatchRead::Authority, user_id, limit)
             .await
     }
 
@@ -4816,7 +4845,7 @@ impl HiqliteAuthStore {
         user_id: i64,
         item_ids: &[i64],
     ) -> Result<Vec<(i64, WatchState)>, StoreError> {
-        self.read_watch_map(WatchRead::Local, user_id, item_ids)
+        self.read_watch_map("local_watch_map", WatchRead::Local, user_id, item_ids)
             .await
     }
 
@@ -4825,7 +4854,7 @@ impl HiqliteAuthStore {
         user_id: i64,
         item_id: i64,
     ) -> Result<WatchRollup, StoreError> {
-        self.read_watch_rollup(WatchRead::Local, user_id, item_id)
+        self.read_watch_rollup("local_watch_rollup", WatchRead::Local, user_id, item_id)
             .await
     }
 
@@ -4835,8 +4864,14 @@ impl HiqliteAuthStore {
         item_ids: &[i64],
         container_ids: &[i64],
     ) -> Result<WatchSummary, StoreError> {
-        self.read_watch_summary(WatchRead::Local, user_id, item_ids, container_ids)
-            .await
+        self.read_watch_summary(
+            "local_watch_summary",
+            WatchRead::Local,
+            user_id,
+            item_ids,
+            container_ids,
+        )
+        .await
     }
 
     pub(super) async fn local_progress_rails(
@@ -4844,12 +4879,13 @@ impl HiqliteAuthStore {
         user_id: i64,
         limit: i64,
     ) -> Result<ProgressRails, StoreError> {
-        self.read_progress_rails(WatchRead::Local, user_id, limit)
+        self.read_progress_rails("local_progress_rails", WatchRead::Local, user_id, limit)
             .await
     }
 
     async fn read_watch_map(
         &self,
+        method: &'static str,
         read: WatchRead,
         user_id: i64,
         item_ids: &[i64],
@@ -4866,7 +4902,7 @@ impl HiqliteAuthStore {
                  CROSS JOIN watch_state w ON w.user_id = $2 AND w.item_id = j.value";
         trace_statement("watch_map", SQL);
         Ok(self
-            .watch_query::<WatchMapRow>("read_watch_map", read, SQL, params!(ids_json, user_id))
+            .watch_query::<WatchMapRow>(method, read, SQL, params!(ids_json, user_id))
             .await?
             .into_iter()
             .map(|row| (row.item_id, row.state.into()))
@@ -4878,6 +4914,7 @@ impl HiqliteAuthStore {
     /// leaf count in `leaves`, watched leaves in `watched`).
     async fn read_watch_summary(
         &self,
+        method: &'static str,
         read: WatchRead,
         user_id: i64,
         item_ids: &[i64],
@@ -4896,7 +4933,7 @@ impl HiqliteAuthStore {
         }
         let rows = self
             .watch_query::<WatchSummaryRow>(
-                "read_watch_summary",
+                method,
                 read,
                 watch_summary_sql(),
                 params!(ids_json(container_ids)?, ids_json(item_ids)?, user_id),
@@ -4921,18 +4958,14 @@ impl HiqliteAuthStore {
 
     async fn read_progress_rails(
         &self,
+        method: &'static str,
         read: WatchRead,
         user_id: i64,
         limit: i64,
     ) -> Result<ProgressRails, StoreError> {
         let sql = super::sql_source::progress_rails(&item_cols("i"), &item_cols("e")).hiqlite();
         let rows = self
-            .watch_query::<ProgressRailRow>(
-                "read_progress_rails",
-                read,
-                sql,
-                params!(user_id, limit),
-            )
+            .watch_query::<ProgressRailRow>(method, read, sql, params!(user_id, limit))
             .await?;
         let mut rails = ProgressRails::default();
         for row in rows {
@@ -4948,17 +4981,13 @@ impl HiqliteAuthStore {
 
     async fn read_watch_rollup(
         &self,
+        method: &'static str,
         read: WatchRead,
         user_id: i64,
         item_id: i64,
     ) -> Result<WatchRollup, StoreError> {
         let rows = self
-            .watch_query::<RollupRow>(
-                "read_watch_rollup",
-                read,
-                watch_rollup_sql(),
-                params!(item_id, user_id),
-            )
+            .watch_query::<RollupRow>(method, read, watch_rollup_sql(), params!(item_id, user_id))
             .await?;
         let row = rows
             .into_iter()
@@ -4972,6 +5001,7 @@ impl HiqliteAuthStore {
 
     async fn read_watch_rollups(
         &self,
+        method: &'static str,
         read: WatchRead,
         user_id: i64,
         ids: &[i64],
@@ -4983,7 +5013,7 @@ impl HiqliteAuthStore {
         let sql = watch_rollups_sql();
         trace_statement("watch_rollups", &sql);
         let rows = self
-            .watch_query::<RollupRow>("read_watch_rollups", read, sql, params!(ids_json, user_id))
+            .watch_query::<RollupRow>(method, read, sql, params!(ids_json, user_id))
             .await?;
         let mut rollups: HashMap<_, _> = ids
             .iter()
@@ -5004,6 +5034,7 @@ impl HiqliteAuthStore {
 
     async fn read_continue_watching(
         &self,
+        method: &'static str,
         read: WatchRead,
         user_id: i64,
         limit: i64,
@@ -5023,20 +5054,16 @@ impl HiqliteAuthStore {
             i = item_cols("i")
         );
         trace_statement("continue_watching", &sql);
-        self.watch_query::<InProgressRow>(
-            "read_continue_watching",
-            read,
-            sql,
-            params!(user_id, limit),
-        )
-        .await?
-        .into_iter()
-        .map(TryInto::try_into)
-        .collect()
+        self.watch_query::<InProgressRow>(method, read, sql, params!(user_id, limit))
+            .await?
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect()
     }
 
     async fn read_next_up(
         &self,
+        method: &'static str,
         read: WatchRead,
         user_id: i64,
         limit: i64,
@@ -5044,7 +5071,7 @@ impl HiqliteAuthStore {
         let sql = super::sql_source::next_up(&item_cols("e")).hiqlite();
         trace_statement("next_up", &sql);
         recent_items(
-            self.watch_query::<RecentItemRow>("read_next_up", read, sql, params!(user_id, limit))
+            self.watch_query::<RecentItemRow>(method, read, sql, params!(user_id, limit))
                 .await?,
         )
     }

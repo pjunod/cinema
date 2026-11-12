@@ -290,6 +290,7 @@ impl From<&mut Row<'_>> for FileGrantRow {
 impl FileGrantStore for HiqliteAuthStore {
     async fn create_file_grant(&self, grant: NewFileGrant) -> Result<(), StoreError> {
         self.execute(
+            "create_file_grant",
             "INSERT INTO file_grants
              (id, token_hash, file_id, user_id, source_token_hash, purpose, created_at, expires_at)
              VALUES ($1, $2, $3, $4, $5, 'open_in', $6, $7)",
@@ -360,6 +361,7 @@ impl FileGrantStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         Ok(self
             .execute(
+                "revoke_file_grant",
                 "UPDATE file_grants SET revoked_at = $1
                  WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL",
                 params!(now, id, user_id),
@@ -370,6 +372,7 @@ impl FileGrantStore for HiqliteAuthStore {
 
     async fn revoke_file_grants_for_user(&self, user_id: i64, now: i64) -> Result<(), StoreError> {
         self.execute(
+            "revoke_file_grants_for_user",
             "UPDATE file_grants SET revoked_at = $1
              WHERE user_id = $2 AND revoked_at IS NULL",
             params!(now, user_id),
@@ -381,6 +384,7 @@ impl FileGrantStore for HiqliteAuthStore {
     async fn prune_file_grants(&self, before: i64) -> Result<u64, StoreError> {
         Ok(self
             .execute(
+                "prune_file_grants",
                 "DELETE FROM file_grants WHERE expires_at < $1",
                 params!(before),
             )
@@ -433,9 +437,13 @@ struct DurableDump {
 }
 
 pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String, StoreError> {
-    async fn rows(client: &TimedClient, sql: &'static str) -> Result<Vec<String>, StoreError> {
+    async fn rows(
+        method: &'static str,
+        client: &TimedClient,
+        sql: &'static str,
+    ) -> Result<Vec<String>, StoreError> {
         Ok(client
-            .query_map::<JsonValueRow, _>("rows", sql, params!())
+            .query_map::<JsonValueRow, _>(method, sql, params!())
             .await
             .map_err(database_error)?
             .into_iter()
@@ -444,48 +452,48 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
     }
 
     let dump = DurableDump {
-        trakt_auth: rows(
+        trakt_auth: rows("local_durable_digest", 
             client,
             "SELECT json_array(user_id, access_token, refresh_token, expires_at, \
                     trakt_username, connected_at, last_sync_at, last_activities) AS value \
              FROM trakt_auth ORDER BY user_id",
         )
         .await?,
-        watched_outbox: rows(
+        watched_outbox: rows("local_durable_digest", 
             client,
             "SELECT json_array(id, payload, attempts, last_error, status, next_at, \
                     created_at, updated_at, claim_until) AS value \
              FROM watched_outbox ORDER BY id",
         )
         .await?,
-        background_job_migration: rows(client, "SELECT json_array(singleton, format_version, source_count) AS value FROM background_job_migration ORDER BY singleton").await?,
-        background_job_legacy: rows(client, "SELECT json_array(legacy_key, kind, snapshot_json, state, job_id, outcome, updated_at_ms) AS value FROM background_job_legacy ORDER BY legacy_key").await?,
-        background_fragment_targets: rows(client, "SELECT json_array(cache_key, target_node_id, job_id) AS value
+        background_job_migration: rows("local_durable_digest", client, "SELECT json_array(singleton, format_version, source_count) AS value FROM background_job_migration ORDER BY singleton").await?,
+        background_job_legacy: rows("local_durable_digest", client, "SELECT json_array(legacy_key, kind, snapshot_json, state, job_id, outcome, updated_at_ms) AS value FROM background_job_legacy ORDER BY legacy_key").await?,
+        background_fragment_targets: rows("local_durable_digest", client, "SELECT json_array(cache_key, target_node_id, job_id) AS value
             FROM background_fragment_targets ORDER BY cache_key, target_node_id").await?,
-        background_job_domain_leases: rows(client, "SELECT json_array(resource, domain_fence, job_id, job_fence, node_id, boot_id, claim_id) AS value FROM background_job_domain_leases ORDER BY resource").await?,
-        background_artifact_repairs: rows(client, "SELECT json_array(id,original_key,target_node_id,location_generation,artifact_key,producer_payload,phase,job_id,created_at_ms,updated_at_ms,expires_ms) AS value FROM background_artifact_repairs ORDER BY id").await?,
-        background_embeddings: rows(client, "SELECT json_array(item_id,model_digest,content_digest,artifact_json,built_by_node_id,built_at_ms) AS value FROM background_embeddings ORDER BY item_id,model_digest").await?,
-        background_predictions: rows(client, "SELECT json_array(request_id,file_id,request_json,expires_ms,state,created_at_ms,updated_at_ms) AS value FROM background_predictions ORDER BY request_id").await?,
-        background_transcode_artifacts: rows(client, "SELECT json_array(recipe_hash,manifest_digest,file_id,source_size,source_mtime,recipe_version,built_by_node_id,built_at_ms,producer_payload) AS value FROM background_transcode_artifacts ORDER BY recipe_hash,manifest_digest").await?,
-        background_artwork_locations: rows(client, "SELECT json_array(artifact_key,node_id,spec_json,blob_sha256,bytes,built_by_node_id,built_at_ms,verified_at_ms) AS value FROM background_artwork_locations ORDER BY artifact_key,node_id").await?,
-        background_library_requests: rows(client, "SELECT json_array(request_id, library_id, job_id, input_json, result_json, completed_claim_id, completed_at_ms) AS value FROM background_library_requests ORDER BY request_id").await?,
-        background_storage_domains: rows(client, "SELECT json_array(library_id, root_path, domain_id) AS value FROM background_storage_domains ORDER BY library_id, root_path").await?,
-        background_provider_budgets: rows(client, "SELECT json_array(provider, next_dispatch_ms, interval_ms) AS value FROM background_provider_budgets ORDER BY provider").await?,
-        background_jobs: rows(client, "SELECT json_array(id, kind, payload_version, payload_json, dedupe_key,
+        background_job_domain_leases: rows("local_durable_digest", client, "SELECT json_array(resource, domain_fence, job_id, job_fence, node_id, boot_id, claim_id) AS value FROM background_job_domain_leases ORDER BY resource").await?,
+        background_artifact_repairs: rows("local_durable_digest", client, "SELECT json_array(id,original_key,target_node_id,location_generation,artifact_key,producer_payload,phase,job_id,created_at_ms,updated_at_ms,expires_ms) AS value FROM background_artifact_repairs ORDER BY id").await?,
+        background_embeddings: rows("local_durable_digest", client, "SELECT json_array(item_id,model_digest,content_digest,artifact_json,built_by_node_id,built_at_ms) AS value FROM background_embeddings ORDER BY item_id,model_digest").await?,
+        background_predictions: rows("local_durable_digest", client, "SELECT json_array(request_id,file_id,request_json,expires_ms,state,created_at_ms,updated_at_ms) AS value FROM background_predictions ORDER BY request_id").await?,
+        background_transcode_artifacts: rows("local_durable_digest", client, "SELECT json_array(recipe_hash,manifest_digest,file_id,source_size,source_mtime,recipe_version,built_by_node_id,built_at_ms,producer_payload) AS value FROM background_transcode_artifacts ORDER BY recipe_hash,manifest_digest").await?,
+        background_artwork_locations: rows("local_durable_digest", client, "SELECT json_array(artifact_key,node_id,spec_json,blob_sha256,bytes,built_by_node_id,built_at_ms,verified_at_ms) AS value FROM background_artwork_locations ORDER BY artifact_key,node_id").await?,
+        background_library_requests: rows("local_durable_digest", client, "SELECT json_array(request_id, library_id, job_id, input_json, result_json, completed_claim_id, completed_at_ms) AS value FROM background_library_requests ORDER BY request_id").await?,
+        background_storage_domains: rows("local_durable_digest", client, "SELECT json_array(library_id, root_path, domain_id) AS value FROM background_storage_domains ORDER BY library_id, root_path").await?,
+        background_provider_budgets: rows("local_durable_digest", client, "SELECT json_array(provider, next_dispatch_ms, interval_ms) AS value FROM background_provider_budgets ORDER BY provider").await?,
+        background_jobs: rows("local_durable_digest", client, "SELECT json_array(id, kind, payload_version, payload_json, dedupe_key,
             priority, state, target_node_id, owner_node_id, owner_boot_id, claim_id, fence, revision,
             lease_expires_ms, failure_policy, failed_attempts, attempt_limit, retry_deadline_ms, attempt_errors, index_diagnostic_json, yield_count, abandoned_count, not_before_ms, checkpoint_json,
             result_ref, last_error_code, created_at_ms, updated_at_ms) AS value FROM background_jobs ORDER BY id").await?,
-        background_job_waiters: rows(client, "SELECT json_array(request_scope, request_id, request_digest, job_id,
+        background_job_waiters: rows("local_durable_digest", client, "SELECT json_array(request_scope, request_id, request_digest, job_id,
             consumer_kind, consumer_ref, priority, state, target_node_id, deadline_ms, receipt_expires_ms,
             retain_identity, result_ref, failed_attempts, attempt_limit, not_before_ms, retry_deadline_ms,
             participation_fence, attempt_errors, last_error_code, index_diagnostic_json, created_at_ms, updated_at_ms) AS value FROM background_job_waiters
             ORDER BY request_scope, request_id").await?,
-        background_job_attempts: rows(client, "SELECT json_array(job_id, fence, claim_id, owner_node_id, owner_boot_id,
+        background_job_attempts: rows("local_durable_digest", client, "SELECT json_array(job_id, fence, claim_id, owner_node_id, owner_boot_id,
             started_at_ms, resolve_until_ms, finished_at_ms, outcome, error_code) AS value
             FROM background_job_attempts ORDER BY job_id, fence").await?,
-        background_job_reservations: rows(client, "SELECT json_array(resource_key, slot, job_id, fence, expires_at_ms)
+        background_job_reservations: rows("local_durable_digest", client, "SELECT json_array(resource_key, slot, job_id, fence, expires_at_ms)
             AS value FROM background_job_reservations ORDER BY resource_key, slot").await?,
-        pretranscode_jobs: rows(
+        pretranscode_jobs: rows("local_durable_digest", 
             client,
             "SELECT json_array(id, dedupe_key, file_id, source_size, source_mtime,
                     target_height, policy_generation, requirements_json, reason, priority,
@@ -495,13 +503,13 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
              FROM pretranscode_jobs ORDER BY id",
         )
         .await?,
-        transcode_cache_recipes: rows(
+        transcode_cache_recipes: rows("local_durable_digest", 
             client,
             "SELECT json_array(recipe_hash, file_id, recipe_version, created_at) AS value \
              FROM transcode_cache_recipes ORDER BY recipe_hash",
         )
         .await?,
-        transcode_cache_locations: rows(
+        transcode_cache_locations: rows("local_durable_digest", 
             client,
             "SELECT json_array(recipe_hash, node_id, storage_class, relative_dir, bytes, \
                     complete, manifest_digest, scrub_object_index, last_used_at, last_seen_at, \
@@ -509,14 +517,14 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
              FROM transcode_cache_locations ORDER BY recipe_hash, node_id, storage_class",
         )
         .await?,
-        cache_storage_members: rows(
+        cache_storage_members: rows("local_durable_digest", 
             client,
             "SELECT json_array(storage_id, node_id, storage_class, verified_at_ms, \
                     verification_state) AS value \
              FROM cache_storage_members ORDER BY storage_id, node_id",
         )
         .await?,
-        cache_consumer_pins: rows(
+        cache_consumer_pins: rows("local_durable_digest", 
             client,
             "SELECT json_array(storage_id, recipe_hash, generation_id, consumer_kind, \
                     consumer_id, consumer_epoch, expires_at_ms) AS value \
@@ -524,7 +532,7 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
              ORDER BY storage_id, recipe_hash, generation_id, consumer_kind, consumer_id",
         )
         .await?,
-        offline_packages: rows(
+        offline_packages: rows("local_durable_digest", 
             client,
             "SELECT json_array(id, request_id, user_id, file_id, node_id, source_path, \
                     source_size, source_mtime, recipe_hash, claim_generation, \
@@ -537,25 +545,25 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
              FROM offline_packages ORDER BY id",
         )
         .await?,
-        offline_package_leases: rows(
+        offline_package_leases: rows("local_durable_digest", 
             client,
             "SELECT json_array(token_hash, package_id, created_at, last_access_at, expires_at) \
                     AS value FROM offline_package_leases ORDER BY token_hash",
         )
         .await?,
-        file_grants: rows(
+        file_grants: rows("local_durable_digest", 
             client,
             "SELECT json_array(id, token_hash, file_id, user_id, source_token_hash, purpose, created_at, \
                     expires_at, revoked_at) AS value FROM file_grants ORDER BY id",
         )
         .await?,
-        offline_lease_guards: rows(
+        offline_lease_guards: rows("local_durable_digest", 
             client,
             "SELECT json_array(package_id, token_hash, had_lease) AS value \
              FROM offline_lease_guards ORDER BY package_id",
         )
         .await?,
-        offline_source_probes: rows(
+        offline_source_probes: rows("local_durable_digest", 
             client,
             "SELECT json_array(package_id, node_id, requested_at, answered_at, readable) \
                     AS value FROM offline_source_probes ORDER BY package_id, node_id",
@@ -717,6 +725,7 @@ impl TraktStore for HiqliteAuthStore {
 
     async fn put_trakt_auth(&self, auth: &TraktAuth) -> Result<(), StoreError> {
         self.execute(
+            "put_trakt_auth",
             "INSERT INTO trakt_auth (user_id, access_token, refresh_token, expires_at, \
                  trakt_username, connected_at, last_sync_at, last_activities) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
@@ -744,6 +753,7 @@ impl TraktStore for HiqliteAuthStore {
 
     async fn delete_trakt_auth(&self, user_id: i64) -> Result<(), StoreError> {
         self.execute(
+            "delete_trakt_auth",
             "DELETE FROM trakt_auth WHERE user_id = $1",
             params!(user_id),
         )
@@ -758,6 +768,7 @@ impl TraktStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         Ok(self
             .execute(
+                "delete_trakt_auth_if_current",
                 "DELETE FROM trakt_auth WHERE user_id = $1 AND refresh_token = $2",
                 params!(user_id, expected_refresh_token.as_stored().to_owned()),
             )
@@ -775,6 +786,7 @@ impl TraktStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         Ok(self
             .execute(
+                "update_trakt_tokens",
                 "UPDATE trakt_auth SET access_token = $1, refresh_token = $2, expires_at = $3 \
              WHERE user_id = $4 AND refresh_token = $5",
                 params!(
@@ -797,6 +809,7 @@ impl TraktStore for HiqliteAuthStore {
         last_activities: Option<&str>,
     ) -> Result<(), StoreError> {
         self.execute(
+            "set_trakt_sync",
             "UPDATE trakt_auth SET last_sync_at = $1, last_activities = $2 WHERE user_id = $3",
             params!(last_sync_at, last_activities, user_id),
         )
@@ -919,6 +932,7 @@ impl WatchedOutboxStore for HiqliteAuthStore {
     async fn settle_watched(&self, entry: &OutboxEntry) -> Result<(), StoreError> {
         let now = self.now()?;
         self.execute(
+            "settle_watched",
             "UPDATE watched_outbox SET attempts = $1, last_error = $2, status = $3, \
                  next_at = $4, updated_at = $5, claim_until = 0 \
              WHERE id = $6 AND claim_until = $7",
@@ -1127,6 +1141,7 @@ impl TranscodeCacheStore for HiqliteAuthStore {
                 // queued callers must not publish their older invocation time.
                 let now = self.now()?;
                 self.execute(
+                    "touch_cache_claim",
                     "UPDATE transcode_cache_locations SET last_seen_at = MAX(last_seen_at, $1) \
                      WHERE recipe_hash = $2 AND node_id = $3 AND complete = 0",
                     params!(now, recipe_hash, node_id),
@@ -1151,6 +1166,7 @@ impl TranscodeCacheStore for HiqliteAuthStore {
         // unfenced completion of the same recipe must not blank it. `None`
         // means "this publication has none", never "clear the one there".
         self.execute(
+            "complete_cache_entry",
             "UPDATE transcode_cache_locations SET complete = 1, bytes = $1, \
                  manifest_digest = COALESCE($2, manifest_digest), \
                  publication_generation = publication_generation + 1, \
@@ -1177,6 +1193,7 @@ impl TranscodeCacheStore for HiqliteAuthStore {
             async {
                 let now = self.now()?;
                 self.execute(
+                    "touch_cache_entry",
                     "UPDATE transcode_cache_locations SET last_used_at = MAX(last_used_at, $1) \
                      WHERE recipe_hash = $2 AND node_id = $3",
                     params!(now, recipe_hash, node_id),
@@ -2155,6 +2172,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         let now = self.now()?;
         Ok(self
             .execute(
+                "reset_interrupted_offline_packages",
                 "UPDATE offline_packages SET state = 'queued', phase = 'waiting_for_encoder', \
                  claim_generation = claim_generation + 1, \
                  updated_at = $1 WHERE node_id = $2 AND state = 'preparing'",
@@ -2261,6 +2279,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         let now = self.now()?;
         Ok(self
             .execute(
+                "requeue_offline_package",
                 "UPDATE offline_packages SET state = 'queued', phase = 'waiting_for_encoder', \
                  claim_generation = claim_generation + 1, \
                  updated_at = $1 WHERE id = $2 AND node_id = $3 \
@@ -2281,6 +2300,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         let now = self.now()?;
         Ok(self
             .execute(
+                "set_offline_package_recipe",
                 "UPDATE offline_packages SET recipe_hash = $1, updated_at = $2 \
                  WHERE id = $3 AND node_id = $4 AND claim_generation = $5 \
                    AND state = 'preparing' \
@@ -2305,6 +2325,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         let now = self.now()?;
         Ok(self
             .execute(
+                "begin_offline_decode_recovery",
                 "UPDATE offline_packages SET decoder_recovery_state = 'recovery_pending', \
                     recipe_hash = NULL, updated_at = $1 \
                  WHERE id = $2 AND node_id = $3 AND claim_generation = $4 \
@@ -2332,6 +2353,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         let now = self.now()?;
         Ok(self
             .execute(
+                "install_offline_decode_alternate",
                 "UPDATE offline_packages SET decoder_recovery_state = 'alternate', \
                     alternate_recipe_hash = $1, recipe_hash = $1, updated_at = $2 \
                  WHERE id = $3 AND node_id = $4 AND claim_generation = $5 \
@@ -2384,6 +2406,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         let now = self.now()?;
         Ok(self
             .execute(
+                "complete_offline_cache_entry",
                 "UPDATE transcode_cache_locations SET complete = 1, bytes = $1, \
                     manifest_digest = COALESCE($2, manifest_digest), \
                     publication_generation = publication_generation + 1, \
@@ -2419,6 +2442,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         let now = self.now()?;
         Ok(self
             .execute(
+                "update_offline_progress",
                 "UPDATE offline_packages SET phase = $1, \
                  progress_millis = MAX(progress_millis, $2), updated_at = $3 \
                  WHERE id = $4 AND node_id = $5 AND claim_generation = $6 \
@@ -2448,6 +2472,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         let now = self.now()?;
         Ok(self
             .execute(
+                "fail_offline_package",
                 "UPDATE offline_packages SET state = 'failed', phase = $1, error_code = $2, \
                  error_message = $3, claim_generation = claim_generation + 1, updated_at = $4 \
                  WHERE id = $5 AND node_id = $6 AND claim_generation = $7 \
@@ -2990,6 +3015,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         Ok(self
             .execute(
+                "answer_offline_source_probe",
                 "UPDATE offline_source_probes SET answered_at = $1, readable = $2 \
                  WHERE package_id = $3 AND node_id = $4 AND answered_at IS NULL",
                 params!(now, i64::from(readable), package_id, node_id),

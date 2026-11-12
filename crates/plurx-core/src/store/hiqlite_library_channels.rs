@@ -215,12 +215,14 @@ impl From<&mut Row<'_>> for CountRow {
 }
 
 async fn request_ledger_full(
+    method: &'static str,
     store: &HiqliteAuthStore,
     user_id: i64,
     now_ms: i64,
 ) -> Result<bool, StoreError> {
     store
         .execute(
+            method,
             "DELETE FROM library_channel_requests WHERE user_id = $1 AND expires_at_ms <= $2",
             params!(user_id, now_ms),
         )
@@ -228,7 +230,7 @@ async fn request_ledger_full(
     let count = store
         .client()
         .query_consistent_map::<CountRow, _>(
-            "request_ledger_full",
+            method,
             "SELECT COUNT(*) AS count FROM library_channel_requests WHERE user_id = $1",
             params!(user_id),
         )
@@ -366,6 +368,7 @@ fn channel_query(scope: &str) -> String {
 }
 
 async fn query_channel(
+    method: &'static str,
     store: &HiqliteAuthStore,
     actor_user_id: i64,
     channel_id: &str,
@@ -373,7 +376,7 @@ async fn query_channel(
     let rows = store
         .client()
         .query_consistent_map::<ChannelRow, _>(
-            "query_channel",
+            method,
             channel_query("c.id = $2"),
             params!(actor_user_id, channel_id),
         )
@@ -496,9 +499,11 @@ impl LibraryChannelStore for HiqliteAuthStore {
         actor_is_admin: bool,
         channel_id: &str,
     ) -> Result<Option<LibraryChannel>, StoreError> {
-        Ok(query_channel(self, actor_user_id, channel_id)
-            .await?
-            .filter(|channel| visible(channel, actor_user_id, actor_is_admin)))
+        Ok(
+            query_channel("get_library_channel", self, actor_user_id, channel_id)
+                .await?
+                .filter(|channel| visible(channel, actor_user_id, actor_is_admin)),
+        )
     }
 
     async fn create_library_channel(
@@ -527,14 +532,26 @@ impl LibraryChannelStore for HiqliteAuthStore {
             if replay.operation_hash != channel.request_hash {
                 return Ok(ChannelMutation::RequestConflict);
             }
-            return query_channel(self, channel.owner_user_id, &replay.channel_id)
-                .await?
-                .map(ChannelMutation::Replay)
-                .ok_or_else(|| {
-                    StoreError::Database("channel request points to a missing channel".to_owned())
-                });
+            return query_channel(
+                "create_library_channel",
+                self,
+                channel.owner_user_id,
+                &replay.channel_id,
+            )
+            .await?
+            .map(ChannelMutation::Replay)
+            .ok_or_else(|| {
+                StoreError::Database("channel request points to a missing channel".to_owned())
+            });
         }
-        if request_ledger_full(self, channel.owner_user_id, channel.now_ms).await? {
+        if request_ledger_full(
+            "create_library_channel",
+            self,
+            channel.owner_user_id,
+            channel.now_ms,
+        )
+        .await?
+        {
             return Ok(ChannelMutation::RequestLedgerFull);
         }
         let recipe = serde_json::to_string(&channel.recipe)
@@ -589,17 +606,28 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
         if counts == [0, 0]
-            && request_ledger_full(self, channel.owner_user_id, channel.now_ms).await?
+            && request_ledger_full(
+                "create_library_channel",
+                self,
+                channel.owner_user_id,
+                channel.now_ms,
+            )
+            .await?
         {
             return Ok(ChannelMutation::RequestLedgerFull);
         }
         if counts != [1, 1] {
             return Ok(ChannelMutation::LimitExceeded);
         }
-        query_channel(self, channel.owner_user_id, &channel.id)
-            .await?
-            .map(ChannelMutation::Applied)
-            .ok_or_else(|| StoreError::Database("created channel disappeared".to_owned()))
+        query_channel(
+            "create_library_channel",
+            self,
+            channel.owner_user_id,
+            &channel.id,
+        )
+        .await?
+        .map(ChannelMutation::Applied)
+        .ok_or_else(|| StoreError::Database("created channel disappeared".to_owned()))
     }
 
     async fn update_library_channel(
@@ -609,7 +637,13 @@ impl LibraryChannelStore for HiqliteAuthStore {
         if update.visibility == ChannelVisibility::Shared && !update.actor_is_admin {
             return Ok(ChannelMutation::Forbidden);
         }
-        let Some(current) = query_channel(self, update.actor_user_id, &update.channel_id).await?
+        let Some(current) = query_channel(
+            "update_library_channel",
+            self,
+            update.actor_user_id,
+            &update.channel_id,
+        )
+        .await?
         else {
             return Ok(ChannelMutation::NotFound);
         };
@@ -638,7 +672,14 @@ impl LibraryChannelStore for HiqliteAuthStore {
             }
             return Ok(ChannelMutation::Stale);
         }
-        if request_ledger_full(self, update.actor_user_id, update.now_ms).await? {
+        if request_ledger_full(
+            "update_library_channel",
+            self,
+            update.actor_user_id,
+            update.now_ms,
+        )
+        .await?
+        {
             return Ok(ChannelMutation::RequestLedgerFull);
         }
         if current.revision != update.expected_revision {
@@ -711,10 +752,15 @@ impl LibraryChannelStore for HiqliteAuthStore {
         if counts.first() != Some(&1) || counts.get(1) != Some(&1) {
             return Ok(ChannelMutation::Stale);
         }
-        query_channel(self, update.actor_user_id, &update.channel_id)
-            .await?
-            .map(ChannelMutation::Applied)
-            .ok_or_else(|| StoreError::Database("updated channel disappeared".to_owned()))
+        query_channel(
+            "update_library_channel",
+            self,
+            update.actor_user_id,
+            &update.channel_id,
+        )
+        .await?
+        .map(ChannelMutation::Applied)
+        .ok_or_else(|| StoreError::Database("updated channel disappeared".to_owned()))
     }
 
     async fn delete_library_channel(
@@ -743,11 +789,23 @@ impl LibraryChannelStore for HiqliteAuthStore {
             }
             return Ok(ChannelMutation::Replay(()));
         }
-        if request_ledger_full(self, deletion.actor_user_id, deletion.now_ms).await? {
+        if request_ledger_full(
+            "delete_library_channel",
+            self,
+            deletion.actor_user_id,
+            deletion.now_ms,
+        )
+        .await?
+        {
             return Ok(ChannelMutation::RequestLedgerFull);
         }
-        let Some(current) =
-            query_channel(self, deletion.actor_user_id, &deletion.channel_id).await?
+        let Some(current) = query_channel(
+            "delete_library_channel",
+            self,
+            deletion.actor_user_id,
+            &deletion.channel_id,
+        )
+        .await?
         else {
             return Ok(ChannelMutation::NotFound);
         };
@@ -817,7 +875,9 @@ impl LibraryChannelStore for HiqliteAuthStore {
         favourite: bool,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
-        let Some(channel) = query_channel(self, user_id, channel_id).await? else {
+        let Some(channel) =
+            query_channel("set_library_channel_favourite", self, user_id, channel_id).await?
+        else {
             return Ok(false);
         };
         if channel.owner_user_id != user_id
@@ -826,7 +886,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
             return Ok(false);
         }
         let changed = if favourite {
-            self.execute(
+            self.execute("set_library_channel_favourite", 
                 "INSERT INTO library_channel_favourites (user_id, channel_id, created_at_ms) \
                  SELECT $1, $2, $3 WHERE EXISTS(SELECT 1 FROM library_channels \
                    WHERE id = $2 AND (owner_user_id = $1 OR (visibility = 'shared' AND enabled = 1))) \
@@ -836,6 +896,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .await?
         } else {
             self.execute(
+                "set_library_channel_favourite",
                 "DELETE FROM library_channel_favourites WHERE user_id = $1 AND channel_id = $2",
                 params!(user_id, channel_id),
             )
@@ -956,7 +1017,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         limit: i64,
     ) -> Result<i64, StoreError> {
         let limit = limit.clamp(1, CHANNEL_PRUNE_BATCH_MAX);
-        let requests = self.execute(
+        let requests = self.execute("prune_library_channel_state", 
             "DELETE FROM library_channel_requests WHERE rowid IN (SELECT rowid \
              FROM library_channel_requests WHERE expires_at_ms <= $1 ORDER BY expires_at_ms LIMIT $2)",
             params!(now_ms, limit),
@@ -965,6 +1026,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         let remaining = limit.saturating_sub(requests);
         let abandoned = if remaining > 0 {
             self.execute(
+                "prune_library_channel_state",
                 "DELETE FROM library_channel_generations WHERE id IN (SELECT id \
                  FROM library_channel_generations WHERE state = 'building' \
                    AND build_claim_expires_ms <= $1 ORDER BY created_at_ms LIMIT $2)",
@@ -979,7 +1041,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         };
         let remaining = remaining.saturating_sub(abandoned);
         let superseded = if remaining > 0 {
-            self.execute(
+            self.execute("prune_library_channel_state", 
                 "DELETE FROM library_channel_generations WHERE id IN (SELECT g.id \
                  FROM library_channel_generations g WHERE g.state = 'ready' AND g.created_at_ms <= $1 \
                    AND NOT EXISTS(SELECT 1 FROM library_channels c \
@@ -1034,6 +1096,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
     ) -> Result<ChannelBuildMutation, StoreError> {
         let changed = self
             .execute(
+                "renew_library_channel_build",
                 "UPDATE library_channel_generations SET build_claim_expires_ms = $1 \
                  WHERE id = $2 AND channel_id = $3 AND state = 'building' \
                    AND build_claim_id = $4 AND build_claim_expires_ms > $5",
@@ -1233,6 +1296,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
             failure.claim_id.as_deref(),
         ) {
             self.execute(
+                "fail_library_channel_build",
                 "UPDATE library_channel_generations SET build_claim_expires_ms = $1 \
                  WHERE id = $2 AND channel_id = $3 AND build_claim_id = $4",
                 params!(
@@ -1246,6 +1310,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         }
         let changed = self
             .execute(
+                "fail_library_channel_build",
                 "UPDATE library_channels SET build_state = 'failed', build_error_code = $1, \
              build_error_message = $2, build_candidate_count = $3, build_last_attempt_ms = $4, \
              updated_at_ms = $4 WHERE id = $5 AND definition_revision = $6",
@@ -1274,7 +1339,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         automatic: bool,
         now_ms: i64,
     ) -> Result<ChannelBuildMutation, StoreError> {
-        let changed = self.execute(
+        let changed = self.execute("complete_library_channel_build_without_publication", 
             "UPDATE library_channels SET build_state = 'ready', build_error_code = NULL, \
              build_error_message = NULL, build_candidate_count = $1, \
              build_entry_count = COALESCE((SELECT entry_count FROM library_channel_generations \
@@ -1298,7 +1363,14 @@ impl LibraryChannelStore for HiqliteAuthStore {
         channel_id: &str,
         generation_id: &str,
     ) -> Result<Option<LibraryChannelGeneration>, StoreError> {
-        let Some(channel) = query_channel(self, actor_user_id, channel_id).await? else {
+        let Some(channel) = query_channel(
+            "read_library_channel_generation",
+            self,
+            actor_user_id,
+            channel_id,
+        )
+        .await?
+        else {
             return Ok(None);
         };
         if !visible(&channel, actor_user_id, actor_is_admin) {

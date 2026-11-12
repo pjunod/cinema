@@ -62,11 +62,14 @@ impl From<&mut Row<'_>> for SubtitleRepairCountsRow {
     }
 }
 
-async fn configured_max_attempts(store: &HiqliteAuthStore) -> Result<i64, StoreError> {
+async fn configured_max_attempts(
+    method: &'static str,
+    store: &HiqliteAuthStore,
+) -> Result<i64, StoreError> {
     let raw = store
         .client()
         .query_consistent_map::<AnalysisSettingRow, _>(
-            "configured_max_attempts",
+            method,
             "SELECT value FROM settings WHERE key = $1",
             params!(crate::store::keys::ANALYSIS_MAX_ATTEMPTS),
         )
@@ -77,11 +80,14 @@ async fn configured_max_attempts(store: &HiqliteAuthStore) -> Result<i64, StoreE
     Ok(bounded_analysis_max_attempts(raw.as_deref()))
 }
 
-async fn configured_backoff_base_ms(store: &HiqliteAuthStore) -> Result<i64, StoreError> {
+async fn configured_backoff_base_ms(
+    method: &'static str,
+    store: &HiqliteAuthStore,
+) -> Result<i64, StoreError> {
     let raw = store
         .client()
         .query_consistent_map::<AnalysisSettingRow, _>(
-            "configured_backoff_base_ms",
+            method,
             "SELECT value FROM settings WHERE key = $1",
             params!(crate::store::keys::ANALYSIS_BACKOFF_BASE_SECS),
         )
@@ -92,11 +98,14 @@ async fn configured_backoff_base_ms(store: &HiqliteAuthStore) -> Result<i64, Sto
     Ok(bounded_analysis_backoff_base_secs(raw.as_deref()).saturating_mul(1_000))
 }
 
-async fn configured_backoff_max_ms(store: &HiqliteAuthStore) -> Result<i64, StoreError> {
+async fn configured_backoff_max_ms(
+    method: &'static str,
+    store: &HiqliteAuthStore,
+) -> Result<i64, StoreError> {
     let raw = store
         .client()
         .query_consistent_map::<AnalysisSettingRow, _>(
-            "configured_backoff_max_ms",
+            method,
             "SELECT value FROM settings WHERE key = $1",
             params!(crate::store::keys::ANALYSIS_BACKOFF_MAX_SECS),
         )
@@ -1608,12 +1617,18 @@ impl HiqliteAuthStore {
         node_id: &str,
         probes: &[crate::store::ClusterIndexAvailabilityProbe],
     ) -> Result<Vec<bool>, StoreError> {
-        self.cluster_index_availability_read(node_id, probes, false)
-            .await
+        self.cluster_index_availability_read(
+            "local_cluster_fragment_index_availability",
+            node_id,
+            probes,
+            false,
+        )
+        .await
     }
 
     async fn cluster_index_availability_read(
         &self,
+        method: &'static str,
         node_id: &str,
         probes: &[crate::store::ClusterIndexAvailabilityProbe],
         consistent: bool,
@@ -1638,19 +1653,11 @@ impl HiqliteAuthStore {
         let sources = if consistent {
             self.client()
                 // authority: the reader's fallback when no bounded proof holds.
-                .query_consistent_map::<SourceRow, _>(
-                    "cluster_index_availability_read",
-                    AVAILABILITY_SOURCES_SQL,
-                    params,
-                )
+                .query_consistent_map::<SourceRow, _>(method, AVAILABILITY_SOURCES_SQL, params)
                 .await?
         } else {
             self.client()
-                .query_map::<SourceRow, _>(
-                    "cluster_index_availability_read",
-                    AVAILABILITY_SOURCES_SQL,
-                    params,
-                )
+                .query_map::<SourceRow, _>(method, AVAILABILITY_SOURCES_SQL, params)
                 .await?
         };
         let attested: Vec<FragmentIndexSourceObservation> =
@@ -1669,7 +1676,7 @@ impl HiqliteAuthStore {
             self.client()
                 // authority: the reader's fallback when no bounded proof holds.
                 .query_consistent_map::<LogicalArtifactRow, _>(
-                    "cluster_index_availability_read",
+                    method,
                     AVAILABILITY_ARTIFACTS_SQL,
                     params!(keys),
                 )
@@ -1677,7 +1684,7 @@ impl HiqliteAuthStore {
         } else {
             self.client()
                 .query_map::<LogicalArtifactRow, _>(
-                    "cluster_index_availability_read",
+                    method,
                     AVAILABILITY_ARTIFACTS_SQL,
                     params!(keys),
                 )
@@ -1696,13 +1703,14 @@ impl HiqliteAuthStore {
     /// time, the rest its own parameters) with `node_removed`.
     async fn retire_analysis_requests_where(
         &self,
+        method: &'static str,
         target: &str,
         params: Vec<hiqlite::Param>,
     ) -> Result<u64, StoreError> {
         let results = self
             .client()
             .txn(
-                "retire_analysis_requests_where",
+                method,
                 vec![
                     (
                         format!(
@@ -1740,12 +1748,16 @@ impl HiqliteAuthStore {
     /// [`Self::retire_analysis_requests_where`] for every node membership
     /// has removed. A store used before membership created `cluster_nodes`
     /// (the store contract, a fresh install) has no removed node to consult.
-    async fn retire_requests_of_removed_nodes(&self, now_ms: i64) -> Result<u64, StoreError> {
+    async fn retire_requests_of_removed_nodes(
+        &self,
+        method: &'static str,
+        now_ms: i64,
+    ) -> Result<u64, StoreError> {
         let membership = self
             .client()
             // authority: retirement needs committed membership schema before treating removed-target authority as absent.
             .query_consistent_map::<SchemaCountRow, _>(
-                "retire_requests_of_removed_nodes",
+                method,
                 "SELECT COUNT(*) AS count FROM sqlite_master
                   WHERE type = 'table' AND name = 'cluster_nodes'",
                 params!(),
@@ -1757,6 +1769,7 @@ impl HiqliteAuthStore {
             return Ok(0);
         }
         self.retire_analysis_requests_where(
+            method,
             "target_node_id <> '' AND target_node_id IN (
                SELECT node_id FROM cluster_nodes WHERE removed_at IS NOT NULL)",
             params!(now_ms),
@@ -1931,6 +1944,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
            ))"#;
         let changed = self
             .execute(
+                "retire_subtitle_source_ready",
                 SQL,
                 params!(
                     now_ms,
@@ -1961,7 +1975,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 "invalid subtitle source observation".to_owned(),
             ));
         }
-        let changed = self.execute("UPDATE analysis_requests SET state = 'cancelled', last_error_code = CASE WHEN EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.source_attestation = $1 AND p.origin = 'extracted') THEN 'coverage_incomplete' ELSE 'artifact_lost' END, owner_node_id = NULL, lease_expires_ms = NULL, updated_at_ms = $2 WHERE file_id = $3 AND source_size = $4 AND source_mtime = $5 AND component = 'subtitle_source' AND pipeline_version = $6 AND state = 'ready' AND NOT EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.ordinal = $7 AND p.source_attestation = $1 AND p.origin = 'extracted' AND (p.verdict IN ('kept','empty','malformed') OR (p.verdict = 'transient' AND p.attempts >= 3)))", params!(source_attestation, now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, ordinal)).await?;
+        let changed = self.execute("retire_subtitle_source_ready_for_ordinal", "UPDATE analysis_requests SET state = 'cancelled', last_error_code = CASE WHEN EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.source_attestation = $1 AND p.origin = 'extracted') THEN 'coverage_incomplete' ELSE 'artifact_lost' END, owner_node_id = NULL, lease_expires_ms = NULL, updated_at_ms = $2 WHERE file_id = $3 AND source_size = $4 AND source_mtime = $5 AND component = 'subtitle_source' AND pipeline_version = $6 AND state = 'ready' AND NOT EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.ordinal = $7 AND p.source_attestation = $1 AND p.origin = 'extracted' AND (p.verdict IN ('kept','empty','malformed') OR (p.verdict = 'transient' AND p.attempts >= 3)))", params!(source_attestation, now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, ordinal)).await?;
         Ok(changed > 0)
     }
 
@@ -1974,7 +1988,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 "invalid subtitle source publication".to_owned(),
             ));
         }
-        self.execute("INSERT INTO subtitle_source_publications(file_id,source_size,source_mtime,source_attestation,node_id,ordinal,kind,format,verdict,attempts,origin,sha256,bytes,published_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(file_id,source_size,source_mtime,node_id,ordinal,format) DO UPDATE SET source_attestation=excluded.source_attestation,kind=excluded.kind,verdict=excluded.verdict,attempts=excluded.attempts,origin=excluded.origin,sha256=excluded.sha256,bytes=excluded.bytes,published_at_ms=excluded.published_at_ms", params!(p.file_id,p.source_size,p.source_mtime,&p.source_attestation,&p.node_id,p.ordinal,&p.kind,&p.format,&p.verdict,p.attempts,&p.origin,&p.sha256,p.bytes,p.published_at_ms)).await?;
+        self.execute("upsert_subtitle_source_publication", "INSERT INTO subtitle_source_publications(file_id,source_size,source_mtime,source_attestation,node_id,ordinal,kind,format,verdict,attempts,origin,sha256,bytes,published_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(file_id,source_size,source_mtime,node_id,ordinal,format) DO UPDATE SET source_attestation=excluded.source_attestation,kind=excluded.kind,verdict=excluded.verdict,attempts=excluded.attempts,origin=excluded.origin,sha256=excluded.sha256,bytes=excluded.bytes,published_at_ms=excluded.published_at_ms", params!(p.file_id,p.source_size,p.source_mtime,&p.source_attestation,&p.node_id,p.ordinal,&p.kind,&p.format,&p.verdict,p.attempts,&p.origin,&p.sha256,p.bytes,p.published_at_ms)).await?;
         Ok(())
     }
 
@@ -1993,6 +2007,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         node_id: &str,
     ) -> Result<(), StoreError> {
         self.execute(
+            "delete_subtitle_source_publications",
             "DELETE FROM subtitle_source_publications WHERE file_id=$1 AND node_id=$2",
             params!(file_id, node_id),
         )
@@ -2009,7 +2024,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         ordinal: i64,
         format: &str,
     ) -> Result<(), StoreError> {
-        self.execute("DELETE FROM subtitle_source_publications WHERE file_id=$1 AND source_size=$2 AND source_mtime=$3 AND node_id=$4 AND ordinal=$5 AND format=$6", params!(file_id,source_size,source_mtime,node_id,ordinal,format)).await?;
+        self.execute("delete_subtitle_source_publication", "DELETE FROM subtitle_source_publications WHERE file_id=$1 AND source_size=$2 AND source_mtime=$3 AND node_id=$4 AND ordinal=$5 AND format=$6", params!(file_id,source_size,source_mtime,node_id,ordinal,format)).await?;
         Ok(())
     }
     async fn enqueue_analysis_request_with(
@@ -2288,9 +2303,13 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         let excluded = super::fragment_index_cluster::analysis_claim_exclusions_json(
             excluded_video_identities,
         )?;
-        let max_attempts = configured_max_attempts(self).await?;
-        let backoff_base_ms = configured_backoff_base_ms(self).await?;
-        let backoff_max_ms = configured_backoff_max_ms(self).await?.max(backoff_base_ms);
+        let max_attempts =
+            configured_max_attempts("claim_analysis_request_for_capacity", self).await?;
+        let backoff_base_ms =
+            configured_backoff_base_ms("claim_analysis_request_for_capacity", self).await?;
+        let backoff_max_ms = configured_backoff_max_ms("claim_analysis_request_for_capacity", self)
+            .await?
+            .max(backoff_base_ms);
         // Requeueing expired leases and failing attempt-limited rows are
         // cluster-wide sweeps. A learner's targeted-only claim leaves them to
         // the voters' claims instead of running them on every wake.
@@ -2524,6 +2543,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         }
         Ok(self
             .execute(
+                "record_analysis_request_phase",
                 "UPDATE analysis_attempts
                     SET phase = $1, phase_updated_at_ms = $2, terminal_code = $3
                   WHERE request_id = $4 AND attempt = $5 AND claim_epoch = $6
@@ -2703,15 +2723,22 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         if node_id.is_empty() {
             return Err(StoreError::Task("invalid removed node".to_owned()));
         }
-        self.retire_analysis_requests_where("target_node_id = $2", params!(now_ms, node_id))
-            .await
+        self.retire_analysis_requests_where(
+            "retire_analysis_requests_for_node",
+            "target_node_id = $2",
+            params!(now_ms, node_id),
+        )
+        .await
     }
 
     async fn settle_analysis_requests(&self, now_ms: i64) -> Result<u64, StoreError> {
         // Rows targeted at a node membership has removed can never be
         // claimed. Removal retires them as it finishes; this catches the rows
         // a removal predating that, or one that could not, left behind.
-        let retired = match self.retire_requests_of_removed_nodes(now_ms).await {
+        let retired = match self
+            .retire_requests_of_removed_nodes("settle_analysis_requests", now_ms)
+            .await
+        {
             Ok(retired) => retired,
             Err(error) => {
                 // Housekeeping beside the settle, not part of it: a failure
@@ -2838,7 +2865,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
     ) -> Result<u64, StoreError> {
         let limit = limit.clamp(1, MAX_ANALYSIS_REQUESTS);
         Ok(self
-            .execute(
+            .execute("prune_analysis_requests", 
                 "WITH ranked AS (
                    SELECT request_id, updated_at_ms, file_id, source_size, source_mtime,
                           force_rebuild,
@@ -3811,6 +3838,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             ));
         }
         self.execute(
+            "record_fragment_index_source",
             "INSERT INTO cluster_fragment_index_sources
                 (node_id, file_id, object_version, source_size, source_mtime,
                  source_sha256, observed_at_ms)
@@ -3886,8 +3914,13 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         node_id: &str,
         probes: &[crate::store::ClusterIndexAvailabilityProbe],
     ) -> Result<Vec<bool>, StoreError> {
-        self.cluster_index_availability_read(node_id, probes, true)
-            .await
+        self.cluster_index_availability_read(
+            "cluster_fragment_index_availability",
+            node_id,
+            probes,
+            true,
+        )
+        .await
     }
 
     async fn enqueue_cluster_fragment_index(
@@ -3970,6 +4003,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             ));
         }
         self.execute(
+            "put_cluster_fragment_index_location",
             "INSERT INTO cluster_fragment_index_locations
                 (cache_key, node_id, bytes, verified_at_ms, last_seen_at_ms)
              SELECT $1, $2, $3, $4, $5
@@ -4045,6 +4079,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         Ok(self
             .execute(
+                "forget_cluster_fragment_index_location",
                 "DELETE FROM cluster_fragment_index_locations
                   WHERE cache_key = $1 AND node_id = $2",
                 params!(cache_key, node_id),
@@ -4064,6 +4099,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             ));
         }
         self.execute(
+            "prune_cluster_fragment_indexes",
             "DELETE FROM cluster_fragment_index_locations
               WHERE (cache_key, node_id) IN (
                 SELECT cache_key, node_id

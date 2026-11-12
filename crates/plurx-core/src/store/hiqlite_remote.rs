@@ -29,6 +29,7 @@ impl RemoteStore for HiqliteAuthStore {
         let r = new.receiver;
         Ok(self
             .execute(
+                "create_remote_receiver",
                 INSERT_RECEIVER,
                 params!(
                     r.id,
@@ -46,6 +47,7 @@ impl RemoteStore for HiqliteAuthStore {
         let g = new.grant;
         Ok(self
             .execute(
+                "create_remote_grant",
                 INSERT_GRANT,
                 params!(
                     g.id,
@@ -125,10 +127,14 @@ impl RemoteStore for HiqliteAuthStore {
         Ok(())
     }
     async fn revoke_remote_grant(&self, id: &str, user: i64, now: i64) -> Result<(), StoreError> {
-        self.execute(REVOKE_GRANT, params!(now, id, user)).await?;
+        self.execute("revoke_remote_grant", REVOKE_GRANT, params!(now, id, user))
+            .await?;
         Ok(())
     }
     async fn admit_remote_pair_claim(&self, user: i64, now: i64) -> Result<bool, StoreError> {
-        Ok(self.execute(CLAIM_BUDGET, params!(user, now)).await? > 0)
+        Ok(self
+            .execute("admit_remote_pair_claim", CLAIM_BUDGET, params!(user, now))
+            .await?
+            > 0)
     }
 }

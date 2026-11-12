@@ -22,8 +22,13 @@
 //! [`CONSISTENT_DISPATCH`], or its callers are invisible here. The per-request number is what `plurx_http_store_reads_total`
 //! measures (K-04 M0), and only that measurement is evidence about latency.
 //!
-//! Three rules:
+//! Four rules:
 //!
+//! - every label names a Store method, not the helper that ran it
+//!   ([`label_failures`]): a label is a method declared in a `Store` trait, the
+//!   `local_` twin of one, or a function listed with its reason in
+//!   [`NOT_A_STORE_METHOD`], and a helper takes the caller's label and
+//!   forwards it;
 //! - every consistent read names the Store method that issued it
 //!   ([`unlabelled_sites`]): the first argument of `query_consistent_map*` is a
 //!   string literal, or the `method` a wrapper was handed, so a quorum read
@@ -129,16 +134,23 @@ fn dispatch_sites(line: &str) -> usize {
 
 /// The consistent-read call sites whose first argument is neither a string
 /// literal nor the forwarded `method` label, as `(line, text)`. A call on the
-/// raw vendor client (`self.inner().`, which the one `TimedClient` wrapper
-/// makes) is not a site of this rule: it has no label to take.
+/// raw vendor client (`self.inner().`, `Client::query_consistent_map(..)`) has
+/// no label to take, so it is one of these and is pinned in
+/// [`RAW_CLIENT_SITES`]; so is a site this scan cannot parse, so that a
+/// spelling it does not understand fails the census instead of escaping it.
 fn unlabelled_sites(source: &str) -> Vec<(usize, String)> {
     let text = production(source);
     let mut found = Vec::new();
-    for (at, _) in text.match_indices(".query_consistent_map") {
+    let mut calls = text
+        .match_indices(".query_consistent_map")
+        .chain(text.match_indices("::query_consistent_map"))
+        .collect::<Vec<_>>();
+    calls.sort_by_key(|(at, _)| *at);
+    for (at, _) in calls {
         let line_start = text[..at].rfind('\n').map_or(0, |index| index + 1);
         let line_end = text[at..].find('\n').map_or(text.len(), |index| at + index);
         let line = &text[line_start..line_end];
-        if line.trim_start().starts_with("//") || text[..at].trim_end().ends_with("inner()") {
+        if line.trim_start().starts_with("//") {
             continue;
         }
         let mut rest = &text[at + ".query_consistent_map".len()..];
@@ -160,6 +172,8 @@ fn unlabelled_sites(source: &str) -> Vec<(usize, String)> {
             rest = &turbofish[end..];
         }
         let Some(arguments) = rest.strip_prefix('(') else {
+            let number = text[..at].matches('\n').count() + 1;
+            found.push((number, line.trim().to_owned()));
             continue;
         };
         let first = arguments.trim_start();
@@ -399,16 +413,17 @@ fn consistent_read_census_admits_a_raised_entry_with_an_authority_reason() {
 }
 
 /// Consistent reads made on a raw `hiqlite::Client`, not through
-/// `TimedClient`: schema bootstrap, migration and compatibility checks that
-/// run before the store serves a request. They never reach
-/// `HttpStoreOperationCounts` or the by-method metric, so there is no label
-/// for them to take. Pinned per slice: a new raw read fails here until it is
+/// `TimedClient`: schema bootstrap, migration and compatibility checks, and
+/// the one `TimedClient` wrapper itself. They are outside request accounting
+/// (a few, such as the committed-schema-version read, can run on a live
+/// store, but never inside a request's scope), so there is no label for them
+/// to take. Pinned per slice: a new raw read fails here until it is
 /// either labelled (made through `TimedClient`) or consciously added.
 const RAW_CLIENT_SITES: &[(&str, usize)] = &[
     // Watch-column migration, sharing object shape, the cluster compatibility
-    // probe and its two committed-marker readers, and two Source/custody
-    // shape guards.
-    ("hiqlite.rs", 7),
+    // probe and its two committed-marker readers, two Source/custody shape
+    // guards, and the one `TimedClient` wrapper that makes the labelled call.
+    ("hiqlite.rs", 8),
     // The producer payload column shape before a bootstrap ALTER.
     ("hiqlite_background_jobs.rs", 1),
     // The analysis-component and subtitle-source schema currency probes.
@@ -447,11 +462,469 @@ fn the_label_rule_refuses_an_unlabelled_read_and_admits_labelled_ones() {
     let found = unlabelled_sites(unlabelled);
     assert_eq!(found.len(), 2, "{found:?}");
     assert_eq!((found[0].0, found[1].0), (3, 5));
-    // A literal, a forwarded label, the scoped variant and the raw client.
+    // A literal, a forwarded label, the scoped variant and a comment.
     let labelled = "client.query_consistent_map::<Row, _>(\"list_users\", sql, p);\n\
                     client.query_consistent_map(method, sql, p);\n\
                     client.query_consistent_map_scoped(\n    method,\n    sql,\n    p,\n    s);\n\
-                    self.inner().query_consistent_map(sql.clone(), p);\n\
                     // client.query_consistent_map(sql, p) in a comment\n";
     assert!(unlabelled_sites(labelled).is_empty());
+    // The raw vendor client, in both spellings, and a site the scan cannot
+    // parse are sites too, so they are pinned rather than skipped.
+    let raw = "self.inner().query_consistent_map(sql.clone(), p);\n\
+               hiqlite::Client::query_consistent_map(&client, sql, p);\n\
+               let read = client.query_consistent_map;\n";
+    assert_eq!(
+        unlabelled_sites(raw).len(),
+        3,
+        "{:?}",
+        unlabelled_sites(raw)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The label rule: every label names a Store method (D3a, S1 of the review).
+// ---------------------------------------------------------------------------
+
+/// Every source that declares a `Store` trait. Their method names are the
+/// vocabulary of `plurx_http_store_operations_by_method_total{method}`.
+const STORE_TRAIT_SOURCES: &[&str] = &[
+    include_str!("mod.rs"),
+    include_str!("background_jobs.rs"),
+    include_str!("classification.rs"),
+    include_str!("classification_schedule.rs"),
+    include_str!("dv_conversion.rs"),
+    include_str!("field_order_backfill.rs"),
+    include_str!("file_grants.rs"),
+    include_str!("fragment_index_cluster.rs"),
+    include_str!("invitations.rs"),
+    include_str!("jellyfin_catalog.rs"),
+    include_str!("jellyfin_identity.rs"),
+    include_str!("jellyfin_login.rs"),
+    include_str!("jellyfin_play.rs"),
+    include_str!("offline_claim.rs"),
+    include_str!("offline_expiry.rs"),
+    include_str!("playback_handoffs.rs"),
+    include_str!("remote.rs"),
+    include_str!("sharing.rs"),
+    include_str!("sharing_catalogue.rs"),
+    include_str!("sharing_catalogue_artwork.rs"),
+    include_str!("sharing_catalogue_details.rs"),
+    include_str!("sharing_catalogue_source.rs"),
+    include_str!("sharing_file_locators.rs"),
+    include_str!("sharing_ingress_custody.rs"),
+    include_str!("sharing_purpose_keys.rs"),
+    include_str!("sharing_receiver_delivery.rs"),
+    include_str!("sharing_receiver_ingress.rs"),
+    include_str!("sharing_receiver_progress.rs"),
+    include_str!("sharing_receiver_retirement.rs"),
+    include_str!("sharing_receiver_sessions.rs"),
+    include_str!("sharing_source_ingress_custody.rs"),
+    include_str!("sharing_source_sessions.rs"),
+    include_str!("watched_drain.rs"),
+];
+
+/// Labels that are deliberately not a `Store` method, each with why. A label
+/// here is a function that is not on a request's path or that is its own
+/// operation; a helper that merely stands where a Store method should is not
+/// admitted — it takes the label and forwards it. The rule also admits
+/// `local_<method>` for a `Store` method (the bounded-replica twin of that
+/// method), so those are not listed.
+const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
+    // Startup, schema migration and compatibility probes: run at bootstrap or
+    // on a membership change, outside a request's accounting.
+    ("analysis_component_schema_is_current", STARTUP),
+    ("analysis_coordination_shape", STARTUP),
+    ("bootstrap_with_clock", STARTUP),
+    ("bridge_private_lineage_inner", STARTUP),
+    ("dispatch_turns_installed", STARTUP),
+    ("committed_schema_version_unchecked", STARTUP),
+    ("custody_migration_settled", STARTUP),
+    ("drain_deadline_column_present", STARTUP),
+    ("dv_title_jobs_schema_version", STARTUP),
+    ("invitation_schema_version", STARTUP),
+    ("library_annotations_schema_version", STARTUP),
+    ("migrate_additive_schema_step", STARTUP),
+    ("migrate_playback_inputs", STARTUP),
+    ("migrate_schema", STARTUP),
+    ("playback_handoffs_schema_version", STARTUP),
+    ("pointer_desired_revision_column_present", STARTUP),
+    ("read_lineage_snapshot", STARTUP),
+    ("refuse_ambiguous_sharing_lineage", STARTUP),
+    ("remote_schema_current", STARTUP),
+    ("scan_request_v2_schema_version", STARTUP),
+    ("schema_migration_transaction", STARTUP),
+    ("seal_legacy", STARTUP),
+    ("settle_migration_attempt", STARTUP),
+    ("shared_caption_schema_version", STARTUP),
+    ("source_arbitration_shape", STARTUP),
+    ("subtitle_managed_schema_version", STARTUP),
+    ("subtitle_text_translation_schema_version", STARTUP),
+    ("subtitle_translation_schema_version", STARTUP),
+    ("verify_compatibility", STARTUP),
+    // SQLite import and its verification: an operator command, never a request.
+    ("import_instance_setting", IMPORT),
+    ("import_sqlite_backup_inner", IMPORT),
+    ("insert_import_chunk", IMPORT),
+    ("target_count", IMPORT),
+    ("target_digest", IMPORT),
+    ("verify_empty_import_target", IMPORT),
+    ("verify_target_foreign_keys", IMPORT),
+    // Validation-only hooks behind `cluster-read-cost-validation` and tests.
+    ("validation_duplicate_instance_id_transaction", VALIDATION),
+    ("validation_lineage_union_fingerprint", VALIDATION),
+    ("validation_reset_contract_state", VALIDATION),
+    ("validation_set_schema_lineage", VALIDATION),
+    // The one layout probe every guarded session statement re-reads while the
+    // cached layout is not the permanent v82 one. Named on purpose, so a fleet
+    // that has installed v82 shows none and one that has not shows how many.
+    (
+        "session_layout",
+        "the session-layout marker and guard reads, one bounded label",
+    ),
+    // The queue bridge is generic over `QueueSql`, shared by both stores and
+    // the formally pinned background-jobs code; its create-path writes are
+    // named in the per-shape pin. Deferred to D3b.
+    ("queue_sql", "the queue bridge's statement path (D3b)"),
+    (
+        "queue_transaction",
+        "the queue bridge's transaction path (D3b)",
+    ),
+    // The live-TV resource ledger's own two operations behind its private
+    // `Backend` trait, which is not a `Store`.
+    ("read_ledger", "live-TV resource ledger `Backend` read"),
+    ("commit_ledger", "live-TV resource ledger `Backend` commit"),
+    // The `bounded_replica_reads` switch read every bounded read's gate makes:
+    // the gate itself, not a Store method's read.
+    (
+        "local_bounded_reads_enabled",
+        "the bounded-replica switch read behind every gate",
+    ),
+    // Operator dumps and digests, not request reads.
+    ("local_auth_dump", "operator dump of the auth tables"),
+    ("authoritative_dump", "operator catalog dump"),
+    ("local_catalog_digest", "operator catalog digest"),
+    (
+        "local_durable_digest",
+        "operator digest of the durable tables",
+    ),
+    // The sharing `Backend` trait is shared with the SQLite store and its
+    // 458 call sites live in the sharing modules, none on the playback path:
+    // its read and transaction name themselves. Forwarding a Store method
+    // through that trait is deferred with the rest of sharing attribution.
+    (
+        "sharing_read",
+        "sharing `Backend` read, shared with SQLite; not a playback path",
+    ),
+    (
+        "sharing_txn",
+        "sharing `Backend` transaction, shared with SQLite; not a playback path",
+    ),
+    // Throttled last-seen writes the auth lookups trigger: their own
+    // operation, one caller each, better named than folded into the lookup.
+    (
+        "refresh_api_key_activity",
+        "throttled last-seen write after an API-key lookup",
+    ),
+    (
+        "refresh_token_activity_if_due",
+        "throttled last-seen write after a token lookup",
+    ),
+];
+const STARTUP: &str =
+    "startup, schema migration or compatibility probe, outside request accounting";
+const IMPORT: &str = "SQLite import and verification, an operator command";
+const VALIDATION: &str = "validation hook behind a test or cost-validation feature";
+
+/// [`production`], also without a `#[cfg(test)]` helper module of any name.
+fn label_production(source: &str) -> &str {
+    production(source)
+        .split("\n#[cfg(test)]\nmod ")
+        .next()
+        .unwrap_or(source)
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// The text after the bracket that closes the one `text` opens.
+fn skip_balanced(text: &str, open: char, close: char) -> &str {
+    let mut depth = 0_usize;
+    for (index, character) in text.char_indices() {
+        if character == open {
+            depth += 1;
+        } else if character == close {
+            depth -= 1;
+            if depth == 0 {
+                return &text[index + character.len_utf8()..];
+            }
+        }
+    }
+    ""
+}
+
+/// Every function named in `sources` whose first parameter, after any
+/// receiver, is `method: &'static str`: the functions that take a label.
+fn label_taking_fns(sources: &[&str]) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for source in sources {
+        let text = label_production(source);
+        for (at, _) in text.match_indices("fn ") {
+            if at > 0 && is_ident_byte(text.as_bytes()[at - 1]) {
+                continue;
+            }
+            let rest = &text[at + 3..];
+            let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+            let Some(end) = end.filter(|end| *end > 0) else {
+                continue;
+            };
+            let mut after = rest[end..].trim_start();
+            if after.starts_with('<') {
+                after = skip_balanced(after, '<', '>').trim_start();
+            }
+            let Some(mut params) = after.strip_prefix('(').map(str::trim_start) else {
+                continue;
+            };
+            for receiver in ["&mut self", "&self", "self"] {
+                if let Some(next) = params.strip_prefix(receiver) {
+                    if let Some(next) = next.trim_start().strip_prefix(',') {
+                        params = next.trim_start();
+                    }
+                    break;
+                }
+            }
+            if params.starts_with("method: &'static str") {
+                names.insert(rest[..end].to_owned());
+            }
+        }
+    }
+    names
+}
+
+/// How a call to a label-taking function spells its label.
+#[derive(Debug, PartialEq, Eq)]
+enum LabelArg {
+    /// The caller's own `method`, forwarded.
+    Forwarded,
+    /// A string literal.
+    Literal(String),
+}
+
+/// Every call to one of `fns` in `source`'s production text, as `(line,
+/// function, label argument)`. A call on the raw vendor client (`inner()`)
+/// is the consistent-read rule's, not this one's; a bare array first argument
+/// is a `rusqlite` call of the same name.
+fn label_calls(
+    source: &str,
+    fns: &std::collections::BTreeSet<String>,
+) -> Vec<(usize, String, LabelArg)> {
+    let text = label_production(source);
+    let mut calls = Vec::new();
+    for name in fns {
+        for (at, _) in text.match_indices(name.as_str()) {
+            let before = &text[..at];
+            let after_name = &text[at + name.len()..];
+            if before
+                .as_bytes()
+                .last()
+                .is_some_and(|byte| is_ident_byte(*byte))
+                || after_name
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| is_ident_byte(*byte))
+                || before.trim_end().ends_with("fn")
+                || before.trim_end().ends_with("inner()")
+            {
+                continue;
+            }
+            let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+            if text[line_start..at].trim_start().starts_with("//") {
+                continue;
+            }
+            let mut rest = after_name;
+            if rest.starts_with("::<") {
+                rest = skip_balanced(&rest[2..], '<', '>');
+            }
+            let Some(arguments) = rest.strip_prefix('(') else {
+                continue;
+            };
+            let first = arguments.trim_start();
+            // Anything else as the first argument is the vendor client's own
+            // method of that name (`client.batch(SCHEMA)`, `rusqlite`'s
+            // `query_map([], ..)`): a `TimedClient` call cannot spell it, since
+            // its first parameter is the `&'static str` label. The raw
+            // consistent reads are the census rule's, pinned in
+            // `RAW_CLIENT_SITES`.
+            let argument = if let Some(literal) = first.strip_prefix('"') {
+                match literal.split_once("\",") {
+                    Some((label, _)) if !label.is_empty() && label.bytes().all(is_ident_byte) => {
+                        LabelArg::Literal(label.to_owned())
+                    }
+                    _ => continue,
+                }
+            } else if first
+                .strip_prefix("method")
+                .is_some_and(|tail| tail.trim_start().starts_with([',', ')']))
+            {
+                LabelArg::Forwarded
+            } else {
+                continue;
+            };
+            calls.push((before.matches('\n').count() + 1, name.clone(), argument));
+        }
+    }
+    calls.sort_by_key(|(line, _, _)| *line);
+    calls
+}
+
+/// The names declared by `Store` traits: every function inside a `trait`.
+fn store_method_names(sources: &[&str]) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for source in sources {
+        for (at, _) in production(source).match_indices("trait ") {
+            let text = production(source);
+            if at > 0 && is_ident_byte(text.as_bytes()[at - 1]) {
+                continue;
+            }
+            let Some(open) = text[at..].find('{').map(|index| at + index) else {
+                continue;
+            };
+            // `QueueSql` and the like are not Stores: only `...Store` traits
+            // name Store methods.
+            let declared = text[at + "trait ".len()..open].trim_start();
+            let name_end = declared
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(declared.len());
+            if !declared[..name_end].ends_with("Store") {
+                continue;
+            }
+            let body = &text[open..];
+            let closed = skip_balanced(body, '{', '}');
+            let body = &body[..body.len() - closed.len()];
+            for (index, _) in body.match_indices("fn ") {
+                let tail = &body[index + 3..];
+                let end = tail
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(tail.len());
+                names.insert(tail[..end].to_owned());
+            }
+        }
+    }
+    names
+}
+
+/// Labels in `sources` that name neither a Store method, nor the local twin
+/// of one, nor an allow-listed function; and calls that spell no label.
+fn label_failures(
+    sources: &[(&str, &str)],
+    methods: &std::collections::BTreeSet<String>,
+    allowed: &[(&str, &str)],
+) -> Vec<String> {
+    let texts = sources.iter().map(|(_, text)| *text).collect::<Vec<_>>();
+    let fns = label_taking_fns(&texts);
+    let mut failures = Vec::new();
+    for (name, source) in sources {
+        for (line, function, argument) in label_calls(source, &fns) {
+            match argument {
+                LabelArg::Forwarded => {}
+                LabelArg::Literal(label) => {
+                    let twin = label
+                        .strip_prefix("local_")
+                        .is_some_and(|method| methods.contains(method));
+                    if !methods.contains(&label)
+                        && !twin
+                        && !allowed.iter().any(|(entry, _)| *entry == label)
+                    {
+                        failures.push(format!(
+                            "{name}:{line}: `{function}` is labelled \"{label}\", which is not a Store method"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    failures
+}
+
+/// D3a review S1: a label names the `Store` method that issued the operation,
+/// not the helper that ran it. A helper takes `method` and forwards it, so the
+/// fleet's `by_method` reading resolves to methods; only the functions listed
+/// in [`NOT_A_STORE_METHOD`], each with its reason, are named otherwise.
+#[test]
+fn every_label_names_a_store_method() {
+    let methods = store_method_names(STORE_TRAIT_SOURCES);
+    assert!(
+        methods.len() > 500,
+        "the Store trait scan found {} methods",
+        methods.len()
+    );
+    let failures = label_failures(STORE_SOURCES, &methods, NOT_A_STORE_METHOD);
+    assert!(
+        failures.is_empty(),
+        "labels that are not Store methods:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The allow-list does not rot: each entry is used, none is a Store method
+/// (it would not need listing), and none is listed twice.
+#[test]
+fn the_label_allow_list_has_only_live_entries() {
+    let methods = store_method_names(STORE_TRAIT_SOURCES);
+    let texts = STORE_SOURCES
+        .iter()
+        .map(|(_, text)| *text)
+        .collect::<Vec<_>>();
+    let fns = label_taking_fns(&texts);
+    let used = STORE_SOURCES
+        .iter()
+        .flat_map(|(_, source)| label_calls(source, &fns))
+        .filter_map(|(_, _, argument)| match argument {
+            LabelArg::Literal(label) => Some(label),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut seen = std::collections::BTreeSet::new();
+    for (entry, reason) in NOT_A_STORE_METHOD {
+        assert!(!reason.is_empty(), "{entry} has no reason");
+        assert!(seen.insert(*entry), "{entry} is listed twice");
+        assert!(
+            !methods.contains(*entry),
+            "{entry} is a Store method and needs no entry"
+        );
+        assert!(
+            used.contains(*entry),
+            "{entry} is allow-listed but no call labels it; remove the entry"
+        );
+    }
+}
+
+#[test]
+fn the_label_rule_refuses_a_helper_name_and_admits_store_methods() {
+    let source = "\
+impl S {\n\
+    async fn helper(&self, method: &'static str, sql: &'static str) {\n\
+        self.client().execute(method, sql, p).await;\n\
+    }\n\
+    async fn get_user(&self) {\n\
+        self.helper(\"get_user\", SQL).await;\n\
+        self.helper(\"local_get_user\", SQL).await;\n\
+        self.helper(\"helper\", SQL).await;\n\
+        self.helper(\"get_user\", SQL).await;\n\
+        self.inner().helper(sql, p);\n\
+    }\n\
+}\n";
+    let methods = ["get_user"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    let failures = label_failures(&[("fixture.rs", source)], &methods, &[]);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].contains("labelled \"helper\""), "{failures:?}");
+    // An allow-listed function is admitted and named.
+    assert!(
+        label_failures(&[("fixture.rs", source)], &methods, &[("helper", "why")])
+            .iter()
+            .all(|failure| !failure.contains("labelled")),
+    );
 }

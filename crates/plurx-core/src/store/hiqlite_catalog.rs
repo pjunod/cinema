@@ -201,9 +201,13 @@ struct JsonValueRow {
     value: String,
 }
 
-async fn rows(client: &TimedClient, sql: &'static str) -> Result<Vec<String>, StoreError> {
+async fn rows(
+    method: &'static str,
+    client: &TimedClient,
+    sql: &'static str,
+) -> Result<Vec<String>, StoreError> {
     Ok(client
-        .query_map::<JsonValueRow, _>("rows", sql, params!())
+        .query_map::<JsonValueRow, _>(method, sql, params!())
         .await
         .map_err(database_error)?
         .into_iter()
@@ -248,6 +252,7 @@ struct CatalogTruthDump {
 async fn authoritative_dump(client: &TimedClient) -> Result<CatalogTruthDump, StoreError> {
     Ok(CatalogTruthDump {
         libraries: rows(
+            "authoritative_dump",
             client,
             "SELECT json_array(id, name, kind, paths, anime, created_at, \
                     scan_interval_mins, refresh_interval_mins, last_scan_at, last_refresh_at) \
@@ -255,6 +260,7 @@ async fn authoritative_dump(client: &TimedClient) -> Result<CatalogTruthDump, St
         )
         .await?,
         items: rows(
+            "authoritative_dump",
             client,
             "SELECT json_array(id, library_id, kind, parent_id, title, sort_title, year, \
                     overview, tmdb_id, imdb_id, season_number, episode_number, air_date, \
@@ -264,6 +270,7 @@ async fn authoritative_dump(client: &TimedClient) -> Result<CatalogTruthDump, St
         )
         .await?,
         files: rows(
+            "authoritative_dump",
             client,
             "SELECT json_array(id, item_id, path, size, mtime, duration_ms, container, \
                     video_codec, video_profile, width, height, bit_depth, hdr, bitrate, \
@@ -276,12 +283,14 @@ async fn authoritative_dump(client: &TimedClient) -> Result<CatalogTruthDump, St
         )
         .await?,
         watch_state: rows(
+            "authoritative_dump",
             client,
             "SELECT json_array(user_id, item_id, position_ms, duration_ms, watched, updated_at) \
              AS value FROM watch_state ORDER BY user_id, item_id",
         )
         .await?,
         reading_state: rows(
+            "authoritative_dump",
             client,
             "SELECT json_array(user_id, item_id, file_id, file_size, file_mtime, \
                     locator_json, progression_millis, completed, updated_at) \
@@ -289,18 +298,21 @@ async fn authoritative_dump(client: &TimedClient) -> Result<CatalogTruthDump, St
         )
         .await?,
         library_roots: rows(
+            "authoritative_dump",
             client,
             "SELECT json_array(library_id, fingerprint) AS value \
              FROM library_roots ORDER BY library_id",
         )
         .await?,
         scan_reconcile_guards: rows(
+            "authoritative_dump",
             client,
             "SELECT json_array(library_id) AS value \
              FROM scan_reconcile_guards ORDER BY library_id",
         )
         .await?,
         scan_reconcile_items: rows(
+            "authoritative_dump",
             client,
             "SELECT json_array(library_id, item_id) AS value \
              FROM scan_reconcile_items ORDER BY library_id, item_id",
@@ -326,12 +338,14 @@ pub(super) async fn local_catalog_digest(client: &TimedClient) -> Result<String,
         scan_reconcile_guards: truth.scan_reconcile_guards,
         scan_reconcile_items: truth.scan_reconcile_items,
         fts_terms: rows(
+            "local_catalog_digest",
             client,
             "SELECT json_array(term, doc, col, offset) AS value \
              FROM items_fts_vocab ORDER BY term, doc, col, offset",
         )
         .await?,
         fts_schema: rows(
+            "local_catalog_digest",
             client,
             "SELECT json_array(name, type, sql) AS value FROM sqlite_master \
              WHERE name IN ('items_fts','items_fts_vocab','items_fts_ai', \
@@ -352,6 +366,7 @@ mod query_helper_tests {
     #[tokio::test]
     async fn rows_helper_rejects_misordered_placeholders() {
         let error = rows(
+            "rows_helper_rejects_misordered_placeholders",
             &disconnected_test_client(),
             "SELECT $2 AS value WHERE $1 = 1",
         )
@@ -572,6 +587,7 @@ impl LibraryStore for HiqliteAuthStore {
     async fn mark_library_scanned(&self, id: i64, refreshed: bool) -> Result<(), StoreError> {
         let now = self.now()?;
         self.execute(
+            "mark_library_scanned",
             "UPDATE libraries SET last_scan_at = $1, \
              last_refresh_at = CASE WHEN $2 THEN $1 ELSE last_refresh_at END \
              WHERE id = $3",

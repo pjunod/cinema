@@ -848,13 +848,14 @@ fn recording_page_statement(
 }
 
 async fn read_recordings(
+    method: &'static str,
     store: &HiqliteAuthStore,
     sql: String,
     values: Vec<Param>,
 ) -> Result<Vec<DvrRecording>, StoreError> {
     store
         .client()
-        .query_consistent_map::<RecordingRow, _>("read_recordings", sql, values)
+        .query_consistent_map::<RecordingRow, _>(method, sql, values)
         .await?
         .into_iter()
         .map(TryInto::try_into)
@@ -862,13 +863,14 @@ async fn read_recordings(
 }
 
 async fn read_reminders(
+    method: &'static str,
     store: &HiqliteAuthStore,
     sql: String,
     values: Vec<Param>,
 ) -> Result<Vec<DvrReminder>, StoreError> {
     store
         .client()
-        .query_consistent_map::<ReminderRow, _>("read_reminders", sql, values)
+        .query_consistent_map::<ReminderRow, _>(method, sql, values)
         .await?
         .into_iter()
         .map(TryInto::try_into)
@@ -955,7 +957,11 @@ impl DvrStore for HiqliteAuthStore {
 
     async fn delete_dvr_rule(&self, id: &str) -> Result<bool, StoreError> {
         let changed = self
-            .execute("DELETE FROM dvr_rules WHERE id = $1", params!(id))
+            .execute(
+                "delete_dvr_rule",
+                "DELETE FROM dvr_rules WHERE id = $1",
+                params!(id),
+            )
             .await?;
         Ok(changed == 1)
     }
@@ -1210,6 +1216,7 @@ impl DvrStore for HiqliteAuthStore {
 
     async fn get_dvr_recording(&self, id: &str) -> Result<Option<DvrRecording>, StoreError> {
         Ok(read_recordings(
+            "get_dvr_recording",
             self,
             format!("SELECT {RECORDING_COLS} FROM dvr_recordings WHERE id = $1"),
             params!(id),
@@ -1231,6 +1238,7 @@ impl DvrStore for HiqliteAuthStore {
         airing_start: i64,
     ) -> Result<Option<DvrRecording>, StoreError> {
         Ok(read_recordings(
+            "get_dvr_recording_for_airing",
             self,
             format!(
                 "SELECT {RECORDING_COLS} FROM dvr_recordings \
@@ -1250,7 +1258,7 @@ impl DvrStore for HiqliteAuthStore {
         limit: i64,
     ) -> Result<Vec<DvrRecording>, StoreError> {
         let (sql, values) = recording_page_statement(filter, after, limit);
-        read_recordings(self, sql, values).await
+        read_recordings("list_dvr_recordings", self, sql, values).await
     }
 
     /// Every row in one of these states, in the order the owner loop acts on
@@ -1266,6 +1274,7 @@ impl DvrStore for HiqliteAuthStore {
         let mut binder = Binder::default();
         let list = binder.bind_states(states);
         read_recordings(
+            "list_dvr_recordings_in",
             self,
             format!(
                 "SELECT {RECORDING_COLS} FROM dvr_recordings \
@@ -1295,6 +1304,7 @@ impl DvrStore for HiqliteAuthStore {
             .first()
             .map_or(0, |row| row.count);
         let rows = read_recordings(
+            "dvr_overview_rows",
             self,
             format!(
                 "SELECT {RECORDING_COLS} FROM dvr_recordings \
@@ -1369,6 +1379,7 @@ impl DvrStore for HiqliteAuthStore {
         let id = page.bind(after_id);
         let page_limit = page.bind(limit.clamp(1, DVR_RECORDINGS_LIST_PAGE.saturating_add(1)));
         let rows = read_recordings(
+            "list_dvr_schedule_window",
             self,
             format!(
                 "SELECT {RECORDING_COLS} FROM dvr_recordings WHERE {page_predicate} \
@@ -1468,6 +1479,7 @@ impl DvrStore for HiqliteAuthStore {
         at_ms: i64,
     ) -> Result<(), StoreError> {
         self.execute(
+            "progress_dvr_recording",
             "UPDATE dvr_recordings SET bytes = $1, last_progress_ms = $2 \
              WHERE id = $3 AND state = 'recording'",
             params!(bytes, at_ms, id),
@@ -1491,6 +1503,7 @@ impl DvrStore for HiqliteAuthStore {
         by_user: i64,
     ) -> Result<Option<DvrRecording>, StoreError> {
         self.execute(
+            "request_dvr_stop",
             // `updated_at_ms` moves because a stop request is a change of
             // intent someone made, unlike a progress write, which is the
             // capture reporting on itself and deliberately stamps nothing.
@@ -1501,6 +1514,7 @@ impl DvrStore for HiqliteAuthStore {
         )
         .await?;
         Ok(read_recordings(
+            "request_dvr_stop",
             self,
             format!("SELECT {RECORDING_COLS} FROM dvr_recordings WHERE id = $1"),
             params!(id),
@@ -1555,6 +1569,7 @@ impl DvrStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
         Ok(read_recordings(
+            "request_dvr_stop_with_event",
             self,
             format!("SELECT {RECORDING_COLS} FROM dvr_recordings WHERE id=$1"),
             params!(id),
@@ -1611,6 +1626,7 @@ impl DvrStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         let changed = self
             .execute(
+                "link_dvr_recording_media",
                 "UPDATE dvr_recordings SET item_id = $1, file_id = $2, updated_at_ms = $3 \
                  WHERE id = $4",
                 params!(item_id, file_id, now_ms, recording_id),
@@ -1781,6 +1797,7 @@ impl DvrStore for HiqliteAuthStore {
             return Ok(None);
         }
         let recording = read_recordings(
+            "acknowledge_dvr_attention",
             self,
             format!("SELECT {RECORDING_COLS} FROM dvr_recordings WHERE id=$1"),
             params!(recording_id),
@@ -1969,6 +1986,7 @@ impl DvrStore for HiqliteAuthStore {
         match state {
             Some(state) => {
                 read_reminders(
+                    "list_dvr_reminders",
                     self,
                     format!(
                         "SELECT {REMINDER_COLS} FROM dvr_reminders \
@@ -1980,6 +1998,7 @@ impl DvrStore for HiqliteAuthStore {
             }
             None => {
                 read_reminders(
+                    "list_dvr_reminders",
                     self,
                     format!(
                         "SELECT {REMINDER_COLS} FROM dvr_reminders \
@@ -1997,6 +2016,7 @@ impl DvrStore for HiqliteAuthStore {
         state: DvrReminderState,
     ) -> Result<Vec<DvrReminder>, StoreError> {
         read_reminders(
+            "list_dvr_reminders_in",
             self,
             format!(
                 "SELECT {REMINDER_COLS} FROM dvr_reminders \
@@ -2056,6 +2076,7 @@ impl DvrStore for HiqliteAuthStore {
     async fn delete_dvr_reminder(&self, user_id: i64, id: &str) -> Result<bool, StoreError> {
         let changed = self
             .execute(
+                "delete_dvr_reminder",
                 "DELETE FROM dvr_reminders WHERE id = $1 AND user_id = $2",
                 params!(id, user_id),
             )
@@ -2106,6 +2127,7 @@ impl DvrStore for HiqliteAuthStore {
         // start arrived first. Both are `expired`; neither is a row a client
         // should still be drawing an overlay for.
         self.execute(
+            "transition_dvr_reminders",
             "UPDATE dvr_reminders SET state = 'expired', updated_at_ms = $1 \
              WHERE state IN ('armed', 'fired') AND airing_start < $2",
             params!(now_ms, now_seconds),
@@ -2146,6 +2168,7 @@ impl DvrStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         let changed = self
             .execute(
+                "set_dvr_reminder_state",
                 "UPDATE dvr_reminders SET state = $1, \
                    fired_at_ms = CASE WHEN $1 = 'fired' THEN $2 ELSE fired_at_ms END, \
                    acked_at_ms = CASE WHEN $1 = 'acked' THEN $2 ELSE acked_at_ms END, \
