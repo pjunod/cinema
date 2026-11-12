@@ -4004,12 +4004,6 @@ derivations that fell back to the source in
 full sweep walk measured it, is in `plurx_subtitle_source_store_bytes` and
 `plurx_subtitle_source_store_directories`.
 
-The same pass's copy index ride is counted in
-`plurx_copy_index_ride_total{outcome}` (`observed`, `abandoned`,
-`not_built`). An abandoned ride is also a warn log naming the file and the
-reason, and shows on the pass's live Analysis row; the pass and its index are
-unaffected, and that file's next pass does not ride.
-
 **Where it shows while it runs.** The work is attributable from inside the
 product, not only from metrics:
 
