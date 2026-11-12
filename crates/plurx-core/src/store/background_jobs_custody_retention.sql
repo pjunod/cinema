@@ -1,6 +1,6 @@
 -- A job that still owns charged source custody is retained.
 --
--- 2026-11-12, nuc3: custody 4170fe8e outlived its dead owner. Retention then
+-- 2026-11-12: custody 4170fe8e outlived its dead owner. Retention then
 -- deleted the owner's settled job row: the receipt-pressure prune, past the
 -- 9,000-row watermark. That row was the custody's only exact source binding,
 -- so the host source census could no longer tie its observation to the file

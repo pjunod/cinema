@@ -510,6 +510,8 @@ paths = [
   "crates/plurx-core/src/store/background_jobs_foreground.sql",
   "crates/plurx-core/src/store/scan_request_v2.rs",
   "crates/plurx-core/src/store/scan_request_v2.sql",
+  "crates/plurx-core/src/store/custody_retention.rs",
+  "crates/plurx-core/src/store/background_jobs_custody_retention.sql",
   "crates/plurx-core/src/store/background_jobs_source_interest.sql",
   "crates/plurx-core/src/store/background_jobs_source_service.sql",
   "crates/plurx-core/src/store/source_checkpoints.sql",

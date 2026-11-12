@@ -2433,7 +2433,7 @@ async fn busy_scan_voter_keeps_its_local_turn_without_blocking_a_free_remote_dis
 
 #[tokio::test]
 async fn retention_keeps_a_job_that_still_owns_charged_source_custody() {
-    // 2026-11-12, nuc3: custody 4170fe8e outlived its dead owner, and
+    // 2026-11-12: custody 4170fe8e outlived its dead owner, and
     // retention then deleted the owner's settled job row. That row was the
     // custody's only exact source binding, so the host census could no longer
     // release it. A job is retained while any custody it owns is charged.
