@@ -133,3 +133,25 @@ package tests completed with one platform-specific skip; nine affected Docker
 contracts passed; paperwork passed all 15 checks. This evidence covers base
 publication and consumption, without asserting a full daemon rebuild, hardware
 playback qualification or audited amd64 release readiness.
+
+## Republication — 2026-11-12
+
+Republished from `c0a234817` after #1481 changed the renderer sources without a
+re-pin, which left processed Dolby Vision off on every node built from that
+tree. The variant is the same as the initial base: an ordinary base, not the
+audited amd64 release base. Forgejo run 7267 built amd64 on the nonvoter heavy
+worker and arm64 on the release arm64 runner.
+
+| | Digest |
+|---|---|
+| Index (pinned) | `sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67` |
+| linux/amd64 | `sha256:7242b24e931f887deb1136a7172cc0e8d163765d7d2702bd61b22b3b7aedb1a9` |
+| linux/arm64 | `sha256:44bda5af679331e52fc699e3b3ba9fb371f30d87f25b8c31a8122768da814c9d` |
+
+Both platform bundles report DV `source_sha256`
+`0ae1fc25613537752ae7a9e0e632b82bb9269603208f1994694377c499486e50`, which is the
+identity of `tools/dv_processing` at `c0a234817`. The public copy (GitHub run
+43136340769) is anonymously readable with identical index bytes. The temporary
+copy credential was removed afterwards. `scripts/media-runtime pin` verified
+both platforms and the public index before rewriting the pin.
+
