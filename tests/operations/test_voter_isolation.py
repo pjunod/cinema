@@ -222,7 +222,7 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
     # Jobs whose container the workflow bounds run on the two-carrier
     # compile pool; host-mode and publishing jobs stay on the heavy host.
     COMPILE_ROUTE = "[ci-nonvoter-compile-amd64]"
-    COMPILE_JOBS = frozenset({"rust_compile", "cluster_daemon"})
+    COMPILE_JOBS = frozenset({"rust_compile", "cluster_daemon", "rust_units_archive", "rust_units_baseline"})
     CAPS = {"--memory": "20g", "--memory-swap": "20g", "--cpus": "4",
             "--cpuset-cpus": "0-3", "--pids-limit": "4096"}
     EFFECTIVE = {"memory.max": "21474836480", "memory.swap.max": "0",
@@ -249,6 +249,11 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                      self.job(".github/workflows/media-runtime.yml", "platform")))
         jobs.append((self.WORKFLOWS[2], "worker_control_proof",
                      self.job(self.WORKFLOWS[2], "worker_control_proof")))
+        # The PR-time Rust unit stage compiles its archive and its merge-base
+        # check on the same bounded compile pool.
+        jobs.extend((".github/workflows/rust-units.yml", name,
+                     self.job(".github/workflows/rust-units.yml", name))
+                    for name in ("rust_units_archive", "rust_units_baseline"))
         return jobs
 
     def verifier(self, job, package=False):
@@ -327,7 +332,7 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                     if name not in {"publish_main", "worker_control_proof"}:
                         self.assertIn('      CARGO_BUILD_JOBS: "1"\n', header)
                 scripts.append(self.verifier(job, name in {"package_smoke", "image", "platform"}))
-        self.assertEqual(len(scripts), 15)
+        self.assertEqual(len(scripts), 17)
         self.assertEqual(len(set(scripts)), 1, "all fifteen routes must execute the same actual cgroup checks")
 
     def test_actual_posix_verifier_accepts_private_and_host_service_cgroups(self):
