@@ -954,6 +954,47 @@ fn route_activation(user_id: i64, session: &str, incarnation: &str) -> MediaSess
     }
 }
 
+/// Apply the frozen principal session rebuild to the replicated tables (rows
+/// survive it) and record the layout as installed, so the route view's local
+/// twin runs. Production installs it with the coordinated Source installer.
+#[cfg(feature = "cluster-read-cost-validation")]
+async fn install_principal_layout(client: &Client, store: &HiqliteAuthStore) {
+    let statements: Vec<(String, hiqlite::Params)> =
+        plurx_core::store::media_session_principal_rebuild_schema()
+            .split("-- next statement\n")
+            .map(|sql| {
+                (
+                    sql.trim().trim_end_matches(';').to_owned(),
+                    hiqlite::params!(),
+                )
+            })
+            .collect();
+    for result in client
+        .txn(statements)
+        .await
+        .expect("apply the principal rebuild")
+    {
+        result.expect("rebuild statement");
+    }
+    store.validation_assume_installed_session_layout();
+}
+
+/// End a session's row as a release does (`state`, `terminal_reason`).
+#[cfg(feature = "cluster-read-cost-validation")]
+async fn release(client: &Client, session: &str) {
+    let sql = format!(
+        "UPDATE media_sessions SET state = 'ended', terminal_reason = 'deleted' \
+         WHERE session_id = '{session}'"
+    );
+    for result in client
+        .txn([(sql, hiqlite::params!())])
+        .await
+        .expect("release")
+    {
+        assert_eq!(result.expect("release statement"), 1, "one row ended");
+    }
+}
+
 /// On SQLite the route view is the store: every read is a store read, and no
 /// answer carries a stamp a cache could keep.
 #[tokio::test]
@@ -1014,13 +1055,19 @@ async fn applied_route_view_moves_with_a_release_applied_here() {
             .expect("activate")
             .expect("activation wins");
     }
+    install_principal_layout(&node.client, &node.store).await;
     let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
     let view = node.view(metrics.clone());
     metrics.validation_confirm_now(node.applied_index());
 
     node.store.validation_reset_operation_counts();
     let read = view.route(SESSION).await.expect("view route");
-    assert_eq!(read.source, ViewSource::View);
+    assert_eq!(
+        read.source,
+        ViewSource::View,
+        "{:?}",
+        view.observation().last_fallback
+    );
     assert_eq!(
         read.route,
         node.store
@@ -1046,11 +1093,7 @@ async fn applied_route_view_moves_with_a_release_applied_here() {
     assert_eq!(view.check(&stamp), StampCheck::Current);
     assert!(view.same_image(&stamp));
 
-    node.store
-        .end_media_session(SESSION, "deleted", 2_000)
-        .await
-        .expect("release")
-        .expect("the release ends the row");
+    release(&node.client, SESSION).await;
     assert_eq!(
         view.check(&stamp),
         StampCheck::Stale,
@@ -1072,11 +1115,7 @@ async fn applied_route_view_moves_with_a_release_applied_here() {
     );
 
     let stamp = read.stamp.expect("stamped");
-    node.store
-        .end_media_session(OTHER, "deleted", 2_000)
-        .await
-        .expect("release the other session")
-        .expect("ended");
+    release(&node.client, OTHER).await;
     assert_eq!(
         view.check(&stamp),
         StampCheck::Stale,
@@ -1084,9 +1123,11 @@ async fn applied_route_view_moves_with_a_release_applied_here() {
     );
 }
 
-/// Legacy session layout (or one this process has not read yet): the route
-/// view answers from Authority and says why; once a read has seen the
-/// installed layout, the view answers.
+/// The legacy session layout — the one a store has until the coordinated
+/// Source installation rebuilds `media_sessions`, which this singleton never
+/// runs: the route view answers every read from Authority and says why, and
+/// an Authority read that re-verifies the layout does not open it. Once the
+/// principal layout is installed, the same view answers locally.
 #[cfg(feature = "cluster-read-cost-validation")]
 #[tokio::test]
 async fn applied_route_view_answers_authority_in_the_legacy_layout() {
@@ -1111,30 +1152,42 @@ async fn applied_route_view_answers_authority_in_the_legacy_layout() {
     let view = node.view(metrics.clone());
     metrics.validation_confirm_now(node.applied_index());
 
-    node.store.validation_forget_installed_session_layout();
+    for _ in 0..3 {
+        node.store.validation_reset_operation_counts();
+        let read = view.route(SESSION).await.expect("legacy route");
+        assert_eq!(read.source, ViewSource::Authority);
+        assert!(read.stamp.is_none());
+        assert_eq!(
+            read.route.as_ref().map(|route| route.session_id.as_str()),
+            Some(SESSION)
+        );
+        assert_eq!(
+            view.observation().last_fallback,
+            Some(ViewFallback::LegacyLayout)
+        );
+        assert!(
+            node.store
+                .validation_operation_counts()
+                .consistent_query_calls
+                >= 1,
+            "the legacy layout is answered by a quorum read"
+        );
+    }
+
+    install_principal_layout(&node.client, &node.store).await;
+    metrics.validation_confirm_now(node.applied_index());
     node.store.validation_reset_operation_counts();
-    let read = view.route(SESSION).await.expect("legacy route");
-    assert_eq!(read.source, ViewSource::Authority);
-    assert!(read.stamp.is_none());
+    let read = view.route(SESSION).await.expect("installed route");
+    assert_eq!(
+        read.source,
+        ViewSource::View,
+        "{:?}",
+        view.observation().last_fallback
+    );
     assert_eq!(
         read.route.as_ref().map(|route| route.session_id.as_str()),
         Some(SESSION)
     );
-    assert_eq!(
-        view.observation().last_fallback,
-        Some(ViewFallback::LegacyLayout)
-    );
-    assert!(
-        node.store
-            .validation_operation_counts()
-            .consistent_query_calls
-            >= 1,
-        "the legacy layout is answered by a quorum read"
-    );
-    // That Authority read verified the layout again and found it installed.
-    node.store.validation_reset_operation_counts();
-    let read = view.route(SESSION).await.expect("installed route");
-    assert_eq!(read.source, ViewSource::View);
     assert_eq!(
         node.store
             .validation_operation_counts()
@@ -1157,6 +1210,30 @@ impl LaggingLearner {
             .into_iter()
             .next()
             .map(|row| row.state)
+    }
+
+    /// Until the learner has applied the principal rebuild with `session`.
+    async fn await_principal_layout(&self, session: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let rebuilt = self
+                .client
+                .query_map::<RouteState, _>(
+                    "SELECT state FROM media_sessions WHERE session_id = $1 \
+                     AND owner_key IS NOT NULL",
+                    hiqlite::params!(session.to_owned()),
+                )
+                .await
+                .is_ok_and(|rows| !rows.is_empty());
+            if rebuilt {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the learner applies the principal rebuild within 30 s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     async fn await_route_state(&self, session: &str, state: &str) {
@@ -1217,14 +1294,8 @@ async fn applied_route_view_never_meets_the_floor_of_a_release_its_replica_holds
         .await
         .expect("activate")
         .expect("activation wins");
-    node.await_route_state(SESSION, "active").await;
-    // A route read through the store has seen the installed layout.
-    assert!(node
-        .store
-        .media_session_route(SESSION)
-        .await
-        .expect("Authority")
-        .is_some());
+    install_principal_layout(&node.client, &node.store).await;
+    node.await_principal_layout(SESSION).await;
     let mark = node.mark();
     let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(mark.applied_index());
     let authority: Arc<dyn Store> = node.store.clone();
@@ -1236,7 +1307,12 @@ async fn applied_route_view_never_meets_the_floor_of_a_release_its_replica_holds
     );
     metrics.validation_confirm_now(mark.applied_index());
     let read = view.route(SESSION).await.expect("view route");
-    assert_eq!(read.source, ViewSource::View);
+    assert_eq!(
+        read.source,
+        ViewSource::View,
+        "{:?}",
+        view.observation().last_fallback
+    );
     let stamp = read.stamp.expect("stamped");
 
     let (entered, release) = node

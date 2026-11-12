@@ -2055,14 +2055,16 @@ impl HiqliteAuthStore {
             == 2
     }
 
-    /// Return this process's layout hint to legacy, as a node that last read
-    /// the predecessor layout holds it, so a contract can drive the route
-    /// view's legacy arm. Reads re-verify the layout and raise it again.
+    /// Record the principal session layout as installed, for a contract that
+    /// has applied the frozen principal rebuild itself (the coordinated Source
+    /// installation that also advances the committed marker needs a
+    /// three-voter Source cluster). Reads then dispatch on the principal
+    /// layout without re-verifying it, as a node that verified it does.
     #[cfg(feature = "cluster-read-cost-validation")]
     #[doc(hidden)]
-    pub fn validation_forget_installed_session_layout(&self) {
+    pub fn validation_assume_installed_session_layout(&self) {
         self.media_session_projection
-            .store(1, std::sync::atomic::Ordering::Release);
+            .store(2, std::sync::atomic::Ordering::Release);
     }
 
     /// [`MediaSessionStore::media_session_route`] from this node's own
