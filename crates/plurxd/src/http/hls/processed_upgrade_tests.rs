@@ -174,3 +174,38 @@ fn a_skipped_upgrade_explains_only_its_own_generation_until_release_or_replaceme
     drop(run);
     assert!(processing_skip(&session, &generation).is_none());
 }
+
+#[test]
+fn an_unreadable_link_memory_lets_the_trial_run_but_never_grants_after_it() {
+    use super::{link_admission, Admission, AdmissionStage};
+    use crate::http::hls::link_receipts::ProcessedLinkEvidence as Evidence;
+    // Measured 2026-11-12 on the Google TV: every re-open declined the
+    // upgrade before its trial although no negative was held for the recipe.
+    // Only an exact negative is a verdict before the GPU runs.
+    assert_eq!(
+        link_admission(Evidence::Unavailable, AdmissionStage::BeforeTrial),
+        Ok(Admission::Unproven)
+    );
+    assert_eq!(
+        link_admission(Evidence::Admissible, AdmissionStage::BeforeTrial),
+        Ok(Admission::Proven)
+    );
+    assert!(link_admission(Evidence::Negative, AdmissionStage::BeforeTrial).is_err());
+    // The reserved read after the trial is the last word before a grant.
+    assert!(link_admission(Evidence::Unavailable, AdmissionStage::AfterTrial).is_err());
+    assert!(link_admission(Evidence::Negative, AdmissionStage::AfterTrial).is_err());
+    assert_eq!(
+        link_admission(Evidence::Admissible, AdmissionStage::AfterTrial),
+        Ok(Admission::Proven)
+    );
+}
+
+#[test]
+fn an_unproven_pre_trial_admission_never_skips_the_check_after_the_trial() {
+    let source = include_str!("processed_upgrade.rs");
+    assert!(
+        source.contains("let admitted_before = proven_before\n        && projected"),
+        "the post-trial admission is skipped only after a proven pre-trial one"
+    );
+    assert!(source.contains("Ok(Admission::Unproven) => {"));
+}
