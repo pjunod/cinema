@@ -74,6 +74,11 @@ pub(crate) struct PendingSource {
     /// The local playback that asked for this source, when one did. It
     /// names the Analysis request the build runs under.
     asked_by: Option<super::LocalCopyAuthority>,
+    /// Whether this source's coordination request is known to exist in the
+    /// store. A demand's is made on its first attempt, before the source
+    /// domain is even looked at, so that a restart finds it; after that a
+    /// busy source costs no write.
+    persisted: bool,
     observed: Instant,
     /// Not before this instant: a busy source domain or a contended claim
     /// waits for the next dispatch wake after it, never a private timer.
@@ -214,6 +219,7 @@ impl PendingSources {
                 file: demand.file,
                 interest: source_interest(&demand.authority),
                 asked_by,
+                persisted: false,
                 held: Held::Demand {
                     catalog_namespace: demand.catalog_namespace,
                     observed: Box::new(demand.source.clone()),
@@ -307,6 +313,7 @@ impl PendingSources {
                         recipe: message.recipe,
                         interest,
                         asked_by: None,
+                        persisted: false,
                         observed: Instant::now(),
                         retry_after: None,
                     },
@@ -407,10 +414,24 @@ pub(crate) async fn work_copy_observations(
 ) {
     // Before this process joins or creates any coordination request: what
     // its predecessor left queued has no worker. Once per process.
+    // Durable demands are read first: retiring ends their requests, and each
+    // recovered demand makes its own again on its first attempt.
+    let recovered = Arc::new(std::sync::Mutex::new(Vec::new()));
     registry
         .retire_stranded_once(|created_before_ms| {
             let context = Arc::clone(&context);
+            let recovered = Arc::clone(&recovered);
             async move {
+                let demands = recover_demands(&context, created_before_ms).await?;
+                if !demands.is_empty() {
+                    tracing::info!(
+                        demands = demands.len(),
+                        "took up the copy index demands a previous process left"
+                    );
+                }
+                *recovered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = demands;
                 let retired = context
                     .store
                     .retire_stranded_analysis_coordination(
@@ -435,6 +456,14 @@ pub(crate) async fn work_copy_observations(
     let pending = registry.pending();
     let (units, defects) = {
         let mut sources = pending.lock().await;
+        let recovered = std::mem::take(
+            &mut *recovered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for demand in recovered {
+            sources.fold(CopyAnalysisMessage::Demand(Box::new(demand)), retry);
+        }
         for message in registry.take_pending() {
             sources.fold(message, retry);
         }
@@ -508,6 +537,130 @@ pub(crate) async fn work_copy_observations(
     }
 }
 
+/// Whether a viewer holds this source's domain now: the attempt to return
+/// if so, or if the read-only look itself failed.
+async fn source_is_busy(context: &CopyAnalysisContext, file_id: i64) -> Option<Attempt> {
+    match context
+        .store
+        .foreground_source_pressure(file_id, crate::state::clock_ms())
+        .await
+    {
+        Ok(false) => None,
+        Ok(true) => Some(Attempt::Busy),
+        Err(error) => Some(Attempt::Retry(error.to_string())),
+    }
+}
+
+/// The demands a previous process of this node left durable: its queued
+/// coordination requests under the local-playback id, each rebuilt from the
+/// catalogue and this node's current object. One that cannot be rebuilt
+/// (the file changed or went, no copy recipe has the request's video
+/// identity) is left out; the title asks again when it is next played.
+pub(super) async fn recover_demands(
+    context: &CopyAnalysisContext,
+    created_before_ms: i64,
+) -> Result<Vec<CopyIndexDemand>, String> {
+    let rows = context
+        .store
+        .queued_analysis_coordination_with_prefix(
+            &context.node_id,
+            created_before_ms,
+            super::LOCAL_PLAYBACK_REQUEST_PREFIX,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let namespace = context
+        .store
+        .instance_id()
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut demands = Vec::new();
+    for row in rows {
+        let file_id = row.source.file_id;
+        match rebuild_demand(context, &namespace, row).await {
+            Some(demand) => demands.push(demand),
+            None => tracing::debug!(file_id, "a durable copy index demand could not be rebuilt"),
+        }
+    }
+    Ok(demands)
+}
+
+async fn rebuild_demand(
+    context: &CopyAnalysisContext,
+    namespace: &str,
+    row: plurx_core::store::analysis_coordination::AnalysisCoordination,
+) -> Option<CopyIndexDemand> {
+    let coordinated = row.source;
+    if coordinated.origin_node_id != context.node_id {
+        return None;
+    }
+    let authority = super::LocalCopyAuthority::of_durable_request(&row.request_id)?;
+    let file = context
+        .store
+        .get_file(coordinated.file_id)
+        .await
+        .ok()
+        .flatten()
+        .filter(|file| {
+            file.size == coordinated.source_size && file.mtime == coordinated.source_mtime
+        })?;
+    // The object this node holds now must be the one the request was for.
+    let object_version = crate::fragment_index_cluster::inspect_source(&file)
+        .await
+        .ok()
+        .filter(|object_version| *object_version == coordinated.object_version)?;
+    // The request records the copy-video identity, not the options that
+    // gave it. The stored probe and the three copy shapes a start can ask
+    // for give the candidates; the one with that identity is the recipe.
+    let probe = context
+        .store
+        .get_file_probe_json(file.id)
+        .await
+        .ok()
+        .flatten();
+    let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
+    let video = [(false, false), (true, false), (false, true)]
+        .into_iter()
+        .map(|(preserve, convert)| {
+            plurx_core::transcode::CopyVideoOptions::from_probe(
+                &file,
+                probe.as_deref(),
+                have_dovi,
+                preserve,
+            )
+            .with_dolby_vision_conversion(convert)
+        })
+        .find(|video| {
+            crate::fragindex::identity_for(&file, *video).argv_fingerprint
+                == coordinated.video_identity
+        })?;
+    // As playback observes it, under its own generation: a quarantined
+    // head's repair generation is adopted again by the head decision.
+    let source = super::source_for_copy(
+        namespace,
+        &file,
+        &coordinated.video_identity,
+        &object_version,
+        &context.node_id,
+    )
+    .ok()?;
+    Some(CopyIndexDemand {
+        file: Arc::new(file),
+        catalog_namespace: namespace.to_owned(),
+        source,
+        recipe: super::CopyRecipe {
+            video,
+            audio_index: None,
+            transcode_audio: false,
+            audio_delivery: None,
+        },
+        authority: CopyObservationAuthority::Local(authority),
+    })
+}
+
 /// Let a title ask again once nothing holds or works its source.
 pub(super) fn forget_settled(
     asked: &std::sync::Mutex<std::collections::HashSet<String>>,
@@ -545,15 +698,15 @@ pub(super) async fn publish_source(
     // look answers without enqueueing, claiming or charging anything. A
     // contradicted head is quarantined whoever is watching: the viewer whose
     // range found it is the one being served the wrong index.
-    if contradicted.is_none() && !pending.is_complete() {
-        match context
-            .store
-            .foreground_source_pressure(source.file_id, crate::state::clock_ms())
-            .await
-        {
-            Ok(false) => {}
-            Ok(true) => return Attempt::Busy,
-            Err(error) => return Attempt::Retry(error.to_string()),
+    let waits_for_idle = contradicted.is_none() && !pending.is_complete();
+    // A demand lives only in memory until its request exists. Its first
+    // attempt therefore makes the request before it looks at the source
+    // domain, once; a restart then finds the request and takes the demand
+    // up again.
+    let persist_first = !pending.persisted && matches!(pending.held, Held::Demand { .. });
+    if waits_for_idle && !persist_first {
+        if let Some(busy) = source_is_busy(context, source.file_id).await {
+            return busy;
         }
     }
     // A build local playback asked for runs under a request that says so.
@@ -569,6 +722,12 @@ pub(super) async fn publish_source(
         Ok(Coordination::Ended) => return Attempt::Ended,
         Err(reason) => return Attempt::Retry(reason),
     };
+    pending.persisted = true;
+    if waits_for_idle && persist_first {
+        if let Some(busy) = source_is_busy(context, source.file_id).await {
+            return busy;
+        }
+    }
     // Record the Source demand on the coordinator. A route that has since
     // ended simply fails to join; the committed observations stay valid. A
     // source only local playback asked for has no Source demand to record.

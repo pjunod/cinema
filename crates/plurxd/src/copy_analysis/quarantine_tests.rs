@@ -23,7 +23,8 @@
 //!   VOD start emits the demand here.
 use super::work::{
     coordination_request, forget_settled, publish_source, quarantine_defect, reconcile_demand,
-    reconcile_with_head, Attempt, Coordination, CopyIndexCacheOwner, HeadDecision, PendingSources,
+    reconcile_with_head, recover_demands, Attempt, Coordination, CopyIndexCacheOwner, HeadDecision,
+    PendingSources,
 };
 use super::*;
 use crate::playback_cache::{CacheCandidate, CacheOwner};
@@ -771,6 +772,17 @@ fn a_local_copy_authority_is_never_made_from_a_sharing_principal() {
         id.starts_with("local-play.u7.playback-1.") && id.len() <= 64,
         "{id}"
     );
+    // A durable request gives back the authority it was made under.
+    assert_eq!(LocalCopyAuthority::of_durable_request(&id), Some(local));
+    assert_eq!(
+        LocalCopyAuthority::of_durable_request(&uuid::Uuid::new_v4().to_string()),
+        None,
+        "any other request is not a local demand"
+    );
+    assert_eq!(
+        LocalCopyAuthority::of_durable_request("local-play.u0.playback-1.ab12"),
+        None
+    );
     let mut unsafe_viewer = local_viewer(7);
     unsafe_viewer.playback_id = "a/b".into();
     let id = LocalCopyAuthority::of(&unsafe_viewer)
@@ -1083,5 +1095,111 @@ fn a_source_is_asked_for_once_until_its_work_settles() {
             .count(),
         64,
         "one demand left to make room"
+    );
+}
+
+/// A demand outlives its process: the coordination request it made is found
+/// by the next process, which rebuilds the demand from the catalogue row,
+/// this node's current object and the copy recipe with the request's video
+/// identity, under the user and playback that asked. A file that changed
+/// since is left out. Covers the recovery read and rebuild against a real
+/// store and file; the first pass that calls it, and the demand making its
+/// request before the source is idle, are not run here.
+#[tokio::test]
+async fn a_restarted_worker_takes_up_the_demands_its_predecessor_left() {
+    let fixture = store_fixture().await;
+    let store = &fixture.context.store;
+    let path = fixture
+        .context
+        .cache_dir
+        .parent()
+        .expect("fixture directory")
+        .join("film.mkv");
+    std::fs::write(&path, b"the catalogued source object").expect("source");
+    let metadata = std::fs::metadata(&path).expect("source metadata");
+    let mtime = metadata
+        .modified()
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("unix mtime")
+        .as_secs() as i64;
+    fixture
+        .sql()
+        .execute(
+            "UPDATE files SET path=?1,size=?2,mtime=?3 WHERE id=100",
+            rusqlite::params![path.to_string_lossy(), metadata.len() as i64, mtime],
+        )
+        .expect("catalogue row of the real file");
+    let file = store.get_file(100).await.expect("file read").expect("file");
+    let object_version = crate::fragment_index_cluster::inspect_source(&file)
+        .await
+        .expect("object version");
+    let video = plurx_core::transcode::CopyVideoOptions::from_probe(
+        &file,
+        None,
+        crate::ffmpeg::has_dovi_rpu().await,
+        false,
+    );
+    let namespace = store.instance_id().await.expect("namespace");
+    let source = source_for_copy(
+        &namespace,
+        &file,
+        &crate::fragindex::identity_for(&file, video).argv_fingerprint,
+        &object_version,
+        NODE,
+    )
+    .expect("copy source");
+
+    // What the previous process left: one queued request under the id a
+    // local demand runs under.
+    let asked = LocalCopyAuthority::of(&local_viewer(7)).expect("local playback");
+    let Coordination::Queued(_) =
+        coordination_request(&fixture.context, &source, asked.request_id())
+            .await
+            .expect("coordination")
+    else {
+        panic!("a fresh generation is queued");
+    };
+    let later = crate::state::clock_ms() + 60_000;
+
+    let mut demands = recover_demands(&fixture.context, later)
+        .await
+        .expect("recovery");
+    assert_eq!(demands.len(), 1);
+    let demand = demands.pop().expect("the demand");
+    assert_eq!(demand.source, source, "as playback observes it");
+    assert_eq!(demand.catalog_namespace, namespace);
+    assert_eq!(demand.file.id, 100);
+    assert!(
+        matches!(&demand.authority, CopyObservationAuthority::Local(local) if *local == asked),
+        "under the user and playback that asked"
+    );
+    assert_eq!(
+        crate::fragindex::identity_for(&demand.file, demand.recipe.video).argv_fingerprint,
+        source.video_identity,
+        "the recipe a fill of this source needs"
+    );
+    let key = copy_index_v3_source_key(&namespace, &source).expect("key");
+    let mut pending = PendingSources::default();
+    pending.fold(CopyAnalysisMessage::Demand(Box::new(demand)), NO_WAIT);
+    assert!(pending.holds(&key) || !cfg!(unix));
+
+    assert!(
+        recover_demands(&fixture.context, 1)
+            .await
+            .expect("recovery")
+            .is_empty(),
+        "a request this process made is not a predecessor's"
+    );
+    fixture
+        .sql()
+        .execute("UPDATE files SET mtime=mtime+1 WHERE id=100", [])
+        .expect("the file changed");
+    assert!(
+        recover_demands(&fixture.context, later)
+            .await
+            .expect("recovery")
+            .is_empty(),
+        "a demand for a file that changed is not taken up"
     );
 }

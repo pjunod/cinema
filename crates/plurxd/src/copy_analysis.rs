@@ -197,6 +197,26 @@ impl LocalCopyAuthority {
     pub(crate) fn playback_id(&self) -> &str {
         &self.playback_id
     }
+    /// The authority a durable request recorded. A request under
+    /// [`LOCAL_PLAYBACK_REQUEST_PREFIX`] is written only by this worker for
+    /// a demand `of` admitted, so a restarted worker that finds one queued
+    /// takes the build up again under the same attribution. The playback is
+    /// empty when the id had no room for it.
+    pub(crate) fn of_durable_request(request_id: &str) -> Option<Self> {
+        let rest = request_id
+            .strip_prefix(LOCAL_PLAYBACK_REQUEST_PREFIX)?
+            .strip_prefix('u')?;
+        let (user, rest) = rest.split_once('.')?;
+        let user_id = user.parse::<i64>().ok().filter(|user_id| *user_id > 0)?;
+        let playback_id = rest
+            .rsplit_once('.')
+            .map(|(playback, _)| playback.to_owned())
+            .unwrap_or_default();
+        Some(Self {
+            user_id,
+            playback_id,
+        })
+    }
     /// The id of the Analysis request this demand creates, which is how the
     /// build is attributed wherever requests are listed: it names the local
     /// user and, when it fits the 64-byte bound and is plain enough to sit
