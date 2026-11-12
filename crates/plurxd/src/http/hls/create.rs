@@ -92,10 +92,17 @@ pub(crate) fn processed_candidate_is_admitted(
     admitted: &[plurx_core::playback::candidate::QualityCandidate],
     candidate: &plurx_core::playback::candidate::QualityCandidate,
 ) -> bool {
-    admitted.iter().any(|admitted| {
-        admitted.id == candidate.id
-            && admitted.recipe_digest == candidate.recipe_digest
-            && admitted.playable()
+    processed_candidate_kept(admitted, candidate).is_some_and(|admitted| admitted.playable())
+}
+
+/// The exact recipe's row among the rows the link filters kept, whatever its
+/// production proof: the same short id never stands for another recipe.
+pub(crate) fn processed_candidate_kept<'a>(
+    admitted: &'a [plurx_core::playback::candidate::QualityCandidate],
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+) -> Option<&'a plurx_core::playback::candidate::QualityCandidate> {
+    admitted.iter().find(|admitted| {
+        admitted.id == candidate.id && admitted.recipe_digest == candidate.recipe_digest
     })
 }
 

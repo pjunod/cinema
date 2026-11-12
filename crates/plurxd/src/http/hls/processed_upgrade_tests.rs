@@ -258,3 +258,14 @@ fn an_unreadable_recovery_memory_lets_the_trial_run_but_never_grants_after_it() 
         Ok(Admission::Proven)
     );
 }
+
+#[test]
+fn a_trial_that_did_not_prove_production_is_never_staged() {
+    let mut candidate = processed_candidate_fixture();
+    candidate.planned_codec = Some("hevc".into());
+    assert_eq!(super::trial_proved_production(&candidate), Ok(()));
+    candidate.sustainable = false;
+    assert!(super::trial_proved_production(&candidate).is_err());
+    candidate.complete_cache = true;
+    assert_eq!(super::trial_proved_production(&candidate), Ok(()));
+}

@@ -330,3 +330,77 @@ async fn an_ordinary_fallback_reports_the_reason_without_private_qualification_d
     }
     assert_eq!(crate::transcode::ordinary_processing_decline("the decoder refused the window".into()),"the decoder refused the window");
 }
+
+/// A repeat upgrade of the same playback: this node described the processed
+/// recipe on an earlier trial, and nothing is producing it now, so the
+/// description carries no production proof. That is what the trial measures,
+/// so it never refuses the trial; Auto's link evidence alone decides before
+/// it (Avatar on the Google TV: every resume after the first upgrade was
+/// refused as "link evidence" before any trial ran).
+#[tokio::test]
+async fn a_description_without_production_proof_still_reaches_the_trial() {
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("upgrade-repeat-description");
+    let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let (mut intent, run, _) = upgrade_after_playing_to(&fixture, &session_id, &route, 60_000).await;
+    let source = fixture
+        .store
+        .get_file(intent.request.file_id)
+        .await
+        .expect("file read")
+        .expect("source");
+    let height = u32::try_from(source.height.expect("the fixture's source height") & !1)
+        .expect("height");
+    intent.auto_policy = true;
+    intent.request.candidate_context = Some(Box::new(
+        crate::transcode::continuous_test_candidate_context(
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x31; 32]),
+            [0x31; 32],
+            height,
+        ),
+    ));
+    let mut described = crate::transcode::continuous_test_candidate_context(
+        plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x32; 32]),
+        [0x32; 32],
+        height,
+    )
+    .selected_candidate;
+    described.processed_dv = true;
+    described.planned_codec = Some("hevc".into());
+    described.complete_cache = false;
+    described.sustainable = false;
+    assert!(
+        !crate::http::hls::processed_candidate_is_admitted(
+            std::slice::from_ref(&described),
+            &described
+        ),
+        "the description has no current production proof"
+    );
+    intent.request.quality_catalog = Some(std::sync::Arc::new(
+        crate::media_pool::QualityCatalogResult {
+            candidates: vec![crate::media_pool::WorkerQualityCandidate {
+                node_id: fixture.state.node_id.clone(),
+                candidate: described,
+                binding: None,
+                partial: false,
+                dispatch_supported: true,
+            }],
+            authority_refused: false,
+            complete: true,
+            causes: Vec::new(),
+        },
+    ));
+    let reached = std::sync::atomic::AtomicBool::new(false);
+    let outcome = super::processed_upgrade::run_upgrade_with(
+        &fixture.state,
+        &intent,
+        &run,
+        |_request, _recovery| {
+            reached.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(Err("test trial".to_owned()))
+        },
+    )
+    .await;
+    assert_eq!(outcome, "declined", "the trial decides, not the missing proof");
+    assert!(reached.load(std::sync::atomic::Ordering::SeqCst));
+}
