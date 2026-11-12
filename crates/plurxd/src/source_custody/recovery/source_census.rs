@@ -116,7 +116,8 @@ struct Pass {
 /// daemon container would still sit in the daemon's deployment slice, where
 /// nothing older than the owner's death may remain. No process outside the
 /// daemon's namespace has any file, working directory, root, executable or
-/// mapping on a counted superblock.
+/// mapping on any of the daemon's media storage, so no survivor is reading
+/// any file there, whichever file the owner read.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 struct Teardown {
@@ -129,11 +130,16 @@ struct Teardown {
     preexisting: u32,
     /// Processes outside that namespace but in the daemon's parent cgroup
     /// (its deployment slice, where an earlier daemon container would still
-    /// be) that started at or before the owner's lease expiry.
+    /// be) that started before the daemon itself.
     preexisting_in_daemon_slice: u32,
-    /// Open descriptors, cwd, root, exe or mappings on any counted superblock
+    /// Open descriptors, cwd, root, exe or mappings on any storage superblock
     /// held by processes outside that namespace (the helper excluded).
     foreign_storage_holders: u32,
+    /// Processes that existed but could not be read; never skipped.
+    unreadable: u32,
+    /// Every superblock the helper scanned: the census's, and every network
+    /// or FUSE filesystem mounted for the daemon.
+    storage_devices: Vec<u64>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -178,17 +184,26 @@ impl Proof {
     /// Both passes observed this daemon's own PID namespace with no process
     /// older than the owner's death in it and no foreign storage holder.
     fn owner_teardown_verified(&self, context: &Context<'_>) -> bool {
-        let Some(namespace) = context.namespace_init else {
+        let (Some(namespace), Some(storage)) = (context.namespace_init, &context.storage_devices)
+        else {
             return false;
         };
         self.passes.iter().all(|pass| {
-            pass.owner_teardown.as_ref().is_some_and(|teardown| {
-                teardown.pid_namespace == namespace
-                    && teardown.daemon_is_namespace_init
-                    && teardown.preexisting == 0
-                    && teardown.preexisting_in_daemon_slice == 0
-                    && teardown.foreign_storage_holders == 0
-            })
+            // A census taken before this daemon existed observed another one,
+            // even if the namespace inode was reused.
+            pass.at_ms >= context.process_started_ms
+                && pass.owner_teardown.as_ref().is_some_and(|teardown| {
+                    teardown.pid_namespace == namespace
+                        && teardown.daemon_is_namespace_init
+                        && teardown.preexisting == 0
+                        && teardown.preexisting_in_daemon_slice == 0
+                        && teardown.foreign_storage_holders == 0
+                        && teardown.unreadable == 0
+                        && storage
+                            .iter()
+                            .chain(pass.superblocks.iter().map(|sb| &sb.device))
+                            .all(|device| teardown.storage_devices.contains(device))
+                })
         })
     }
     fn census_devices(&self) -> impl Iterator<Item = u64> + '_ {
@@ -361,6 +376,7 @@ pub(super) async fn replay(
                 process_started_ms: started,
                 now_ms: crate::state::clock_ms(),
                 namespace_init: namespace_init(),
+                storage_devices: storage_devices(),
             },
             &proof,
         )
@@ -380,6 +396,28 @@ pub(super) struct Context<'a> {
     pub(super) now_ms: i64,
     /// This daemon's PID namespace inode when it is that namespace's init.
     pub(super) namespace_init: Option<u64>,
+    /// Every network or FUSE superblock mounted for this daemon.
+    pub(super) storage_devices: Option<Vec<u64>>,
+}
+
+/// The superblocks of every network or FUSE filesystem in this process's
+/// mount namespace, from `/proc/self/mountinfo`.
+fn storage_devices() -> Option<Vec<u64>> {
+    const NETWORK: [&str; 7] = ["nfs", "nfs4", "cifs", "smb3", "9p", "ceph", "glusterfs"];
+    let table = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let mut devices = Vec::new();
+    for line in table.lines() {
+        let (left, right) = line.split_once(" - ")?;
+        let device = left.split_whitespace().nth(2)?;
+        let fstype = right.split_whitespace().next()?;
+        if NETWORK.contains(&fstype) || fstype.starts_with("fuse") {
+            let (major, minor) = device.split_once(':')?;
+            devices.push(libc::makedev(major.parse().ok()?, minor.parse().ok()?));
+        }
+    }
+    devices.sort_unstable();
+    devices.dedup();
+    Some(devices)
 }
 
 /// This process's PID namespace inode, when it is PID 1 of that namespace.

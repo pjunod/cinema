@@ -3,6 +3,8 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 
 const KERNEL: &str = "linux:source-census-test";
+/// A network superblock the daemon mounts besides the census's.
+const STORAGE: u64 = 66;
 
 struct Dead {
     _root: tempfile::TempDir,
@@ -159,6 +161,7 @@ impl Dead {
                 process_started_ms,
                 now_ms: self.lease + 5_000,
                 namespace_init,
+                storage_devices: namespace_init.map(|_| vec![STORAGE]),
             },
             proof,
         )
@@ -296,6 +299,8 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
                 preexisting,
                 preexisting_in_daemon_slice: slice,
                 foreign_storage_holders: foreign,
+                unreadable: 0,
+                storage_devices: vec![STORAGE, dead.source.dev()],
             });
         }
         proof
@@ -339,8 +344,45 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
     );
     // An earlier daemon container still alive in the deployment slice refuses.
     refused(
-        dead.apply_in(&with_slice(NAMESPACE, true, 0, 1, 0), started, Some(NAMESPACE))
-            .await,
+        dead.apply_in(
+            &with_slice(NAMESPACE, true, 0, 1, 0),
+            started,
+            Some(NAMESPACE),
+        )
+        .await,
+        "census job unavailable",
+    );
+    // A process the helper could not read is never assumed harmless.
+    let mut unread = with(NAMESPACE, true, 0, 0);
+    unread.passes[0]
+        .owner_teardown
+        .as_mut()
+        .expect("teardown")
+        .unreadable = 1;
+    refused(
+        dead.apply_in(&unread, started, Some(NAMESPACE)).await,
+        "census job unavailable",
+    );
+    // The helper must have scanned every network superblock this daemon mounts.
+    let mut narrow = with(NAMESPACE, true, 0, 0);
+    for pass in &mut narrow.passes {
+        pass.owner_teardown
+            .as_mut()
+            .expect("teardown")
+            .storage_devices = vec![dead.source.dev()];
+    }
+    refused(
+        dead.apply_in(&narrow, started, Some(NAMESPACE)).await,
+        "census job unavailable",
+    );
+    // A census older than this daemon observed some other daemon.
+    refused(
+        dead.apply_in(
+            &with(NAMESPACE, true, 0, 0),
+            dead.lease + 2_000,
+            Some(NAMESPACE),
+        )
+        .await,
         "census job unavailable",
     );
     // One pass without teardown evidence refuses.

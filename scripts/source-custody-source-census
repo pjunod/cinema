@@ -190,57 +190,87 @@ def daemon_pid(explicit):
     return found[0]
 
 
-def started_ms(pid, btime_s, hz):
-    ticks = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
-    return btime_s * 1000 + ticks * 1000 // hz
+# Filesystems whose files are media storage the daemon reads over the network
+# or through FUSE; a survivor reading any of them is counted.
+NETWORK_FS = {"nfs", "nfs4", "cifs", "smb3", "9p", "ceph", "glusterfs"}
 
 
-def teardown(daemon, devices, lease_expires_ms):
+def storage_devices(daemon, census_devices):
+    """Every network or FUSE superblock mounted for the daemon, plus the census's."""
+    devices = set(census_devices)
+    for row in mountinfo(daemon):
+        if row["fstype"] in NETWORK_FS or row["fstype"].startswith("fuse"):
+            major, minor = map(int, row["dev"].split(":"))
+            devices.add(os.makedev(major, minor))
+    return devices
+
+
+def start_ticks(base):
+    return int(Path(f"{base}/stat").read_text().rsplit(")", 1)[1].split()[19])
+
+
+def teardown(daemon, census_devices, lease_expires_ms):
     """The dead owner's process tree, seen from the host.
 
     Processes in the live daemon's PID namespace must all be younger than the
-    owner's death. So must every process in the daemon's parent cgroup (its
-    deployment slice), where a still-running earlier daemon container would be.
-    Processes outside the namespace must hold nothing on the counted
-    superblocks: no descriptor, cwd, root, executable or mapping.
+    owner's death. Processes in the daemon's parent cgroup (its deployment
+    slice, where an earlier daemon container would be) must all be younger
+    than the daemon itself. Processes outside the namespace must hold nothing
+    on the daemon's media storage: no descriptor, cwd, root, executable or
+    mapping on any network or FUSE superblock it mounts, or on the census's.
+    A process that exists but cannot be read is counted, never skipped.
     """
+    require(os.stat("/proc/1/ns/pid").st_ino == os.stat("/proc/self/ns/pid").st_ino,
+            "run the helper in the host's PID namespace")
     namespace = os.stat(f"/proc/{daemon}/ns/pid").st_ino
-    def cgroup(pid):
-        return Path(f"/proc/{pid}/cgroup").read_text().splitlines()[-1].split(":", 2)[2]
-    slice_ = os.path.dirname(cgroup(daemon))
-    require(slice_ not in ("", "/"), "the daemon's cgroup has no deployment parent")
+    devices = storage_devices(daemon, census_devices)
+    daemon_started = start_ticks(f"/proc/{daemon}")
     btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
                  if line.startswith("btime "))
     hz = os.sysconf("SC_CLK_TCK")
-    preexisting = foreign = sibling = 0
+    def cgroup(base):
+        return Path(f"{base}/cgroup").read_text().splitlines()[-1].split(":", 2)[2]
+    slice_ = os.path.dirname(cgroup(f"/proc/{daemon}"))
+    require(slice_ not in ("", "/"), "the daemon's cgroup has no deployment parent")
+    preexisting = foreign = sibling = unreadable = 0
+
+    def holds(base):
+        names = [f"{base}/fd/{fd}" for fd in os.listdir(f"{base}/fd")]
+        count = 0
+        for name in names + [f"{base}/cwd", f"{base}/root", f"{base}/exe"]:
+            try:
+                count += os.stat(name).st_dev in devices
+            except FileNotFoundError:
+                continue  # closed, or no executable (kernel thread)
+        for line in Path(f"{base}/maps").read_text().splitlines():
+            fields = line.split()
+            if len(fields) >= 5 and fields[4] != "0":
+                major, minor = (int(part, 16) for part in fields[3].split(":"))
+                count += os.makedev(major, minor) in devices
+        return count
+
     for entry in os.listdir("/proc"):
         if not entry.isdigit() or int(entry) == os.getpid():
             continue
         base = f"/proc/{entry}"
         try:
-            inside = os.stat(f"{base}/ns/pid").st_ino == namespace
-            if inside:
-                preexisting += started_ms(entry, btime, hz) <= lease_expires_ms
+            if os.stat(f"{base}/ns/pid").st_ino == namespace:
+                started = btime * 1000 + start_ticks(base) * 1000 // hz
+                preexisting += started <= lease_expires_ms
                 continue
-            if cgroup(entry).startswith(slice_ + "/"):
-                sibling += started_ms(entry, btime, hz) <= lease_expires_ms
-            names = [f"{base}/fd/{fd}" for fd in os.listdir(f"{base}/fd")]
-            maps = Path(f"{base}/maps").read_text()
+            if cgroup(base).startswith(slice_ + "/"):
+                sibling += start_ticks(base) < daemon_started
+            # A zombie leader's live threads keep the files; read every task.
+            tasks = [f"{base}/task/{tid}" for tid in os.listdir(f"{base}/task")]
+            foreign += max(holds(task) for task in tasks) if tasks else holds(base)
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # the process exited between listing and reading
         except OSError:
-            continue  # exited, or a kernel thread with nothing open
-        for name in names + [f"{base}/cwd", f"{base}/root", f"{base}/exe"]:
-            try:
-                foreign += os.stat(name).st_dev in devices
-            except OSError:
-                continue
-        for line in maps.splitlines():
-            fields = line.split()
-            if len(fields) >= 5 and fields[4] != "0":
-                major, minor = (int(part, 16) for part in fields[3].split(":"))
-                foreign += os.makedev(major, minor) in devices
+            unreadable += 1
     return {"pid_namespace": namespace, "daemon_is_namespace_init": True,
             "preexisting": preexisting, "preexisting_in_daemon_slice": sibling,
-            "foreign_storage_holders": foreign}
+            "foreign_storage_holders": foreign, "unreadable": unreadable,
+            "storage_devices": sorted(devices)}
 
 
 def census(source: Path, anchor: Path, daemon=None, lease_expires_ms=None):
@@ -327,6 +357,7 @@ def main():
         and all(p[k] == 0 for p in proof["passes"] for k in ("anchor_locks", "silly_renames", "path_references"))
     torn_down = all(p["owner_teardown"]["preexisting"] == 0
                     and p["owner_teardown"]["preexisting_in_daemon_slice"] == 0
+                    and p["owner_teardown"]["unreadable"] == 0
                     and p["owner_teardown"]["foreign_storage_holders"] == 0 for p in proof["passes"])
     print(json.dumps({"quiescent": quiet, "owner_teardown": torn_down, "proof": proof}, indent=1))
     require(quiet, "source is not quiescent; nothing published")
