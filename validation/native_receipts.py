@@ -78,11 +78,12 @@ BUILD_SPECS = {
     # Apple/macOS recipes, flags and external inputs are unchanged.
     # Pin these exact bytes; no old-to-new receipt adoption is authorized.
     'Makefile': '1d8ba9f31adfe9a8f557e41aecbdded4de4b5cd7b8de017381c04b9ad8956305',
-    # Reviewed 0.8.0 build 295 (DV enhancement skip reasons, PR1491): only
-    # CURRENT_PROJECT_VERSION differs from the reviewed build 294 bytes. Pin
-    # this exact spec; build-294 case receipts do not transfer, and added
+    # Reviewed 0.8.0 build 296: only CURRENT_PROJECT_VERSION differs from the
+    # reviewed build 295 bytes (520e46157, 0625d215f and the successor-commit
+    # test anchor changed the Apple client after 295 was claimed). Pin this
+    # exact spec; build-295 case receipts do not transfer, and added
     # resources or scripts still change its digest.
-    'clients/apple/project.yml': '94b6a6c9772dd10174113292c52851e6ad3c7eea3e4f57ebefeedc3463db7991',
+    'clients/apple/project.yml': 'adda22a1af0787bf8eaf9f8a2b7f9044f325cfabe6a0f217dff796cc50e59b72',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     'clients/server-tray/macos/build': 'b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0',

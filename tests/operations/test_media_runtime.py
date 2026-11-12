@@ -3,6 +3,7 @@ import importlib.util
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -17,14 +18,25 @@ loader.exec_module(media_runtime)
 
 OLD = "sha256:" + "1" * 64
 NEW = "sha256:" + "2" * 64
+OLD_DV = "a" * 64
+NEW_DV = "b" * 64
 SOURCE = (
     "# syntax=docker/dockerfile:1\n"
     "ARG PLURX_MEDIA_RUNTIME_REPOSITORY=ghcr.io/pjunod/cinema-media-runtime\n"
     f"FROM ${{PLURX_MEDIA_RUNTIME_REPOSITORY}}@{OLD} AS runtime-assets\n"
     "FROM runtime-assets AS runtime\n"
     f'ARG PLURX_MEDIA_RUNTIME_DIGEST="{OLD}"\n'
+    f'ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="{OLD_DV}"\n'
     "COPY --from=build /plurxd /usr/local/bin/plurxd\n"
 )
+
+
+def bundle_manifest():
+    loader = SourceFileLoader("bundle_manifest", str(ROOT / "tools/dv_processing/bundle-manifest.py"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def index(*architectures):
@@ -41,12 +53,14 @@ class MediaRuntimeTests(unittest.TestCase):
             dockerfile.write_text(SOURCE)
             dockerfile.chmod(0o640)
             image = "registry.example:5000/noirr/plurx-media-runtime@" + NEW
-            with patch.object(media_runtime, "run", return_value=index("amd64", "arm64")) as run, patch.object(media_runtime, "verify_public_image"):
-                media_runtime.pin_image(image, dockerfile)
-            self.assertEqual(dockerfile.read_text(), SOURCE.replace(OLD, NEW))
+            with patch.object(media_runtime, "run", side_effect=[index("amd64", "arm64"), NEW_DV + "\n"]) as run, patch.object(media_runtime, "verify_public_image"):
+                media_runtime.pin_image(image, dockerfile, NEW_DV)
+            self.assertEqual(dockerfile.read_text(), SOURCE.replace(OLD, NEW).replace(OLD_DV, NEW_DV))
             self.assertEqual(dockerfile.stat().st_mode & 0o777, 0o640)
-            run.assert_called_once_with(
-                ["docker", "manifest", "inspect", image], capture=True)
+            self.assertEqual(run.call_args_list[0].args, (["docker", "manifest", "inspect", image],))
+            self.assertEqual(run.call_args_list[1].args[0][:6],
+                             ["docker", "run", "--rm", "--pull", "always", "--entrypoint"])
+            self.assertIn("ghcr.io/pjunod/cinema-media-runtime@" + NEW, run.call_args_list[1].args[0])
             self.assertEqual(list(Path(directory).glob(".media-runtime-pin-*")), [])
 
     def test_pin_explicitly_supports_the_private_http_registry(self):
@@ -54,11 +68,10 @@ class MediaRuntimeTests(unittest.TestCase):
             dockerfile = Path(directory) / "Dockerfile"
             dockerfile.write_text(SOURCE)
             image = "registry.example:5000/noirr/plurx-media-runtime@" + NEW
-            with patch.object(media_runtime, "run", return_value=index("amd64", "arm64")) as run, patch.object(media_runtime, "verify_public_image"):
-                media_runtime.pin_image(image, dockerfile, insecure=True)
-            run.assert_called_once_with(
-                ["docker", "manifest", "inspect", "--insecure", image], capture=True)
-            self.assertEqual(dockerfile.read_text(), SOURCE.replace(OLD, NEW))
+            with patch.object(media_runtime, "run", side_effect=[index("amd64", "arm64"), NEW_DV]) as run, patch.object(media_runtime, "verify_public_image"):
+                media_runtime.pin_image(image, dockerfile, NEW_DV, insecure=True)
+            self.assertEqual(run.call_args_list[0].args, (["docker", "manifest", "inspect", "--insecure", image],))
+            self.assertEqual(dockerfile.read_text(), SOURCE.replace(OLD, NEW).replace(OLD_DV, NEW_DV))
 
     def test_pin_refuses_missing_platform_without_changing_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -66,7 +79,7 @@ class MediaRuntimeTests(unittest.TestCase):
             dockerfile.write_text(SOURCE)
             with patch.object(media_runtime, "run", return_value=index("amd64")):
                 with self.assertRaisesRegex(ValueError, "both linux/amd64 and linux/arm64"):
-                    media_runtime.pin_image("registry.example/noirr/plurx-media-runtime@" + NEW, dockerfile)
+                    media_runtime.pin_image("registry.example/noirr/plurx-media-runtime@" + NEW, dockerfile, NEW_DV)
             self.assertEqual(dockerfile.read_text(), SOURCE)
 
     def test_pin_refuses_unpublished_digest_without_changing_source(self):
@@ -75,7 +88,7 @@ class MediaRuntimeTests(unittest.TestCase):
             dockerfile.write_text(SOURCE)
             with patch.object(media_runtime, "run", side_effect=subprocess.CalledProcessError(1, ["docker"])):
                 with self.assertRaises(subprocess.CalledProcessError):
-                    media_runtime.pin_image("registry.example/noirr/plurx-media-runtime@" + NEW, dockerfile)
+                    media_runtime.pin_image("registry.example/noirr/plurx-media-runtime@" + NEW, dockerfile, NEW_DV)
             self.assertEqual(dockerfile.read_text(), SOURCE)
 
     def test_pin_refuses_private_only_digest_without_changing_source(self):
@@ -88,7 +101,7 @@ class MediaRuntimeTests(unittest.TestCase):
                              side_effect=ValueError("canonical public media runtime is not anonymously available")) as public,
             ):
                 with self.assertRaisesRegex(ValueError, "not anonymously available"):
-                    media_runtime.pin_image("registry.example/noirr/plurx-media-runtime@" + NEW, dockerfile)
+                    media_runtime.pin_image("registry.example/noirr/plurx-media-runtime@" + NEW, dockerfile, NEW_DV)
             public.assert_called_once_with(NEW)
             self.assertEqual(dockerfile.read_text(), SOURCE)
             self.assertEqual(list(Path(directory).glob(".media-runtime-pin-*")), [])
@@ -138,7 +151,7 @@ class MediaRuntimeTests(unittest.TestCase):
                           "registry.example/noirr/plurx-media-runtime@sha256:invalid",
                           "https://registry.example/noirr/plurx-media-runtime@" + NEW):
                 with self.subTest(image=image), self.assertRaises(ValueError):
-                    media_runtime.pin_image(image, Path("missing"))
+                    media_runtime.pin_image(image, Path("missing"), NEW_DV)
             run.assert_not_called()
 
     def test_pin_refuses_ambiguous_or_inconsistent_application_contract(self):
@@ -148,9 +161,65 @@ class MediaRuntimeTests(unittest.TestCase):
                 dockerfile.write_text(source)
                 with patch.object(media_runtime, "run") as run:
                     with self.assertRaises(ValueError):
-                        media_runtime.pin_image("registry.example/noirr/plurx-media-runtime@" + NEW, dockerfile)
+                        media_runtime.pin_image("registry.example/noirr/plurx-media-runtime@" + NEW, dockerfile, NEW_DV)
                     run.assert_not_called()
                 self.assertEqual(dockerfile.read_text(), source)
+
+    def test_pin_requires_the_bundle_source_identity_and_one_record_of_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dockerfile = Path(directory) / "Dockerfile"
+            image = "registry.example/noirr/plurx-media-runtime@" + NEW
+            for source, dv_source in ((SOURCE, "B" * 64), (SOURCE, "b" * 63), (SOURCE, ""),
+                                      (SOURCE.replace(f'ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="{OLD_DV}"\n', ""), NEW_DV)):
+                dockerfile.write_text(source)
+                with self.subTest(dv_source=dv_source), patch.object(media_runtime, "run") as run:
+                    with self.assertRaises(ValueError):
+                        media_runtime.pin_image(image, dockerfile, dv_source)
+                    run.assert_not_called()
+                self.assertEqual(dockerfile.read_text(), source)
+
+    def test_pin_refuses_a_value_the_published_bundle_does_not_carry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dockerfile = Path(directory) / "Dockerfile"
+            dockerfile.write_text(SOURCE)
+            image = "registry.example/noirr/plurx-media-runtime@" + NEW
+            for published in (OLD_DV, ""):
+                with self.subTest(published=published), \
+                        patch.object(media_runtime, "run", side_effect=[index("amd64", "arm64"), published]), \
+                        patch.object(media_runtime, "verify_public_image"):
+                    with self.assertRaisesRegex(ValueError, "published DV helper bundle reports"):
+                        media_runtime.pin_image(image, dockerfile, NEW_DV)
+                self.assertEqual(dockerfile.read_text(), SOURCE)
+
+    def test_bundle_builder_and_plurxd_digest_the_same_renderer_inputs(self):
+        inputs = bundle_manifest().INPUTS
+        runtime = (ROOT / "crates/plurxd/src/dv_runtime.rs").read_text()
+        body = runtime.split("fn renderer_source_identity()", 1)[1].split("\n}\n", 1)[0]
+        names = re.findall(r'\(\s*"([^"]+)",\s*include_bytes!\("\.\./\.\./\.\./tools/dv_processing/([^"]+)"\)', body)
+        self.assertEqual([name for name, _ in names], sorted(inputs))
+        self.assertTrue(all(name == path for name, path in names))
+
+    def test_application_build_checks_the_pinned_bundle_against_its_record(self):
+        source = (ROOT / "Dockerfile").read_text()
+        runtime = source.split("FROM runtime-assets AS runtime\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertIn('ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="', runtime)
+        self.assertIn("/usr/lib/plurx/dv-processing/build-identity.json", runtime)
+        self.assertIn('"$PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256"', runtime)
+
+    def test_release_render_keeps_the_pinned_bundle_check(self):
+        from validation.release_dockerfile import render
+        source = (ROOT / "Dockerfile").read_text()
+        check = next(line for line in source.splitlines()
+                     if line.startswith("RUN python3 -c") and "build-identity.json" in line)
+        generated = render(source)
+        self.assertIn('ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="', generated)
+        self.assertIn(check, generated)
+
+    def test_publication_workflow_ties_the_bundle_to_its_commit(self):
+        workflow = (ROOT / ".github/workflows/media-runtime.yml").read_text()
+        self.assertIn('test "$(cat media-digests/arm64.dv-source)" = "$dv_source"', workflow)
+        self.assertIn('test "$(python3 tools/dv_processing/bundle-manifest.py --identity tools/dv_processing)" = "$dv_source"', workflow)
+        self.assertIn("--dv-source-sha256 %s", workflow)
 
     def test_publication_workflow_is_manual_and_pins_published_native_platforms(self):
         workflow = (ROOT / ".github/workflows/media-runtime.yml").read_text()

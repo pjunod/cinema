@@ -66,6 +66,29 @@ public repository before updating source. Publish publicly first, then commit
 the source update. A missing base fails at image resolution; application builds
 never fall back to rebuilding it.
 
+## Renderer sources travel with the pin
+
+The DV helper bundle is built from `tools/dv_processing` when the runtime is
+published, and plurxd refuses a bundle built from any other renderer sources
+(`DV backend unavailable: unsupported DV build identity`). Processed Dolby
+Vision is then off on every node that deploys the build. That happened on
+2026-11-11, when a renderer change merged without a republish.
+
+The pin therefore records the bundle's `source_sha256` beside the digest
+(`ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256` in `Dockerfile`). Three checks hold
+it in place:
+
+- `tests/operations/test_media_runtime_dv_identity.py` (recomputing plurxd's
+  own input list) and the plurxd unit test
+  `this_daemon_accepts_the_pinned_media_runtimes_dv_helpers` fail any change
+  whose `tools/dv_processing` inputs differ from the recorded identity, so a
+  renderer change must arrive with a republished runtime and a new pin.
+- The application build fails if the pinned image's bundle differs from the
+  record.
+- The publish workflow reads the identity from both platform images, requires
+  them to agree, and prints it in the receipt. `scripts/media-runtime pin`
+  requires it as `--dv-source-sha256`.
+
 ## Qualification and rollback stay explicit
 
 The `media-runtime` maintenance target preserves the incumbent ordinary runtime.
@@ -112,3 +135,25 @@ package tests completed with one platform-specific skip; nine affected Docker
 contracts passed; paperwork passed all 15 checks. This evidence covers base
 publication and consumption, without asserting a full daemon rebuild, hardware
 playback qualification or audited amd64 release readiness.
+
+## Republication — 2026-11-12
+
+Republished from `c0a234817` after #1481 changed the renderer sources without a
+re-pin, which left processed Dolby Vision off on every node built from that
+tree. The variant is the same as the initial base: an ordinary base, not the
+audited amd64 release base. Forgejo run 7267 built amd64 on the nonvoter heavy
+worker and arm64 on the release arm64 runner.
+
+| | Digest |
+|---|---|
+| Index (pinned) | `sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67` |
+| linux/amd64 | `sha256:7242b24e931f887deb1136a7172cc0e8d163765d7d2702bd61b22b3b7aedb1a9` |
+| linux/arm64 | `sha256:44bda5af679331e52fc699e3b3ba9fb371f30d87f25b8c31a8122768da814c9d` |
+
+Both platform bundles report DV `source_sha256`
+`0ae1fc25613537752ae7a9e0e632b82bb9269603208f1994694377c499486e50`, which is the
+identity of `tools/dv_processing` at `c0a234817`. The public copy (GitHub run
+43136340769) is anonymously readable with identical index bytes. The temporary
+copy credential was removed afterwards. `scripts/media-runtime pin` verified
+both platforms and the public index before rewriting the pin.
+
