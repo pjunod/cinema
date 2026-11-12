@@ -44,10 +44,6 @@ const MAX_DEFERRED_RANGES: usize = 8;
 /// is dropped; the next start that meets its head reports it again.
 const MAX_PENDING_DEFECTS: usize = 64;
 
-/// The quarantine code of a head whose published variant fresh observations
-/// of the same source contradict.
-const CONTRADICTION_CODE: &str = "copy_observation_contradiction";
-
 pub(crate) struct PendingSource {
     file: Arc<plurx_core::domain::MediaFile>,
     set: CopyObservationSet,
@@ -425,7 +421,7 @@ async fn publish_source(
                 &claim,
                 *epoch,
                 blob,
-                CONTRADICTION_CODE,
+                plurx_core::store::COPY_INDEX_V3_CONTRADICTION_CODE,
             )
             .await
         }
@@ -549,6 +545,17 @@ async fn contradiction_with_head(
     variant: &CopyIndexV3Variant,
 ) -> Option<String> {
     let artifact = variant.readable()?;
+    // The observed rows are this engine's cut of the source and the
+    // published rows are the producer engine's. Two ffmpeg builds may
+    // fragment the same bytes differently, so a difference between them says
+    // which engine wrote each table and nothing about either being wrong.
+    // Only when this node's engine is exactly the variant's producer engine
+    // does a differing row mean one of the two reads was faulty; with any
+    // other engine the head stays as published, as for a sealed-init
+    // refusal.
+    if crate::ffmpeg::fragment_index_engine_digest().await != artifact.producer_engine_sha256 {
+        return None;
+    }
     let path = v3_blob_path(&v3_root(&context.cache_dir), &artifact.blob_sha256)?;
     let blob = {
         let _pin = crate::playback_cache::pin(&path).ok()?;
@@ -591,9 +598,11 @@ async fn quarantine_head(
 
 /// Act on one defect a reader reported: re-read the head, check what this
 /// worker can check itself, and quarantine it under a claim on its repair
-/// generation. `Ok(false)` means the head was left as it is. The request is
-/// handed back queued, so the origin's next observation of the source finds
-/// it and rebuilds; nothing here reads the source.
+/// generation. `Ok(false)` means the head was left as it is. The request was
+/// borrowed only for that write and is ended as a stranded coordinator: this
+/// node may not be the origin and holds no observations, so the origin's
+/// next observation of the source enqueues its own. Nothing here reads the
+/// source.
 pub(super) async fn quarantine_defect(
     context: &CopyAnalysisContext,
     defect: &CopyIndexDefect,
@@ -703,24 +712,17 @@ pub(super) async fn quarantine_defect(
         defect.kind.code(),
     )
     .await;
-    // Hand the claim back whatever happened, uncharged: the rebuild is the
-    // origin's, from its own observations, under this same request.
-    let mut claimed = request;
-    claimed.state = "running".into();
-    claimed.owner_node_id = claim.node_id.clone();
-    claimed.fence = claim.fence;
-    let now = crate::state::clock_ms();
-    if let Err(error) = store
-        .retry_analysis_request(
-            &claimed,
-            "copy_index_quarantine_settled",
-            now,
-            now.saturating_add(1),
-            false,
-        )
+    // End the borrowed request whatever happened, uncharged. Left queued it
+    // would wait for a worker of this source that may never run here.
+    match store
+        .retire_analysis_coordination_claim(&claim, crate::state::clock_ms())
         .await
     {
-        tracing::warn!(%error, "the quarantine claim was not handed back; its lease ends it");
+        Ok(true) => {}
+        Ok(false) => tracing::warn!("the quarantine claim was already gone when it was ended"),
+        Err(error) => {
+            tracing::warn!(%error, "the quarantine claim was not ended; its lease ends it");
+        }
     }
     match quarantined {
         Ok(()) => Ok(true),
@@ -1206,9 +1208,9 @@ fn v3_blob_digest(name: &str) -> Option<&str> {
 }
 
 /// Let the playback-cache budget evict this node's v3 blobs, as it evicts
-/// its v2 ones. A blob is this node's disposable copy of bytes the catalogue
-/// names by digest; evicting it retires this node's holder rows, and a head
-/// left with no holder is rebuilt when its next reader finds it so.
+/// its v2 ones. A blob another member also holds is this node's disposable
+/// copy; evicting it retires this node's holder rows. Coldness is the file's
+/// access time, which every read moves, exactly as for the v2 root.
 pub(crate) fn register_playback_cache(
     budget: &Arc<crate::playback_cache::PlaybackCacheBudget>,
     runtime_root: &Path,
@@ -1278,6 +1280,20 @@ impl crate::playback_cache::CacheOwner for CopyIndexCacheOwner {
         let blob = v3_blob_digest(name);
         if blob.is_none() && !name.ends_with(".tmp") {
             return Ok(false);
+        }
+        if let Some(blob) = blob {
+            // The last member holding a readable head's bytes keeps them.
+            // Evicting them would leave a healthy head nobody can serve,
+            // whose rebuild installs the same blob here for the budget to
+            // evict again.
+            if self
+                .store
+                .copy_index_v3_last_blob_holder(blob, &self.node)
+                .await
+                .map_err(std::io::Error::other)?
+            {
+                return Ok(false);
+            }
         }
         match tokio::fs::remove_file(&candidate.path).await {
             Ok(()) => {

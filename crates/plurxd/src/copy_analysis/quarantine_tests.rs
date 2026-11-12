@@ -314,9 +314,9 @@ impl Fixture {
 }
 
 /// Observed rows are compared with a published index of the same source row
-/// by row; a complete set must also agree on the row count and the HEVC
-/// slice total. Adopting a repair generation changes only what the set seals
-/// for. Pure: no store, no blob file.
+/// by row, and only the observed rows are judged. Adopting a repair
+/// generation changes only what the set seals for. Pure: no store, no blob
+/// file.
 #[test]
 fn observations_contradict_a_published_index_only_where_they_differ() {
     let init = muxer_init();
@@ -342,17 +342,10 @@ fn observations_contradict_a_published_index_only_where_they_differ() {
             .is_some(),
         "a row the published index does not have"
     );
-    assert!(
-        set_of(&init, &all[..3], true)
-            .contradiction(&published)
-            .is_some_and(|reason| reason.contains("rows were published")),
-        "a complete set shorter than the published table"
-    );
-    assert!(
-        whole
-            .contradiction(&sealed(&init, all.clone(), 11, true))
-            .is_some_and(|reason| reason.contains("slice")),
-        "a complete set whose slices are not the proof's"
+    assert_eq!(
+        whole.contradiction(&sealed(&init, all.clone(), 11, true)),
+        None,
+        "totals the rows do not carry are not this check's"
     );
     let mut retimed = published.clone();
     retimed.timescale += 1;
@@ -367,16 +360,34 @@ fn observations_contradict_a_published_index_only_where_they_differ() {
 
 /// The head decision of a set of observations, against a real store and the
 /// origin's installed blob. Covers items 1 and 2 up to the claim: a healthy
-/// head agreeing with the rows is done whichever generation built it; a
-/// contradicted one names its exact epoch and blob and the set adopts the
-/// repair generation; a quarantined head's desire is adopted only when it is
-/// that same computed generation.
+/// head agreeing with the rows is done whichever generation built it; rows
+/// that differ from a variant another engine built prove nothing; a variant
+/// this engine built is contradicted, names its exact epoch and blob, and
+/// the set adopts the repair generation; a quarantined head's desire is
+/// adopted only when it is that same computed generation.
 #[tokio::test]
 async fn a_set_adopts_only_the_repair_generation_of_the_head_it_contradicts() {
-    let fixture = store_fixture().await;
     let init = muxer_init();
     let all = rows(4, 4_500);
-    let (artifact, blob) = variant(&sealed(&init, all.clone(), 12, true), &hex64('e'));
+    let mut other = all.clone();
+    other[1].bytes += 1;
+
+    // Another engine's variant: its rows may differ from this engine's cut.
+    let foreign = store_fixture().await;
+    let (theirs, blob) = variant(&sealed(&init, all.clone(), 12, true), &hex64('e'));
+    foreign.publish(&theirs);
+    foreign.install(&theirs, &blob).await;
+    let mut differing = set_of(&init, &other[..2], false);
+    assert_eq!(
+        reconcile_with_head(&foreign.context, &foreign.key, &mut differing).await,
+        Ok(HeadDecision::Done),
+        "a difference between two engines is not a contradiction"
+    );
+    assert_eq!(differing.source().requested_generation, hex64('c'));
+
+    let fixture = store_fixture().await;
+    let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+    let (artifact, blob) = variant(&sealed(&init, all.clone(), 12, true), &engine);
     let successor =
         copy_index_v3_rebuild_generation(&fixture.key, &artifact.blob_sha256, 1).expect("repair");
 
@@ -401,9 +412,7 @@ async fn a_set_adopts_only_the_repair_generation_of_the_head_it_contradicts() {
     );
     assert_eq!(set.source().requested_generation, hex64('c'));
 
-    // Fresh rows that are not the published ones.
-    let mut other = all.clone();
-    other[1].bytes += 1;
+    // Fresh rows that are not the ones this same engine published.
     let mut contradicting = set_of(&init, &other[..2], false);
     assert_eq!(
         reconcile_with_head(&fixture.context, &fixture.key, &mut contradicting).await,
@@ -451,7 +460,7 @@ async fn a_set_adopts_only_the_repair_generation_of_the_head_it_contradicts() {
 
 /// A reader's holderless report quarantines the exact head under a real
 /// coordination claim on its repair generation, with its own ledger code, and
-/// hands the request back queued. A holder that is still listed, or a head
+/// ends the borrowed request as a stranded coordinator, uncharged. A holder that is still listed, or a head
 /// that has moved, keeps the head. The quarantined pointer keeps its blob
 /// and epoch but is not readable.
 #[tokio::test]
@@ -502,18 +511,18 @@ async fn a_holderless_head_is_quarantined_under_a_claim_and_the_request_handed_b
         variant.readable().is_none(),
         "a quarantined pointer is not readable before its successor publishes"
     );
-    let (state, code, generation): (String, String, String) = fixture
+    let (state, code, generation, attempts): (String, String, String, i64) = fixture
         .sql()
         .query_row(
-            "SELECT state,last_error_code,requested_generation FROM analysis_requests",
+            "SELECT state,last_error_code,requested_generation,attempts FROM analysis_requests",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("the one coordination request");
     assert_eq!(
-        (state.as_str(), code.as_str(), generation),
-        ("queued", "copy_index_quarantine_settled", successor),
-        "the rebuild's request waits for the origin's observations"
+        (state.as_str(), code.as_str(), generation, attempts),
+        ("cancelled", "coordination_stranded", successor, 0),
+        "the borrowed request is ended, not left queued for a worker that may never run"
     );
     assert_eq!(
         quarantine_defect(&fixture.context, &defect).await,
@@ -583,20 +592,20 @@ async fn an_unindexed_blob_and_a_same_engine_sealed_init_each_quarantine_with_th
     );
     assert_eq!(
         fixture.quarantine_code().as_deref(),
-        Some("copy_index_sealed_init_mismatch")
+        Some(plurx_core::store::COPY_INDEX_V3_SEALED_INIT_CODE)
     );
 }
 
-/// The v3 eviction owner offers exactly this root's blobs, removes the one it
-/// is asked to and forgets this node's holder rows for those bytes under
-/// every contract, leaving other holders listed.
+/// The v3 eviction owner offers exactly this root's blobs. It refuses to
+/// evict the bytes of a readable head this node is the last member holding
+/// (a removed node's row does not count), and otherwise removes the blob and
+/// forgets this node's holder rows for it under every contract.
 #[tokio::test]
 async fn evicting_a_v3_blob_forgets_this_nodes_holder_rows_for_it() {
     let fixture = store_fixture().await;
     let init = muxer_init();
     let (artifact, blob) = variant(&sealed(&init, rows(4, 4_500), 12, true), &hex64('e'));
     fixture.publish(&artifact);
-    fixture.hold(&artifact, "node-two");
     // The same bytes named by a second logical contract.
     let mut alias = artifact.clone();
     alias.contract_key = hex64('a');
@@ -626,6 +635,24 @@ async fn evicting_a_v3_blob_forgets_this_nodes_holder_rows_for_it() {
     };
     assert!(!owner.evict(&outside).await.expect("refusal"));
     assert!(stray.exists());
+
+    // The origin is the head's only holder: its copy is not evictable.
+    assert!(!owner.evict(&candidates[0]).await.expect("refusal"));
+    assert!(path.exists(), "the last holder keeps the bytes");
+    fixture.hold(&artifact, "node-two");
+    let removed = "internal.cluster_job_owner_removed.node-two";
+    fixture
+        .sql()
+        .execute("INSERT INTO settings(key,value) VALUES(?1,'1')", [removed])
+        .expect("removal fence");
+    assert!(
+        !owner.evict(&candidates[0]).await.expect("refusal"),
+        "a node the cluster removed holds nothing"
+    );
+    fixture
+        .sql()
+        .execute("DELETE FROM settings WHERE key=?1", [removed])
+        .expect("a member again");
 
     assert!(owner.evict(&candidates[0]).await.expect("eviction"));
     assert!(!path.exists());

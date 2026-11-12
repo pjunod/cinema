@@ -196,7 +196,7 @@ impl CopyIndexDefectKind {
         match self {
             Self::UnindexedHdr10 => "copy_index_hdr10_unindexed",
             Self::NoHolder => plurx_core::store::COPY_INDEX_V3_NO_HOLDER_CODE,
-            Self::SealedInit => "copy_index_sealed_init_mismatch",
+            Self::SealedInit => plurx_core::store::COPY_INDEX_V3_SEALED_INIT_CODE,
         }
     }
 }
@@ -395,9 +395,9 @@ impl CopyObservationSet {
         self.source.requested_generation = generation.to_owned();
     }
     /// Why these observations contradict `published`, a decoded index of the
-    /// same source, or `None` when every observed row is in it unchanged. A
-    /// complete set must also agree on the row count, the slice total of the
-    /// HEVC proof and the whole-title HDR10 fold.
+    /// same source, or `None` when every observed row is in it unchanged.
+    /// Only the observed rows are judged: a set compared with a healthy head
+    /// holds the ranges just committed, never the whole title.
     pub(crate) fn contradiction(
         &self,
         published: &plurx_core::segplan::FragmentIndex,
@@ -417,8 +417,7 @@ impl CopyObservationSet {
         {
             return None;
         }
-        let observed = self.rows.rows();
-        for row in observed {
+        for row in self.rows.rows() {
             match published
                 .rows
                 .binary_search_by_key(&row.dts, |held| held.dts)
@@ -428,31 +427,7 @@ impl CopyObservationSet {
                 Err(_) => return Some(format!("no row was published at {}", row.dts)),
             }
         }
-        if !self.rows.is_complete() {
-            return None;
-        }
-        if published.rows.len() != observed.len() {
-            return Some(format!(
-                "{} rows were published, {} observed",
-                published.rows.len(),
-                observed.len()
-            ));
-        }
-        if self.hevc {
-            let slices = observed.iter().try_fold(0u64, |total, row| {
-                total.checked_add(self.inspections.get(&row.dts)?.slices)
-            });
-            let proved = published
-                .promotion
-                .hevc_configuration
-                .as_ref()
-                .map(|proof| proof.slices);
-            if slices.is_some() && slices != proved {
-                return Some("the HEVC slice total differs".to_owned());
-            }
-        }
-        (published.promotion.hdr10_sei != self.hdr10.promotion_nals())
-            .then(|| "the whole-title HDR10 metadata differs".to_owned())
+        None
     }
     pub(crate) fn new(message: &CompletedCopyRange) -> Result<Self, CopyObservationError> {
         let mut value = Self::empty(
