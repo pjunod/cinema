@@ -1,0 +1,148 @@
+name: rust gate image
+
+# Builds Dockerfile.rust-gate, publishes it to the fleet registry, and then
+# runs the fast Rust gate inside the image it just published, on the same
+# runner pool and limits as the lane. Dispatch only: `scripts/rust-gate-image
+# publish` dispatches it on a branch, waits, and prints the digest to pin.
+# docs/ci/RUST-GATE-IMAGE.md is the reference.
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: rust-gate-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish the rust-gate image
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    timeout-minutes: 45
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build, smoke and publish the image
+        id: publish
+        env:
+          REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          input="$(sha256sum Dockerfile.rust-gate | cut -d' ' -f1)"
+          tag="$REGISTRY/noirr/plurx-rust-gate:input-${input:0:16}"
+          # A job-local Docker config: the registry login never lands in the
+          # runner user's ~/.docker on a shared host.
+          export DOCKER_CONFIG="$RUNNER_TEMP/rust-gate-docker-$GITHUB_RUN_ID"
+          mkdir -p "$DOCKER_CONFIG"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          # No build context: the Dockerfile copies nothing from the tree.
+          docker build --pull --build-arg "PLURX_RUST_GATE_INPUT=$input" -t "$tag" - < Dockerfile.rust-gate
+          docker run --rm "$tag" sh -ec '
+            rustc --version | grep -F "rustc 1.97.1 "
+            cargo clippy --version
+            rustfmt --version
+            node --version | grep -Fx v22.23.4
+            ffmpeg -version | sed -n 1p
+            test "$(cat /etc/plurx/rust-gate-input)" = "'"$input"'"'
+          printf '%s\n' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u fleet --password-stdin
+          docker push "$tag"
+          image="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" \
+            | grep -F "$REGISTRY/noirr/plurx-rust-gate@sha256:" | head -n 1)"
+          test -n "$image"
+          echo "rust-gate-image digest: $image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          {
+            echo "### rust-gate image"
+            echo "input \`$input\`, published \`$image\`"
+            echo "pin it: \`scripts/rust-gate-image pin ${image#*@}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The lane's gate, unchanged, against the image just published: proves the
+  # image on the real pool before a lane is pointed at it, and warms the same
+  # runner-local Cargo cache the lane uses.
+  probe:
+    name: fast Rust gate on the published image
+    needs: publish
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    container:
+      image: ${{ needs.publish.outputs.image }}
+      options: --memory 20g --memory-swap 20g --cpus 6 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 60
+    steps:
+      - name: Verify effective container resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=600000 100000' pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
+      - name: Check out the candidate
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Require the gate image built from this tree
+        run: |
+          set -eu
+          want="$(sha256sum Dockerfile.rust-gate | cut -d' ' -f1)"
+          have="$(cat /etc/plurx/rust-gate-input 2>/dev/null || echo none)"
+          if [ "$have" != "$want" ]; then
+            echo "::error::The pinned rust-gate image was built from Dockerfile.rust-gate $have, but this tree's is $want. Run \`scripts/rust-gate-image publish\` and commit the digest with \`scripts/rust-gate-image pin <digest>\` (docs/ci/RUST-GATE-IMAGE.md)."
+            exit 1
+          fi
+          rustc --version | grep -F 'rustc 1.97.1 '
+          cargo clippy --version
+          node --version | grep -Fx 'v22.23.4'
+      - name: Size Cargo parallelism from the container's limits
+        run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
+      - name: Install the pinned FFmpeg
+        uses: ./.github/actions/ffmpeg
+        with:
+          major: "6"
+      - name: Restore the main fast Rust cache
+        id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: main-fast-rust
+      - name: Run the Rust gate
+        run: make fast-rust-gate
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
