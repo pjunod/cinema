@@ -10,14 +10,15 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |
 | [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 build contract. | open |
+| [LOCAL-COPY-ENGINE-BUILD.md](LOCAL-COPY-ENGINE-BUILD.md) | Item 6 remainder: build plan. | open |
 | [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 contract; build record: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md). | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Effort plan: rulings, lanes, status. | open |
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |
 | [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
-| [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, implementation, retained evidence and merge prerequisites. | built |
-| [SHARED-SUBTITLE-CUSTODY-AND-START-503.md](SHARED-SUBTITLE-CUSTODY-AND-START-503.md) | S5 Source-owned caption windows, custody initialization race and follow-up qualification. | done |
-| [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold publication and Resume fault repair: review and merge ledger. | open |
+| [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, evidence and merge prerequisites. | built |
+| [SHARED-SUBTITLE-CUSTODY-AND-START-503.md](SHARED-SUBTITLE-CUSTODY-AND-START-503.md) | S5 caption windows, custody init race, follow-up. | done |
+| [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Publication and Resume repair ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs; review and acceptance. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
 | [FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL quality findings. | open |
