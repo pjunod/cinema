@@ -166,6 +166,10 @@ storage-pressure-check: ## Root Linux: prove a real ENOSPC cache/scratch device 
 paperwork: ## Fast bookkeeping checks (index rows, counters, names, Regression-Test) with fixes
 	@python3 scripts/paperwork
 
+.PHONY: paperwork-fix
+paperwork-fix: ## Apply the derivable paperwork fixes (counters, Markdown host names, index rows) to the working tree
+	@python3 scripts/paperwork-fix
+
 .PHONY: history-check
 history-check: ## Verify every corrective commit has current regression evidence
 	@scripts/history-audit --report target/validation/history.json

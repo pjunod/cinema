@@ -325,8 +325,9 @@ jobs:
       # docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.1: the pull
       # request's `Regression-Test:` lines, judged in the tree the merge will
       # produce. The body and title are payload data on the `pull_request`
-      # event, read from the environment: no API call, no credential, and
-      # nothing interpolated into the script. This checkout is the branch
+      # event, read from the event file (validation/pr_event.py): no API call,
+      # no credential, nothing interpolated into the script, and no size
+      # limit from the environment. This checkout is the branch
       # head, not a merge candidate (the step prints both to keep that
       # visible), so the module builds the candidate with `git merge-tree`.
       # Advisory while validation/merge-errata.toml sets no boundary (phase
@@ -335,7 +336,6 @@ jobs:
       # one without the other.
       - name: Check validation catalog and static contracts
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
           KNOWLEDGE_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           make validation-lint
@@ -457,7 +457,7 @@ jobs:
     # unbounded, swapping build. docs/ci/RUST-GATE-IMAGE.md.
     runs-on: [ci-nonvoter-compile-amd64]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-rust-gate@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-rust-gate@sha256:9bb5c1d51f8b0269a1b58c7d8d2bfa8cab9610707453ff21cd6a2d54324ecac3
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr

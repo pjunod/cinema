@@ -60,6 +60,14 @@ every push. Forgejo runs it as the first job of every pull request, drafts
 included, and nothing else starts until it passes, so skipping it only costs
 you the wait. [docs/ci/PAPERWORK.md](docs/ci/PAPERWORK.md) lists the rules.
 
+`make paperwork-fix` applies the ones with a single right answer — release
+counters, host names in Markdown, missing index rows — and the lane does the
+same on its own: it pushes a `chore(paperwork)` commit to your branch instead
+of failing, so `git pull --rebase` before your next push. A new push cancels
+the PR's in-flight lane run; successes from earlier finished runs are still reused.
+[docs/ci/CI-THROUGHPUT.md](docs/ci/CI-THROUGHPUT.md) says what to run before
+pushing and what reruns.
+
 A start-path change — anything under `crates/plurxd/src/http/hls/`,
 `transcode/`, `vod/`, `playstart.rs`, or the client players — cites in its
 pull request a before reading from `/metrics` and names the after reading it

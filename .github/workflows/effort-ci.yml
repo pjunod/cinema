@@ -205,7 +205,7 @@ jobs:
     # CARGO_BUILD_JOBS is derived from them.
     runs-on: [ci-nonvoter-compile-amd64]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-rust-gate@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-rust-gate@sha256:9bb5c1d51f8b0269a1b58c7d8d2bfa8cab9610707453ff21cd6a2d54324ecac3
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
