@@ -304,3 +304,29 @@ for(const [mode,size] of [['slot','compact'],['slot','wide'],['full','wide']])te
   assert.equal(ledger.innerHTML,'retained ledger');
   assert.equal(dialog.open,true);
 });
+
+test('a deferred upgrade refusal explains only current inactive rows and clears with its receipt',()=>{
+  const ordinary={active:['DYN'],details:[
+    {badge:'FEL',active:false,text:'FEL: not used for this play'},
+    {badge:'RPU',active:false,text:'RPU: converted reshaping is pass-through'},
+    {badge:'DYN',active:true,text:'DYN: carried to the display'}]};
+  const context=enhancementSetup(ordinary);
+  const p=context.PLAYER;
+  p.processingSkip={generation,reason:'the title is being measured'};
+  const shown=context.playerEnhancement(p);
+  assert.deepEqual([...shown.active],['DYN']);
+  assert.equal(shown.details[0].text,'FEL: not used for this play — the title is being measured');
+  assert.equal(shown.details[1].text,ordinary.details[1].text);
+  p.processingSkip.generation='retired-generation';
+  assert.equal(context.playerEnhancement(p).details[0].text,ordinary.details[0].text);
+  p.processingSkip={generation,reason:'bad\nreason'};
+  assert.equal(context.playerEnhancement(p).details[0].text,ordinary.details[0].text);
+  p.processingSkip={generation,reason:'the title is being measured'};
+  context.clearEffectiveProcessing(p);
+  assert.equal(p.processingSkip,null);
+  assert.equal(context.playerEnhancement(p).details[0].text,ordinary.details[0].text);
+  p.enhancement=context.playbackEnhancementFromWire(processedEnhancement);
+  const active=context.enhancementWithProcessingSkip(p.enhancement,{generation,reason:'old refusal'},generation);
+  assert.deepEqual([...active.active],['FEL','RPU','DYN']);
+  assert.equal(active.details[0].text,processedEnhancement.details[0].text);
+});

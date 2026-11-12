@@ -10,6 +10,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Dolby Vision on Safari, web and mobile no longer stops at dynamic metadata
+  when the server's GPU can do better: AMD, Intel and NVIDIA reconstruction is
+  qualified with each vendor's actual production encoder, and a recipe that
+  qualifies during a play upgrades that same play. Playback Info shows the real
+  reason an enhancement was skipped. Source custody left behind by a job whose
+  owner died before its join can now be released from a host source-open
+  census instead of holding the shared storage fence indefinitely (#1491).
 - CM4 display mapping evaluates the ST 2084 transfer functions in its point and
   final passes with precise split-float helpers and the normative black and
   white endpoints. On the measured Source16 frame no enhanced pixel is farther
@@ -49,6 +56,13 @@ bump may break compatibility and a **patch** bump never does.
 
 - Cinema application images reuse a separately published, digest-pinned media
   runtime instead of downloading Debian packages and recompiling bundled tools.
+
+- Dolby Vision FEL quality measurement supports Intel VA-API and NVIDIA
+  NVENC using each actual encoder/device recipe. Deferred enhancement failures
+  and pending measurements reach Playback Info on web, Apple and Android;
+  playback starts on the compatible stream while verified enhancements prepare.
+  Disabling the independent HDR10-processing preference no longer prevents
+  a Dolby Vision display's enabled FEL recipe from being measured.
 
 - Digest-keyed analysis requests can register their source custody,
   allowing the index queue to progress instead of renewing a rejected request

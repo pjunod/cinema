@@ -570,6 +570,7 @@ fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
     let body = serde_json::to_vec(&valid_start_response()).expect("start response JSON");
     let created = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
         dv_processing_header: None,
+        processing_skip_header: None,
         clock_timing: None,
         status: reqwest::StatusCode::CREATED,
         body: body.clone(),
@@ -583,6 +584,7 @@ fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
 
     let recovered = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
         dv_processing_header: None,
+        processing_skip_header: None,
         clock_timing: None,
         status: reqwest::StatusCode::ALREADY_REPORTED,
         body: body.clone(),
@@ -599,6 +601,7 @@ fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
     legacy_info.activation_generation = None;
     let legacy = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
         dv_processing_header: None,
+        processing_skip_header: None,
         clock_timing: None,
         status: reqwest::StatusCode::OK,
         body: serde_json::to_vec(&legacy_info).expect("legacy start response JSON"),
@@ -3104,6 +3107,7 @@ fn quality_reservation_burst_keeps_manual_control_budget_independent() {
 fn owner_answer(status: u16, body: &[u8]) -> PeerResponse {
     PeerResponse {
         dv_processing_header: None,
+        processing_skip_header: None,
         clock_timing: None,
         status: reqwest::StatusCode::from_u16(status).expect("status"),
         body: body.to_vec(),
@@ -4241,6 +4245,7 @@ async fn terminal_control_relay_accepts_and_replays_the_exact_ended_response() {
         let response = validated_control_relay_response(
             PeerResponse {
                 dv_processing_header: None,
+                processing_skip_header: None,
                 clock_timing: None,
                 status: reqwest::StatusCode::OK,
                 body: body.clone(),
@@ -4271,6 +4276,7 @@ async fn processing_owner_header_preserves_old_control_body_and_refuses_wrong_in
         let response = validated_control_relay_response(
             PeerResponse {
                 dv_processing_header: Some(header),
+                processing_skip_header: None,
                 clock_timing: None,
                 status: reqwest::StatusCode::OK,
                 body: body.clone(),
@@ -4527,4 +4533,37 @@ fn route_reads_are_exposed_for_every_site_and_source() {
     assert!(!exposition.contains(
         "plurx_media_session_route_reads_total{site=\"receipt_fence\",source=\"authority\"} 0\n"
     ));
+}
+
+#[tokio::test]
+async fn skipped_processing_owner_reason_survives_relay_only_for_its_generation() {
+    let request = terminal_relay_request();
+    let expected = terminal_relay_response(&request);
+    for generation in [&request.generation, &request.session_id] {
+        let response = validated_control_relay_response(
+            PeerResponse {
+                dv_processing_header: None,
+                processing_skip_header: Some(
+                    serde_json::json!({"generation": generation,
+                "reason": "the title is being measured"})
+                    .to_string(),
+                ),
+                clock_timing: None,
+                status: reqwest::StatusCode::OK,
+                body: serde_json::to_vec(&expected).expect("legacy body"),
+            },
+            &request,
+        )
+        .expect("compatible relay");
+        assert_eq!(
+            response.headers().contains_key("x-plurx-processing-skip"),
+            generation == &request.generation
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .expect("bounded body");
+        let parsed: crate::playback_control::ControlResponseV1 =
+            serde_json::from_slice(&bytes).expect("strict legacy body");
+        assert_eq!(parsed, expected);
+    }
 }

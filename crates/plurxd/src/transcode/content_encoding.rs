@@ -844,6 +844,9 @@ async fn verify_sample(
 }
 
 async fn rewind_source(source: &std::fs::File) -> Result<(), String> {
+    if let Some(budget) = crate::background_jobs::source_budget() {
+        budget.untracked_source_capability();
+    }
     let mut file =
         tokio::fs::File::from_std(source.try_clone().map_err(|error| error.to_string())?);
     file.seek(std::io::SeekFrom::Start(0))
@@ -856,6 +859,11 @@ async fn hash_source(
     source: &std::fs::File,
     cancelled: &tokio_util::sync::CancellationToken,
 ) -> Result<String, String> {
+    // Tokio's internal blocking read may outlive a cancelled hash waiter.
+    // This unregistered descriptor duplicate cannot join live completion.
+    if let Some(budget) = crate::background_jobs::source_budget() {
+        budget.untracked_source_capability();
+    }
     let mut file = tokio::fs::File::from_std(source.try_clone().map_err(|e| e.to_string())?);
     file.seek(std::io::SeekFrom::Start(0))
         .await

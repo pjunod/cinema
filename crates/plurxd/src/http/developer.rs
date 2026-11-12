@@ -2178,8 +2178,8 @@ async fn dolby_vision_fel_reencode(
 #[derive(Debug, Clone)]
 #[cfg(any(target_os = "linux", test))]
 struct FelQualityFacts {
-    /// radeonsi VA-API with its Main10 graph: the only encoder the route's
-    /// recipe and its verdicts are measured on.
+    /// A supported hardware completed-picture encoder. Every device and
+    /// actual recipe still requires its own title quality measurement.
     capable: bool,
     /// Titles holding a verdict for this node's renderer and the route's
     /// recipe, and how many of those admit the reconstruction.
@@ -2204,8 +2204,8 @@ fn fel_quality_requirement(facts: &FelQualityFacts) -> DeveloperRequirement {
     let (status, measured) = match (&facts.counts, facts.capable) {
         (_, false) => (
             RequirementStatus::Unmet,
-            "This node's encoder has no qualified reconstruction recipe (the route is measured \
-             on radeonsi VA-API only)."
+            "This node has no proved hardware reconstruction measurement path. \
+             Supported paths are Intel/AMD VA-API and NVIDIA NVENC; each measures its own recipe."
                 .to_owned(),
         ),
         (Err(reason), true) => (
@@ -3693,7 +3693,9 @@ mod tests {
         let incapable = row(false, Ok((3, 1)));
         assert_eq!(incapable.status, RequirementStatus::Unmet);
         assert!(
-            incapable.evidence.contains("radeonsi VA-API only"),
+            incapable
+                .evidence
+                .contains("Intel/AMD VA-API and NVIDIA NVENC"),
             "{}",
             incapable.evidence
         );

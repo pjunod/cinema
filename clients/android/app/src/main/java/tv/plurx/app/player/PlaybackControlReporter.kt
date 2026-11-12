@@ -817,6 +817,7 @@ data class ControlResponse(
     val action: ControlAction,
     val delivery: ControlDelivery? = null,
     @SerialName("effective_processing") val effectiveProcessing: kotlinx.serialization.json.JsonElement? = null,
+    @SerialName("processing_skip") val processingSkip: kotlinx.serialization.json.JsonElement? = null,
     /**
      * What the session that is playing *now* delivers. The server has always
      * sent it; `ignoreUnknownKeys` meant this client dropped it. Comparing it
