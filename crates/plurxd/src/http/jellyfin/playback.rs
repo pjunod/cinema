@@ -290,13 +290,15 @@ async fn bind_native_start(
     play: &JellyfinPlay,
     session_id: &str,
 ) -> Result<Option<JellyfinPlay>, ApiError> {
-    let route = state
-        .store
-        .media_session_route(session_id)
-        .await?
-        .ok_or(ApiError::Conflict(
-            "native play activation unavailable".into(),
-        ))?;
+    let route = crate::media_sessions::read_media_session_route(
+        &*state.store,
+        crate::media_sessions::RouteReadSite::Verdict,
+        session_id,
+    )
+    .await?
+    .ok_or(ApiError::Conflict(
+        "native play activation unavailable".into(),
+    ))?;
     if route.principal.local_user_id() != Some(play.negotiation.scope.user_id)
         || route.playback_id != play.negotiation.playback_id
     {
@@ -328,7 +330,13 @@ async fn unclaimed_native_start(
     play: &JellyfinPlay,
     session_id: &str,
 ) -> Result<bool, ApiError> {
-    let Some(route) = state.store.media_session_route(session_id).await? else {
+    let Some(route) = crate::media_sessions::read_media_session_route(
+        &*state.store,
+        crate::media_sessions::RouteReadSite::Verdict,
+        session_id,
+    )
+    .await?
+    else {
         return Ok(false);
     };
     let bound = state

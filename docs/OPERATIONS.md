@@ -2835,6 +2835,29 @@ is how many entries each expired-entry sweep walks; and
 are not in the lookup counts. None of these changes the cache; the plan's §6.4
 says how to read them.
 
+The playback-start E1a baseline ([PLAYBACK-START-E1-BUILD.md](streaming/PLAYBACK-START-E1-BUILD.md)
+§7, §9) adds, all loaded from atomics at scrape time:
+`plurx_media_session_route_reads_total{site,source}` counts every
+session-keyed route read by the decision it serves (`routing`, `status_first`,
+`status_bracket`, `status_reclassify`, `control`, `verdict`, `receipt_fence`,
+`receipt_candidate`, `observer`); `source` is `authority` until E1c.
+`plurx_applied_view_reads_total{view,source,reason}` and
+`plurx_applied_view_reloads_total{view}` count applied-view reads and stamp
+reloads (`view="settings"` since E1b, whose settings memo reloads at most once
+per settings change a reader saw; `view="route"` stays 0 until E1c);
+`plurx_applied_view_table_changes_total{view}` is how often this replica
+applied a change to `settings` or `media_sessions`, the most a per-table memo
+would reload. `plurx_applied_view_proof{mode}`,
+`plurx_applied_view_image_stable`, `plurx_applied_view_applied_index` and
+`plurx_applied_view_failed_replacements_total` say whether the view could
+answer now, and `plurx_hiqlite_read_pool_wait_seconds` is the wait for a local
+read-pool connection. Settings → Developer → Applied view shows the same facts.
+
+Since E1b, request-path settings reads answer from this replica while it
+holds the proof; `reason="floor"` is this node reading back its own settings
+write until its replica applied it, `reason="reload_in_flight"` a page that
+met another reader's memo reload. Inventory: `http/applied_settings_inventory.rs`.
+
 Backups do not become interchangeable merely because the database is
 replicated. Preserve the data directory, node identity, and cluster secrets for
 each voter in host/storage backups so the original majority can be restored.
@@ -3400,7 +3423,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_DOVI_TOOL` | — | `dovi_tool` | `dovi_tool` binary for permanent Profile 7 → 8.1 conversion; probed at boot and required only when that feature is enabled |
 | `PLURX_MKVMERGE` | — | `mkvmerge` | MKVToolNix muxer for the verified Profile 8.1 replacement; version 68 or newer is required |
 | `PLURX_HWACCEL` | — | `auto` | Preferred encoder: `auto` · `qsv` · `vaapi` · `nvenc` · `videotoolbox` |
-| `PLURX_VAAPI_DEVICE` | — | `/dev/dri/renderD128` | VA-API render node |
+| `PLURX_VAAPI_DEVICE` | — | first VA-API-driver render node (i915, xe, amdgpu, radeon), else `/dev/dri/renderD128` | VA-API render node; skips NVIDIA nodes |
 | `PLURX_TONEMAP` | — | zscale | The **CPU** tone-map operator: `zscale` · `libplacebo` · `off` (no tone-map — plays HDR washed, but a useful test/escape hatch). Which *pipeline* runs — GPU or CPU — is probed at boot, not configured; this only chooses the operator when the CPU chain is the one running |
 | `PLURX_HWDECODE` | — | on | Set `off` to force software decode (still hardware-encodes) — for a GPU that decodes a stream to garbage, e.g. some Dolby Vision |
 | `PLURX_GDM_PORT` | — | `32414` | Host UDP port for GDM discovery (move if Plex owns 32414) |

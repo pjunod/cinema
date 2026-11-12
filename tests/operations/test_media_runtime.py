@@ -3,6 +3,7 @@ import importlib.util
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -25,6 +26,14 @@ SOURCE = (
     f'ARG PLURX_MEDIA_RUNTIME_DIGEST="{OLD}"\n'
     "COPY --from=build /plurxd /usr/local/bin/plurxd\n"
 )
+
+
+def bundle_manifest():
+    loader = SourceFileLoader("bundle_manifest", str(ROOT / "tools/dv_processing/bundle-manifest.py"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def index(*architectures):
@@ -290,6 +299,58 @@ class MediaRuntimeTests(unittest.TestCase):
                     media_runtime.pin_image(image, dockerfile, dv_dependencies=True)
                 self.assertEqual(dockerfile.read_text(), source)
                 self.assertEqual(removed.call_count, 2)
+
+    def test_pin_refuses_a_value_the_published_bundle_does_not_carry(self):
+        # The established regression ID. The runtime no longer carries a
+        # bundle; what a pin can still misstate is which inputs the published
+        # dependency image was built from, and the image itself is the witness.
+        tree = "sha256:" + "4" * 64
+        source = SOURCE + (
+            f"FROM ${{PLURX_MEDIA_RUNTIME_REPOSITORY}}@{OLD} AS dv-processing-dependencies\n"
+            f'ARG PLURX_DV_DEPENDENCY_INPUTS="{tree}"\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            dockerfile = Path(directory) / "Dockerfile"
+            image = "registry.example/noirr/plurx-media-runtime@" + NEW
+            for published in ("sha256:" + "5" * 64, "sha256:" + hashlib.sha256(b"").hexdigest()):
+                dockerfile.write_text(source)
+                with self.subTest(published=published), \
+                        patch.object(media_runtime, "run", return_value=index("amd64", "arm64")), \
+                        patch.object(media_runtime, "verify_public_image"), \
+                        patch.object(media_runtime, "dv_dependency_inputs", return_value=tree), \
+                        patch.object(media_runtime, "image_dependency_inputs", return_value=published):
+                    with self.assertRaisesRegex(ValueError, "DV dependency image was built from other inputs"):
+                        media_runtime.pin_image(image, dockerfile, dv_dependencies=True)
+                self.assertEqual(dockerfile.read_text(), source)
+
+    def test_bundle_builder_and_plurxd_digest_the_same_renderer_inputs(self):
+        inputs = bundle_manifest().INPUTS
+        runtime = (ROOT / "crates/plurxd/src/dv_runtime.rs").read_text()
+        body = runtime.split("fn renderer_source_identity()", 1)[1].split("\n}\n", 1)[0]
+        names = re.findall(r'\(\s*"([^"]+)",\s*include_bytes!\("\.\./\.\./\.\./tools/dv_processing/([^"]+)"\)', body)
+        self.assertEqual([name for name, _ in names], sorted(inputs))
+        self.assertTrue(all(name == path for name, path in names))
+        # One implementation of the identity, shared by the installer's build,
+        # its verification and its --identity query.
+        installer = (ROOT / "tools/dv_processing/bundle-manifest.py").read_text()
+        self.assertEqual(installer.count("def source_identity(source):"), 1)
+        self.assertEqual(installer.count("source_identity(source)"), 3)
+        self.assertIn("print(source_identity(args.source))", installer)
+
+    def test_application_build_checks_the_installed_bundle_against_its_daemon(self):
+        source = (ROOT / "Dockerfile").read_text()
+        runtime = source.split("FROM runtime-assets AS runtime\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertIn('RUN ["plurxd", "dv-helper-identity"]', runtime)
+        # The recorded identity and its check of the pinned runtime's bundle
+        # are gone with their subject: the runtime supplies no bundle.
+        self.assertNotIn("PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256", source)
+        self.assertNotIn("build-identity.json", source)
+
+    def test_release_render_keeps_the_daemon_bundle_check(self):
+        from validation.release_dockerfile import render
+        generated = render((ROOT / "Dockerfile").read_text())
+        self.assertIn('RUN ["plurxd", "dv-helper-identity"]', generated)
+        self.assertIn("COPY --from=dv-processing-helpers /opt/dv-bundle /usr/lib/plurx/dv-processing", generated)
 
     def test_dv_dependency_pin_refuses_a_source_without_exactly_one_pin(self):
         with tempfile.TemporaryDirectory() as directory:

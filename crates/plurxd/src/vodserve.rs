@@ -58,10 +58,9 @@ use crate::copyseg::sanitize_stale_dolby_brand;
 use crate::ffmpeg::ffmpeg_bin;
 use crate::prodexec::{next_step, yield_step, Contention, Producer, Step, Termination};
 use crate::prodrun::{Performed, ProducerSlot};
-#[path = "vod/source_lifetime.rs"]
-mod source_lifetime;
 use crate::prodsched::{decide, Action, Demand, Position, WorkingSet, AHEAD_HORIZON_SECONDS};
 use crate::renditiondir::{InitIdentity, InitRefused, RenditionDir, INIT_NAME};
+use crate::source_generation as source_lifetime;
 use crate::titlestore::{Budgets, Manifest, ReaderWindow, SegState};
 use crate::transcode::{session_log_id, SessionKind, SessionRequest};
 use crate::vodgen::{self, Failure, Generation, Outcome};

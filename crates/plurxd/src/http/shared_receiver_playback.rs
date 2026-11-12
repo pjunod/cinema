@@ -1,5 +1,5 @@
 //! B owns its relay attempt independently of HTTP waiters.
-use super::{hls::StartResponse, sharing_playback_wire::project_shared_start};
+use super::{hls::StartResponse, sharing_playback_wire::project_shared_start_with_receiver};
 use crate::state::{clock_ms, AppState};
 use plurx_core::{
     domain::{MediaSessionActivation, MediaSessionRequestClaim, MEDIA_SESSION_PUBLICATION_BLOCKED},
@@ -324,6 +324,7 @@ struct ReceivedSource {
     viewer_hash: String,
     endpoint: plurx_core::sharing::Endpoint,
     incarnation: Uuid,
+    receiver_presentation_affirmed: bool,
     start: ReceivedStart,
 }
 /// Compare authenticated current plaintext with an actual retained invocation.
@@ -1807,6 +1808,7 @@ async fn run_owner(
         viewer_hash: result.viewer_hash,
         endpoint: result.endpoint,
         incarnation: source_incarnation,
+        receiver_presentation_affirmed: result.receiver_presentation_affirmed,
         start,
     });
     entry.state.lock().expect("receiver owner").received = Some(received.clone());
@@ -1817,12 +1819,16 @@ async fn run_owner(
     // an HDR grade must be one the viewer's own retained caps present.
     if entry.direct != received.direct().is_some()
         || received.hls().is_some_and(|response| {
-            response.media_origin_ms != Some(0)
-                || !response.vod
-                || !crate::http::sharing_start_decode::delivered_range_presentable(
+            !super::shared_source_playback::receiver_presentation::response_presentable(
+                response,
+                super::shared_source_playback::receiver_presentation::client_supports_range(
                     &intent.recipe.request_json,
-                    response,
-                )
+                ),
+                received.receiver_presentation_affirmed,
+            ) || !crate::http::sharing_start_decode::delivered_range_presentable(
+                &intent.recipe.request_json,
+                response,
+            )
         })
     {
         return Err(ReceiverStartError::Unresolved);
@@ -1903,12 +1909,16 @@ async fn run_owner(
             )
         }
         (None, Some(response)) => ReceiverPublished::Hls(Box::new(
-            project_shared_start(
+            project_shared_start_with_receiver(
                 response.clone(),
                 source_session,
                 attachment.owner.session_id,
                 incarnation,
                 attachment.owner.owner_epoch,
+                received.receiver_presentation_affirmed
+                    && super::shared_source_playback::receiver_presentation::client_supports_range(
+                        &intent.recipe.request_json,
+                    ),
             )
             .map_err(|_| ReceiverStartError::Unresolved)?,
         )),
@@ -2157,7 +2167,13 @@ pub(crate) async fn receiver_media(
         {
             return StatusCode::NO_CONTENT.into_response();
         }
-        match state.store.media_session_route(session).await {
+        match crate::media_sessions::read_media_session_route(
+            &*state.store,
+            crate::media_sessions::RouteReadSite::Verdict,
+            session,
+        )
+        .await
+        {
             Ok(Some(route)) => {
                 // Only the explicit remote discriminant is inspected here;
                 // neither a row nor its recipe creates a playback authority.
@@ -3184,6 +3200,7 @@ mod rewrap_tests {
                 spki_sha256: "b".repeat(64),
             },
             incarnation,
+            receiver_presentation_affirmed: false,
             start: ReceivedStart::Direct(crate::http::sharing_direct_wire::SourceDirectStart {
                 session_id: session.to_string(),
                 control_epoch: 1,

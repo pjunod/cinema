@@ -15,20 +15,46 @@ import tv.plurx.app.data.SharedStartedDirect
 class SharedPlaybackOwnerTest {
     private class Renderer(private val log: MutableList<String>, private val rejectAttach: Boolean = false) : SharedRenderer {
         var position = 0L; var active = false; var presented = true
-        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) { if (rejectAttach) error("decoder allocation failed"); log += "attach hls $url @$positionMs"; position = positionMs; active = playWhenReady }
+        var startDescriptor: tv.plurx.app.data.HlsStart? = null
+        var window: LongRange? = null
+        var durationMs = 90_000L
+        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean, start: tv.plurx.app.data.HlsStart) { if (rejectAttach) error("decoder allocation failed"); log += "attach hls $url @$positionMs"; position = positionMs; active = playWhenReady; startDescriptor = start }
         override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) { if (rejectAttach) error("decoder allocation failed"); log += "attach direct $url @$positionMs"; position = positionMs; active = playWhenReady }
         override fun seekTo(positionMs: Long) { log += "seek $positionMs"; position = positionMs }
         override fun setPlaying(playing: Boolean) { log += "playing $playing"; active = playing }
-        override fun snapshot() = SharedRendererSnapshot(position, position + 4_000, 90_000, active, RenderState.RENDERING, framePresented = presented)
+        override fun snapshot() = SharedRendererSnapshot(position, position + 4_000, durationMs, active, RenderState.RENDERING, framePresented = presented, seekableFilmRangeMs = window)
         override fun release() { log += "release" }
         // These owners never declare a Shared successor, so nothing primes one.
-        override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean) = error("no successor without the declaration")
+        override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean, start: tv.plurx.app.data.HlsStart) = error("no successor without the declaration")
         override fun successorSnapshot(): SharedSuccessorSnapshot? = null
         override fun parkSuccessor(positionMs: Long) = error("no successor")
         override fun switchToSuccessor() = error("no successor")
         override fun restorePredecessor() = error("no successor")
         override fun releasePredecessor() = error("no successor")
         override fun releaseSuccessor() = error("no successor")
+    }
+
+    @Test fun boundedRangeStartPassesItsDescriptorAndOutsideSeekReopens(): Unit = runBlocking {
+        val f = SharedFixture("207"); f.login()
+        f.startReply = { index, _ ->
+            val legacy = Json.parseToJsonElement(f.hlsReply(index)).jsonObject
+            JsonObject(legacy + mapOf("vod" to JsonPrimitive(false), "start_seconds" to JsonPrimitive(5_398.0),
+                "media_origin_ms" to JsonPrimitive(5_398_000), "duration_ms" to JsonPrimitive(7_200_000))).toString()
+        }
+        val renderer = Renderer(f.log)
+        renderer.window = 5_398_000L..5_428_000L
+        renderer.durationMs = 7_200_000
+        val owner = SharedPlaybackOwner(this, { SharedDecisionClient.forTest(f.transport()) }, renderer)
+        owner.start(f.plan(f.context(), resumeMs = 5_400_000))
+        assertEquals(5_398_000L, renderer.startDescriptor?.media_origin_ms)
+        assertEquals(5_400_000L, renderer.position)
+        owner.seek(5_405_000)
+        assertTrue(f.log.contains("seek 5405000"))
+        val starts = f.starts
+        owner.seek(6_000_000)
+        assertEquals(starts + 1, f.starts)
+        assertFalse(f.log.contains("seek 6000000"))
+        owner.stop()
     }
 
     @Test fun admittedSharedStartKeepsActualPlayFocusThroughOwnerBusyAndRecordsBeforeTransfer(): Unit = runBlocking {

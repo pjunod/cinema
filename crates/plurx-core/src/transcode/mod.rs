@@ -2501,6 +2501,35 @@ fn copy_input_args(
     video: CopyVideoOptions,
     audio: Option<&crate::playback::audio::AudioDelivery>,
 ) -> Vec<String> {
+    copy_input_args_with_offset_mode(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+        CopyAudioOffsetMode::LegacySecondInput,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyAudioOffsetMode {
+    LegacySecondInput,
+    SingleInputPacketTimestamps,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_input_args_with_offset_mode(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    offset_mode: CopyAudioOffsetMode,
+) -> Vec<String> {
     let transcode_audio = audio.map_or(transcode_audio, |audio| audio.transcodes());
     let source_path = source.path.to_string_lossy().into_owned();
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
@@ -2522,13 +2551,22 @@ fn copy_input_args(
 
     // A per-file A/V sync correction (positive = audio later). COPIED audio
     // cannot take a filter — copy moves packets, filters need frames — so
-    // that case keeps the second `-itsoffset`'d input of the same file, used
-    // only for its audio. Audio that is being transcoded anyway takes the
+    // legacy mode keeps the second `-itsoffset`'d input of the same file,
+    // used only for audio. The measured mode shifts packet clocks below. Audio that is being transcoded anyway takes the
     // correction as a filter on the one input instead: the second demuxer
     // read the whole source again — on NAS media, double the read traffic in
     // exactly the sessions that need the disk most (review §3.4).
     let has_offset = source.audio_offset_ms != 0 && !source.audio_streams.is_empty();
-    let audio_input = if has_offset && !transcode_audio {
+    let copied_packet_offset = offset_mode == CopyAudioOffsetMode::SingleInputPacketTimestamps
+        && has_offset
+        && !transcode_audio
+        && audio.is_none_or(|delivery| {
+            !matches!(delivery.action, crate::playback::audio::AudioAction::None)
+        });
+    let audio_input = if has_offset
+        && !transcode_audio
+        && offset_mode == CopyAudioOffsetMode::LegacySecondInput
+    {
         args.extend(copy_input_seek_args(start_seconds));
         pacing.push(&mut args);
         args.push("-itsoffset".into());
@@ -2634,6 +2672,17 @@ fn copy_input_args(
         args.push("-c:a".into());
         args.push("copy".into());
     }
+    if copied_packet_offset {
+        // setts evaluates these in the audio input TB and rounds to packet
+        // ticks. Keep absent timestamps absent; never force DTS equal to PTS.
+        // n8.0/libavcodec/bsf/setts.c uses double eval + llrint, so this is not
+        // an arbitrary-i64 rational-timestamp equivalence proof.
+        let offset = source.audio_offset_ms;
+        args.extend([
+            "-bsf:a".into(),
+            format!("setts=pts='if(eq(PTS,NOPTS),NOPTS,PTS+({offset})/(1000*TB))':dts='if(eq(DTS,NOPTS),NOPTS,DTS+({offset})/(1000*TB))'"),
+        ]);
+    }
     args
 }
 
@@ -2730,6 +2779,21 @@ pub fn copy_index_output_args(
         "-sn".into(),
     ];
     args.extend(strip_plurx_markers(&copy_video_args(source, video)));
+    append_copy_mp4_output(&mut args, url);
+    if trace && matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+        if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
+            args[index + 1] = format!("trace_headers,{}", args[index + 1]);
+        } else {
+            // Insert before the output URL so this remains an output option.
+            let at = args.len() - 1;
+            args.splice(at..at, ["-bsf:v".to_owned(), "trace_headers".to_owned()]);
+        }
+    }
+    args
+}
+
+/// The common fragmented MP4 mux contract for playback and index outputs.
+fn append_copy_mp4_output(args: &mut Vec<String>, url: &str) {
     args.extend(
         [
             "-avoid_negative_ts",
@@ -2745,16 +2809,6 @@ pub fn copy_index_output_args(
         .map(|s| s.to_string()),
     );
     args.push(url.to_owned());
-    if trace && matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
-        if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
-            args[index + 1] = format!("trace_headers,{}", args[index + 1]);
-        } else {
-            // Insert before the output URL so this remains an output option.
-            let at = args.len() - 1;
-            args.splice(at..at, ["-bsf:v".to_owned(), "trace_headers".to_owned()]);
-        }
-    }
-    args
 }
 
 /// Build ffmpeg args for a copy session that plurx segments itself.
@@ -2834,22 +2888,156 @@ pub fn copy_pipe_args_with_audio_delivery(
         video,
         audio,
     );
+    append_copy_mp4_output(&mut args, "pipe:1");
+    args
+}
+
+/// One production playback output plus canonical video-only measurement,
+/// sharing the input and selected video recipe. The caller must inherit and
+/// concurrently drain `measurement_url` (a `pipe:N` descriptor with N >= 3).
+/// HEVC tracing belongs only to the measurement output and requires info logs.
+///
+/// Copied audio offsets use a distinct one-input packet-timestamp recipe;
+/// legacy playback APIs retain their second offset input unchanged. This argv
+/// alone does not qualify seeked measurements as equal to the whole-file index.
+#[allow(clippy::too_many_arguments)]
+pub fn copy_pipe_args_with_index_measurement(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    measurement_url: &str,
+) -> Result<Vec<String>, &'static str> {
+    let descriptor = measurement_url
+        .strip_prefix("pipe:")
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|descriptor| *descriptor >= 3);
+    if descriptor.is_none() {
+        return Err("index measurement requires an inherited pipe descriptor >= 3");
+    }
+    let mut args = copy_input_args_with_offset_mode(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+        CopyAudioOffsetMode::SingleInputPacketTimestamps,
+    );
+    append_copy_mp4_output(&mut args, "pipe:1");
+    if args.iter().filter(|arg| arg.as_str() == "-i").count() != 1 {
+        return Err("index measurement requires a single production input");
+    }
+    if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+        // This is a global option; change the existing option before the
+        // input rather than appending another loglevel between outputs.
+        if let Some(level) = args.iter().position(|arg| arg == "-loglevel") {
+            args[level + 1] = "info".to_owned();
+        }
+    }
+    args.extend(copy_index_output_args(source, video, measurement_url, true));
+    Ok(args)
+}
+
+/// Add a selected-video packet-clock observation output to the one-input
+/// playback/canonical-measurement recipe. Clock packets retain source decode
+/// timestamps with `-copyts`; MP4 outputs still request their existing
+/// `make_zero` mux normalization. This interaction, especially after seeking,
+/// requires media qualification before the observations can bind a range.
+///
+/// Sizes/checksums describe packets after FFmpeg filters and before any Rust
+/// Dolby Vision rewrite. The caller must correlate packet order with samples
+/// and drain all three outputs concurrently. No trace filter runs on clocks.
+#[allow(clippy::too_many_arguments)]
+pub fn copy_pipe_args_with_index_and_packet_clock(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    measurement_url: &str,
+    clock_url: &str,
+) -> Result<Vec<String>, &'static str> {
+    let clock_descriptor = clock_url
+        .strip_prefix("pipe:")
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|descriptor| *descriptor >= 3)
+        .ok_or("packet clock requires an inherited pipe descriptor >= 3")?;
+    let mut args = copy_pipe_args_with_index_measurement(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+        measurement_url,
+    )?;
+    let measurement_descriptor = measurement_url[5..]
+        .parse::<i32>()
+        .map_err(|_| "invalid measurement descriptor")?;
+    if clock_descriptor == measurement_descriptor {
+        return Err("packet clock and measurement require different descriptors");
+    }
+    args.insert(0, "-copyts".to_owned());
+    args.extend(["-map", "0:v:0?", "-an", "-sn"].map(str::to_owned));
+    args.extend(strip_plurx_markers(&copy_video_args(source, video)));
     args.extend(
         [
+            "-copytb",
+            "1",
             "-avoid_negative_ts",
-            "make_zero",
-            "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
-            "-use_editlist",
-            "0",
+            "disabled",
             "-f",
-            "mp4",
-            "pipe:1",
+            "framecrc",
+            clock_url,
         ]
-        .iter()
-        .map(|s| s.to_string()),
+        .map(str::to_owned),
     );
-    args
+    Ok(args)
+}
+
+/// A bounded head census using the identical measured recipe. All three
+/// outputs stop at one selected video packet; the caller independently caps
+/// source bytes/time and joins the actual child and every drain. The artificial
+/// one-packet MP4 fragment is metadata, never canonical row coverage.
+pub fn copy_head_census_args(
+    source: &MediaFile,
+    video: CopyVideoOptions,
+    measurement_url: &str,
+    clock_url: &str,
+) -> Result<Vec<String>, &'static str> {
+    let mut args = copy_pipe_args_with_index_and_packet_clock(
+        source,
+        0.0,
+        None,
+        false,
+        Pacing::unpaced(),
+        video,
+        None,
+        measurement_url,
+        clock_url,
+    )?;
+    for output in ["pipe:1", measurement_url, clock_url] {
+        let index = args
+            .iter()
+            .rposition(|arg| arg == output)
+            .ok_or("head census output missing")?;
+        let mut limit = vec!["-frames:v".to_owned(), "1".to_owned()];
+        if output == "pipe:1" {
+            limit.insert(0, "-an".to_owned());
+        }
+        args.splice(index..index, limit);
+    }
+    Ok(args)
 }
 
 /// Build ffmpeg args to *copy* the source video into HLS (fMP4 segments) with

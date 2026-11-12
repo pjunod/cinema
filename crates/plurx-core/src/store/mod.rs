@@ -15,6 +15,13 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+pub mod analysis_coordination;
+mod copy_index_v3;
+pub use copy_index_v3::{
+    copy_index_v3_publish_payload, copy_index_v3_rebuild_generation, copy_index_v3_source_key,
+    CopyIndexSourceAttestation, CopyIndexV3Artifact, CopyIndexV3Head, CopyIndexV3HeadState,
+    CopyIndexV3Quarantine,
+};
 pub mod sharing;
 pub use sharing::SharingStore;
 pub mod sharing_catalogue;
@@ -164,6 +171,12 @@ pub use scan_identity_repair::{
     IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX,
 };
 
+pub mod applied_view;
+pub use applied_view::{
+    AppliedSettings, AppliedSnapshot, AppliedTable, AppliedView, AppliedViewMetrics,
+    AppliedViewObservation, FactInstant, SettingsDigest, SettingsWriteFloor, StampCheck,
+    ViewFallback, ViewSource, ViewStamp, APPLIED_VIEW_TABLES,
+};
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite;
 /// The replicated auth schema (`settings`, `users`, `tokens`, ...) the cluster
@@ -265,6 +278,8 @@ mod background_jobs_tests;
 pub mod background_jobs_transcode;
 pub mod background_jobs_transcription;
 pub mod classification_schedule;
+#[cfg(test)]
+mod copy_index_v3_tests;
 pub mod dv_title_jobs;
 mod dv_title_jobs_schema;
 mod library_annotations_schema;
@@ -1153,23 +1168,28 @@ pub use fragment_index_cluster::{
     analysis_backoff_ms, bounded_analysis_backoff_base_secs, bounded_analysis_backoff_max_secs,
     bounded_analysis_lease_secs, bounded_analysis_max_attempts, bounded_subtitle_window_seconds,
     cluster_fragment_index_blob_sha256, cluster_fragment_index_generation_key,
-    cluster_fragment_index_key, cluster_fragment_index_pipeline_digest,
-    decode_cluster_fragment_index_blob, encode_cluster_fragment_index_blob, stored_switch,
-    AnalysisAttempt, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
-    AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
-    AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    ClusterFragmentIndexStore, ClusterIndexAvailabilityProbe, FragmentIndexSourceObservation,
+    cluster_fragment_index_key, cluster_fragment_index_output_identity,
+    cluster_fragment_index_pipeline_digest, cluster_fragment_index_v3_key,
+    decode_cluster_fragment_index_blob, decode_cluster_fragment_index_blob_v3,
+    decode_cluster_fragment_index_blob_with_provenance, encode_cluster_fragment_index_blob,
+    encode_cluster_fragment_index_blob_v3, stored_switch, AnalysisAttempt, AnalysisFileLabel,
+    AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryPage, AnalysisHistoryQuery,
+    AnalysisHistoryRow, AnalysisIndexRepairCandidate, AnalysisIndexRepairResult, AnalysisRequest,
+    AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
+    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, ClusterIndexAvailabilityProbe,
+    DecodedFragmentIndex, FragmentIndexBlobExpectations, FragmentIndexEngineProvenance,
+    FragmentIndexOutputIdentity, FragmentIndexProvenance, FragmentIndexSourceObservation,
     LiveAnalysisEngines, NewAnalysisRequest, NewClusterFragmentIndexJob, StrandedRemedy,
     SubtitleBackfillCandidate, SubtitleBackfillDiagnostics, SubtitleSourcePublication,
     SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
     CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
     DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
-    DEFAULT_SUBTITLE_WINDOW_SECS, FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS,
-    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
-    MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES, MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS,
-    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_FILE_REQUEST_LOOKUP, MAX_SUBTITLE_WINDOW_SECS,
-    MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
+    DEFAULT_SUBTITLE_WINDOW_SECS, FRAGMENT_INDEX_CONTRACT, FRAGMENT_PRUNE_CANDIDATES,
+    FRAGMENT_PRUNE_TERMINAL_JOBS, MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS,
+    MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES, MAX_ANALYSIS_LEASE_SECS,
+    MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_FILE_REQUEST_LOOKUP,
+    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
+    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};

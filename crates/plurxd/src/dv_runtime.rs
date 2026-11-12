@@ -2545,6 +2545,49 @@ mod helper_decoder_tests {
 }
 
 #[cfg(test)]
+mod pinned_runtime_renderer_sources {
+    /// plurxd refuses a DV helper bundle built from other renderer sources
+    /// (2026-11-11, after #1481: processed Dolby Vision off on every node).
+    /// The bundle is now compiled by the application image's helper stage
+    /// from this tree, and stamped by `bundle-manifest.py`. This daemon's own
+    /// identity must equal the one that installer computes for the same
+    /// sources, or the image build stops at `plurxd dv-helper-identity`.
+    ///
+    /// The name is the regression's recorded one: when it was written the
+    /// bundle came from the pinned media runtime and the identity was a value
+    /// recorded beside that pin. Nothing is recorded any more; the installer
+    /// is asked.
+    #[test]
+    fn this_daemon_accepts_the_pinned_media_runtimes_dv_helpers() {
+        let sources =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/dv_processing");
+        let installer = std::process::Command::new("python3")
+            .arg(sources.join("bundle-manifest.py"))
+            .arg("--identity")
+            .arg(&sources)
+            .output()
+            .expect("run the bundle installer's identity");
+        assert!(
+            installer.status.success(),
+            "{}",
+            String::from_utf8_lossy(&installer.stderr)
+        );
+        assert_eq!(
+            super::renderer_source_identity(),
+            String::from_utf8_lossy(&installer.stdout).trim(),
+            "the daemon and tools/dv_processing/bundle-manifest.py digest different \
+             renderer sources: the helper stage would build a bundle this daemon refuses"
+        );
+        // The application build is where that bundle comes from, and where
+        // the daemon is asked again about the installed bytes.
+        let recipe = include_str!("../../../Dockerfile");
+        assert!(recipe.contains("COPY tools/dv_processing /build-inputs/dv_processing"));
+        assert!(recipe.contains("RUN [\"plurxd\", \"dv-helper-identity\"]"));
+        assert!(!recipe.contains("PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256"));
+    }
+}
+
+#[cfg(test)]
 mod private_window_outcome_tests {
     use super::encoder_diagnostic_tail;
 

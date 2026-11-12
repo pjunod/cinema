@@ -119,6 +119,7 @@ pub(crate) struct ReceiverSourceStartResult {
     pub viewer_hash: String,
     pub endpoint: plurx_core::sharing::Endpoint,
     pub source: crate::http::sharing_direct_wire::DecodedSourceStart,
+    pub receiver_presentation_affirmed: bool,
 }
 /// Transport inputs for one exact Source Start. The caller's clock stays
 /// outside the canonical request bytes; connection custody survives every
@@ -313,6 +314,7 @@ impl SharingManager {
             viewer_hash: viewer,
             endpoint,
             source: reply,
+            receiver_presentation_affirmed: peer.receiver_presentation_affirmed(),
         })
     }
 

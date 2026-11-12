@@ -4720,8 +4720,62 @@ impl ArtworkRepairClaim {
     }
 }
 
-struct ReplicatedMembership {
+/// The membership manager's replicated client: hiqlite's [`Client`] with
+/// the store's settings floor armed around every write (playback-start E1b,
+/// `docs/streaming/PLAYBACK-START-E1-BUILD.md` §4.3). Membership writes
+/// `settings` in its own transactions (the reduction reference, the removal
+/// owner fence, the Live TV activation tuple), outside the store's
+/// `TimedClient`; without this the saving node's applied view could answer
+/// from a replica that has not applied them. Reads deref to the client.
+#[derive(Clone)]
+struct FlooredClient {
     client: Client,
+    floor: crate::store::SettingsWriteFloor,
+}
+
+impl std::ops::Deref for FlooredClient {
+    type Target = Client;
+
+    fn deref(&self) -> &Client {
+        &self.client
+    }
+}
+
+impl FlooredClient {
+    async fn execute<S>(&self, sql: S, params: hiqlite::Params) -> Result<usize, hiqlite::Error>
+    where
+        S: Into<std::borrow::Cow<'static, str>>,
+    {
+        let sql = sql.into();
+        let settings = self.floor.arm([sql.as_ref()]);
+        let result = self.client.execute(sql, params).await;
+        drop(settings);
+        result
+    }
+
+    async fn txn<C, Q>(
+        &self,
+        statements: Q,
+    ) -> Result<Vec<Result<usize, hiqlite::Error>>, hiqlite::Error>
+    where
+        Q: IntoIterator<Item = (C, hiqlite::Params)>,
+        C: Into<std::borrow::Cow<'static, str>>,
+    {
+        let statements: Vec<(std::borrow::Cow<'static, str>, hiqlite::Params)> = statements
+            .into_iter()
+            .map(|(sql, params)| (sql.into(), params))
+            .collect();
+        let settings = self
+            .floor
+            .arm(statements.iter().map(|(sql, _)| sql.as_ref()));
+        let result = self.client.txn(statements).await;
+        drop(settings);
+        result
+    }
+}
+
+struct ReplicatedMembership {
+    client: FlooredClient,
     local_metrics: hiqlite::LocalDbRaftMetrics,
     store: Arc<dyn Store>,
     identity: ClusterIdentity,
@@ -5230,6 +5284,7 @@ impl MembershipManager {
         client: Client,
         replication: ReplicationMonitor,
         store: Arc<dyn Store>,
+        settings_floor: crate::store::SettingsWriteFloor,
         identity: ClusterIdentity,
         local: ClusterPeer,
         bootstrap_http: String,
@@ -5244,6 +5299,7 @@ impl MembershipManager {
             client,
             replication,
             store,
+            settings_floor,
             identity,
             local,
             bootstrap_http,
@@ -5268,6 +5324,7 @@ impl MembershipManager {
         client: Client,
         replication: ReplicationMonitor,
         store: Arc<dyn Store>,
+        settings_floor: crate::store::SettingsWriteFloor,
         identity: ClusterIdentity,
         local: ClusterPeer,
         bootstrap_http: String,
@@ -5282,6 +5339,7 @@ impl MembershipManager {
             client,
             replication,
             store,
+            settings_floor,
             identity,
             local,
             bootstrap_http,
@@ -5461,6 +5519,7 @@ impl MembershipManager {
         client: Client,
         replication: ReplicationMonitor,
         store: Arc<dyn Store>,
+        settings_floor: crate::store::SettingsWriteFloor,
         identity: ClusterIdentity,
         local: ClusterPeer,
         bootstrap_http: String,
@@ -5500,7 +5559,10 @@ impl MembershipManager {
                 })?
                 .clock_guard(),
             inner: Some(Arc::new(ReplicatedMembership {
-                client,
+                client: FlooredClient {
+                    client,
+                    floor: settings_floor,
+                },
                 local_metrics,
                 store,
                 identity,
@@ -6962,8 +7024,20 @@ impl MembershipManager {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
+        // Distinct protocol capability: an old Source must not accept a new
+        // owner-designated copy request merely because it can read the file.
+        statements.push((
+            "DELETE FROM cluster_node_capabilities WHERE node_id=$1 AND capability=$2".into(),
+            params!(
+                inner.identity.node_id.as_str(),
+                crate::store::analysis_coordination::SOURCE_COPY_COORDINATION_CAPABILITY
+            ),
+        ));
         if let Some(boot) = ingress_boot {
             let shape = crate::store::sharing_ingress_custody::schema_guard();
+            if inner.source_dispatch_ready.load(Ordering::Acquire) {
+                statements.push((format!("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE ({shape}) AND EXISTS(SELECT 1 FROM analysis_coordination_schema WHERE singleton=1 AND version=1) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at"),params!(inner.identity.node_id.as_str(),crate::store::analysis_coordination::SOURCE_COPY_COORDINATION_CAPABILITY,now)));
+            }
             let capability = format!("sharing_ingress_boot_v1:{boot}");
             statements.push((format!("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE ({shape}) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at"),params!(inner.identity.node_id.as_str(),capability,now)));
         }

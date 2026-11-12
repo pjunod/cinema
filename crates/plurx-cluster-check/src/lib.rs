@@ -11965,6 +11965,8 @@ async fn membership_manager_with_identity_artwork_url(
         client.clone(),
         replication.clone(),
         store,
+        // The checker has no applied view: nothing reads this floor.
+        plurx_core::store::SettingsWriteFloor::detached(),
         ClusterIdentity {
             cluster_id: INSTANCE_ID.to_owned(),
             node_id: node_id.clone(),

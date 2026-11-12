@@ -378,3 +378,70 @@ test("shared client refusal logs only its fixed validation phase and HTTP status
  assert.deepEqual(diagnostics,[{message:"Shared playback request refused",status:502,mode:"page",code:"unrecognized_refusal"}]);
  assert.equal(JSON.stringify(diagnostics).includes("must-not-be-logged"),false);
 });
+
+test("bounded shared attachment maps ninety-minute film time into its item and keeps full-title fallback",()=>{
+ const attached=[];const player={fileId:7,method:'remux'};
+ const c=vm.createContext({PLAYER:player,clearEffectiveProcessing(){},stopPlaybackControl(){},
+  playbackEnhancementFromWire:()=>null,attachHls:(video,url,at)=>attached.push({url,at}),
+  startPlaybackControl(){},effectiveHdrProcessing:()=>null,renderPlayerInfo(){},markPlaybackControlSeekExecuted(){}});
+ vm.runInContext(fn('player/directed-change.js','attachSession'),c);
+ const range={session_id:'range',playlist_url:'/range.m3u8',vod:false,media_origin_ms:5398000,start_seconds:5398};
+ assert.equal(c.attachSession({},player,range,5400),5400);
+ assert.equal(attached[0].at,2);assert.equal(player.offset,5398);assert.equal(player.vod,false);
+ assert.equal(player.controlPositionHintSec,5400);
+ c.attachSession({},player,{...range,vod:true},5400);
+ assert.equal(player.vod,false,'completed nonzero range still has its explicit origin');
+ c.attachSession({},player,{...range,vod:true,media_origin_ms:0,start_seconds:0},5400);
+ assert.equal(attached.at(-1).at,5400);assert.equal(player.vod,true);
+});
+
+test("bounded seek reopens outside advertised coverage and prepared clock keeps source origin",()=>{
+ const policy=require('../../crates/plurxd/src/web/playback-policy.js');
+ const c=vm.createContext({});
+ for(const name of ['sessionMediaOriginMs','realMediaPositionMs','preparedLocalPositionMs'])
+  vm.runInContext(fn('player/prepared-replacement.js',name),c);
+ const origin=c.sessionMediaOriginMs({vod:false,media_origin_ms:5398000});
+ assert.equal(c.preparedLocalPositionMs(5402000,origin),4000);
+ assert.equal(c.realMediaPositionMs(4000,origin,false),5402000);
+ assert.equal(c.sessionMediaOriginMs({vod:true,media_origin_ms:5398000}),5398000);
+ const window={method:'remux',vod:false,copyHls:true,bufferedMs:[{from:5398000,through:5428000}],
+  seekableMs:[{from:5398000,through:5428000}]};
+ assert.equal(policy.seekRoute({...window,targetMs:5405000}).route,'local');
+ assert.equal(policy.seekRoute({...window,targetMs:6000000}).route,'reopen');
+});
+
+test("a bounded EVENT ending without title duration never marks the title watched",async()=>{
+ const reports=[];let finished=0;
+ const player={rangePresentation:true};
+ const c=vm.createContext({PLAYER:player,playbackOwnsAttachedMedia:()=>true,
+  playbackContinuation:()=>()=>true,pbTotalSec:()=>0,pbPosSec:()=>5400,
+  reportProgress:async(id,watched)=>reports.push({id,watched}),finishPlayback:()=>++finished});
+ vm.runInContext(fn('player/autoplay-next.js','handleEnded'),c);
+ await c.handleEnded(7);
+ assert.deepEqual(reports,[{id:7,watched:false}]);assert.equal(finished,0);
+});
+
+
+test("signed bounded origins preserve preroll and prepared replacement title clocks",()=>{
+ const attached=[],player={fileId:7,method:'remux'};
+ const c=vm.createContext({PLAYER:player,clearEffectiveProcessing(){},stopPlaybackControl(){},
+  playbackEnhancementFromWire:()=>null,attachHls:(video,url,at)=>attached.push(at),
+  startPlaybackControl(){},effectiveHdrProcessing:()=>null,renderPlayerInfo(){},markPlaybackControlSeekExecuted(){}});
+ for(const name of ['sessionMediaOriginMs','realMediaPositionMs','preparedLocalPositionMs'])
+  vm.runInContext(fn('player/prepared-replacement.js',name),c);
+ vm.runInContext(fn('player/directed-change.js','attachSession'),c);
+ const origin=c.sessionMediaOriginMs({vod:false,media_origin_ms:-83});
+ assert.equal(origin,-83);
+ c.attachSession({},player,{session_id:'range',playlist_url:'/range.m3u8',vod:false,media_origin_ms:-83},0);
+ assert.equal(attached[0],0.083);assert.equal(player.offset,-0.083);
+ assert.equal(c.preparedLocalPositionMs(0,origin),83);
+ assert.equal(c.realMediaPositionMs(83,origin,false),0);
+ assert.equal(c.realMediaPositionMs(0,origin,false),0);
+ const film=c.realMediaPositionMs(1083,origin,false),nextOrigin=-41;
+ assert.equal(c.preparedLocalPositionMs(film,nextOrigin),1041);
+ assert.equal(c.realMediaPositionMs(1041,nextOrigin,false),film);
+ const policy=require('../../crates/plurxd/src/web/playback-policy.js');
+ const window={method:'remux',vod:false,copyHls:true,bufferedMs:[{from:0,through:4917}],seekableMs:[{from:0,through:4917}]};
+ assert.equal(policy.seekRoute({...window,targetMs:0}).route,'local');
+ assert.equal(policy.seekRoute({...window,targetMs:6000}).route,'reopen');
+});

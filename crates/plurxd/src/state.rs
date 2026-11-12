@@ -799,6 +799,10 @@ pub struct AppState {
     pub(crate) trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
     pub catalogue: CatalogueReader,
+    /// Node-local applied views of settings and media-session routes
+    /// (playback-start E1). E1a builds and observes it; no call site reads
+    /// through it yet.
+    pub applied: plurx_core::store::AppliedView,
     /// Read-only projection of the selected backend's watch-state convergence.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     /// Monotonic, Store-free authority for mutable media and readiness.
@@ -808,6 +812,8 @@ pub struct AppState {
     /// Shared complete observation owner. Pending startup hands this exact
     /// handle to normal HTTP; a second loop cannot claim its receiver.
     pub(crate) clock_observer: crate::clock_offset::ClockObserver,
+    pub(crate) copy_analysis: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
+    pub(crate) copy_observation_dir: Option<PathBuf>,
     /// Bounded authenticated client for node-local activity snapshots.
     #[allow(dead_code)] // aggregation child #326 is the first consumer
     pub peer_activity: crate::http::internal_activity::PeerActivityClient,
@@ -1128,6 +1134,7 @@ impl AppState {
         logs: Arc<LogBuffer>,
     ) -> Self {
         let catalogue = CatalogueReader::authority(Arc::clone(&store));
+        let applied = plurx_core::store::AppliedView::authority(Arc::clone(&store));
         Self::new_configured(
             AppConfig {
                 sharing_network: Default::default(),
@@ -1147,6 +1154,7 @@ impl AppState {
                 shared_cache_dir: PathBuf::new(),
                 shared_cache_id: String::new(),
                 catalogue,
+                applied,
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
                 data_dir: PathBuf::new(),
                 credential_key_path: PathBuf::new(),
@@ -1186,12 +1194,15 @@ impl AppState {
             shared_cache_dir,
             shared_cache_id,
             catalogue,
+            applied,
             snapshot_recovery_budgets,
             data_dir,
             credential_key_path,
             backup_client,
         } = config;
         crate::source_custody::configure_settlement_journal(&data_dir);
+        let copy_observation_dir = (!data_dir.as_os_str().is_empty())
+            .then(|| data_dir.join("copy-ranges").join("observations"));
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
             artwork: artwork_dir,
@@ -1374,6 +1385,8 @@ impl AppState {
             runtime_cache.join("live-tv"),
         );
         live_tv.set_settings_changes(settings_changes.clone());
+        let copy_analysis = Arc::clone(&jobs.copy_analysis);
+
         AppState {
             https: None,
             store,
@@ -1386,12 +1399,15 @@ impl AppState {
             jellyfin_standard_port: Default::default(),
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
+            applied,
             replication,
             peer_activity,
             peer_status_cache: Default::default(),
             membership_status_cache: Default::default(),
             serving,
             clock_observer: crate::clock_offset::ClockObserver::new(membership.clone()),
+            copy_analysis,
+            copy_observation_dir,
             node_hostname: membership.local_hostname(),
             membership,
             media_pool,
@@ -1597,6 +1613,7 @@ pub struct AppConfig {
     pub shared_cache_dir: PathBuf,
     pub shared_cache_id: String,
     pub catalogue: CatalogueReader,
+    pub applied: plurx_core::store::AppliedView,
     pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
     pub data_dir: PathBuf,
     pub credential_key_path: PathBuf,
@@ -1774,6 +1791,7 @@ pub(crate) const TITLE_SCAN_INDEX_WAIT: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
 
 pub struct JobManager {
+    pub(crate) copy_analysis: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
     store: Arc<dyn Store>,
     /// Durable source continuation root. Standalone test managers omit it.
     source_checkpoint_dir: Option<PathBuf>,
@@ -3306,8 +3324,8 @@ pub(crate) struct PlaybackViewerDemand {
 }
 
 impl PlaybackViewerDemand {
-    /// Shared source admission is not installed. Refuse explicitly rather
-    /// than dropping typed viewer ownership from background or VOD work.
+    /// Local demand uses the Local viewer-interest path. Shared Source demand
+    /// must retain its typed Source grant and use the separate Source join.
     pub(crate) fn require_local_authority(&self) -> Result<(), &'static str> {
         match &self.principal {
             plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id }
@@ -3403,6 +3421,11 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
     }
     let _ = fragment_analysis_wake().send(());
     Ok(request)
+}
+
+/// Wake the Analysis dispatcher: a viewer joined, or a copy range committed.
+pub(crate) fn wake_fragment_analysis() {
+    let _ = fragment_analysis_wake().send(());
 }
 
 pub(crate) fn clock_ms() -> i64 {
@@ -3909,6 +3932,7 @@ impl JobManager {
             analysis_progress: std::sync::Mutex::new(HashMap::new()),
             analysis_progress_epoch: AtomicU64::new(0),
             analysis_metrics: Arc::new(AnalysisRuntimeMetrics::default()),
+            copy_analysis: Arc::new(Default::default()),
             #[cfg(test)]
             finished_analysis_rows: std::sync::Mutex::new(Vec::new()),
             now_producing: Mutex::new(None),
@@ -6622,6 +6646,31 @@ impl JobManager {
             loop {
                 let kinds = [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate];
                 let before = crate::background_jobs::accepted_claims(&kinds);
+                // Copy-range observations are metadata-owned Analysis work of
+                // their own, independent of the optional cluster cache build.
+                if self
+                    .job_authority
+                    .may_execute_job(JobKind::FragmentIndexPublish)
+                    .await
+                {
+                    let jobs = Arc::clone(&self);
+                    let transcode = Arc::clone(&transcode);
+                    tokio::spawn(async move {
+                        let policy = jobs.analysis_retry_policy().await;
+                        let context = crate::copy_analysis::CopyAnalysisContext {
+                            store: Arc::clone(&jobs.store),
+                            node_id: jobs.coordinator.node_id().to_owned(),
+                            cache_dir: transcode.runtime_cache_dir().to_path_buf(),
+                            checkpoint_root: jobs.source_checkpoint_dir.clone(),
+                            lease_ms: policy.lease_ms,
+                            renew_every: policy.renew_every(),
+                            retry_ms: policy.backoff_base_ms,
+                            metrics: Arc::clone(&jobs.analysis_metrics),
+                        };
+                        crate::copy_analysis::work_copy_observations(&jobs.copy_analysis, &context)
+                            .await;
+                    });
+                }
                 if self
                     .job_authority
                     .may_execute_job(JobKind::FragmentIndexBuild)

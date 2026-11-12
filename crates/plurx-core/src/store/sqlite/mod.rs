@@ -1339,6 +1339,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::scan_request_v2::SCHEMA,
     // v126: targeted library probes do not reserve a background source reader.
     super::subtitle_managed_schema::TARGETED_MIGRATION,
+    // v127: metadata-only index coordination and fenced physical phases.
+    super::analysis_coordination::SCHEMA,
+    // v128: canonical fragment publication never reserves original media.
+    super::subtitle_managed_schema::PUBLISH_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1803,6 +1807,9 @@ impl SqliteStore {
             }
             if version == super::subtitle_managed_schema::TARGETED_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_targeted_predecessor(&tx)?;
+            }
+            if version == super::subtitle_managed_schema::PUBLISH_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_publish_predecessor(&tx)?;
             }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;

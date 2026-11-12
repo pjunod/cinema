@@ -2116,8 +2116,8 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     .is_some_and(|value| value.trim() == "1")
             } else {
                 state
-                    .store
-                    .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+                    .applied
+                    .setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
                     .await?
                     .is_some_and(|value| value.trim() == "1")
             };
@@ -3470,12 +3470,15 @@ async fn create_with_purpose_inner(
             &user.password_hash,
         ));
     }
-    let network_prior =
-        super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
-            .await
-            .map_err(|error| {
-                ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
-            })?;
+    let network_prior = super::super::network::stored_prior(
+        state.store.as_ref(),
+        &state.applied,
+        identity.as_ref(),
+    )
+    .await
+    .map_err(|error| {
+        ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
+    })?;
     crate::media_pool::mark_create_phase("settings");
     let resolved = resolve_plan_with_continuous(
         PlanInputs {
@@ -4098,11 +4101,13 @@ async fn create_with_purpose_inner(
         std::collections::HashSet::new()
     };
     let predecessor_owner = if let Some(previous) = request.previous_session_id.as_deref() {
-        state
-            .store
-            .media_session_route(previous)
-            .await?
-            .map(|route| route.owner_node_id)
+        crate::media_sessions::read_media_session_route(
+            &*state.store,
+            crate::media_sessions::RouteReadSite::Verdict,
+            previous,
+        )
+        .await?
+        .map(|route| route.owner_node_id)
     } else {
         None
     };
@@ -6300,6 +6305,14 @@ pub(crate) struct SourcePlaybackTarget {
 /// Prepared by current Source authority and the actual shared planning engine.
 /// No wire constructor, serialization, local account, physical readiness or
 /// replicated-write authority is carried by this observation.
+/// Immutable presentation selected by authenticated Source normalization and
+/// bound with the exact durable invocation. Raw client capabilities cannot mint it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceCopyPresentation {
+    FullVod,
+    BoundedRange,
+}
+
 #[allow(dead_code)]
 pub(crate) struct PreparedSourcePlayback {
     target: SourcePlaybackTarget,
@@ -6308,6 +6321,8 @@ pub(crate) struct PreparedSourcePlayback {
     resolved: ResolvedPlan,
     source_fingerprint: String,
     source_invocation_fingerprint: Option<String>,
+    source_presentation: Option<SourceCopyPresentation>,
+    copy_head_caps: plurx_core::playback::DeviceCaps,
     decision: super::super::stream::DecisionResponse,
 }
 #[allow(dead_code)]
@@ -6336,8 +6351,16 @@ impl PreparedSourcePlayback {
     pub(crate) fn bind_source_invocation(
         &mut self,
         binding: &plurx_core::sharing_source_sessions::SourceBindingHandle,
+        presentation: SourceCopyPresentation,
     ) -> Result<(), ()> {
-        if binding.principal() != &self.principal
+        if self
+            .source_presentation
+            .is_some_and(|current| current != presentation)
+            || self
+                .source_invocation_fingerprint
+                .as_deref()
+                .is_some_and(|current| current != binding.request_fingerprint())
+            || binding.principal() != &self.principal
             || binding.source_server_id() != self.target.server_id
             || binding.catalogue_epoch() != self.target.catalogue_epoch
             || binding.library_id() != &self.target.library_id
@@ -6350,7 +6373,39 @@ impl PreparedSourcePlayback {
             return Err(());
         }
         self.source_invocation_fingerprint = Some(binding.request_fingerprint().to_owned());
+        self.source_presentation = Some(presentation);
         Ok(())
+    }
+    pub(crate) fn source_presentation(&self) -> Option<SourceCopyPresentation> {
+        self.source_presentation
+    }
+    /// Validate declared bytes from this held object's selected copy head
+    /// against the exact prepared recipe and client. This does not certify
+    /// the whole elementary stream; the common kernel/Trace check each range.
+    pub(crate) fn validate_copy_head(&self, init: &plurx_core::fmp4::Init) -> Result<(), ApiError> {
+        let refused = || {
+            ApiError::typed(
+                StatusCode::CONFLICT,
+                "vod_source_rescan_required",
+                "The held Source copy head differs from its prepared playback facts",
+            )
+        };
+        let crate::transcode::SessionKind::Copy {
+            preserve_dolby_vision,
+            ..
+        } = self.resolved.request.kind
+        else {
+            return Err(refused());
+        };
+        let facts = plurx_core::fmp4::copy_video_sample_entry_facts(init).map_err(|_| refused())?;
+        validate_prepared_copy_head(
+            &self.file,
+            self.resolved.height,
+            &self.copy_head_caps,
+            preserve_dolby_vision,
+            &facts,
+        )
+        .map_err(|()| refused())
     }
     pub(crate) fn fingerprint(&self) -> &str {
         self.source_invocation_fingerprint
@@ -6381,14 +6436,17 @@ impl PreparedSourcePlayback {
                     && id.to_string() == value
             })
         };
+        let media_origin_ms = source_media_origin_ms(
+            self.source_presentation,
+            info.media_origin_seconds,
+            info.vod,
+        )
+        .ok_or_else(refused)?;
         if !canonical_uuid(&info.session_id)
             || !canonical_uuid(incarnation_id)
             || info.kind != self.resolved.request.kind
             || !info.start_seconds.is_finite()
             || info.start_seconds < 0.0
-            || !info.media_origin_seconds.is_finite()
-            || info.media_origin_seconds < 0.0
-            || info.media_origin_seconds * 1000.0 >= i64::MAX as f64
             || info.duration_ms.is_some_and(|duration| duration < 0)
             || info.playlist_url != format!("/api/v1/hls/{}/index.m3u8", info.session_id)
         {
@@ -6456,7 +6514,7 @@ impl PreparedSourcePlayback {
             playlist_url,
             duration_ms: info.duration_ms,
             start_seconds: info.start_seconds,
-            media_origin_ms: Some((info.media_origin_seconds * 1000.0).round() as i64),
+            media_origin_ms: Some(media_origin_ms),
             height: info.target_height,
             encoder: info.encoder.to_owned(),
             vod: info.vod,
@@ -6678,12 +6736,126 @@ pub(crate) async fn prepare_source_playback<
     Ok(PreparedSourcePlayback {
         source_fingerprint,
         source_invocation_fingerprint: None,
+        source_presentation: None,
+        copy_head_caps: caps,
         target,
         principal,
         file,
         resolved,
         decision,
     })
+}
+
+/// Checks only declared decoder configuration/raster/color. Missing facts do
+/// not acquire an optimistic source or decoder qualification.
+fn validate_prepared_copy_head(
+    file: &MediaFile,
+    resolved_height: i64,
+    caps: &plurx_core::playback::DeviceCaps,
+    preserve_dolby_vision: bool,
+    facts: &plurx_core::fmp4::CopyVideoSampleEntryFacts,
+) -> Result<(), ()> {
+    use plurx_core::{
+        fmp4::VideoCodec,
+        playback::{PlaybackMethod, Transfer},
+        transcode::OutputGrade,
+    };
+    let (codec, profile) = match (facts.codec, facts.profile_idc) {
+        (VideoCodec::H264, 66) => ("h264", "baseline"),
+        (VideoCodec::H264, 77) => ("h264", "main"),
+        (VideoCodec::H264, 88) => ("h264", "extended"),
+        (VideoCodec::H264, 100) => ("h264", "high"),
+        (VideoCodec::H264, 110) => ("h264", "high10"),
+        (VideoCodec::Hevc, 1) => ("hevc", "main"),
+        (VideoCodec::Hevc, 2) => ("hevc", "main10"),
+        _ => return Err(()),
+    };
+    let normalized_profile = file.video_profile.as_deref().map(|profile| {
+        profile
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    });
+    // FFprobe names constrained-baseline separately although avcC carries
+    // profile_idc 66 plus constraints. Both name the same prepared family;
+    // constraint-bit admission remains the decoder's AVC contract.
+    let profile_matches = normalized_profile.as_deref().is_some_and(|value| {
+        value == profile || (profile == "baseline" && value == "constrainedbaseline")
+    });
+    if file.video_codec.as_deref() != Some(codec)
+        || !profile_matches
+        || file.width != Some(i64::from(facts.width))
+        || file.height != Some(i64::from(facts.height))
+        || resolved_height != i64::from(facts.height)
+        || file.bit_depth != Some(i64::from(facts.bit_depth))
+        || facts.chroma_format_idc != 1
+        || facts.width == 0
+        || facts.height == 0
+        || facts.dolby_vision_config
+            != (preserve_dolby_vision && plurx_core::playback::is_dolby_vision(file))
+    {
+        return Err(());
+    }
+    let (_, transfer, _, _) = facts.color.ok_or(())?;
+    let range = plurx_core::playback::delivered_dynamic_range(
+        file,
+        PlaybackMethod::Remux,
+        preserve_dolby_vision,
+        OutputGrade::Sdr,
+    );
+    let expected_transfer = match range {
+        "hdr10" => Transfer::Pq,
+        "hlg" => Transfer::Hlg,
+        "sdr" => Transfer::Sdr,
+        _ => return Err(()),
+    };
+    let actual_transfer = match transfer {
+        16 => Transfer::Pq,
+        18 => Transfer::Hlg,
+        1 | 6 | 13 | 14 | 15 => Transfer::Sdr,
+        _ => return Err(()),
+    };
+    if actual_transfer != expected_transfer {
+        return Err(());
+    }
+    if !caps.video.iter().any(|entry| {
+        entry.codec == codec
+            && (entry.profiles.is_empty() || entry.profiles.iter().any(|claim| claim == profile))
+            && entry.geometry_admission(u32::from(facts.width), u32::from(facts.height), None)
+                != Some(false)
+            && entry.present.contains(&actual_transfer)
+    }) {
+        return Err(());
+    }
+    if codec == "hevc" {
+        let tag = std::str::from_utf8(&facts.sample_entry).map_err(|_| ())?;
+        if caps
+            .hls_hevc_sample_entries
+            .as_ref()
+            .is_some_and(|entries| !entries.iter().any(|entry| entry == tag))
+        {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+fn source_media_origin_ms(
+    presentation: Option<SourceCopyPresentation>,
+    seconds: f64,
+    vod: bool,
+) -> Option<i64> {
+    let millis = (seconds * 1000.0).round();
+    if !millis.is_finite() || millis.abs() > crate::playback_control::MAX_MEDIA_ORIGIN_MILLIS as f64
+    {
+        return None;
+    }
+    match presentation? {
+        SourceCopyPresentation::FullVod if !vod || seconds != 0.0 => None,
+        SourceCopyPresentation::BoundedRange if vod && seconds != 0.0 => None,
+        _ => Some(millis as i64),
+    }
 }
 
 // Source-only durable identity also freezes native presentation selection.
@@ -6709,3 +6881,137 @@ mod source_fingerprint_tests;
 
 #[cfg(test)]
 mod compatibility_service_policy_tests;
+
+#[cfg(test)]
+mod source_presentation_origin_tests {
+    use super::{source_media_origin_ms, SourceCopyPresentation};
+
+    #[test]
+    fn bound_range_preserves_negative_origin_but_full_vod_keeps_zero() {
+        assert_eq!(
+            source_media_origin_ms(Some(SourceCopyPresentation::BoundedRange), -0.083, false),
+            Some(-83)
+        );
+        assert_eq!(
+            source_media_origin_ms(Some(SourceCopyPresentation::FullVod), 0.0, true),
+            Some(0)
+        );
+        assert_eq!(
+            source_media_origin_ms(Some(SourceCopyPresentation::FullVod), -0.083, true),
+            None
+        );
+        assert_eq!(
+            source_media_origin_ms(Some(SourceCopyPresentation::FullVod), 0.0, false),
+            None
+        );
+        assert_eq!(
+            source_media_origin_ms(Some(SourceCopyPresentation::BoundedRange), -0.083, true),
+            None
+        );
+    }
+
+    #[test]
+    fn origin_requires_bound_mode_and_finite_safe_milliseconds() {
+        assert_eq!(source_media_origin_ms(None, 0.0, true), None);
+        for seconds in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            9_007_199_254_741.0,
+            -9_007_199_254_741.0,
+        ] {
+            assert_eq!(
+                source_media_origin_ms(Some(SourceCopyPresentation::BoundedRange), seconds, false),
+                None
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod source_copy_head_tests {
+    use super::*;
+    fn file() -> MediaFile {
+        MediaFile {
+            id: 1,
+            item_id: 1,
+            path: "/source".into(),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(1000),
+            container: Some("mp4".into()),
+            video_codec: Some("h264".into()),
+            video_codec_tag: Some("avc1".into()),
+            field_order: Some("progressive".into()),
+            video_profile: Some("High".into()),
+            width: Some(1920),
+            height: Some(1080),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
+            dolby_vision: Default::default(),
+            bitrate: None,
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            downloaded_subtitles: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+        }
+    }
+    fn caps() -> plurx_core::playback::DeviceCaps {
+        serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","profiles":["high"],"max_height":1080,"max_width":1920,"present":["sdr"]}]})).expect("capabilities fixture")
+    }
+    fn facts() -> plurx_core::fmp4::CopyVideoSampleEntryFacts {
+        plurx_core::fmp4::CopyVideoSampleEntryFacts {
+            codec: plurx_core::fmp4::VideoCodec::H264,
+            sample_entry: *b"avc1",
+            width: 1920,
+            height: 1080,
+            profile_idc: 100,
+            level_idc: 40,
+            bit_depth: 8,
+            chroma_format_idc: 1,
+            color: Some((1, 1, 1, false)),
+            dolby_vision_config: false,
+        }
+    }
+    #[test]
+    fn prepared_copy_head_rejects_changed_geometry_profile_depth_and_grade() {
+        let source = file();
+        let caps = caps();
+        let good = facts();
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_ok());
+        let mut changed = good.clone();
+        changed.width = 1280;
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        let mut changed = good.clone();
+        changed.profile_idc = 77;
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        let mut changed = good.clone();
+        changed.bit_depth = 10;
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        let mut changed = good.clone();
+        changed.color = Some((9, 16, 9, false));
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        let mut changed = good.clone();
+        changed.color = None;
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        assert!(validate_prepared_copy_head(&source, 720, &caps, false, &good).is_err());
+    }
+    #[test]
+    fn prepared_copy_head_rechecks_specific_decoder_profile_and_geometry_claim() {
+        let source = file();
+        let good = facts();
+        let mut caps = caps();
+        caps.video[0].max_width = Some(1280);
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_err());
+        caps.video[0].max_width = Some(1920);
+        caps.video[0].profiles = vec!["main".into()];
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_err());
+    }
+}

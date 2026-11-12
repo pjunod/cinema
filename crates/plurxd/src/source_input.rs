@@ -18,6 +18,24 @@ const SOURCE_WINDOW_MAX: usize = 4 * 1024 * 1024;
 const SOURCE_WINDOW_CONTROL: usize = 256 * 1024;
 const SOURCE_HTTP_CHUNK: usize = 256 * 1024;
 
+/// One-way allowance for ONE already-authorized primary Input operation.
+/// This token cannot reset a census ceiling or address any other Input URL.
+#[derive(Clone)]
+pub(crate) struct SourceSeekBootstrap(Arc<SourceSeekBootstrapState>);
+struct SourceSeekBootstrapState {
+    bytes: u64,
+    verified: std::sync::atomic::AtomicBool,
+}
+impl SourceSeekBootstrap {
+    pub(crate) fn is_verified(&self) -> bool {
+        self.0.verified.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub(crate) fn verified_landing(&self) {
+        self.0
+            .verified
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 pub(crate) trait SourceInputByteBudget: Send + Sync {
     fn allowance(
         &self,
@@ -231,6 +249,9 @@ struct InputState {
     len: u64,
     mime: &'static str,
     window_bytes: std::sync::atomic::AtomicUsize,
+    /// Immutable issued-read ceiling for a dedicated bounded census input.
+    read_ceiling: std::sync::atomic::AtomicU64,
+    seek_bootstrap: std::sync::OnceLock<Arc<SourceSeekBootstrapState>>,
     source_bytes: std::sync::atomic::AtomicU64,
     cache_hits: std::sync::atomic::AtomicU64,
     cached_bytes: std::sync::atomic::AtomicUsize,
@@ -239,6 +260,8 @@ struct InputState {
 }
 #[derive(Default)]
 struct ByteBudget {
+    /// Conservative issued bytes; never reset or refunded across seeks.
+    operation_used: u64,
     grant: Option<SourceServiceGrant>,
     used: u64,
     window: ReadWindow,
@@ -357,6 +380,8 @@ impl SourceInput {
             len,
             mime,
             window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
+            seek_bootstrap: std::sync::OnceLock::new(),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -424,6 +449,8 @@ impl SourceInput {
             len,
             mime,
             window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
+            seek_bootstrap: std::sync::OnceLock::new(),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -482,6 +509,8 @@ impl SourceInput {
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             read_gate: Some(Arc::clone(&gate)),
+            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
+            seek_bootstrap: std::sync::OnceLock::new(),
         });
         (
             Self::launch(state).await.expect("real input bridge"),
@@ -517,6 +546,8 @@ impl SourceInput {
             len,
             mime,
             window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
+            seek_bootstrap: std::sync::OnceLock::new(),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -572,6 +603,68 @@ impl SourceInput {
     /// Internal qualification control; no host tuning or Developer switch.
     /// Set before passing the URL to a child. Both candidates remain bounded.
     #[cfg_attr(not(test), allow(dead_code))]
+    /// A ceiling belongs to this input's unique URL for its complete lifetime.
+    /// There is deliberately no reset/remove API: late census requests cannot
+    /// acquire the allowance of a later primary-input operation.
+    pub(crate) fn seal_seek_bootstrap_limit(
+        &self,
+        bytes: u64,
+    ) -> Result<SourceSeekBootstrap, String> {
+        if bytes == 0 || bytes == u64::MAX {
+            return Err("source seek bootstrap ceiling invalid".into());
+        }
+        let budget = self
+            .state
+            .budget
+            .try_lock()
+            .map_err(|_| "source input already reading".to_owned())?;
+        if budget.operation_used != 0
+            || self
+                .state
+                .read_ceiling
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != u64::MAX
+        {
+            return Err("source seek bootstrap is not a fresh primary operation".into());
+        }
+        let state = Arc::new(SourceSeekBootstrapState {
+            bytes,
+            verified: std::sync::atomic::AtomicBool::new(false),
+        });
+        self.state
+            .seek_bootstrap
+            .set(Arc::clone(&state))
+            .map_err(|_| "source seek bootstrap already sealed".to_owned())?;
+        Ok(SourceSeekBootstrap(state))
+    }
+    pub(crate) fn seal_read_ceiling(&self, bytes: u64) -> Result<(), String> {
+        if bytes == 0 {
+            return Err("source census byte ceiling is empty".into());
+        }
+        {
+            let budget = self
+                .state
+                .budget
+                .try_lock()
+                .map_err(|_| "source input already reading".to_owned())?;
+            if budget.operation_used != 0 {
+                return Err("source input already read".into());
+            }
+            self.state
+                .read_ceiling
+                .compare_exchange(
+                    u64::MAX,
+                    bytes,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .map_err(|_| "source input ceiling already sealed".to_owned())?;
+        }
+        Ok(())
+    }
+
+    /// Qualification control only: the production read window is fixed.
+    #[cfg(test)]
     pub(crate) fn with_read_window(self, bytes: usize) -> Result<Self, String> {
         if !(SOURCE_WINDOW_CONTROL..=SOURCE_WINDOW_MAX).contains(&bytes) {
             return Err("source read window outside qualification bounds".into());
@@ -782,9 +875,26 @@ async fn read_source(
     state
         .cached_bytes
         .store(0, std::sync::atomic::Ordering::SeqCst);
+    let seek_ceiling = state
+        .seek_bootstrap
+        .get()
+        .filter(|bootstrap| !bootstrap.verified.load(std::sync::atomic::Ordering::SeqCst))
+        .map_or(u64::MAX, |bootstrap| bootstrap.bytes);
     let wanted = remaining
         .min(state.len.saturating_sub(offset))
-        .min(state.window_bytes.load(std::sync::atomic::Ordering::SeqCst) as u64);
+        .min(state.window_bytes.load(std::sync::atomic::Ordering::SeqCst) as u64)
+        .min(
+            state
+                .read_ceiling
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .min(seek_ceiling)
+                .saturating_sub(budget.operation_used),
+        );
+    if wanted == 0 {
+        return Err(std::io::Error::other(
+            "source census byte ceiling exhausted",
+        ));
+    }
     let observer = state.observer.as_ref();
     if observer.is_some_and(|observer| !observer.has_authority()) {
         return Err(std::io::Error::other("source authority lost"));
@@ -859,6 +969,10 @@ async fn read_source(
     // worker. Cancelled/short reads receive no refund and cannot reset an
     // epoch by abandoning their HTTP waiter.
     budget.used = budget.used.saturating_add(size as u64);
+    budget.operation_used = budget
+        .operation_used
+        .checked_add(size as u64)
+        .ok_or_else(|| std::io::Error::other("source issued-byte counter overflow"))?;
     if let Some(observer) = observer {
         tokio::select! {biased;
             ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),

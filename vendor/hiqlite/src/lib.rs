@@ -58,6 +58,11 @@ pub use crate::client::{
     DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbMembershipSnapshot,
     LocalDbRaftMetrics, LocalDbRaftSnapshot, WriteAck,
 };
+#[cfg(feature = "sqlite")]
+pub use crate::applied_mark::{
+    APPLIED_MARK_MAX_TABLES, AppliedMarkHandle, AppliedMarkObservation, AppliedSlot,
+    DB_READ_POOL_WAIT_BOUNDS_NANOS, DbReadPoolWait, db_read_pool_wait,
+};
 #[cfg(feature = "validation-test-helpers")]
 pub use crate::network::raft_client::validation_set_raft_partitioned;
 #[cfg(feature = "sqlite")]
@@ -121,6 +126,8 @@ mod startup_cleanup;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 mod store;
 
+#[cfg(feature = "sqlite")]
+mod applied_mark;
 #[cfg(feature = "backup")]
 mod backup;
 #[cfg(feature = "dashboard")]

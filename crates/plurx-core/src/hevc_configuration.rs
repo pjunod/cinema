@@ -181,6 +181,24 @@ impl Proof {
     }
 }
 
+/// One closed, inspected source packet. This is range-local evidence, never
+/// a whole-source [`Proof`] or authorization to read or publish media.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PacketInspection {
+    pub sequence: u64,
+    pub slices: u64,
+    pub configuration_sha256: String,
+}
+
+/// Inspection of the packets actually drained from one range child. A seeked
+/// range can return this successfully without inspecting any preceding bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RangeInspection {
+    pub packets: u64,
+    pub slices: u64,
+    pub configuration_sha256: String,
+}
+
 #[derive(Default)]
 pub struct Trace {
     line: Vec<u8>,
@@ -197,6 +215,8 @@ pub struct Trace {
     slices: u64,
     packets: u64,
     packet_slices: u64,
+    configuration_sha256: Option<String>,
+    closed_packet: Option<PacketInspection>,
     /// Discarding the rest of an over-long line that is not trace output.
     skipping: bool,
     /// Search state across the bytes of the current over-long line, so trace
@@ -220,6 +240,12 @@ impl Trace {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.feed_with_packets(bytes, |_| {});
+    }
+
+    /// Emits a packet only after the following packet header closes all of its
+    /// slice/parameter sections. No unbounded event queue is retained.
+    pub fn feed_with_packets(&mut self, bytes: &[u8], mut emit: impl FnMut(PacketInspection)) {
         self.faults.feed(bytes);
         // A rejection is terminal: keep draining stderr, but bound parsing work.
         if self.refusal.is_some() {
@@ -236,7 +262,12 @@ impl Trace {
                 }
                 let line = std::mem::take(&mut self.line);
                 match std::str::from_utf8(&line) {
-                    Ok(line) => self.parse(line),
+                    Ok(line) => {
+                        self.parse(line);
+                        if let Some(packet) = self.closed_packet.take() {
+                            emit(packet);
+                        }
+                    }
                     Err(_) => self.reject("invalid trace encoding"),
                 }
             } else if self.skipping {
@@ -310,8 +341,19 @@ impl Trace {
                 if self.sets.iter().any(Option::is_none) {
                     self.reject("source extradata lacks a complete decoder configuration");
                 }
-                if self.packets > 0 && self.packet_slices == 0 {
-                    self.reject("video packet has no inspected slices");
+                self.close_packet();
+                if self.configuration_sha256.is_none()
+                    && self.refusal.is_none()
+                    && self.sets.iter().all(Option::is_some)
+                {
+                    use sha2::{Digest, Sha256};
+                    let mut digest = Sha256::new();
+                    digest.update(b"plurx.hevc-inspected-configuration.v1\0");
+                    for fields in self.sets.iter().flatten() {
+                        digest.update((fields.len() as u64).to_be_bytes());
+                        digest.update(fields);
+                    }
+                    self.configuration_sha256 = Some(format!("{:x}", digest.finalize()));
                 }
                 self.packets += 1;
                 self.packet_slices = 0;
@@ -399,7 +441,25 @@ impl Trace {
         }
     }
 
-    pub fn finish(mut self, source_object_version: String, stream_index: u32) -> Proof {
+    fn close_packet(&mut self) {
+        if self.packets == 0 {
+            return;
+        }
+        if self.packet_slices == 0 {
+            self.reject("video packet has no inspected slices");
+        }
+        if self.refusal.is_none() {
+            if let Some(configuration_sha256) = &self.configuration_sha256 {
+                self.closed_packet = Some(PacketInspection {
+                    sequence: self.packets - 1,
+                    slices: self.packet_slices,
+                    configuration_sha256: configuration_sha256.clone(),
+                });
+            }
+        }
+    }
+
+    fn finish_input(&mut self) {
         if !self.line.is_empty() || self.skipping {
             self.reject("truncated trace line");
         }
@@ -411,6 +471,34 @@ impl Trace {
         {
             self.reject("no complete pre-filter HEVC configuration scan");
         }
+        self.close_packet();
+    }
+
+    /// Close a drained range. The caller still checks successful child exit
+    /// and matches packet sequence/clock/sample coverage. This method cannot
+    /// mint a full-source proof, even when the range child exited at EOF.
+    pub fn finish_range(
+        mut self,
+        mut emit: impl FnMut(PacketInspection),
+    ) -> Result<RangeInspection, String> {
+        self.finish_input();
+        if let Some(reason) = self.refusal {
+            return Err(reason);
+        }
+        if let Some(packet) = self.closed_packet.take() {
+            emit(packet);
+        }
+        Ok(RangeInspection {
+            packets: self.packets,
+            slices: self.slices,
+            configuration_sha256: self
+                .configuration_sha256
+                .ok_or_else(|| "missing inspected configuration".to_owned())?,
+        })
+    }
+
+    pub fn finish(mut self, source_object_version: String, stream_index: u32) -> Proof {
+        self.finish_input();
         Proof {
             revision: REVISION,
             source_object_version,
@@ -451,6 +539,48 @@ mod tests {
         .map(line)
         .concat()
     }
+    #[test]
+    fn range_events_close_packets_in_order_across_arbitrary_stderr_chunks() {
+        let input = fixture()
+            + &line("Packet: 80 bytes")
+            + &line("Slice Segment Header")
+            + &line("0 slice_pic_parameter_set_id 0 = 0");
+        let mut trace = Trace::default();
+        let mut packets = Vec::new();
+        for chunk in input.as_bytes().chunks(7) {
+            trace.feed_with_packets(chunk, |packet| packets.push(packet));
+        }
+        assert_eq!(packets.len(), 1, "last packet is still open");
+        let range = trace
+            .finish_range(|packet| packets.push(packet))
+            .expect("range inspected");
+        assert_eq!(range.packets, 2);
+        assert_eq!(range.slices, 2);
+        assert_eq!(
+            packets.iter().map(|p| p.sequence).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(packets
+            .iter()
+            .all(|p| p.slices == 1 && p.configuration_sha256 == range.configuration_sha256));
+        assert_eq!(range.configuration_sha256.len(), 64);
+    }
+
+    #[test]
+    fn missing_or_changed_late_inspection_never_emits_that_packet() {
+        for suffix in [
+            line("Packet: 80 bytes"),
+            fixture().replace("pps_cb_qp_offset 0 = -6", "pps_cb_qp_offset 0 = -1"),
+        ] {
+            let mut trace = Trace::default();
+            let mut packets = Vec::new();
+            trace.feed_with_packets(fixture().as_bytes(), |packet| packets.push(packet));
+            trace.feed_with_packets(suffix.as_bytes(), |packet| packets.push(packet));
+            assert!(trace.finish_range(|packet| packets.push(packet)).is_err());
+            assert!(packets.iter().all(|p| p.sequence == 0));
+        }
+    }
+
     #[test]
     fn stable_repeats_are_proved_but_updates_and_distinct_ids_are_refused() {
         for change in [

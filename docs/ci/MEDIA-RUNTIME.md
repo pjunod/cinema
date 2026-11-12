@@ -119,51 +119,31 @@ public repository before updating source. Publish publicly first, then commit
 the source update. A missing base fails at image resolution; application builds
 never fall back to rebuilding it.
 
-## Qualification and rollback stay explicit
+## Republication — 2026-11-12
 
-The `media-runtime` maintenance target preserves the incumbent ordinary runtime.
-Pinned amd64 release publication requires the audited Dolby capsule, executable
-identity and complete shipping system-library checksums. The initial ordinary
-base preserves local-build behavior and does not satisfy that release contract.
-Publish and promote an audited base before attempting a release.
+Republished from `c0a234817` after #1481 changed the renderer sources without a
+re-pin, which left processed Dolby Vision off on every node built from that
+tree. The variant is the same as the initial base: an ordinary base, not the
+audited amd64 release base. Forgejo run 7267 built amd64 on the nonvoter heavy
+worker and arm64 on the release arm64 runner.
 
-The separate `runtime-assets-dolby-amd64` target still accepts an audited Dolby
-package through the named `linux-dolby-package` build context. Building the base
-alone does not establish hardware playback or audited-package qualification.
-For that target, publish amd64 separately, compose it with the reviewed arm64
-image using `docker manifest create --insecure` followed by `docker manifest push --insecure`, then pin the combined index.
-The retired `build-linux-dolby-ffmpeg --step docker-build` route prints this
-migration instead of rebuilding dependencies during an application build.
+| | Digest |
+|---|---|
+| Index (pinned) | `sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67` |
+| linux/amd64 | `sha256:7242b24e931f887deb1136a7172cc0e8d163765d7d2702bd61b22b3b7aedb1a9` |
+| linux/arm64 | `sha256:44bda5af679331e52fc699e3b3ba9fb371f30d87f25b8c31a8122768da814c9d` |
 
-Historical release tags with inline runtime recipes retain their original
-packaging path. New tags consume their committed base and continue recording the
-selected runtime digest and Debian package inventory. The CI tooling target can
-install compiler and browser test tools; it is not in the application runtime
-closure.
+Both platform bundles report DV `source_sha256`
+`0ae1fc25613537752ae7a9e0e632b82bb9269603208f1994694377c499486e50`, which is the
+identity of `tools/dv_processing` at `c0a234817`. The public copy (GitHub run
+43136340769) is anonymously readable with identical index bytes. The temporary
+copy credential was removed afterwards. `scripts/media-runtime pin` verified
+both platforms and the public index before rewriting the pin.
 
-Rollback restores the previous committed digest and rebuilds the application.
-Retain previous runtime manifests and layers for as long as those application
-revisions remain supported. Run focused packaging contracts and platform runtime
-smoke checks before promoting a dependency update.
-
-## Initial publication — 2026-11-09
-
-The first ordinary base is pinned to index digest
-`sha256:17b3bf9f0d3ed5dd167540a3c805e30a7624fbd93dad250e9e866799ecb22cae`.
-On 2026-11-11 the pin moved to `sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67`,
-rebuilt from main `c0a234817` as the immediate repair: the previous pin's bundle
-carried a Nov 7 `dv_dm.h`, so plurxd refused it and declined processed upgrades.
-That base still carries a bundle; the application build discards it.
-Both native platform builds succeeded. Media executable version checks passed;
-the amd64 helper loaders returned their expected usage errors. A cold
-`runtime-assets` application build with an empty source context resolved the
-published index and executed no `RUN` instructions.
-
-Validation: 97 focused publication, maintenance, snapshot, readiness and Dolby
-package tests completed with one platform-specific skip; nine affected Docker
-contracts passed; paperwork passed all 15 checks. This evidence covers base
-publication and consumption, without asserting a full daemon rebuild, hardware
-playback qualification or audited amd64 release readiness.
+That republication was the immediate repair. Its guard recorded the bundle's
+identity beside the pin (`PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256`) and checked the
+pinned image against it; both went when the bundle returned to the application
+build, below, because the runtime no longer supplies the bundle.
 
 ## Helper bundle returned to the application build — 2026-11-12
 

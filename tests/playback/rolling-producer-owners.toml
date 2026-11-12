@@ -1810,12 +1810,18 @@ pattern = "DurableRouteResolution"
 # 82 -> 101 with M6 server prime: the media-only prepared classifier, its
 # authoritative/local callers, and exact regressions all name the durable
 # verdict they consume. Control classification remains the original authority.
-expected_occurrences = 102
+# 102 -> 105 with playback-start E1a's route-read baseline: the status
+# resolution and the two site-labelled authoritative helpers return the same
+# enum. Counting only (`site="status"`); no new resolution, no producer.
+expected_occurrences = 105
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
 pattern = "authoritative_route_resolution_before"
-expected_occurrences = 9
+# 9 -> 8 with E1a's route-read baseline: the media form now reaches the shared
+# body through `authoritative_route_resolution_at`, which carries the site
+# label. The same quorum read, counted; no call site changed authority.
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-owner-bound-vod-facade"
@@ -2224,7 +2230,12 @@ pattern = "publication_ready_at_ms"
 # activation and then the confirmed row a takeover produces.
 # S5 custody fixtures: +1 test-only assertion that a Source route's
 # publication_ready_at_ms stays at the 0 sentinel; no shipped fence moves.
-expected_occurrences = 163
+# 163 -> 167 with the A1/B1 growing Source engine (#1495): its actor
+# registers its session route with publication_ready_at_ms set to the blocked
+# sentinel, and three read-only checks refuse a route whose session or fence
+# moved. The engine never advances or clears the fence; the actor slot remains
+# the only authority that publishes.
+expected_occurrences = 167
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -2292,7 +2303,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # #978: +1, test-only, the same blocked activation as the handoff fence above.
 # PR1225: +1 in manager/processed_reuse_tests.rs:1425, the test incumbent's
 # blocked activation before its existing Confirm settlement; no shipped write.
-expected_occurrences = 58
+# 58 -> 59 with the A1/B1 growing engine's route registration (#1495), which
+# writes the blocked sentinel the way every other actor registration does.
+expected_occurrences = 59
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -3866,7 +3879,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # by its 4 s CHECK_BUDGET that owns no child; any upgrade it starts goes through
 # start_upgrade_claim. Nine are test fixtures (decode_facts, processed upgrade
 # runs, reader tests) joined or aborted before the test returns.
-expected_occurrences = 1136
+# A1/B1 batch (#1495), +6 owned spawns:
+# - The fragments loop spawns one copy-observation pass only when this node may
+#   execute fragment_index_publish. The registry admits one pass at a time, and
+#   the pass ends when its coalesced pending sources drain.
+# - The claimed Analysis lease heartbeat ends on its stop token (any publish
+#   outcome) or on a lost lease, which it records.
+# - The copy pipe reader returns its JoinHandle to the pipe set that joins it;
+#   it ends on EOF, a read error or a dropped receiver.
+# - The copy producer launches through producer_spawn, so the shared admission,
+#   descendant ownership and reap apply.
+# - The growing-copy production task holds its production and ends on the Source
+#   actor's stop token.
+# - source_resource's spawn_blocking reads the opened held file's metadata and
+#   is awaited inline.
+expected_occurrences = 1142
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4119,7 +4146,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # PR1491: +1 decode_facts.rs routes spawn_job_owned through the retirement
 # custody's declared spawn (same owned job, escape tick recorded first); +3
 # reader/tests.rs fixture threads/children, joined or reaped before return.
-expected_occurrences = 97
+# 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
+# one real child. Test-only.
+expected_occurrences = 98
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5700,7 +5729,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # deadline and its Instant (timeout is a terminal refusal, never admission).
 # The other 15 are test fixture bounds (decode_facts, processed upgrade runs,
 # reader and census tests); elapsed bounds fail the test, never certify closure.
-expected_occurrences = 2194
+# A1/B1 batch (#1495), +8:
+# - Three 250 ms phase-retry sleeps in the physical Analysis phases. Each loop is
+#   bounded by its claim fence.
+# - Three deadlines inside `select!` with the copy range's stop token (census x2,
+#   production).
+# - A route-change `timeout_at` and a 10 s lease-renewal interval in the growing
+#   actor, both owned by that actor's lifetime.
+expected_occurrences = 2202
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6199,7 +6235,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # neither launches a production producer or turns timeout into valid evidence.
 # PR1491: +2 test-only commands in source_custody/recovery/reader/tests.rs
 # (the source-reading cat child and the unmediated sh launch), each reaped.
-expected_occurrences = 338
+# +2 more (338 -> 340) with the A1/B1 batch (#1495): two test-only `/bin/sh` fixtures
+# (output_pipe descriptor collision, prodrun natural exit).
+expected_occurrences = 340
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6898,7 +6936,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # are present; the total is the merge base plus each side's delta.
 # PR1491: +4. decode_facts.rs +1 is the declared spawn_job_owned call above;
 # reader/tests.rs +3 spawn/wait the same two reaped fixture children.
-expected_occurrences = 920
+# 916 -> 919 with the A1/B1 batch (#1495): two test-only child launches
+# (output_pipe's descriptor test `.output()`, prodrun's natural-exit `.spawn()`)
+# and one HTTP `response.status()` read in shared_source_forwarding, which is
+# not a process.
+expected_occurrences = 923
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7205,7 +7247,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # PR1491: +2 test-only waits in source_custody/recovery/reader/tests.rs: the
 # unmediated sh launch and the cat source reader are each reaped before the
 # assertions; neither wait is settlement evidence.
-expected_occurrences = 386
+# 384 -> 387 with the A1/B1 batch (#1495): prodrun's owned reap task now
+# stops waiting when generation retirement is cancelled, kills the child once,
+# and keeps waiting under the same retained admission. There is still exactly
+# one reaper per child; the added wait/start_kill sites are its select arms.
+expected_occurrences = 389
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7441,7 +7487,10 @@ pattern = "kill_on_drop\\s*\\("
 # PR1369: +2 cancellation backstops on those same physical-control diagnostics.
 # Successful evidence requires collected exit status and decoded/probed media;
 # a timeout drops the guarded child and fails the control.
-expected_occurrences = 126
+# 126 -> 127 with the A1/B1 batch (#1495): prodrun's natural-exit test builds
+# one real `/bin/sh` child with kill_on_drop and attaches it to a ChildJob.
+# Test-only; no shipped launch path changes.
+expected_occurrences = 127
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

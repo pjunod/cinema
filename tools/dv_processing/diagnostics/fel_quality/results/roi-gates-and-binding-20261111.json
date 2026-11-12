@@ -1,0 +1,166 @@
+{
+  "schema": 1,
+  "scope": "All ROI harness byte-identity gates and harness binary-to-source binding; offline diagnostic only.",
+  "gates": [
+    {
+      "gate": "michael5400-gate-none",
+      "mode": "none",
+      "status": "encoded",
+      "equivalence_gate": "pass",
+      "harness_sha256": "aeed36542b731577d4f89095f56a2eda89fdbc227c5d4a2e2ea7073915e9aae6",
+      "elementary_stream": {
+        "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+        "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+        "identical_to_baseline": true
+      },
+      "unused_encoder_options": {
+        "cli_baseline": [
+          "sc_threshold"
+        ],
+        "harness": [
+          "sc_threshold"
+        ],
+        "equal": true
+      },
+      "recipe_sha256": "c2e538b6de560274508060714f7d7bd01a969b46074633e85d3b1b1202deff5d"
+    },
+    {
+      "gate": "michael5400-gate-zero",
+      "mode": "zero",
+      "status": "encoded",
+      "equivalence_gate": "pass",
+      "harness_sha256": "aeed36542b731577d4f89095f56a2eda89fdbc227c5d4a2e2ea7073915e9aae6",
+      "elementary_stream": {
+        "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+        "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+        "identical_to_baseline": true
+      },
+      "unused_encoder_options": {
+        "cli_baseline": [
+          "sc_threshold"
+        ],
+        "harness": [
+          "sc_threshold"
+        ],
+        "equal": true
+      },
+      "recipe_sha256": "75b80d5b2b9160ef726c0069be2ed44635359e295f34a5e68b21cf6f80d9dbfa"
+    },
+    {
+      "gate": "michael1800-gate-none",
+      "mode": "none",
+      "status": "encoded",
+      "equivalence_gate": "pass",
+      "harness_sha256": "aeed36542b731577d4f89095f56a2eda89fdbc227c5d4a2e2ea7073915e9aae6",
+      "elementary_stream": {
+        "candidate_sha256": "3c4a523f7bea0d1cc0298aba278ae54d32ab8fa3a0117eda1d7eda6059057db0",
+        "baseline_sha256": "3c4a523f7bea0d1cc0298aba278ae54d32ab8fa3a0117eda1d7eda6059057db0",
+        "identical_to_baseline": true
+      },
+      "unused_encoder_options": {
+        "cli_baseline": [
+          "sc_threshold"
+        ],
+        "harness": [
+          "sc_threshold"
+        ],
+        "equal": true
+      },
+      "recipe_sha256": "6bedc59c28ac996a2861be4c30595053fe6275d9df9685aa4d851930368f13ad"
+    },
+    {
+      "gate": "michael5400-gate6-none",
+      "mode": "none",
+      "status": "encoded",
+      "equivalence_gate": "pass",
+      "harness_sha256": "6a0b293cd9ee2cb348bbec4030f15ab98aa0e80719442e1240020ea8dc9e6026",
+      "elementary_stream": {
+        "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+        "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+        "identical_to_baseline": true
+      },
+      "unused_encoder_options": {
+        "cli_baseline": [
+          "sc_threshold"
+        ],
+        "harness": [
+          "sc_threshold"
+        ],
+        "equal": true
+      },
+      "recipe_sha256": "e1da423a4b25dacda8b7c626114976ca4f9cb0187d101f3d17ed4b19750c8348"
+    },
+    {
+      "gate": "michael5400-gate6-zero",
+      "mode": "zero",
+      "status": "encoded",
+      "equivalence_gate": "pass",
+      "harness_sha256": "6a0b293cd9ee2cb348bbec4030f15ab98aa0e80719442e1240020ea8dc9e6026",
+      "elementary_stream": {
+        "candidate_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+        "baseline_sha256": "7b092bba474ead3440492aba0b8b574f25936e3839c63b52d97ee8512d0ccabc",
+        "identical_to_baseline": true
+      },
+      "unused_encoder_options": {
+        "cli_baseline": [
+          "sc_threshold"
+        ],
+        "harness": [
+          "sc_threshold"
+        ],
+        "equal": true
+      },
+      "recipe_sha256": "be4bc5c8cf10a354e4956090b52317e965a601a2832337d4f3360695bece2510"
+    },
+    {
+      "gate": "michael1800-gate6-none",
+      "mode": "none",
+      "status": "encoded",
+      "equivalence_gate": "pass",
+      "harness_sha256": "6a0b293cd9ee2cb348bbec4030f15ab98aa0e80719442e1240020ea8dc9e6026",
+      "elementary_stream": {
+        "candidate_sha256": "3c4a523f7bea0d1cc0298aba278ae54d32ab8fa3a0117eda1d7eda6059057db0",
+        "baseline_sha256": "3c4a523f7bea0d1cc0298aba278ae54d32ab8fa3a0117eda1d7eda6059057db0",
+        "identical_to_baseline": true
+      },
+      "unused_encoder_options": {
+        "cli_baseline": [
+          "sc_threshold"
+        ],
+        "harness": [
+          "sc_threshold"
+        ],
+        "equal": true
+      },
+      "recipe_sha256": "2adeda4d4423eddfcb33919766ef22d699f046d4ad4b01559cd86964bc4cb109"
+    }
+  ],
+  "harness_binding": {
+    "method": "Rebuilt each source with the same clang command and output basename; byte-identical binaries",
+    "builds": [
+      {
+        "binary": "tooling/roi_encode",
+        "binary_sha256": "aeed36542b731577d4f89095f56a2eda89fdbc227c5d4a2e2ea7073915e9aae6",
+        "used_by": [
+          "gate-none/zero (attempt 5)",
+          "arm S"
+        ],
+        "source_git_blob": "70762439b2fe861c0265455b1f2ea828e73890ce",
+        "source_commit": "72db37f58",
+        "rebuild_sha256": "aeed36542b731577d4f89095f56a2eda89fdbc227c5d4a2e2ea7073915e9aae6"
+      },
+      {
+        "binary": "tooling/roi_encode-v6",
+        "binary_sha256": "6a0b293cd9ee2cb348bbec4030f15ab98aa0e80719442e1240020ea8dc9e6026",
+        "used_by": [
+          "gate6-none/zero",
+          "arm Z",
+          "arm Z6"
+        ],
+        "source_git_blob": "d31e5d3d8d5eaa577be41b1bac522ddeae75c554",
+        "source_commit": "7e977b8fe",
+        "rebuild_sha256": "6a0b293cd9ee2cb348bbec4030f15ab98aa0e80719442e1240020ea8dc9e6026"
+      }
+    ]
+  }
+}

@@ -41,7 +41,9 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Text translation and shared captions add four more schema/marker reads.
     // Source arbitration verifies both the committed object shape and marker.
     // The contract v2 scan request sidecar does the same: two more.
-    ("hiqlite.rs", 64),
+    // Analysis coordination checks its table marker, canonical objects and
+    // protocol singleton before admitting adjunct work: three more.
+    ("hiqlite.rs", 67),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
