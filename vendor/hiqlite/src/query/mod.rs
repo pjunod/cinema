@@ -44,7 +44,7 @@ where
         info!("query_owned_local:\n{}\n{:?}", sql, params)
     }
 
-    let conn = read_pool.get().await?;
+    let conn = crate::applied_mark::timed_read_connection(&read_pool).await?;
 
     task::spawn_blocking(move || {
         let mut stmt = conn.prepare_cached(sql.as_ref())?;
@@ -86,7 +86,7 @@ where
         info!("query_map_typed:\n{}\n{:?}", sql, params)
     }
 
-    let conn = state.raft_db.read_pool.get().await?;
+    let conn = crate::applied_mark::timed_read_connection(&state.raft_db.read_pool).await?;
     task::spawn_blocking(move || {
         let mut stmt = conn.prepare_cached(sql.as_ref())?;
 
@@ -165,7 +165,7 @@ where
         info!("query_as:\n{}\n{:?}", sql, params)
     }
 
-    let conn = state.raft_db.read_pool.get().await?;
+    let conn = crate::applied_mark::timed_read_connection(&state.raft_db.read_pool).await?;
     task::spawn_blocking(move || {
         let mut stmt = conn.prepare_cached(sql.as_ref())?;
 

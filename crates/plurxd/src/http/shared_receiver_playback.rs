@@ -2167,7 +2167,13 @@ pub(crate) async fn receiver_media(
         {
             return StatusCode::NO_CONTENT.into_response();
         }
-        match state.store.media_session_route(session).await {
+        match crate::media_sessions::read_media_session_route(
+            &*state.store,
+            crate::media_sessions::RouteReadSite::Verdict,
+            session,
+        )
+        .await
+        {
             Ok(Some(route)) => {
                 // Only the explicit remote discriminant is inspected here;
                 // neither a row nor its recipe creates a playback authority.

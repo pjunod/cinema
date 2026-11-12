@@ -2622,7 +2622,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(workflow_step_scalar(
             full_compile_steps["Compile every Rust target without executing tests"], "run"
         ), "make effort-rust-check")
-        self.assertRegex(full_jobs["check"], r"(?m)^    timeout-minutes: 120$")
+        self.assertRegex(full_jobs["check"], r"(?m)^    timeout-minutes: 180$")
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
         # Main must also finish the cold full-unit fallback when prior receipts
         # cannot authenticate; effort retains its separate finite budget.
@@ -3352,7 +3352,7 @@ assert.equal(context.ACT_TIMER, null);
             header,
         )
         self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"\n      RUST_TEST_THREADS: "2"\n', header)
-        self.assertRegex(header, r"(?m)^    timeout-minutes: 120$")
+        self.assertRegex(header, r"(?m)^    timeout-minutes: 180$")
         self.assertIn(
             FLEET_REGISTRY_EXPR + "/noirr/plurx-ci@sha256:"
             "3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855",
@@ -3441,7 +3441,7 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_full_runtime_job_allowances_preserve_the_existing_suites(self):
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
-        for name, minutes in (("preflight", 30), ("check", 120), ("cluster_store_legacy", 120), ("cluster_wal", 60)):
+        for name, minutes in (("preflight", 30), ("check", 180), ("cluster_store_legacy", 120), ("cluster_wal", 60)):
             with self.subTest(job=name):
                 self.assertRegex(jobs[name], rf"(?m)^    timeout-minutes: {minutes}$")
                 # The serial Store suite is not a compiler lane; the full unit

@@ -2504,7 +2504,11 @@ pub(crate) async fn verify_authority(
 ) -> Result<(), ControlStateError> {
     let route = tokio::time::timeout(
         Duration::from_secs(2),
-        store.media_session_route(session_id),
+        crate::media_sessions::read_media_session_route(
+            store,
+            crate::media_sessions::RouteReadSite::Control,
+            session_id,
+        ),
     )
     .await
     .map_err(|_| ControlStateError::Unavailable)?

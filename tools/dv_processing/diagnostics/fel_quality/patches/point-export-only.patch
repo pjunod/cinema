@@ -1,0 +1,69 @@
+--- a/helper/yuv420p10.h
++++ b/helper/yuv420p10.h
+@@ -8,8 +8,8 @@
+ // rgb555le); the encoder repacks planar to P010 for hardware upload.
+ //
+ // A fixed matrix on exact texel fetches: luma at full resolution, Cb and Cr
+-// at half resolution with left-sited chroma (the [1 2 1]/4 horizontal by
+-// [1 1]/2 vertical filter centred on even columns, edges clamped). One
++// at half resolution with diagnostic top-left point chroma at even x/y.
++// No low-pass filter is applied to chroma in this separate experiment. One
+ // compute pass writes all three planes where R16 is storable, otherwise one
+ // fragment pass per plane. A general pl_render_image into a three-plane
+ // target cost more than the whole reconstruction at 4K.
+@@ -128,16 +128,12 @@
+     "color = vec4(dv_code(64.0 + 876.0 * dot(dv_kY, rgb)), 0.0, 0.0, 1.0);\n",
+     // Cb: (B' - Y') / 1.8814
+     "ivec2 p = ivec2(gl_FragCoord.xy) * 2;\n"
+-    "vec3 rgb = 0.125 * (dv_rgb_at(p + ivec2(-1, 0)) + dv_rgb_at(p + ivec2(-1, 1))\n"
+-    "                  + dv_rgb_at(p + ivec2( 1, 0)) + dv_rgb_at(p + ivec2( 1, 1)))\n"
+-    "         + 0.25  * (dv_rgb_at(p) + dv_rgb_at(p + ivec2(0, 1)));\n"
++    "vec3 rgb = dv_rgb_at(p);\n"
+     "color = vec4(dv_code(512.0 + 896.0 * (rgb.b - dot(dv_kY, rgb)) / 1.8814),\n"
+     "             0.0, 0.0, 1.0);\n",
+     // Cr: (R' - Y') / 1.4746
+     "ivec2 p = ivec2(gl_FragCoord.xy) * 2;\n"
+-    "vec3 rgb = 0.125 * (dv_rgb_at(p + ivec2(-1, 0)) + dv_rgb_at(p + ivec2(-1, 1))\n"
+-    "                  + dv_rgb_at(p + ivec2( 1, 0)) + dv_rgb_at(p + ivec2( 1, 1)))\n"
+-    "         + 0.25  * (dv_rgb_at(p) + dv_rgb_at(p + ivec2(0, 1)));\n"
++    "vec3 rgb = dv_rgb_at(p);\n"
+     "color = vec4(dv_code(512.0 + 896.0 * (rgb.r - dot(dv_kY, rgb)) / 1.4746),\n"
+     "             0.0, 0.0, 1.0);\n",
+ };
+@@ -156,7 +152,7 @@
+     "imageStore(dv_y, p + ivec2(0, 1), vec4(dv_code(64.0 + 876.0 * dot(dv_kY, c01))));\n"
+     "imageStore(dv_y, p + ivec2(1, 0), vec4(dv_code(64.0 + 876.0 * dot(dv_kY, c10))));\n"
+     "imageStore(dv_y, p + ivec2(1, 1), vec4(dv_code(64.0 + 876.0 * dot(dv_kY, c11))));\n"
+-    "vec3 rgb = 0.125 * (l0 + l1 + c10 + c11) + 0.25 * (c00 + c01);\n"
++    "vec3 rgb = c00;\n"
+     "float y = dot(dv_kY, rgb);\n"
+     "imageStore(dv_cb, b, vec4(dv_code(512.0 + 896.0 * (rgb.b - y) / 1.8814)));\n"
+     "imageStore(dv_cr, b, vec4(dv_code(512.0 + 896.0 * (rgb.r - y) / 1.4746)));\n"
+--- a/helper/segment_decode_render.c
++++ b/helper/segment_decode_render.c
+@@ -364,7 +364,7 @@
+   p->color_space = EXPORT_YUV10 ? (dv_target.sdr ? AVCOL_SPC_BT709 : AVCOL_SPC_BT2020_NCL) : AVCOL_SPC_RGB;
+   p->color_range = EXPORT_YUV10 ? AVCOL_RANGE_MPEG : AVCOL_RANGE_JPEG;
+   if (EXPORT_YUV10)
+-    p->chroma_location = AVCHROMA_LOC_LEFT;
++    p->chroma_location = AVCHROMA_LOC_TOPLEFT;
+   need(avio_open(&nut_output->pb, path, AVIO_FLAG_WRITE) >= 0,
+        "NUT output open");
+   need(avformat_write_header(nut_output, NULL) >= 0, "NUT output header");
+@@ -847,7 +847,7 @@
+   if (argc >= 19) {
+     EXPORT_WIDTH = number(argv[16], 32, 4096);
+     EXPORT_HEIGHT = number(argv[17], 32, 2160);
+-    EXPORT_YUV10 = !strcmp(argv[18], "pq-bilinear-yuv420p10-v1");
++    EXPORT_YUV10 = !strcmp(argv[18], "pq-topleft-point-yuv420p10-diagnostic-v1");
+     need((EXPORT_YUV10 || !strcmp(argv[18], "pq-bilinear-rgb48-v1")) &&
+              EXPORT_WIDTH <= expected_w[0] && EXPORT_HEIGHT <= expected_h[0] &&
+              EXPORT_WIDTH % 2 == 0 && EXPORT_HEIGHT % 2 == 0,
+@@ -868,6 +868,7 @@
+   need(argc == 21 ? dv_target_policy(argv[10], argv[19], argv[20]) :
+                        strcmp(argv[10], "bt2020-pq-master-clip") == 0,
+         "unsupported output policy");
++  need(!EXPORT_YUV10 || !dv_target.sdr, "top-left point diagnostic YUV requires PQ, not SDR");
+   need(
+       expected_w[0] % 2 == 0 && expected_h[0] % 2 == 0 &&
+           expected_w[1] % 2 == 0 && expected_h[1] % 2 == 0 &&

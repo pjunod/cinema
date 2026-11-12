@@ -331,7 +331,7 @@ final class EffectiveProcessingPresentationTests: XCTestCase {
             .standardizedFileURL, encoding: .utf8)
         let commit = try XCTUnwrap(source.range(of: "func commitPreparedSuccessor("))
         let body = source[commit.upperBound...]
-        let adopt = try XCTUnwrap(body.range(of: "playbackEnhancement = action.enhancement"))
+        let adopt = try XCTUnwrap(body.range(of: "adoptPlaybackEnhancement(action.enhancement)"))
         let clear = try XCTUnwrap(body.range(of: "effectiveProcessingGeneration = nil"))
         XCTAssertLessThan(clear.lowerBound, adopt.lowerBound, "the report is cleared first")
     }

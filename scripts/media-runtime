@@ -20,6 +20,10 @@ PIN = re.compile(
     r"(sha256:[0-9a-f]{64})( AS runtime-assets)$"
 )
 DIGEST_ARG = re.compile(r'(?m)^ARG PLURX_MEDIA_RUNTIME_DIGEST="(sha256:[0-9a-f]{64})"$')
+DV_SOURCE_ARG = re.compile(r'(?m)^ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="([0-9a-f]{64})"$')
+DV_SOURCE = re.compile(r"[0-9a-f]{64}")
+READ_DV_SOURCE = ('import json; print(json.load(open('
+                  '"/usr/lib/plurx/dv-processing/build-identity.json"))["source_sha256"])')
 IMAGE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}"
 )
@@ -87,16 +91,27 @@ def verify_public_image(digest: str) -> None:
                          + PUBLIC_REPOSITORY + "@" + digest) from error
 
 
-def pin_image(image: str, dockerfile: Path, *, insecure: bool = False) -> None:
-    """Require a published multi-platform image before changing application source."""
+def pin_image(image: str, dockerfile: Path, dv_source_sha256: str, *, insecure: bool = False) -> None:
+    """Require a published multi-platform image before changing application source.
+
+    `dv_source_sha256` is the `source_sha256` of the published image's Dolby
+    Vision helper bundle (the publish receipt prints it). The pin reads it back
+    from the public image and refuses a mismatch; the application build checks
+    the pinned image against it, and the tests hold it to this tree's renderer
+    sources.
+    """
     if not IMAGE.fullmatch(image):
         raise ValueError("image must be REGISTRY/REPOSITORY@sha256:<64 lowercase hex>")
+    if not DV_SOURCE.fullmatch(dv_source_sha256):
+        raise ValueError("--dv-source-sha256 must be the bundle's 64 lowercase hex source_sha256")
     source = dockerfile.read_text()
     if len(PIN.findall(source)) != 1:
         raise ValueError("Dockerfile must contain exactly one immutable media runtime pin")
     defaults = DIGEST_ARG.findall(source)
     if len(defaults) != 1 or defaults[0] != PIN.findall(source)[0][1]:
         raise ValueError("runtime digest identity default must match the committed media base")
+    if len(DV_SOURCE_ARG.findall(source)) != 1:
+        raise ValueError("Dockerfile must record exactly one pinned DV helper source identity")
     inspect = ["docker", "manifest", "inspect"]
     if insecure:
         inspect.append("--insecure")
@@ -109,8 +124,16 @@ def pin_image(image: str, dockerfile: Path, *, insecure: bool = False) -> None:
         raise ValueError("media image index must contain both linux/amd64 and linux/arm64")
     digest = image.rsplit("@", 1)[1]
     verify_public_image(digest)
+    # Read the bundle's identity out of the published image itself, so a pin
+    # cannot record a value its runtime does not carry.
+    published = run(["docker", "run", "--rm", "--pull", "always", "--entrypoint", "python3",
+                     f"{PUBLIC_REPOSITORY}@{digest}", "-c", READ_DV_SOURCE], capture=True).strip()
+    if published != dv_source_sha256:
+        raise ValueError(f"the published DV helper bundle reports source_sha256 {published or '(none)'}, "
+                         f"not {dv_source_sha256}")
     updated = PIN.sub(lambda match: match[1] + digest + match[3], source)
     updated = DIGEST_ARG.sub(f'ARG PLURX_MEDIA_RUNTIME_DIGEST="{digest}"', updated)
+    updated = DV_SOURCE_ARG.sub(f'ARG PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256="{dv_source_sha256}"', updated)
     # Keep the mirror repository configurable while making the selected bytes immutable.
     temporary: str | None = None
     try:
@@ -136,6 +159,8 @@ def main() -> int:
     pin = commands.add_parser("pin", help="verify a published multi-platform index and update its digest")
     pin.add_argument("image")
     pin.add_argument("--insecure", action="store_true", help="allow the configured private HTTP registry")
+    pin.add_argument("--dv-source-sha256", required=True,
+                     help="source_sha256 of the published image's DV helper bundle (printed by its build's bundle verification)")
     pin.add_argument("--dockerfile", type=Path, default=ROOT / "Dockerfile")
     build = commands.add_parser("build", help="explicitly build and push media dependencies")
     build.add_argument("--image", required=True)
@@ -155,7 +180,7 @@ def main() -> int:
             reference = matches[0][0].removeprefix("FROM ") + matches[0][1]
             print(reference.replace("${PLURX_MEDIA_RUNTIME_REPOSITORY}", args.repository))
         elif args.command == "pin":
-            pin_image(args.image, args.dockerfile, insecure=args.insecure)
+            pin_image(args.image, args.dockerfile, args.dv_source_sha256, insecure=args.insecure)
         else:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9_.-]+", args.image):
                 raise ValueError("build image must be a tagged REGISTRY/REPOSITORY reference")

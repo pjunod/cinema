@@ -706,6 +706,7 @@ function developerPanels(){
       // preparation and rolling retention arrived with their Developer cards.
       shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
       shippedSource("indexingWhileServingCard"),
+      shippedSource("appliedViewCard"),
       shippedSource("processedDvUpgradeCard"),
       shippedSource("subtitleTranscriptionCard"),
       shippedSource("subtitleTranslationCard"),
@@ -866,6 +867,14 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     assert.match(indexing[0], new RegExp(`data-devstat="indexing_while_serving:${id}"`), `indexing reports ${id}`);
   assert.doesNotMatch(indexing[0], /TOG:|FOOT:/, "advisory only: no switch and no Save");
   assert.match(indexing[0], /Leaves Developer when/);
+  // E1a: the applied view has no switch; three advisory rows and the
+  // evidence it graduates on.
+  const applied = /CARDHEAD:Applied view\|[\s\S]*?(?=<div class="setsection"|$)/.exec(html);
+  assert.ok(applied, "Developer shows the applied-view card");
+  for (const id of ["applied_view_proof", "applied_view_image", "applied_view_reads"])
+    assert.match(applied[0], new RegExp(`data-devstat="applied_view:${id}"`), `applied view reports ${id}`);
+  assert.doesNotMatch(applied[0], /TOG:|FOOT:/, "advisory only: no switch and no Save");
+  assert.match(applied[0], /Leaves Developer when/);
   // D1: the processed DV upgrade has no switch; per-platform switch
   // qualification rows, this node's renderer and slot, and the bar it
   // graduates on.
@@ -1043,8 +1052,9 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const developerCards = html.split("CARD[").slice(1);
   assert.ok(developerCards.length >= 15, `Developer renders its cards (${developerCards.length})`);
   // 21 since D1 (2026-11-07): the processed DV upgrade waits on its measured
-  // switches. The bound still catches a card that should have graduated.
-  assert.ok(developerCards.length <= 21, `Developer holds only what still waits (${developerCards.length})`);
+  // switches. 22 since E1a (2026-11-11): the applied view waits on its
+  // readers. The bound still catches a card that should have graduated.
+  assert.ok(developerCards.length <= 22, `Developer holds only what still waits (${developerCards.length})`);
   for (const card of developerCards) {
     const title = (/CARDHEAD:([^|]*)/.exec(card) || [])[1] || card.slice(0, 80);
     assert.match(card, /<b>Leaves Developer when:<\/b> \S[^<]*<b>Then:<\/b> \S/,

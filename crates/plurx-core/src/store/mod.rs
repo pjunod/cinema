@@ -171,6 +171,12 @@ pub use scan_identity_repair::{
     IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX,
 };
 
+pub mod applied_view;
+pub use applied_view::{
+    AppliedSettings, AppliedSnapshot, AppliedTable, AppliedView, AppliedViewMetrics,
+    AppliedViewObservation, FactInstant, SettingsDigest, SettingsWriteFloor, StampCheck,
+    ViewFallback, ViewSource, ViewStamp, APPLIED_VIEW_TABLES,
+};
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite;
 /// The replicated auth schema (`settings`, `users`, `tokens`, ...) the cluster

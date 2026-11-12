@@ -56,6 +56,8 @@ mod pgs_overlay;
 mod photos;
 mod plex;
 pub(crate) use plex::looks_like_plex;
+#[cfg(test)]
+mod applied_settings_inventory;
 pub(crate) mod plex_census;
 pub(crate) mod publication;
 mod reading;

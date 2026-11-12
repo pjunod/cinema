@@ -48,9 +48,9 @@ use crate::config::{
 use crate::secrets::{self, CredentialKey, SealedRowCensus};
 #[cfg(feature = "hiqlite-store")]
 use crate::store::{
-    CatalogueReader, HiqliteAuthStore, SettingsStore, SharingStore, SqliteImportReport,
-    SqliteImportTableDigest, SqliteStore, Store, TraktStore, AUTH_SCHEMA_BASELINE_VERSION,
-    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    AppliedView, CatalogueReader, HiqliteAuthStore, SettingsStore, SharingStore,
+    SqliteImportReport, SqliteImportTableDigest, SqliteStore, Store, TraktStore,
+    AUTH_SCHEMA_BASELINE_VERSION, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "hiqlite-store")]
 use hiqlite::tls::ServerTlsConfig;
@@ -283,6 +283,7 @@ pub struct SelectedStore {
     membership: MembershipManager,
     replication: status::ReplicationMonitor,
     catalogue: CatalogueReader,
+    applied: AppliedView,
     local_client: Option<Client>,
     source_schema_startup_consumed: bool,
     _daemon_lock: File,
@@ -300,6 +301,13 @@ impl SelectedStore {
     #[must_use]
     pub fn catalogue_reader(&self) -> CatalogueReader {
         self.catalogue.clone()
+    }
+
+    /// Node-local applied views of settings and media-session routes
+    /// (playback-start E1).
+    #[must_use]
+    pub fn applied_view(&self) -> AppliedView {
+        self.applied.clone()
     }
 
     /// Membership lifecycle and privacy-safe node health for the daemon API.
@@ -628,6 +636,7 @@ pub async fn select_daemon_store_observing(
         remove_activation_attempt(&config.storage.data_dir)?;
         let legacy = super::open_store(config).await?;
         let catalogue = CatalogueReader::authority(Arc::clone(&legacy.store));
+        let applied = AppliedView::authority(Arc::clone(&legacy.store));
         return Ok(SelectedStore {
             store: legacy.store,
             identity: legacy.identity,
@@ -636,6 +645,7 @@ pub async fn select_daemon_store_observing(
             membership: MembershipManager::unavailable(),
             replication: status::ReplicationMonitor::sqlite(),
             catalogue,
+            applied,
             local_client: None,
             source_schema_startup_consumed: false,
             _daemon_lock: daemon_lock,
@@ -851,10 +861,19 @@ async fn join_fresh_store(
         let credential_key = open_active_credential_key(config, &store, &identity).await?;
         let concrete_store = Arc::new(store);
         let store: Arc<dyn Store> = concrete_store.clone();
+        // Membership writes `settings` through its own client; it raises the
+        // same floor as the store (E1b, read-your-write).
+        let settings_floor = concrete_store.settings_write_floor();
         let replication = status::ReplicationMonitor::replicated(
             client.clone(),
             active.clone(),
             HIQLITE_DATABASE_FILENAME,
+        );
+        let applied = AppliedView::replicated(
+            Arc::clone(&store),
+            Arc::clone(&concrete_store),
+            replication.metrics_handle(),
+            &client,
         );
         let catalogue = CatalogueReader::replicated(
             Arc::clone(&store),
@@ -867,6 +886,7 @@ async fn join_fresh_store(
             client.clone(),
             replication.clone(),
             Arc::clone(&store),
+            settings_floor,
             identity.clone(),
             local,
             configured_join_url(config)?,
@@ -915,6 +935,7 @@ async fn join_fresh_store(
             membership: membership_manager,
             replication,
             catalogue,
+            applied,
             local_client: Some(client),
             source_schema_startup_consumed: false,
             _daemon_lock: daemon_lock,
@@ -2983,6 +3004,9 @@ async fn open_active_store_with_key(
         let activation_master = credential_key;
         let concrete_store = Arc::new(store);
         let store: Arc<dyn Store> = concrete_store.clone();
+        // Membership writes `settings` through its own client; it raises the
+        // same floor as the store (E1b, read-your-write).
+        let settings_floor = concrete_store.settings_write_floor();
         let replication = status::ReplicationMonitor::replicated(
             client.clone(),
             active.clone(),
@@ -2994,6 +3018,12 @@ async fn open_active_store_with_key(
             replication.metrics_handle(),
             config.cluster.bounded_replica_reads,
             config.cluster.bounded_replica_max_lag_entries,
+        );
+        let applied = AppliedView::replicated(
+            Arc::clone(&store),
+            concrete_store.clone(),
+            replication.metrics_handle(),
+            &client,
         );
         let membership_file = match local_membership.take() {
             Some(mut membership) => {
@@ -3042,6 +3072,7 @@ async fn open_active_store_with_key(
             client.clone(),
             replication.clone(),
             Arc::clone(&store),
+            settings_floor,
             identity.clone(),
             membership_file.local,
             configured_join_url(config)?,
@@ -3161,6 +3192,7 @@ async fn open_active_store_with_key(
             membership,
             replication,
             catalogue,
+            applied,
             local_client: Some(client),
             source_schema_startup_consumed: false,
             _daemon_lock: daemon_lock,
@@ -4121,6 +4153,11 @@ pub fn production_hiqlite_defaults_with_read_pool(read_pool_size: usize) -> Node
         snapshot_transfer_timeout: snapshot_timeout_duration(
             DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
         ),
+        // Vendor patch 27: one applied-mark revision per applied-view table.
+        applied_mark_tables: crate::store::APPLIED_VIEW_TABLES
+            .iter()
+            .map(|table| Cow::Borrowed(*table))
+            .collect(),
         // Snapshot frequency, disaster-recovery retention, and WAL sync retain
         // Hiqlite's established values. The heartbeat/election window above
         // admits measured durable recovery responses; the snapshot transfer
@@ -6006,6 +6043,39 @@ pub mod status {
             metrics
         }
 
+        /// Publish a quorum confirmation of `committed_index` whose attempt
+        /// starts now, with this node's sampled apply caught up to it — the
+        /// generation [`Self::validation_bounded_ready`] uses. An applied-view
+        /// contract uses it to meet (or, above the real replica, to miss) a
+        /// floor recorded earlier.
+        #[cfg(feature = "cluster-read-cost-validation")]
+        #[doc(hidden)]
+        pub fn validation_confirm_now(&self, committed_index: u64) {
+            let elapsed = self.started_at.elapsed();
+            assert!(self.publish_at(
+                &LocalDbRaftSnapshot {
+                    running: true,
+                    node_id: 1,
+                    current_term: 7,
+                    current_leader: Some(1),
+                    last_applied_term: Some(7),
+                    last_applied_index: Some(committed_index),
+                },
+                elapsed.as_secs(),
+            ));
+            let started = duration_nanos(elapsed);
+            assert!(self.publish_watermark_at(
+                DbQuorumWatermark {
+                    term: 7,
+                    leader_id: 1,
+                    committed_index,
+                    local_read_protocol_version: hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
+                },
+                started,
+                started,
+            ));
+        }
+
         /// Revoke the current proof inside a validation-only local operation,
         /// exercising production's post-query discard and Authority fallback.
         #[cfg(feature = "cluster-read-cost-validation")]
@@ -6302,6 +6372,46 @@ pub mod status {
                     return Some(view);
                 }
             }
+        }
+
+        /// The floor behind an applied view (playback-start E1 §4.2): the
+        /// lowest committed index among the kept quorum confirmations whose
+        /// attempt started strictly after `at`, on this process's monotonic
+        /// clock — the clock the sampler stamps attempts with.
+        ///
+        /// A confirmation started after `at` carries a read index at least the
+        /// leader's commit index at `at`. So once this node has applied it, its
+        /// replica holds every write this process had acknowledged by `at` and
+        /// every committed row a quorum read returned by then. The lowest such
+        /// index is the easiest to satisfy and proves exactly as much.
+        ///
+        /// `None` until such a confirmation exists, and always on a process
+        /// that is not locally bound (a remote-authority client has no replica
+        /// to apply it to). This answers the floor only; serving still needs
+        /// [`Self::eligible_serving_proof`].
+        #[must_use]
+        pub fn confirmed_since(&self, at: Instant) -> Option<u64> {
+            self.confirmed_since_nanos(duration_nanos(
+                at.saturating_duration_since(self.started_at),
+            ))
+        }
+
+        fn confirmed_since_nanos(&self, at_nanos: u64) -> Option<u64> {
+            let view = self.read_watermark_view()?;
+            if !view.watermark_published || view.watermark_invalidated {
+                return None;
+            }
+            let count = usize::try_from(view.confirmation_count)
+                .unwrap_or(QUORUM_CONFIRMATIONS)
+                .min(QUORUM_CONFIRMATIONS);
+            let next = usize::try_from(view.confirmation_next).unwrap_or(0) % QUORUM_CONFIRMATIONS;
+            (1..=count)
+                .map(|back| {
+                    view.confirmations[(next + QUORUM_CONFIRMATIONS - back) % QUORUM_CONFIRMATIONS]
+                })
+                .filter(|(_, started_nanos)| *started_nanos > at_nanos)
+                .map(|(committed_index, _)| committed_index)
+                .min()
         }
 
         /// Whether a captured proof may still be served under.
@@ -8191,6 +8301,47 @@ pub mod status {
                     .eligible_serving_proof_at(10, 10_600_000_000)
                     .is_none(),
                 "a successor generation clears the ring even though its publish is rejected"
+            );
+        }
+
+        /// E1 floor: only a confirmation whose attempt started after the fact
+        /// counts, the lowest such index answers, and nothing answers before
+        /// one exists, after the ring is cleared, or without a local binding.
+        #[test]
+        fn confirmed_since_answers_only_confirmations_started_after_the_fact() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(100), Some(1)), 10));
+            assert_eq!(metrics.confirmed_since_nanos(0), None, "no watermark yet");
+            for (step, committed) in [(0_u64, 101_u64), (1, 104), (2, 109)] {
+                let started = 10_000_000_000 + step * 500_000_000;
+                assert!(metrics.publish_watermark_at(
+                    watermark(7, 1, committed),
+                    started,
+                    started + 40_000_000,
+                ));
+            }
+            assert_eq!(metrics.confirmed_since_nanos(9_999_999_999), Some(101));
+            assert_eq!(
+                metrics.confirmed_since_nanos(10_000_000_000),
+                Some(104),
+                "an attempt that started at the fact's instant does not count"
+            );
+            assert_eq!(metrics.confirmed_since_nanos(10_700_000_000), Some(109));
+            assert_eq!(metrics.confirmed_since_nanos(11_000_000_000), None);
+
+            // A successor generation clears the ring: nothing from the old
+            // generation answers, and the floor waits for the new one.
+            let sequence = metrics.begin_write();
+            metrics.clear_confirmations();
+            metrics.end_write(sequence);
+            assert_eq!(metrics.confirmed_since_nanos(0), None);
+
+            let remote = PassiveRaftMetrics::remote_authority();
+            assert!(remote.publish_watermark_at(watermark(7, 1, 101), 10, 20));
+            assert_eq!(
+                remote.confirmed_since_nanos(0),
+                None,
+                "no replica to apply it to"
             );
         }
 
