@@ -195,6 +195,10 @@ ENV PLURX_BIND=0.0.0.0:32400 \
 EXPOSE 32400
 VOLUME ["/var/lib/plurx"]
 USER plurx
+# The daemon's own verdict on the bundle installed above, as the service
+# account: the same capture the worker performs at startup. An image whose
+# daemon would refuse its helpers fails here, on every architecture built.
+RUN ["plurxd", "dv-helper-identity"]
 
 # The default replicated startup may spend 45s reaching Hiqlite health, 45s
 # awaiting admission, then a 1,200s snapshot transfer plus a 120s final install

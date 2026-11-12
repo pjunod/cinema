@@ -196,6 +196,25 @@ fn renderer_source_identity() -> String {
     }
     hex::encode(identity.finalize())
 }
+/// The installed bundle's identity as this daemon accepts it, or why it does
+/// not. One validation path: the same capture the worker performs.
+pub(crate) async fn installed_helper_identity() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let tools = ToolSet::capture()
+            .await?
+            .ok_or_else(|| "no DV helper bundle is installed".to_string())?;
+        Ok(serde_json::json!({
+            "source_sha256": renderer_source_identity(),
+            "backend_digest": tools.backend_digest(),
+        })
+        .to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("DV helper bundles are a Linux runtime asset".into())
+    }
+}
 /// Decode on the GPU the renderer already draws on. The helper maps VA-API
 /// surfaces straight into its Vulkan renderer; a host copy of a decoded 4K
 /// picture costs more than decoding it in software. The VA-API runtime and

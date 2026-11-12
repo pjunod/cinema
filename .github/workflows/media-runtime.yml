@@ -159,8 +159,11 @@ jobs:
           set -euo pipefail
           mkdir media-qualification-build
           for name in plurxd plurxd.dwp plurx-cluster-check plurx-cluster-check.dwp; do
-            printf 'media qualification placeholder, never shipped\n' > "media-qualification-build/$name"
+            printf '#!/bin/sh\n# media qualification placeholder, never shipped\nexit 0\n' > "media-qualification-build/$name"
           done
+          # The image build asks the daemon to accept the bundle. No daemon is
+          # built here, so the placeholder answers; application builds ask the real one.
+          chmod 0755 media-qualification-build/plurxd
       # The application recipe, unchanged, against both candidates: the bundle
       # must compile from this revision's tools/dv_processing against the new
       # dependencies and every helper must load in the new runtime.

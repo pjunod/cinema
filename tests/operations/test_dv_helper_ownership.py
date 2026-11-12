@@ -14,7 +14,9 @@ import shutil
 import subprocess
 import unittest
 
+from validation.ci_scope import scope_for_paths
 from validation.release_dockerfile import _stages, render
+from validation.runner import load_catalog
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = ROOT / "Dockerfile"
@@ -71,6 +73,17 @@ class DvHelperOwnershipTests(unittest.TestCase):
         for helper in ("segment_decode_render", "mux_rgb", "author_p81", "scan_title"):
             self.assertIn(helper, check)
         self.assertIn("grep -q 'usage:'", check)
+        # The daemon itself must accept the installed bundle, as the service account.
+        verdict = 'RUN ["plurxd", "dv-helper-identity"]'
+        self.assertEqual(runtime.count(verdict), 1)
+        self.assertEqual(runtime[runtime.index(verdict) - 1], "USER plurx")
+        self.assertLess(runtime.index("COPY --from=build /plurxd /usr/local/bin/plurxd"), runtime.index(verdict))
+        self.assertNotIn("dv-helper-source-sha256", source)
+        main = (ROOT / "crates/plurxd/src/main.rs").read_text(encoding="utf-8")
+        self.assertIn("crate::vodencode::dv_runtime::installed_helper_identity().await", main)
+        capture = DAEMON.read_text(encoding="utf-8")
+        capture = capture[capture.index("pub(crate) async fn installed_helper_identity()"):]
+        self.assertIn("ToolSet::capture()", capture[:capture.index("\n}\n")])
         # The bundle is installed nowhere else, and the pinned bases stay untouched.
         self.assertEqual(source.count("/usr/lib/plurx/dv-processing ") + source.count("/usr/lib/plurx/dv-processing\n"), 2)
         for name in ("runtime-assets", "dv-processing-dependencies"):
@@ -101,15 +114,14 @@ class DvHelperOwnershipTests(unittest.TestCase):
         # The daemon hashes in array order and the bundle in sorted order.
         self.assertEqual(names, sorted(PACKAGING["INPUTS"]))
         self.assertEqual(len(set(names)), len(names))
-        expected = hashlib.sha256()
         for name, path in daemon:
             self.assertEqual(path, ROOT / "tools/dv_processing" / name)
-            expected.update(name.encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
-        bundle = hashlib.sha256()
-        for name in sorted(PACKAGING["INPUTS"]):
-            bundle.update(name.encode() + b"\0"
-                          + bytes.fromhex(PACKAGING["sha"](ROOT / "tools/dv_processing" / name)))
-        self.assertEqual(bundle.hexdigest(), expected.hexdigest())
+        # Names only. That the two hashes agree is the daemon's to say: its
+        # bundle-capture unit test runs this installer through capture_at, and
+        # every image build runs `plurxd dv-helper-identity` on the real bundle.
+        capture = DAEMON.read_text(encoding="utf-8")
+        self.assertIn('include_str!("../../../tools/dv_processing/bundle-manifest.py")', capture)
+        self.assertIn("async fn revised_bundle_capture_accepts_current_sources_and_rejects_stale_or_incomplete_identity(", capture)
 
     def test_every_source_compiled_into_the_bundle_is_in_its_identity(self):
         source = ROOT / "tools/dv_processing"
@@ -133,6 +145,16 @@ class DvHelperOwnershipTests(unittest.TestCase):
         # one identity input that is not a helper source.
         self.assertEqual(set(PACKAGING["INPUTS"]), compiled | {"hevc-rasl-frame-thread.patch"})
         self.assertEqual({name for name, _ in daemon_identity_inputs()}, set(PACKAGING["INPUTS"]))
+
+    def test_a_helper_only_change_selects_the_daemon_suite_and_the_image_builds(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        for path in ("tools/dv_processing/dv_dm.h", "tools/dv_processing/mux_rgb.c",
+                     "tools/dv_processing/hevc-rasl-frame-thread.patch",
+                     "tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock"):
+            scope = scope_for_paths(catalog, (path,))
+            for lane in ("rust", "release_build", "container"):
+                self.assertTrue(scope[lane], f"{path} must select {lane}")
+            self.assertFalse(scope["docs_only"], path)
 
     def test_dependency_pin_records_this_trees_dependency_inputs(self):
         source = DOCKERFILE.read_text(encoding="utf-8")
