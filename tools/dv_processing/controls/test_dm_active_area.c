@@ -263,11 +263,108 @@ static void test_cm29_detail_holds_at_the_top_clip(void) {
     for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-cases[k].licensed)>6e-5) {
       fprintf(stderr,"top clip: field %.3f speck %.3f channel %d: %.6f, licensed %.5f\n",cases[k].field,cases[k].speck,ch,out[4*c+ch],cases[k].licensed); abort(); }
   }
-  // a curve that never reaches its clip inside [0,1] leaves the detail input alone
-  dm_cm29_state s=f.c29; s.TM=2.0; s.tr.lift=s.tr.gain=s.tr.gamma=0;
-  const double top=dm_cm29_tc(&s,1.0); assert(top<s.TM);
-  dm_cm29_pix p={.I=0.95,.C=0.1}; s.xtop=1.0; assert(dm_cm29_detail_in(&s,&p,0)==0.95);
   puts("test_cm29_detail_holds_at_the_top_clip: PASS");
+}
+
+// Direct bisection of the tone curve: the smallest intensity in [0,1] that maps to tc(1), or 1 for a
+// flat curve. An independent restatement of what dm_cm29_prepare must produce in xtop.
+static double bisect_top_clip(const dm_cm29_state *s) {
+  const double top=dm_cm29_tc(s,1.0);
+  if(!(dm_cm29_tc(s,0.0)<top)) return 1.0;
+  double lo=0.0, hi=1.0;
+  for(int i=0;i<100;i++){ const double m=0.5*(lo+hi); if(dm_cm29_tc(s,m)>=top) hi=m; else lo=m; }
+  return hi;
+}
+
+// xtop from a real dm_cm29_prepare state (not a hand-set field): each case is checked against the
+// direct bisection, and against where the source intensity range ends (L1 max).
+static double clip_state(double l1max, double spk, double tpk, const dm_cm29_trim *tr, dm_cm29_state *s) {
+  const double l1[3]={0.0,0.3,l1max};
+  const dm_cm29_target tg={.peak_nits=tpk,.min_nits=0.005,.prim=DM_P3D65,.floor_pq=0.0};
+  assert(dm_cm29_prepare(s,l1,0.0001,spk,&tg,tr)==1);
+  const double want=bisect_top_clip(s);
+  if(fabs(s->xtop-want)>1e-9){ fprintf(stderr,"xtop %.12f, bisection %.12f\n",s->xtop,want); abort(); }
+  return s->xtop;
+}
+
+static void test_cm29_top_clip_state(void) {
+  const dm_cm29_trim off={0};
+  dm_cm29_state s;
+  // target peak above the source max, trims off: the curve reaches its top value only at or above
+  // the highest source intensity, so no source pixel is held (min(I, xtop) == I for every I <= L1 max)
+  const double l4000=3728/4095.0, l1000=2841/4095.0;
+  assert(clip_state(l4000,4000,4000,&off,&s)>=l4000-1e-6);
+  assert(clip_state(l1000,1000,10000,&off,&s)>=1.0-1e-3);   // target at the PQ ceiling: the curve is unclipped on [0,1]
+  dm_cm29_pix p={.I=l1000,.C=0.1}; assert(dm_cm29_detail_in(&s,&p,0)==p.I);
+  assert(dm_cm29_detail_in(&s,&p,1)==p.I);   // cw is 0 here: the chroma form is the base form
+  // L1 max at the target (shift keeps the clip anchor under the peak) and above it (the curve is on
+  // its top value at or before the source maximum)
+  const double at=clip_state(2851/4095.0,1000,600,&off,&s); assert(at>2851/4095.0);
+  const double above=clip_state(3079/4095.0,1000,600,&off,&s); assert(above<=3079/4095.0+1e-9);
+  // a non-neutral L2 trim: xtop follows the trimmed curve, not the base one
+  const dm_cm29_trim trim={.lift=0.1,.gain=0.05,.gamma=-0.1};
+  const double base=clip_state(l1000,1000,600,&off,&s), trimmed=clip_state(l1000,1000,600,&trim,&s);
+  assert(fabs(trimmed-base)>1e-2);
+  assert(clip_state(l1000,1000,4000,&trim,&s)>0.5);
+  puts("test_cm29_top_clip_state: PASS");
+}
+
+// The chroma-weighted hold (xtop - 0.5*cw*C) at large L2 chroma weights, raw 1000 and 3000
+// (cw -0.5117 and +0.4648), on chroma-rich specks above the clip. The CPU reference must (a) hold the
+// chroma plane's tone-curve argument on the clip, (b) leave a gray speck at its pointwise value even
+// with the chroma plane live (it has no chroma to keep), and (c) give a chroma-rich speck a value
+// that differs from the unheld detail term and matches the pinned CPU-reference value (a
+// characterization of the CPU model at this commit: there is no licensed measurement of the chroma plane).
+static void test_cm29_detail_hold_chroma_weight(void) {
+  static const struct { unsigned raw; double cw; float gold[3]; } cw[] = {
+    {1000,(1000-2048)/2048.0,{0.6923612f,0.6952758f,0.5542746f}}, {3000,(3000-2048)/2048.0,{0.6751965f,0.5883724f,0.3776678f}},
+  };
+  const float speck[3]={0.97f,0.80f,0.55f};
+  enum { W=33, H=17 };
+  for(size_t k=0;k<sizeof(cw)/sizeof(cw[0]);k++) {
+    DoviExtMetadataBlockLevel1 l1 = {.min_pq=0, .avg_pq=1229, .max_pq=2841};
+    DoviExtMetadataBlockLevel6 l6 = {.max_display_mastering_luminance=1000, .min_display_mastering_luminance=1};
+    DoviExtMetadataBlockLevel2 l2 = {.target_max_pq=2851, .trim_slope=2071, .trim_offset=2048, .trim_power=1963,
+        .trim_chroma_weight=cw[k].raw, .trim_saturation_gain=2048, .ms_weight=2048};
+    const DoviExtMetadataBlockLevel2 *list[1] = {&l2};
+    DoviVdrDmData dm = {0};
+    dm.dm_data.level1=&l1; dm.dm_data.level6=&l6;
+    dm.dm_data.level2.list=(__typeof__(dm.dm_data.level2.list))list; dm.dm_data.level2.len=1;
+    dv_dm_frame f;
+    assert(dv_dm_prepare(&dm,600,.005,DM_P3D65,1000,true,true,&f)==NULL);
+    assert(f.algo==29 && f.weight>-1 && fabs(f.c29.tr.cw-cw[k].cw)<1e-12 && !strcmp(f.trim,"l2-exact"));
+    assert(fabs(f.c29.xtop-bisect_top_clip(&f.c29))<1e-9 && f.u[10][3]==(float)f.c29.xtop);
+    const double top=dm_cm29_tc(&f.c29,1.0);
+    // (a) the chroma plane's argument lands on the clip for a speck above it
+    dm_cm29_pix px; const double rgb[3]={speck[0],speck[1],speck[2]};
+    dm_cm29_pixel_pre(&f.c29,rgb,&px);
+    assert(px.C>0.1 && fabs(0.5*f.c29.tr.cw*px.C)>0.01 && px.I>f.c29.xtop);
+    assert(fabs(dm_cm29_detail_in(&f.c29,&px,0)-f.c29.xtop)<1e-12);
+    const double held=dm_cm29_detail_in(&f.c29,&px,1);
+    assert(fabs(held-(f.c29.xtop-0.5*f.c29.tr.cw*px.C))<1e-12);
+    assert(fabs(dm_cm29_tc(&f.c29,held+0.5*f.c29.tr.cw*px.C)-top)<1e-9);
+    float in[W*H*4], out[W*H*4], uni[W*H*4], unheld[W*H*4];
+    const int c=(H/2)*W+W/2;
+    // (b) gray speck above the clip, chroma plane live: its own pointwise value
+    for(int i=0;i<W*H;i++){ in[4*i]=in[4*i+1]=in[4*i+2]=0.90f; in[4*i+3]=1; }
+    in[4*c]=in[4*c+1]=in[4*c+2]=0.80f;
+    for(int i=0;i<W*H;i++){ uni[4*i]=uni[4*i+1]=uni[4*i+2]=0.80f; uni[4*i+3]=1; }
+    assert(dv_dm_cpu_render(&f,in,W,H,out) && dv_dm_cpu_render(&f,uni,W,H,uni));
+    for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-uni[4*c+ch])>1e-6) {
+      fprintf(stderr,"raw %u gray speck: ch %d %.7f, pointwise %.7f\n",cw[k].raw,ch,out[4*c+ch],uni[4*c+ch]); abort(); }
+    // (c) chroma-rich speck: held, against the same frame with the hold switched off
+    for(int i=0;i<W*H;i++){ in[4*i]=in[4*i+1]=in[4*i+2]=0.90f; in[4*i+3]=1; }
+    in[4*c]=speck[0]; in[4*c+1]=speck[1]; in[4*c+2]=speck[2];
+    dv_dm_frame nohold=f; nohold.c29.xtop=1e9;
+    assert(dv_dm_cpu_render(&f,in,W,H,out) && dv_dm_cpu_render(&nohold,in,W,H,unheld));
+    double dmax=0; for(int ch=0;ch<3;ch++) dmax=fmax(dmax,fabs(out[4*c+ch]-unheld[4*c+ch]));
+    printf("raw %u chroma speck: held %.7f %.7f %.7f, unheld %.7f %.7f %.7f\n",cw[k].raw,
+           out[4*c],out[4*c+1],out[4*c+2],unheld[4*c],unheld[4*c+1],unheld[4*c+2]);
+    if(dmax<2e-3){ fprintf(stderr,"raw %u: hold moves the chroma speck by only %.2e\n",cw[k].raw,dmax); abort(); }
+    for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-cw[k].gold[ch])>1e-6) {
+      fprintf(stderr,"raw %u chroma speck: ch %d %.7f, pinned %.7f\n",cw[k].raw,ch,out[4*c+ch],cw[k].gold[ch]); abort(); }
+  }
+  puts("test_cm29_detail_hold_chroma_weight: PASS");
 }
 
 int main(int argc,char **argv) {
@@ -281,6 +378,8 @@ int main(int argc,char **argv) {
   RUN(test_l5_cm29_absent_and_zero_preserve_full_frame);
   RUN(test_l5_cm29_crop_domain_excludes_adversarial_bars);
   RUN(test_cm29_detail_holds_at_the_top_clip);
+  RUN(test_cm29_top_clip_state);
+  RUN(test_cm29_detail_hold_chroma_weight);
 #undef RUN
   if(!matched)return 2;
   puts("test_dm_active_area: PASS");

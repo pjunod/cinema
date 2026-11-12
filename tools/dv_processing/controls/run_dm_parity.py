@@ -174,9 +174,28 @@ def cm29_top_clip():
         img[ys.ravel(), xs.ravel()] = speck
     return img
 clip = cm29_top_clip()
+# The 4000-nit target sits above the 3728 source max's intensity, so the curve clips at (or just above)
+# the source maximum: the no-clip path. A uniform left at 0 would hold every pixel at 0 and the GPU
+# would leave the CPU reference by a wide margin.
 for fam, meta in (('cm29', cm29), ('cm29b', cm29b)):
-    for tgt in ("600 0 1 4000", "1000 0.005 1 4000"):
+    for tgt in ("600 0 1 4000", "1000 0.005 1 4000", "4000 0 1 4000"):
         ok &= run(fam + '_top_clip_' + tgt.split()[0] + '_p' + tgt.split()[2], meta + 'target ' + tgt + '\n', clip, W, H)
+# Chroma-weighted hold (xtop - 0.5*cw*C) at large L2 chroma weights (raw 1000: cw -0.51, raw 3000: +0.46,
+# on the 600-nit target's exact L2): fields above the clip with chroma-rich specks on the 16x8 grid.
+def cm29_top_clip_chroma():
+    img = np.zeros((H, W, 3)); rng = np.random.default_rng(2929)
+    fields = np.linspace(0.84, 1.0, 8)
+    for b, v in enumerate(fields):
+        r0, r1 = b * H // len(fields), (b + 1) * H // len(fields)
+        img[r0:r1] = v
+        ys, xs = np.meshgrid(np.arange(r0 + 4, r1 - 4, 8), np.arange(8, W - 8, 16), indexing='ij')
+        img[ys.ravel(), xs.ravel()] = rng.uniform(0.45, 1.0, (ys.size, 3))
+    return img
+clipc = cm29_top_clip_chroma()
+for raw in (1000, 3000):
+    meta = cm29.replace('2000 2040 2150 2048 2294 512', '2000 2040 2150 %d 2294 512' % raw, 1)
+    assert meta != cm29
+    ok &= run('cm29_top_clip_chroma%d_600_p1' % raw, meta + 'target 600 0 1 4000\n', clipc, W, H)
 # a black frame (L1 0,0,0) maps instead of refusing
 black = 'l1 0 0 0\nl6 50 4000\n'
 ok &= run('cm29_black_1000_p1', black + 'target 1000 0 1 4000\n', np.zeros((H, W, 3)), W, H)

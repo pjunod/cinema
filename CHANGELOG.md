@@ -13,7 +13,7 @@ bump may break compatibility and a **patch** bump never does.
 - CM v2.9 display mapping restores no detail where the tone curve sits on its
   top clip, as the licensed reference does. Pixels brighter than the shot's
   clip point kept a detail term the reference drops (up to 33 dE ITP on
-  synthetic fields); frames with no pixel above the clip render exactly as
+  synthetic specks above the clip); frames with no pixel above the clip render exactly as
   before.
 - The server image builds its Dolby Vision helper bundle from the same source
   tree as the server it ships with. The bundle had been taken from a separately
