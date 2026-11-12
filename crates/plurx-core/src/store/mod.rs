@@ -282,6 +282,7 @@ pub mod classification_schedule;
 #[cfg(test)]
 mod copy_index_v3_tests;
 mod custody_retention;
+pub mod dv_refit_jobs;
 pub mod dv_title_jobs;
 mod dv_title_jobs_schema;
 mod library_annotations_schema;

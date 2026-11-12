@@ -1345,6 +1345,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_managed_schema::PUBLISH_MIGRATION,
     // v129: retention keeps a job that still owns charged source custody.
     super::custody_retention::SCHEMA,
+    // v130: F+ curve fits for Profile 7 FEL titles, written by `dv_refit` jobs.
+    super::dv_refit_jobs::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1907,6 +1909,7 @@ impl SqliteStore {
         super::shared_caption_schema::verify_sqlite(conn)?;
         super::playback_handoffs::verify_sqlite(conn)?;
         super::scan_request_v2::verify_sqlite(conn)?;
+        super::dv_refit_jobs::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

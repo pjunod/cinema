@@ -50,7 +50,9 @@ rustls = { version = "0.23", default-features = false, features = [
 ] }
 rusqlite = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# F+ curves and statistics are stored as JSON and read back for serving and
+# re-solving: the parse must return the exact f64 that was written.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 ipnet = { workspace = true }
 icu_normalizer = { workspace = true }
 thiserror = { workspace = true }

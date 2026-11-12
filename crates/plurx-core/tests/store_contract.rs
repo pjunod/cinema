@@ -23,6 +23,8 @@ use queue_fixture::QueueFixture;
 mod applied_view;
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/dv_refit_jobs.rs"]
+mod dv_refit_jobs;
 #[path = "store_contract/dv_title_jobs.rs"]
 mod dv_title_jobs;
 #[path = "store_contract/formal_publication.rs"]
@@ -620,6 +622,12 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
     "probe_can_preempt_title",
+    // F+ curve fits: demand, bounded staging, fenced publication and the
+    // current curve table, on every backend in store_contract/dv_refit_jobs.rs.
+    "dv_refit_demands",
+    "stage_dv_refit_scenes",
+    "publish_dv_refit_job",
+    "dv_refit_curves",
     // Contract v2 targeted-scan sidecar: admission with its sidecar, reads by
     // request and by creating key, and the later report/waiting writes. All
     // six run on every backend in store_contract/scan_request_v2.rs.
@@ -21305,7 +21313,10 @@ fn contract_inventory_matches_every_store_method() {
     // main declared (551) without naming them here; named above.
     // +1: request_dv_fel_variant is named in BACKGROUND_JOB_METHODS and
     // exercised by the source-fenced DV title-job contracts.
-    assert_eq!(declared.len(), 559, "review the Store method count");
+    // +4: F+ curve-fit demand, staging, publication and the curve table,
+    // named in BACKGROUND_JOB_METHODS and covered on both backends by the
+    // store_contract/dv_refit_jobs.rs contracts. No new trait.
+    assert_eq!(declared.len(), 563, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

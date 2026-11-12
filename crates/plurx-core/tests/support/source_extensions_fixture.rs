@@ -564,6 +564,52 @@ fn published_trigger(migration: &str, name: &str) -> String {
     statement
 }
 
+/// Rewind v130 (F+ curve fits) to v129: the exact marker is required and
+/// stored fits refuse; the extension's own objects go.
+fn rewind_dv_refit_to_v129(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture F+ ordinal");
+    if version != 130 {
+        return;
+    }
+    let marker: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM background_dv_refit_schema WHERE singleton=1 AND version=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("F+ marker");
+    assert_eq!(marker, 1, "F+ curve fits require their exact marker");
+    let rows: i64 = connection
+        .query_row(
+            "SELECT (SELECT count(*) FROM background_dv_refit_titles)
+              + (SELECT count(*) FROM background_dv_refit_scenes)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("F+ fixture data");
+    assert_eq!(rows, 0, "stored F+ fits cannot be rewound");
+    let objects: Vec<(String, String)> = connection
+        .prepare(
+            "SELECT type,name FROM sqlite_master WHERE name GLOB 'background_dv_refit_*'
+              AND type IN ('trigger','table') ORDER BY type DESC,name",
+        )
+        .expect("F+ objects")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("F+ object rows")
+        .collect::<Result<_, _>>()
+        .expect("F+ object inventory");
+    let mut plan: Vec<String> = objects
+        .iter()
+        .map(|(kind, name)| format!("DROP {} {name};", kind.to_ascii_uppercase()))
+        .collect();
+    plan.push("PRAGMA user_version=129;".into());
+    connection
+        .execute_batch(&plan.join("\n"))
+        .expect("published F+ rewind");
+}
+
 /// Rewind v129 (retention keeps a charged custody's owner job) to v128: the
 /// exact marker is required; the v85 enqueue and v86 upkeep triggers return.
 fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
@@ -613,6 +659,7 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
+    rewind_dv_refit_to_v129(connection);
     rewind_custody_retention_to_v128(connection);
     if let Some(plan) = coordination_tail_rewind_plan(connection) {
         connection

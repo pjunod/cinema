@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 85] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 86] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1764,6 +1764,9 @@ mod tests {
             // v129: the shared queue helper drops every background_* object,
             // the replaced triggers and their marker among them.
             "CREATE TABLE IF NOT EXISTS background_custody_retention_schema",
+            // v130: the shared queue helper drops every background_* object,
+            // the F+ curve tables, their triggers and marker among them.
+            "CREATE TABLE IF NOT EXISTS background_dv_refit_schema",
         ];
 
         assert!(

@@ -264,7 +264,7 @@ pub(super) async fn probe_can_preempt<T: QueueSql>(
     }
     let rows=store.queue_sql(r#"
 SELECT 'true' AS result_json FROM background_jobs job
-JOIN background_jobs title ON title.id=json_extract($1,'$.title') AND title.kind='dv_title_scan'
+JOIN background_jobs title ON title.id=json_extract($1,'$.title') AND title.kind IN ('dv_title_scan','dv_refit')
  AND title.state='running' AND title.owner_node_id=json_extract($1,'$.node')
  AND title.lease_expires_ms>json_extract($1,'$.now')
 WHERE job.id=json_extract($1,'$.probe') AND job.kind='media_probe' AND job.payload_version=1

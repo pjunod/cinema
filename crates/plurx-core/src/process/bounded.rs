@@ -183,6 +183,7 @@ pub async fn output_command(
         work,
         Environment::Service,
         None,
+        &[],
     )
     .await
 }
@@ -208,6 +209,7 @@ pub async fn output_command_clean_env(
         work,
         Environment::Clean,
         None,
+        &[],
     )
     .await
 }
@@ -228,6 +230,35 @@ pub async fn output_command_inherited_env(
         work,
         Environment::Inherited,
         None,
+        &[],
+    )
+    .await
+}
+
+/// A clean-environment child of a validated helper bundle: `LC_ALL` and only
+/// the bundle's own declared variables (its library path), never the
+/// daemon's environment. Otherwise identical to [`output_command_clean_env`].
+pub async fn output_command_bundle_env(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+    bundle_env: &[(String, std::ffi::OsString)],
+) -> io::Result<Output> {
+    if !std::path::Path::new(command.as_std().get_program()).is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "managed child executable must be absolute",
+        ));
+    }
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Clean,
+        None,
+        bundle_env,
     )
     .await
 }
@@ -256,6 +287,7 @@ pub async fn output_command_clean_env_selected_stderr(
         work,
         Environment::Clean,
         Some(select),
+        &[],
     )
     .await
 }
@@ -274,6 +306,7 @@ async fn output_command_environment(
     work: super::ChildWork,
     environment: Environment,
     stderr_selector: Option<fn(&[u8]) -> bool>,
+    bundle_env: &[(String, std::ffi::OsString)],
 ) -> io::Result<Output> {
     check_cancellation()?;
     let cancellation = cancellation().unwrap_or_default();
@@ -283,6 +316,9 @@ async fn output_command_environment(
         if descriptor_handoff {
             super::source_lifetime::tag_descriptor_handoff(command);
         }
+    }
+    for (name, value) in bundle_env {
+        command.env(name, value);
     }
     command
         .stdin(std::process::Stdio::null())

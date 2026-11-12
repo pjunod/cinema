@@ -813,6 +813,8 @@ pub enum JobKind {
     SemanticEmbedding,
     MediaProbe,
     DvTitleScan,
+    /// F+ curve fit of a Profile 7 FEL title: decodes the whole title on the CPU.
+    DvRefit,
 }
 
 impl JobKind {
@@ -839,7 +841,8 @@ impl JobKind {
             | Self::ArtworkDerivative
             | Self::SemanticEmbedding
             | Self::MediaProbe
-            | Self::DvTitleScan => true,
+            | Self::DvTitleScan
+            | Self::DvRefit => true,
             Self::LibraryScan | Self::MetadataRefresh => false,
         }
     }
@@ -1177,6 +1180,16 @@ pub enum JobPayload {
         probe_revision: i64,
         scanner_digest: String,
     },
+    /// The identity of one title's fit: its source, the title-scan generation
+    /// whose facts it read, the helper that decodes it and the fit method.
+    DvRefit {
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        probe_revision: i64,
+        helper_digest: String,
+        fit_version: String,
+    },
 }
 
 impl JobPayload {
@@ -1241,6 +1254,7 @@ impl JobPayload {
             Self::SemanticEmbedding { .. } => JobKind::SemanticEmbedding,
             Self::MediaProbe { .. } => JobKind::MediaProbe,
             Self::DvTitleScan { .. } => JobKind::DvTitleScan,
+            Self::DvRefit { .. } => JobKind::DvRefit,
         }
     }
 
@@ -1597,6 +1611,21 @@ impl JobPayload {
                     && *source_mtime >= 0
                     && *probe_revision > 0
                     && digest(scanner_digest)
+            }
+            Self::DvRefit {
+                file_id,
+                source_size,
+                source_mtime,
+                probe_revision,
+                helper_digest,
+                fit_version,
+            } => {
+                *file_id > 0
+                    && *source_size >= 0
+                    && *source_mtime >= 0
+                    && *probe_revision > 0
+                    && digest(helper_digest)
+                    && super::dv_refit_jobs::valid_fit_version(fit_version)
             }
             Self::MediaProbe {
                 file_id,
@@ -2523,6 +2552,30 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         output: super::dv_title_jobs::AnalysisTitleOutput,
     ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError>;
+    /// Profile 7 FEL titles whose F+ fit is missing or stale for `helper`
+    /// and `fit_version`, after `after_file_id`.
+    async fn dv_refit_demands(
+        &self,
+        helper: &str,
+        fit_version: &str,
+        after_file_id: i64,
+        limit: u32,
+    ) -> Result<Vec<super::dv_refit_jobs::RefitDemand>, StoreError>;
+    /// Stage one bounded page of a running F+ attempt's scenes.
+    async fn stage_dv_refit_scenes(
+        &self,
+        request: super::dv_refit_jobs::StageRefitScenes,
+    ) -> Result<bool, StoreError>;
+    /// Adopt the attempt's staged scenes as the file's fit and settle the job.
+    async fn publish_dv_refit_job(
+        &self,
+        request: super::dv_refit_jobs::PublishRefitJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    /// The file's current F+ curve table, for the source its row describes.
+    async fn dv_refit_curves(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError>;
     async fn probe_can_preempt_title(
         &self,
         probe_id: &str,
@@ -3556,6 +3609,33 @@ LIMIT 1
         output: super::dv_title_jobs::AnalysisTitleOutput,
     ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError> {
         super::dv_title_jobs::publish_from_analysis(self, output).await
+    }
+    async fn dv_refit_demands(
+        &self,
+        helper: &str,
+        fit_version: &str,
+        after_file_id: i64,
+        limit: u32,
+    ) -> Result<Vec<super::dv_refit_jobs::RefitDemand>, StoreError> {
+        super::dv_refit_jobs::demands(self, helper, fit_version, after_file_id, limit).await
+    }
+    async fn stage_dv_refit_scenes(
+        &self,
+        request: super::dv_refit_jobs::StageRefitScenes,
+    ) -> Result<bool, StoreError> {
+        super::dv_refit_jobs::stage(self, request).await
+    }
+    async fn publish_dv_refit_job(
+        &self,
+        request: super::dv_refit_jobs::PublishRefitJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::dv_refit_jobs::publish(self, request).await
+    }
+    async fn dv_refit_curves(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError> {
+        super::dv_refit_jobs::curves(self, file_id).await
     }
     async fn probe_can_preempt_title(
         &self,
@@ -4623,7 +4703,9 @@ LIMIT 1
         let payload = original.supported_payload()?;
         if !matches!(
             payload,
-            JobPayload::TranscodePrepare { .. } | JobPayload::ArtifactHydrate { .. }
+            JobPayload::TranscodePrepare { .. }
+                | JobPayload::ArtifactHydrate { .. }
+                | JobPayload::DvRefit { .. }
         ) {
             return Err(invalid("retry requires a domain generation adapter"));
         }
