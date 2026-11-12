@@ -548,6 +548,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("migrate_playback_inputs", STARTUP),
     ("migrate_schema", STARTUP),
     ("playback_handoffs_schema_version", STARTUP),
+    ("playback_input_keys_shape", STARTUP),
     ("pointer_desired_revision_column_present", STARTUP),
     ("read_lineage_snapshot", STARTUP),
     ("refuse_ambiguous_sharing_lineage", STARTUP),

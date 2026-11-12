@@ -51,7 +51,8 @@ and native prepared-switch/TTFF measurements remain open.
 
 The schema is SQLite v127 (coordination and v3 index) and v128
 (managed-resource v6), after #1469's v125/v126; Hiqlite chains managed
-v4→v5→v6. Older binaries refuse it, so the deploy needs the playbook's
+v4→v5→v6. D3t adds the planning-key triggers as an
+idempotent extension on both stores, so neither schema version moves. Older binaries refuse it, so the deploy needs the playbook's
 pre-upgrade backup. Clients: Apple 297, Android 198.
 
 The fast lane passed paperwork, preflight, web and Android on the merged head.
