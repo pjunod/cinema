@@ -464,7 +464,7 @@ async fn a_set_adopts_only_the_repair_generation_of_the_head_it_contradicts() {
 /// that has moved, keeps the head. The quarantined pointer keeps its blob
 /// and epoch but is not readable.
 #[tokio::test]
-async fn a_holderless_head_is_quarantined_under_a_claim_and_the_request_handed_back() {
+async fn a_holderless_head_is_quarantined_under_a_claim_and_its_borrowed_request_ended() {
     let fixture = store_fixture().await;
     let init = muxer_init();
     let (artifact, _) = variant(&sealed(&init, rows(4, 4_500), 12, true), &hex64('e'));
