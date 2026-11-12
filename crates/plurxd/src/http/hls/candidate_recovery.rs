@@ -83,7 +83,13 @@ pub(crate) async fn accept_sample(
     let deadline = super::link_receipts::advisory_deadline();
     tokio::time::timeout_at(deadline, async {
         let session = session?;
-        let route = state.store.media_session_route(session).await.ok()??;
+        let route = crate::media_sessions::read_media_session_route(
+            &*state.store,
+            crate::media_sessions::RouteReadSite::ReceiptFence,
+            session,
+        )
+        .await
+        .ok()??;
         if route.principal.local_user_id() != Some(network.user_id?)
             || route.recipe_json.len() > 64 * 1024
         {

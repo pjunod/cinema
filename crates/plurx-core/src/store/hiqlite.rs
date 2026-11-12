@@ -1299,6 +1299,10 @@ pub fn prometheus_store_operations() -> String {
 #[derive(Clone)]
 pub(super) struct TimedClient {
     inner: TimedClientInner,
+    /// Read-your-write for the applied view: every write whose SQL may
+    /// change `settings` raises the settings floor here, at the one path
+    /// every replicated write takes, so no store method can be missed.
+    facts: super::applied_view::SettingsWriteFloor,
     #[cfg(feature = "cluster-read-cost-validation")]
     operations: Arc<OperationCounters>,
 }
@@ -1332,9 +1336,23 @@ impl TimedClient {
     fn new(client: Client) -> Self {
         Self {
             inner: TimedClientInner::Connected(client),
+            facts: super::applied_view::SettingsWriteFloor::detached(),
             #[cfg(feature = "cluster-read-cost-validation")]
             operations: Arc::new(OperationCounters::default()),
         }
+    }
+
+    /// This process's settings floor, shared with the applied view built
+    /// over this store (`docs/streaming/PLAYBACK-START-E1-BUILD.md` §4.3).
+    pub(super) fn settings_write_floor(&self) -> super::applied_view::SettingsWriteFloor {
+        self.facts.clone()
+    }
+
+    /// Arm the settings floor for one write: `wrote` is whether any of its
+    /// statements may write `settings`, directly or through a trigger. See
+    /// [`super::applied_view::SettingsWriteFloor::arm`] for when it rises.
+    fn settings_write(&self, wrote: bool) -> super::applied_view::SettingsWriteGuard {
+        self.facts.guard(wrote)
     }
 
     fn inner(&self) -> &Client {
@@ -1470,15 +1488,18 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        let settings = self.settings_write(writes_settings(&sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        time_store_operation(
+        let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
             timeout_store(self.inner().execute(sql, params)),
             |_| true,
         )
-        .await
+        .await;
+        drop(settings);
+        result
     }
 
     /// [`Self::execute`] that also returns the committed entry's Raft log
@@ -1493,15 +1514,18 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        let settings = self.settings_write(writes_settings(&sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        time_store_operation(
+        let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
             timeout_store(self.inner().execute_acked(sql, params)),
             |_| true,
         )
-        .await
+        .await;
+        drop(settings);
+        result
     }
 
     pub(super) async fn execute_idempotent<S>(
@@ -1514,13 +1538,14 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        let settings = self.settings_write(writes_settings(&sql));
         // The arm is client-wide, but only the activation confirmation is
         // under contract here. Scoping it to that statement keeps an unrelated
         // idempotent write (settings upserts share this path) from stealing the
         // injection and failing the contract for the wrong reason.
         #[cfg(feature = "cluster-read-cost-validation")]
         let injectable = sql.contains("UPDATE media_sessions");
-        time_idempotent_write_with_retry(&STORE_OPERATION_METRICS, || {
+        let result = time_idempotent_write_with_retry(&STORE_OPERATION_METRICS, || {
             #[cfg(feature = "cluster-read-cost-validation")]
             self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
             let operation = timeout_store(self.inner().execute(sql.clone(), params.clone()));
@@ -1539,7 +1564,9 @@ impl TimedClient {
                 result
             }
         })
-        .await
+        .await;
+        drop(settings);
+        result
     }
 
     /// Retain the existing timeout recovery contract for the one exact-state
@@ -1582,15 +1609,18 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        let settings = self.settings_write(writes_settings(&sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        time_store_operation(
+        let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
             timeout_store(self.inner().execute_returning_map(sql, params)),
             |rows| rows.iter().all(Result::is_ok),
         )
-        .await
+        .await;
+        drop(settings);
+        result
     }
 
     /// [`Self::execute_returning_map`] that also returns the committed
@@ -1606,15 +1636,18 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        let settings = self.settings_write(writes_settings(&sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        time_store_operation(
+        let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
             timeout_store(self.inner().execute_returning_map_acked(sql, params)),
             |ack| ack.result.iter().all(Result::is_ok),
         )
-        .await
+        .await;
+        drop(settings);
+        result
     }
 
     pub(super) async fn execute_returning_map_one<S, T>(
@@ -1628,15 +1661,18 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        let settings = self.settings_write(writes_settings(&sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        time_store_operation(
+        let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
             timeout_store(self.inner().execute_returning_map_one(sql, params)),
             |_| true,
         )
-        .await
+        .await;
+        drop(settings);
+        result
     }
 
     pub(super) async fn txn<C, Q>(
@@ -1654,15 +1690,18 @@ impl TimedClient {
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
+        let settings = self.settings_write(statements.iter().any(|(sql, _)| writes_settings(sql)));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        time_store_operation(
+        let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
             timeout_store(self.inner().txn(statements)),
             |results| results.iter().all(Result::is_ok),
         )
-        .await
+        .await;
+        drop(settings);
+        result
     }
 
     /// A certificate is inspected before converting a vendor error into a
@@ -1674,9 +1713,10 @@ impl TimedClient {
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
+        let settings = self.settings_write(statements.iter().any(|(sql, _)| writes_settings(sql)));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        time_store_operation(
+        let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
             timeout_store(async {
@@ -1691,7 +1731,9 @@ impl TimedClient {
                     .is_none_or(|rows| rows.iter().all(Result::is_ok))
             },
         )
-        .await
+        .await;
+        drop(settings);
+        result
     }
 
     pub(super) async fn batch(
@@ -1699,15 +1741,18 @@ impl TimedClient {
         sql: &'static str,
     ) -> Result<Vec<Result<usize, hiqlite::Error>>, StoreError> {
         validate_sql(sql)?;
+        let settings = self.settings_write(writes_settings(sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        time_store_operation(
+        let result = time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
             timeout_store(self.inner().batch(sql)),
             |results| results.iter().all(Result::is_ok),
         )
-        .await
+        .await;
+        drop(settings);
+        result
     }
 
     pub(super) async fn is_healthy_db(&self) -> Result<(), StoreError> {
@@ -1719,6 +1764,7 @@ impl TimedClient {
 pub(super) fn disconnected_test_client() -> TimedClient {
     TimedClient {
         inner: TimedClientInner::Disconnected,
+        facts: super::applied_view::SettingsWriteFloor::detached(),
         #[cfg(feature = "cluster-read-cost-validation")]
         operations: Arc::new(OperationCounters::default()),
     }
@@ -1740,6 +1786,28 @@ impl HiqliteAuthStore {
             rows.first().map(|row| row.value.as_str()),
             default,
         ))
+    }
+
+    /// This store's settings floor, for another writer of `settings` that
+    /// does not go through this store (the membership manager's client).
+    #[must_use]
+    pub fn settings_write_floor(&self) -> super::applied_view::SettingsWriteFloor {
+        self.client().settings_write_floor()
+    }
+
+    /// [`SettingsStore::settings_snapshot`] from this node's replica: the
+    /// applied view's settings memo reload (§4.3), under its proof rule only.
+    pub(super) async fn local_settings_snapshot(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        let rows = self
+            .client()
+            .query_map::<SettingEntryRow, _>(
+                "SELECT key, value FROM settings ORDER BY key",
+                params!(),
+            )
+            .await?;
+        Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
     }
 
     /// [`SettingsStore::get_settings`] from this node's replica, for
@@ -5315,7 +5383,12 @@ impl HiqliteAuthStore {
                 "DELETE FROM continuous_quality_ledgers".to_owned(),
                 params!(),
             ),
-            ("DELETE FROM media_sessions".to_owned(), params!()),
+            // `WHERE true`: SQLite's truncate shortcut for an unqualified
+            // DELETE skips the update hook that moves the applied mark.
+            (
+                "DELETE FROM media_sessions WHERE true".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM media_session_requests".to_owned(), params!()),
             ("DELETE FROM job_leases".to_owned(), params!()),
             ("DELETE FROM pretranscode_jobs".to_owned(), params!()),
@@ -7018,6 +7091,12 @@ impl Clock for SystemClock {
         i64::try_from(seconds)
             .map_err(|_| StoreError::Task("system clock exceeds i64 unix seconds".to_owned()))
     }
+}
+
+/// Whether a replicated statement may write `settings`, directly or through
+/// a trigger.
+fn writes_settings(sql: &str) -> bool {
+    super::applied_view::writes_settings(sql)
 }
 
 pub(super) fn validate_sql(sql: &str) -> Result<(), StoreError> {

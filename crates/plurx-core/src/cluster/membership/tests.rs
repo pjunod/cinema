@@ -2399,6 +2399,7 @@ async fn aged_committed_learner_clock_response_fixture() {
         learner_client.clone(),
         selected.replication_monitor(),
         Arc::clone(&selected.store),
+        crate::store::SettingsWriteFloor::detached(),
         identity,
         local,
         config.cluster.join_url.clone(),

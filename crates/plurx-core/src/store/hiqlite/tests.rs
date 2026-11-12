@@ -680,6 +680,7 @@ async fn takeover_authority_attribution_settings_pair_reaches_timed_client_retri
             media_session_projection: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             client: TimedClient {
                 inner: TimedClientInner::InjectedConsistentRead(Arc::clone(&io)),
+                facts: super::super::applied_view::SettingsWriteFloor::detached(),
                 #[cfg(feature = "cluster-read-cost-validation")]
                 operations: Arc::new(OperationCounters::default()),
             },
