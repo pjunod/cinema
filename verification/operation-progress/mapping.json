@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "51bb61f0939987877e591d8ca26b712dda46f983e4e0d30d6302fefd24d68be5"
+        "sha256": "1261c41a9dd3e2e5e7a515e90f702b350d66507b38b82a52805580246dbd0be1"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "51bb61f0939987877e591d8ca26b712dda46f983e4e0d30d6302fefd24d68be5"
+        "sha256": "1261c41a9dd3e2e5e7a515e90f702b350d66507b38b82a52805580246dbd0be1"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "51bb61f0939987877e591d8ca26b712dda46f983e4e0d30d6302fefd24d68be5"
+        "sha256": "1261c41a9dd3e2e5e7a515e90f702b350d66507b38b82a52805580246dbd0be1"
       },
       {
         "table": "24 vendor transaction rate limit",
