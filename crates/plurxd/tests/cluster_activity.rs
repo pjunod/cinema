@@ -2227,11 +2227,14 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // rolling copy each register and activate foreground source custody.
     // Rolling fallback also reads the current source fingerprint and suspends
     // the viewer's competing analysis demand for that source.
+    // E1a (#1503) reads PLAYBACK_DISPLAY_AWARE_AUTO from the node's applied
+    // view instead of the Store, so each shape's planning settings read is
+    // one Local read rather than one Authority read.
     let expected: [(&str, (u64, u64, u64)); 4] = [
-        ("first play, VOD index", (26, 0, 6)),
-        ("reopen, new position", (34, 0, 8)),
-        ("Auto encode, VOD", (31, 0, 8)),
-        ("index miss, rolling copy", (26, 0, 9)),
+        ("first play, VOD index", (25, 1, 6)),
+        ("reopen, new position", (33, 1, 8)),
+        ("Auto encode, VOD", (30, 1, 8)),
+        ("index miss, rolling copy", (25, 1, 9)),
     ];
     let observed = measured
         .iter()
