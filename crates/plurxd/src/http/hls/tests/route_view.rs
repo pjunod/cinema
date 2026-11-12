@@ -88,8 +88,9 @@
         assert!(
             matches!(
                 result,
-                Err(ApiError::TypedDetail {
+                Err(ApiError::Typed {
                     status: StatusCode::GONE,
+                    code: "media_session_ended",
                     ..
                 })
             ),
