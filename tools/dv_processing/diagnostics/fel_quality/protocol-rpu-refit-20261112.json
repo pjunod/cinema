@@ -1,0 +1,13 @@
+{"schema":1,"id":"protocol-rpu-refit-20261112","status":"Fixed before any output (idea and design by Fable 5.2, 2026-11-12).",
+ "question":"How much of the FEL improvement over F can a re-fitted single-layer RPU mapping capture with the BL bitstream untouched (no encode, Profile 8.1, Dolby Vision out on every client)?",
+ "fixtures":["michael5400","michael1800","beekeeper1800"],
+ "fixture_note":"On all three fixtures the source RPU mapping is identity (pivots 0..1023, one order-1 piece, coef 1.0), so R = 4*BL + NLQ residual and F (dovi_tool mode 2) equals F with the original mapping kept (mode 5).",
+ "arms":{
+  "Fp_lut":"ceiling: luma 1024-bin conditional mean of the 12-bit composed luma given the BL luma code; chroma 3rd-order MMR (DV basis: y,u,v,yu,yv,uv,yuv and their squares and cubes, plus constant) least-squares fit of the composed chroma given the pixel's BL (Y,Cb,Cr); one fit per window (all 48 frames)",
+  "Fp_poly":"constrained: luma as 8 equal-width pieces of 2nd-order polynomials on the BL luma code, least squares per piece; chroma as in Fp_lut; coefficients rounded to the RPU's 2^-23 precision; one fit per window",
+  "Fp_frame":"oracle upper bound, not deployable as is: Fp_lut fitted per frame (flicker-prone)"},
+ "fit_inputs":"BL planes, EL planes and the source RPU only (the composed master R is what the EL defines); the fit sample is the stride-8 phase-0 lattice of the active ROI over the window",
+ "application":"per pixel: luma from the pixel's BL luma; chroma from the pixel's BL (Y,Cb,Cr) as sample_codes pairs them; outputs rounded and clipped to 12-bit and scored as a composed candidate through the unchanged four models (sample_codes, model_rgb, vector_metrics.delta)",
+ "readouts":"per model: all-48 stride-8 lattice pooled mean and shadow-p99 frames beating F, frames 0/24 full-resolution full mean and dark<0.1 nit mean/p99, for F and each arm; frame-to-frame change of mean composed luma vs R's (flicker); fraction of (F - R) mean error removed",
+ "decision":"If Fp_lut removes less than 10% of F's pooled error on every fixture, the RPU re-fit is dead. If Fp_poly beats F in all four models on a fixture, F+ becomes the baseline that any re-encode must beat on that title. Step 4 (decoders honour a non-identity P8.1 mapping) is a separate device check before anything ships.",
+ "not_claimed":["perceptual judgement","a shipped RPU","device behaviour","the chroma MMR luma input is the pixel's own luma, not a DV-normative chroma-site luma"]}
