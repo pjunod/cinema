@@ -1,0 +1,8 @@
+{"schema":1,"id":"protocol-bframe-probe-20261112","status":"Fixed before any output. Diagnostic only; cannot be admitted (frozen author refuses reordered samples).",
+ "baseline":"protocol-roi-zeromean-qpm6-20261111.json arm_Z6 (identical_to protocol-roi-zeromean-20261111.json; dark block < 1.0 nit; zero-mean)",
+ "dark_offset":"-6 QP (qoffset -6/63)",
+ "arms":{"B10":"bf=4; x265-params += b-adapt=2:b-pyramid=1:weightb=1:b-intra=1:pbratio=1.0","B13":"as B10 with pbratio=1.3"},
+ "rate":"encoded mp4 video packet average + (baseline authored - baseline encoded) must land in [128.5,130.0]; same secant rule",
+ "scoring":"decoded frames in presentation order as unbound lattice candidate; per-frame slice type reported",
+ "decision":"pooled full mean <= landed Z6 * 0.95 on both fixtures, frames-beating-F >= landed Z6 => propose author change; else B-frames closed",
+ "not_claimed":["an authored or playable stream","admission","HRD/CPB conformance"]}
