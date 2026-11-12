@@ -1,69 +1,71 @@
 # Playback start — D3 build contract (create collapse)
 
-**Status:** open — design and build contract for lane **D3** of [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) revision 3 (§3 D3, sequenced after E1 in §4). Not reviewed; not built. Needs one adversarial review and Paul's answers to §12 before a build agent claims D3b. Where this contract and the plan disagree, the plan's §0 rulings win; raise the conflict in the lane PR.
+**Status:** open — design and build contract for lane **D3** of [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) revision 3 (§3 D3, sequenced after E1 in §4). Revision 2: the adversarial review [PLAYBACK-START-D3-REVIEW-2026-11-12.md](../reviews/PLAYBACK-START-D3-REVIEW-2026-11-12.md) is applied (§13) with the coordinator's decisions (§12). D3a can be claimed now; D3b onward needs Paul's answers to §12. Where this contract and the plan disagree, the plan's §0 rulings win; raise the conflict in the lane PR.
 **Verified against:** `main @ 640c6bee8` (2026-11-12), from source only — nothing was compiled or run. Re-anchor line numbers with `scripts/outline` and `git grep` before editing.
 **Author:** Claude (claude-opus-5-5, session 01BCWL9xwmpSjitHqZMTRAht). **How to work:** [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) §0.
 
-Short paths: `hc.rs` = `crates/plurxd/src/http/hls/create.rs`; `tc.rs` = `crates/plurxd/src/transcode/manager/create.rs`; `cand.rs` = `…/transcode/manager/candidates.rs`; `mp.rs` = `crates/plurxd/src/media_pool.rs`; `ims.rs` = `crates/plurxd/src/http/internal_media_sessions.rs`; `av.rs` = `crates/plurx-core/src/store/applied_view.rs`; `hs.rs` = `crates/plurx-core/src/store/hiqlite_sessions.rs`; `inv.rs` = `crates/plurxd/src/http/applied_settings_inventory.rs`.
+Short paths: `hc.rs` = `crates/plurxd/src/http/hls/create.rs`; `tc.rs` = `crates/plurxd/src/transcode/manager/create.rs`; `cand.rs` = `…/transcode/manager/candidates.rs`; `desc.rs` = `…/transcode/manager/describe.rs`; `mp.rs` = `crates/plurxd/src/media_pool.rs`; `ms.rs` = `crates/plurxd/src/media_sessions.rs`; `ims.rs` = `crates/plurxd/src/http/internal_media_sessions.rs`; `act.rs` = `crates/plurxd/tests/cluster_activity.rs`; `av.rs` = `crates/plurx-core/src/store/applied_view.rs`; `hs.rs` = `crates/plurx-core/src/store/hiqlite_sessions.rs`; `hq.rs` = `crates/plurx-core/src/store/hiqlite.rs`; `inv.rs` = `crates/plurxd/src/http/applied_settings_inventory.rs`.
 
 ## 1. Goal
 
-Plan §1: "Create is one snapshot read → one pure decision → at most two durable writes (admission claim; activation publication — the desired selection folds into the claim) → spawn → answer. Nothing advisory or speculative runs before the answer. Create p99 < 1 s on the fleet."
+Plan §1: "Create is one snapshot read → one pure decision → at most two durable writes … Nothing advisory or speculative runs before the answer. Create p99 < 1 s on the fleet."
 
-**Baseline** (a busy voter, build `7929c2439`, 10.6 h uptime): the `playback` route group made 52,307 authority reads over 9,187 requests (5.7 per request). 27,151 are session-route reads (E1's scope). The other ≈ 25,150 (2.7 per request) are not attributed: no metric names the Store method. Per-create counts do exist: G1 records `authority_reads`, `local_reads`, `mutations` and per-phase splits for every start (`http/activity_starts.rs:66-68`, logged at `hc.rs:3032-3043`). D3's ledger reads those.
+D3 removes the part of that gap that is a root cause and not a fence: **the create path re-reads, by quorum, planning inputs it already holds or can read once** — the planning snapshot, settings, the stored probe and the file row. The session writes and their read-backs are a separate question, out of D3's scope (§10, §12).
 
-**Expected bulk, from code reading** (one ordinary caps-v2 create, local owner; D3a measures it):
+**What main already pins.** `create_path_store_operations_are_pinned_per_shape` (`act.rs:1933`) measures (authority, local, writes) for the create handler and the activation task it awaits, on a two-voter cluster with the ingress as owner (`act.rs:2224-2238`):
 
-| Read | Sites | Per create |
-|---|---|---|
-| Planning snapshot | `hc.rs:3341`; `mp.rs:1985` (once per catalog call); `tc.rs:752` via `:849` (candidate re-validation), again via `:964` on fallback; `tc.rs:1242`, `:4384`; `transcode/manager/start.rs:67` | 2–4 |
-| Settings | `transcode/manager/describe.rs:140` (typeless, from `hc.rs:4157`); `mp.rs:1362` (`remote_placement_ready`, `hc.rs:4189`); `tc.rs:4660` (`vod_settings`); `vod/serve/create.rs:955` or `vodencode.rs:947-1000` (encoder admission pair); `vod/serve/create.rs:2659`; encoded path: `plan.rs:1518, 1640, 1667`, `construct.rs:223, 320`, `describe.rs:239, 825, 1219`; `transcode/planning.rs:67`; `tc.rs:1071` | 3–8 |
-| Stored probe | `hevc_census.rs:64` via `hc.rs:2656` (copy with caps); `tc.rs:3038` (encoded) | 0–2 |
-| File row | `tc.rs:973` (fallback), `:5581` | 0–1 |
-| Fences (stay) | `hc.rs:3892` (`media_session_route_for_playback`), `:4104` (predecessor verdict) | 1–2 |
+| Shape | Authority | Local | Writes | What the writes include (test comment `act.rs:2224-2229`) |
+|---|---|---|---|---|
+| First play, VOD index | 25 | 1 | 6 | claim, owner assignment, activation (prepare, `BLOCKED`), Confirm, publication, … |
+| Reopen, new position | 33 | 1 | 8 | the above + predecessor projection and handoff |
+| Auto encode, VOD | 30 | 1 | 8 | the above + foreground source custody register and activate |
+| Index miss, rolling copy | 25 | 1 | 9 | custody + `suspend_playback_analysis_interest` |
 
-Every one of the first four rows re-reads something the first snapshot already returned or could have: the snapshot carries the file, its probe and 25 settings (`cand.rs:2264`), and `VodSettings.index_cluster_cache` (`vodserve.rs:219`) is read and then read again at `vod/serve/create.rs:2659`. That is the root cause: helpers shared with workers read the Store themselves, so the create path pays each one as a quorum read. A remote owner repeats most of them on its `cluster` route group (`ims.rs:188` placement setting, `cand.rs:1783` snapshot, `tc.rs:849` the same snapshot again), and each catalog peer — up to 64 (`mp.rs:45`) — does one snapshot read per create.
+The bodies carry neither caps nor an intent (`act.rs:2150-2197`), so the catalog read and `record_desired_selection` are not in these numbers. Which Store method makes each count is not known: **D3a's first deliverable is that breakdown** (§7).
 
-Other `playback` requests also read: `/decision` (`http/stream.rs:2678` snapshot, `:2524` probe), control (`http/hls/control.rs:335, 2114` `get_file`), token authentication on a proof-cache miss (`http/extract.rs:779-781, 924`). If D3a shows creates are not the bulk of the 25k, D3's per-create acceptance still stands and the remainder is reported with an owner, not claimed.
+**Fleet baseline** (a busy voter, build `7929c2439`, 10.6 h): `playback` made 52,307 authority reads over 9,187 requests; 27,151 are session-route reads (E1); ≈ 25,150 are unattributed. D3a's method label attributes them.
+
+**Re-reads in scope, from code reading** (D3a confirms or corrects per shape): planning snapshot `hc.rs:3341`, then again in the local catalog (`mp.rs:1985`), the candidate re-validation (`tc.rs:752` via `:849`), `vod_preparation_snapshot` (`tc.rs:1242`), `try_vod_session` (`tc.rs:4384`), `rolling_start_inputs` (`transcode/manager/start.rs:67`), the fallback (`tc.rs:964`); settings `desc.rs:140` (typeless), `mp.rs:1362` (placement), `tc.rs:4660` (`vod_settings`), `tc.rs:1071` (live recovery); probe `hevc_census.rs:64` via `hc.rs:2656`, `tc.rs:3038`; file `tc.rs:973`. A remote owner repeats the snapshot at `cand.rs:1783` and `tc.rs:849` and the setting at `ims.rs:188`. Before the answer the create also lists media peers and fans out offers (`mp.rs:1661-1700`) and catalogs (`mp.rs:1468-1530`); D3 counts them (§9-4) and changes neither (§12-C5).
 
 ## 2. Constraints that bind the build
 
-- **Rulings and rules.** No feature gate: one advisory Developer row (§4.7). Root causes: no watchdog, no "just in case" re-read, no retry loop around the view. Every hardware-using job stays attributable: a held-source probe or HEVC census measurement that still runs is named in the start's phases (G1). Processed DV is a post-first-frame upgrade: create computes no processed candidate (§4.6). One copy engine: D3 changes no engine (§3.8).
-- **E1's view and inventory.** `AppliedView` rules 1–4 and the floor (E1 contract §4.2) apply unchanged; a fence never reads the view. The pinned inventory (`inv.rs`, `STAYS` `:199-228`) lists `transcode/`, `vod/`, `vodencode.rs`, `source_probe/` and `ims.rs` as files that never read the view. D3 keeps that: those files receive plan values; the one new owner-side view call is pinned by name (§6.1).
-- **Media-pool wire.** `tests/operations/test_media_pool_wire.py` refuses any strict-envelope change without a `PROTOCOL_VERSION` bump (`mp.rs:37`, now 9) and a dated `docs/OPERATIONS.md` line; a bump splits the worker pool during rollout. **D3 changes no envelope** (§12-2).
-- **Store twins** change together, through `crates/plurx-core/tests/store_contract.rs`. D3c's schema step follows H2: both stores, old/new startup, upgrade order, rollback from preserved pre-upgrade state.
-- **Consistent-read census** (`store/consistent_read_census.rs`): D3 adds no `query_consistent*` site. Removing calls changes no site count; removing a site lowers its row in the same commit.
+- **Rulings and rules.** No feature gate: one advisory Developer row (§4.6). Root causes: no watchdog, no "just in case" re-read, no retry loop around the view. Every hardware-using job stays attributable (a held probe that still runs is named in the start's G1 phases). Processed DV is a post-first-frame upgrade, and the create still needs processed descriptions to map a named processed id to its ordinary rung (`hc.rs:2199-2225`): D3 keeps computing them. One copy engine: D3 changes no engine (§3.6).
+- **E1's view and inventory.** `AppliedView` rules 1–4 and the floor apply unchanged; a fence never reads the view. `inv.rs` `STAYS` (`:199-228`) keeps `transcode/`, `vod/`, `vodencode.rs`, `source_probe/` and `ims.rs` free of view reads; D3 hands those files values and pins the exceptions as caller chains (§6).
+- **Media-pool wire.** `tests/operations/test_media_pool_wire.py` refuses a strict-envelope change without a `PROTOCOL_VERSION` bump (`mp.rs:37`, now 9). D3 changes no envelope.
+- **No schema version bump.** A cluster schema bump makes voters on the old version refuse to open (`hq.rs:7452-7466`). D3's one schema change is additive triggers with their own extension marker (§4.1).
+- **Store twins** change together, through `crates/plurx-core/tests/store_contract.rs`. Replicated statements in one transaction do not roll back together (`hs.rs:2522-2531`): every statement carries its own predicate.
+- **Consistent-read census** (`store/consistent_read_census.rs`, 365 sites in 29 files): D3 adds no `query_consistent*` site; a removed site lowers its row in the same commit.
+- **Formal mappings.** `verification/{durable-jobs,operation-progress}/mapping.json` pin `hq.rs`, `store/sqlite/mod.rs`, `transcode/manager/construct.rs` and `produce.rs` by whole-file digest. A lane that edits one runs `scripts/check-formal`, refreshes the digest and states in its record that the anchored text is unchanged.
 - **Rolling-producer census:** D3 adds no spawn and no timer.
-- **E1c** (`claude/ps-e1c`, routes) is in flight. D3 designs nothing around route reads. D3c edits `hs.rs` claim and activation SQL, which E1c's local route twin also touches: D3c rebases after E1c lands.
-- **A1/B1** (PR #1525 to `effort/playback-start-phase2`) owns the source-growing engine and copy index v3. D3 assumes the interface in §3.8 and redesigns none of it.
+- **E1c** (`claude/ps-e1c`, routes) is in flight; D3 designs nothing around route reads, and D3c rebases after E1c because both edit `hs.rs`.
+- **A1/B1** (PR #1525 to `effort/playback-start-phase2`): D3 states the interface it assumes (§3.6) and edits nothing in `vod/` or `transcode/source_actor.rs`.
 
 ## 3. What exists today (the seams)
 
-**3.1 The ingress create** (`create_with_purpose_inner`, `hc.rs:3235`), in order: `record_desired_selection` (`:3304`, the first write, before any validation) → planning snapshot (`:3341`, authority; `capture_create_planning_binding`, `mp.rs:674`) → plan review and ladder ceiling (from the snapshot) → network prior (`stored_prior` with `state.applied`, `:3473`; E1b) → `resolve_plan_with_continuous` (`:3483`; catalog at `:2176`) → `validate_hevc_copy_transport` (`:3535` → `:2656`, probe re-read) → claim (`:3622`) → predecessor route (`:3892`) and verdict (`:4104`) → typeless (`:4157`) → placement (`:4189`, offers `:4202`) → local `create_cluster_session` (spawned `:4264`) or remote start → owner assignment (`:4541`) → activation (local `activate_session_under_authority`, `:5258`; remote `activate_remote`) → publication (`:4958`). Phases `lookup … registration` are already marked (`mark_create_phase`, `mp.rs:598`).
+**3.1 Entry points that reach the shared helpers.** HTTP create `create_with_purpose_inner` (`hc.rs:3235`) runs the ingress plan and, for a local owner, `create_cluster_session` → `create_cluster_session_with_priority` (`tc.rs:360, 435`) → `create_session_inner` (`:767`). A remote owner enters at `ims.rs::start` (`:164`) → `create_cluster_session_for_receiver` (`ims.rs:217`). The same `create_cluster_session_with_priority` is entered by the prepared successor (`create_cluster_prepared_session`, `hc.rs:5632`). Not creates, but sharing helpers: takeover (`attempt_takeover`, `ms.rs:6664`; restore at `:6806`, live-recovery switch at `:6746`), resurrection from a recipe (`resurrect_vod_from_recipe_before`, `tc.rs:5440`; restore `:5527`, `vod_settings` `:5568`, `get_file` `:5581`), the rate-control refresh (`requested_rate_control`, `desc.rs:820`, callers `:844, 863, 925, 932, 978`), offline packaging (`encoder_for_offline_package`, `plan.rs:1632`), `produce.rs:448, 905` and `source_actor.rs:188, 1605` (`vod_settings`), and `live_tv_worker` (`mp.rs:1288`, `remote_placement_ready`). **Whether a helper may use plan values is a property of the call, not of the function.**
 
-**3.2 The binding.** `PlanningBinding { generation, source_digest }` (`mp.rs:318-336`) hashes file, probe and reorder flag; `generation` is `playback_input_generation`, bumped by triggers on `playback.*` and `transcode.*` keys only (`store/mod.rs:1890-1906`). `QUALITY_PLANNING_KEYS` also holds `cache.max_gb`, `vod.output_preparation` and `vod.rolling_retention`: **a change to those moves no generation and no binding** (finding; fixed in D3c). The snapshot itself is process-private (`CandidateExecutionContext.planning_snapshot`, `transcode/session_request.rs:532`); what travels is `CandidateCatalogContext { caps, candidate, binding }` (`media_sessions.rs:1329`). A remote owner rebuilds the snapshot (`cand.rs:1783`), compares the binding, stores it in the context (`:1872`), and `tc.rs:849` then reads it a third time.
+**3.2 The binding.** `PlanningBinding { generation, source_digest }` (`mp.rs:318-336`) hashes file, probe and reorder flag; `generation` moves only on `playback.*`/`transcode.*` writes (`store/mod.rs:1890-1906`, `CREATE TRIGGER IF NOT EXISTS`). `QUALITY_PLANNING_KEYS` (`cand.rs:2264`) holds three keys outside those globs — `cache.max_gb`, `vod.output_preparation`, `vod.rolling_retention` — so a change to them moves no binding. `PLAYBACK_INPUT_SCHEMA` is also the historical witness the lineage bridge recognises (`schema_lineage.rs:341-345, 429-437`): it is not edited. The snapshot is process-private (`session_request.rs:532`); `CandidateCatalogContext { caps, candidate, binding }` (`ms.rs:1331`) travels; a peer bounds only `generation ≥ 0` and a 64-character digest (`mp.rs:1616-1621`).
 
-**3.3 The store.** The snapshot is one quorum statement over `files`, `items`, `settings` and `playback_input_generation` (`hiqlite_media.rs:3074-3101`). The view registers `settings` and `media_sessions` (`av.rs:56`); `Replicated::admit` (`av.rs:430`) wants a registered slot because it stamps; floors are `confirmed_since(t) ≤ applied_index` (`av.rs:423`), which needs no slot.
+**3.3 The store and the view.** The snapshot is one quorum statement over `files`, `items`, `settings` and `playback_input_generation` (`hiqlite_media.rs:3074-3101`). The view registers `settings` and `media_sessions` (`av.rs:56`); `TableFloors` is indexed by `AppliedTable` (`av.rs:300-325`) and `Replicated::admit` fails `Unregistered` without a slot (`av.rs:419-437`). Settings writers are classified by `writes_settings` plus `SETTINGS_TRIGGER_TABLES` (`av.rs:331-345`). `files` is also written by triggers (`store/dv_title_jobs.sql:64, 77, 104, 134`), by the probe result applied through `background_job_commands` (`background_jobs_probe.rs:179`) and by cascades from `items` and `libraries` (`hiqlite_catalog.rs:36-38, 75`).
 
-**3.4 Shared helpers.** The split already exists in places: `try_permit` / `try_permit_after` (`vodencode.rs:947, 980`), `planning_hwaccel_preference(snapshot)` beside `hwaccel_preference` (`describe.rs:239`), `capability_height_ceiling_for_preference` beside `_for_request`, `vod_dv_preferences_from_snapshot` (`tc.rs:1299`), `probe_json_for_copy_from` (`hevc_census.rs:71`). Where it does not: `live_hls_recovery_enabled` (`tc.rs:1068`, also takeover), `cluster_playlist_is_typeless` (`describe.rs:136`, also takeover), `requested_rate_control` (`describe.rs:820`, also the rate-control refresh loop), `lang_prefs` (`:1210`), `dv_convert_enabled` (`construct.rs:317`), `encoder_for_file` (`plan.rs:1660`), `vod_settings` (`tc.rs:4651`), `remote_placement_ready` (`mp.rs:1360`, also `ims.rs:188`).
+**3.4 The writes.** Claim (`hs.rs:2904`), owner assignment (`hs.rs:3055`), activation (`activate_session_under_authority`, called at `hc.rs:4813`; Store call `:5278`) inserting the route with `publication_ready_at_ms = BLOCKED` (`hs.rs:2535`; the owner's activation requires the request's `owner_node_id = $6`, `:2438-2443`), Confirm (`settle_media_session_activation`, `hc.rs:5331-5341`, `hs.rs:4243-4262`), publication requiring `publication_ready_at_ms = 0` (`hs.rs:4496-4524`), custody, predecessor projection and handoff. `BLOCKED` keeps a prepare that commits behind a timeout unservable until Abandon tombstones it (`hc.rs:5303-5308`). A remote owner makes activation and Confirm (`ims.rs:456`). With an intent, `record_desired_selection` (`hs.rs:3319`) is one more write plus a read-back (`desired_row`, `:3367`).
 
-**3.5 Writes on a local create today: five.** `record_desired_selection` (`hs.rs:3319`), the claim (`hs.rs:2904`; it may maintain the session tables first, `store/mod.rs:5169-5174`), owner assignment (`hs.rs:3055`), activation (`activate_media_session`, from `hc.rs:5278`), publication (`hs.rs:4471`). A Library-channel start adds `record_library_channel_session_recipe`. G1's `mutations` counts them physically.
+**3.5 The held probe.** Every encoded start probes the held descriptor (`probe_vod_source_once`, `plan.rs:483`; or `held_source_probe_json_bound`, `tc.rs:3070-3085`; phase `held_source_probe`, `:3092`). The node-local decode-fact cache keys on the source identity and a content digest (`decode_facts.rs:507-515`) and validates a seven-field tuple of the held descriptor, the path and the snapshot, including device, inode and `ctime`, hashing the content on any difference (`decode_facts.rs:82-93`, `ProbeFileIdentity` `:890-915`).
 
-**3.6 The catalog.** `quality_catalog` (`mp.rs:1423`) runs the local catalog and fans out to every reachable peer (`:1468-1530`) under a 2 s deadline (`mp.rs:27`), 1.5 s per peer. Each runs `local_quality_catalog` (`:1961`): a quorum snapshot (`:1983-1987`), `processed_quality_descriptions` (`:2005`), the ordinary candidates (`:2016-2027`). The create then discards the processed ones (`hc.rs:2191-2197`). Peers already advertise `encoders: Vec<EncoderOfferCapability { family, max_target_height, decoders }>` and slot use in the 15 s `MediaNodeSnapshot` (`mp.rs:155-187, 81-85, 40`).
-
-**3.7 The held probe.** Every encoded start runs a descriptor-bound probe (`probe_vod_source_once`, `plan.rs:483`, "No full document is cached" `:482`; or `held_source_probe_json_bound`, `tc.rs:3070-3085`; phase `held_source_probe`, `:3092`). It supplies both source verification and decoder facts. `decode_facts.rs` has a node-local descriptor-bound cache (`:1-6`; identity `plan.rs:932`) that this path does not use.
-
-**3.8 A1/B1 interface D3 assumes.** From [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) §1, §5.1: create takes one snapshot and makes ≤ 2 mutations; preparation is scheduled under the existing durable start identity and the analysis claim attaches worker-side after the answer; `CopyPlanState::Growing | Frozen` lives in `vod/`. D3 assumes (a) the copy/index decision stays inside the owner's VOD runtime (`try_vod_session`, `tc.rs:4336`), fed by the plan's file and settings; (b) A1 adds no create-side read or write; (c) A1 removes the index-pending rolling fallback's trigger — D3 keeps that fallback and enumerates its writes until then; (d) D3 edits A1's files only at `vod/serve/create.rs:955` and `:2659` (two settings reads become plan values) and rebases onto A1 there if A1 lands first.
+**3.6 A1/B1 interface D3 assumes** ([PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) §1, §5.1, §7): create takes one snapshot; preparation runs under the existing durable start identity and the analysis claim attaches worker-side after the answer; `CopyPlanState` lives in `vod/`. D3 assumes the copy/index decision stays in the owner's VOD runtime (`try_vod_session`, `tc.rs:4336`) fed by the plan's file and settings; that A1 adds no create-side read or write; that A1 removes the index-pending rolling fallback's trigger (D3 keeps the fallback and its writes until then). The reads at `vod/serve/create.rs:955` (`reserve_media_group`) and `:2659` (`prepare_source_rendition`) and `source_actor.rs:188, 1605` stay, **owned by A1 steps 4 and 5**; D3 makes the plan's values available in `VodSettings` so A1 can drop them.
 
 ## 4. Design
 
-### 4.1 One read: `StartPlan`
+### 4.1 The binding covers every planning key (D3t, before D3b)
+
+New triggers under **new names** — insert, update and delete on `settings` for the keys in `QUALITY_PLANNING_KEYS` outside the `playback.*`/`transcode.*` globs, as D3b will widen it (the list is fixed in D3t and pinned) — bump `playback_input_generation`. Installed as an extension with its own shape marker (precedent `source_arbitration_shape`, `hq.rs:4027-4115`) on both stores; `PLAYBACK_INPUT_SCHEMA` is untouched, so the lineage bridge still recognises old backups. No schema version bump: old binaries ignore unknown trigger names, triggers fire identically on every replica because they are part of the replicated schema, and a rollback leaves them in place. A pin test asserts that a write to every key in `QUALITY_PLANNING_KEYS` moves the generation on both stores.
+
+### 4.2 One read: `StartPlan` (D3b)
 
 ```rust
 pub(crate) struct StartPlan {                    // http/hls/start_plan.rs
     pub snapshot: Arc<PlaybackPlanningSnapshot>, // file, probe, planning keys, generation, title
     pub binding: PlanningBinding,                // unchanged wire type
-    pub settings_digest: SettingsDigest,         // av.rs:188, over the snapshot's keys
     pub source: ViewSource,                      // ledger: View | Authority
 }
 impl AppliedView {
@@ -72,165 +74,183 @@ impl AppliedView {
 }
 ```
 
-- **One key list.** `QUALITY_PLANNING_KEYS` stays the one list (its comment, `cand.rs:2255-2263`, says widening changes no identity) and grows by every setting the create path reads after the snapshot: the `vod_settings` keys (`tc.rs:4660-4679`), `HEVC_UNVERIFIED_COPY`, `HLS_TYPELESS_SLIDING`, `CLUSTER_SESSION_TAKEOVER_ENABLED`, `CLUSTER_MEDIA_POOL_ENABLED`, and the encoded path's keys that are not already in it. The build derives the list from D3a's site counts plus a source walk of §6.2 and pins it (§8).
-- **The read** runs the snapshot statement on the local read pool under E1 rules 1–3. It is **unstamped** — nothing caches it — so it needs no slot, no new registered table and no vendor change: admission is even generation + proof + floors. Two floors: the settings floor (E1b) and a new **files floor**, raised by every replicated statement that writes `files` (a classifier like `writes_settings`, `av.rs:342`, with the same census over production SQL). `playback_input_generation` is written only by settings triggers, so the settings floor covers it; `items` supplies only the title, not a planning input. On SQLite it is a store read; on a remote-authority process, authority.
-- **Pass-down.** `SessionRequest` gains a process-private `start_plan: Option<Arc<StartPlan>>`, never serialized (like `planning_snapshot`). Every create-path helper in §6.2 gets a pure `…_from_plan(&StartPlan)` form; the Store-reading form stays, unchanged, for workers, takeover and the refresh loop. A create-path caller may call only the pure form (§8 pin).
+- **Keys.** `QUALITY_PLANNING_KEYS` stays the one list (`cand.rs:2255-2263`) and gains the settings the create path reads after the snapshot: the `vod_settings` keys (`tc.rs:4660-4679`), `HLS_TYPELESS_SLIDING`, `CLUSTER_SESSION_TAKEOVER_ENABLED`, `CLUSTER_MEDIA_POOL_ENABLED`, and any encoded-path key D3a finds. D3t's triggers cover exactly the list.
+- **The read** is the snapshot statement on the local read pool under E1 rules 1–3, **unstamped** (nothing caches it): `admit_unstamped(floors: &[Floor])` beside `admit`, with its own revocation-during-read and floor tests. Two floors: the settings floor (E1b) and a **files floor**. The files floor is raised by every replicated statement that writes `files` directly (`writes_table`), through a trigger (`FILES_TRIGGER_TABLES` beside `SETTINGS_TRIGGER_TABLES`, including `background_job_commands`), or through a cascade (deletes from `items` and `libraries`). A census over trigger bodies **and** `REFERENCES … ON DELETE CASCADE` keeps the list true. `playback_input_generation` is written only by settings triggers (settings floor); `items` gives only the title. SQLite: a store read; remote-authority: authority.
+- **One rule for every shared helper:** it takes `plan: Option<&StartPlan>`. `Some` answers from the plan; `None` reads the Store exactly as on `640c6bee8`. `SessionRequest.start_plan: Option<Arc<StartPlan>>` is `#[serde(skip)]`, so takeover and resurrection, which rebuild their request from the stored recipe, cannot receive one. It is assigned in exactly two places — `create_with_purpose_inner` and `ims.rs::start` — pinned by a source test.
 
-### 4.2 The owner
+### 4.3 The owner
 
-- **Local owner:** the `Arc<StartPlan>` is handed over in-process. Zero reads for planning inputs.
-- **Remote owner, no wire change.** The ingress sends what it sends today (`CandidateCatalogContext.binding`; a legacy route carries none). `ims.rs::start` builds the owner's plan with `start_plan::owner_plan(&state.applied, file_id, expected)`: one view read; if its binding equals `expected`, use it; else one authority read; if that equals `expected`, use it (the owner's replica was behind); else answer `catalog_input_unavailable: planning inputs changed before admission` (`transcode/errors.rs:238`), and the ingress re-plans on its retry. `restore_catalog_context` (`cand.rs:1729`) and `tc.rs:849` consume that plan instead of reading. Settings used on the owner are then the owner's view at the same binding — the same values the ingress planned with once D3c closes the generation gap (§3.2).
-- **Held descriptor (D3e).** The owner already opens and fences the source. It compares the held descriptor's `fstat` (size, mtime) with `plan.snapshot.file`; on a match it takes decoder facts from the node-local decode-fact cache (`DecodeCacheIdentity::from_media_file`) when that entry holds every fact the held probe supplies; on a miss or a mismatch it probes exactly as today. If the cache cannot supply every fact, the lane records the gap and keeps the probe (§12-4).
+- **Local owner:** the `Arc<StartPlan>` is handed over in-process.
+- **Remote owner, no wire change.** `ims.rs::start` calls `start_plan::owner_plan(&state.applied, file_id, expected)` once and passes the result into `restore_candidate_context_with_deadline` and the create. With `expected = Some(b)`: one view read; equal binding → use it; else one authority read; equal → use it; else `catalog_input_unavailable` (`transcode/errors.rs:238`), surfaced as the typed `quality_catalog_unavailable` (`hc.rs:6127-6130`). With `expected = None` (a legacy route): **authority**, as today.
+- **A refusal closes the ingress's view.** When an owner answers `catalog_input_unavailable` or a peer `StaleSource`, the ingress may be the stale side. It calls `note_fact` for both floors and re-plans once from Authority in the same request before offering the next candidate. One re-plan per request, not a loop: E1's "a quorum fact closes the view".
 
-### 4.3 Writes: two on the ingress
+### 4.4 Settings change during dispatch
 
-1. **Claim with selection.** `claim_media_session_request` takes `desired: Option<DesiredSelectionWrite>` and `plan: PlanRevisions { generation, source_digest, settings_digest }`. One transaction inserts the claim, upserts the desired selection with today's idempotence (the revision moves only for a new digest, `store/mod.rs:5277-5282`) and returns that revision as `recorded_ask_revision`. A joined or resolved claim does not rewrite it. The write moves from before validation to after the plan: a create refused by validation records no ask. The rule the comment names (`hc.rs:3279-3290`, "persisted *before* … reported accepted") still holds, because the claim precedes every answer that reports acceptance.
-2. **Owner assignment folds into the owner's activation.** `activate_media_session` sets `media_session_requests.owner_node_id` in its own transaction under the predicate `assign_media_session_request_owner` uses today (`hs.rs:3055-3089`: same incarnation, `starting`, unexpired, owner null or equal). A refused assignment refuses the activation, and the armed guard aborts the worker, as `Ok(false)` does at `hc.rs:4552`.
-3. **Publication.** A **local** owner activates and publishes in one transaction, `activate_and_publish`, under the one serving authority (ingress and owner are the same `ServingAuthority`; one commit guard). A **remote** owner activates (its write) and the ingress publishes (`hs.rs:4471`) as today.
+The ingress plans at binding *b*. An owner whose view is past *b* reads authority once and refuses; the ingress re-plans from Authority (§4.3). An owner still at *b* builds at *b*. The session is built from one revision; since D3t, every planning key moves the binding, so "at *b*" means the same values the ingress read.
 
-Result: ingress ≤ 2 mutations on every create; a remote owner ≤ 1 (§12-3).
+### 4.5 Writes (D3c): only the selection fold
 
-**Plan revisions in the claim (D3c schema step).** `media_session_requests` gains nullable `plan_revisions` (JSON). A retry that joins an in-flight claim through another ingress joins it whatever its own plan says — the owner's plan wins, and Activity → Starts shows both. The same step widens the generation triggers to every key in `QUALITY_PLANNING_KEYS` (the existing globs, or `key IN (…)`), so the binding covers every planning input. `schema_lineage.rs:191-196` fingerprints those triggers: the step follows H2's upgrade order.
+The claim takes `desired: Option<DesiredSelectionWrite>`. One replicated transaction: the claim's statements, then the selection upsert (today's SQL and idempotence, `hs.rs:3329-3356`) with an added predicate tying it to **this incarnation's** claim — `EXISTS (SELECT 1 FROM media_session_requests WHERE <owner> AND request_id = $r AND incarnation_id = $i AND state = 'starting' AND claim_expires_at_ms > $now)` — so a refused or joined claim upserts nothing. The incarnation is a fresh UUID, so no earlier attempt matches. The claim's post-insert `request_row` read (`hs.rs:2991`) also selects the desired revision, replacing `desired_row`. The SQLite twin applies the same predicate, not its rollback. The write moves from before validation to after the plan: a create refused before the claim records no ask (§12-C7). If the predicate cannot be made to hold on both stores under the store contract's concurrency cases, D3c is dropped and the selection stays where it is.
 
-### 4.4 Every retained fallback's writes
+Not in D3: owner assignment and publication stay separate writes, with the `BLOCKED` fence and Confirm (§12-C3).
 
-| Fallback | Reads today → after D3 | Writes (kept) |
-|---|---|---|
-| VOD → live recovery (`tc.rs:950-1040`) | re-validation `:964` → none (plan); `get_file` `:973` → plan file | `suspend_playback_analysis_interest` (`:981`); `restore_playback_analysis_interest` on drop or session end (`tc.rs:220-258`); the rolling start's own |
-| Processed → ordinary degrade (`hc.rs:4457+`) | none | none extra: claim and activation describe the ordinary request |
-| Next owner candidate (`hc.rs:4227` loop) | none | remote abort (`ims.rs:630`, `settle_remote_abort` `:676`) for a started worker |
-| Spawn failure / early return after the claim | none | the guard settles the claim (`http/hls/session_guard.rs:152`) |
-| Activation failure | none | `settle_media_session_activation` (`hc.rs:5334`); abandonment (`:5164`) |
-| HEVC census first measurement (`hevc_census.rs:104`) | probe re-read → plan probe | the census record; a source read before the answer, attributed in phases; A1 (v) owns copy eligibility |
+### 4.6 The catalog (D3d) and the Developer row
 
-### 4.5 Settings change during dispatch
+- In create scope the local catalog takes the create's `StartPlan` (the `CREATE_STARTUP_BUDGET` scope, `mp.rs:1456-1466`, already carries the binding) instead of reading at `mp.rs:1985`. A peer's catalog request reads its view with the `expected_binding` it is sent (`mp.rs:1500-1502`); mismatch → authority once → `StaleSource` (which then closes the ingress's view, §4.3).
+- Fan-out, peers and placement are **unchanged** (§12-C5). Processed descriptions are still computed (`mp.rs:2002-2006`).
+- A per-candidate cache is built only if D3a shows local catalog compute ≥ 100 ms at p90 (§12-5).
+- Developer row "Create plan" (`http/developer.rs`, beside "Applied view"): share of plans from the view, last authority reason, re-plans after a refusal, per-shape counts from G1 (computed at read time). Advisory, no switch.
 
-The ingress plans at binding *b*. If an owner's view is already past *b*, it reads authority once and refuses with `catalog_input_unavailable`; if not, it builds at *b*. Either way the session is built from one revision — never the ingress's rung with the owner's newer settings — and the claim records which. Neither path waits.
+### 4.7 The held probe (D3e)
 
-### 4.6 The catalog
-
-- **Create scope reads nothing.** The local catalog takes the create's `StartPlan` (the `CREATE_STARTUP_BUDGET` scope, `mp.rs:1456-1466`, already carries the binding) instead of `mp.rs:1985`. A peer's catalog request (`/internal/v2/media/quality-candidates`) reads its view with the `expected_binding` it is sent (`mp.rs:1500-1502`); mismatch → authority once → `StaleSource`.
-- **Fan out only when needed,** decided from the cached snapshots with no read: ask peer P only if P advertises an encoder family, height or decoder this node lacks for the request's ladder ceiling, or this node's own snapshot says it cannot start now (slots or pressure, `can_start_now`, `mp.rs:2442`). Otherwise the catalog is local, `quality_owners` is this node and placement stays local.
-- **No processed candidates before the answer.** `processed_quality_descriptions` (`mp.rs:2005`) is skipped in create scope; D1's post-first-frame qualification resolves its own (`http/hls/processed_upgrade_qualification.rs:327`).
-- **Cache, only on numbers.** Per (source digest, settings digest, canonical caps digest, node capability digest = advertised encoders + ffmpeg build), keep the ordinary candidate list before request-specific evaluation (audio index and offset, burn-in, presentation, copy contract, audio delivery/claim — the `QualityCatalogRequest` fields applied at `mp.rs:2016-2027`). Built only if D3a shows local catalog compute ≥ 100 ms at p90, and only for the part the build proves request-independent (§12-5).
-
-### 4.7 Developer row "Create plan"
-
-`http/developer.rs` beside "Applied view": share of plans from the view and the last authority reason; catalog fan-outs per create; G1's authority reads and mutations per create (p50/p99, computed at read time); peers whose catalog verified the binding. Advisory, no switch.
+The owner validates the held descriptor with the decode-fact cache's seven-field tuple (`decode_facts.rs:82-93, 890-915`) against the cache entry for the plan's source identity. On a hit the cached facts serve decoder planning and the held probe is skipped; on any tuple difference the cache hashes the content, and a different content is refused `vod_source_rescan_required`, as the held probe refuses today. If the cache cannot supply every fact the held probe document provides, the lane records the gap and keeps the probe.
 
 ## 5. State transitions and failure modes
 
 | Event | Plan read | Outcome |
 |---|---|---|
-| Healthy replica, proof held | view | 0 authority reads for planning |
-| No proof, odd generation, local SQL error | authority | today's cost for that read only |
-| This node just wrote a setting or a `files` row | authority until a later watermark applies | read-your-write |
-| Owner replica behind the ingress | owner: view mismatch → authority → match | builds at the ingress's binding |
-| Setting saved between plan and owner | §4.5 | one revision; typed refusal or build |
-| Same-path file replaced, readable | owner: `fstat` ≠ plan → probe; binding read → mismatch → refusal | no session on the old plan |
-| Same size and mtime replacement | not caught by `fstat` | §12-4 |
-| Remote owner refuses before publication | ingress claim stays `starting`; guard settles | next candidate or typed not-yet (D2) |
-| Reply lost after activation | owner wrote `owner_node_id` with the activation | D2's durable result lookup finds it |
-| Mixed fleet (owner without D3b) | owner reads as today | correct, slower; no wire change |
-| Capability snapshot stale (≤ 15 s) | local-only catalog when a peer had a better encoder | the start still plays; the row counts it |
+| Healthy replica, proof held | view | 1 local read for planning |
+| No proof, odd generation, local SQL error | authority | today's cost for that read |
+| This node wrote a setting or a `files` row (directly, by trigger or cascade) | authority until a later watermark applies | read-your-write |
+| Owner replica behind the ingress | owner: view mismatch → authority → match | builds at *b* |
+| Ingress replica behind | owner refuses; ingress closes its view, re-plans from authority | one refusal, one success |
+| Setting saved between plan and owner | §4.4 | one revision |
+| Legacy route (no binding) on a remote owner | authority | as today |
+| Readable same-path replacement | tuple differs → content hash → refusal; binding mismatch on the owner | no session on the old plan |
+| Same size, same mtime replacement | inode/`ctime` differ → content hash | refused `vod_source_rescan_required` |
+| Mixed fleet, D3b | old owner reads as today | correct, slower; no wire change |
+| Mixed fleet, D3t | old binary ignores the new triggers; they still fire | binding covers the keys fleet-wide |
+| Mixed fleet, D3c | selection and claim are both ingress SQL; the owner's desired-revision compare reads the same row | unchanged |
 
 ## 6. Call-site classification
 
-### 6.1 `playback_planning_snapshot` — 19 production sites
+### 6.1 Caller chains (seed; D3b's first commit replaces it with the full source walk, pinned in the style of `inv.rs`)
 
-| Site | D3 | Reason |
-|---|---|---|
-| `hc.rs:3341` | **view → `StartPlan`** | the one read |
-| `mp.rs:1985` | **plan** in create scope; **view + binding** on a peer | §4.6 |
-| `tc.rs:752` (via `:849`, `:964`) | **plan**; the fn stays for `tc.rs:2269` | `prepare_processed_upgrade` is post-first-frame (D1) |
-| `tc.rs:1242`, `:4384`; `start.rs:67` | **plan** | create path |
-| `cand.rs:1783` | **`owner_plan`**, called once in `ims.rs::start` (view + binding; pinned in `inv.rs`) and handed to the restore | owner restore |
-| `tc.rs:4139`; `processed_upgrade_qualification.rs:334` | **stays** | processed upgrade, after first frame |
-| `cand.rs:820`; `http/hls/link_receipts.rs:1963` | **stays** unless D3a shows them hot | receipt and recovery paths |
-| `http/stream.rs:2678`; `jellyfin/playback.rs:56, 843, 1031`; `shared_playback.rs:196`; `shared_source_direct.rs:168`; `shared_source_ingress.rs:1173`; `hc.rs:6659` | **stays** in D3 | other create flavours; move with the same `AppliedView::planning` in a follow-up if D3a shows them hot (§12-7) |
-
-### 6.2 Settings, probe and file reads on the create path → plan values
-
-| Site | Pure form |
+| Entry → helper → read | Plan |
 |---|---|
-| `describe.rs:140` typeless | from plan keys (takeover keeps the read) |
-| `mp.rs:1362` placement (ingress and `ims.rs:188`) | from plan (§12-1) |
-| `tc.rs:4660` `vod_settings` | `VodSettings::from_plan` |
-| `tc.rs:1071` live recovery | `VodSettings.live_recovery` (takeover keeps the read) |
-| `vod/serve/create.rs:955`, `vodencode.rs:947-1000` | `try_permit_after(ready(plan pair))`; workers keep `try_permit` |
-| `vod/serve/create.rs:2659` | `VodSettings.index_cluster_cache` |
-| `plan.rs:1518, 1640, 1667`; `construct.rs:223, 320`; `describe.rs:239, 825, 1219`; `transcode/planning.rs:67` | `…_from_plan`; workers, offline and the refresh loop keep the reads |
-| `hc.rs:2656` → `hevc_census.rs:64`; `tc.rs:3038` | `probe_json_for_copy_from(plan probe)`; plan probe |
-| `tc.rs:973`, `:5581` | plan file |
-| `hc.rs:3892`, `:4104` | **stays** — fences (E1 §6.2) |
+| create `hc.rs:3235` → `hc.rs:3341` snapshot | **view → `StartPlan`** |
+| create → `quality_catalog` `mp.rs:1423` → `local_quality_catalog` → `mp.rs:1985` | `Some` |
+| peer catalog request → `local_quality_catalog` → `mp.rs:1985` | view + `expected_binding` |
+| create → `validate_hevc_copy_transport` `hc.rs:2645` → `probe_json_for_copy` → `hevc_census.rs:64` | `Some` (`probe_json_for_copy_from`) |
+| create → `cluster_playlist_is_typeless` `desc.rs:136` | `Some` (only caller) |
+| create → `remote_placement_ready` `mp.rs:1360`; `ims.rs::start` → same (`:188`) | `Some` (§12-1); `live_tv_worker` `mp.rs:1288` → `None` |
+| create / `ims.rs::start` → `create_session_inner` → `validate_candidate_planning_binding` `tc.rs:849` | `Some`; `prepare_processed_upgrade` `tc.rs:2269` → `None` |
+| `create_session_inner` → `vod_settings` `tc.rs:897` → `tc.rs:4660`; → `live_hls_recovery_enabled` `tc.rs:903` | `Some`; `tc.rs:3584, 3917, 5568`, `produce.rs`, `source_actor.rs` → `None`; takeover `ms.rs:6746` → `None` |
+| `create_session_inner` fallback → `tc.rs:964` re-validation, `tc.rs:973` `get_file` | `Some` |
+| `try_vod_session` `tc.rs:4336` → `tc.rs:4384`; `vod_preparation_snapshot` → `tc.rs:1242`; `rolling_start_inputs` → `start.rs:67` | `Some` |
+| encoded preparation → `tc.rs:3038` `get_file_probe_json` | `Some` |
+| `ims.rs::start` → `restore_candidate_context_with_deadline` → `cand.rs:1783` | `owner_plan`; takeover `ms.rs:6806`, resurrection `tc.rs:5527` → `None` |
+| prepared successor `hc.rs:5632` → `create_cluster_session_with_priority` | `None` |
+| resurrection `tc.rs:5440` (`:5568`, `:5581`); rate refresh `desc.rs:820`; offline `plan.rs:1632`; `dv_convert_enabled` (status pages, `state.rs`) | `None` — not create paths |
+| `hc.rs:3892`, `:4104` | **stay** — fences |
 
-### 6.3 Writes
+### 6.2 Other `playback_planning_snapshot` sites (18 in production)
 
-`record_desired_selection` → folds into the claim; `assign_media_session_request_owner` (create path) → folds into activation; the other callers (`store/sharing_receiver_*.rs`, `http/shared_receiver_playback.rs:1643`) are unchanged; local activation + publication → one transaction. The §4.4 writes stay.
+`tc.rs:4139` and `http/hls/processed_upgrade_qualification.rs:334` (after first frame), `cand.rs:820`, `http/stream.rs:2678`, `http/jellyfin/playback.rs:56, 843, 1031`, `http/shared_playback.rs:196`, `http/shared_source_direct.rs:168`, `http/shared_source_ingress.rs:1173` and `hc.rs:6659`: **unchanged** in D3 (§12-7).
 
 ## 7. Sub-lanes, order, size
 
-| Lane | Content | Size | Depends |
-|---|---|---|---|
-| **D3a** — attribution | `#[track_caller]` on `TimedClient`'s consistent-read entry points (made non-`async` fns returning the future, so the location is captured at the call) → `plurx_http_store_authority_reads_total{route_group,site}`, `site` = `file:line` of the Store method's consistent read, plus `dispatch:<kind>` for `CONSISTENT_DISPATCH` helpers. Cardinality is bounded by the consistent-read census. No behaviour change. Records the baseline over the §9 scenario: which sites make the 25k, and the create share | S | — |
-| **D3b** — one plan | `AppliedView::planning` with the files floor; `StartPlan`; widened key list; `…_from_plan` forms; `owner_plan`; inventory amendments; Developer row | M–L | D3a, E1b |
-| **D3c** — two writes | schema step (both stores, H2); claim with selection and plan revisions; owner in activation; local `activate_and_publish`; generation triggers | M | D3b; after E1c lands |
-| **D3d** — catalog | create scope reads nothing; fan-out rule; no processed descriptions in create; cache only per §12-5 | M | D3b |
-| **D3e** — held descriptor | `fstat` verification and decode-fact cache reuse, or a recorded gap | S–M | D3b |
+| # | Lane | Content | Size | Depends |
+|---|---|---|---|---|
+| 1 | **D3a** — attribution | §7.1 | M | — |
+| 2 | **D3t** — binding | §4.1: additive triggers, marker, both stores, pin | S–M | D3a's key findings |
+| 3 | **D3b** — one plan | §4.2–4.4: `AppliedView::planning`, `admit_unstamped`, files floor and census, `Option<&StartPlan>` through every chain in §6.1, `owner_plan`, refusal re-plan, inventory chains, Developer row | L | D3t, E1b |
+| 4 | **D3c** — selection fold | §4.5 | S | D3b; after E1c lands |
+| 5 | **D3d** — catalog | §4.6 | S–M | D3b |
+| 6 | **D3e** — held probe | §4.7 | S–M | D3b |
 
-D3c and D3d may run in parallel. D3a lands first so every later PR reports a before and after on the same metric.
+### 7.1 D3a, exactly
+
+1. **A Store-method label on every operation.** Each `TimedClient` consistent read and write (`query_consistent_map[_scoped]`, `execute*`, `txn`, batch) takes a `method: &'static str`, passed by the `Store` trait method that issues it — the `AuthorityReadScope` pattern (`hq.rs:878`). Wrappers forward the caller's label: `SessionClient::query_consistent_map` (`hs.rs:636`), `request_row` (`:2083`), `route_by` (`:2028`), `scalar`, `watch_query`, and the watch dispatch. `file:line` goes to a debug log only. The consistent-read census gains a rule: no site without a label.
+2. **Request-scoped counts by method.** `HttpStoreOperationCounts` (`store/mod.rs:6183`) gains a bounded per-method map of (authority, local, write); the create budget line (`hc.rs:3032-3043`) logs it as `methods=`; the owner's `ims.rs::start` logs its own scope's map keyed by incarnation.
+3. **Metric** `plurx_http_store_operations_by_method_total{route_group,class,method}`, emitted only when non-zero. Bound: method labels ≤ 365 consistent-read sites plus the write sites, × 9 route groups × 6 roles; the exposition caps the series count.
+4. **The per-shape breakdown.** `create_path_store_operations_are_pinned_per_shape` pins, for each of the four shapes, every method's authority, local and write counts beside today's totals, and names each of the 6/8/8/9 writes. It gains a fifth shape: a caps-v2 Auto create with an intent, so the catalog read and the selection write are pinned too.
+5. **No behaviour change.** The totals stay 25/1/6, 33/1/8, 30/1/8, 25/1/9. `hq.rs` changes, so the formal mappings are refreshed with `scripts/check-formal` and the record states the anchored `txn` text is unchanged.
+6. **Output:** the table (in the D3a record) is the "before" every later lane's PR updates, and the fleet reading of the metric over §9's scenario attributes the ≈ 25k.
 
 ## 8. Tests
 
 **New behaviour — fails against `640c6bee8`** (each PR records the counterfactual run):
-- *Ledger* (daemon, embedded replicated store with a held proof): an ordinary caps-v2 create with a local owner costs `authority_reads ≤ 3` and `mutations ≤ 2` in its G1 row; with a remote owner the ingress row is the same, and the owner's start makes no planning, settings, probe or file authority read (D3a's `site` counter on its `cluster` group) and one mutation. Old code: more than 3, and 4–5 mutations.
-- *Settings change during dispatch:* hold the owner's start; save a planning key; release. The session is built from exactly one binding — the refusal or the old values — never mixed (§4.5). Repeat with each of `cache.max_gb`, `vod.output_preparation`, `vod.rolling_retention` (old code: binding unchanged, owner builds with the new value).
-- *Readable same-path replacement:* rename a different file over the planned path between plan and owner; the owner refuses (`fstat` and binding) and no session plays the new bytes under the old plan.
-- *Remote owner rejection before publication:* the owner refuses activation; the ingress publishes nothing, the claim settles, the next candidate or a typed not-yet answers.
-- *Read-your-write:* a `files` write on node F (scan) then a create on F reads authority until F applies the next watermark; same for a settings save (E1b's case, through the planning read).
-- *Selection fold:* a create with an intent writes one transaction containing claim and selection; a validation refusal writes nothing; a repeated digest does not move the revision; a joined retry does not rewrite it.
-- *Owner in activation:* a stale incarnation, an expired claim, or a different recorded owner refuses the activation and leaves no route row.
-- *Catalog:* with peers advertising nothing this node lacks and free slots, a create sends no peer catalog request; with a peer advertising a missing family, exactly that peer is asked; no processed description is computed in create scope.
-- *Mixed fleet:* an owner without D3b given today's envelope starts correctly (old/new decode in `test_media_pool_wire`'s fixtures; no envelope change).
+- *Per-shape pin* (`act.rs`): each lane updates the per-method counts by exactly the reads it removes; D3b's target is §9-1.
+- *Binding* (D3t, both stores): a write to each key in `QUALITY_PLANNING_KEYS` moves the generation; old code: `cache.max_gb`, `vod.output_preparation`, `vod.rolling_retention` do not.
+- *Settings change during dispatch:* hold the owner's start, save a planning key, release: the session is built from one binding (refusal + re-plan, or the old values), never mixed.
+- *Stale ingress:* hold the ingress's apply, save a setting elsewhere: one create succeeds after one owner refusal and one authority re-plan.
+- *Legacy route:* a remote start with no binding reads authority.
+- *Files floor:* a direct `files` write, a `dv_title_jobs` trigger write, a probe result through `background_job_commands` and an `items` delete each close the planning view on the writing node until the next applied watermark.
+- *Readable same-path replacement* and *same size and mtime replacement:* both refused, no session on the new bytes under the old plan.
+- *Selection fold* (D3c, store contract, both stores): claim and selection in one transaction; a refused, joined or overloaded claim upserts nothing; a repeated digest does not move the revision; concurrent claims for one request upsert at most once.
 
 **Guards — pass today, must keep passing; mutation counterfactual in the PR:**
-- Fences: zero view calls in `hc.rs:3892, 4104`, every `authoritative_*`, and the receipt fences (E1's counting double).
-- Inventory (`inv.rs`): no `STAYS` file reads the view or calls a view helper except the one pinned `owner_plan` call in `ims.rs::start`, whose result `restore_candidate_context_with_deadline` receives; a create-path function calls no Store-reading form listed in §6.2 (a new pin over the §6.2 function names).
-- Store contract, both backends: claim + selection, owner-in-activation and `activate_and_publish` under concurrent claims, expiry and takeover; the migration's old/new startup and rollback.
+- *Takeover class* (E1's behavioural guard): a store double whose view answers differ from Authority, driven through takeover (`ms.rs:6664`), resurrection (`tc.rs:5440`), a prepared successor (`hc.rs:5598`), the rate-control refresh (`desc.rs:844`) and an offline package (`plan.rs:1632`). Each sees Authority's values, makes the same Authority reads as on `640c6bee8` and zero view reads. Mutation: hand takeover a plan.
+- *Assignment sites:* `start_plan` is set only in `create_with_purpose_inner` and `ims.rs::start` (source test).
+- *Fences:* zero view calls in `hc.rs:3892, 4104`, every `authoritative_*` and the receipt fences.
+- *Placement:* the owner distribution for a fixed offers fixture is identical before and after D3d.
+- *Inventory* (`inv.rs`): the §6.1 chains are the only paths from a `STAYS` file to a view read.
 - `test_media_pool_wire` unchanged; consistent-read census unchanged or lowered.
 
 ## 9. Acceptance — what is read and how
 
 "Built on effort" and "accepted on fleet" stay separate; Paul deploys; the PR carries the GPT prompt for the client run.
 
-1. **Create latency:** create `elapsed_ms` p50/p99 from G1 rows over one scripted scenario on the fleet — 30 cold and 30 warm starts each of copy and encode, half through a second ingress with a remote owner, while two other sessions play — before and after. Target p99 < 1,000 ms.
-2. **Ledger:** from the same rows, `authority_reads` and `mutations` per ingress create, target ≤ 3 and ≤ 2; on remote owners, D3a's planning/settings/probe/file `site` counts per remote start, target 0, and one mutation. Every row above target is listed with its phases.
-3. **Per request:** `Δ plurx_http_store_reads_total{route_group="playback",class="authority_read"}` minus the route reads (`plurx_media_session_route_reads_total`) ÷ `Δ plurx_http_route_seconds_count{route_group="playback"}`, per role, before/after; with D3a's `site` split naming what remains.
-4. **Catalog:** peer catalog requests per create (`cluster` group on peers) before/after; local catalog compute p90 (decides §12-5).
-5. **Developer row** reads plan view share, fan-outs and the ledger percentiles.
+1. **Per shape, as deltas against the pinned counts.** Each shape's planning, settings, probe and file re-reads that D3a attributes are gone: for each shape, authority = pinned total − (those re-reads) and +0 or +1 local read; writes unchanged (6/8/8/9), and −1 write for the intent shape after D3c. The claim, activation, Confirm and publication read-backs and the two fences are listed, unchanged, and out of scope.
+2. **Create latency** from G1 rows over one scripted fleet scenario — 30 cold and 30 warm starts each of copy and encode, half through a second ingress with a remote owner, while two other sessions play — before and after: **no start ≥ 1,000 ms; report p50, p95 and max** per cell.
+3. **Remote owners:** planning, settings, probe and file reads per remote start, counted in the owner's own `ims.rs::start` scope (§7.1-2): target 0.
+4. **Per request:** D3a's `method` split of `playback` authority reads per request, before/after; peer catalog requests, media-peer listings and offers per create, unchanged.
+5. **Developer row** reads plan view share, re-plans and the per-shape counts.
 
 ## 10. Out of scope
 
-Route and fence reads (E1c, E1 §6); auth and token reads; Jellyfin, sharing, `/decision` and compatibility-preview creates beyond what shares the changed helpers (§12-7); the copy engine, index v3 and fragment identity (A1/B1); processed-upgrade internals (D1); D2's deadlines, codes and cross-ingress result lookup, which D3 preserves; the media-pool wire; background-worker settings reads.
+The claim, activation, Confirm and publication writes and their read-backs; the two fences (`hc.rs:3892, 4104`); custody and handoff; folding owner assignment or publication (§12-C3); route and fence reads (E1c); auth and token reads; catalog fan-out and placement (§12-C5); Jellyfin, sharing, `/decision` and compatibility creates (§12-7); `vod/` and `source_actor` (A1); index v3 and the copy engine (A1/B1); processed-upgrade internals (D1); D2's deadlines and result lookup, which D3 preserves; the media-pool wire; background-worker settings reads.
 
 ## 11. Before pushing
 
-`python3 scripts/paperwork` (or `make paperwork`); `scripts/scrub-infra-names --check`; `cargo clippy -p plurxd --tests -- -D warnings` (+ `-p plurx-core --features plurx-core/hiqlite-contract-tests` when the store changes); `cargo fmt --check`; the focused tests above; `python3 -m unittest tests.operations.test_media_pool_wire tests.validation.test_rolling_producer_ownership_inventory`; store contract on both backends for D3c; before/after readings in plan §6 row D3.
+`python3 scripts/paperwork` (or `make paperwork`); `scripts/scrub-infra-names --check`; `scripts/check-formal` and the mapping refresh when `hq.rs`, `store/sqlite/mod.rs`, `construct.rs` or `produce.rs` change; `cargo clippy -p plurxd --tests -- -D warnings` (+ `-p plurx-core --features plurx-core/hiqlite-contract-tests` for store changes); `cargo fmt --check`; the focused tests above and the per-shape pin; `python3 -m unittest tests.operations.test_media_pool_wire tests.validation.test_rolling_producer_ownership_inventory`; store contract on both backends for D3t and D3c; before/after readings in plan §6 row D3.
 
-## 12. Open decisions for Paul
+## 12. Open decisions
 
-1. **Planning and admission settings read before a local reservation move to the view, bound by the binding.** E1's rule keeps a read that precedes a reservation on quorum; encoder admission (`vodencode.rs`) and `remote_placement_ready` precede a permit or a placement. The permit is a node-local semaphore, not a durable write, and the binding makes the owner's values the ingress's. Cost: a changed `max_hw_sessions` or media-pool switch reaches a start up to one lease late. Recommended: move them.
-2. **No wire change.** The owner re-reads its own view at the carried binding (§4.2) instead of receiving the plan's values. The alternative, protocol 10 carrying the values, saves one local read per remote start and splits the worker pool during rollout. Recommended: no wire change now; carry values only if another lane bumps the protocol anyway.
-3. **What "≤ 2 durable writes" counts.** The plan's two are the claim and the publication. A remote owner's activation is a third write on a second node (it holds the owner's fence and cannot move to the ingress). This contract counts ≤ 2 per ingress create and ≤ 1 on a remote owner, and makes the local case two in total. Recommended: confirm.
-4. **Held probe.** A same-size, same-mtime replacement is not caught by `fstat`. Today's per-start probe catches it for encoded starts. Recommended: accept the residual where the decode-fact cache supplies every fact (encodes read the bytes anyway, and a wrong map fails typed); keep the probe where it does not.
-5. **Catalog cache** only if D3a shows local compute ≥ 100 ms at p90. Recommended: decide on the numbers.
-6. **The ask is recorded only for creates that reach the claim** (today: before validation, so a refused create also records it). Recommended: confirm.
-7. **Other create flavours** (Jellyfin, sharing, `/decision`) keep their reads in D3 unless D3a shows them hot. Recommended: leave until measured.
+**Decided by the coordinator, for Paul to review:**
+- **C1 (B1/B2).** No absolute targets. D3a's first deliverable is the per-shape breakdown by Store method; acceptance is per-shape deltas (§9-1). Claim, activation, Confirm and publication read-backs and the two fences are out of scope. The write ledger is the pinned 6/8/8/9.
+- **C2 (B3).** Caller-chain table; `Option<&StartPlan>`, `None` reads the Store; the takeover-class behavioural guard.
+- **C3 (B4).** No owner-assignment fold and no publication fold; `BLOCKED` and Confirm stay. Follow-up idea, needing two releases: the owner's activation sets the owner when null; after every node runs that, the ingress stops assigning, decided per owner from its advertised `build`/`protocol_version` (`mp.rs:155-187`). The selection fold stays only with its per-statement predicate (§4.5).
+- **C4 (B5, S1).** The binding step is its own lane ahead of D3b, as additive triggers under new names, no schema version bump, no `plan_revisions` column. A legacy route reads authority.
+- **C5 (S4, B6).** Placement and fan-out unchanged in D3; fan-out collapse is a measured follow-up. Processed descriptions are still computed.
+- **C6 (S5, S6).** The held probe uses the cache's seven-field tuple, so no residual risk remains to accept. D3 edits nothing in `vod/serve/create.rs` or `source_actor`.
+
+**For Paul** (numbers kept from revision 1; 3 and 4 are decided above as C3 and C6):
+1. **Planning and admission settings read before a local reservation move to the plan, bound by the binding.** E1 kept a read that precedes a reservation on quorum; encoder admission and `remote_placement_ready` precede a permit or a placement. The permit is a node-local semaphore, and the binding (complete after D3t) makes the owner's values the ingress's. Cost: a changed `max_hw_sessions` or media-pool switch reaches a start up to one lease late. Recommended: move them.
+2. **No wire change.** The owner re-reads its view at the carried binding rather than receiving the values (which needs protocol 10 and splits the pool during rollout). Recommended: no wire change.
+5. **Catalog cache** only if D3a shows local catalog compute ≥ 100 ms at p90. Recommended: decide on the numbers.
+6. **The ask is recorded only for creates that reach the claim.** Answers a client may retry before any ask is recorded: `400 invalid_capabilities`, `422 hdr_subtitle_burn_refused`, the HEVC copy-transport refusal, `503 quality_catalog_unavailable` (`hc.rs:2357`) and `503 media_session_overloaded` (the claim refused, `hc.rs:3845-3851`). None was ever reported accepted. Recommended: confirm.
+7. **Other create flavours** (§6.2) keep their reads unless D3a shows them hot. Recommended: leave until measured.
 
 ## 13. Review disposition
 
-Not reviewed. One adversarial review of this contract before D3b is claimed; its findings and dispositions go here.
+Every finding was checked against `main @ 640c6bee8` before it was answered. None is rebutted.
+
+| # | Disposition | Where / evidence |
+|---|---|---|
+| B1 | **fixed (coordinator C1)** — ledger rebuilt from the pinned test: 6/8/8/9; activation is prepare + Confirm (`hs.rs:2535`, `hc.rs:5331-5341`); custody, projection and handoff named; no fold | §1, §3.4, §9-1, §10 |
+| B2 | **fixed differently (C1)** — no absolute target; acceptance is per-shape deltas; read-backs and fences out of scope and listed | §1, §9-1, §10 |
+| B3 | **fixed** — caller chains; `tc.rs:5581`, `desc.rs:825`, `plan.rs:1640`, `construct.rs:320`, `planning.rs:67` removed; `Option<&StartPlan>`; two assignment sites pinned; takeover-class guard | §3.1, §4.2, §6.1, §8 |
+| B4 | **fixed differently (C3)** — owner and publication folds removed; two-release fold recorded as follow-up; selection fold kept with its own predicate | §4.5, §12-C3 |
+| B5 | **fixed** — D3t before D3b; `owner_plan(None)` reads authority | §4.1, §4.3, §7 |
+| B6 | **fixed** — processed descriptions kept; the §8 pin removed | §2, §4.6 |
+| S1 | **fixed** — additive triggers under new names with a marker; `PLAYBACK_INPUT_SCHEMA` untouched; no version bump; `plan_revisions` dropped | §3.2, §4.1 |
+| S2 | **fixed** — `FILES_TRIGGER_TABLES`, cascade census, `admit_unstamped` with its own tests | §3.3, §4.2, §8 |
+| S3 | **fixed** — refusal or `StaleSource` → `note_fact` both floors → one authority re-plan; test | §4.3, §8 |
+| S4 | **fixed differently (C5)** — placement and fan-out unchanged; placement guard test | §4.6, §8, §12-C5 |
+| S5 | **fixed** — seven-field tuple; §12-4 deleted; §5 row | §3.5, §4.7, §5 |
+| S6 | **fixed** — no edits in `vod/` or `source_actor`; reads named as A1's | §3.6, §10 |
+| S7 | **fixed** — label by Store method, forwarded through wrappers; `file:line` in a debug log; cardinality stated and capped | §7.1 |
+| S8 | **fixed** — `scripts/check-formal` and mapping refresh | §2, §7.1-5, §11 |
+| S9 | **fixed** — max/p50/p95 per cell; remote owner counted in its own start scope; per request from D3a's split | §9 |
+| N1 | **fixed** — 18 sites; `http/` prefixes | §6.2 |
+| N2 | **fixed** — `ms.rs:1331`; activation call `hc.rs:4813`, Store call `:5278` | §3.2, §3.4 |
+| N3 | **fixed** — per-statement predicate on the selection upsert; SQLite twin the same rule | §4.5 |
+| N4 | **fixed** — the not-yet answers before the claim listed | §12-6 |
+| N5 | **fixed** — D3b L; D3c S now that no migration and no owner fold remain | §7 |
+| N6 | **fixed** — media peers and offers counted beside the catalog | §1, §9-4 |
 
 ## 14. Build records
 
-None yet. Each sub-lane records what it built and where it departs from this text in a `PLAYBACK-START-D3-RECORD.md`, as E1 does.
+None yet. Each sub-lane records what it built and where it departs from this text in `PLAYBACK-START-D3-RECORD.md`, as E1 does.

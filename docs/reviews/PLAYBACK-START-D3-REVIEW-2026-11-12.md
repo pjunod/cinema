@@ -1,6 +1,6 @@
 # Playback start — D3 build contract: adversarial review
 
-**Status:** open — findings await dispositions in the contract's §13. Review of [PLAYBACK-START-D3-BUILD.md](../streaming/PLAYBACK-START-D3-BUILD.md) (`claude/ps-d3-contract @ 633027fe1`) against `main @ 640c6bee8`, from source only (nothing compiled or run).
+**Status:** complete — every finding is dispositioned in the contract's §13 (revision 2). Review of [PLAYBACK-START-D3-BUILD.md](../streaming/PLAYBACK-START-D3-BUILD.md) (`claude/ps-d3-contract @ 633027fe1`) against `main @ 640c6bee8`, from source only (nothing compiled or run).
 **Reviewer:** Claude (claude-fable-5-2, session 01BCWL9xwmpSjitHqZMTRAht), 2026-11-12.
 **Verdict:** do not build D3b–D3e as written. 6 blockers, 9 should-fix, 6 nits. D3a (attribution) can start once S7 is applied. The one-plan idea and the view read are sound; the blockers are the write and read ledgers (both contradicted by a count already pinned on main), the helper table (it names takeover, resurrection and worker sites as create sites), the D3b→D3c ordering, a mixed-fleet break in the owner fold, and the processed-catalog skip.
 
