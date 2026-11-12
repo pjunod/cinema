@@ -830,7 +830,8 @@ def nextest_command(archive, filters, extra):
     # Extract into the workspace so the JUnit report outlives the run, and
     # remap the workspace so `CARGO_MANIFEST_DIR` and fixtures resolve here.
     command = ["cargo-nextest", "nextest", "run", "--archive-file", str(archive),
-               "--workspace-remap", ".", "--extract-to", str(EXTRACT), "--extract-overwrite",
+               "--workspace-remap", str(Path.cwd()), "--extract-to", str(EXTRACT.resolve()),
+               "--extract-overwrite",
                "--profile", "ci", "--no-fail-fast", "--color", "never", *extra]
     for expression in filters:
         command += ["-E", expression]
