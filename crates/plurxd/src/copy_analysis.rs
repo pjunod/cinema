@@ -457,6 +457,32 @@ impl LocalCopyAuthority {
     }
 }
 
+/// A local user's playback as the owner of physical copy work: a range's
+/// files and the generations that cut them. Its only constructor is
+/// [`LocalPlaybackOwner::of`], which takes the viewer of a live playback and
+/// requires that playback to be named. An authority read back from a durable
+/// request, or the unattributed one, is attribution for an index build and
+/// can never be made into an owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalPlaybackOwner(LocalCopyAuthority);
+impl LocalPlaybackOwner {
+    // Called by tests until a local VOD session attaches a range.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no local VOD session owns a range yet")
+    )]
+    pub(crate) fn of(viewer: &crate::state::PlaybackViewerDemand) -> Result<Self, &'static str> {
+        let authority = LocalCopyAuthority::of(viewer)?;
+        if authority.playback_id.is_empty() {
+            return Err("a local range owner is a named playback");
+        }
+        Ok(Self(authority))
+    }
+    pub(crate) fn authority(&self) -> &LocalCopyAuthority {
+        &self.0
+    }
+}
+
 /// What the id of an Analysis request raised by local playback starts with.
 pub(crate) const LOCAL_PLAYBACK_REQUEST_PREFIX: &str = "local-play.";
 

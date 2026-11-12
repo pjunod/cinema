@@ -1,27 +1,39 @@
 //! A range's owner: its directories, its manifest binding and its retirement.
 //!
-//! The manifest tests hold the Source manifest to the exact bytes the binary
-//! before the owner enum wrote, through a verbatim copy of that binary's
-//! manifest declaration. No binary reads a checkpoint manifest back today
-//! (observations reach the Analysis worker in memory), so that copy and
-//! [`OwnerView`] stand for the two readers: the strict one a binary that
-//! knows only Source manifests would be, and the additive one that takes a
-//! manifest without `owner` to be a Source owner's.
+//! The Source manifest is held to a committed golden file,
+//! `source_manifest_4b125e6.json`: a populated manifest as the binary before
+//! the owner enum (`4b125e6`) wrote it, derived from that commit's manifest
+//! declaration, with fixed sample values for the three fields its Source
+//! binding supplies. No binary reads a checkpoint manifest back today
+//! (observations reach the Analysis worker in memory), so
+//! [`PreviousManifest`] and [`OwnerView`] stand for the two readers: the
+//! strict one a binary that knows only Source manifests would be, and the
+//! additive one that takes a manifest without `owner` to be a Source owner's.
 //!
-//! A `SourceDispatchAssignment` can only be made by plurx-core's Source
-//! session store, so a Source owner's files are a local owner's with the
-//! recorded binding replaced; the directory a Source owner derives is checked
-//! on the binding itself.
+//! A `SourceDispatchAssignment` is made only by a Source session, so the
+//! tests of a real Source owner are [`a_source_owner_through_its_real_binding`],
+//! which the Source actor fixture calls with the assignment it holds.
 use super::*;
 
 const NAMESPACE: &str = "catalogue";
+const GOLDEN: &str = include_str!("source_manifest_4b125e6.json");
+/// The sample values the golden file carries where a Source binding's own
+/// incarnation, request and owner key go.
+const GOLDEN_INCARNATION: &str = "00000000-0000-4000-8000-000000000001";
+const GOLDEN_REQUEST: &str = "golden-source-request";
+const GOLDEN_OWNER_KEY: &str = "golden-source-owner-key";
+const GOLDEN_RANGE: &str = "11111111-2222-4333-8444-555555555555";
 
-fn viewer(user_id: i64) -> LocalCopyAuthority {
-    LocalCopyAuthority::of(&crate::state::PlaybackViewerDemand {
+fn local_viewer(user_id: i64, playback_id: &str) -> crate::state::PlaybackViewerDemand {
+    crate::state::PlaybackViewerDemand {
         principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
-        playback_id: "playback-1".into(),
-    })
-    .expect("a local user's own playback")
+        playback_id: playback_id.into(),
+    }
+}
+
+fn viewer(user_id: i64) -> LocalPlaybackOwner {
+    LocalPlaybackOwner::of(&local_viewer(user_id, "playback-1"))
+        .expect("a local user's own named playback")
 }
 
 fn source() -> AnalysisCoordinationSource {
@@ -32,7 +44,9 @@ fn source() -> AnalysisCoordinationSource {
         origin_node_id: "origin-node".into(),
         object_version: "object-version".into(),
         video_identity: "ab".repeat(32),
-        contract_version: plurx_core::store::FRAGMENT_INDEX_CONTRACT,
+        // The golden file's, not the current contract's: a contract bump
+        // must not rewrite what an earlier binary wrote.
+        contract_version: 3,
         requested_generation: "normal".into(),
     }
 }
@@ -42,6 +56,15 @@ fn origin() -> SourceTimestamp {
         dts: -7500,
         time_base_num: 1,
         time_base_den: 90000,
+    }
+}
+
+fn promotion() -> PromotionInputs {
+    PromotionInputs {
+        indexed_hdr10_metadata: true,
+        parameter_sets: vec![vec![64, 1], vec![66, 1]],
+        hdr10_sei: vec![vec![78, 1, 137]],
+        ..PromotionInputs::default()
     }
 }
 
@@ -75,7 +98,7 @@ impl Roots {
             origin(),
             0,
             "c".repeat(64),
-            PromotionInputs::default(),
+            promotion(),
         )
         .await
     }
@@ -88,9 +111,9 @@ fn local(session: &str) -> CopyRangeOwner {
     }
 }
 
-/// The manifest exactly as the binary before the owner enum declared it,
-/// field for field and in its order. It reads strictly, as that declaration
-/// asked (`deny_unknown_fields`).
+/// The manifest exactly as `4b125e6` declared it, field for field and in its
+/// order. It reads strictly, as that declaration asked
+/// (`deny_unknown_fields`).
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreviousManifest {
@@ -142,91 +165,219 @@ fn source_owner() -> String {
     "source".into()
 }
 
-const INCARNATION: &str = "3a1c7c0e-6f2b-4f57-9d0a-0d6c1a2b3c4d";
-const REQUEST: &str = "request-1";
-const OWNER_KEY: &str = "sharing-owner-key";
+/// Give `files` the state the golden manifest records: two rows in two
+/// segments, their inspections, the range inspection, both inits, a rendered
+/// third checkpoint.
+fn populate_as_golden(files: &mut CopyRangeFiles) {
+    use plurx_core::fmp4::CutClass;
+    files.sequence = 3;
+    files.canonical_init_sha256 = "a".repeat(64);
+    files.av_init_sha256 = "b".repeat(64);
+    files.rendered = true;
+    files.rows = vec![
+        IndexRow {
+            dts: 0,
+            duration: 360_000,
+            bytes: 100_000,
+            video_bytes: 99_400,
+            class: CutClass::CleanIdr,
+        },
+        IndexRow {
+            dts: 360_000,
+            duration: 225_000,
+            bytes: 50_000,
+            video_bytes: 49_700,
+            class: CutClass::CleanCra,
+        },
+    ];
+    files.segments = vec![
+        StoredCopySegment {
+            index: 0,
+            name: "segment-0.m4s".into(),
+            bytes: 123_456,
+            sha256: "d".repeat(64),
+            seconds: 4.0,
+            first_row: 0,
+            rows: 1,
+        },
+        StoredCopySegment {
+            index: 1,
+            name: "segment-1.m4s".into(),
+            bytes: 65_432,
+            sha256: "e".repeat(64),
+            seconds: 2.5,
+            first_row: 1,
+            rows: 1,
+        },
+    ];
+    files.row_inspections = vec![
+        StoredInspection {
+            dts: 0,
+            duration: 360_000,
+            packets: 96,
+            slices: 96,
+            configuration_sha256: "f".repeat(64),
+            hdr10_mastering: Some(
+                "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)".into(),
+            ),
+            hdr10_light: Some([1000, 400]),
+            hdr10_conflict: false,
+        },
+        StoredInspection {
+            dts: 360_000,
+            duration: 225_000,
+            packets: 60,
+            slices: 60,
+            configuration_sha256: "f".repeat(64),
+            hdr10_mastering: None,
+            hdr10_light: None,
+            hdr10_conflict: false,
+        },
+    ];
+    files.inspection = Some(RangeInspection {
+        packets: 156,
+        slices: 156,
+        configuration_sha256: "f".repeat(64),
+    });
+}
 
-fn source_binding() -> OwnerBinding {
-    OwnerBinding::Source {
-        incarnation: INCARNATION.into(),
-        request: REQUEST.into(),
-        owner_key: OWNER_KEY.into(),
+fn golden_boundaries() -> RangeBoundaries {
+    RangeBoundaries {
+        begins_title: true,
+        eof: true,
     }
 }
 
-/// What the previous binary wrote for the state `files` holds.
-fn previous(files: &CopyRangeFiles, range_id: uuid::Uuid) -> PreviousManifest {
-    PreviousManifest {
-        version: 1,
-        catalog_namespace: NAMESPACE.into(),
-        source: source(),
-        source_incarnation: INCARNATION.into(),
-        source_request: REQUEST.into(),
-        source_owner_key: OWNER_KEY.into(),
-        range_id,
-        range_epoch: 1,
-        checkpoint_sequence: files.sequence,
-        init_contract_sha256: "c".repeat(64),
-        canonical_init_sha256: String::new(),
-        av_init_sha256: String::new(),
-        source_origin_dts: -7500,
-        source_time_base_num: 1,
-        source_time_base_den: 90000,
-        canonical_title_start: 0,
-        timescale: 90000,
-        media_origin_ms: -83,
-        target_duration: 16,
-        begins_title: false,
-        eof: false,
-        first_frame_rendered: false,
-        rows: Vec::new(),
-        segments: Vec::new(),
-        row_inspections: Vec::new(),
-        inspection_packets: None,
-        inspection_slices: None,
-        inspection_configuration_sha256: None,
-        promotion: PromotionInputs::default(),
-    }
-}
-
-/// Both directions of the Source manifest: the new binary writes the bytes
-/// the previous one wrote, so each reads the other's.
-#[tokio::test]
-async fn a_source_manifest_is_the_previous_binarys_in_both_directions() {
-    let roots = Roots::new();
-    let range_id = uuid::Uuid::new_v4();
-    let mut files = roots
-        .create(local("session-1"), range_id)
-        .await
-        .expect("range files");
-    files.owner = source_binding();
-    let written = files
-        .manifest(90000, -83, RangeBoundaries::default())
-        .expect("a Source manifest");
-    let old = serde_json::to_vec(&previous(&files, range_id)).expect("the previous manifest");
+/// The golden file is a manifest the previous binary's strict declaration
+/// reads and writes back unchanged, and the additive reader takes it for a
+/// Source owner's: old, read by new.
+#[test]
+fn the_golden_source_manifest_reads_strictly_and_as_a_source_owners() {
+    let golden = GOLDEN.trim_end();
+    let read: PreviousManifest = serde_json::from_str(golden).expect("the previous reader");
+    assert_eq!(read.source_incarnation, GOLDEN_INCARNATION);
+    assert_eq!(read.rows.len(), 2);
+    assert_eq!(read.segments.len(), 2);
+    assert_eq!(read.row_inspections.len(), 2);
+    assert_eq!(read.promotion, promotion());
+    assert_eq!(read.source, source());
     assert_eq!(
-        String::from_utf8(written.clone()).expect("JSON"),
-        String::from_utf8(old.clone()).expect("JSON"),
-        "a Source manifest gained, lost or moved a field"
+        serde_json::to_string(&read).expect("the previous writer"),
+        golden,
+        "the golden file is not what the previous declaration writes"
     );
+    let owner: OwnerView = serde_json::from_str(golden).expect("the additive reader");
+    assert_eq!(owner.owner, "source");
+    assert_eq!(
+        owner.source_incarnation.as_deref(),
+        Some(GOLDEN_INCARNATION)
+    );
+    assert_eq!(owner.source_request.as_deref(), Some(GOLDEN_REQUEST));
+    assert_eq!(owner.source_owner_key.as_deref(), Some(GOLDEN_OWNER_KEY));
+    assert!(owner.local_session.is_none());
+    assert!(owner.local_user_id.is_none());
+    assert!(owner.local_playback_id.is_none());
+}
 
-    // New, read by the previous binary's strict declaration: nothing unknown.
-    let read: PreviousManifest = serde_json::from_slice(&written).expect("the previous reader");
-    assert_eq!(read.source_incarnation, INCARNATION);
-    assert_eq!(read.source_request, REQUEST);
-    assert_eq!(read.source_owner_key, OWNER_KEY);
-    assert_eq!(read.range_id, range_id);
+/// A real Source owner, made from the assignment of a real Source session:
+/// its directories are the ones it always had, and the manifest it writes
+/// through `CopyRangeOwner::Source`'s own binding is the golden file's bytes
+/// with this assignment's incarnation, request and owner key in place of the
+/// sample ones. New, read by old: the previous strict reader takes it.
+///
+/// A local generation is also refused on a rendition this assignment is
+/// attached to, before any child.
+pub(crate) async fn a_source_owner_through_its_real_binding(assignment: &SourceDispatchAssignment) {
+    let roots = Roots::new();
+    let range_id: uuid::Uuid = GOLDEN_RANGE.parse().expect("the golden range");
+    let mut files = roots
+        .create(
+            CopyRangeOwner::Source(Box::new(assignment.clone())),
+            range_id,
+        )
+        .await
+        .expect("a Source owner's range files");
+    let incarnation = assignment.binding().incarnation_id().to_string();
+    assert_eq!(
+        files.payload_path,
+        roots
+            .work
+            .path()
+            .join("source-copy-ranges")
+            .join(&incarnation)
+            .join(GOLDEN_RANGE)
+    );
+    assert!(files.payload_path.is_dir());
+    assert_eq!(
+        files.observation_path,
+        roots.observations().join(GOLDEN_RANGE)
+    );
+    assert!(files.observation_path.is_dir());
+    assert!(!roots.work.path().join("local-copy-ranges").exists());
+    assert!(!roots
+        .data
+        .path()
+        .join("copy-ranges")
+        .join("local-observations")
+        .exists());
 
-    // Old, read additively by the new binary: no `owner` means Source.
-    for bytes in [&old, &written] {
-        let owner: OwnerView = serde_json::from_slice(bytes).expect("the additive reader");
-        assert_eq!(owner.owner, "source");
-        assert_eq!(owner.source_incarnation.as_deref(), Some(INCARNATION));
-        assert_eq!(owner.source_request.as_deref(), Some(REQUEST));
-        assert_eq!(owner.source_owner_key.as_deref(), Some(OWNER_KEY));
-        assert!(owner.local_session.is_none());
-        assert!(owner.local_user_id.is_none());
-        assert!(owner.local_playback_id.is_none());
+    populate_as_golden(&mut files);
+    let written = String::from_utf8(
+        files
+            .manifest(90000, -83, golden_boundaries())
+            .expect("a Source manifest"),
+    )
+    .expect("JSON");
+    let quoted = |value: &str| serde_json::to_string(value).expect("a JSON string");
+    let mut expected = GOLDEN.trim_end().to_owned();
+    for (sample, actual) in [
+        (GOLDEN_INCARNATION, incarnation.as_str()),
+        (GOLDEN_REQUEST, assignment.binding().request_id()),
+        (
+            GOLDEN_OWNER_KEY,
+            assignment.binding().principal().owner_key().as_str(),
+        ),
+    ] {
+        assert_eq!(expected.matches(&quoted(sample)).count(), 1, "{sample}");
+        expected = expected.replace(&quoted(sample), &quoted(actual));
+    }
+    assert_eq!(
+        written, expected,
+        "a Source manifest gained, lost, moved or re-encoded a field"
+    );
+    let read: PreviousManifest = serde_json::from_str(&written).expect("the previous reader");
+    assert_eq!(read.source_incarnation, incarnation);
+    let owner: OwnerView = serde_json::from_str(&written).expect("the additive reader");
+    assert_eq!(owner.owner, "source");
+
+    files.retire_payload().await.expect("retirement");
+    assert!(!files.payload_path.exists());
+    assert!(!files.observation_path.exists());
+
+    #[cfg(target_os = "linux")]
+    {
+        let owners = crate::source_generation::SourceRenditionOwners::default();
+        let _source_owner = owners.attach(assignment).expect("a Source viewer attaches");
+        let local = viewer(7);
+        let (input, _held) =
+            crate::source_input::SourceInput::qualification_fixture(b"source").await;
+        let cache = crate::test_tempdir().expect("runtime cache");
+        let refused = crate::copyrange::spawn_source_generation(
+            input,
+            Path::new("/films/film.mkv"),
+            &["-i".to_owned(), "/films/film.mkv".to_owned()],
+            cache.path(),
+            crate::copyrange::CopyGenerationOwner::Local {
+                owners: &owners,
+                dispatch: owners.begin_generation().expect("a dispatch"),
+                viewer: &local,
+                permit: None,
+            },
+            Arc::new(crate::prodrun::ProducerSlot::new()),
+        )
+        .await
+        .err();
+        assert_eq!(refused, Some("copy_local_owner_invalid".to_owned()));
     }
 }
 
@@ -237,12 +388,13 @@ async fn a_source_manifest_is_the_previous_binarys_in_both_directions() {
 async fn a_local_manifest_names_its_owner_and_is_not_a_source_manifest() {
     let roots = Roots::new();
     let range_id = uuid::Uuid::new_v4();
-    let files = roots
+    let mut files = roots
         .create(local("session-1"), range_id)
         .await
         .expect("range files");
+    populate_as_golden(&mut files);
     let written = files
-        .manifest(90000, -83, RangeBoundaries::default())
+        .manifest(90000, -83, golden_boundaries())
         .expect("a local manifest");
     let owner: OwnerView = serde_json::from_slice(&written).expect("the additive reader");
     assert_eq!(owner.owner, "local");
@@ -275,18 +427,10 @@ async fn a_local_manifest_names_its_owner_and_is_not_a_source_manifest() {
     assert!(!roots.work.path().join("source-copy-ranges").exists());
 }
 
-/// A Source owner's directories are the ones it always had.
-#[test]
-fn a_source_owner_keeps_its_directories() {
-    let binding = source_binding();
-    assert_eq!(binding.payload(), ("source-copy-ranges", INCARNATION));
-    assert_eq!(binding.observations(), "observations");
-}
-
-/// A session that is not one plain directory name, and an authority that
-/// names no user, make no range and no directory.
+/// A session that is not one plain directory name makes no range and no
+/// directory.
 #[tokio::test]
-async fn a_local_owner_needs_a_plain_session_and_a_named_viewer() {
+async fn a_local_owner_needs_a_plain_session() {
     let roots = Roots::new();
     let long = "s".repeat(129);
     for session in ["", "..", "a/b", "a.b", long.as_str()] {
@@ -299,49 +443,29 @@ async fn a_local_owner_needs_a_plain_session_and_a_named_viewer() {
             "{session:?}"
         );
     }
-    assert_eq!(
-        roots
-            .create(
-                CopyRangeOwner::Local {
-                    session: "session-1".into(),
-                    viewer: LocalCopyAuthority::unattributed(),
-                },
-                uuid::Uuid::new_v4(),
-            )
-            .await
-            .err(),
-        Some("copy_range_binding_invalid".to_owned())
-    );
     assert!(!roots.work.path().join("local-copy-ranges").exists());
     assert!(!roots.data.path().join("copy-ranges").exists());
 }
 
-/// A generation owned by a local playback is refused before any child when
-/// its authority names no user. (A dispatch of a Source-assigned rendition is
-/// refused the same way; attaching an assignment needs a Source session.)
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn a_local_generation_needs_a_named_viewer() {
-    let owners = crate::source_generation::SourceRenditionOwners::default();
-    let nobody = LocalCopyAuthority::unattributed();
-    let (input, _held) = crate::source_input::SourceInput::qualification_fixture(b"source").await;
-    let cache = crate::test_tempdir().expect("runtime cache");
-    let refused = crate::copyrange::spawn_source_generation(
-        input,
-        Path::new("/films/film.mkv"),
-        &["-i".to_owned(), "/films/film.mkv".to_owned()],
-        cache.path(),
-        crate::copyrange::CopyGenerationOwner::Local {
-            owners: &owners,
-            dispatch: owners.begin_generation().expect("a local dispatch"),
-            viewer: &nobody,
-            permit: None,
-        },
-        Arc::new(crate::prodrun::ProducerSlot::new()),
-    )
-    .await
-    .err();
-    assert_eq!(refused, Some("copy_local_owner_invalid".to_owned()));
+/// Only a live local viewer with a named playback makes a range owner. The
+/// authorities that carry a durable request across a restart have no way to
+/// become one: the owner has no other constructor.
+#[test]
+fn a_local_range_owner_is_only_a_live_named_local_playback() {
+    let owner = LocalPlaybackOwner::of(&local_viewer(7, "playback-1")).expect("a named playback");
+    assert_eq!(owner.authority().user_id(), 7);
+    assert_eq!(owner.authority().playback_id(), "playback-1");
+    assert!(LocalPlaybackOwner::of(&local_viewer(7, "")).is_err());
+    assert!(LocalPlaybackOwner::of(&local_viewer(0, "playback-1")).is_err());
+    let shared = crate::state::PlaybackViewerDemand {
+        principal: plurx_core::playback_principal::PlaybackPrincipal::sharing(
+            uuid::Uuid::new_v4(),
+            &"a".repeat(64),
+        )
+        .expect("a sharing principal"),
+        playback_id: "playback-1".into(),
+    };
+    assert!(LocalPlaybackOwner::of(&shared).is_err());
 }
 
 #[cfg(target_os = "linux")]
@@ -447,9 +571,11 @@ mod engine {
             Err(_) => {
                 // The stop token ends the running generation: it retires its
                 // child and joins its pipe tasks, Input and reap before the
-                // run returns, so no ffmpeg outlives the test.
+                // run returns, so no ffmpeg outlives the test. That wait is
+                // bounded too: a settlement that never comes fails the test
+                // instead of hanging it.
                 stop.cancel();
-                let settled = run.await;
+                let settled = tokio::time::timeout(Duration::from_secs(60), &mut run).await;
                 panic!("the local range did not finish in 240 s; cancelled, it settled with {settled:?}");
             }
         }

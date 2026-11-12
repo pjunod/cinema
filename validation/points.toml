@@ -1096,6 +1096,7 @@ paths = [
   "crates/plurxd/src/copy_normalization/*.rs",
   "crates/plurxd/src/copyrange.rs",
   "crates/plurxd/src/copyrange/*.rs",
+  "crates/plurxd/src/copyrange/source_manifest_4b125e6.json",
   "tests/support/rust_source_inventory.rs",
   "crates/plurx-core/src/fmp4/tests.rs",
   "crates/plurxd/src/ffmpeg/tests.rs",

@@ -3,7 +3,7 @@
 //! checkpoint. Inflight observers own the opened immutable manifest itself.
 //! A range's owner is typed: shared Source playback or a local user's own.
 use super::ObservedCopySegment;
-use crate::copy_analysis::{CopyRangeCheckpoint, CopyRowInspection, LocalCopyAuthority};
+use crate::copy_analysis::{CopyRangeCheckpoint, CopyRowInspection, LocalPlaybackOwner};
 use plurx_core::{
     fmp4::{Init, PromotionInputs},
     fs_secure::SecureDirectory,
@@ -123,8 +123,9 @@ struct OldManifest {
 /// Who owns one range's files. The payload directory, the observation
 /// directory and the manifest's binding all come from it. Neither owner can
 /// be made from the other: a Source owner is its grant-scoped assignment and
-/// holds no local authority, and a local owner is a local user's own
-/// playback in one VOD session and holds no assignment, gate or grant.
+/// holds no local authority, and a local owner is a local user's own named
+/// playback in one VOD session ([`LocalPlaybackOwner`], which only a live
+/// viewer makes) and holds no assignment, gate or grant.
 pub(crate) enum CopyRangeOwner {
     Source(Box<SourceDispatchAssignment>),
     // Constructed by tests until a local VOD session attaches a range.
@@ -135,7 +136,7 @@ pub(crate) enum CopyRangeOwner {
     Local {
         /// The local VOD session the range is the rendition of.
         session: String,
-        viewer: LocalCopyAuthority,
+        viewer: LocalPlaybackOwner,
     },
 }
 impl CopyRangeOwner {
@@ -147,17 +148,16 @@ impl CopyRangeOwner {
                 owner_key: assignment.binding().principal().owner_key(),
             }),
             Self::Local { session, viewer } => {
-                // The session names a directory; an unattributed authority
-                // only carries a durable request across a restart and never
-                // played anything.
+                // The session names a directory.
                 let plain = !session.is_empty()
                     && session.len() <= 128
                     && session
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
-                if !plain || !viewer.is_attributed() {
+                if !plain {
                     return Err("copy_range_binding_invalid".into());
                 }
+                let viewer = viewer.authority();
                 Ok(OwnerBinding::Local {
                     session: session.clone(),
                     user_id: viewer.user_id(),
@@ -799,3 +799,5 @@ mod publisher_tests {
 #[cfg(test)]
 #[path = "storage_tests.rs"]
 mod owner_tests;
+#[cfg(test)]
+pub(crate) use owner_tests::a_source_owner_through_its_real_binding;

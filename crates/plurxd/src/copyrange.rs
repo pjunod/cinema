@@ -21,6 +21,8 @@ pub(crate) use observed::{
 mod census_format;
 #[cfg(unix)]
 mod storage;
+#[cfg(all(test, unix))]
+pub(crate) use storage::a_source_owner_through_its_real_binding;
 #[cfg(unix)]
 pub(crate) use storage::{CopyRangeFiles, CopyRangeOwner, CopyRangePublisher};
 
