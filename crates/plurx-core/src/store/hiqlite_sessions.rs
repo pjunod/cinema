@@ -384,6 +384,7 @@ impl From<&mut Row<'_>> for LayoutGuardRow {
     }
 }
 async fn session_layout(
+    method: &'static str,
     store: &HiqliteAuthStore,
     refresh: bool,
 ) -> Result<SessionLayout, StoreError> {
@@ -401,7 +402,7 @@ async fn session_layout(
         .client()
         // authority: read the committed layout before choosing authority predicates.
         .query_consistent_map::<LayoutVersionRow, _>(
-            "session_layout",
+            method,
             "SELECT schema_version AS version FROM cluster_meta WHERE singleton=1",
             params!(),
         )
@@ -438,7 +439,7 @@ async fn session_layout(
         .client()
         // authority: prove the committed session shape before decoding authoritative rows.
         .query_consistent_map::<LayoutGuardRow, _>(
-            "session_layout",
+            method,
             format!("SELECT CASE WHEN ({guard}) THEN 1 ELSE 0 END AS valid"),
             params!(),
         )
@@ -455,7 +456,7 @@ async fn session_layout(
                 .client()
                 // authority: recheck a concurrent layout transition before accepting its shape.
                 .query_consistent_map::<LayoutVersionRow, _>(
-                    "session_layout",
+                    method,
                     "SELECT schema_version AS version FROM cluster_meta WHERE singleton=1",
                     params!(),
                 )
@@ -470,7 +471,7 @@ async fn session_layout(
                     .client()
                     // authority: prove the installed shape after the marker advances.
                     .query_consistent_map::<LayoutGuardRow, _>(
-                        "session_layout",
+                        method,
                         format!("SELECT CASE WHEN ({guard}) THEN 1 ELSE 0 END AS valid"),
                         params!(),
                     )
@@ -648,7 +649,7 @@ impl SessionClient<'_> {
         S: Into<std::borrow::Cow<'static, str>>,
     {
         let template = sql.into();
-        let layout = session_layout(self.store, false).await?;
+        let layout = session_layout(method, self.store, false).await?;
         let result = self
             .store
             .client()
@@ -660,7 +661,7 @@ impl SessionClient<'_> {
             )
             .await;
         if layout == SessionLayout::Legacy
-            && session_layout(self.store, true).await? == SessionLayout::Principal
+            && session_layout(method, self.store, true).await? == SessionLayout::Principal
         {
             // Mapping errors and empty results are buffered too: legacy route
             // projection may have observed a Shared row after the migration.
@@ -724,12 +725,12 @@ impl SessionClient<'_> {
             .into_iter()
             .map(|(sql, bindings)| (sql.into(), bindings))
             .collect::<Vec<_>>();
-        let layout = session_layout(self.store, false).await?;
+        let layout = session_layout(method, self.store, false).await?;
         if let Some(result) = self.attempt(method, &templates, layout).await? {
             return Ok(result);
         }
         if layout != SessionLayout::Legacy
-            || session_layout(self.store, true).await? != SessionLayout::Principal
+            || session_layout(method, self.store, true).await? != SessionLayout::Principal
         {
             return Err(StoreError::Task(
                 "guarded session proposal refused its layout".into(),
@@ -767,7 +768,7 @@ impl SessionClient<'_> {
 }
 
 async fn route_projection(store: &HiqliteAuthStore) -> Result<&'static str, StoreError> {
-    match session_layout(store, false).await? {
+    match session_layout("route_projection", store, false).await? {
         SessionLayout::Legacy => Ok(LEGACY_ROUTE_COLS),
         SessionLayout::Principal => Ok(PRINCIPAL_ROUTE_COLS),
     }
@@ -982,6 +983,7 @@ fn validate_desired_selection(
 }
 
 async fn desired_row(
+    method: &'static str,
     store: &HiqliteAuthStore,
     user_id: i64,
     playback_id: &str,
@@ -997,11 +999,7 @@ async fn desired_row(
     store
         .session_client()
         // authority: current desired revision fences playback preparation against competing asks.
-        .query_consistent_map::<PrincipalDesiredRow, _>(
-            "desired_row",
-            sql,
-            params!(user_id, playback_id),
-        )
+        .query_consistent_map::<PrincipalDesiredRow, _>(method, sql, params!(user_id, playback_id))
         .await?
         .into_iter()
         .next()
@@ -2080,6 +2078,7 @@ async fn route_by(
 }
 
 async fn live_local_route(
+    method: &'static str,
     store: &HiqliteAuthStore,
     incarnation_id: &str,
 ) -> Result<Option<MediaSessionRoute>, StoreError> {
@@ -2090,7 +2089,7 @@ async fn live_local_route(
     store
         .session_client()
         .query_consistent_map::<RouteRow, _>(
-            "live_local_route",
+            method,
             format!(
                 "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = $1 {live_local}"
             ),
@@ -2205,7 +2204,7 @@ async fn claim_existing_or_reacquire(
         let existing_user = ownership.existing_user(4);
         let reacquired = store
             .session_client()
-            .execute("claim_existing_or_reacquire", 
+            .execute("claim_existing_or_reacquire",
                 format!(
                     "UPDATE media_session_requests
                     SET state = 'starting', claim_expires_at_ms = $1,
@@ -2265,12 +2264,14 @@ async fn claim_existing_or_reacquire(
 }
 
 async fn activate_with_authority(
+    method: &'static str,
     store: &HiqliteAuthStore,
     activation: &MediaSessionActivation,
     authority: Option<&crate::sharing_source_sessions::SourceSessionWriteAuthority>,
     receiver: Option<&crate::sharing_receiver_sessions::ReceiverSessionWriteAuthority>,
 ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
-    if authority.is_some() && session_layout(store, true).await? != SessionLayout::Principal {
+    if authority.is_some() && session_layout(method, store, true).await? != SessionLayout::Principal
+    {
         return Ok(None);
     }
     let local = LocalSessionSql::load(store).await?;
@@ -2314,7 +2315,7 @@ async fn activate_with_authority(
     let current_pointer = store
         .session_client()
         .query_consistent_map::<PointerRow, _>(
-            "activate_with_authority",
+            method,
             format!(
                 "SELECT current_incarnation_id FROM media_playback_pointers
                   WHERE {owner_1} AND playback_id = $2"
@@ -2345,7 +2346,7 @@ async fn activate_with_authority(
             .and_then(|id| id.strip_prefix("jellyfin:"))
         {
             // authority: native replay must observe current negotiation cancellation and login revocation.
-            let rows = store.session_client().query_consistent_map::<CompatibilityActivationAdmission, _>("activate_with_authority", 
+            let rows = store.session_client().query_consistent_map::<CompatibilityActivationAdmission, _>(method,
                 "SELECT COUNT(*) AS admitted FROM jellyfin_plays WHERE play_id=$1 AND user_id=$2 AND playback_id=$3
                  AND ((state='pending' AND expires_at_ms>$4) OR (state='active' AND native_incarnation_id=$5))
                  AND json_extract(payload,'$.native_request_fingerprint')=$6
@@ -2364,26 +2365,16 @@ async fn activate_with_authority(
             }
         }
 
-        let route = route_by(
-            "activate_with_authority",
-            store,
-            "incarnation_id",
-            &activation.incarnation_id,
-        )
-        .await?
-        .filter(|route| activation_route_matches(route, activation));
+        let route = route_by(method, store, "incarnation_id", &activation.incarnation_id)
+            .await?
+            .filter(|route| activation_route_matches(route, activation));
         let Some(route) = route else {
             return Ok(None);
         };
         let predecessor = match activation.expected_predecessor_incarnation_id.as_deref() {
-            Some(incarnation_id) => route_by(
-                "activate_with_authority",
-                store,
-                "incarnation_id",
-                incarnation_id,
-            )
-            .await?
-            .filter(|route| route.principal == activation.principal),
+            Some(incarnation_id) => route_by(method, store, "incarnation_id", incarnation_id)
+                .await?
+                .filter(|route| route.principal == activation.principal),
             None => None,
         };
         if let Some(receiver) = receiver {
@@ -2772,7 +2763,7 @@ async fn activate_with_authority(
     let statement_count = statements.len();
     let committed = match store
         .session_client()
-        .txn("activate_with_authority", statements)
+        .txn(method, statements)
         .await
         .map_err(database_error)
     {
@@ -2846,7 +2837,7 @@ async fn activate_with_authority(
         .session_client()
         // authority: the post-commit projection must observe this activation and any later writer of the route or pointer.
         .query_consistent_map::<RoutePointerRow, _>(
-            "activate_with_authority",
+            method,
             format!(
                 "SELECT {route_cols},
                         (SELECT current_incarnation_id FROM media_playback_pointers
@@ -2877,14 +2868,9 @@ async fn activate_with_authority(
     // owner/epoch the terminal projection must acknowledge.
     let predecessor = match (!predecessor_incarnation.is_empty()).then_some(predecessor_incarnation)
     {
-        Some(incarnation) => route_by(
-            "activate_with_authority",
-            store,
-            "incarnation_id",
-            incarnation,
-        )
-        .await?
-        .filter(|route| route.principal == activation.principal),
+        Some(incarnation) => route_by(method, store, "incarnation_id", incarnation)
+            .await?
+            .filter(|route| route.principal == activation.principal),
         None => None,
     };
     Ok(Some(MediaSessionActivationOutcome { route, predecessor }))
@@ -3104,7 +3090,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let existing_user = ownership.existing_user(1);
         Ok(self
             .session_client()
-            .execute("record_library_channel_session_recipe", 
+            .execute("record_library_channel_session_recipe",
                 format!("INSERT INTO library_channel_session_recipes
                     (user_id, request_id, incarnation_id, recipe_json, created_at_ms{principal_columns})
                  SELECT $1, $2, $3, $4, $5{principal_values}
@@ -3167,7 +3153,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
         validate_activation(activation)?;
-        activate_with_authority(self, activation, None, None).await
+        activate_with_authority("activate_media_session", self, activation, None, None).await
     }
 
     async fn activate_receiver_media_session(
@@ -3183,7 +3169,14 @@ impl MediaSessionStore for HiqliteAuthStore {
         {
             return Err(crate::sharing::invalid());
         }
-        activate_with_authority(self, activation, None, Some(authority)).await
+        activate_with_authority(
+            "activate_receiver_media_session",
+            self,
+            activation,
+            None,
+            Some(authority),
+        )
+        .await
     }
 
     async fn activate_source_media_session(
@@ -3198,7 +3191,14 @@ impl MediaSessionStore for HiqliteAuthStore {
         ) {
             return Err(crate::sharing::invalid());
         }
-        activate_with_authority(self, activation, Some(authority), None).await
+        activate_with_authority(
+            "activate_source_media_session",
+            self,
+            activation,
+            Some(authority),
+            None,
+        )
+        .await
     }
 
     async fn prepare_media_session(
@@ -3223,7 +3223,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(None);
         }
         // authority: a committed quality cancellation must fence this preparation before it is admitted
-        let bindings = timeout_store(self.session_client().query_consistent_map::<PreparationCancellationBinding, _>("prepare_media_session", 
+        let bindings = timeout_store(self.session_client().query_consistent_map::<PreparationCancellationBinding, _>("prepare_media_session",
             "SELECT cancellation_key FROM quality_preparation_owners WHERE staged_incarnation_id = $1", params!(preparation.incarnation_id.as_str()))).await?;
         if bindings.first().is_some_and(|binding| {
             binding.0
@@ -3449,7 +3449,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "desired-selection principal is unavailable".into(),
             ));
         }
-        desired_row(self, user_id, playback_id)
+        desired_row("record_desired_selection", self, user_id, playback_id)
             .await?
             .ok_or_else(|| StoreError::Database("desired selection vanished".to_owned()))
     }
@@ -3511,7 +3511,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             ));
         }
         if let Some(user_id) = principal.local_user_id() {
-            return desired_row(self, user_id, playback_id).await;
+            return desired_row("desired_selection", self, user_id, playback_id).await;
         }
         self.session_client()
             .query_consistent_map::<PrincipalDesiredRow, _>(
@@ -3556,7 +3556,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         });
         if exact_replay {
             // authority: a committed quality cancellation must fence the staged successor before it commits
-            let bindings = timeout_store(self.session_client().query_consistent_map::<PreparationCancellationBinding, _>("rejoin_media_session_preparation", 
+            let bindings = timeout_store(self.session_client().query_consistent_map::<PreparationCancellationBinding, _>("rejoin_media_session_preparation",
                 "SELECT cancellation_key FROM quality_preparation_owners WHERE staged_incarnation_id = $1",
                 params!(preparation.incarnation_id.as_str()))).await?;
             if bindings
@@ -4671,7 +4671,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         if request_id.starts_with("jellyfin:") && results.first().copied() != Some(1) {
             return Ok(None);
         }
-        let route = live_local_route(self, incarnation_id)
+        let route = live_local_route("publish_media_session_activation", self, incarnation_id)
             .await?
             .filter(|route| {
                 route.principal
@@ -4792,14 +4792,16 @@ impl MediaSessionStore for HiqliteAuthStore {
                 )
                 .await?;
         }
-        Ok(live_local_route(self, incarnation_id)
-            .await?
-            .filter(|route| {
-                route.owner_node_id == owner_node_id
-                    && route.owner_epoch == owner_epoch
-                    && route.state == "active"
-                    && route.publication_ready_at_ms == 0
-            }))
+        Ok(
+            live_local_route("complete_media_session_handoff", self, incarnation_id)
+                .await?
+                .filter(|route| {
+                    route.owner_node_id == owner_node_id
+                        && route.owner_epoch == owner_epoch
+                        && route.state == "active"
+                        && route.publication_ready_at_ms == 0
+                }),
+        )
     }
 
     async fn arm_media_session_handoff(
@@ -4848,14 +4850,16 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             )
             .await?;
-        Ok(live_local_route(self, incarnation_id)
-            .await?
-            .filter(|route| {
-                route.owner_node_id == owner_node_id
-                    && route.owner_epoch == owner_epoch
-                    && route.state == "active"
-                    && route.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED
-            }))
+        Ok(
+            live_local_route("arm_media_session_handoff", self, incarnation_id)
+                .await?
+                .filter(|route| {
+                    route.owner_node_id == owner_node_id
+                        && route.owner_epoch == owner_epoch
+                        && route.state == "active"
+                        && route.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED
+                }),
+        )
     }
 
     async fn arm_media_session_terminal_projection(
@@ -5367,7 +5371,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         recipe_revision: i64,
     ) -> Result<bool, StoreError> {
         // authority: an intent's cancellation must be observed exactly once the cancel is committed
-        let rows = timeout_store(self.session_client().query_consistent_map::<QualityCancellationRow, _>("quality_intent_cancelled", 
+        let rows = timeout_store(self.session_client().query_consistent_map::<QualityCancellationRow, _>("quality_intent_cancelled",
             format!("SELECT {} FROM quality_cancellation_receipts WHERE generation = $1 AND client_instance_id = $2 AND lifetime_id = $3 AND recipe_revision = $4 LIMIT 1", crate::store::quality_cancellation::CANCELLATION_COLS),
             params!(generation, client_instance_id, lifetime_id, recipe_revision))).await?;
         Ok(!rows.is_empty())
@@ -6106,7 +6110,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // log by proving that at least one bounded cleanup has work first.
         let pending = self
             .session_client()
-            .query_consistent_map::<PendingMaintenanceRow, _>("maintain_media_sessions", 
+            .query_consistent_map::<PendingMaintenanceRow, _>("maintain_media_sessions",
                 format!(
                     "SELECT 1 AS pending WHERE
                     EXISTS (SELECT 1 FROM media_sessions
@@ -6769,7 +6773,9 @@ async fn renew_with_authority(
     if renewals.is_empty() {
         return Ok(Vec::new());
     }
-    if authority.is_some() && session_layout(store, true).await? != SessionLayout::Principal {
+    if authority.is_some()
+        && session_layout("renew_with_authority", store, true).await? != SessionLayout::Principal
+    {
         return Ok(Vec::new());
     }
     let layout = LocalSessionSql::load(store).await?;
