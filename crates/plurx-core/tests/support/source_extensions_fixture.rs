@@ -418,6 +418,15 @@ fn published_v124_reservation_trigger() -> &'static str {
     statement
 }
 
+/// Statements removing the D3t planning-key extension (v129): three triggers
+/// on `settings` and a marker table that holds no data of its own. Run before
+/// the coordination tail is validated, so the tail then sits at v128.
+const PLAYBACK_INPUT_KEYS_REWIND: &str = "DROP TRIGGER IF EXISTS playback_input_keys_insert;
+DROP TRIGGER IF EXISTS playback_input_keys_update;
+DROP TRIGGER IF EXISTS playback_input_keys_delete;
+DROP TABLE IF EXISTS playback_input_keys_schema;
+";
+
 /// Plan the rewind of an owned, empty v127/v128 tail to published v126.
 /// Coordination roles, interests, designations and every v3 copy index row
 /// refuse; the v124 claim reservation trigger and the managed v5 view return.
@@ -428,6 +437,12 @@ fn coordination_tail_rewind_plan(connection: &rusqlite::Connection) -> Option<St
     if version <= 126 {
         return None;
     }
+    // v129 is the D3t planning-key extension on top of the v128 tail.
+    let (version, keys_rewind) = if version == 129 {
+        (128, PLAYBACK_INPUT_KEYS_REWIND)
+    } else {
+        (version, "")
+    };
     assert!(
         matches!(version, 127 | 128),
         "only published coordination tails may be rewound"
@@ -510,6 +525,7 @@ fn coordination_tail_rewind_plan(connection: &rusqlite::Connection) -> Option<St
         "managed generation marker must match the coordination ordinal"
     );
     let mut statements = Vec::new();
+    statements.push(keys_rewind.to_owned());
     for kind in ["trigger", "table"] {
         for (_, name, _) in expected
             .iter()

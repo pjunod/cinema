@@ -908,9 +908,13 @@ mod tests {
             (rows(&conn).expect("managed shape"), version)
         };
         let before = snapshot();
-        assert_eq!(before.1, PUBLISH_MIGRATION_VERSION);
+        assert_eq!(before.1, crate::store::SQLITE_SCHEMA_VERSION);
         drop(SqliteStore::open(&path).expect("restart"));
-        assert_eq!(snapshot(), before, "a restart is a no-op at v128/v6");
+        assert_eq!(
+            snapshot(),
+            before,
+            "a restart is a no-op at the current ordinal and managed v6"
+        );
     }
 
     #[test]
