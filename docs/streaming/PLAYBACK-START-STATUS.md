@@ -1,7 +1,7 @@
 # Playback start — continuation and merge ledger
 
 **Status:** open · **Owner:** Claude (claude-opus-5-5), session
-`session_01BCWL9ypnQEiQUyRaZtMhh3`, resumed from Codex on 2026-11-11 · **Updated:** 2026-11-11.
+`session_01BCWL9ypnQEiQUyRaZtMhh3`, resumed from Codex on 2026-11-11 · **Updated:** 2026-11-12.
 
 Companion to the [implementation plan](PLAYBACK-START-PLAN.md) and
 [Phase 1 build contract](PLAYBACK-START-BUILD.md). Phase 1 merged in
@@ -38,38 +38,44 @@ with the signed-in Xcode account and Cloud Managed Apple Distribution;
 The standing publisher has not been migrated or requalified. Android 193
 and native prepared-switch/TTFF measurements remain open.
 
-## Current batch — A1/B1
+## Merged — A1/B1 first batch (#1495)
 
-Claude owns `effort/playback-start-phase2` (resumed from Codex 2026-11-11; the
-handed-over staged and unstaged layers are preserved verbatim as two
-checkpoint commits). Current main is merged in. The
-[A1/B1 implementation contract](PLAYBACK-START-A1-B1-BUILD.md) remains the
-design authority.
+#1495 merged as `41e23c193` on 2026-11-12. It carries:
 
-Built on the branch, compiled and lint-clean (plurx-core lib, plurxd bin,
-clippy `-D warnings`, rustc 1.97.1):
+- the Source growing copy engine for authenticated bounded shared playback;
+- canonical range observations, normalization and the companion verifier;
+- the copy-range consumer (coordination claim, fenced full-source
+  attestation, seal, content-addressed v3 blob, claimed
+  `fragment_index_publish` job);
+- the guarded v3 publication transaction.
 
-- Source growing engine for authenticated bounded shared playback, canonical
-  range observations, normalization and the companion verifier (Codex).
-- Copy-range consumer: the Analysis dispatcher coalesces committed ranges per
-  exact source; a fully covered title is claimed under the existing Analysis
-  lease and heartbeat, attested in one fenced full-source phase, sealed,
-  installed as a content-addressed v3 blob and published through a claimed
-  `fragment_index_publish` job.
-- v3 publication: one guarded transaction and trigger adopts a pending or
-  quarantined head at the next epoch (a healthy same-contract head keeps its
-  first variant), records only the publisher's verified location, readies the
-  Analysis and settles job and waiters, and rolls back on a pointer mismatch.
-  Real-SQLite regressions in `copy_index_v3_tests.rs`.
+The schema is SQLite v127 (coordination and v3 index) and v128
+(managed-resource v6), after #1469's v125/v126; Hiqlite chains managed
+v4→v5→v6. Older binaries refuse it, so the deploy needs the playbook's
+pre-upgrade backup. Clients: Apple 297, Android 198.
 
-Not yet built, planned [below](#after-the-first-a1b1-merge--remaining-build-order): background
-gap filling through the common engine (an index publishes today only when
-playback itself covered the whole title), a v3 consumer and peer hydration,
-discrepancy quarantine, and local-playback observations. A sealed observation index must not be bridged into the legacy
-local index store: its head-census promotion lacks the whole-title HDR10
-metadata the legacy key promises. Daemon test compilation exceeds the 8 GiB
-voter cap, so it runs on the nonvoter effort compile gate. No unit suite has
-run for this batch; the fast lane runs once after the final review.
+The fast lane passed paperwork, preflight, web and Android on the merged head.
+Its Rust and Apple jobs had failed on runner infrastructure on earlier heads,
+and Paul had it merged. Three plurx-core unit tests are red on main from
+before this batch (two `placeholder_census` tests and the source82 layout
+test).
+
+## Current batch — A1/B1 gap filling (#1520, draft)
+
+Owner: Claude (claude-opus-5-5), same session. The gap-fill draft was written
+by a claude-fable-5-2 agent and finished by Opus. Items 1–3 below are built on
+`claude/a1b1-gap-fill`; clippy and fmt are clean, and the new focused tests
+pass:
+
+1. The copy spawn and head census take `CopyGenerationOwner::{Source,
+   Analysis}`.
+2. `copyrange::fill_copy_gap` fills each first gap from an Analysis-owned
+   generation into the same observation set.
+3. The seal folds per-row HDR10 SEI facts (`Hdr10IndexMetadata::merge`) into
+   the whole-title metadata the legacy index computes.
+
+Next: an end-to-end gap-fill test on a real fixture, then items 4–6. The
+adversarial review comes before the effort gate and the effort → main PR.
 
 ## After the first A1/B1 merge — remaining build order
 
