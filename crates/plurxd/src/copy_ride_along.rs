@@ -389,6 +389,9 @@ pub(crate) struct CopyRide {
     video: CopyVideoOptions,
     stamp: SourceStamp,
     clock_reader: tokio::task::JoinHandle<()>,
+    /// Tells a clock reader that is only holding its descriptor open that
+    /// the pass is done with it: on `finish`, or when the pass is dropped.
+    ended: tokio_util::sync::DropGuard,
 }
 
 impl CopyRide {
@@ -412,12 +415,15 @@ impl CopyRide {
         let deaf = plan.deaf_clock;
         #[cfg(not(test))]
         let deaf = false;
-        let clock_reader = tokio::spawn(read_clock(clock, Arc::clone(&shared), deaf));
+        let ended = tokio_util::sync::CancellationToken::new();
+        let clock_reader =
+            tokio::spawn(read_clock(clock, Arc::clone(&shared), deaf, ended.clone()));
         Self {
             shared,
             video: plan.video,
             stamp: plan.stamp,
             clock_reader,
+            ended: ended.drop_guard(),
         }
     }
 
@@ -445,7 +451,9 @@ impl CopyRide {
             video,
             stamp,
             clock_reader,
+            ended,
         } = self;
+        drop(ended);
         if !lead_built || shared.abandoned.load(Ordering::Acquire) {
             clock_reader.abort();
         }
@@ -492,10 +500,16 @@ impl CopyRide {
 /// Drain the child's packet clock to the end of the file. What is read goes
 /// to the ride while it is still observing and nowhere once it is not.
 ///
-/// A read error ends the ride, never the read: the descriptor stays open and
-/// is tried again, so the child is never handed a broken pipe. The pass
-/// stops this task once its child is gone.
-async fn read_clock(mut clock: impl AsyncRead + Unpin, shared: Arc<RideShared>, deaf: bool) {
+/// A read error ends the ride, never the pass: the reader stops reading and
+/// holds the descriptor open, so the child is never handed a broken pipe,
+/// until the pass says it is done (`ended`, on the pass's own reap join or
+/// its drop). It does not retry and waits on no clock.
+async fn read_clock(
+    mut clock: impl AsyncRead + Unpin,
+    shared: Arc<RideShared>,
+    deaf: bool,
+    ended: tokio_util::sync::CancellationToken,
+) {
     let mut buffer = vec![0_u8; 32 * 1024];
     loop {
         match clock.read(&mut buffer).await {
@@ -508,11 +522,10 @@ async fn read_clock(mut clock: impl AsyncRead + Unpin, shared: Arc<RideShared>, 
                     shared.feed(|observer| observer.clock(&buffer[..read]));
                 }
             }
-            Err(error) => {
-                if error.kind() != std::io::ErrorKind::Interrupted {
-                    shared.abandon("copy_clock_read_failed");
-                }
-                tokio::task::yield_now().await;
+            Err(_) => {
+                shared.abandon("copy_clock_read_failed");
+                ended.cancelled().await;
+                return;
             }
         }
     }

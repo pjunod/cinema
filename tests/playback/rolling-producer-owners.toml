@@ -3905,8 +3905,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 #   lead output built and the ride is still observing, which is when the
 #   child has exited successfully and closed the clock; in every other case
 #   (a failed, killed or unwaitable child, an abandoned ride) it is aborted,
-#   so nothing waits on it without a bound. A read error ends the ride, not
-#   the read: the descriptor stays open so the child never sees EPIPE.
+#   so nothing waits on it without a bound. A read error ends the ride:
+#   the reader stops reading and holds the descriptor open, so the child
+#   never sees EPIPE, until `finish` or the pass's drop releases it. It
+#   does not retry.
 # The ride has no observer task: its state is fed in place, under one lock,
 # by the pass's own lead reader, stderr reader and this clock reader.
 # If the pass future is dropped the reader still ends with the child

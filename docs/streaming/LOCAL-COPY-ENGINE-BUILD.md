@@ -230,9 +230,9 @@ standalone form exists (item 6 step 1). This step is the ride-along.
   descriptor: the format start, only when it is a whole number of stream
   ticks, and checked against the video stream's probed first presentation
   time. Anything else abandons the ride. The clock reader drains to end
-  of file whatever the ride does. A read error abandons the ride and
-  keeps the descriptor open and read, so the child never sees a broken
-  pipe. The reader is joined only when the lead built (the child exited
+  of file whatever the ride does. A read error abandons the ride; the
+  reader then stops reading and holds the descriptor open, with no retry,
+  until the pass ends, so the child never sees a broken pipe. The reader is joined only when the lead built (the child exited
   and closed the clock); otherwise it is stopped. Nothing waits on it
   without a bound.
 - **A ride only adds:** rows that disagree with rows already held are
