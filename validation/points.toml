@@ -1131,6 +1131,7 @@ paths = [
   "crates/plurx-core/tests/decoder_selection.rs",
   "crates/plurx-core/tests/fixtures/hevc-progressive-configuration.json",
   "crates/plurx-core/tests/fixtures/dv-runtime/**",
+  "crates/plurx-core/tests/fixtures/dv-refit/**",
   "crates/plurxd/src/dv_runtime.rs",
   "crates/plurxd/src/dv_runtime/observe_tests.rs",
   "crates/plurx-core/examples/dv_target_policy.rs",
