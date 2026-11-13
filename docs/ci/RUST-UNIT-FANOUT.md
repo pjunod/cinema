@@ -185,10 +185,12 @@ literal re-keys only its reader.
 - **One shard, from the Forgejo UI:** "Re-run" on the `Rust units shard i`
   job. Its receipt artifact is overwritten; re-run the verdict and the gate
   after it if Forgejo does not do so itself.
-- **Agents (Forgejo 16 has no re-run API):** start a new lane run — close and
-  reopen the PR (`PATCH /pulls/<n>` `{"state":"closed"}` then `"open"`), or
-  push. Receipts make the new run execute only tests that have not passed
-  under their current keys, so this is the "re-run only what failed" path.
+- **Agents (Forgejo 17):** retry only the failed workflow job with
+  `POST /api/v1/repos/<owner>/<repo>/actions/jobs/<job_id>/rerun`. Use the
+  workflow job ID, not the task ID. Forgejo also reruns its dependent gates;
+  unrelated successful jobs keep their results. If source inputs changed,
+  push the corrected source and let authenticated receipts preserve matching
+  passes. The old Forgejo 16 close/reopen workaround is no longer needed.
 - **Any branch, by hand:** `POST /actions/workflows/rust-units.yml/dispatches`
   with `{"ref": "<branch>", "inputs": {"base": "<sha or origin/main>"}}`.
 
@@ -238,9 +240,9 @@ Dispatched proofs on 2026-11-13 establish the following boundaries:
 
 | Proof | Result |
 |---|---|
-| Leaf-only change (run 7615) | Only `plurx-tray` selected; all 43 cases and the final verdict passed. |
-| New commit, unchanged leaf inputs (run 7623) | Authenticated prior passes; archive, shards and baseline all skipped. Zero test bodies rerun. |
-| Core change restored to the final lane tree (run 7618) | All six shards and coverage verdict passed. Failure-only merge-base check stopped at the 25 GiB disk guard; this is incomplete qualification, not a green gate. |
+| Leaf-only change (run 7615) | Only `plurx-tray` selected; all 43 cases and final verdict passed. Wall time 34m44s, including archive33m48s. |
+| New commit, unchanged leaf inputs (run 7623) | Authenticated prior passes; archive, shards and baseline all skipped. Zero test bodies rerun; wall time14s. |
+| Core change restored to the final lane tree (run 7618) | All six shards and coverage verdict passed. Failure-only merge-base check stopped at the 25 GiB disk guard; this is incomplete qualification, not a green gate. Total54m17s; archive8m13s. |
 | Full corrected harness seed (run 7610) | 8,102 passing cases authenticated in the subsequent PR selector; 30 cases remained unpassed. Baseline capacity prevented classification. |
 
 These are execution and reuse proofs, not a measured speedup claim. Concurrent

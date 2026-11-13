@@ -1,7 +1,7 @@
 """Fast-lane throughput contracts (docs/ci/CI-THROUGHPUT.md, RUST-GATE-IMAGE.md).
 
 Each case pins one change that stopped costing lane runs: a push cancels the
-obsolete run, derivable paperwork is fixed instead of failed, the PR
+obsolete run, paperwork publication stays outside PR code, the PR
 description is read from the event file, and the Rust gate runs once, in its
 pinned image, sized from its own container.
 """

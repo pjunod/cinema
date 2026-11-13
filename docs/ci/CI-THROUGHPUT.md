@@ -62,12 +62,12 @@ fail several rules):
 
 | Rule | Runs | PRs | Now |
 |---|---|---|---|
-| mobile release counters (mostly: main claimed the same number first) | 23 | 5 | fixed by the lane |
+| mobile release counters (mostly: main claimed the same number first) | 23 | 5 | trusted publisher/local fixer |
 | `Regression-Test:` line missing for a `fix(`/`perf(` commit | 19 | 12 | author; message names the commits and the command |
-| real host names in the tree | 9 | 3 | fixed by the lane in Markdown; code is left to the author |
+| real host names in the tree | 9 | 3 | trusted publisher/local fixer in Markdown; code stays author-owned |
 | file without a functionality point | 8 | 3 | author |
 | doc over 40 KB | 4 | 3 | author |
-| doc without an index row | 4 | 1 | fixed by the lane (row from title and Status header) |
+| doc without an index row | 4 | 1 | trusted publisher/local fixer (row from title and Status header) |
 | step never started: description too long for an env var | 3 | 3 | fixed (read from the event file) |
 
 Preflight failures, 117 job logs of the 127 failed preflight jobs:
