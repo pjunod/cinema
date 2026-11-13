@@ -1,8 +1,8 @@
 # Local copy on the one engine — build plan for the rest of item 6
 
-**Status:** open — step 1 built on `item6b`, step 3 built on `step3`,
-step 4 built on `step4`, step 5 built on `step5`, steps 2 and 6–10 not
-started ·
+**Status:** open — steps 1, 3, 4 and 5 built (`item6b`, `step3`,
+`step4`, `step5`), step 6's range half built on `step6` and its
+attachment awaiting a ruling, steps 2 and 7–10 not started ·
 **Executes:** item 6 of [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md)
 under the [A1/B1 build contract](PLAYBACK-START-A1-B1-BUILD.md) ·
 **Written:** 2026-11-12 against `item6` @ `92c0e28`
@@ -465,13 +465,10 @@ the attachment in step 6.
   the fixture; a running rolling session (its flow's holds are replayed);
   an Analysis phase pausing on the recorded pressure; a kill and a real
   boot.
-- **Left for step 6, with the attachment:** the calls from
-  `vod/session.rs` (`observe_control` where a control exchange is
-  accepted, `refresh` from maintenance, `settle` from the session's
-  terminal cleanup). A session cannot hold a range until it can attach
-  one, so those call sites would be dead wiring here.
+- **Left for step 6, with the attachment:** the session's calls
+  (`observe_control`, `refresh`, `settle`); see step 6 for their owner.
 
-### Step 6 — Local serving attachment and rendered milestone (P4, P9; build contract step 4)
+### Step 6 — Local serving attachment and rendered milestone (P4, P9; build contract step 4) (range half built)
 
 - **Owner surfaces:** `vod/session.rs`, `vod/shared.rs`,
   `vod/serve/create.rs`, the retained-manifest path, the A1-N publication
@@ -496,6 +493,32 @@ the attachment in step 6.
 - **Tests:** attachment, snapshot coherence and refusal fallbacks in
   `vod/tests`; client attachment and seek tests named by the contract's
   step 5.
+- **Built (6a), the range's serving half, `copyrange/local.rs`:**
+  `snapshot()`, one view under one lock (playlist, its committed segments,
+  init, origin, completion, the bytes held in the playback cache);
+  `wait_admitted()` by A1-N's one rule, now one function
+  (`transcode::startup_admission_window_ms`) that rolling publication and
+  the Source range also call; a second range of a session whose
+  settlement is removing its directory refused
+  `copy_range_session_settling`. Tests in `copyrange/local_tests.rs`. No
+  session attaches a range, so no serving path changed.
+- **Stopped for Paul's ruling, the attachment's owner.** A VOD session is
+  an immutable-plan, `vod: true`, origin-0 presentation with no rolling
+  lease, and clients read `vod` as a whole-title timeline (web:
+  `t.vod=!!info.vod&&t.offset===0`). A growing range is an EVENT range
+  presentation, as the Source range and today's rolling fallback are
+  (`vod: false`, rolling lease, nonzero origin), which every client plays
+  today; step 5's `startup_protected` is that lease's. (a) Attach in the
+  VOD session: `CopyPlanState::Growing` through session, shared attach,
+  delivery, playlist, retained and control, plus contract step 5's EVENT
+  work on web, Apple and Android before any start uses it. (b) Attach in
+  the rolling copy start the `vod_index_pending` fallback makes
+  (`start_copy_with_audio_offset`), served rolling-shaped: its flow
+  evaluation calls `observe_control`/`refresh`, retirement `settle`, the
+  rendered report `mark_rendered`, its Activity line shows
+  `payload_bytes` and Stop retires it; copyseg answers every refusal. (b)
+  needs no client change; (a) is what this plan names. Neither fits one
+  safe PR beside 6a.
 
 ### Step 7 — Local ranges commit observations
 
@@ -576,3 +599,4 @@ session id or URL. **Tests** says whether the step's tests have been run.
 | 2026-11-12 | 3 Copy index rides the content-analysis pass | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step3` (local, on `item6b`) | Built, with its review fixes (2 majors, 9 minors): the ride consumes the lead reader's parsed fragments in place, `ridden` is pass-only, custody is bound to file and object. Clippy `-D warnings` and fmt clean, inventory and pins green. Post-deploy UHD/DV qualification open | Written, not yet run: the fast lane is their one run |
 | 2026-11-12 | 4 A local owner at P1, P2 and P5 | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step4` (local, on `step3`) | Built, with its review fixes (2 majors, 8 minors): `CopyRangeOwner` and `CopyGenerationOwner::Local`, constructed only by tests and only from a live named playback; one copy pipeline derivation (capability and probe evidence) for the Source range, Source and local renditions and the planning hint, which re-keys stripped Dolby Vision Source copies on nodes with the strip filter. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
 | 2026-11-12 | 5 Local input admission, liveness, control and reaping | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step5` (local, on #1548) | Built, with its review fixes (8 findings): `LocalCopyRange` reads under one custody carried from census to primary, presses by the rolling rule (`rolling_source_observation`, shared with maintenance), takes no copy admission, has no lease or timer, retires on drop, survives a panicking run task, and is reaped at boot; nothing starts one yet. The session's calls into it are left to step 6. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
+| 2026-11-12 | 6 Local serving attachment | claude-opus-5-5 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step6` (local, on #1555) | 6a built (range serving half: snapshot, A1-N admission, settling refusal). Attachment stopped for the owner ruling above; nothing serves from a range. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |

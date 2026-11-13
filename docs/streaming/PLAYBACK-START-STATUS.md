@@ -134,7 +134,38 @@ Decisions (Paul away):
 Still open: fleet acceptance of the items below and the limits listed under
 items 4 and 5.
 
-## Current batch — a local range's input admission (item 6, plan step 5)
+## Current batch — a local range's serving half (item 6, plan step 6a)
+
+Owner: Claude (claude-opus-5-5), same session; local branch `step6`,
+stacked on step 5 (#1555), not pushed. Clippy `-D warnings` and fmt are
+clean, the inventory and formal pins are green. The tests are written and
+wait for the fast lane.
+
+Decision (Paul away): [plan step 6](LOCAL-COPY-ENGINE-BUILD.md) cannot land
+safely as one PR, so only its range half is built. Nothing serves from a
+range yet and no serving path changed:
+
+- `LocalCopyRange::snapshot` is one view under one lock: the playlist,
+  the committed segments behind it, init, origin, completion and the bytes
+  the range holds in the playback cache, for its session's Activity line.
+- `LocalCopyRange::wait_admitted` applies A1-N's one rule. That rule is
+  now one function, `transcode::startup_admission_window_ms`; rolling
+  publication and the Source range call it too, with the same values.
+- A second range of a session whose settlement is removing the session's
+  directory is refused `copy_range_session_settling`; the session then
+  serves that start another way.
+
+Ruling needed (Paul): which session owns the attachment. The plan names
+the VOD session. A VOD session is `vod: true` with origin 0 and no rolling
+lease, and every client reads `vod` as a whole-title timeline, so serving
+a growing range from it needs a growing plan state through the VOD serving
+stack, plus EVENT support on web, Apple and Android (contract step 5). The
+other choice is the rolling copy start the `vod_index_pending` fallback
+already makes. It would serve the range rolling-shaped, as the Source range
+is served, which every client plays today, and step 5's API was built
+against that session's lease. The plan's step 6 lays out both options.
+
+## Previous batch — a local range's input admission (item 6, plan step 5)
 
 Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
 agent on local branch `step5`, stacked on #1548, not pushed.
@@ -453,10 +484,10 @@ steps with an Execution log. Its step 1, durable demand, is built on
   have done so since item 2. The fix redefines that trigger and is one
   schema version on both backends; it is plan step 2.
 
-Plan steps 3, 4 and 5 are built on `step3`, `step4` and `step5`: see the
-batches above.
+Plan steps 3, 4 and 5 are built on `step3`, `step4` and `step5`, and step
+6's range half on `step6`: see the batches above.
 
-Remaining for item 6, not started (plan step 2 and steps 6-10):
+Remaining for item 6 (plan step 2, step 6's attachment, steps 7-10):
 
 - Local rolling copy and indexed-VOD copy still run their own producers
   (`copy_pipe_args` to the rolling segmenter, and plan-verified VOD
