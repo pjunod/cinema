@@ -1,6 +1,7 @@
 # Dolby Vision title scanning — metadata, shared reads and demand identity
 
-**Status:** open · Implementation reviewed in [PR #1301](http://forge.lan:3000/noirr/plurx/pulls/1301); qualification and landing tracked there. Not deployed.
+**Status:** implemented scanner; live playback scheduling correction in progress.
+The scheduling correction still requires adversarial review, qualification and operator deployment.
 
 Companion to [the display-targeted DV build ledger](DISPLAY-TARGETED-DV-BUILD.md)
 (target selection and rendering) — this is how the title scanner reads and
@@ -57,6 +58,31 @@ It runs two ways, with one aggregate:
   stored and settles without reading the file (and qualifies a FEL title). A
   fresh title's job waits up to an hour for the node-local pass that reads it
   anyway.
+
+## Playback qualification precedes maintenance scanning
+
+An exact, unexpired `playback_qualification` waiter with an outstanding
+source-bound FEL recipe promotes its current
+`dv_title_scan` demand ahead of ordinary probe and title pagination, including
+when its revision is behind the maintenance cursor. The worker checks current
+source facts, readability, installed scanner and the requested encoder identity
+before replacing an ordinary title task. Cancellation reaps the existing child
+and settles its typed yield before the replacement starts.
+
+The promoted turn measures only the explicitly requested FEL recipe. Its
+bounded picture windows do not depend on a complete title aggregate, so it
+publishes the recipe receipt before a full-file metadata scan. It yields the
+unfinished aggregate job back to maintenance; a qualification receipt never
+stands in for complete title metadata or marks the scan complete. Window
+coverage and quality thresholds remain unchanged, so this removes queue and
+whole-file prerequisites rather than promising a fixed measurement duration.
+
+Qualification uses the existing spare-capacity companion admission alongside
+playback, within the CPU and GPU pools. Waiting viewers retain priority. It
+still owns the heavy lane and uses the same durable job, source grant,
+foreground sharing permission, physical pause and freshness fences. Expired
+playback interest returns the task to maintenance. Ordinary complete-title
+scans retain their idle-node admission and index-read reuse.
 
 ## Scanner identity keeps renderer updates from re-queuing titles
 

@@ -26,6 +26,11 @@ pub(super) struct TitleTask {
     job_id: String,
     probe_pipeline: String,
     probe_after: Option<CandidateCursor>,
+    scanner: String,
+    backend_digest: String,
+    file_id: i64,
+    probe_revision: i64,
+    playback_requested: bool,
 }
 impl TitleTask {
     /// Discovery is bounded by the existing runner tick. Durable demand survives
@@ -34,14 +39,12 @@ impl TitleTask {
         state: &AppState,
         boot: &str,
         after: &mut i64,
+        playback_only: bool,
     ) -> Result<Option<Self>, StoreError> {
         let authority = state.jobs.execution_authority();
         if !authority.may_execute_job(JobKind::DvTitleScan).await {
             return Ok(None);
         }
-        let Some(admission) = state.transcode.admit_dv_title().await else {
-            return Ok(None);
-        };
         let tools = match ToolSet::capture().await {
             Ok(Some(tools)) => tools,
             Ok(None) => return Ok(None),
@@ -54,51 +57,44 @@ impl TitleTask {
             return Ok(None);
         };
         let scanner = tools.title_scanner_digest();
-        let demands = state.store.dv_title_demands(&scanner, *after).await?;
+        let demands = state
+            .store
+            .dv_title_demands(&scanner, *after, now_ms())
+            .await?;
         if demands.is_empty() {
+            if playback_only {
+                return Ok(None);
+            }
             *after = 0;
             #[cfg(target_os = "linux")]
             requalify_stale_fel_titles(state, &tools, &scanner).await;
             return Ok(None);
         }
+        if !playback_only && !demands.iter().any(|demand| !demand.playback_requested) {
+            *after = 0;
+        }
         for mut demand in demands {
-            *after = demand.probe_revision;
-            let Some(file) = state.store.get_file(demand.file_id).await? else {
+            if playback_only && !demand.playback_requested {
+                continue;
+            }
+            if !demand.playback_requested {
+                *after = demand.probe_revision;
+            }
+            let Some(file) = eligible_file(state, &demand, &tools.backend_digest()).await? else {
                 continue;
             };
-            if file.size != demand.source_size
-                || file.mtime != demand.source_mtime
-                || snapshot(&file.path).await != Some((file.size, file.mtime))
-                || tokio::fs::File::open(&file.path).await.is_err()
-            {
-                continue;
-            }
-            #[cfg(target_os = "linux")]
-            {
-                let pending = plurx_core::transcode::dv_fel_qualification::pending_recipes(
-                    &demand.probe_json,
-                    file.size,
-                    file.mtime,
-                );
-                if !pending.is_empty() {
-                    let backend = state
-                        .transcode
-                        .fel_identity(&tools.backend_digest())
-                        .await
-                        .ok();
-                    if !pending
-                        .iter()
-                        .any(|request| Some(&request.backend_identity) == backend.as_ref())
-                    {
-                        continue;
-                    }
-                }
-            }
             // The local index pass reads this title next, and reads its RPUs
             // in that same read: do not read the file twice.
-            if state.jobs.title_scan_awaits_index_pass(file.id) {
+            if !demand.playback_requested && state.jobs.title_scan_awaits_index_pass(file.id) {
                 continue;
             }
+            let Some(admission) = state
+                .transcode
+                .admit_dv_title(demand.playback_requested)
+                .await
+            else {
+                return Ok(None);
+            };
             let Some(revision) = state
                 .store
                 .bind_dv_title_demand(demand.probe_revision, &scanner)
@@ -205,6 +201,10 @@ impl TitleTask {
             )
             .await?;
             let cancel = CancellationToken::new();
+            let file_id = file.id;
+            let probe_revision = demand.probe_revision;
+            let playback_requested = demand.playback_requested;
+            let backend_digest = tools.backend_digest();
             let work = execute(
                 state.clone(),
                 file,
@@ -222,6 +222,11 @@ impl TitleTask {
                 job_id: id,
                 probe_pipeline,
                 probe_after: None,
+                scanner,
+                backend_digest,
+                file_id,
+                probe_revision,
+                playback_requested,
             }));
         }
         Ok(None)
@@ -230,6 +235,31 @@ impl TitleTask {
     /// Scheduler checks only locally readable, compatible, live ordinary work.
     /// Durable SQL excludes stale coordinators and other resource blockers.
     pub(super) async fn should_yield(&mut self, state: &AppState) -> Result<bool, StoreError> {
+        let demands = state
+            .store
+            .dv_title_demands(&self.scanner, 0, now_ms())
+            .await?;
+        let mut own_live = false;
+        for demand in demands.iter().filter(|demand| demand.playback_requested) {
+            if eligible_file(state, demand, &self.backend_digest)
+                .await?
+                .is_none()
+            {
+                continue;
+            }
+            if !self.playback_requested {
+                // A viewer may upgrade the very title this maintenance pass owns.
+                return Ok(true);
+            }
+            if demand.file_id == self.file_id && demand.probe_revision == self.probe_revision {
+                own_live = true;
+            }
+        }
+        if self.playback_requested {
+            // Live bounded qualification holds its lane until its interest ends;
+            // an ordinary probe must not continually restart its measurement.
+            return Ok(!own_live);
+        }
         if !state
             .jobs
             .execution_authority()
@@ -290,6 +320,48 @@ impl TitleTask {
         // Never drop the child future to release the lane: reap, settle, finish.
         self.work.as_mut().await
     }
+}
+
+/// Scheduling interest never substitutes for a locally readable current source
+/// or for the backend able to satisfy its exact pending FEL recipe.
+async fn eligible_file(
+    state: &AppState,
+    demand: &TitleDemand,
+    backend_digest: &str,
+) -> Result<Option<plurx_core::domain::MediaFile>, StoreError> {
+    let Some(file) = state.store.get_file(demand.file_id).await? else {
+        return Ok(None);
+    };
+    if file.size != demand.source_size
+        || file.mtime != demand.source_mtime
+        || snapshot(&file.path).await != Some((file.size, file.mtime))
+        || tokio::fs::File::open(&file.path).await.is_err()
+    {
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let pending = plurx_core::transcode::dv_fel_qualification::pending_recipes(
+            &demand.probe_json,
+            file.size,
+            file.mtime,
+        );
+        if demand.playback_requested && pending.is_empty() {
+            return Ok(None);
+        }
+        if !pending.is_empty() {
+            let backend = state.transcode.fel_identity(backend_digest).await.ok();
+            if !pending
+                .iter()
+                .any(|request| Some(&request.backend_identity) == backend.as_ref())
+            {
+                return Ok(None);
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = backend_digest;
+    Ok(Some(file))
 }
 
 /// A renderer, recipe or encoder change leaves every FEL verdict measured
@@ -374,29 +446,75 @@ async fn execute(
     let source_version = crate::fragment_index_cluster::inspect_source(&file)
         .await
         .ok();
-    let result = match reused {
-        Some(stats) => Ok(stats),
-        None => {
-            super::run_source_admitted_probe(
-                &state.transcode,
-                &admission,
-                &cancel,
-                &shutdown,
-                None,
-                &fence,
-                || async {
-                    source_version.is_some()
-                        && tools.is_current().await
-                        && crate::fragment_index_cluster::inspect_source(&file)
-                            .await
-                            .ok()
-                            == source_version
-                },
-                super::dv_title::scan(&file, &demand.probe_json, &tools),
-            )
-            .await
+    let result = acquire_title(
+        demand.playback_requested,
+        reused,
+        super::run_source_admitted_probe(
+            &state.transcode,
+            &admission,
+            &cancel,
+            &shutdown,
+            None,
+            &fence,
+            || async {
+                source_version.is_some()
+                    && tools.is_current().await
+                    && crate::fragment_index_cluster::inspect_source(&file)
+                        .await
+                        .ok()
+                        == source_version
+            },
+            super::dv_title::scan(&file, &demand.probe_json, &tools),
+        ),
+        qualify_owned(
+            &state,
+            &file,
+            &demand,
+            &tools,
+            &admission,
+            &cancel,
+            &shutdown,
+            &fence,
+            &source_version,
+        ),
+    )
+    .await;
+    if let Ok(TitleAcquisition::QualificationOnly(reused)) = result {
+        // The independently stored quality receipt can serve the viewer now.
+        // Complete-title statistics remain separate maintenance work: never
+        // use a live admission to scan the full source or invent an aggregate.
+        let settlement =
+            if snapshot(&file.path).await != Some((demand.source_size, demand.source_mtime)) {
+                JobSettlement::Stop {
+                    error_code: "title_source_changed".into(),
+                }
+            } else {
+                JobSettlement::Yield {
+                    error_code: Some(
+                        if shutdown.is_cancelled() || cancel.is_cancelled() {
+                            "title_interrupted"
+                        } else {
+                            "title_qualification_continuation"
+                        }
+                        .into(),
+                    ),
+                    not_before_ms: now_ms().saturating_add(1000),
+                    checkpoint: reused.map(|stats| {
+                        serde_json::json!({"fel_title_aggregate":TitleOutput {
+                            file_id: file.id, probe_revision: demand.probe_revision,
+                            source_size: demand.source_size, source_mtime: demand.source_mtime,
+                            scanner_digest: tools.title_scanner_digest(), stats,
+                        }})
+                    }),
+                }
+            };
+        if let Err(error) = fence.settle(settlement).await {
+            tracing::warn!(%error,"title qualification continuation unavailable");
         }
-    };
+        active.finish().await;
+        drop(admission);
+        return false;
+    }
     let mut published = false;
     let settlement = if shutdown.is_cancelled() || cancel.is_cancelled() {
         // A manual cancel/source supersession has already invalidated our token,
@@ -413,51 +531,7 @@ async fn execute(
         })
     } else {
         match result {
-            Ok(stats) => {
-                // A Profile 7 FEL title is qualified for the reconstructed
-                // 8.1 here, once, while this job holds it. Foreground work
-                // preempts only the qualification: the aggregate is still
-                // published, and the verdict stays missing until a later play
-                // asks again.
-                let qualification = cancel.child_token();
-                match super::run_source_admitted_probe(
-                    &state.transcode,
-                    &admission,
-                    &qualification,
-                    &shutdown,
-                    None,
-                    &fence,
-                    || async {
-                        source_version.is_some()
-                            && tools.is_current().await
-                            && crate::fragment_index_cluster::inspect_source(&file)
-                                .await
-                                .ok()
-                                == source_version
-                    },
-                    super::fel_qualification::qualify_if_due(
-                        &state,
-                        &file,
-                        &demand.probe_json,
-                        &tools,
-                        &admission,
-                        &qualification,
-                    ),
-                )
-                .await
-                {
-                    Ok(super::fel_qualification::Qualification::Stored(verdict)) => {
-                        tracing::debug!(target: "plurxd::dv", file_id = file.id,
-                            admitted = verdict.admitted, "FEL qualification stored");
-                    }
-                    Ok(outcome) => {
-                        tracing::debug!(target: "plurxd::dv", file_id = file.id, ?outcome, "FEL qualification");
-                    }
-                    Err(error) => {
-                        tracing::warn!(target: "plurxd::dv", file_id = file.id, %error,
-                            "FEL qualification did not complete; the title keeps the plain conversion");
-                    }
-                }
+            Ok(TitleAcquisition::Complete(stats)) => {
                 let output = TitleOutput {
                     file_id: file.id,
                     probe_revision: demand.probe_revision,
@@ -509,6 +583,9 @@ async fn execute(
                     }
                 }
             }
+            Ok(TitleAcquisition::QualificationOnly(_)) => {
+                unreachable!("live work returned after yielding")
+            }
             Err(error) => {
                 tracing::warn!(%error,"complete-title scan failed");
                 Some(JobSettlement::Retry {
@@ -529,4 +606,104 @@ async fn execute(
     active.finish().await;
     drop(admission);
     published
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "qualification retains the title attempt's source, fence and admission"
+)]
+async fn qualify_owned(
+    state: &AppState,
+    file: &plurx_core::domain::MediaFile,
+    demand: &TitleDemand,
+    tools: &ToolSet,
+    admission: &crate::transcode::FragmentAdmission,
+    cancel: &CancellationToken,
+    shutdown: &CancellationToken,
+    fence: &crate::background_jobs::JobFence,
+    source_version: &Option<String>,
+) {
+    let qualification = cancel.child_token();
+    match super::run_source_admitted_probe(
+        &state.transcode,
+        admission,
+        &qualification,
+        shutdown,
+        None,
+        fence,
+        || async {
+            source_version.is_some()
+                && tools.is_current().await
+                && crate::fragment_index_cluster::inspect_source(file)
+                    .await
+                    .ok()
+                    == *source_version
+        },
+        async {
+            if demand.playback_requested {
+                super::fel_qualification::qualify_requested_if_due(
+                    state,
+                    file,
+                    &demand.probe_json,
+                    tools,
+                    admission,
+                    &qualification,
+                )
+                .await
+            } else {
+                super::fel_qualification::qualify_if_due(
+                    state,
+                    file,
+                    &demand.probe_json,
+                    tools,
+                    admission,
+                    &qualification,
+                )
+                .await
+            }
+        },
+    )
+    .await
+    {
+        Ok(super::fel_qualification::Qualification::Stored(verdict)) => {
+            tracing::debug!(target: "plurxd::dv", file_id = file.id,
+                            admitted = verdict.admitted, "FEL qualification stored");
+        }
+        Ok(outcome) => {
+            tracing::debug!(target: "plurxd::dv", file_id = file.id, ?outcome, "FEL qualification");
+        }
+        Err(error) => {
+            tracing::warn!(target: "plurxd::dv", file_id = file.id, %error,
+                            "FEL qualification did not complete; the title keeps the plain conversion");
+        }
+    }
+}
+
+/// A viewer's bounded quality receipt and the maintenance aggregate are
+/// independent outputs. Constructing a scan future never starts its I/O.
+enum TitleAcquisition {
+    QualificationOnly(Option<plurx_core::scan::dv_title::DvTitleStats>),
+    Complete(plurx_core::scan::dv_title::DvTitleStats),
+}
+
+async fn acquire_title<S, Q>(
+    playback_requested: bool,
+    reused: Option<plurx_core::scan::dv_title::DvTitleStats>,
+    scan: S,
+    qualify: Q,
+) -> Result<TitleAcquisition, String>
+where
+    S: Future<Output = Result<plurx_core::scan::dv_title::DvTitleStats, String>>,
+    Q: Future<Output = ()>,
+{
+    if playback_requested {
+        qualify.await;
+        return Ok(TitleAcquisition::QualificationOnly(reused));
+    }
+    let stats = match reused {
+        Some(stats) => stats,
+        None => scan.await?,
+    };
+    qualify.await;
+    Ok(TitleAcquisition::Complete(stats))
 }

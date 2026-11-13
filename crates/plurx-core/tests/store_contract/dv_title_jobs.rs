@@ -55,7 +55,7 @@ async fn seed(store: &Arc<dyn Store>, name: &str) -> MediaFile {
 }
 async fn demand(store: &Arc<dyn Store>, file: i64, scanner: &str) -> TitleDemand {
     store
-        .dv_title_demands(scanner, 0)
+        .dv_title_demands(scanner, 0, 1_000)
         .await
         .expect("demand")
         .into_iter()
@@ -208,7 +208,7 @@ async fn title_publication_is_atomic_idempotent_and_never_self_enqueues() {
         );
         assert!(
             store
-                .dv_title_demands(&scanner, 0)
+                .dv_title_demands(&scanner, 0, 1_000)
                 .await
                 .expect("settled demand")
                 .is_empty(),
@@ -281,7 +281,7 @@ async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yiel
         );
         assert!(
             store
-                .dv_title_demands(&scanner, 0)
+                .dv_title_demands(&scanner, 0, 1_000)
                 .await
                 .expect("cancel suppression")
                 .is_empty(),
@@ -295,7 +295,7 @@ async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yiel
             Some(demand.probe_revision),
         );
         assert!(store
-            .dv_title_demands(&scanner, 0)
+            .dv_title_demands(&scanner, 0, 1_000)
             .await
             .expect("cancel remains suppressed")
             .is_empty());
@@ -470,7 +470,7 @@ async fn title_demand_and_manual_cancel_suppression_survive_store_reopen() {
     let store: Arc<dyn Store> =
         Arc::new(plurx_core::store::SqliteStore::open(&path).expect("reopen cancelled"));
     assert!(store
-        .dv_title_demands(&scanner, 0)
+        .dv_title_demands(&scanner, 0, 1_000)
         .await
         .expect("suppressed")
         .is_empty());
@@ -482,7 +482,7 @@ async fn title_demand_and_manual_cancel_suppression_survive_store_reopen() {
         Some(current.probe_revision)
     );
     assert!(store
-        .dv_title_demands(&scanner, 0)
+        .dv_title_demands(&scanner, 0, 1_000)
         .await
         .expect("still suppressed")
         .is_empty());
@@ -827,7 +827,7 @@ async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the
         assert!(store.dv_fel_stale_titles(&identity, 0).await.is_err());
         // The settled title has no demand until a play asks for it again.
         assert!(store
-            .dv_title_demands(&scanner, 0)
+            .dv_title_demands(&scanner, 0, 1_000)
             .await
             .expect("settled")
             .is_empty());
@@ -1079,7 +1079,7 @@ async fn fel_recipe_variants_preserve_peers_and_late_requests_reopen_the_title_o
             .request_dv_fel_variant(id, &second)
             .await
             .expect("late request"));
-        assert!(store.dv_title_demands(&scanner,0).await.expect("running demand").iter().all(|d|d.file_id!=id));
+        assert!(store.dv_title_demands(&scanner, 0, 1_000).await.expect("running demand").iter().all(|d|d.file_id!=id));
         // Qualification Busy/preempted does not complete its request. The same
         // durable title job must be discoverable and reclaimable after Yield,
         // including the recipe which arrived after its original snapshot.
@@ -1134,7 +1134,7 @@ async fn fel_recipe_variants_preserve_peers_and_late_requests_reopen_the_title_o
             JobPublishOutcome::Published { .. }
         ));
         assert!(store
-            .dv_title_demands(&scanner, 0)
+            .dv_title_demands(&scanner, 0, 1_000)
             .await
             .expect("pending wakes after completion")
             .iter()
@@ -1241,6 +1241,273 @@ async fn fel_recipe_variants_preserve_peers_and_late_requests_reopen_the_title_o
             "oldest complete variant evicts only under bounded pressure"
         );
         eprintln!("exact FEL variant backend completed: {backend}");
+    })
+    .await;
+}
+
+/// A viewer interest uses the ordinary enqueue authority and claim path.
+async fn playback_title(
+    store: &Arc<dyn Store>,
+    demand: &TitleDemand,
+    scanner: &str,
+    deadline_ms: Option<i64>,
+) -> String {
+    let recipe = playback_recipe(demand);
+    assert!(store
+        .request_dv_fel_variant(demand.file_id, &recipe)
+        .await
+        .expect("pending exact recipe"));
+    let id = uuid::Uuid::new_v4().to_string();
+    let outcome = store
+        .enqueue_job(EnqueueJob {
+            id: id.clone(),
+            payload: JobPayload::DvTitleScan {
+                file_id: demand.file_id,
+                source_size: demand.source_size,
+                source_mtime: demand.source_mtime,
+                probe_revision: demand.probe_revision,
+                scanner_digest: scanner.into(),
+            },
+            dedupe_key: format!("playback-title:{id}"),
+            priority: 3,
+            not_before_ms: 1_000,
+            now_ms: 1_000,
+            request: JobRequest {
+                scope: "playback-title".into(),
+                request_id: id.clone(),
+                request_digest: "b".repeat(64),
+                consumer_kind: "playback_qualification".into(),
+                consumer_ref: demand.file_id.to_string(),
+                target_node_id: None,
+                deadline_ms,
+                retain_identity: false,
+            },
+        })
+        .await
+        .expect("enqueue viewer through actual source authority");
+    assert!(matches!(outcome, EnqueueOutcome::Accepted { .. }));
+    id
+}
+
+#[tokio::test]
+async fn title_live_playback_demands_precede_cursor_and_remain_visible_while_running() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let viewer = seed_playback(&store, "title-live-viewer").await;
+        let requested = bound(&store, viewer.id, &scanner).await;
+        let ordinary = seed(&store, "title-live-ordinary").await;
+        let ordinary_demand = bound(&store, ordinary.id, &scanner).await;
+        let job_id = playback_title(&store, &requested, &scanner, Some(5_000)).await;
+        let rows = store
+            .dv_title_demands(&scanner, requested.probe_revision, 1_001)
+            .await
+            .expect("live demand behind cursor");
+        assert_eq!(
+            rows.iter().map(|d| d.file_id).collect::<Vec<_>>(),
+            vec![viewer.id, ordinary.id],
+            "{backend}"
+        );
+        assert!(rows[0].playback_requested);
+        assert_eq!(rows[0].queued_job_id.as_deref(), Some(job_id.as_str()));
+        assert!(!rows[1].playback_requested);
+        let _running = claim(&store, &job_id, 1_002).await;
+        let rows = store
+            .dv_title_demands(&scanner, ordinary_demand.probe_revision, 1_003)
+            .await
+            .expect("running live demand");
+        assert_eq!(rows.len(), 1, "{backend}");
+        assert!(rows[0].playback_requested);
+        assert!(rows[0].queued_job_id.is_none());
+        assert!(store.dv_title_demands(&scanner, 0, -1).await.is_err());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn title_expired_unbounded_cancelled_and_stale_playback_do_not_promote() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        for case in ["expired", "unbounded", "cancelled", "source", "scanner"] {
+            let file = seed_playback(&store, &format!("title-inactive-{case}")).await;
+            let requested = bound(&store, file.id, &scanner).await;
+            let deadline = match case {
+                "expired" => Some(1_001),
+                "unbounded" => None,
+                _ => Some(5_000),
+            };
+            let job_id = playback_title(&store, &requested, &scanner, deadline).await;
+            match case {
+                "cancelled" => {
+                    store
+                        .cancel_waiter(CancelWaiter {
+                            scope: "playback-title".into(),
+                            request_id: job_id,
+                            now_ms: 1_001,
+                        })
+                        .await
+                        .expect("cancel viewer");
+                }
+                "source" => {
+                    store
+                        .upsert_file(
+                            file.item_id,
+                            file.path.to_str().expect("path"),
+                            file.size + 1,
+                            file.mtime + 1,
+                            &probe(),
+                        )
+                        .await
+                        .expect("replace source");
+                }
+                "scanner" => {
+                    store
+                        .bind_dv_title_demand(requested.probe_revision, &"c".repeat(64))
+                        .await
+                        .expect("replace scanner generation");
+                }
+                _ => {}
+            }
+            let rows = store
+                .dv_title_demands(&scanner, 0, 1_001)
+                .await
+                .expect("inactive viewer");
+            assert!(
+                rows.iter().all(|d| !d.playback_requested),
+                "{backend}: {case}"
+            );
+            let cursor = rows
+                .iter()
+                .map(|d| d.probe_revision)
+                .max()
+                .unwrap_or(requested.probe_revision);
+            assert!(
+                store
+                    .dv_title_demands(&scanner, cursor, 1_001)
+                    .await
+                    .expect("past cursor")
+                    .iter()
+                    .all(|d| d.file_id != file.id),
+                "{backend}: {case}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn title_ordinary_demands_keep_bounded_revision_paging() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let mut ids = Vec::new();
+        for n in 0..130 {
+            ids.push(seed(&store, &format!("title-page-{n}")).await.id);
+        }
+        let first = store
+            .dv_title_demands(&scanner, 0, 1_000)
+            .await
+            .expect("first page");
+        assert_eq!(first.len(), 128, "{backend}");
+        assert!(first.iter().all(|d| !d.playback_requested));
+        assert!(first
+            .windows(2)
+            .all(|d| d[0].probe_revision < d[1].probe_revision));
+        let second = store
+            .dv_title_demands(&scanner, first.last().expect("page").probe_revision, 1_000)
+            .await
+            .expect("remaining page");
+        assert_eq!(
+            second.iter().map(|d| d.file_id).collect::<Vec<_>>(),
+            ids[128..],
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+async fn seed_playback(store: &Arc<dyn Store>, name: &str) -> MediaFile {
+    let file = seed(store, name).await;
+    let mut fel_probe = probe();
+    fel_probe.dolby_vision.el_present = Some(true);
+    store
+        .upsert_file(
+            file.item_id,
+            file.path.to_str().expect("path"),
+            file.size,
+            file.mtime,
+            &fel_probe,
+        )
+        .await
+        .expect("FEL source facts");
+    store.get_file(file.id).await.expect("file").expect("file")
+}
+
+fn playback_recipe(
+    demand: &TitleDemand,
+) -> plurx_core::transcode::dv_fel_qualification::FelRecipeRequest {
+    use plurx_core::transcode::{
+        dv_fel_qualification as q, EnhancementRateEnvelope, EnhancementRateLimits,
+        EnhancementRateProvenance,
+    };
+    let envelope = EnhancementRateEnvelope::resolve(
+        90_000,
+        EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+        3840,
+        2160,
+        (24, 1),
+        true,
+        EnhancementRateLimits::default(),
+    )
+    .expect("recipe envelope");
+    q::FelRecipeRequest::new(
+        "b".repeat(64),
+        demand.source_size,
+        demand.source_mtime,
+        envelope,
+        q::FelRecipeOutput::new(0, (3840, 2160), (24, 1)),
+    )
+}
+
+#[tokio::test]
+async fn title_consumed_playback_recipe_returns_to_ordinary_paging() {
+    use plurx_core::transcode::dv_fel_qualification as q;
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let file = seed_playback(&store, "title-consumed-playback").await;
+        let demand = bound(&store, file.id, &scanner).await;
+        let _job = playback_title(&store, &demand, &scanner, Some(5_000)).await;
+        assert!(
+            store
+                .dv_title_demands(&scanner, demand.probe_revision, 1_001)
+                .await
+                .expect("live")[0]
+                .playback_requested
+        );
+        let request = playback_recipe(&demand);
+        let verdict =
+            q::FelVerdict::unmeasurable(request.identity.clone(), file.size, file.mtime, 1_002);
+        assert!(store
+            .put_dv_fel_verdict(
+                file.id,
+                file.size,
+                file.mtime,
+                &serde_json::to_value(q::FelRecipeVerdict { request, verdict }).expect("receipt")
+            )
+            .await
+            .expect("independent quality receipt"));
+        assert!(
+            store
+                .dv_title_demands(&scanner, demand.probe_revision, 1_003)
+                .await
+                .expect("past cursor")
+                .is_empty(),
+            "{backend}"
+        );
+        let maintenance = store
+            .dv_title_demands(&scanner, 0, 1_003)
+            .await
+            .expect("maintenance");
+        assert_eq!(maintenance.len(), 1, "{backend}");
+        assert!(!maintenance[0].playback_requested);
     })
     .await;
 }

@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "b0f1a58ca4f6ce6b16c1e9f501616397cc475652b11b24f60f37b8ac634b83ca"
+        "sha256": "5dac72bef550857c98d15da7f59c2c36661f3c958bc0661d7cde983c6ad4bfb4"
       },
       {
         "table": "31 authority implementation",
@@ -249,7 +249,7 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "6fca497a045451153b9232eeac6ad404e8fe5eb15b875263c460e9762c0c02c3"
+        "sha256": "24337f3f22d9922b34ca62beb8ebcb4e6958ca619da1b4023ab1a01364b47f9c"
       },
       {
         "table": "42 daemon schedule loop no token",

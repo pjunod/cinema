@@ -92,7 +92,11 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         );
     }
     let scanner = "a".repeat(64);
-    let revision = store.dv_title_demands(&scanner, 0).await.expect("demand")[0].probe_revision;
+    let revision = store
+        .dv_title_demands(&scanner, 0, now_ms())
+        .await
+        .expect("demand")[0]
+        .probe_revision;
     let revision = store
         .bind_dv_title_demand(revision, &scanner)
         .await
@@ -119,7 +123,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
                     source_size: size,
                     source_mtime: mtime,
                     probe_revision: revision,
-                    scanner_digest: scanner
+                    scanner_digest: scanner.clone()
                 },
                 dedupe_key: "title-priority".into(),
                 priority: 0,
@@ -219,6 +223,11 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         job_id: title_id.clone(),
         probe_pipeline: "a".repeat(64),
         probe_after: None,
+        scanner: "a".repeat(64),
+        backend_digest: "b".repeat(64),
+        file_id: file,
+        probe_revision: revision,
+        playback_requested: false,
     };
     assert!(!task
         .should_yield(&state)
@@ -244,6 +253,54 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
     task.probe_after = None;
     assert!(!task.should_yield(&state).await.expect("offline first page"));
     assert!(!task.should_yield(&state).await.expect("offline next page"));
+    let viewer_id = uuid::Uuid::new_v4().to_string();
+    let mut viewer_request = request(&viewer_id);
+    viewer_request.consumer_kind = "playback_qualification".into();
+    viewer_request.deadline_ms = Some(now_ms().saturating_add(60_000));
+    assert!(matches!(
+        store
+            .enqueue_job(EnqueueJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                payload: JobPayload::DvTitleScan {
+                    file_id: file,
+                    source_size: size,
+                    source_mtime: mtime,
+                    probe_revision: revision,
+                    scanner_digest: scanner,
+                },
+                dedupe_key: "title-priority".into(),
+                priority: 3,
+                not_before_ms: now_ms(),
+                now_ms: now_ms(),
+                request: viewer_request,
+            })
+            .await
+            .expect("join exact running title"),
+        EnqueueOutcome::Existing { .. }
+    ));
+    assert!(!task
+        .should_yield(&state)
+        .await
+        .expect("interest without an exact pending recipe cannot preempt"));
+    // A waiter alone cannot hold live admission once its exact recipe work
+    // is absent. Cancellation likewise returns the lane to maintenance.
+    task.playback_requested = true;
+    assert!(task
+        .should_yield(&state)
+        .await
+        .expect("no exact pending recipe retains no live lane"));
+    store
+        .cancel_waiter(plurx_core::store::background_jobs::CancelWaiter {
+            scope: "title-priority".into(),
+            request_id: viewer_id,
+            now_ms: now_ms(),
+        })
+        .await
+        .expect("viewer leaves");
+    assert!(task
+        .should_yield(&state)
+        .await
+        .expect("live admission returns to maintenance"));
 }
 
 #[tokio::test]
@@ -263,6 +320,11 @@ async fn title_stop_awaits_owned_work_instead_of_dropping_it() {
         job_id: uuid::Uuid::new_v4().to_string(),
         probe_pipeline: "a".repeat(64),
         probe_after: None,
+        scanner: "a".repeat(64),
+        backend_digest: "b".repeat(64),
+        file_id: 0,
+        probe_revision: 0,
+        playback_requested: false,
     };
     assert!(!task.stop().await);
     assert!(reaped.load(std::sync::atomic::Ordering::Acquire));
@@ -284,7 +346,10 @@ async fn title_admission_accounts_one_thread_and_reaps_before_ordinary_admission
         EncoderCaps::default(),
         Pipeline::Cpu,
     ));
-    let admission = manager.admit_dv_title().await.expect("title admission");
+    let admission = manager
+        .admit_dv_title(false)
+        .await
+        .expect("title admission");
     assert_eq!(manager.test_software_threads_in_use(), 1);
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
@@ -454,7 +519,7 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
     );
     assert!(
         store
-            .dv_title_demands(&tools.title_scanner_digest(), 0)
+            .dv_title_demands(&tools.title_scanner_digest(), 0, now_ms())
             .await
             .expect("demands")
             .iter()
@@ -476,7 +541,7 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
             .expect("probe");
         let admission = state
             .transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .expect("title admission");
         let token = CancellationToken::new();
@@ -521,7 +586,7 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
     let started = std::time::Instant::now();
     let scanner = tools.title_scanner_digest();
     let mut demand = store
-        .dv_title_demands(&scanner, 0)
+        .dv_title_demands(&scanner, 0, now_ms())
         .await
         .expect("demands")
         .into_iter()
@@ -603,7 +668,7 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
     .expect("active job");
     let admission = state
         .transcode
-        .admit_dv_title()
+        .admit_dv_title(false)
         .await
         .expect("title admission");
     let published = execute(
@@ -651,6 +716,7 @@ fn stored_title() -> TitleDemand {
     });
     TitleDemand {
         queued_job_id: None,
+        playback_requested: false,
         file_id: 9,
         probe_revision: 7,
         source_size: 1,
@@ -698,7 +764,7 @@ fn title_discovery_waits_for_the_pass_then_reuses_by_generation() {
         .find("demand.probe_revision = revision;")
         .expect("rebind");
     assert!(wait < bind && bind < reuse && reuse < moved);
-    assert!(source.contains("let result = match reused {\n        Some(stats) => Ok(stats),"));
+    assert!(source.contains("let stats = match reused {\n        Some(stats) => stats,"));
 }
 
 #[test]
@@ -734,4 +800,123 @@ fn a_fresh_title_waits_only_for_a_local_index_pass() {
         state.jobs.note_fresh_index_files_at(vec![7], long_ago);
         assert!(!state.jobs.title_scan_awaits_index_pass(7));
     }
+}
+
+#[tokio::test]
+async fn live_title_qualification_publishes_its_receipt_without_polling_full_scan() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let visible = AtomicBool::new(false);
+    let acquired = acquire_title(
+        true,
+        None,
+        async { panic!("a live qualification must not read the whole title") },
+        async {
+            visible.store(true, Ordering::Release);
+        },
+    )
+    .await
+    .expect("bounded qualification");
+    assert!(
+        visible.load(Ordering::Acquire),
+        "receipt is visible before continuation"
+    );
+    assert!(
+        matches!(acquired, TitleAcquisition::QualificationOnly(None)),
+        "bounded quality never fabricates complete-title statistics"
+    );
+    let stats = reusable_aggregate(&stored_title(), 7).expect("existing aggregate");
+    let acquired = acquire_title(
+        true,
+        Some(stats.clone()),
+        async { panic!("a stored aggregate does not turn live work into a scan") },
+        async {},
+    )
+    .await
+    .expect("qualification preserves aggregate");
+    let TitleAcquisition::QualificationOnly(Some(retained)) = acquired else {
+        panic!("live work must leave a maintenance continuation");
+    };
+    assert_eq!(retained, stats);
+}
+
+#[tokio::test]
+async fn ordinary_title_acquisition_scans_before_qualification_and_preserves_errors() {
+    let order = std::sync::Mutex::new(Vec::new());
+    let stats = reusable_aggregate(&stored_title(), 7).expect("aggregate");
+    let acquired = acquire_title(
+        false,
+        None,
+        async {
+            order.lock().expect("order").push("scan");
+            Ok(stats.clone())
+        },
+        async {
+            order.lock().expect("order").push("qualify");
+        },
+    )
+    .await
+    .expect("maintenance");
+    assert!(matches!(acquired, TitleAcquisition::Complete(_)));
+    assert_eq!(*order.lock().expect("order"), vec!["scan", "qualify"]);
+    let failed = acquire_title(
+        false,
+        None,
+        async { Err("source changed".to_owned()) },
+        async { panic!("failed source acquisition cannot qualify") },
+    )
+    .await;
+    assert!(matches!(failed, Err(error) if error == "source changed"));
+}
+
+#[tokio::test]
+async fn live_title_admission_uses_spare_capacity_and_yields_to_waiting_viewers() {
+    use crate::admission::Priority;
+    use plurx_core::transcode::{EncoderCaps, Pipeline};
+    let dir = crate::test_tempdir().expect("scratch");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "4")
+        .await
+        .expect("budget");
+    let manager = crate::transcode::TranscodeManager::new(
+        store,
+        dir.path().into(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let admissions = manager.admissions();
+    let viewer = admissions
+        .try_admit_software(4, 1, Priority::Live)
+        .expect("playing viewer");
+    assert!(
+        manager.admit_dv_title(false).await.is_none(),
+        "maintenance yields to playback"
+    );
+    let qualification = manager
+        .admit_dv_title(true)
+        .await
+        .expect("spare bounded qualification");
+    assert_eq!(manager.test_software_threads_in_use(), 2);
+    assert!(
+        manager.fragment_worker_idle(&qualification),
+        "playing is compatible with bounded work"
+    );
+    let waiting = admissions.wait_for_slot();
+    assert!(
+        !manager.fragment_worker_idle(&qualification),
+        "waiting viewer reclaims qualification"
+    );
+    drop(waiting);
+    drop(qualification);
+    let occupied = admissions
+        .try_admit_software(4, 3, Priority::Live)
+        .expect("fill remaining capacity");
+    assert_eq!(manager.test_software_threads_in_use(), 4);
+    assert!(
+        manager.admit_dv_title(true).await.is_none(),
+        "qualification cannot exceed cap"
+    );
+    drop(occupied);
+    drop(viewer);
+    assert_eq!(manager.test_software_threads_in_use(), 0);
 }

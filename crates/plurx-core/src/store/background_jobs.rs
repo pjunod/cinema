@@ -2516,6 +2516,7 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         scanner: &str,
         after: i64,
+        now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError>;
     async fn bind_dv_title_demand(
         &self,
@@ -3593,8 +3594,9 @@ LIMIT 1
         &self,
         scanner: &str,
         after: i64,
+        now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError> {
-        super::dv_title_jobs::demands(self, scanner, after).await
+        super::dv_title_jobs::demands(self, scanner, after, now_ms).await
     }
     async fn bind_dv_title_demand(
         &self,

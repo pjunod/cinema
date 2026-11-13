@@ -921,6 +921,31 @@ pub(super) async fn qualify_if_due(
     admission: &crate::transcode::FragmentAdmission,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Qualification, String> {
+    qualify_due(state, file, document, tools, admission, cancel, false).await
+}
+
+/// A live successor may only measure an explicit, still-pending recipe.
+/// It must not create opportunistic maintenance work after a competing receipt.
+pub(super) async fn qualify_requested_if_due(
+    state: &crate::state::AppState,
+    file: &plurx_core::domain::MediaFile,
+    document: &str,
+    tools: &crate::vodencode::dv_runtime::ToolSet,
+    admission: &crate::transcode::FragmentAdmission,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Qualification, String> {
+    qualify_due(state, file, document, tools, admission, cancel, true).await
+}
+
+async fn qualify_due(
+    state: &crate::state::AppState,
+    file: &plurx_core::domain::MediaFile,
+    document: &str,
+    tools: &crate::vodencode::dv_runtime::ToolSet,
+    admission: &crate::transcode::FragmentAdmission,
+    cancel: &tokio_util::sync::CancellationToken,
+    requested_only: bool,
+) -> Result<Qualification, String> {
     let renderer = Renderer {
         scanner: tools.backend_digest(),
         path: &tools.renderer,
@@ -931,7 +956,7 @@ pub(super) async fn qualify_if_due(
             crate::ffmpeg::has_hevc_main10_vaapi_decode().await,
         ),
     };
-    qualify_with(
+    qualify_with_mode(
         state,
         file,
         document,
@@ -939,6 +964,7 @@ pub(super) async fn qualify_if_due(
         admission,
         cancel,
         measure_title,
+        requested_only,
     )
     .await
 }
@@ -953,6 +979,7 @@ impl Drop for Extension<'_> {
 }
 
 /// [`qualify_if_due`] with its renderer and measurement given.
+#[cfg(test)]
 pub(crate) async fn qualify_with(
     state: &crate::state::AppState,
     file: &plurx_core::domain::MediaFile,
@@ -961,6 +988,23 @@ pub(crate) async fn qualify_with(
     admission: &crate::transcode::FragmentAdmission,
     cancel: &tokio_util::sync::CancellationToken,
     measurer: Measurer,
+) -> Result<Qualification, String> {
+    qualify_with_mode(
+        state, file, document, renderer, admission, cancel, measurer, false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn qualify_with_mode(
+    state: &crate::state::AppState,
+    file: &plurx_core::domain::MediaFile,
+    document: &str,
+    renderer: &Renderer<'_>,
+    admission: &crate::transcode::FragmentAdmission,
+    cancel: &tokio_util::sync::CancellationToken,
+    measurer: Measurer,
+    requested_only: bool,
 ) -> Result<Qualification, String> {
     let dv = file.dolby_vision;
     if dv.profile != Some(7)
@@ -1014,7 +1058,7 @@ pub(crate) async fn qualify_with(
         .find(|request| request.backend_identity == backend_identity)
     {
         request.clone()
-    } else if !pending.is_empty() {
+    } else if requested_only || !pending.is_empty() {
         return Ok(Qualification::NotDue);
     } else {
         let doc: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
@@ -1940,7 +1984,7 @@ mod tests {
             .expect("physical encoder identity");
         let admission = state
             .transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .expect("real graph resource admission");
         let token = tokio_util::sync::CancellationToken::new();
@@ -2025,7 +2069,7 @@ mod tests {
                 qualification_fixture_with_threads(dir.path(), threads).await;
             let admission = state
                 .transcode
-                .admit_dv_title()
+                .admit_dv_title(false)
                 .await
                 .expect("admit the one-thread title worker");
             let renderer_path = dir.path().join("renderer");
@@ -2102,7 +2146,7 @@ mod tests {
             .expect("HDR10 processing disabled independently");
         let admission = state
             .transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .expect("title admission");
         let renderer_path = dir.path().join("renderer");
@@ -2199,6 +2243,57 @@ mod tests {
         assert!(matches!(again, Qualification::NotDue), "{again:?}");
     }
 
+    #[tokio::test]
+    async fn live_qualification_does_not_invent_a_recipe_after_request_consumption() {
+        let dir = crate::test_tempdir().expect("scratch");
+        let (state, file, document) = qualification_fixture(dir.path()).await;
+        let admission = state
+            .transcode
+            .admit_dv_title(true)
+            .await
+            .expect("live admission");
+        let renderer_path = dir.path().join("renderer");
+        let renderer = Renderer {
+            scanner: "a".repeat(64),
+            path: &renderer_path,
+            tools: None,
+            env: Vec::new(),
+            decode: RendererDecode::Gpu,
+        };
+        let before = state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe");
+        assert!(
+            q::pending_recipes(before.as_deref().expect("document"), file.size, file.mtime)
+                .is_empty()
+        );
+        let outcome = qualify_with_mode(
+            &state,
+            &file,
+            &document,
+            &renderer,
+            &admission,
+            &tokio_util::sync::CancellationToken::new(),
+            slow_measurement,
+            true,
+        )
+        .await
+        .expect("no request is not due");
+        assert!(matches!(outcome, Qualification::NotDue));
+        assert_eq!(
+            state
+                .store
+                .get_file_probe_json(file.id)
+                .await
+                .expect("probe"),
+            before,
+            "no default request or receipt may replace consumed live demand"
+        );
+        assert!(!admission.has_extension());
+    }
+
     /// S1: a live reconstructed 8.1 preempts a running qualification through
     /// the slot: the qualification stops (no verdict), the play gets the slot.
     #[tokio::test]
@@ -2208,7 +2303,7 @@ mod tests {
         let (state, file, document) = qualification_fixture(dir.path()).await;
         let admission = state
             .transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .expect("title admission");
         let renderer_path = dir.path().join("renderer");
@@ -2289,7 +2384,7 @@ mod tests {
         let (state, file, document) = qualification_fixture(dir.path()).await;
         let admission = state
             .transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .expect("title admission");
         let path = dir.path().join("renderer");
@@ -2396,7 +2491,7 @@ mod tests {
         let (state, file, document) = qualification_fixture(dir.path()).await;
         let admission = state
             .transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .expect("title admission");
         let path = dir.path().join("renderer");

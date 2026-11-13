@@ -1330,6 +1330,7 @@ impl TranscodeManager {
                         Priority::Live,
                     ) {
                         let admission = FragmentAdmission {
+                            playback_qualification: false,
                             _heavy: Some(heavy),
                             threads: 2,
                             _permit: Some(permit),
@@ -1399,6 +1400,7 @@ impl TranscodeManager {
                 Priority::Speculative,
             )
             .map(|permit| FragmentAdmission {
+                playback_qualification: false,
                 _heavy: Some(heavy),
                 threads,
                 _permit: Some(permit),
@@ -1466,8 +1468,48 @@ impl TranscodeManager {
 
     /// The title scanner has one software decoder thread and never uses a GPU.
     #[cfg(target_os = "linux")]
-    pub(crate) async fn admit_dv_title(&self) -> Option<FragmentAdmission> {
-        self.admit_source_work(1).await
+    pub(crate) async fn admit_dv_title(
+        &self,
+        playback_requested: bool,
+    ) -> Option<FragmentAdmission> {
+        if !playback_requested {
+            return self.admit_source_work(1).await;
+        }
+        // Qualification prepares a successor for somebody already playing.
+        // Use the existing spare-capacity class, not the maintenance-only idle
+        // rule. It still cannot jump a waiting viewer or exceed either pool.
+        if self.admissions.live_is_waiting()
+            || self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        let heavy = Arc::clone(&self.background_heavy)
+            .try_acquire_owned()
+            .ok()?;
+        let budget = self.software_budget().await;
+        if self.admissions.software_in_use().checked_add(1)? > budget {
+            return None;
+        }
+        self.admissions
+            .try_admit_bundle(
+                self.max_hw_sessions().await,
+                budget,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: 1,
+                    decoder_threads: None,
+                },
+                Priority::Speculative,
+            )
+            .map(|permit| FragmentAdmission {
+                playback_qualification: true,
+                _heavy: Some(heavy),
+                threads: 1,
+                extension: std::sync::Mutex::new(None),
+                _permit: Some(permit),
+            })
     }
 
     /// The node-local fragment index pass's queued turn on the heavy lane.
@@ -1513,6 +1555,7 @@ impl TranscodeManager {
                 Priority::Background,
             )
             .map(|permit| FragmentAdmission {
+                playback_qualification: false,
                 _heavy: Some(heavy),
                 threads,
                 extension: std::sync::Mutex::new(None),
@@ -1542,7 +1585,11 @@ impl TranscodeManager {
             self.software_budget().await,
             resources,
             software_threads,
-            Priority::Background,
+            if admission.playback_qualification {
+                Priority::Speculative
+            } else {
+                Priority::Background
+            },
             None,
         )
         .map_err(|_| "the GPU slot or CPU this step needs is in use".to_owned())?;
@@ -1575,6 +1622,12 @@ impl TranscodeManager {
             // keeps going while a viewer plays (contract v2 §5.1).
             return true;
         }
+        if admission.playback_qualification {
+            return !self.admissions.live_is_waiting()
+                && !self
+                    .offline_waiting
+                    .load(std::sync::atomic::Ordering::Acquire);
+        }
         let (hardware, threads) = admission.claimed();
         !self.admissions.live_is_waiting()
             && self.admissions.in_use() <= hardware
@@ -1588,7 +1641,8 @@ impl TranscodeManager {
     /// waits or holds capacity beyond the admission's own claim. The job's
     /// own reservation is not competing work.
     pub(crate) fn fragment_must_yield(&self, admission: &FragmentAdmission) -> bool {
-        !self.fragment_worker_idle(admission) || self.admissions.background_must_yield()
+        !self.fragment_worker_idle(admission)
+            || (!admission.playback_qualification && self.admissions.background_must_yield())
     }
 
     /// Why background work that holds no admission should not start now:

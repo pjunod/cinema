@@ -18,6 +18,9 @@ pub struct TitleDemand {
     pub probe_json: String,
     /// Resume the same yielded job even when its pending recipe set changed.
     pub queued_job_id: Option<String>,
+    /// An unexpired playback interest in this exact source and scanner generation.
+    #[serde(default)]
+    pub playback_requested: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleOutput {
@@ -65,8 +68,9 @@ pub(super) async fn demands<T: QueueSql>(
     store: &T,
     scanner: &str,
     after: i64,
+    now_ms: i64,
 ) -> Result<Vec<TitleDemand>, StoreError> {
-    if !digest(scanner) || after < 0 {
+    if !digest(scanner) || after < 0 || now_ms < 0 {
         return Err(StoreError::Task("invalid title demand query".into()));
     }
     store.queue_sql(r#"
@@ -80,22 +84,41 @@ UPDATE dv_title_jobs_demand SET terminal=0 WHERE terminal=1 AND json_type($1)='o
 RETURNING 'true' AS result_json
 "#.into(),"{}".into(),true,true).await?;
     let rows = store.queue_sql(r#"
-SELECT json_object('file_id',file.id,'probe_revision',d.revision,
+WITH candidates AS (
+ SELECT d.revision,d.terminal,d.scanner_digest,file.id,file.size,file.mtime,file.probe_json,
+  EXISTS(SELECT 1 FROM background_jobs j JOIN background_job_waiters w ON w.job_id=j.id
+   WHERE d.terminal=0 AND d.scanner_digest=json_extract($1,'$.scanner')
+    AND EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+     THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END) r
+     WHERE json_extract(r.value,'$.source_size')=file.size AND json_extract(r.value,'$.source_mtime')=file.mtime)
+    AND j.kind='dv_title_scan' AND j.state IN ('queued','running')
+    AND json_extract(j.payload_json,'$.file_id')=file.id
+    AND json_extract(j.payload_json,'$.source_size')=file.size
+    AND json_extract(j.payload_json,'$.source_mtime')=file.mtime
+    AND json_extract(j.payload_json,'$.probe_revision')=d.revision
+    AND json_extract(j.payload_json,'$.scanner_digest')=json_extract($1,'$.scanner')
+    AND w.consumer_kind='playback_qualification' AND w.state IN ('pending','awaiting_hydration')
+    AND w.deadline_ms IS NOT NULL AND w.deadline_ms>json_extract($1,'$.now')) AS playback_requested
+ FROM dv_title_jobs_demand d JOIN files file ON file.id=d.file_id
+)
+SELECT json_object('file_id',file.id,'probe_revision',file.revision,
  'source_size',file.size,'source_mtime',file.mtime,'probe_json',file.probe_json,
+ 'playback_requested',json(CASE WHEN file.playback_requested THEN 'true' ELSE 'false' END),
  'queued_job_id',(SELECT j.id FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state='queued'
   AND json_extract(j.payload_json,'$.file_id')=file.id
   AND json_extract(j.payload_json,'$.source_size')=file.size AND json_extract(j.payload_json,'$.source_mtime')=file.mtime
-  AND json_extract(j.payload_json,'$.probe_revision')=d.revision
+  AND json_extract(j.payload_json,'$.probe_revision')=file.revision
   AND json_extract(j.payload_json,'$.scanner_digest')=json_extract($1,'$.scanner')
   ORDER BY j.created_at_ms,j.id LIMIT 1)) AS result_json
-FROM dv_title_jobs_demand d JOIN files file ON file.id=d.file_id
-WHERE d.revision>json_extract($1,'$.after') AND (d.terminal=0 OR d.scanner_digest IS NOT json_extract($1,'$.scanner'))
- AND (NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+FROM candidates file
+WHERE (file.playback_requested OR file.revision>json_extract($1,'$.after'))
+ AND (file.terminal=0 OR file.scanner_digest IS NOT json_extract($1,'$.scanner'))
+ AND (file.playback_requested OR NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
  THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END))
  OR NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('running','cancelling')
   AND json_extract(j.payload_json,'$.file_id')=file.id))
-ORDER BY d.revision LIMIT 128
-"#.into(), encode(&serde_json::json!({"scanner":scanner,"after":after}))?, false, true).await?;
+ORDER BY file.playback_requested DESC,file.revision LIMIT 128
+"#.into(), encode(&serde_json::json!({"scanner":scanner,"after":after,"now":now_ms}))?, false, true).await?;
     rows.iter().map(|row| decode(row)).collect()
 }
 
