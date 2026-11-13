@@ -1,6 +1,6 @@
 # Storage domains — implementation and qualification status
 
-**Status:** open · **Owner:** Codex · **Updated:** 2026-11-13
+**Status:** built · **Owner:** Codex · **Updated:** 2026-11-13
 
 Companion to [the implementation plan](STORAGE-DOMAINS-DEFERRED-APPLY-PLAN.md).
 This page records what is built and what still needs evidence. A saved
@@ -14,8 +14,8 @@ ownership remain valid. Saving itself never waits for runtime state.
 | HTTP and existing scheduler integration | Focused command passed | Admin-only save; voter applies; no new task/timer |
 | Settings status and pending values | Focused regressions pass | 89 cases passed initially; corrected the remaining fixture expectation and reran that case successfully |
 | Adversarial review | Findings addressed | Protected edits made during GET/PUT; reviewer accepted targeted disposition; atomic ownership logic had no blocker |
-| Focused regressions and fast lane | Local checks pass; PR lane next | Seven schema/migration cases, six behavior contracts, Store inventory, HTTP/scheduler command and Settings cases; retry only failed checks |
-| Merge and deployment | Pending | Merge only qualified candidate; operator deploys |
+| Focused regressions and fast lane | Passed | Seven schema/migration cases, six behavior contracts, Store inventory, HTTP/scheduler command, Settings cases and green qualification run 7650 |
+| Merge and deployment | Merged; deployment belongs to operator | PR #1571 landed as `4bf364fc3`; no deployment performed |
 
 ## Decisions and limits
 
@@ -38,3 +38,8 @@ ownership remain valid. Saving itself never waits for runtime state.
 | 2026-11-13 | Codex | Claimed implementation after plans PR #1563 merged; schema and UI delegated to lower-cost agents; tests deferred until final review. |
 
 | 2026-11-13 | Codex | Integrated current main after offload claimed v130; pending domains moved to v131, with ordered strict fixture rewind. Affected schema/store checks are requalified on this tree. |
+
+PR #1571 merged on 2026-11-13 after final review, focused checks and green
+Main promotion gate. A final merge-only integration retained identical storage
+Rust/web source and reused passing validation under the operator instruction.
+Mandatory final paperwork passed 16/16; all nine regression trailers landed.

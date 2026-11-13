@@ -1,6 +1,6 @@
 # Storage domains — save always, apply when safe
 
-**Status:** implementation in progress · owned by Codex · see
+**Status:** built in PR #1571 · owned by Codex · see
 [execution status](STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) ·
 **Updated:** 2026-11-12 · **Source baseline:** `origin/main` at `54aebebf9`
 (after PR #1546)
