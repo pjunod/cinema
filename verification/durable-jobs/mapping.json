@@ -61,61 +61,61 @@
       },
       {
         "anchor": "pub trait BackgroundJobStore: Send + Sync {",
-        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa",
+        "sha256": "f2d3e1e9032b11594e24a170868fd581e1671820f778c3cea67de4fac8239f7b",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 queue protocol trait"
       },
       {
         "anchor": "pub struct JobToken {",
-        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa",
+        "sha256": "f2d3e1e9032b11594e24a170868fd581e1671820f778c3cea67de4fac8239f7b",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 queue token schema"
       },
       {
         "anchor": "impl<T: QueueSql> BackgroundJobStore for T {",
-        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa",
+        "sha256": "f2d3e1e9032b11594e24a170868fd581e1671820f778c3cea67de4fac8239f7b",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 shared queue adapter"
       },
       {
         "anchor": "            || self.now_ms.saturating_sub(self.dispatched_at_ms) >= CLAIM_RESOLUTION_WINDOW_MS",
-        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa",
+        "sha256": "f2d3e1e9032b11594e24a170868fd581e1671820f778c3cea67de4fac8239f7b",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:1495"
       },
       {
         "anchor": "        if request.fence.is_none()",
-        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa",
+        "sha256": "f2d3e1e9032b11594e24a170868fd581e1671820f778c3cea67de4fac8239f7b",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3465"
       },
       {
         "anchor": "            if token.lease_expires_ms <= request.now_ms {",
-        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa",
+        "sha256": "f2d3e1e9032b11594e24a170868fd581e1671820f778c3cea67de4fac8239f7b",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3497"
       },
       {
         "anchor": "  AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))",
-        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa",
+        "sha256": "f2d3e1e9032b11594e24a170868fd581e1671820f778c3cea67de4fac8239f7b",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:532"
       },
       {
         "anchor": "    AND job.lease_expires_ms > now_ms AND job.state = 'running'",
-        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa",
+        "sha256": "f2d3e1e9032b11594e24a170868fd581e1671820f778c3cea67de4fac8239f7b",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:630"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms)\n                  AND NOT EXISTS(SELECT 1 FROM background_source_pauses paused,json_each(paused.resource_keys_json) resource\n                    WHERE paused.job_id=job.id AND paused.fence=job.fence AND paused.node_id=job.owner_node_id\n                      AND paused.boot_id=job.owner_boot_id AND paused.claim_id=job.claim_id AND paused.phase='paused'\n                      AND resource.value=required.resource_key))",
-        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa",
+        "sha256": "f2d3e1e9032b11594e24a170868fd581e1671820f778c3cea67de4fac8239f7b",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:636"
       },
       {
         "anchor": "pub const MAX_RETAINED_JOBS: usize = 10_000;",
-        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa",
+        "sha256": "f2d3e1e9032b11594e24a170868fd581e1671820f778c3cea67de4fac8239f7b",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs.rs:50"
       },
@@ -595,7 +595,7 @@
       },
       {
         "anchor": " job.state='running' AND job.kind='dv_title_scan' AND job.payload_version=1",
-        "sha256": "7b5c8b385af671ae505cce8e626f04617132aee0fe32d84d36090762c5c56e6b",
+        "sha256": "0a88f0bb15247d3d9f069e8a8a08c79b515c75b62e752ca2b81bffbc2d71b86d",
         "source": "crates/plurx-core/src/store/dv_title_jobs.rs",
         "table": "DV extension exclusion: publication remains kind-specific"
       },
