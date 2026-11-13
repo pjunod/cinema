@@ -879,7 +879,7 @@ test("Settings loads only the active tab manifest", () => {
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
     sharing: { required: ["sharingStatus", "sharingImports", "sharingExports"], secondary: [] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
-    developer: { required: ["settings"], secondary: ["developerReadiness", "https"] },
+    developer: { required: ["settings"], secondary: ["developerReadiness", "https", "sourceRecovery"] },
   });
   const view = shippedSource("viewSettings");
   assert.doesNotMatch(view, /Promise\.all\(\[\s*api/,
