@@ -51,7 +51,7 @@ Paul installs the dedicated publisher account, token and service outside PR
 runners. Source implementation and installation acceptance are distinct: until
 that installation and its disposable-PR canary pass, use the local fixer.
 Effort-bound PRs currently use the local fixer; their CI job checks without
-publishing. The source runbook is ci-fleet's `docs/PAPERWORK-PUBLISHER.md`.
+publishing. See the [ci-fleet publisher runbook](http://forge.lan:3000/noirr/ci-fleet/src/branch/main/docs/PAPERWORK-PUBLISHER.md).
 Never add `PAPERWORK_PUSH_TOKEN` to a PR workflow: adding a secret alone does
 not establish this trust boundary.
 
