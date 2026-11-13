@@ -2551,7 +2551,7 @@ impl HiqliteAuthStore {
             ));
         }
         if identity_allocator {
-            let changed = self.client().execute("UPDATE item_identity_watermark SET importing=1 WHERE singleton=1 AND importing=0 AND high_water=0",params!()).await?;
+            let changed = self.client().execute("import_sqlite_backup_inner", "UPDATE item_identity_watermark SET importing=1 WHERE singleton=1 AND importing=0 AND high_water=0",params!()).await?;
             if changed != 1 {
                 return Err(import_error(
                     "item identity import target is not fresh; discard incoming target",
@@ -2562,6 +2562,7 @@ impl HiqliteAuthStore {
         // its own marker; older backups are sealed only after parity is proved.
         self.client()
             .execute(
+                "import_sqlite_backup_inner",
                 "DELETE FROM background_job_migration WHERE source_count = 0",
                 params!(),
             )
@@ -2576,6 +2577,7 @@ impl HiqliteAuthStore {
         // data. Rebuild it above every imported attempt epoch before serving.
         self.client()
             .execute(
+                "import_sqlite_backup_inner",
                 "UPDATE live_tv_resource_revision SET revision=MAX(revision,
             COALESCE((SELECT MAX(CAST(json_extract(body,'$.value.epoch') AS INTEGER))
                 FROM live_tv_resource_records),0)),nonce='' WHERE singleton=1",
@@ -2595,6 +2597,7 @@ impl HiqliteAuthStore {
             let changed = self
                 .client()
                 .execute(
+                    "import_sqlite_backup_inner",
                     "UPDATE settings SET value = $1 WHERE key = $2",
                     params!("corrupted-after-import", "migration.fixture"),
                 )
@@ -2640,14 +2643,18 @@ impl HiqliteAuthStore {
             // Parity describes the imported snapshot. Only after proving it do
             // we revoke pre-common-queue owners; their spent attempts survive.
             self.client()
-                .execute(super::background_jobs_subtitle::RESET_LEGACY, params!())
+                .execute(
+                    "import_sqlite_backup_inner",
+                    super::background_jobs_subtitle::RESET_LEGACY,
+                    params!(),
+                )
                 .await?;
         }
 
         if identity_allocator {
-            self.client().execute("UPDATE item_identity_watermark SET high_water=max(high_water,$1) WHERE singleton=1 AND importing=1",params!(source_watermark.unwrap_or(0))).await?;
-            self.client().execute("INSERT INTO sharing_catalogue_revisions(library_id,order_revision) SELECT id,1 FROM libraries WHERE true ON CONFLICT(library_id) DO NOTHING",params!()).await?;
-            self.client().execute("UPDATE item_identity_watermark SET importing=0 WHERE singleton=1 AND importing=1",params!()).await?;
+            self.client().execute("import_sqlite_backup_inner", "UPDATE item_identity_watermark SET high_water=max(high_water,$1) WHERE singleton=1 AND importing=1",params!(source_watermark.unwrap_or(0))).await?;
+            self.client().execute("import_sqlite_backup_inner", "INSERT INTO sharing_catalogue_revisions(library_id,order_revision) SELECT id,1 FROM libraries WHERE true ON CONFLICT(library_id) DO NOTHING",params!()).await?;
+            self.client().execute("import_sqlite_backup_inner", "UPDATE item_identity_watermark SET importing=0 WHERE singleton=1 AND importing=1",params!()).await?;
         }
         Ok(SqliteImportReport {
             source_schema_version: schema_version,
@@ -2700,7 +2707,7 @@ impl HiqliteAuthStore {
         // Device credentials are never imported: restore cannot resurrect
         // pairings. A nonempty target is refused before any import write.
         // authority: refuse import before writes if the target retains live device credentials.
-        let remote = self.client().query_consistent_map::<CountRow,_>("SELECT (SELECT count(*) FROM remote_receivers)+(SELECT count(*) FROM remote_grants)+(SELECT count(*) FROM invitation_phones)+(SELECT count(*) FROM invitation_consents)+(SELECT count(*) FROM invitation_events) AS count",params!()).await?;
+        let remote = self.client().query_consistent_map::<CountRow,_>("verify_empty_import_target", "SELECT (SELECT count(*) FROM remote_receivers)+(SELECT count(*) FROM remote_grants)+(SELECT count(*) FROM invitation_phones)+(SELECT count(*) FROM invitation_consents)+(SELECT count(*) FROM invitation_events) AS count",params!()).await?;
         if !matches!(remote.as_slice(),[r] if r.count==0) {
             return Err(StoreError::Migration(
                 "import target has Cinema remote credentials".into(),
@@ -2746,6 +2753,7 @@ impl HiqliteAuthStore {
         let changed = self
             .client()
             .execute(
+                "import_instance_setting",
                 "UPDATE settings SET updated_at = $1 WHERE key = $2 AND value = $3",
                 params!(
                     source.instance_updated_at,
@@ -2856,7 +2864,10 @@ impl HiqliteAuthStore {
         }
         let results = self
             .client()
-            .txn(chunk.into_iter().map(|row| (insert_sql.to_owned(), row)))
+            .txn(
+                "insert_import_chunk",
+                chunk.into_iter().map(|row| (insert_sql.to_owned(), row)),
+            )
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -2881,7 +2892,7 @@ impl HiqliteAuthStore {
         };
         let rows = self
             .client()
-            .query_consistent_map::<CountRow, _>(sql, params!())
+            .query_consistent_map::<CountRow, _>("target_count", sql, params!())
             .await?;
         one_count(rows, table)
     }
@@ -2890,6 +2901,7 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map::<CountRow, _>(
+                "verify_target_foreign_keys",
                 "SELECT COUNT(*) AS count FROM pragma_foreign_key_check",
                 params!(),
             )
@@ -2910,7 +2922,7 @@ impl HiqliteAuthStore {
             let (sql, query_params) = target_parity_page(table, &cursor)?;
             let page = self
                 .client()
-                .query_consistent_map::<ParityPageRow, _>(sql, query_params)
+                .query_consistent_map::<ParityPageRow, _>("target_digest", sql, query_params)
                 .await?;
             if page.is_empty() {
                 break;

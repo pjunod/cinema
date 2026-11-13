@@ -20,6 +20,7 @@ impl JellyfinCatalogStore for HiqliteAuthStore {
         self.client()
             // authority: anonymous artwork cannot follow retired identities or a disabled/replaced switch generation.
             .query_consistent_map::<CatalogRow, _>(
+                "jellyfin_catalog_artwork",
                 super::jellyfin_catalog::CATALOG_ARTWORK_SQL,
                 params!(wire_id, backdrop),
             )
@@ -36,6 +37,7 @@ impl JellyfinCatalogStore for HiqliteAuthStore {
         self.client()
             // authority: user incarnation and views remain bound to the presented compatibility token.
             .query_consistent_map::<CatalogRow, _>(
+                "jellyfin_catalog_identity",
                 super::jellyfin_catalog::CATALOG_IDENTITY_SQL,
                 params!(token_hash),
             )
@@ -53,7 +55,7 @@ impl JellyfinCatalogStore for HiqliteAuthStore {
         let row = self
             .client()
             // authority: catalog bodies, credentials, retirement mappings and watch facts share one committed snapshot.
-            .query_consistent_map::<CatalogRow, _>(sql, params!(args))
+            .query_consistent_map::<CatalogRow, _>("jellyfin_catalog_page", sql, params!(args))
             .await?
             .into_iter()
             .next()
