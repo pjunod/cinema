@@ -6175,7 +6175,7 @@ async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
         &state,
         &request,
         tokio::time::Instant::now(),
-        None,
+        crate::media_pool::CatalogSource::Quorum(None),
     )
     .await;
     assert!(!outcome.complete);
@@ -6188,7 +6188,7 @@ async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
         &state,
         &request,
         tokio::time::Instant::now() + Duration::from_secs(1),
-        None,
+        crate::media_pool::CatalogSource::Quorum(None),
     )
     .await;
     assert!(matches!(

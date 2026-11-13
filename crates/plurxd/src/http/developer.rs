@@ -589,6 +589,7 @@ pub(crate) async fn readiness(
                 &state.applied.observation(),
                 super::hls::start_plan::refusal_closes(),
                 super::hls::start_plan::stale_replans(),
+                super::hls::start_plan::peer_catalog_counts(),
             ),
             cluster_backup(
                 &state,
@@ -1235,6 +1236,7 @@ pub(crate) fn create_plan(
     observation: &plurx_core::store::AppliedViewObservation,
     refusal_closes: u64,
     stale_replans: u64,
+    peer_catalogs: (u64, u64),
 ) -> DeveloperEnableItem {
     use plurx_core::store::{AppliedTable, ViewSource};
     use RequirementStatus::{Met, Unknown};
@@ -1299,6 +1301,15 @@ pub(crate) fn create_plan(
                     "Since start: {} plans asked quorum because this replica answered another binding than a peer planned at; {} plans for a start with no binding (an owner's legacy route, or this ingress confirming one) read quorum.",
                     by_reason("binding_mismatch"),
                     by_reason("unbound")
+                ),
+            },
+            DeveloperRequirement {
+                id: "create_plan_peer_catalogs",
+                title: "Peer catalogs at a sender's binding",
+                status: Met,
+                evidence: format!(
+                    "Since start: {} peer catalog requests planned from this replica at the sender's binding, {} refused as stale (Authority held another binding, so the sender's plan was the stale one and its create re-plans). This node's own create answers its local catalog from its plan and reads nothing for it.",
+                    peer_catalogs.0, peer_catalogs.1
                 ),
             },
             DeveloperRequirement {
@@ -4134,7 +4145,7 @@ mod tests {
         let store: std::sync::Arc<dyn plurx_core::store::Store> =
             std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
         let mut observation = plurx_core::store::AppliedView::authority(store).observation();
-        let item = super::create_plan(&observation, 0, 0);
+        let item = super::create_plan(&observation, 0, 0, (0, 0));
         assert_eq!(item.id, "create_plan");
         assert!(
             item.enabled.is_none() && item.setting.is_none(),
@@ -4164,13 +4175,13 @@ mod tests {
         observation.last_planning_fallback = Some(plurx_core::store::ViewFallback::Floor);
         // A SQLite node's plans all read the store.
         let (status, evidence) = row(
-            &super::create_plan(&observation, 5, 1),
+            &super::create_plan(&observation, 5, 1, (7, 2)),
             "create_plan_source",
         );
         assert_eq!(status, super::RequirementStatus::Met);
         assert!(evidence.contains("10 plans read the store"), "{evidence}");
         observation.mode = "replicated";
-        let item = super::create_plan(&observation, 5, 1);
+        let item = super::create_plan(&observation, 5, 1, (7, 2));
         let (status, evidence) = row(&item, "create_plan_source");
         assert_eq!(status, super::RequirementStatus::Met);
         assert!(

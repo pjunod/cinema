@@ -453,13 +453,15 @@ pub(crate) async fn quality_candidates_v2(
         .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
     let deadline = tokio::time::Instant::now()
         + std::time::Duration::from_millis(u64::from(request.budget_ms).min(1500));
-    let result = crate::media_pool::local_quality_catalog(
-        &state,
-        &request.request,
-        deadline,
-        request.expected_binding.as_ref(),
-    )
-    .await;
+    // A request at the sender's binding reads this node's view, and
+    // Authority once when the view holds another binding (D3d); a sender
+    // with no binding (a legacy ingress) is answered from quorum, as before.
+    let source = match request.expected_binding.as_ref() {
+        Some(expected) => crate::media_pool::CatalogSource::PeerView(expected),
+        None => crate::media_pool::CatalogSource::Quorum(None),
+    };
+    let result =
+        crate::media_pool::local_quality_catalog(&state, &request.request, deadline, source).await;
     let mut response = (private_no_store_headers(), Json(result)).into_response();
     if !request.request.is_valid() {
         *response.status_mut() = StatusCode::BAD_REQUEST;
@@ -497,7 +499,7 @@ pub(crate) async fn quality_candidates(
         &state,
         &request,
         tokio::time::Instant::now() + crate::media_pool::QUALITY_CATALOG_DEADLINE,
-        None,
+        crate::media_pool::CatalogSource::Quorum(None),
     )
     .await;
     if !result.complete {

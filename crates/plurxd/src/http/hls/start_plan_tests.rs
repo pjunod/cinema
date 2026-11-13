@@ -359,3 +359,286 @@ async fn a_legacy_remote_start_plans_from_authority() {
         .expect("owner plan")
         .is_none());
 }
+
+// ---- D3d: the catalog reads the create's plan, a peer's reads its view ----
+
+/// A node on a store with one probed source; its applied view is that store's.
+async fn catalog_node() -> (crate::state::AppState, i64) {
+    let (store, file) = planned_source().await;
+    let root = crate::test_temp_path(format!("plurx-d3d-{}", uuid::Uuid::new_v4()));
+    let state = crate::state::AppState::new(
+        "test".to_owned(),
+        store,
+        crate::state::Dirs {
+            artwork: root.join("artwork"),
+            transcode: root.join("transcode"),
+            cache: root.join("cache"),
+            subs: root.join("subs"),
+            runtime_cache: root.join("runtime"),
+            renditions: root.join("renditions"),
+        },
+        "test-node".to_owned(),
+        Default::default(),
+        Default::default(),
+        Arc::new(crate::logbuf::LogBuffer::new(64)),
+    );
+    state.serving.validation_set_ready(true).await;
+    (state, file)
+}
+
+fn catalog_request(plan: &StartPlan) -> crate::media_pool::QualityCatalogRequest {
+    crate::media_pool::QualityCatalogRequest {
+        audio_claim: None,
+        audio_delivery: None,
+        copy_contract: None,
+        file_id: plan.snapshot.file.id,
+        source_size: plan.snapshot.file.size,
+        source_mtime: plan.snapshot.file.mtime,
+        caps: plurx_core::playback::DeviceCaps {
+            v: 2,
+            ..Default::default()
+        },
+        audio_index: None,
+        audio_offset_ms: 0,
+        subtitle_burn: None,
+        presentation: crate::transcode::Presentation::Vod,
+    }
+}
+
+fn soon() -> tokio::time::Instant {
+    tokio::time::Instant::now() + std::time::Duration::from_secs(5)
+}
+
+/// D3d, §4.6: in create scope the local catalog is answered from the create's
+/// plan and reads no planning snapshot of its own. The store moves on after
+/// the plan is captured (a planning setting is saved); the create's catalog
+/// still describes the plan's revision and is complete, where a quorum read
+/// at the plan's binding (what it did before D3d) is refuted as stale.
+#[tokio::test]
+async fn the_create_catalog_answers_from_the_create_plan_and_reads_nothing() {
+    let (state, file) = catalog_node().await;
+    let plan = ingress_plan(&state.applied, file)
+        .await
+        .expect("plan")
+        .expect("source");
+    let request = catalog_request(&plan);
+    // Anything the catalog read would see this.
+    state
+        .store
+        .put_setting(plurx_core::store::keys::VOD_BLOCK_BUDGET_SECS, "20")
+        .await
+        .expect("a planning key moves after the plan");
+
+    // Through the create's own scope: `quality_catalog` finds the captured plan.
+    let budget = crate::media_pool::CreateStartupBudget::new(5_000);
+    let through_scope = budget
+        .scope(async {
+            crate::media_pool::capture_create_plan(&plan);
+            state
+                .media_pool
+                .quality_catalog(&state, request.clone())
+                .await
+        })
+        .await;
+    assert!(
+        through_scope.complete && through_scope.causes.is_empty(),
+        "the create's catalog describes its plan: {:?}",
+        through_scope.causes
+    );
+
+    // The plan source directly, and the counterfactual: the same request by
+    // quorum at the plan's binding is refuted, because it reads the store.
+    let from_plan = crate::media_pool::local_quality_catalog(
+        &state,
+        &request,
+        soon(),
+        crate::media_pool::CatalogSource::Plan(&plan),
+    )
+    .await;
+    assert!(
+        from_plan.complete && from_plan.causes.is_empty(),
+        "{:?}",
+        from_plan.causes
+    );
+    let by_quorum = crate::media_pool::local_quality_catalog(
+        &state,
+        &request,
+        soon(),
+        crate::media_pool::CatalogSource::Quorum(Some(&plan.binding)),
+    )
+    .await;
+    assert_eq!(
+        by_quorum.causes,
+        vec![crate::media_pool::CatalogCause::StaleSource],
+        "a quorum read sees the saved key"
+    );
+    // A plan for another file is not the create's plan for this request: the
+    // catalog reads the Store.
+    let mut other = request.clone();
+    other.file_id += 1;
+    let budget = crate::media_pool::CreateStartupBudget::new(5_000);
+    let unplanned = budget
+        .scope(async {
+            crate::media_pool::capture_create_plan(&plan);
+            state.media_pool.quality_catalog(&state, other).await
+        })
+        .await;
+    assert_eq!(
+        unplanned.causes,
+        vec![crate::media_pool::CatalogCause::StaleSource],
+        "no plan for that file: it is the quorum read's answer for a missing source"
+    );
+}
+
+/// D3d, §4.6: a peer's catalog request reads this node's view at the binding
+/// it is sent; the same binding is answered from the view, a binding Authority
+/// holds differently is `StaleSource` after one authority read, a request with
+/// no binding reads quorum as before, and `StaleSource` is the cause that
+/// re-plans the sending create, through the same wire answer a peer sends.
+#[tokio::test]
+async fn a_peers_catalog_reads_its_view_and_a_stale_sender_replans() {
+    let (state, file) = catalog_node().await;
+    let ingress = ingress_plan(&state.applied, file)
+        .await
+        .expect("plan")
+        .expect("source");
+    let request = catalog_request(&ingress);
+    let (planned_before, stale_before) = peer_catalog_counts();
+
+    let agreed = crate::media_pool::local_quality_catalog(
+        &state,
+        &request,
+        soon(),
+        crate::media_pool::CatalogSource::PeerView(&ingress.binding),
+    )
+    .await;
+    assert!(
+        agreed.complete && agreed.causes.is_empty(),
+        "{:?}",
+        agreed.causes
+    );
+    assert_eq!(
+        reads(&state.applied, "binding_mismatch"),
+        0,
+        "the view answered"
+    );
+    assert_eq!(peer_catalog_counts(), (planned_before + 1, stale_before));
+
+    // The sender planned from a replica that is behind: Authority holds
+    // another revision of the settings by the time the peer reads.
+    state
+        .store
+        .put_setting(plurx_core::store::keys::VOD_BLOCK_BUDGET_SECS, "20")
+        .await
+        .expect("a planning key moves");
+    let stale = crate::media_pool::local_quality_catalog(
+        &state,
+        &request,
+        soon(),
+        crate::media_pool::CatalogSource::PeerView(&ingress.binding),
+    )
+    .await;
+    assert_eq!(
+        stale.causes,
+        vec![crate::media_pool::CatalogCause::StaleSource]
+    );
+    assert!(!stale.complete);
+    assert_eq!(
+        reads(&state.applied, "binding_mismatch"),
+        1,
+        "Authority once"
+    );
+    assert_eq!(
+        peer_catalog_counts(),
+        (planned_before + 1, stale_before + 1)
+    );
+
+    // A missing source is `StaleSource`, as the quorum read always answered.
+    let mut gone = request.clone();
+    gone.file_id += 1_000;
+    let missing = crate::media_pool::local_quality_catalog(
+        &state,
+        &gone,
+        soon(),
+        crate::media_pool::CatalogSource::PeerView(&ingress.binding),
+    )
+    .await;
+    assert_eq!(
+        missing.causes,
+        vec![crate::media_pool::CatalogCause::StaleSource]
+    );
+
+    // The whole path: the peer's answer crosses the wire as JSON, the
+    // ingress notes it, and the create closes its view and plans once more
+    // from Authority; that attempt's answer is the create's.
+    let wire: crate::media_pool::QualityCatalogResult =
+        serde_json::from_slice(&serde_json::to_vec(&stale).expect("serialize"))
+            .expect("the peer's answer round-trips");
+    let attempts = std::sync::atomic::AtomicUsize::new(0);
+    let before = stale_replans();
+    let budget = crate::media_pool::CreateStartupBudget::new(5_000);
+    let answer = budget
+        .scope(replan_once_after_stale(&state.applied, || async {
+            let first = attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0;
+            let plan = ingress_plan(&state.applied, file)
+                .await
+                .expect("plan")
+                .expect("source");
+            crate::media_pool::capture_create_plan(&plan);
+            if first {
+                // `quality_catalog` notes what its peers answered.
+                crate::media_pool::note_create_catalog(&wire);
+                return Err(crate::http::error::ApiError::typed(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "quality_catalog_unavailable",
+                    "quality discovery is incomplete",
+                ));
+            }
+            // The re-plan is at the revision the peer holds: it agrees.
+            let agreed = crate::media_pool::local_quality_catalog(
+                &state,
+                &catalog_request(&plan),
+                soon(),
+                crate::media_pool::CatalogSource::PeerView(&plan.binding),
+            )
+            .await;
+            assert!(agreed.complete, "{:?}", agreed.causes);
+            Ok(plan.source)
+        }))
+        .await;
+    assert_eq!(
+        answer.expect("the re-planned create succeeds"),
+        ViewSource::Authority
+    );
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(stale_replans(), before + 1);
+    assert!(state.applied.floor_noted(AppliedTable::Settings));
+
+    // No binding, no view: quorum, with nothing to compare.
+    let legacy = crate::media_pool::local_quality_catalog(
+        &state,
+        &request,
+        soon(),
+        crate::media_pool::CatalogSource::Quorum(None),
+    )
+    .await;
+    assert!(legacy.complete, "{:?}", legacy.causes);
+}
+
+/// The two places that decide a catalog's source stay the only ones: the
+/// create's scope answers from its plan, the peer handler from the view, and
+/// every other caller says Quorum by name.
+#[test]
+fn the_catalog_sources_are_chosen_in_three_places() {
+    let pool = include_str!("../../media_pool.rs");
+    let squashed = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    let pool_body = squashed(pool);
+    assert!(pool_body.contains("Some(plan)=>CatalogSource::Plan(plan),None=>CatalogSource::Quorum(expected_binding.as_ref()),"));
+    assert!(pool_body.contains("CatalogSource::Quorum(Some(&catalog.binding)),"));
+    let internal = squashed(include_str!("../internal_media.rs"));
+    assert!(internal.contains("Some(expected)=>crate::media_pool::CatalogSource::PeerView(expected),None=>crate::media_pool::CatalogSource::Quorum(None),"));
+}
