@@ -159,7 +159,7 @@ async fn title_with(store: &Arc<dyn Store>, name: &str, profile: i64, fel: bool)
                     max_l1_pq: Some(3900),
                     mastering_luminance: TitleConstant::Unknown,
                     mastering_primaries: TitleConstant::Unknown,
-                el_kind: if fel && profile == 7 {
+                    el_kind: if fel && profile == 7 {
                     TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel)
                 } else {
                     TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Mel)

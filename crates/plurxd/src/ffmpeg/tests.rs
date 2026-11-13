@@ -545,7 +545,7 @@ fn a_dv_title_report_is_not_a_source_change_for_either_reporter_direction() {
         max_l1_pq: Some(3441),
         mastering_luminance: TitleConstant::Unknown,
         mastering_primaries: TitleConstant::Unknown,
-    el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
+        el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
     };
     let held = current_reporter_probe();
     for different_reporter in [false, true] {

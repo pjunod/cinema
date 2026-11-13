@@ -33,8 +33,8 @@ fn stats() -> DvTitleStats {
         max_l1_pq: Some(3900),
         mastering_luminance: TitleConstant::Unknown,
         mastering_primaries: TitleConstant::Unknown,
+        el_kind: TitleConstant::Unknown,
     }
-el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
 }
 async fn reprobe(store: &Arc<dyn Store>, file: &MediaFile) {
     store
