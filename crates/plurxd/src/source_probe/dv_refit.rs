@@ -277,6 +277,34 @@ impl Spool {
         .map_err(|e| format!("F+ spool: {e}"))
     }
 
+    /// Recover whole scene lines left by a node crash before truncating the
+    /// next run file. A resumed run replaces the last kept scene, just as
+    /// normal interruption settlement does; torn lines never become progress.
+    pub(super) async fn recover_interrupted(&self) -> Result<(), String> {
+        self.blocking(|spool| {
+            let Ok(bytes) = Self::read_bounded(&spool.path(".run")) else {
+                return Ok::<_, std::io::Error>(());
+            };
+            let kept = Self::read_bounded(&spool.path(".partial"))
+                .map(|bytes| dv_refit_title::complete_scenes(&bytes))
+                .unwrap_or_default();
+            let scenes: Vec<_> = kept.iter().map(|(_, scene)| scene.clone()).collect();
+            let keep = dv_refit_title::resume_point(&scenes).map_or(0, |(keep, _)| keep);
+            let mut prefix: Vec<_> = kept.into_iter().take(keep).collect();
+            let recovered = dv_refit_title::continue_scenes(prefix.last().map(|(_, s)| s), &bytes);
+            if !recovered.is_empty() {
+                prefix.extend(recovered);
+                let mut text = prefix.into_iter().map(|(line, _)| line).collect::<Vec<_>>().join("\n");
+                text.push('\n');
+                spool.write_atomically(".partial", text.as_bytes(), false)?;
+            }
+            std::fs::remove_file(spool.path(".run"))?;
+            Ok(())
+        })
+        .await?
+        .map_err(|e| format!("recovering F+ progress: {e}"))
+    }
+
     /// A fresh file for the helper's stdout.
     pub(super) async fn open_run(&self) -> Result<std::fs::File, String> {
         self.blocking(|spool| {
@@ -398,6 +426,7 @@ pub(super) async fn spawn(
         &mut command,
         WALL_TIME,
         MAX_STDERR_BYTES,
+        (MAX_SPOOL_BYTES + 1) as usize,
         plurx_core::process::ChildWork::background(ACTIVITY),
         environment,
         stdout,
@@ -516,6 +545,7 @@ pub(super) async fn run(
             }
         }
     }
+    spool.recover_interrupted().await.map_err(transient)?;
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None)
         .await
         .map_err(transient)?;

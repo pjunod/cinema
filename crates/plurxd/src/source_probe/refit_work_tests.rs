@@ -838,6 +838,30 @@ async fn a_complete_spool_re_solves_without_decoding() {
     assert_eq!(output, dv_refit_title::parse(MICHAEL5400.as_bytes()).expect("run"));
 }
 
+/// A node crash bypasses `settle_child`; the next attempt recovers whole
+/// initial or resumed lines before `open_run` truncates the old file.
+#[tokio::test]
+async fn a_crashed_fit_recovers_its_initial_and_resumed_scene_lines() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().expect("scratch");
+    let spool = spool_in(dir.path(), "crashed-helper");
+    let lines: Vec<_> = MICHAEL5400.lines().filter(|line| line.contains("refit_scene")).map(str::to_owned).collect();
+    assert!(lines.len() >= 5, "fixture exercises both crash boundaries");
+    let mut run = spool.open_run().await.expect("run file");
+    write!(run, "{}\n{}", lines[..3].join("\n"), &lines[3][..lines[3].len()/2]).expect("interrupted initial output");
+    drop(run);
+    spool.recover_interrupted().await.expect("initial crash recovered");
+    assert_eq!(spool.partial().await.into_iter().map(|(line,_)| line).collect::<Vec<_>>(), lines[..3]);
+    let mut run = spool.open_run().await.expect("resumed run file");
+    write!(run, "{}\n{}", lines[2..4].join("\n"), &lines[4][..lines[4].len()/2]).expect("interrupted resumed output");
+    drop(run);
+    spool.recover_interrupted().await.expect("resumed crash recovered");
+    assert_eq!(spool.partial().await.into_iter().map(|(line,_)| line).collect::<Vec<_>>(), lines[..4]);
+    drop(spool.open_run().await.expect("empty run file"));
+    spool.recover_interrupted().await.expect("crash before first line");
+    assert_eq!(spool.partial().await.len(), 4, "empty output preserves previous progress");
+}
+
 /// Decision F through `execute`: a preemption mid-run keeps the helper's
 /// whole scene lines and yields; the next attempt resumes at the last kept
 /// scene's start, and the published table is the uninterrupted run's.

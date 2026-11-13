@@ -9,7 +9,7 @@ use std::io;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
@@ -270,11 +270,13 @@ pub async fn output_command_bundle_env(
 /// [`output_command_bundle_env`] with the child's stdout written straight to
 /// `stdout` (an open, writable file) as it is produced, so whatever a long
 /// run printed survives its interruption. The returned output's `stdout` is
-/// empty; `max_stderr_bytes` bounds what is kept of stderr.
+/// empty; `max_stderr_bytes` bounds stderr and `max_stdout_bytes` bounds
+/// the file. Excess stdout is drained without retaining it.
 pub async fn output_command_bundle_env_to_file(
     command: &mut Command,
     wall_time: Duration,
     max_stderr_bytes: usize,
+    max_stdout_bytes: usize,
     work: super::ChildWork,
     bundle_env: &[(String, std::ffi::OsString)],
     stdout: std::fs::File,
@@ -293,7 +295,7 @@ pub async fn output_command_bundle_env_to_file(
         Environment::Clean,
         None,
         bundle_env,
-        Some(stdout),
+        Some((stdout, max_stdout_bytes)),
     )
     .await
 }
@@ -343,7 +345,7 @@ async fn output_command_environment(
     environment: Environment,
     stderr_selector: Option<fn(&[u8]) -> bool>,
     bundle_env: &[(String, std::ffi::OsString)],
-    stdout_file: Option<std::fs::File>,
+    stdout_file: Option<(std::fs::File, usize)>,
 ) -> io::Result<Output> {
     check_cancellation()?;
     let cancellation = cancellation().unwrap_or_default();
@@ -357,10 +359,9 @@ async fn output_command_environment(
     for (name, value) in bundle_env {
         command.env(name, value);
     }
-    let stdout_to_file = stdout_file.is_some();
     command
         .stdin(std::process::Stdio::null())
-        .stdout(stdout_file.map_or_else(std::process::Stdio::piped, std::process::Stdio::from))
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     if matches!(environment, Environment::Service) {
@@ -397,7 +398,7 @@ async fn output_command_environment(
     };
     let (mut child, job) = super::spawn_job_owned(command, work)?;
     let stdout = child.stdout.take();
-    if stdout.is_none() && !stdout_to_file {
+    if stdout.is_none() {
         return Err(io::Error::other("probe stdout was not piped"));
     }
     let stderr = child
@@ -405,10 +406,10 @@ async fn output_command_environment(
         .take()
         .ok_or_else(|| io::Error::other("probe stderr was not piped"))?;
     let mut stdout = tokio::spawn(async move {
-        match stdout {
-            Some(stdout) => drain_capped(stdout, max_output_bytes).await,
-            // Written straight to the caller's file; nothing to collect.
-            None => Ok(Vec::new()),
+        match (stdout, stdout_file) {
+            (Some(stdout), Some((file, limit))) => drain_to_file(stdout, file, limit).await,
+            (Some(stdout), None) => drain_capped(stdout, max_output_bytes).await,
+            (None, _) => Ok(Vec::new()),
         }
     });
     let mut stderr = tokio::spawn(async move {
@@ -482,6 +483,29 @@ async fn output_command_environment(
             }
             Err(io::Error::new(io::ErrorKind::TimedOut, "probe timed out"))
         }
+    }
+}
+
+/// Persist a bounded prefix while continuing to drain the pipe. The caller
+/// reserves one sentinel byte above its valid-input bound, so overflow is
+/// rejected by its parser rather than consuming unbounded disk space.
+async fn drain_to_file(
+    mut reader: impl AsyncRead + Unpin,
+    file: std::fs::File,
+    limit: usize,
+) -> io::Result<Vec<u8>> {
+    let mut file = tokio::fs::File::from_std(file);
+    let mut retained = 0;
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            file.flush().await?;
+            return Ok(Vec::new());
+        }
+        let keep = read.min(limit.saturating_sub(retained));
+        file.write_all(&chunk[..keep]).await?;
+        retained += keep;
     }
 }
 
@@ -564,6 +588,31 @@ mod tests {
     use super::*;
 
     const TEST_WORK: super::super::ChildWork = super::super::ChildWork::background("bounded test");
+
+
+    #[tokio::test]
+    async fn file_output_drains_excess_and_retains_only_the_bound() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let path = dir.path().join("stdout");
+        let file = std::fs::File::create(&path).expect("stdout file");
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "/usr/bin/head -c 131072 /dev/zero; printf reason >&2"]);
+        let output = output_command_bundle_env_to_file(
+            &mut command,
+            Duration::from_secs(5),
+            3,
+            17,
+            TEST_WORK,
+            &[],
+            file,
+        )
+        .await
+        .expect("excess output must drain without blocking the child");
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"rea");
+        assert_eq!(std::fs::read(path).expect("saved prefix"), vec![0; 17]);
+    }
 
     fn selected_record(line: &[u8]) -> bool {
         line.starts_with(b"frame:")

@@ -21,7 +21,7 @@ bump may break compatibility and a **patch** bump never does.
   title is not fitted again until its source changes or it is retried. Each
   title's curve table (scene spans, the quantised served coefficients, held-out
   errors, verdict and curve digest) is published in one replicated write
-  (SQLite v130; a shape-verified hiqlite extension; carried by the SQLite to
+  (SQLite v131; a shape-verified hiqlite extension; carried by the SQLite to
   cluster import), and a superseded table stays addressable by digest for
   seven days. The Developer card lists and deletes the spool. Nothing serves
   the curves yet.
