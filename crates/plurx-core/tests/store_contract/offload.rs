@@ -163,18 +163,21 @@ async fn an_offloaded_item_survives_prunes_is_found_by_ids_and_clears_when_a_fil
             "{backend}: an on-disk title still is"
         );
 
-        // Nor does the artwork retry sweep: an offloaded title with a provider
-        // match and no poster is not artwork work, while an on-disk one is.
-        store
-            .apply_metadata(
-                twin,
-                &MetadataPatch {
-                    tmdb_id: Some(900_001),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("tmdb");
+        // Nor does the artwork retry sweep: an offloaded title a provider has
+        // answered for and with no poster is not artwork work, while an
+        // on-disk one is.
+        for id in [kept, twin] {
+            store
+                .apply_metadata(
+                    id,
+                    &MetadataPatch {
+                        enriched: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("enriched");
+        }
         let missing: Vec<i64> = store
             .items_missing_artwork(Some(library.id), 0, 100)
             .await
