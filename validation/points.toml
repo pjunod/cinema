@@ -506,6 +506,8 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
   "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_copy_output,_pretranscode,_fragment,_delivery,_fragment_admission,_observation,_migration,_offline,_domain,_library,_resources,_provider,_subtitle,_transcription,_artwork,_transcode,_preparation,_predictions,_embeddings,_probe,_integrity}.rs",
   "crates/plurx-core/src/store/background_jobs{_schema,_domain,_library,_resources,_provider,_subtitle,_subtitle_reconcile,_retention,_receipt_pressure,_viewer_analysis,_copy_output,_encoded_output,_artwork,_transcode,_predictions,_embeddings,_probe,_integrity}.sql",
+  "crates/plurx-core/src/store/storage_domain_pending{,_api}.rs",
+  "crates/plurx-core/src/store/storage_domain_pending.sql",
   "crates/plurx-core/src/store/background_job_turns.{rs,sql}",
   "crates/plurx-core/src/store/hiqlite/dispatch_turns.rs",
   "crates/plurx-core/src/store/background_jobs_foreground.sql",
@@ -590,6 +592,8 @@ paths = [
   # K-05 section 3.9: poisoned-connection recovery and the boot integrity
   # check that refuses a corrupt database before migration touches it.
   "crates/plurx-core/src/store/sqlite/housekeeping.rs",
+  "crates/plurx-core/src/store/storage_domain_pending{,_api}.rs",
+  "crates/plurx-core/src/store/storage_domain_pending.sql",
   "crates/plurx-core/src/store/background_job_turns.{rs,sql}",
   "crates/plurx-core/src/store/hiqlite/dispatch_turns.rs",
   "crates/plurx-core/src/store/background_jobs_foreground.sql",
@@ -698,6 +702,8 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
   "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_copy_output,_pretranscode,_fragment,_delivery,_fragment_admission,_observation,_migration,_offline,_domain,_library,_resources,_provider,_subtitle,_transcription,_artwork,_transcode,_preparation,_predictions,_embeddings,_probe,_integrity}.rs",
   "crates/plurx-core/src/store/background_jobs{_schema,_domain,_library,_resources,_provider,_subtitle,_subtitle_reconcile,_retention,_receipt_pressure,_viewer_analysis,_copy_output,_encoded_output,_artwork,_transcode,_predictions,_embeddings,_probe,_integrity}.sql",
+  "crates/plurx-core/src/store/storage_domain_pending{,_api}.rs",
+  "crates/plurx-core/src/store/storage_domain_pending.sql",
   "crates/plurx-core/src/store/background_job_turns.{rs,sql}",
   "crates/plurx-core/src/store/hiqlite/dispatch_turns.rs",
   "crates/plurx-core/src/store/background_jobs_foreground.sql",
@@ -953,6 +959,7 @@ id = "server.api"
 title = "Native server API and runtime"
 contract = "The single server binary exposes stable native endpoints, coordinates background work safely, carries authenticated cluster media control without widening household credentials, and publishes a permanent Dolby Vision replacement only after exact media verification and a final source-identity fence."
 paths = [
+  "crates/plurxd/src/http/tests/storage_domains.rs",
   "crates/plurxd/src/http/system/frame_drop.rs",
   "crates/plurxd/src/dv_disk/tests.rs",
   "crates/plurxd/src/http/system/tests.rs",
@@ -1671,6 +1678,7 @@ paths = [
   "validation/pr_event.py",
   "scripts/outline",
   "scripts/quiet",
+  "tests/operations/test_quiet.py",
   "scripts/ci-failures",
   "scripts/ci-failures.fleet.example.json",
   "swarm/*.txt",

@@ -96,6 +96,13 @@ const _: () = assert!(
 );
 const _: () = assert!(
     migration_is(
+        super::storage_domain_pending::SQLITE_INTRODUCED_SCHEMA,
+        super::storage_domain_pending::SCHEMA
+    ),
+    "storage_domain_pending::SQLITE_INTRODUCED_SCHEMA does not name its migration"
+);
+const _: () = assert!(
+    migration_is(
         super::candidate_recovery::SQLITE_INTRODUCED_SCHEMA,
         super::candidate_recovery::SCHEMA
     ),
@@ -1354,7 +1361,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::custody_retention::SCHEMA,
     // v130: offloaded titles keep their item; a file attaching ends the offload.
     super::offload::SQLITE_MIGRATION,
-    // v131: F+ curve fits for Profile 7 FEL titles, written by `dv_refit` jobs.
+    // v131: storage-domain changes are saved at once and applied when safe.
+    super::storage_domain_pending::SCHEMA,
+    // v132: F+ curve fits for Profile 7 FEL titles, written by `dv_refit` jobs.
     super::dv_refit_jobs::SCHEMA,
 ];
 

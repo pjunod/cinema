@@ -1,0 +1,255 @@
+{
+  "base_commit": "c37058e23f628968dfae37def89ca208fed8e209",
+  "dark_acquisition_sources": {
+    "coordinates_binary_sha256": "5f5db18c93ef0f0bdb7b064c53a90480aed9999398897bb65c19199d4e76b005",
+    "coordinates_source_sha256": "30257834c0ae23effbc195f36e492e2a241fc16d4a6aec117794b8d8347c9cd5",
+    "dm_closed_form_header_sha256": "969d53c3dd17c17a5f6bdcb9d8bfac168ed5ff95602f749480c5be2973e0c1f8",
+    "dm_cm29_gamut_tables_header_sha256_before_supplement_regeneration": "dfffdd9307963731db3b663d449c14202a1490e31f39390b0578c094ac4ab227",
+    "lift": -0.5,
+    "note": "Capture binaries were built against the integration-edited current headers and optional-lift probe/coordinate source. The shared generated table header was hashed before regeneration. The original neutral capture uses the source header SHA recorded under source, from base commit c37058e23f628968dfae37def89ca208fed8e209.",
+    "probe_binary_sha256": "f162b9a5cd81e09e5b5d272bf385062fce922bfd5ecb25d9a5d42e9d7db9dde8",
+    "probe_source_sha256": "c123855e347083fb507a51a125ecc56215c190eaeb0b01cca3c5888d4cbee81f"
+  },
+  "date": "2026-11-13",
+  "exported_csv_sha256": {
+    "vertices-1000.csv": "e8cb1afb59155655fea55a6bde7dde98000c24f4be145e28e7b322e49e3ae67e",
+    "vertices-2000.csv": "f567fdc3e7af926cac3930d3e2dccc8b631e54dffd4728893a3c34db699bfc42",
+    "vertices-600.csv": "00d15cce54f33361bef280d5ae1b7856e0fcfa6bc4d2afe6f7e501fb452f646b"
+  },
+  "fixtures": {
+    "1000": {
+      "both_direct_vertices": 27412,
+      "dark_accepted": 22114,
+      "dark_added": 839,
+      "dark_direct": 20377,
+      "dark_supplement_fixtures": [
+        {
+          "acquisition_lift": -0.5,
+          "pair": "darkening-lift-minus-0.5",
+          "reference_exit_status": 0,
+          "sha256": {
+            "coords.txt": "22308cf700573b8061e494a78a64fabed599e19e6e9826b3ce86aef806f865c3",
+            "m.xml": "564229f9a4fb073ff8b403e1b82e661271f4546140bd265fead5ccb128efd63c",
+            "reference.yuv": "8c979fdb8c4edbc8dc7df12ff66f8c6525d2f764dc9e93d3f1ba19ab02126a40",
+            "src.yuv": "e2edf21cffbde696eb1968aa19c6b1f00ed95f773c97b7f1a314101fad83fc40",
+            "u.f64": "aa42698d9e4825c1e1a9e1b5d45a9451d8f08b0491d9dc4f2a5705224dba9a04"
+          },
+          "target_id": 48,
+          "target_min_nits": 0.005,
+          "target_peak_nits": 1000
+        },
+        {
+          "acquisition_lift": -0.5,
+          "pair": "darkening-lift-minus-0.5",
+          "reference_exit_status": 0,
+          "sha256": {
+            "coords.txt": "5df913ffecc7ddd197825aa1868b47970998a413c1544174e4dc7c27c501b862",
+            "m.xml": "564229f9a4fb073ff8b403e1b82e661271f4546140bd265fead5ccb128efd63c",
+            "reference.yuv": "393ef9f50418c5d1465f7787ad0e9789251e63ecfc68f4c80966e98bcee05e00",
+            "src.yuv": "a5df9e827d8ad0e663bb8279d1fd7b45256611b8134ccf9633178aa288df4bb2",
+            "u.f64": "564768ac56a99c5359c1f630c98626a2612d416a98329370535f0e7fd9bd9225"
+          },
+          "target_id": 48,
+          "target_min_nits": 0.005,
+          "target_peak_nits": 1000
+        }
+      ],
+      "heldout_reference_exit_status": 0,
+      "heldout_sha256": {
+        "coords.txt": "8fae5def6e959cd06fcecc2a6b8b22e3c13baccf31a496eb87c5b3de22381501",
+        "m.xml": "66a8476eed356a4262b290ea2fb9a96db6f460ecc2b4857f9d7cdd158ce32393",
+        "reference.yuv": "9ac782df98039450e357e7d3e8326877996987085e2f2daba911e4fe9ea36e5d",
+        "src.yuv": "9ee3424500302a383dd7b412ec9f13cc259079504fd377a5dc9a87b762c5a8a4",
+        "u.f64": "11fbabc7aa186770ecd0fff556359b275aaa72aa7be7f6fdf8e5a89a04c2ef1d"
+      },
+      "max_overlap_quantized_delta_code": 3,
+      "merged_total": 30309,
+      "neutral_accepted": 29470,
+      "neutral_direct": 27412,
+      "overlap": 21275,
+      "reference_exit_status": 0,
+      "selected_vertices": 29470,
+      "sha256": {
+        "coords.txt": "b23cf4907cb52c6cea362ad49c8343a5407a72c5e73fa9049443d1d8f2b108aa",
+        "m.xml": "66a8476eed356a4262b290ea2fb9a96db6f460ecc2b4857f9d7cdd158ce32393",
+        "reference.yuv": "c8c675b91f9c7c2d6ae261ad85d153784ed850254455a5359436b14c2262f21c",
+        "src.yuv": "3c83e3544c401ec2963ccedd75fd55e996dce5e2be05167b1d75c383c855e408",
+        "u.f64": "6799f8e79444e60293390e679d88065ebf0d89c874bfcbefdba384522cf788cb"
+      },
+      "target_id": 48,
+      "target_min_nits": 0.005,
+      "target_peak_nits": 1000
+    },
+    "2000": {
+      "both_direct_vertices": 25718,
+      "dark_accepted": 22225,
+      "dark_added": 624,
+      "dark_direct": 20595,
+      "dark_supplement_fixtures": [
+        {
+          "acquisition_lift": -0.5,
+          "pair": "darkening-lift-minus-0.5",
+          "reference_exit_status": 0,
+          "sha256": {
+            "coords.txt": "061977c4988abe2a9f047f0b07e7781edf763f59a75332a6df310b20d33d5fb1",
+            "m.xml": "564229f9a4fb073ff8b403e1b82e661271f4546140bd265fead5ccb128efd63c",
+            "reference.yuv": "18e5a58415080a61badb2f379db2784503f7a4e1655a9880c627e52825219233",
+            "src.yuv": "80720effcddb53a1db0afab1dc9fe626e3286f1d34a505f7fe00be9de35022ee",
+            "u.f64": "6590859baf24251974a5f199250b3a90a1c6430943d0c4ceff219b6d3a90228e"
+          },
+          "target_id": 37,
+          "target_min_nits": 0.005,
+          "target_peak_nits": 2000
+        },
+        {
+          "acquisition_lift": -0.5,
+          "pair": "darkening-lift-minus-0.5",
+          "reference_exit_status": 0,
+          "sha256": {
+            "coords.txt": "4208da9dc813d233ba11f3af985e092bcefa1f9a29ca2156c9bc524dc69edd9d",
+            "m.xml": "564229f9a4fb073ff8b403e1b82e661271f4546140bd265fead5ccb128efd63c",
+            "reference.yuv": "74b6ae53175d1137051139500d8da28d38c0266fb2f9eed0d0fb44c89b07630c",
+            "src.yuv": "1e1aaaa954db1b7b47cb3f9db6700a010ccc3b4a963bdfae175dd70433143d24",
+            "u.f64": "3e7f573e1453724d2d9bdb162f1c29eb0f359a54ed0c6e735adddb4391a3ba5a"
+          },
+          "target_id": 37,
+          "target_min_nits": 0.005,
+          "target_peak_nits": 2000
+        }
+      ],
+      "heldout_reference_exit_status": 0,
+      "heldout_sha256": {
+        "coords.txt": "bef58d7e3ef65881538919f8361135d2569271dd1a16c2d432c1a7773e15af07",
+        "m.xml": "66a8476eed356a4262b290ea2fb9a96db6f460ecc2b4857f9d7cdd158ce32393",
+        "reference.yuv": "adeb0215c7efd4099a8ced1e11fa40f646303b211367637e51622541577097c8",
+        "src.yuv": "3bc00f488cfce06d6198e64c51ca6a9207903d370dba7b9559a712975504acf1",
+        "u.f64": "d6eb01cef57e7e7ffb27edfaa9f3def6700a2356b7b83a4423bb1d6aa1a0cc6f"
+      },
+      "max_overlap_quantized_delta_code": 3,
+      "merged_total": 28338,
+      "neutral_accepted": 27714,
+      "neutral_direct": 25718,
+      "overlap": 21601,
+      "reference_exit_status": 0,
+      "selected_vertices": 27714,
+      "sha256": {
+        "coords.txt": "c5f3aa2b8e571623101a6e82541eabe792aa670484580aff0d74b798c1ed357a",
+        "m.xml": "66a8476eed356a4262b290ea2fb9a96db6f460ecc2b4857f9d7cdd158ce32393",
+        "reference.yuv": "1ead6df5fe32657abed0ed0f8bc60dbfcbc5c9e87c8d176c1531f6e8e4c62210",
+        "src.yuv": "2b9b352683f2330b3728ea36219fd1a893d33fe06ac68d409ee77413796c2889",
+        "u.f64": "67edb653a61abf0ca6e421782b610131ae95a34e0a755d757cb46b1cb4d84b49"
+      },
+      "target_id": 37,
+      "target_min_nits": 0.005,
+      "target_peak_nits": 2000
+    },
+    "600": {
+      "both_direct_vertices": 28641,
+      "dark_accepted": 21465,
+      "dark_added": 1124,
+      "dark_direct": 20047,
+      "dark_supplement_fixtures": [
+        {
+          "acquisition_lift": -0.5,
+          "pair": "darkening-lift-minus-0.5",
+          "reference_exit_status": 0,
+          "sha256": {
+            "coords.txt": "7c7a032918c3f059ecb7acd7e04d476cabdc12bf7d403a2e05f1bcbc3c339d8b",
+            "m.xml": "564229f9a4fb073ff8b403e1b82e661271f4546140bd265fead5ccb128efd63c",
+            "reference.yuv": "88ba46d63a4e8c141ef3336e6f9007b7229ddbdb4e40c61282b912c5901e6c00",
+            "src.yuv": "7211123896a626c6bb6c6cc9211740b7f5ee5defe276bfcaa9d1f39e05793907",
+            "u.f64": "e3738e5723c68cc7a64026766a6aacaf0574ecbb5a3085de139412ceb6208c9c"
+          },
+          "target_id": 27,
+          "target_min_nits": 0.005,
+          "target_peak_nits": 600
+        },
+        {
+          "acquisition_lift": -0.5,
+          "pair": "darkening-lift-minus-0.5",
+          "reference_exit_status": 0,
+          "sha256": {
+            "coords.txt": "8fe96ca53431449a03c809b36d09878c43304de39ad8931cc03f45c9acfa9146",
+            "m.xml": "564229f9a4fb073ff8b403e1b82e661271f4546140bd265fead5ccb128efd63c",
+            "reference.yuv": "dba1ea3801bfd4f337963bc1deed883fa13aabe141c725089597b609e47408d7",
+            "src.yuv": "c0298981dca518da1f47789d5281e32b7927a29689ac9dba8cfd6d5a0a9ad851",
+            "u.f64": "58bad5e9a7356b0a6bc1c96654199f7b9b260f37dc232e02cb9a1dea1541b209"
+          },
+          "target_id": 27,
+          "target_min_nits": 0.005,
+          "target_peak_nits": 600
+        }
+      ],
+      "heldout_reference_exit_status": 0,
+      "heldout_sha256": {
+        "coords.txt": "7578ac4d7025eadc2b28e000617d4587eee67b4a0b4f93132a93ce2c06871e85",
+        "m.xml": "66a8476eed356a4262b290ea2fb9a96db6f460ecc2b4857f9d7cdd158ce32393",
+        "reference.yuv": "511c4f255558b7a9bc982b26d8bc693cf5e8680be3eebea50cea137f6fc7b2b2",
+        "src.yuv": "99592f6c3914f5ebf0e29e8b5871601371a23687180fc466847ae4d12668e553",
+        "u.f64": "636d48df2da2ec3cd270948336f11f4dbcf4b2bfccf947424d5010d20413cec5"
+      },
+      "max_overlap_quantized_delta_code": 8,
+      "merged_total": 31545,
+      "neutral_accepted": 30421,
+      "neutral_direct": 28641,
+      "overlap": 20341,
+      "reference_exit_status": 0,
+      "selected_vertices": 30421,
+      "sha256": {
+        "coords.txt": "cbd88888b785c0a648b2b119f3e4d1fa04ec97cb92aafcd27aaba1089e4131f0",
+        "m.xml": "66a8476eed356a4262b290ea2fb9a96db6f460ecc2b4857f9d7cdd158ce32393",
+        "reference.yuv": "4d0180caaaf0ba3eb8a377a837bc79290a7aa600629e5cc19cca71bca15f2a84",
+        "src.yuv": "0a586ed8353fb2f10b56be1651cad7258713dde234e1a168f367812315d48097",
+        "u.f64": "b1d266476b26e0dae6426e67e70182cc1b6c849f5a07bae49cc9d1a2fa92dbc4"
+      },
+      "target_id": 27,
+      "target_min_nits": 0.005,
+      "target_peak_nits": 600
+    },
+    "600-min0-experiment": {
+      "interpretation": "Separate minimum-black experiment; does not establish independence from target minimum.",
+      "reference_exit_status": 0,
+      "sha256": {
+        "coords.txt": "3bd896d5a4d5e88fd89c0f5761541e6f022ab336c42325023da020e3dc11873c",
+        "m.xml": "b128aa73b5312a730844d69342a41aaabdc4cb98db53a340f9eaf0f92a4fa041",
+        "reference.yuv": "185e08700735f214a38516c3e4c387981a13492c632d07ce84962ecddf685b97",
+        "src.yuv": "fee37029ad4ecdf55cf3f4f86249a958822f3c0787119fcb32b8e3d2527f06a9",
+        "u.f64": "9ee85ca61f84571924466d6f23cec95a058d530c97c545b456c3aa1cb96e167b"
+      },
+      "target_id": 27,
+      "target_min_nits": 0.0,
+      "target_peak_nits": 600
+    }
+  },
+  "limits": [
+    "These are approximate 16-bit effective-vertex observations, not extracted Dolby tables and not a complete measured lattice.",
+    "Darkening-trim supplements improve coverage but do not establish internal table contents; supplemental observations are empirical and only fill coordinates absent from the neutral-first tables.",
+    "Overlapping neutral/dark pair quantized estimates differed by up to the per-target recorded code deltas; these are empirical modeling/float discrepancies, not proof that any estimate is an extracted internal vertex.",
+    "Vertices without exported observations remain analytic at runtime.",
+    "Only target minimum 0.005 nits is represented in these tables; the separate 600-nit minimum-zero experiment cannot establish minimum-black independence. Runtime selection is restricted to exact minimum 0.005 nits."
+  ],
+  "owner": "Codex",
+  "reference": {
+    "image": "sha256:1c87411e470f01819ad878418d4857469c5f15d20020121df242ddd7a759ed0b",
+    "method": "black-box CPU reference",
+    "native_format": "3840x2160x3 f32 le tight interleaved 444 pq rgb computer bt2020 24fps frame 0",
+    "renderer": "cm_offline",
+    "version": "5.6.4"
+  },
+  "selection_method": {
+    "center_identifiability": "Center is directly observed in that dataset, or its local SVD center projection residual is <= 1e-7.",
+    "cross_dataset": "Both per-channel estimates must be finite and within [-0.5,65535.5]; their per-channel absolute difference must be < 0.25 code.",
+    "direct": "Direct maximum interpolation weight > 0.99999; coordinates within 1e-5 of an integer are snapped before fitting.",
+    "domain": "Only lattice i=1..64 and p,t=-16..16 are exported.",
+    "independent_solve": "Each table coordinate must pass original and held-out probe datasets independently; only shared integer coordinates are considered.",
+    "pseudoinverse": "For non-direct centers in each dataset, pseudoinverse row norm < 8 and local reconstruction residual < 0.25 native 16-bit code.",
+    "quantization": "Average the two unrounded estimates, round nearest ties-to-even, then clip channels to 0..rounded target peak PQ code.",
+    "supplement_priority": "Neutral original/held-out pair has priority. Each repeatable supplement pair uses the same two-solve acceptance; it fills only coordinates not already exported. Earlier accepted rows win any overlap."
+  },
+  "source": {
+    "base_commit": "c37058e23f628968dfae37def89ca208fed8e209",
+    "identity_note": "Measurement-time header from the unmodified base commit; later integration edits in the working clone are not part of this measurement identity.",
+    "path": "tools/dv_processing/dm_closed_form.h",
+    "sha256": "c8337de47339b22d362575b9dbbba3d1a0cfa48cd7e468b9bfcd2017d395894f"
+  }
+}

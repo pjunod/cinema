@@ -7,11 +7,13 @@ Environment:
                             Never the system temporary directory: a run writes about 100 MB.
   PLURX_DM_REQUIRE_FUSED_FMA=1  optional: refuse a device whose fma is not fused.
 
-test_cm4_real_crops_within_a_tenth_of_a_code: the CM4 real-crop cases must agree with the
-double-precision reference within 1.5e-6 PQ; the legacy float expansion of the ST 2084 transfer
-functions misses that by a factor of two or more. The bound is validated on lavapipe (Mesa 25.2),
-which does not fuse fma, so it holds there without the helpers' last bits; it cannot tell a fused
-fma from a*b+c, or `precise` from its absence.
+test_cm4_real_crops_within_a_tenth_of_a_code keeps its historical regression ID.
+Each real channel must agree within 1.5e-6 PQ OR four binary32 epsilons of that
+pixel's peak in linear light, with max dE_ITP below 0.05. Matrix cancellation
+before PQ can leave tiny light errors at a zero channel that exceed the PQ
+bound: the retained 600-nit crop differs by 2.42e-5 PQ but only 3.99e-8 nits.
+An instrumented pre-PQ readback reproduces that light residue with every RGB
+bit unchanged. This content-scaled acceptance does not weaken helper exactness.
 
 test_helpers_are_bit_exact is the check that can: every helper result must be the correctly
 rounded float32 (run_pq_helper_exact.py: EXACT), and the two deliberately broken headers must not

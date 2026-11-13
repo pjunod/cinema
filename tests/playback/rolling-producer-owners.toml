@@ -5837,7 +5837,29 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bound, which the owner's planning read ran under before D3b. An awaited
 # request-path deadline: no task, no producer, no process; a timeout answers 503.
 # Merged main into D3b: 2203 base, +1 main, +1 D3b = 2205.
-expected_occurrences = 2205
+# Post-merge inventory review (2026-11-13), 2205 -> 2211: six timer shapes
+# carried by #1568 from concurrent main processed-upgrade fixes
+# (03a253fc7/7784de93e; merged into D3b at 2537ee3c5). Source comparison of
+# 9dac5c71d9 to 882d4b691 finds only these two paths with a count delta:
+# - http/hls/processed_upgrade.rs (+1): await_successor_start awaits a 250 ms
+#   pacing sleep in select with PendingCandidateGuard's cancellation token.
+#   run_upgrade_with_claim retains that guard and the trial root while awaiting
+#   the scheduler; each pass also checks the predecessor's preparation gate.
+#   The timer neither spawns work nor establishes cleanup or admission.
+# - http/hls/tests/processed_upgrade_runs.rs (+5): the scheduled-cancellation
+#   fixture has a 20 ms pending-observation timeout and a 1 s cancellation
+#   timeout; the prepared-entry fixture has a 20 ms pending-observation timeout,
+#   a 260 ms control-exchange cadence sleep and a 2 s completion timeout.
+#   Both retain and await the same locally pinned scheduler future, with their
+#   pending guard and UpgradeRun in scope; timeouts fail assertions or observe
+#   pending work, never certify producer settlement. No new task or process.
+# Concurrent main #1572 acknowledged the same six shapes; retain its review:
+# Processed-upgrade successor staging added six reviewed time shapes after
+# that inventory update: one production 250 ms sleep, selected against the
+# pending candidate's cancellation token while the incumbent retains its
+# admitted root; and five test-only timeout/sleep calls that bound or pace
+# the successor scheduling fixture. No new task, producer, or process.
+expected_occurrences = 2211
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

@@ -292,6 +292,8 @@ pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
 pub mod scan_request_v2;
+mod storage_domain_pending;
+pub(crate) mod storage_domain_pending_api;
 mod subtitle_managed_schema;
 pub mod subtitle_text_translation;
 mod subtitle_text_translation_schema;

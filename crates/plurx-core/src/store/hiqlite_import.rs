@@ -1835,6 +1835,25 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "background_storage_domain_pending",
+        columns: &[
+            "singleton",
+            "revision",
+            "mappings_json",
+            "base_json",
+            "saved_at_ms",
+            "saved_by",
+            "state",
+            "settled_at_ms",
+            "settled_reason",
+        ],
+        order_by: "singleton",
+        minimum_schema: super::storage_domain_pending::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "foreground_source_owners",
         columns: &[
             "owner_id",

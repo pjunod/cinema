@@ -754,14 +754,19 @@ async fn dispatch(
         }
         #[cfg(target_os = "linux")]
         Command::DvHelperIdentity => {
-            match crate::vodencode::dv_runtime::installed_helper_identity().await {
-                Ok(identity) => println!("{identity}"),
-                Err(error) => {
-                    eprintln!("DV helper bundle refused: {error}");
-                    std::process::exit(1);
+            #[cfg(target_os = "linux")]
+            {
+                match crate::vodencode::dv_runtime::installed_helper_identity().await {
+                    Ok(identity) => println!("{identity}"),
+                    Err(error) => {
+                        eprintln!("DV helper bundle refused: {error}");
+                        std::process::exit(1);
+                    }
                 }
+                Ok(())
             }
-            Ok(())
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("DV helper bundles are supported only on Linux")
         }
         Command::Advertise { server } => advertise(&server).await,
         Command::ResetPassword { username, password } => {

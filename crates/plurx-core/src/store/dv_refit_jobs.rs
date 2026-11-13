@@ -29,7 +29,7 @@ use crate::error::StoreError;
 use crate::transcode::dv_refit::{QuantisedCurves, ServableCurves};
 
 pub(crate) const SCHEMA: &str = include_str!("dv_refit_jobs.sql");
-pub const SQLITE_INTRODUCED_SCHEMA: i64 = 131;
+pub const SQLITE_INTRODUCED_SCHEMA: i64 = 132;
 pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name GLOB 'background_dv_refit_*' AND sql IS NOT NULL ORDER BY name";
 pub(crate) const MARKER_SQL: &str =
     "SELECT count(*) AS count FROM background_dv_refit_schema WHERE singleton=1 AND version=1";

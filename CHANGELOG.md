@@ -51,6 +51,11 @@ bump may break compatibility and a **patch** bump never does.
   has rebooted. It proves from the machine's own journal that the witness's
   kernel boot ended. A host without the identity binds had no other way to
   release such custody.
+- CM v2.9 uses measured gamut vertices for P3 600-, 1000- and 2000-nit
+  targets at 0.005-nit black, correcting near-black chroma and highlight
+  desaturation without changing the tone curve. Unsupported vertices and
+  targets retain the analytic mapping.
+
 - A plurxd restart no longer fences every source-reading job in the cluster
   until a host reboot. A restart during a read left that owner's custody
   stranded. A new daemon now releases it when the old daemon's whole PID

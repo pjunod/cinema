@@ -145,7 +145,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 21] = [
+    let inputs: [(&str, &[u8]); 22] = [
         (
             "author_p81.c",
             include_bytes!("../../../tools/dv_processing/author_p81.c"),
@@ -161,6 +161,10 @@ fn renderer_source_identity() -> String {
         (
             "dm_closed_form.h",
             include_bytes!("../../../tools/dv_processing/dm_closed_form.h"),
+        ),
+        (
+            "dm_cm29_gamut_tables.h",
+            include_bytes!("../../../tools/dv_processing/dm_cm29_gamut_tables.h"),
         ),
         (
             "dv_dm.h",

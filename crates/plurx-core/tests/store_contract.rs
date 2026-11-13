@@ -14,10 +14,95 @@ mod subtitle_jobs_fixture;
 use subtitle_jobs_fixture::SubtitleFixture;
 
 use plurx_core::store::background_jobs::{
-    AnalysisViewerInterest, ArtifactViewerInterest, CancelWaiter, EnqueueOutcome, WaiterQuery,
+    AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore, CancelWaiter,
+    EnqueueOutcome, WaiterQuery,
 };
+use plurx_core::store::background_jobs_resources::{StorageDomainApply, StorageDomainMapping};
 use plurx_core::store::RootRemovalOutcome;
 use queue_fixture::QueueFixture;
+
+/// Install a mapping for fixture setup using the deferred save/apply API.
+/// Tests that exercise waiting behavior call the two Store methods directly.
+async fn set_storage_domains(
+    store: &dyn Store,
+    mappings: Vec<StorageDomainMapping>,
+    now_ms: i64,
+) -> Result<bool, StoreError> {
+    let Some(_revision) = store.save_storage_domains(mappings, None, now_ms).await? else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        store.apply_pending_storage_domains(now_ms).await?,
+        StorageDomainApply::Applied { .. }
+    ))
+}
+
+#[tokio::test]
+async fn storage_domain_pending_is_superseded_by_legacy_sqlite_replace() {
+    use plurx_core::store::background_jobs_resources::{StorageDomainApply, StorageDomainMapping};
+
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("legacy-storage-replace.sqlite");
+    let store = plurx_core::store::SqliteStore::open(&path).expect("store");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Legacy storage replacement".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/legacy-storage-root".into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let mapping = |domain_id: &str| StorageDomainMapping {
+        library_id: library.id,
+        root_path: "/legacy-storage-root".into(),
+        domain_id: domain_id.into(),
+    };
+    store
+        .save_storage_domains(vec![mapping("before")], None, 1_000)
+        .await
+        .expect("save baseline")
+        .expect("valid root");
+    assert!(matches!(
+        store
+            .apply_pending_storage_domains(1_000)
+            .await
+            .expect("apply baseline"),
+        StorageDomainApply::Applied { .. }
+    ));
+    let pending_revision = store
+        .save_storage_domains(vec![mapping("new-node")], None, 1_001)
+        .await
+        .expect("save pending")
+        .expect("valid root");
+    drop(store);
+
+    // Simulate an older node that still submits the legacy atomic replacement.
+    let connection = rusqlite::Connection::open(&path).expect("open shared SQLite file");
+    connection
+        .execute(
+            "INSERT INTO background_job_commands(id,operation,request_json,result_json) VALUES(?1,'storage_domains',?2,'true')",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                serde_json::json!({"mappings":[mapping("legacy-node")]}).to_string(),
+            ],
+        )
+        .expect("legacy node replacement");
+    drop(connection);
+
+    let reopened = plurx_core::store::SqliteStore::open(&path).expect("reopen store");
+    assert!(matches!(
+        reopened.apply_pending_storage_domains(1_002).await.expect("supersede stale pending revision"),
+        StorageDomainApply::Superseded { revision } if revision == pending_revision
+    ));
+    assert_eq!(
+        reopened
+            .storage_domains()
+            .await
+            .expect("legacy applied mapping"),
+        vec![mapping("legacy-node")]
+    );
+}
 
 #[path = "store_contract/applied_view.rs"]
 mod applied_view;
@@ -707,7 +792,11 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "enqueue_artwork_demand",
     "publish_artwork_job",
     "storage_domains",
-    "replace_storage_domains",
+    // Desired/applied lifecycle covered by the storage-domain contracts in
+    // background_jobs.rs, including blocked saves, safe apply, and state reads.
+    "save_storage_domains",
+    "apply_pending_storage_domains",
+    "storage_domain_state",
     "enqueue_library_work",
     "library_work_requests",
     "complete_library_work",
@@ -9878,24 +9967,24 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: create secondary library: {error}"));
-        assert!(store
-            .replace_storage_domains(
-                vec![
-                    plurx_core::store::background_jobs_resources::StorageDomainMapping {
-                        library_id: library.id,
-                        root_path: "/contract/pretranscode".into(),
-                        domain_id: "pretranscode-primary".into(),
-                    },
-                    plurx_core::store::background_jobs_resources::StorageDomainMapping {
-                        library_id: secondary.id,
-                        root_path: "/contract/pretranscode-secondary".into(),
-                        domain_id: "pretranscode-secondary".into(),
-                    },
-                ],
-                100,
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: map source domains: {error}")));
+        assert!(set_storage_domains(
+            store.as_ref(),
+            vec![
+                plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                    library_id: library.id,
+                    root_path: "/contract/pretranscode".into(),
+                    domain_id: "pretranscode-primary".into(),
+                },
+                plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                    library_id: secondary.id,
+                    root_path: "/contract/pretranscode-secondary".into(),
+                    domain_id: "pretranscode-secondary".into(),
+                },
+            ],
+            100,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: map source domains: {error}")));
         let mut files = Vec::new();
         for ordinal in 1..=5 {
             let (source_library, root) = if matches!(ordinal, 2 | 3) {
@@ -19265,6 +19354,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "background_source_pauses",
             "background_source_service_epochs",
             "background_source_service_grants",
+            "background_storage_domain_pending",
             "background_storage_domains",
             "background_transcode_artifacts",
             "cache_consumer_pins",
@@ -21156,6 +21246,43 @@ async fn sqlite_import_verification_refusals_have_teeth() {
         .contains("table settings failed SQLite-to-Hiqlite parity"));
 }
 
+// Interface inventory, not execution evidence: these methods already exist on
+// main but were omitted from the previous name list. Their tests/receipts must
+// establish behavior independently; listing a method never proves a test ran.
+const RECENT_SOURCE_METHODS: &[&str] = &[
+    "analysis_coordination",
+    "analysis_source_phase_current",
+    "attach_dv_title_viewer",
+    "begin_analysis_source_phase",
+    "claim_analysis_coordination",
+    "claim_analysis_source_phase_service",
+    "copy_index_source_attestation",
+    "copy_index_v3_head",
+    "copy_index_v3_healthy_heads",
+    "copy_index_v3_last_blob_holder",
+    "copy_index_v3_locations",
+    "copy_index_v3_quarantine_code",
+    "copy_index_v3_variant",
+    "ensure_copy_index_v3_head",
+    "establish_analysis_coordination",
+    "find_offloaded_episode",
+    "find_offloaded_movie",
+    "finish_analysis_source_phase",
+    "forget_copy_index_v3_blob_holder",
+    "forget_copy_index_v3_location",
+    "library_file_paths_under",
+    "list_top_items_filtered",
+    "offloaded_leaf_counts",
+    "predecessor_analysis_coordination_with_prefix",
+    "publish_copy_index_v3",
+    "put_copy_index_v3_location",
+    "quarantine_copy_index_v3_head",
+    "record_copy_index_source_attestation",
+    "retire_analysis_coordination_claim",
+    "retire_queued_analysis_coordination",
+    "retire_stranded_analysis_coordination",
+];
+
 #[test]
 fn contract_inventory_matches_every_store_method() {
     let store_source = include_str!("../src/store/mod.rs")
@@ -21208,6 +21335,7 @@ fn contract_inventory_matches_every_store_method() {
         MEDIA_SESSION_METHODS,
         FENCED_PUBLICATION_METHODS,
         METRICS_METHODS,
+        RECENT_SOURCE_METHODS,
     ]
     .into_iter()
     .flatten()
@@ -21292,7 +21420,7 @@ fn contract_inventory_matches_every_store_method() {
     // Shared queue replaces legacy execution and adds 20 net Store methods.
     // E0 adds the catalogue/queue dual-owner binding.
     // Three library admission/query/completion operations preserve each caller.
-    // +2: replicated root-domain observation and atomic replacement.
+    // +4: replicated root-domain observation plus pending save, apply, and state.
     // E1 adds a bounded named-settings snapshot for playback preferences.
     // E2 removes two unfenced legacy scrub methods.
     // Safari seek adds viewer joins and two source-I/O observations.
@@ -21363,11 +21491,12 @@ fn contract_inventory_matches_every_store_method() {
     // main declared (551) without naming them here; named above.
     // +1: request_dv_fel_variant is named in BACKGROUND_JOB_METHODS and
     // exercised by the source-fenced DV title-job contracts.
-    // +7: F+ curve-fit demand, publication, the current and by-digest curve
-    // tables, rebind, prune and progress, named in BACKGROUND_JOB_METHODS
-    // and covered on both backends by the store_contract/dv_refit_jobs.rs
-    // contracts. No new trait.
-    assert_eq!(declared.len(), 566, "review the Store method count");
+    // Current main declares 593 distinct methods after save/apply/state
+    // replace one storage-domain method, adding two names.
+    // +7: F+ curve-fit demand, publication, current and by-digest curves,
+    // rebind, prune and progress remain named in BACKGROUND_JOB_METHODS
+    // and covered by store_contract/dv_refit_jobs.rs on both backends.
+    assert_eq!(declared.len(), 600, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -25827,6 +25956,254 @@ async fn analysis_source_admission_carries_the_claim_decision_through_the_read()
         assert_eq!(row.state, "queued", "{backend}");
         assert_eq!(row.attempts, 0, "{backend}: the yield is uncharged");
         assert_eq!(row.last_error_code, "foreground_preempted", "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_phase_retries_after_storage_domain_apply_without_losing_claim() {
+    use plurx_core::store::analysis_coordination::AnalysisCoordinationSource;
+    use plurx_core::store::background_jobs_resources::{
+        ForegroundSourceOwner, ForegroundSourcePolicy, StorageDomainApply, StorageDomainMapping,
+    };
+
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-domain-phase").await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("file")
+            .expect("analysis file");
+        let library_id = store
+            .get_item(file.item_id)
+            .await
+            .expect("item")
+            .expect("analysis item")
+            .library_id;
+        let library = store
+            .get_library(library_id)
+            .await
+            .expect("library")
+            .expect("analysis library");
+        let root_path = library.paths[0].display().to_string();
+        let source = AnalysisCoordinationSource {
+            file_id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            origin_node_id: "analysis-node".into(),
+            object_version: "object-version-1".into(),
+            video_identity: "0123456789abcdef".into(),
+            contract_version: 1,
+            requested_generation: "analysis-domain-generation".into(),
+        };
+        let request_id = uuid::Uuid::new_v4().to_string();
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: request_id.clone(),
+                file_id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                component: "fragment_index".into(),
+                pipeline_version: source.pipeline_marker(),
+                video_identity: source.video_marker(),
+                requested_generation: source.requested_generation.clone(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: source.origin_node_id.clone(),
+                not_before_ms: 1_000,
+                created_at_ms: 1_000,
+            })
+            .await
+            .expect("enqueue coordinator request");
+        assert!(
+            store
+                .establish_analysis_coordination(&request_id, source.clone(), 1_000)
+                .await
+                .expect("establish coordinator")
+                .is_some(),
+            "{backend}"
+        );
+        let claim = store
+            .claim_analysis_coordination(
+                &request_id,
+                source.clone(),
+                &source.origin_node_id,
+                0,
+                1_001,
+                20_000,
+            )
+            .await
+            .expect("claim coordinator")
+            .expect("claimed coordinator");
+
+        // The metadata claim owns no physical read and therefore does not block applying its new domain.
+        let revision = store
+            .save_storage_domains(
+                vec![StorageDomainMapping {
+                    library_id,
+                    root_path: root_path.clone(),
+                    domain_id: "analysis-nas".into(),
+                }],
+                None,
+                1_002,
+            )
+            .await
+            .expect("save root mapping")
+            .expect("valid root");
+        assert!(
+            matches!(store.apply_pending_storage_domains(1_002).await.expect("apply root mapping"),
+            StorageDomainApply::Applied { revision: applied } if applied == revision),
+            "{backend}"
+        );
+
+        // Two live foreground readers make the new named domain unavailable for a physical phase.
+        let mut blockers = Vec::new();
+        let mut final_mappings = vec![StorageDomainMapping {
+            library_id,
+            root_path,
+            domain_id: "analysis-nas".into(),
+        }];
+        for index in 0..2 {
+            let (_, blocked_file_id) =
+                seed_file(&store, &format!("analysis-domain-blocker-{index}")).await;
+            let blocked_file = store
+                .get_file(blocked_file_id)
+                .await
+                .expect("blocker file")
+                .expect("blocker");
+            let blocked_library_id = store
+                .get_item(blocked_file.item_id)
+                .await
+                .expect("blocker item")
+                .expect("item")
+                .library_id;
+            let blocked_library = store
+                .get_library(blocked_library_id)
+                .await
+                .expect("blocker library")
+                .expect("library");
+            final_mappings.push(StorageDomainMapping {
+                library_id: blocked_library_id,
+                root_path: blocked_library.paths[0].display().to_string(),
+                domain_id: "analysis-nas".into(),
+            });
+            blockers.push((blocked_file_id, blocked_file));
+        }
+        store
+            .save_storage_domains(final_mappings, None, 1_003)
+            .await
+            .expect("save shared domain")
+            .expect("valid roots");
+        assert!(
+            matches!(
+                store
+                    .apply_pending_storage_domains(1_003)
+                    .await
+                    .expect("apply shared domain"),
+                StorageDomainApply::Applied { .. }
+            ),
+            "{backend}"
+        );
+        let mut foreground = Vec::new();
+        for (blocked_file_id, blocked_file) in blockers {
+            let token = store
+                .register_foreground_source(
+                    ForegroundSourceOwner {
+                        owner_id: uuid::Uuid::new_v4().to_string(),
+                        lifetime_id: "analysis-domain-blocker".into(),
+                        session_incarnation: uuid::Uuid::new_v4().to_string(),
+                        producer_attempt: "producer-1".into(),
+                        node_id: "playback-node".into(),
+                        boot_id: uuid::Uuid::new_v4().to_string(),
+                        file_id: blocked_file_id,
+                        source_size: blocked_file.size,
+                        source_mtime: blocked_file.mtime,
+                        source_generation: "analysis-blocker-source".into(),
+                        policy: ForegroundSourcePolicy::Rolling,
+                    },
+                    1_004,
+                    20_000,
+                )
+                .await
+                .expect("register blocker")
+                .expect("blocker owner");
+            foreground.push(token);
+        }
+
+        let blocked = store
+            .begin_analysis_source_phase(
+                claim.clone(),
+                source.clone(),
+                0,
+                uuid::Uuid::new_v4().to_string(),
+                1_005,
+            )
+            .await
+            .expect("capacity refusal is retryable");
+        assert!(
+            blocked.is_none(),
+            "{backend}: foreground capacity must refuse the physical phase"
+        );
+        let request = store
+            .analysis_request(&request_id)
+            .await
+            .expect("read request")
+            .expect("request remains");
+        assert_eq!(
+            request.state, "running",
+            "{backend}: capacity refusal must not lose the analysis claim"
+        );
+        assert_eq!(request.owner_node_id, claim.node_id, "{backend}");
+        assert_eq!(request.fence, claim.fence, "{backend}");
+        let role = store
+            .analysis_coordination(&request_id)
+            .await
+            .expect("read coordinator")
+            .expect("role");
+        assert_eq!(
+            role.phase_sequence, 0,
+            "{backend}: refused phase does not advance sequence"
+        );
+        assert!(
+            role.active_custody_id.is_none(),
+            "{backend}: refusal creates no custody"
+        );
+
+        for token in foreground {
+            assert!(
+                store
+                    .release_foreground_source(token, 1_006)
+                    .await
+                    .expect("release blocker"),
+                "{backend}"
+            );
+        }
+        let phase = store
+            .begin_analysis_source_phase(
+                claim.clone(),
+                source.clone(),
+                0,
+                uuid::Uuid::new_v4().to_string(),
+                1_007,
+            )
+            .await
+            .expect("retry physical phase")
+            .expect("retry succeeds");
+        assert_eq!(
+            phase.claim, claim,
+            "{backend}: retry uses the same coordinator claim"
+        );
+        let holders = store
+            .source_io_holders(1_007)
+            .await
+            .expect("new domain holder");
+        assert!(
+            holders.iter().any(|holder| holder.kind == "analysis_source"
+                && holder.work_id == request_id
+                && holder.resource_key == "source_io:analysis-nas"),
+            "{backend}: physical phase reserves the applied named domain"
+        );
     })
     .await;
 }

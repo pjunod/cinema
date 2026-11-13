@@ -23,6 +23,7 @@
 #define DM_PI 3.14159265358979323846
 #include <string.h>
 #include <stdlib.h>
+#include "dm_cm29_gamut_tables.h"
 
 #ifndef DM_STATIC
 #define DM_STATIC static
@@ -426,6 +427,7 @@ typedef struct {
   double rgb2lms[3][3], lms2rgb[3][3], ipt2lms[3][3], to_t[3][3], from_t[3][3];
   double native_black, native_span, decode_black, decode_span;
   double grid_origin, cube_min;             /* stock gamut cube and resolved output black */
+  const uint16_t *gamut;                    /* measured native vertices for an exact target, otherwise NULL */
 } dm_cm29_state;
 
 typedef struct { double ipt[3], C, I, Ib, Io; } dm_cm29_pix;
@@ -443,6 +445,7 @@ DM_STATIC int dm_cm29_prepare(dm_cm29_state *s, const double l1[3], double smin,
   memset(s, 0, sizeof(*s));
   if (trim) s->tr = *trim;
   s->tg = *tg;
+  s->gamut = dm_cm29_gamut_table(tg->peak_nits, tg->min_nits, tg->prim);
   /* black and flat frames: crush and clip held one 12-bit code apart inside [0,1] */
   const double q = 1.0 / 4095;
   double crush = dm_mind(dm_maxd(l1[0], 0.0), 1 - q), mid = l1[1], clip = dm_maxd(dm_mind(l1[2], 1.0), crush + q);
@@ -516,11 +519,32 @@ DM_STATIC void dm_cm29_pixel_pre(const dm_cm29_state *s, const double rgb[3], dm
   p->Ib = dm_cm29_tc(s, p->I);
   p->Io = s->tr.cw != 0 ? dm_cm29_tc(s, p->I + 0.5 * s->tr.cw * p->C) : p->Ib;
 }
-/* The gamut operation is trilinear in target-peak-normalized IPT. Evaluate only its
- * eight analytic corners: inverse IPT, PQ EOTF, target matrix/cube, native encoding.
- * No measured output tables are required. The zero-intensity plane is black even
- * at virtual (nonphysical) chroma corners. BT.1886 uses the stock cube black as origin. */
+/* The gamut operation is trilinear in target-peak-normalized IPT. An exactly
+ * measured target uses its supported 16-bit native vertices; unsupported vertices
+ * retain inverse IPT, PQ EOTF, target matrix/cube and native encoding. The measured
+ * data includes the target's gray-axis gain and highlight desaturation, without
+ * altering the tone curve. The zero-intensity plane is black. BT.1886 uses the
+ * stock cube black as origin and retains the analytic calculation. */
+DM_STATIC int dm_cm29_measured_vertex(const dm_cm29_state *s, const double q[3], double out[3]) {
+  if (!s->gamut) return 0;
+  const double u[3] = {q[0] * 64 / s->TM, q[1] * 32 / s->TM, q[2] * 32 / s->TM};
+  int v[3];
+  for (int k = 0; k < 3; k++) {
+    if (!isfinite(u[k]) || u[k] < -DM_CM29_GAMUT_R || u[k] > DM_CM29_GAMUT_I) return 0;
+    v[k] = (int)floor(u[k] + 0.5);
+    if (fabs(u[k] - v[k]) > 1e-7) return 0;
+  }
+  if (v[0] < 0 || v[0] >= DM_CM29_GAMUT_I ||
+      v[1] < -DM_CM29_GAMUT_R || v[1] > DM_CM29_GAMUT_R ||
+      v[2] < -DM_CM29_GAMUT_R || v[2] > DM_CM29_GAMUT_R) return 0;
+  size_t idx = ((size_t)v[0] * DM_CM29_GAMUT_C + v[1] + DM_CM29_GAMUT_R) * DM_CM29_GAMUT_C + v[2] + DM_CM29_GAMUT_R;
+  const uint16_t *value = s->gamut + idx * 3;
+  if (value[0] == UINT16_MAX) return 0;
+  for (int k = 0; k < 3; k++) out[k] = value[k] / 65535.0;
+  return 1;
+}
 DM_STATIC void dm_cm29_grid_vertex(const dm_cm29_state *s, const double q[3], double out[3]) {
+  if (dm_cm29_measured_vertex(s, q, out)) return;
   if (q[0] <= s->grid_origin) {
     for (int k = 0; k < 3; k++) out[k] = 0;
     return;

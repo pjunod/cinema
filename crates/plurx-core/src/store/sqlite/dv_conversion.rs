@@ -1770,8 +1770,9 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS background_custody_retention_schema",
             // v130: offload's `items.offloaded_at` and its two clearing triggers.
             "ADD COLUMN offloaded_at",
-            // v131: the shared queue helper drops every background_* object,
-            // the F+ curve tables, their triggers and marker among them.
+            // v131: storage-domain pending tables, views and marker.
+            "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
+            // v132: the shared queue helper drops the F+ curve extension.
             "CREATE TABLE IF NOT EXISTS background_dv_refit_schema",
         ];
 
